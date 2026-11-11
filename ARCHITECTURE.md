@@ -207,16 +207,18 @@ Build paths:
 
 - Each PR runs the isolation check.
 - A path-filtered matrix runs only the families that changed.
-- For each changed family, CI installs only that family from the PR head. Then it runs the CPU tests of that family.
+- For each changed family, CI installs only that family from the PR head, with the CPU build of torch. Then it imports every public module and runs all tests of that family on the CPU runner, outside the source tree. Tests that need a GPU skip.
+- Actions are pinned to full commit SHAs (organization policy).
 - GPU tests and `integration/` tests are not in the GitHub CI yet. Run them on Blackwell machines (`sm_100a`, `sm_103a`, `sm_107a`) before you merge a family change.
 
 ## Running tests
 
-Run the tests of a family against the installed distribution, not the source tree. Copy `tests/` (and the `pyproject.toml`) to a directory outside `kernels/<family>/`, then run pytest there.
+Run the tests of a family against the installed distribution, not the source tree. Copy `tests/`, `benchmarks/` (some tests read it) and `pyproject.toml` to a directory outside `kernels/<family>/`, then run pytest there.
 
 ```bash
 pip install "./kernels/kda[test]"
-cp -r kernels/kda/tests kernels/kda/pyproject.toml /tmp/kda-tests/
+mkdir -p /tmp/kda-tests
+cp -r kernels/kda/tests kernels/kda/benchmarks kernels/kda/pyproject.toml /tmp/kda-tests/
 cd /tmp/kda-tests && python -m pytest -p no:cacheprovider tests
 ```
 

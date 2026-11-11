@@ -11,10 +11,10 @@ jobs:
     outputs:
       families: ${{ steps.changed.outputs.families }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Isolation rules
@@ -37,6 +37,7 @@ jobs:
 
   family:
     needs: isolation
+    timeout-minutes: 90
     if: needs.isolation.outputs.families != '[]'
     runs-on: ubuntu-latest
     strategy:
@@ -44,8 +45,8 @@ jobs:
       matrix:
         family: ${{ fromJson(needs.isolation.outputs.families) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install this family alone
@@ -63,7 +64,12 @@ jobs:
               importlib.import_module(f"cake_pplx.{path.stem}")
               print("imported", path.stem)
           PY
-      - name: CPU tests
-        working-directory: kernels/${{ matrix.family }}
+      - name: Tests on a CPU runner (GPU tests skip)
+        # Run against the installed distribution: copy the tests out of the source tree.
         run: |
-          if [ -d tests/cpu ]; then python -m pytest -q tests/cpu; else echo "no CPU tests"; fi
+          src="kernels/${{ matrix.family }}"
+          run="$RUNNER_TEMP/tests-${{ matrix.family }}"
+          mkdir -p "$run"
+          cp -r "$src/tests" "$src/pyproject.toml" "$run/"
+          if [ -d "$src/benchmarks" ]; then cp -r "$src/benchmarks" "$run/"; fi
+          cd "$run" && python -m pytest -q -p no:cacheprovider -rfE tests
