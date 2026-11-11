@@ -1,0 +1,22 @@
+name: label-new-issues
+
+# Adds a label to every newly opened or reopened issue so that label-based
+# event subscribers (e.g. the Perplexity automation watching this repo) are
+# notified about new issues.
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add needs-triage label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh issue edit "$NUMBER" --repo "$REPO" --add-label needs-triage
