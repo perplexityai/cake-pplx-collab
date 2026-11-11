@@ -1,0 +1,89 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_kda_det_train": "flashinfer/experimental/cake/cake_kda_det_train",
+    "cake_kda_det_train_kcp": "flashinfer/experimental/cake/cake_kda_det_train_kcp",
+    "cake_kda_nondet_train": "flashinfer/experimental/cake/cake_kda_nondet_train",
+    "cake_kda_nondet_train_kcp": "flashinfer/experimental/cake/cake_kda_nondet_train_kcp"
+  },
+  "facades": {
+    "cake_kda_det_train": "flashinfer/cake_kda_det_train.py",
+    "cake_kda_det_train_kcp": "flashinfer/cake_kda_det_train_kcp.py",
+    "cake_kda_nondet_train": "flashinfer/cake_kda_nondet_train.py",
+    "cake_kda_nondet_train_kcp": "flashinfer/cake_kda_nondet_train_kcp.py"
+  },
+  "tests": [
+    "tests/experimental/test_cake_kda_det_train.py",
+    "tests/experimental/test_cake_kda_det_train_api.py",
+    "tests/experimental/test_cake_kda_det_train_kcp.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_api.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_build.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_dist.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_fsdp_walk.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_l2n.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_lean.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_raw_gate.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_shared_ws.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_standalone.py",
+    "tests/experimental/test_cake_kda_det_train_kcp_upload.py",
+    "tests/experimental/test_cake_kda_det_train_l2n.py",
+    "tests/experimental/test_cake_kda_det_train_mode_guard.py",
+    "tests/experimental/test_cake_kda_det_train_names.py",
+    "tests/experimental/test_cake_kda_det_train_raw_gate_accuracy.py",
+    "tests/experimental/test_cake_kda_nondet_train.py",
+    "tests/experimental/test_cake_kda_nondet_train_api.py",
+    "tests/experimental/test_cake_kda_nondet_train_handoff.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_adjoint.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_api.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_build.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_bwd_order.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_dist.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_fsdp_walk.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_handoff.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_l2n.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_lean.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_names.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_raw_gate.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_shared_ws.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_standalone.py",
+    "tests/experimental/test_cake_kda_nondet_train_kcp_upload.py",
+    "tests/experimental/test_cake_kda_nondet_train_l2n.py",
+    "tests/experimental/test_cake_kda_nondet_train_names.py",
+    "tests/experimental/test_helpers/cake_kda_det_train_reference.py",
+    "tests/experimental/test_helpers/cake_kda_det_train_reference_l2n.py",
+    "tests/experimental/test_helpers/cake_kda_kcp_inputs.py",
+    "tests/experimental/test_helpers/cake_kda_kcp_reference.py",
+    "tests/experimental/test_helpers/cake_kda_kcp_shapes.py",
+    "tests/experimental/test_helpers/cake_kda_train_kcp_saved.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_kda_det_train.py",
+    "benchmarks/bench_cake_kda_det_train_kcp.py",
+    "benchmarks/bench_cake_kda_nondet_train.py",
+    "benchmarks/bench_cake_kda_nondet_train_kcp.py"
+  ],
+  "generators": {
+    "cake_kda_det_train": {
+      "cake_revision": "24adea6f2a14be9773102c4e74c229764093cc11",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-06T05:16:51Z"
+    },
+    "cake_kda_det_train_kcp": {
+      "cake_revision": "e60bcf2ee63bb140d7e5f7cfd06fada65961586d",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T22:44:49Z"
+    },
+    "cake_kda_nondet_train": {
+      "cake_revision": "b20c4b20c7eaf5ca5610279585cc850541151a70",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-05T11:26:08Z"
+    },
+    "cake_kda_nondet_train_kcp": {
+      "cake_revision": "e60bcf2ee63bb140d7e5f7cfd06fada65961586d",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T22:44:49Z"
+    }
+  }
+}
