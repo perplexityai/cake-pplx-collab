@@ -8538,6 +8538,9 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
     scan = torch.cumsum(valid, 0, dtype=torch.int32)
     acc = torch.randn(int(idx.numel()), DEFAULT_H, device=CUDA, generator=gen)
     g = torch.tensor(0.75, device=CUDA)
+    # a fresh, enabled binding cache: an earlier test of the process may have remembered the eager scatter form (its
+    # key holds no tensor shape but the output rows, here 4097), which would hide the bind asserted below
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cake_backend.BindingCache())
     bound.clear()
     fused = cake_backend.scale_cast_scatter(acc, g, idx, scan, T, backend="cake")
     shipped = cake_backend.scatter_rows(

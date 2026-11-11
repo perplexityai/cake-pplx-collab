@@ -345,8 +345,8 @@ def test_package_identity_and_build_identity():
 
 def test_cake_pplx_lists_the_module_lazily_and_no_former_name():
     """In a fresh interpreter, importing the ``cake_pplx`` namespaces holds no module or name of the former entry
-    module or package and does not import this module; the namespace lists ``cake_lm_head_nondet_train``, and
-    importing it binds this module."""
+    module or package and does not import this module; ``pkgutil`` lists ``cake_lm_head_nondet_train`` in the
+    namespace without importing it, and an explicit ``importlib.import_module`` loads it under that name."""
     code = (
         "import importlib, json, pkgutil, sys\n"
         "import cake_pplx, cake_pplx._backends\n"
