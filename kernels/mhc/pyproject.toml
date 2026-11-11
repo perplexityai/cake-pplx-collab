@@ -25,7 +25,7 @@ include = ["cake_pplx*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"*" = ["build.json", "build.test.json", "README.md", "csrc/**/*"]
+"*" = ["build.json", "build.test.json", "README.md", "csrc/**/*", ".gitignore"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
