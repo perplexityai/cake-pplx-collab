@@ -26,7 +26,11 @@ import contextlib
 import dataclasses
 import gc
 import inspect
+import json
 import math
+import pathlib
+import subprocess
+import sys
 import warnings
 from types import SimpleNamespace
 
@@ -1219,10 +1223,14 @@ def test_memory_plan_counts_the_exact_loss_phases():
 # ---------------------------------------------------------------------------
 
 
+def _make_glm_weight():
+    return make_inputs(1, seed=SEED, device=CUDA, ignore_frac=0.0).W
+
+
 @pytest.fixture(scope="module")
 def glm_weight():
     _require_program(entry="loss")
-    return make_inputs(1, seed=SEED, device=CUDA, ignore_frac=0.0).W
+    return _make_glm_weight()
 
 
 def _device_inputs(T, *, W, seed=SEED, ignore_frac=0.05, ld_pad=0):
@@ -1472,18 +1480,28 @@ def test_device_budget_mode(glm_weight, train):
         _check_against_references(split, inp, ceiling=True)
 
 
-def _peaks(call):
-    """``(allocated, reserved)`` peak bytes of ``call()`` above its start, after one warm-up call (the binding is
-    remembered) with the caching allocator emptied before each measured call.  The warm-up starts from the same
-    cleared state for every measured path: both modules' binding caches are cleared and the caching allocator emptied
-    first, so the reserved peak does not depend on which allocator segments the remembered bindings of earlier calls
-    -- an earlier path's or an earlier test's in the same process -- leave partly used (the measured calls still find
-    their own binding remembered)."""
+def _release_cached_blocks():
+    """Clear both modules' binding caches and release every cached block the process can let go: collect, free the
+    cuBLAS workspaces and empty the caching allocator.  A cuBLAS workspace (one per thread's handle and stream, 32 MiB
+    here, kept for the process's life) lives where the first GEMM of its thread found room -- an earlier test's
+    reference GEMM can place it in a freed multi-GB segment -- and pins that segment's free remainder past
+    ``empty_cache()``; the next GEMM allocates the workspace again."""
     for mod in (cake_backend, opt_in):
         mod.BINDING_CACHE.clear()
     gc.collect()
     torch.cuda.synchronize()
+    torch._C._cuda_clearCublasWorkspaces()
     torch.cuda.empty_cache()
+
+
+def _peaks(call):
+    """``(allocated, reserved)`` peak bytes of ``call()`` above its start, after one warm-up call (the binding is
+    remembered) with the caching allocator emptied before each measured call.  The warm-up starts from the same
+    cleared state for every measured path (:func:`_release_cached_blocks`), so the reserved peak does not depend on
+    which allocator segments the remembered bindings or cuBLAS workspaces of earlier calls -- an earlier path's or an
+    earlier test's in the same process -- leave partly used (the measured calls still find their own binding
+    remembered)."""
+    _release_cached_blocks()
     call()
     out = []
     for _ in range(2):
@@ -1509,15 +1527,39 @@ def _peaks(call):
     [("xw", None), ("xw", False), ("x_only", None), ("w_only", None), ("none", None)],
 )
 @pytest.mark.parametrize("frac", [0.01, 0.3])
-def test_device_split_peak_memory_within_the_plain_path(
-    glm_weight, train, hidden_count, frac, mode
-):
+def test_device_split_peak_memory_within_the_plain_path(train, hidden_count, frac, mode):
     """The split's measured step peak (forward + backward, allocated and reserved) never exceeds the same call's
     without the split: the term array of the exact loss and the split's indices are offset by the gradient rows'
-    smaller accumulators and row vectors and by the chunk loop's buffers released before the exact loss runs."""
+    smaller accumulators and row vectors and by the chunk loop's buffers released before the exact loss runs.
+
+    Measured in a fresh process (:func:`_isolated_split_peaks`): the reserved peak counts whole allocator segments, and
+    the free space of the 2 MiB small-pool segments depends on the process's earlier calls.  Their process-lifetime
+    constants -- a preload's 256 KiB valid-row arange, the support entries' dummy operands, other threads'
+    aranges -- stay where they were allocated and split the free space of the segment the inputs then share, so at
+    ``frac`` 0.01 the split's logp-only pass (a 745360-byte chunk buffer, a small-pool request the plain path does not
+    make) finds no free block large enough and adds a 2 MiB segment, while the same call in a fresh process places it
+    in the free space of the inputs' segment.  No call of this process can release those constants."""
     _require_program(entry="loss")
+    split_alloc, split_res, plain_alloc, plain_res = _isolated_split_peaks(
+        train, hidden_count, frac, mode
+    )
+    print(
+        f"\nzero-weight peak {train} hidden_count={hidden_count} frac={frac} {mode}: allocated split {split_alloc} "
+        f"plain {plain_alloc}; reserved split {split_res} plain {plain_res}"
+    )
+    assert split_alloc <= plain_alloc
+    assert split_res <= plain_res
+
+
+def _split_peaks(W, train, hidden_count, frac, mode):
+    """``(split allocated, split reserved, plain allocated, plain reserved)`` step peaks (:func:`_peaks`) of the loss
+    entry at ``T = 16231`` with ``W``, the split's floor at ``0`` and above every call."""
     T = 16231
-    base = _device_inputs(T, W=glm_weight)
+    # the inputs from the released state too: built on an earlier call's cached segment (or next to a workspace), an
+    # input pins that segment's free remainder for both measured paths, and the remainder then serves the large
+    # requests of either path (a reserved peak of the small-pool segments alone)
+    _release_cached_blocks()
+    base = _device_inputs(T, W=W)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("random", frac)))
     switches = {} if hidden_count is None else dict(hidden_count=hidden_count)
 
@@ -1544,12 +1586,40 @@ def test_device_split_peak_memory_within_the_plain_path(
             split_alloc, split_res = _peaks(call)
         with _zero_weight_floor(NO_SPLIT):
             plain_alloc, plain_res = _peaks(call)
-    print(
-        f"\nzero-weight peak {train} hidden_count={hidden_count} frac={frac} {mode}: allocated split {split_alloc} "
-        f"plain {plain_alloc}; reserved split {split_res} plain {plain_res}"
+    return split_alloc, split_res, plain_alloc, plain_res
+
+
+# The child of :func:`_isolated_split_peaks`: this module imported from the package root, the GLM-geometry weight
+# made as the ``glm_weight`` fixture makes it, the four peaks printed as one JSON line
+_SPLIT_PEAKS_CHILD = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from tests.experimental import test_cake_lm_head_det_train_zero_weight as m
+args = json.loads(sys.argv[2])
+print("SPLIT_PEAKS " + json.dumps(list(m._split_peaks(m._make_glm_weight(), *args))))
+"""
+
+
+def _isolated_split_peaks(train, hidden_count, frac, mode):
+    """:func:`_split_peaks` in a fresh Python process on the same device (the environment inherited), so both paths
+    start from an allocator state no earlier call of this process shaped."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _SPLIT_PEAKS_CHILD,
+            str(root),
+            json.dumps([train, hidden_count, frac, mode]),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
     )
-    assert split_alloc <= plain_alloc
-    assert split_res <= plain_res
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    lines = [line for line in proc.stdout.splitlines() if line.startswith("SPLIT_PEAKS ")]
+    assert len(lines) == 1, proc.stdout[-4000:]
+    return tuple(json.loads(lines[0][len("SPLIT_PEAKS ") :]))
 
 
 def _cold_peaks(call, modules):
