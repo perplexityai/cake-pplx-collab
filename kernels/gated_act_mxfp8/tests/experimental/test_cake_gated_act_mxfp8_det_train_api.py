@@ -13,10 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake fused SwiGLU + MXFP8
+Tests of the cake_pplx public surface of the Cake fused SwiGLU + MXFP8
 quantization training kernels (SM100 / SM103 / SM107): the
-``cake_pplx.cake_gated_act_mxfp8_det_train`` entry points, their re-export from the
-``flashinfer`` top-level package and the ``torch.ops.flashinfer`` custom ops.
+``cake_pplx.cake_gated_act_mxfp8_det_train`` entry points, the facade bound on
+the ``cake_pplx`` namespace package (which re-exports no entry point) and the
+custom-op wrappers.
 The entry points are pass-throughs to
 ``cake_pplx._backends.cake_gated_act_mxfp8_det_train``;
 this module checks that identity (same objects at the top level, the backend's
@@ -31,7 +32,7 @@ import inspect
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_gated_act_mxfp8_det_train
 import cake_pplx._backends.cake_gated_act_mxfp8_det_train as backend
 from cake_pplx.cake_gated_act_mxfp8_det_train import (
@@ -39,7 +40,6 @@ from cake_pplx.cake_gated_act_mxfp8_det_train import (
     cake_gated_act_mxfp8_det_train_forward,
     cake_gated_act_mxfp8_det_train_backward,
 )
-from flashinfer.utils import get_compute_capability
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 MODES = ((True, False), (False, True), (True, True))
@@ -48,7 +48,7 @@ MODES = ((True, False), (False, True), (True, True))
 def _supported() -> bool:
     return (
         torch.cuda.is_available()
-        and get_compute_capability(torch.device("cuda:0")) in SUPPORTED_CAPABILITIES
+        and torch.cuda.get_device_capability(0) in SUPPORTED_CAPABILITIES
     )
 
 
@@ -77,14 +77,19 @@ def _same(a, b) -> None:
 
 
 def test_entry_points_are_exported() -> None:
+    # The facade is the ``cake_pplx`` submodule; the namespace package itself
+    # re-exports no entry point (it has no ``__init__.py``).
+    facade = cake_pplx.cake_gated_act_mxfp8_det_train
     assert (
-        flashinfer.cake_gated_act_mxfp8_det_train_forward
+        facade.cake_gated_act_mxfp8_det_train_forward
         is cake_gated_act_mxfp8_det_train_forward
     )
     assert (
-        flashinfer.cake_gated_act_mxfp8_det_train_backward
+        facade.cake_gated_act_mxfp8_det_train_backward
         is cake_gated_act_mxfp8_det_train_backward
     )
+    assert not hasattr(cake_pplx, "cake_gated_act_mxfp8_det_train_forward")
+    assert not hasattr(cake_pplx, "cake_gated_act_mxfp8_det_train_backward")
 
 
 def test_entry_point_signatures_mirror_the_backend() -> None:

@@ -24,12 +24,12 @@ after the op: functions are named by the module plus a verb, the support query
 is ``is_cake_gated_act_mxfp8_det_train_supported`` and the output tuple type is
 ``CakeGatedActMXFP8DetOutputs``.  No entry point has a ``deterministic``
 parameter.  The modules and names the family had before
-(``flashinfer.gated_act_mxfp8``, the package
-``flashinfer.cake_gated_act_mxfp8_backend``, ``silu_and_mul_mxfp8_quantize``
+(``cake_pplx.gated_act_mxfp8``, the package
+``cake_pplx.cake_gated_act_mxfp8_backend``, ``silu_and_mul_mxfp8_quantize``
 and the other names without a mode word) fail at import: no alias, no compat
 module.  The facade imports its backend package on first use, so ``import
-flashinfer`` loads no module of it; the family's ``flashinfer`` top-level names
-are rows of the lazy-export table ``flashinfer._LAZY_EXPORTS``.  The shared
+cake_pplx`` loads no module of it; ``cake_pplx`` is a PEP 420 namespace
+package (no ``__init__.py``) that binds no name of the family itself.  The shared
 checks of the mode-in-name rule (``tests/cake/test_helpers/cake_mode_names.py``) run
 over both namespaces; the checks here add what is particular to this family.
 The JIT library names (``cake_gated_act_mxfp8_<hash>``) are build identities,
@@ -47,7 +47,8 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
+import cake_pplx._backends
 import cake_pplx.cake_gated_act_mxfp8_det_train as facade
 import cake_pplx._backends.cake_gated_act_mxfp8_det_train as backend
 from tests.cake.test_helpers.cake_mode_names import assert_cake_mode_module
@@ -55,10 +56,10 @@ from tests.cake.test_helpers.cake_mode_names import assert_cake_mode_module
 pytestmark = pytest.mark.cpu_only
 
 MODULE = "cake_gated_act_mxfp8_det_train"
-FACADE = f"flashinfer.{MODULE}"
+FACADE = f"cake_pplx.{MODULE}"
 BACKEND = f"cake_pplx._backends.{MODULE}"
 OUTPUTS = "CakeGatedActMXFP8DetOutputs"
-# The facade's functions (its own ``flashinfer_api`` defs) and the backend
+# The facade's functions (its own ``cake_api`` defs) and the backend
 # functions three of them call.
 FACADE_FUNCTIONS = {
     f"{MODULE}_forward",
@@ -84,13 +85,9 @@ CONSTANTS = {
     "backend": {"ALIGNMENT_BYTES", "ARCHES", "SUPPORTED_COMPUTE_CAPABILITIES"},
 }
 NAMESPACES = {"facade": facade, "backend": backend}
-# The family's rows of ``flashinfer._LAZY_EXPORTS``: name -> (module, attribute).
-ROWS = {
-    MODULE: (f".{MODULE}", None),
-    **{name: (f".{MODULE}", name) for name in FORWARDED},
-}
-# The modules and packages the family had before the mode-in-name rule.
-OLD_MODULES = ("flashinfer.gated_act_mxfp8", "flashinfer.cake_gated_act_mxfp8_backend")
+# The modules and packages the family had before the mode-in-name rule, under
+# the ``cake_pplx`` prefix (``flashinfer.<module>`` -> ``cake_pplx.<module>``).
+OLD_MODULES = ("cake_pplx.gated_act_mxfp8", "cake_pplx.cake_gated_act_mxfp8_backend")
 # The names the facade (and, for the two entry points, the top level) had.
 OLD_FACADE_NAMES = (
     "GatedActMxfp8Outputs",
@@ -126,26 +123,26 @@ def test_all_is_the_mode_names_and_the_constants() -> None:
 def test_shared_mode_name_checks(kind: str) -> None:
     """The shared checks of the mode-in-name rule (``assert_cake_mode_module``):
     the mode word and its place in every public name; no entry point binds a
-    ``deterministic`` keyword; the namespace, the ``flashinfer`` top level (its
-    lazy-export rows included) and, for the facade, its backend package bind
+    ``deterministic`` keyword; the namespace, the ``cake_pplx`` namespace
+    package and, for the facade, its backend package bind
     each object only under its own name; and in a fresh interpreter the former
     modules and names fail at import."""
     if kind == "facade":
         assert_cake_mode_module(
             facade,
-            namespaces=[flashinfer, backend],
+            namespaces=[cake_pplx, backend],
             forwards=[(name, getattr(backend, name)) for name in FORWARDED],
             old_modules=OLD_MODULES,
             old_names=[
                 (path, name)
-                for path in ("flashinfer", FACADE)
+                for path in ("cake_pplx", FACADE)
                 for name in OLD_FACADE_NAMES
             ],
         )
     else:
         assert_cake_mode_module(
             backend,
-            namespaces=[flashinfer],
+            namespaces=[cake_pplx, cake_pplx._backends],
             old_names=[(BACKEND, name) for name in OLD_BACKEND_NAMES],
         )
 
@@ -172,7 +169,7 @@ def test_no_name_shim() -> None:
 
 
 def test_facade_objects() -> None:
-    """The facade's functions are its own ``flashinfer_api`` defs, named as
+    """The facade's functions are its own ``cake_api`` defs, named as
     exported; its constants are the backend's objects."""
     for name in FACADE_FUNCTIONS:
         obj = getattr(facade, name)
@@ -184,11 +181,16 @@ def test_facade_objects() -> None:
 
 
 def test_modules_sit_at_their_places() -> None:
-    """The facade sits at the ``flashinfer`` top level, the backend package at
-    ``cake_pplx/_backends/<module>/`` with its own build files."""
-    root = Path(flashinfer.__file__).parent
-    assert Path(facade.__file__) == root / f"{MODULE}.py"
-    package = root / "experimental" / "cake" / MODULE
+    """The facade sits at the ``cake_pplx`` top level, the backend package at
+    ``cake_pplx/_backends/<module>/`` with its own build files, and neither
+    namespace level has an ``__init__.py`` (PEP 420)."""
+    root = Path(facade.__file__).parent
+    assert root.name == "cake_pplx"
+    assert not (root / "__init__.py").exists()
+    assert not (root / "_backends" / "__init__.py").exists()
+    assert getattr(cake_pplx, "__file__", None) is None
+    assert getattr(cake_pplx._backends, "__file__", None) is None
+    package = root / "_backends" / MODULE
     assert Path(backend.__file__) == package / "__init__.py"
     files = {p.name for p in package.iterdir() if p.name != "__pycache__"}
     assert {
@@ -214,37 +216,37 @@ def test_old_module_fails_at_import(module: str) -> None:
     assert importlib.util.find_spec(module) is None, module
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(module)
-    assert not hasattr(flashinfer, module.rpartition(".")[2]), module
+    assert not hasattr(cake_pplx, module.rpartition(".")[2]), module
 
 
 def test_top_level_binds_only_mode_names() -> None:
-    """The family's top-level names are exactly its lazy-export rows, and each
-    resolves to the facade's object."""
-    rows = {
-        name: tuple(row)
-        for name, row in flashinfer._LAZY_EXPORTS.items()
-        if FAMILY.search(name)
-    }
-    assert rows == ROWS, sorted(rows)
-    assert {name for name in dir(flashinfer) if FAMILY.search(name)} == set(ROWS)
-    assert {name for name in vars(flashinfer) if FAMILY.search(name)} <= set(ROWS)
+    """The ``cake_pplx`` namespace binds no entry point of the family: its only
+    family name is the facade submodule itself (bound by the import system), and
+    ``cake_pplx._backends`` binds only the backend package."""
+    # private helper modules of the family (``_cake_pplx_api_<family>``) aside
+    public = {name for name in vars(cake_pplx) if not name.startswith("_")}
+    assert {name for name in public if FAMILY.search(name)} == {MODULE}
+    assert getattr(cake_pplx, MODULE) is facade
     for name in FORWARDED:
-        assert getattr(flashinfer, name) is getattr(facade, name), name
-    assert getattr(flashinfer, MODULE) is facade
+        assert not hasattr(cake_pplx, name), name
+    assert {
+        name for name in vars(cake_pplx._backends) if FAMILY.search(name)
+    } == {MODULE}
+    assert getattr(cake_pplx._backends, MODULE) is backend
 
 
-# A plain ``import flashinfer`` binds none of the family's names (each binds on
-# first access) and loads neither the facade nor the backend package; importing
-# the facade still loads no backend module, and its first backend access does.
+# A plain ``import cake_pplx`` binds none of the family's names and loads
+# neither the facade nor the backend package; importing the facade still loads
+# no backend module, and its first backend access does.
 FRESH = (
-    "import re, sys, flashinfer\n"
+    "import re, sys, cake_pplx\n"
     "def family(names):\n"
     f"    return sorted(n for n in names if re.search({FAMILY.pattern!r}, n))\n"
     "def loaded(prefix):\n"
     "    return sorted(m for m in sys.modules if m.startswith(prefix))\n"
-    f"assert family(vars(flashinfer)) == [], family(vars(flashinfer))\n"
+    f"assert family(vars(cake_pplx)) == [], family(vars(cake_pplx))\n"
     f"assert loaded({FACADE!r}) == [] and loaded({BACKEND!r}) == []\n"
-    f"assert family(dir(flashinfer)) == {sorted(ROWS)!r}, family(dir(flashinfer))\n"
+    f"assert family(dir(cake_pplx)) == [], family(dir(cake_pplx))\n"
     f"import {FACADE} as facade\n"
     f"assert loaded({BACKEND!r}) == [], loaded({BACKEND!r})\n"
     "facade.ARCHES\n"

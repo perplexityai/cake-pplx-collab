@@ -26,6 +26,13 @@ from pathlib import Path
 
 import torch
 
+from cake_pplx.cake_gated_act_mxfp8_det_train import (
+    cake_gated_act_mxfp8_det_train_backward,
+    cake_gated_act_mxfp8_det_train_forward,
+)
+
+# FlashInfer is optional here: it provides the decomposed baseline
+# (``mxfp8_quantize``) and the CUPTI timer, never the kernel under test.
 import flashinfer
 from flashinfer import SfLayout
 from flashinfer.testing import bench_gpu_time
@@ -100,10 +107,10 @@ def _fused(
     colwise: bool,
 ):
     if direction == "forward":
-        return flashinfer.cake_gated_act_mxfp8_det_train_forward(
+        return cake_gated_act_mxfp8_det_train_forward(
             gated_input, rowwise=rowwise, colwise=colwise
         )
-    return flashinfer.cake_gated_act_mxfp8_det_train_backward(
+    return cake_gated_act_mxfp8_det_train_backward(
         gated_input, grad_output, rowwise=rowwise, colwise=colwise
     )
 

@@ -17,9 +17,19 @@ limitations under the License.
 import pytest
 import torch
 
-import flashinfer
-from flashinfer.quantization import SfLayout, mxfp8_quantize
-from flashinfer.utils import get_compute_capability
+from cake_pplx.cake_gated_act_mxfp8_det_train import (
+    cake_gated_act_mxfp8_det_train_backward,
+    cake_gated_act_mxfp8_det_train_forward,
+)
+
+
+def _flashinfer_quantization():
+    """FlashInfer's MXFP8 quantization, the independent reference of the
+    correctness tests here (optional: the tests that need it skip without it)."""
+    return pytest.importorskip(
+        "flashinfer.quantization",
+        reason="the independent MXFP8 reference (flashinfer.quantization) is not installed",
+    )
 
 
 MODES = (
@@ -33,9 +43,7 @@ MODES = (
 
 
 def _supported() -> bool:
-    return torch.cuda.is_available() and get_compute_capability(
-        torch.device("cuda:0")
-    ) in (
+    return torch.cuda.is_available() and torch.cuda.get_device_capability(0) in (
         (10, 0),
         (10, 3),
         (10, 7),
@@ -72,6 +80,8 @@ def _logical(
 def _quantize_reference(
     logical: torch.Tensor, rowwise: bool, colwise: bool
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    quantization = _flashinfer_quantization()
+    SfLayout, mxfp8_quantize = quantization.SfLayout, quantization.mxfp8_quantize
     empty_q = logical.new_empty(0, dtype=torch.float8_e4m3fn)
     empty_s = logical.new_empty(0, dtype=torch.uint8)
     if rowwise:
@@ -161,10 +171,10 @@ def _run(
     colwise: bool,
 ):
     if direction == "forward":
-        return flashinfer.cake_gated_act_mxfp8_det_train_forward(
+        return cake_gated_act_mxfp8_det_train_forward(
             gated_input, rowwise=rowwise, colwise=colwise
         )
-    return flashinfer.cake_gated_act_mxfp8_det_train_backward(
+    return cake_gated_act_mxfp8_det_train_backward(
         gated_input, grad_output, rowwise=rowwise, colwise=colwise
     )
 
@@ -229,9 +239,7 @@ def test_gated_act_mxfp8_mode_consistency(direction):
 
 @torch.inference_mode()
 def test_gated_act_mxfp8_sm103_backward_both_special_values():
-    if not torch.cuda.is_available() or get_compute_capability(
-        torch.device("cuda:0")
-    ) != (10, 3):
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (10, 3):
         pytest.skip("SM103-specific backward-both kernel requires SM103")
 
     m = k = 128
