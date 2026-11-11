@@ -15297,10 +15297,19 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
         if kind == "plain":
             assert peak <= fast_peak, (peak, fast_peak)
         del result
-    # a cache miss of each form (the caches cleared): the default call templates on the count's buffers
+    # a cache miss of each form (the caches cleared): the default call templates on the count's buffers.  Both misses
+    # start from one allocator state -- no earlier pass's result alive (``fast`` aside), the caches cleared and every
+    # free cached block released -- as the peaks count allocator blocks: a request that a cached free block less than
+    # 1 MiB larger serves takes the whole block (the caching allocator splits no smaller remainder off), so a result
+    # left alive (pinning a partly free segment) or blocks cached before one miss only can add such a remainder to one
+    # peak at the same requested bytes
+    del _
     _clear_binding_caches()
-    _, fast_miss = _default_pass(inp, C, entry, "plain", tau, memory_mode="fast")
+    gc.collect()
+    torch.cuda.empty_cache()
+    fast_miss = _default_pass(inp, C, entry, "plain", tau, memory_mode="fast")[1]
     _clear_binding_caches()
+    gc.collect()
     torch.cuda.empty_cache()
     result, miss = _default_pass(inp, C, entry, "plain", tau)
     _assert_same_bits(fast, result, keys=keys)
