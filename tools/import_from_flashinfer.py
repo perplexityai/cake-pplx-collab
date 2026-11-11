@@ -79,6 +79,11 @@ def family_of_name(name: str) -> str | None:
     return None
 
 
+def is_training(path: str) -> bool:
+    """A training test or benchmark (FlashInfer also has inference ``cake_gdn`` / ``cake_kda`` suites)."""
+    return re.search(r"cake_.*(?:train|_det|nondet|kcp)", path) is not None
+
+
 def git_head(src: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -106,12 +111,12 @@ def select(src: Path, family: str) -> dict[str, list[str]]:
     tests = [
         f
         for f in tracked_files(src, "tests")
-        if f.endswith(".py") and f not in CROSS_FAMILY_TESTS and family_of_name(f) == family
+        if f.endswith(".py") and f not in CROSS_FAMILY_TESTS and is_training(f) and family_of_name(f) == family
     ]
     benches = [
         f
         for f in tracked_files(src, "benchmarks")
-        if f.endswith(".py") and family_of_name(f) == family
+        if f.endswith(".py") and is_training(f) and family_of_name(f) == family
     ]
     return {"packages": packages, "facades": facades, "tests": sorted(tests), "benchmarks": sorted(benches)}
 
