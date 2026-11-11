@@ -23,8 +23,9 @@ package imports only itself, ``torch`` and ``tvm_ffi``; its stable entry points
 are ``cake_pplx.cake_causal_conv1d_nondet_train`` and
 ``cake_pplx.cake_causal_conv1d_nondet_train_kcp`` (covered by
 ``test_cake_causal_conv1d_nondet_train_api.py``), neither the package nor its
-entry points emit an experimental warning, and the only ``flashinfer`` import is the JIT
-fallback of ``cake_build.py``.  Two tests, CPU-only: no GPU, no generated
+entry points emit an experimental warning, the package imports no ``flashinfer`` module,
+and the only guarded import is the JIT fallback of ``cake_build.py`` (the package's own
+``_cake_pplx_jit`` shim).  Two tests, CPU-only: no GPU, no generated
 program and no JIT build is needed, so both run on every lane.
 """
 
@@ -225,11 +226,21 @@ def _imports_flashinfer(node):
     return False
 
 
+def _imports_jit_shim(node):
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "_cake_pplx_jit"
+    )
+
+
 def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """The package imports nothing from the rest of FlashInfer: no relative import
-    climbs above the package (``from .. import``), every ``flashinfer`` import sits
-    in the body of a ``try`` with an ``except ImportError`` handler, and exactly
-    one such guarded block exists -- the JIT fallback in ``cake_build.py``."""
+    """The package imports nothing from FlashInfer: no relative import climbs above
+    the package (``from .. import``) and no ``flashinfer`` import remains.  The JIT
+    fallback that imported ``flashinfer.jit`` upstream now imports the package's own
+    shim (``from ._cake_pplx_jit import ...``) in the body of a ``try`` with an
+    ``except ImportError`` handler, and exactly one such guarded block exists -- in
+    ``cake_build.py``."""
     guards = {}
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -246,11 +257,10 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _imports_flashinfer(node):
-                assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a "
-                    "try/except ImportError"
-                )
+            assert not _imports_flashinfer(node), (
+                f"{path.name}:{node.lineno}: flashinfer import"
+            )
+            if _imports_jit_shim(node) and node in guarded:
                 guards.setdefault(path.name, set()).add(guarded[node])
     assert {name: len(lines) for name, lines in guards.items()} == {
         "cake_build.py": 1

@@ -132,7 +132,7 @@ def test_multi_autograd_and_facade_bitwise_single_calls(
     name, lens, cuts, Cs, batched
 ) -> None:
     """The autograd entry and the facade against one autograd single call per tensor (and ``[1, T_r, C]`` inputs)."""
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
 
     device = torch.device("cuda")
     ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
@@ -189,7 +189,7 @@ def test_multi_recompute_handle_bitwise_single_handles(
     """A checkpoint of the multi call with ONE handle equals a checkpoint of the single calls with one handle each,
     the plain checkpoints and the direct pass, bitwise; the recompute replays the entry ("replay"); the handle holds
     the n pools (the saved set's own tensors, the forward's ``hist`` bits) and retains their bytes."""
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
 
     conv_kcp = _kcp()
     device = torch.device("cuda")
@@ -248,7 +248,7 @@ def test_multi_recompute_handle_retain_graph_and_nested() -> None:
     outside nested regions serves both recomputes; the multi handle may also carry another package's entry."""
     from torch.utils.checkpoint import checkpoint
 
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
 
     conv_kcp = _kcp()
     device = torch.device("cuda")
@@ -295,7 +295,7 @@ def test_multi_recompute_handle_retain_graph_and_nested() -> None:
 
 
 def test_multi_recompute_handle_misuse_raises() -> None:
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
 
     conv_kcp = _kcp()
     device = torch.device("cuda")

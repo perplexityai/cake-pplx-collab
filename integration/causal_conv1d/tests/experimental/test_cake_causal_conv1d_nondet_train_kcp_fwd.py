@@ -64,7 +64,7 @@ import torch
 from cake_pplx.cake_causal_conv1d_det_train import (
     cake_causal_conv1d_det_train_forward,
 )
-from flashinfer.experimental.cake import cake_causal_conv1d_nondet_train as pkg
+import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import cake_jit
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,

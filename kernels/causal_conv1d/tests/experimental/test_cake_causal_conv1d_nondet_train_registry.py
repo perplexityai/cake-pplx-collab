@@ -20,15 +20,14 @@ the lowest channel counts of its twin, the program of the route it shares a body
 ordinary launch (no reduce program) that owns an ``accumulators`` workspace (FP32, or FP64 on the ``_fp32g``
 routes; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per channel tile), and the workspace byte
 layout and size depend on ``C`` and the route only.  The public names (each carries the mode word ``nondet``; no
-entry point takes a mode keyword), and the package's wiring (test-helper key, package data, the docstring-only
-``flashinfer.experimental.cake``).
+entry point takes a mode keyword), and the package's wiring (test-helper key, package data, no ``__init__.py`` at
+the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
 No device is needed; nothing is built or launched.  The ``build.json`` checks skip until the exporter renders the
 package.
 """
 
 from __future__ import annotations
 
-import ast
 import filecmp
 import hashlib
 import importlib.util
@@ -1224,19 +1223,19 @@ def test_package_wiring() -> None:
     assert (
         pkg.__name__ == "cake_pplx._backends.cake_causal_conv1d_nondet_train"
     )
-    tree = ast.parse((REPO / "cake_pplx/_backends/__init__.py").read_text())
-    assert ast.get_docstring(tree)
-    assert not [
-        node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-    ]
-    assert len(tree.body) == 1, "flashinfer.experimental.cake holds a docstring only"
+    # ``cake_pplx`` and ``cake_pplx._backends`` are PEP 420 namespace levels shared by every family: neither carries
+    # an ``__init__.py`` (FlashInfer's docstring-only ``flashinfer/experimental/cake/__init__.py`` has no
+    # counterpart here).
+    assert not (REPO / "cake_pplx" / "__init__.py").exists()
+    assert not (REPO / "cake_pplx" / "_backends" / "__init__.py").exists()
     try:
         import tomllib
     except ModuleNotFoundError:  # Python < 3.11
         tomllib = pytest.importorskip("tomli")
     data = tomllib.loads((REPO / "pyproject.toml").read_text())
     package_data = data["tool"]["setuptools"]["package-data"]
-    assert package_data[pkg.__name__] == ["csrc/**", "build.json"]
+    # One family-wide rule ships every backend package's ``build.json`` and ``csrc/`` tree.
+    assert {"build.json", "csrc/**/*"} <= set(package_data["*"]), package_data
 
 
 @pytest.mark.cpu_only

@@ -13,12 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake packed width-4 depthwise
+Tests of the public surface of the Cake packed width-4 depthwise
 causal convolution + SiLU training kernels (SM100 / SM103 / SM107): the
-``cake_pplx.cake_causal_conv1d_det_train`` facade and its re-export from the
-``flashinfer`` top-level package.  The facade's three entry points are
+``cake_pplx.cake_causal_conv1d_det_train`` facade.  The facade's three entry points are
 pass-throughs to ``cake_pplx._backends.cake_causal_conv1d_det_train``; this module
-checks that identity (same objects at the top level, the backend's exact
+checks that identity (same objects on the facade, the backend's exact
 signatures, same bits as the backend) and leaves the numerical contract to
 ``test_cake_causal_conv1d_det_train.py``, which imports only the backend package.
 """
@@ -30,7 +29,6 @@ import inspect
 import pytest
 import torch
 
-import flashinfer
 import cake_pplx.cake_causal_conv1d_det_train
 import cake_pplx._backends.cake_causal_conv1d_det_train as backend
 from cake_pplx.cake_causal_conv1d_det_train import (
@@ -43,9 +41,6 @@ from cake_pplx.cake_causal_conv1d_det_train import (
     cake_causal_conv1d_det_train_forward_workspace_bytes,
     is_cake_causal_conv1d_det_train_supported,
 )
-from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as loader
-from flashinfer.jit.env import has_flashinfer_jit_cache
-from flashinfer.utils import get_compute_capability
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 SEED = 2033
@@ -58,7 +53,7 @@ def _device() -> torch.device:
 def _supported() -> bool:
     return (
         torch.cuda.is_available()
-        and get_compute_capability(_device()) in SUPPORTED_CAPABILITIES
+        and torch.cuda.get_device_capability(_device()) in SUPPORTED_CAPABILITIES
         and is_cake_causal_conv1d_det_train_supported(_device())
     )
 
@@ -67,14 +62,6 @@ pytestmark = pytest.mark.skipif(
     not _supported(),
     reason="cake_causal_conv1d_det_train needs an SM100 / SM103 / SM107 device with exported routes",
 )
-
-
-@pytest.fixture(autouse=not has_flashinfer_jit_cache(), scope="module")
-def warmup_jit():
-    if _supported():
-        arch = loader.arch_for_capability(get_compute_capability(_device()))
-        flashinfer.jit.build_jit_specs(loader.specs_for_arch(arch), verbose=False)
-    yield
 
 
 def test_function_signature_is_exported() -> None:
@@ -105,7 +92,7 @@ def test_function_signature_is_exported() -> None:
 
 def test_facade_signatures_mirror_the_backend() -> None:
     """Every keyword of the backend's entry points (``bias``, ``silu_grad_preactivation``, ``dbias``, ...) is
-    spelled identically on the ``@flashinfer_api`` facade, which public-API tooling reads."""
+    spelled identically on the ``@cake_api`` facade, which public-API tooling reads."""
 
     for name in (
         "cake_causal_conv1d_det_train_forward",

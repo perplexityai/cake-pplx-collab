@@ -17,13 +17,13 @@ Public names of the Cake deterministic causal conv1d + SiLU training packages.
 
 Every module, package and entry point of the deterministic packages carries ``det`` in its name, and every former
 name is gone: the modules before the det rename (``cake_pplx.cake_causal_conv1d_train``,
-``flashinfer.cake_causal_conv1d_train_backend`` and its submodules) and the backend package's directory before the
-move under ``cake_pplx/_backends/`` (``flashinfer.cake_causal_conv1d_det_train_backend`` and its submodules)
-do not import, and no namespace (the ``flashinfer`` top level, ``cake_pplx.cake_causal_conv1d_det_train``, its
+``cake_pplx.cake_causal_conv1d_train_backend`` and its submodules) and the backend package's directory before the
+move under ``cake_pplx/_backends/`` (``cake_pplx.cake_causal_conv1d_det_train_backend`` and its submodules)
+do not import, and no namespace (the ``cake_pplx`` namespace package, ``cake_pplx.cake_causal_conv1d_det_train``, its
 backend package ``cake_pplx._backends.cake_causal_conv1d_det_train``, the KCP facade
 ``cake_pplx.cake_causal_conv1d_det_train_kcp`` and the KCP backend module) binds a former name.  Every public name
 carries the mode word ``det`` in one of the allowed forms (UPPER_CASE constants exempt), no ``fwd`` / ``bwd`` token
-in an entry point's name, and no entry point takes a ``deterministic`` keyword.  Importing ``flashinfer`` or a facade
+in an entry point's name, and no entry point takes a ``deterministic`` keyword.  Importing ``cake_pplx`` or a facade
 loads no backend module until first use, and importing a single-rank facade or package loads no KCP host module
 (checked in fresh interpreters).
 """
@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_causal_conv1d_det_train as facade
 import cake_pplx.cake_causal_conv1d_det_train_kcp as kcp_facade
 import cake_pplx._backends.cake_causal_conv1d_det_train as backend
@@ -55,11 +55,11 @@ SUBMODULES = ("cake_build", "cake_jit", "kcp", "kcp_jit")
 REMOVED_MODULES = (
     # before the det rename
     "cake_pplx.cake_causal_conv1d_train",
-    "flashinfer.cake_causal_conv1d_train_backend",
-    *(f"flashinfer.cake_causal_conv1d_train_backend.{m}" for m in SUBMODULES),
+    "cake_pplx.cake_causal_conv1d_train_backend",
+    *(f"cake_pplx.cake_causal_conv1d_train_backend.{m}" for m in SUBMODULES),
     # the det backend package before its move under cake_pplx/_backends/
-    "flashinfer.cake_causal_conv1d_det_train_backend",
-    *(f"flashinfer.cake_causal_conv1d_det_train_backend.{m}" for m in SUBMODULES),
+    "cake_pplx.cake_causal_conv1d_det_train_backend",
+    *(f"cake_pplx.cake_causal_conv1d_det_train_backend.{m}" for m in SUBMODULES),
 )
 
 # (removed name, det name) of the single-rank entry points: the facade and the backend package.
@@ -89,7 +89,7 @@ SINGLE_RANK = (
         "is_cake_causal_conv1d_det_train_supported",
     ),
 )
-# The single-rank names the ``flashinfer`` top level exports.
+# The single-rank names FlashInfer's top level exported; the ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL = (
     ("CakeCausalConv1dFunction", "CakeCausalConv1dDetFunction"),
     ("cake_causal_conv1d", "cake_causal_conv1d_det"),
@@ -176,9 +176,9 @@ def test_removed_module_does_not_import(name: str) -> None:
     sys.modules.pop(name, None)
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(name)
-    leaf = name.removeprefix("flashinfer.")
+    leaf = name.removeprefix("cake_pplx.")
     if "." not in leaf:
-        assert not hasattr(flashinfer, leaf), leaf
+        assert not hasattr(cake_pplx, leaf), leaf
 
 
 @pytest.mark.parametrize("namespace", sorted(NAMESPACES))
@@ -193,9 +193,13 @@ def test_single_rank_names(namespace: str, pair: tuple[str, str]) -> None:
 
 @pytest.mark.parametrize("pair", TOP_LEVEL, ids=lambda p: p[0])
 def test_top_level_names(pair: tuple[str, str]) -> None:
+    # ``cake_pplx`` is a PEP 420 namespace package with no re-exports: neither name is bound on it, the old name is
+    # gone from the facade and the new name is the facade's.
     old, new = pair
-    assert not hasattr(flashinfer, old), old
-    assert getattr(flashinfer, new) is getattr(facade, new), new
+    assert not hasattr(cake_pplx, old), old
+    assert not hasattr(cake_pplx, new), new
+    assert not hasattr(facade, old), old
+    assert callable(getattr(facade, new)), new
 
 
 @pytest.mark.parametrize("pair", KCP_FACADE_NAMES, ids=lambda p: p[1])
@@ -203,7 +207,7 @@ def test_kcp_names_not_on_the_single_rank_facade(
     pair: tuple[tuple[str, ...], str],
 ) -> None:
     olds, new = pair
-    for module in (facade, backend, flashinfer):
+    for module in (facade, backend, cake_pplx):
         for name in (*olds, new):
             assert not hasattr(module, name), (module.__name__, name)
     assert new in kcp_facade.__all__, new
@@ -285,7 +289,7 @@ def test_no_entry_point_takes_deterministic(namespace: str) -> None:
 
 
 def test_det_entry_points_are_the_decorated_defs() -> None:
-    # One ``flashinfer_api`` wrapper per entry point, named as the det def.
+    # One ``cake_api``-decorated def per entry point, named as the det def.
     for _, new in SINGLE_RANK[1:4]:
         assert getattr(facade, new).__name__ == new, new
     assert backend.CakeCausalConv1dDetFunction.__name__ == "CakeCausalConv1dDetFunction"
@@ -325,7 +329,7 @@ print("KCP_DET_NAMES")
 """
 
 IMPORTS = {
-    "flashinfer": "import flashinfer",
+    "namespace": "import cake_pplx",
     "facade": f"import {FACADE}",
     "package": f"import {PACKAGE}",
     "package_names": f"from {PACKAGE} import cake_causal_conv1d_det_train_forward, cake_jit",
@@ -353,17 +357,20 @@ def test_imports_do_not_load_kcp_and_kcp_names_carry_det(form: str) -> None:
 
 
 def test_old_package_directory_is_gone() -> None:
-    root = Path(flashinfer.__file__).parent
+    # The ``cake_pplx`` directory that holds the facade; a PEP 420 namespace level carries no ``__init__.py``.
+    root = Path(facade.__file__).parent
     assert not (root / "cake_causal_conv1d_train_backend").exists()
     assert not (root / "cake_causal_conv1d_train.py").exists()
     assert not (root / "cake_causal_conv1d_det_train_backend").exists()
+    assert not (root / "__init__.py").exists()
+    assert not (root / "_backends" / "__init__.py").exists()
     assert Path(backend.__file__).parent == (
-        root / "experimental" / "cake" / "cake_causal_conv1d_det_train"
+        root / "_backends" / "cake_causal_conv1d_det_train"
     )
 
 
-# ``import flashinfer`` and the facades load no module of the backend package (it sits under
-# flashinfer/experimental/); listing a facade's names (``dir``) does not load it either.  The first access to a
+# ``import cake_pplx`` and the facades load no module of the backend package (it sits under
+# cake_pplx/_backends/); listing a facade's names (``dir``) does not load it either.  The first access to a
 # re-exported name loads it and returns the backend's object.  Checked in fresh interpreters.
 _ISOLATION_CHECK = """
 import sys
@@ -380,10 +387,11 @@ print("BACKEND_LOADED_ON_FIRST_USE")
 """
 
 ISOLATION = {
-    "flashinfer": (
-        "import flashinfer\nnames = dir(flashinfer)\nassert 'CakeCausalConv1dDetFunction' in names",
+    "namespace": (
+        "import cake_pplx\nnames = dir(cake_pplx)\nassert 'CakeCausalConv1dDetFunction' not in names",
         "import importlib\n"
         "b = importlib.import_module({package!r})\n"
+        "import cake_pplx.cake_causal_conv1d_det_train\n"
         "assert cake_pplx.cake_causal_conv1d_det_train.CakeCausalConv1dDetFunction is b.CakeCausalConv1dDetFunction\n"
         "assert cake_pplx.cake_causal_conv1d_det_train.cake_causal_conv1d_det_train_forward_workspace_bytes"
         " is b.cake_causal_conv1d_det_train_forward_workspace_bytes",
@@ -402,7 +410,7 @@ ISOLATION = {
 
 
 @pytest.mark.parametrize("form", sorted(ISOLATION))
-def test_import_flashinfer_and_facades_load_no_backend(form: str) -> None:
+def test_import_namespace_and_facades_load_no_backend(form: str) -> None:
     imports, first_use = ISOLATION[form]
     code = _ISOLATION_CHECK.format(
         package=PACKAGE, imports=imports, first_use=first_use.format(package=PACKAGE)

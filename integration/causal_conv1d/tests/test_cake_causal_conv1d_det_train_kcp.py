@@ -658,7 +658,7 @@ def _ckpt_run(p, *, handle=None, reentrant=False, ckpt=True, counter=None, twice
 
     from torch.utils.checkpoint import checkpoint
 
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
 
     x = p.x_local.clone().requires_grad_(True)
     w = p.w.clone().requires_grad_(True)
@@ -754,7 +754,7 @@ def test_recompute_handle_retain_graph_and_nested_checkpoints(monkeypatch) -> No
 
     from torch.utils.checkpoint import checkpoint
 
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
     from cake_pplx._backends.cake_causal_conv1d_det_train import (
         kcp as conv_kcp,
     )
@@ -817,7 +817,7 @@ def test_recompute_handle_misuse_raises() -> None:
     lost its entry before the recompute makes it an original forward again (exchanges, still bitwise)."""
     from torch.utils.checkpoint import checkpoint
 
-    from flashinfer import cake_causal_conv1d_det_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as facade
     from cake_pplx._backends.cake_causal_conv1d_det_train import (
         kcp as conv_kcp,
     )
@@ -1388,7 +1388,7 @@ def test_vendored_kcp_imports_with_flashinfer_blocked(tmp_path) -> None:
 
     import tvm_ffi
 
-    from flashinfer.experimental.cake import cake_causal_conv1d_det_train as pkg
+    import cake_pplx._backends.cake_causal_conv1d_det_train as pkg
 
     name = "vendored_causal_conv1d_det_train"
     shutil.copytree(

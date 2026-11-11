@@ -25,7 +25,7 @@ to the non-deterministic package unchanged, also under ``torch.use_deterministic
 takes a ``deterministic`` keyword (``TypeError``), and the deterministic names are unchanged.  The entry points are
 stable APIs (none is marked experimental, and a call emits no ``ExperimentalWarning``) and take the deterministic
 package's parameters (the KCP ones plus ``bwd_reserve_sms``);
-``import flashinfer`` imports neither module, and the KCP module imports the package on first use only.  The opt-in
+``import cake_pplx`` imports neither module, and the KCP module imports the package on first use only.  The opt-in
 ``bwd_grid_mult`` is refused with the deterministic package's errors, and ``cooperative=True`` with an error that names
 the deterministic KCP package.  On a device (once the package is rendered): the entry points return the package's
 bits (``y`` and ``dx`` bitwise the deterministic package's, the parameter gradients within budget), at every
@@ -47,13 +47,12 @@ import warnings
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_causal_conv1d_det_train as det_facade
 import cake_pplx.cake_causal_conv1d_det_train_kcp as det_kcp_facade
 import cake_pplx.cake_causal_conv1d_nondet_train as facade
 import cake_pplx.cake_causal_conv1d_nondet_train_kcp as kcp_facade
 import cake_pplx._backends.cake_causal_conv1d_nondet_train as backend
-from flashinfer.api_logging import ExperimentalWarning
 from tests.cake.test_helpers.cake_package import cake_package
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
@@ -408,9 +407,11 @@ def test_entry_points_mirror_the_package() -> None:
 
 @pytest.mark.cpu_only
 def test_entry_points_are_stable(recorded, kcp_recorded) -> None:
-    """Every entry point, helper and support query of the two modules is a stable API (``@flashinfer_api``; FlashInfer
+    """Every entry point, helper and support query of the two modules is a stable API (``@cake_api``; FlashInfer
     issue #8928): none is marked experimental (no ``is_experimental`` set ``True`` on the entry point or on the
-    function it wraps), and a call emits no ``ExperimentalWarning``."""
+    function it wraps), and a call emits no ``ExperimentalWarning``.  FlashInfer's ``flashinfer_api`` emitted that
+    warning for an ``is_experimental`` entry point; ``cake_api`` is a no-op, so the check matches the category by
+    name (no ``ExperimentalWarning`` class of any module may be emitted)."""
 
     x, w, cu, dy, b, ctx = (object() for _ in range(6))
     cpu = torch.device("cpu")
@@ -431,7 +432,7 @@ def test_entry_points_are_stable(recorded, kcp_recorded) -> None:
             result = fn(*args)
         assert result == f"nondet.{name}", name
         experimental = [
-            c for c in caught if issubclass(c.category, ExperimentalWarning)
+            c for c in caught if c.category.__name__ == "ExperimentalWarning"
         ]
         assert experimental == [], (name, experimental)
 
@@ -494,7 +495,8 @@ def test_no_entry_point_takes_a_mode_keyword() -> None:
 def test_deterministic_names_are_unchanged_and_carry_det() -> None:
     """Every deterministic name is the deterministic object and carries ``det``; the names the deterministic package
     had before the det rename, which the non-deterministic package had before FlashInfer issue #8928, are bound
-    nowhere, and the non-deterministic names live in these modules only."""
+    nowhere, and the non-deterministic names live in these modules only.  The ``cake_pplx`` namespace package
+    re-exports no entry point (FlashInfer's top level did): neither the det nor the old names are bound on it."""
 
     for name in (
         "cake_causal_conv1d_det",
@@ -502,7 +504,8 @@ def test_deterministic_names_are_unchanged_and_carry_det() -> None:
         "cake_causal_conv1d_det_train_backward",
         "CakeCausalConv1dDetFunction",
     ):
-        assert getattr(flashinfer, name) is getattr(det_facade, name), name
+        assert not hasattr(cake_pplx, name), name
+        assert callable(getattr(det_facade, name)), name
     for name in (
         "cake_causal_conv1d",
         "cake_causal_conv1d_train_forward",
@@ -512,7 +515,8 @@ def test_deterministic_names_are_unchanged_and_carry_det() -> None:
         "cake_causal_conv1d_train_backend",
         "cake_causal_conv1d_train_kcp",
     ):
-        assert not hasattr(flashinfer, name), name
+        assert not hasattr(cake_pplx, name), name
+        assert not hasattr(det_facade, name), name
     for name in (
         "cake_causal_conv1d_kcp",
         "cake_causal_conv1d_kcp_multi",
@@ -533,8 +537,8 @@ def test_deterministic_names_are_unchanged_and_carry_det() -> None:
 
 @pytest.mark.cpu_only
 def test_core_does_not_import_the_experimental_package() -> None:
-    """``import flashinfer`` imports neither module nor the non-deterministic package.  Both modules sit in core, so
-    each imports the package only on first use (the containment rules of ``flashinfer/experimental/README.md``): the
+    """``import cake_pplx`` imports neither module nor the non-deterministic package.  Each module imports the
+    package (under ``cake_pplx/_backends/``) only on first use: the
     KCP module imports neither the package nor the single-rank module until then (its recompute handle class resolves
     the package's ``kcp`` module on first access); the single-rank module imports the package on the first access to
     one of its names, and no KCP host module."""
@@ -542,7 +546,7 @@ def test_core_does_not_import_the_experimental_package() -> None:
     code = (
         "import importlib\n"
         "import sys\n"
-        "import flashinfer\n"
+        "import cake_pplx\n"
         f"pkg, single, kcp_module = {PACKAGE!r}, {FACADE!r}, {KCP_FACADE!r}\n"
         "def loaded(*names):\n"
         "    prefixes = tuple(n + '.' for n in names)\n"

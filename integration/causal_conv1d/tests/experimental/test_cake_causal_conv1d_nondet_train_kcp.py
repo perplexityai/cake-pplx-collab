@@ -40,7 +40,7 @@ import statistics
 import pytest
 import torch
 
-from flashinfer.experimental.cake import cake_causal_conv1d_nondet_train as pkg
+import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
@@ -530,7 +530,7 @@ def _ckpt_run(p, *, handle=None, reentrant=False, ckpt=True, counter=None, twice
 
     from torch.utils.checkpoint import checkpoint
 
-    from flashinfer import cake_causal_conv1d_nondet_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
     x = p.x_local.clone().requires_grad_(True)
     w = p.w.clone().requires_grad_(True)
@@ -734,7 +734,7 @@ def test_kcp_facade_under_torch_deterministic_mode(multi) -> None:
     the backward raises (strict, also when the mode is set between the forward and the backward: the mode is read
     when the backward runs) or warns and runs (``warn_only``); it never falls back to the deterministic package."""
 
-    from flashinfer import cake_causal_conv1d_nondet_train_kcp as facade
+    import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
     device = torch.device("cuda")
     p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)

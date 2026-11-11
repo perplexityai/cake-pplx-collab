@@ -39,8 +39,8 @@ import warnings
 import pytest
 import torch
 
-from flashinfer import cake_causal_conv1d_nondet_train_kcp as facade
-from flashinfer.experimental.cake import cake_causal_conv1d_nondet_train as pkg
+import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
+import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
@@ -104,7 +104,7 @@ class _Recorder:
 
 
 def _route_recorders(monkeypatch):
-    from flashinfer import cake_causal_conv1d_det_train_kcp as det_facade
+    import cake_pplx.cake_causal_conv1d_det_train_kcp as det_facade
 
     det_single, det_multi, nd_single, nd_multi = (_Recorder() for _ in range(4))
     monkeypatch.setattr(det_facade, "cake_causal_conv1d_det_kcp", det_single)
