@@ -61,7 +61,7 @@ unchanged.  This module checks:
 
 Training with this package composed with the model's deterministic head
 (``cake_pplx.cake_mhc_head_det_train``, family ``mhc_head``) is checked in
-``integration/mhc/tests/experimental/test_cake_mhc_nondet_train_head.py``.
+``tests/cross_family/mhc/tests/experimental/test_cake_mhc_nondet_train_head.py``.
 
 The numerical contract of the package's backward is
 ``test_cake_mhc_nondet_train.py``'s.
