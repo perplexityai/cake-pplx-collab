@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cake-pplx-dsa-indexer"
+dynamic = ["version"]
+description = "Cake dsa_indexer training kernels (det / nondet) for Perplexity"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch",
+    "apache-tvm-ffi>=0.1.11,<0.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "numpy"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cake_pplx*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"*" = ["build.json", "build.test.json", "README.md", "csrc/**/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "cpu_only: identifies tests that do not use any GPU; does not change test behavior",
+]
