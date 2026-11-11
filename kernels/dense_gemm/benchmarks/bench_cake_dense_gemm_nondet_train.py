@@ -124,7 +124,15 @@ from cake_pplx._backends.cake_dense_gemm_nondet_train import (  # noqa: E402
     cake_backend,
 )
 import cake_pplx.cake_dense_gemm_nondet_train as shim  # noqa: E402
-from flashinfer.testing import bench_gpu_time  # noqa: E402
+try:  # FlashInfer is optional: only its CUPTI timer is used, and only when timing
+    from flashinfer.testing import bench_gpu_time  # noqa: E402
+except ImportError:  # the tests load this script for its tables and helpers
+
+    def bench_gpu_time(*args, **kwargs):
+        raise RuntimeError(
+            "timing needs flashinfer.testing.bench_gpu_time: install flashinfer"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Rows

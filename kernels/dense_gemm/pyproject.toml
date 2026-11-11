@@ -31,3 +31,6 @@ namespaces = true
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "cpu_only: identifies tests that do not use any GPU; does not change test behavior",
+]

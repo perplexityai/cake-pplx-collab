@@ -56,7 +56,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cake_pplx._backends.cake_dense_gemm_det_train import cake_backend  # noqa: E402
-from flashinfer.testing import bench_gpu_time  # noqa: E402
+try:  # FlashInfer is optional: only its CUPTI timer is used, and only when timing
+    from flashinfer.testing import bench_gpu_time  # noqa: E402
+except ImportError:  # the tests load this script for its tables and helpers
+
+    def bench_gpu_time(*args, **kwargs):
+        raise RuntimeError(
+            "timing needs flashinfer.testing.bench_gpu_time: install flashinfer"
+        )
+
 
 # GLM-5.2 projection rows: label -> (K = in features, N = out features).
 PROJECTION_ROWS = {

@@ -132,10 +132,10 @@ def test_package_init_imports_nothing():
 
 
 def test_the_package_never_imports_flashinfer_by_name():
-    """The package's own modules reach the deterministic package as a sibling; only the pinned loader's JIT fallback
-    (``cake_build.py``, shared by every Cake package) imports ``flashinfer.jit``."""
+    """The package's own modules reach the deterministic package as a sibling; no module imports ``flashinfer``
+    (the pinned loader's JIT fallback in ``cake_build.py`` imports the package's own JIT shim)."""
     root = Path(cake_jit.__file__).parent
-    for path in sorted(p for p in root.glob("*.py") if p.name != "cake_build.py"):
+    for path in sorted(root.glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Import):
                 assert not [
@@ -9540,7 +9540,8 @@ BENCH_PATH = (
 def _bench() -> ModuleType:
     """The benchmark script as a module (its functions only: nothing runs on import).  A vendored run
     (``scripts/check_cake_build_manifests.py --vendored-gate``, which blocks flashinfer with
-    ``sys.modules["flashinfer"] = None``) skips: the script imports flashinfer."""
+    ``sys.modules["flashinfer"] = None``) skips: the script would import flashinfer's timer.  Without
+    flashinfer installed the script loads (its timer import is optional)."""
     import importlib.util
 
     if sys.modules.get("flashinfer", False) is None:

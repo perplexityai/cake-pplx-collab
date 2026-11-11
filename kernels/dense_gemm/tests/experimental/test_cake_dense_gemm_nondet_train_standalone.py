@@ -25,8 +25,10 @@ package under its own name, and its ``cake_backend``, ``cake_jit`` and
 directory loaded as a top-level package beside it, the first use resolves that
 sibling; without it, importing still succeeds and the first use raises an
 ``ImportError`` that names the missing directory.  With both directories, the
-planners of both packages run under the blocker, and loading a program that is
-not prebuilt raises the error that names the missing FlashInfer JIT.  CPU only:
+planners of both packages run under the blocker, and -- with the package's JIT
+shim (``_cake_pplx_jit``, which replaces FlashInfer's JIT) blocked too -- loading
+a program that is not prebuilt raises the error that names the missing JIT
+shim.  CPU only:
 no GPU, no generated program and no JIT build.
 """
 
@@ -134,11 +136,22 @@ print(json.dumps(facts))
 
 # Under the blocker, with the deterministic directory beside it: the planners of both packages on CPU views (no
 # device: the architecture and SM count given), then the load of each plan's program -- no library is prebuilt in the
-# checkout, and the fallback to FlashInfer's JIT is blocked.
+# checkout, and the fallback to the package's JIT shim (``_cake_pplx_jit``, FlashInfer's JIT before the move to
+# cake_pplx) is blocked as well.
 _PLANS = (
     _BLOCKED
     + r"""
 import torch
+
+
+class _BlockJitShim(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.rpartition(".")[2] == "_cake_pplx_jit":
+            raise ImportError(f"the JIT shim is blocked in this test: {name}")
+        return None
+
+
+sys.meta_path.insert(0, _BlockJitShim())
 
 nd, det = load_top_level(ND_DIR), load_top_level(DET_DIR)
 backend, jit, build = (importlib.import_module(f"{nd.__name__}.{sub}") for sub in ("cake_backend", "cake_jit", "cake_build"))
@@ -151,7 +164,7 @@ facts = {}
 
 
 def load(name, record):
-    # the program's load: the prebuilt library when present, else FlashInfer's JIT (blocked)
+    # the program's load: the prebuilt library when present, else the JIT shim (blocked)
     library = record[0].library_name(name, arch)
     if record[1].prebuilt_path(library).is_file():
         return ["prebuilt", library]
@@ -259,8 +272,8 @@ def test_the_backend_plans_under_the_blocker_and_names_the_missing_jit():
     """With ``flashinfer`` blocked the planners of both packages run on CPU views: this package's weight-gradient
     plan at two splits (bitwise reproducible: one add of two values), the deterministic package's forward plan through
     the sibling, the router planner.  Loading a planned program whose library is not prebuilt under ``aot/`` takes the
-    fallback to FlashInfer's JIT, which the blocker refuses: a ``RuntimeError`` that names the library and the missing
-    JIT, raised from the ``ImportError`` -- in both packages -- and no ``flashinfer`` module is loaded."""
+    fallback to the package's JIT shim, which the blocker refuses: a ``RuntimeError`` that names the library and the
+    missing JIT shim, raised from the ``ImportError`` -- in both packages -- and no ``flashinfer`` module is loaded."""
     facts = _standalone(str(DET_DIR), _PLANS)
     kind, template, splits, reproducible = facts["wgrad_plan"]
     assert kind == "CakeDenseGemmNondetProjectionPlan"
@@ -280,9 +293,9 @@ def test_the_backend_plans_under_the_blocker_and_names_the_missing_jit():
         kind, message, from_import_error, library = load
         assert kind == "RuntimeError", load
         assert library in message and "is not prebuilt" in message, load
-        assert "flashinfer's JIT is not available" in message, load
+        assert "the cake_pplx JIT shim is not available" in message, load
         assert from_import_error is True, load
     if "jit_specs_error" in facts:  # some library of the architecture is not prebuilt
         kind, message = facts["jit_specs_error"]
-        assert kind == "RuntimeError" and "flashinfer's JIT is not available" in message
+        assert kind == "RuntimeError" and "the cake_pplx JIT shim is not available" in message
     assert facts["flashinfer_after_use"] == []

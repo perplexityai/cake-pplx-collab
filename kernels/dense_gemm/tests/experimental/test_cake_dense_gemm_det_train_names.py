@@ -61,13 +61,14 @@ PUBLIC = {
     "CakeDenseGemmDetRouterLaunch",
     "cake_dense_gemm_det_train_convenience_cache_clear",
 }
-# The former import paths: the package and its modules.
+# The former import paths: the package and its modules (``flashinfer.experimental.<package>`` before the move,
+# under the cake_pplx prefix).
 FORMER_MODULES = (
-    "flashinfer.experimental.dense_projection_det_gemm.cake_backend",
-    "flashinfer.experimental.dense_projection_det_gemm.cake_jit",
-    "flashinfer.experimental.dense_projection_det_gemm.cake_build",
+    "cake_pplx._backends.dense_projection_det_gemm.cake_backend",
+    "cake_pplx._backends.dense_projection_det_gemm.cake_jit",
+    "cake_pplx._backends.dense_projection_det_gemm.cake_build",
 )
-FORMER_PACKAGE = "flashinfer.experimental.dense_projection_det_gemm"
+FORMER_PACKAGE = "cake_pplx._backends.dense_projection_det_gemm"
 # Removed backend names: the former public names and the aliases of the names before the det rename.
 REMOVED = {
     "cake_backend": (
@@ -137,9 +138,9 @@ def _run(code: str) -> subprocess.CompletedProcess:
 
 def test_the_shared_mode_name_checks():
     """The shared #8928 checks (tests/cake/test_helpers/cake_mode_names.py): mode word and stem, no ``deterministic``
-    keyword, one name per object across the module, the backend modules and the flashinfer top level, and the
-    former paths and names failing at import in a fresh interpreter."""
-    import flashinfer
+    keyword, one name per object across the module, the backend modules and the ``cake_pplx`` namespace package,
+    and the former paths and names failing at import in a fresh interpreter."""
+    import cake_pplx
 
     from tests.cake.test_helpers.cake_mode_names import assert_cake_mode_module
 
@@ -148,7 +149,7 @@ def test_the_shared_mode_name_checks():
         module,
         "det",
         namespaces=[
-            flashinfer,
+            cake_pplx,
             importlib.import_module(f"{BACKEND}.cake_backend"),
             importlib.import_module(f"{BACKEND}.cake_jit"),
         ],
@@ -265,14 +266,12 @@ def test_the_former_package_is_gone():
 def test_imports_are_lazy():
     code = f"""
 import sys
-import flashinfer
+import cake_pplx
 loaded = sorted(m for m in sys.modules if m.startswith("cake_pplx._backends.cake_dense_gemm"))
 assert loaded == [], loaded
 for name in {sorted(PUBLIC)!r}:
-    assert name not in vars(flashinfer), name
-rows = getattr(flashinfer, "_LAZY_EXPORTS", {{}})
-dense = {{k: v for k, v in rows.items() if "cake_dense_gemm" in str(v[0])}}
-assert all(v[1] is None for v in dense.values()), dense
+    assert name not in vars(cake_pplx), name
+assert getattr(cake_pplx, "__file__", None) is None  # a PEP 420 namespace package: no re-export table
 import {MODULE} as m
 loaded = sorted(n for n in sys.modules if n.startswith("{BACKEND}"))
 assert loaded == [], loaded
