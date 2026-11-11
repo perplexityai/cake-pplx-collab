@@ -44,7 +44,10 @@ kernels/
       cake_<op>_<mode>_train[_kcp].py          # public facades
       _backends/cake_<op>_<mode>_train[_kcp]/  # kernels, build.json, csrc/
     tests/  benchmarks/
-integration/<family>/  # tests that need another family, run on a pinned combination
+tests/
+  cross_family/
+    <family>/       # tests that need another family, run on a pinned combination
+      tests/  benchmarks/                      # same layout as kernels/<family>/
 tools/              # check_isolation.py, import_from_flashinfer.py, release helper
 .github/workflows/
 ```
@@ -175,7 +178,7 @@ There is one cross-family runtime contract. The `causal_conv1d` KCP route consum
 - The contract is a documented duck-typed protocol.
 - It has a version integer, `KCP_CONTEXT_PROTOCOL`.
 - At run time, `causal_conv1d` checks the version. If the version does not match, it raises a clear error.
-- Tests that need another family live in `integration/<family>/`, not in `kernels/<family>/tests/`. The import tool moves them there.
+- Tests that need another family live in `tests/cross_family/<family>/`, not in `kernels/<family>/tests/`. The import tool moves them there.
 - Run them in one environment that has the families they need, each at a chosen commit.
 
 If you change the context shape, increase `KCP_CONTEXT_PROTOCOL`. Then update the consumer side in a separate PR.
@@ -209,7 +212,7 @@ Build paths:
 - A path-filtered matrix runs only the families that changed.
 - For each changed family, CI installs only that family from the PR head, with the default (CUDA) build of torch. Then it imports every public module and runs all tests of that family on the CPU runner, outside the source tree. Tests that need a GPU skip.
 - Actions are pinned to full commit SHAs (organization policy).
-- GPU tests and `integration/` tests are not in the GitHub CI yet. Run them on Blackwell machines (`sm_100a`, `sm_103a`, `sm_107a`) before you merge a family change.
+- GPU tests and `tests/cross_family/` tests are not in the GitHub CI yet. Run them on Blackwell machines (`sm_100a`, `sm_103a`, `sm_107a`) before you merge a family change.
 
 ## Running tests
 
@@ -222,7 +225,7 @@ cp -r kernels/kda/tests kernels/kda/benchmarks kernels/kda/pyproject.toml /tmp/k
 cd /tmp/kda-tests && python -m pytest -p no:cacheprovider tests
 ```
 
-Run the tests of `integration/<family>/` the same way, in an environment that has every family they import. For example, `integration/causal_conv1d/` needs `kda` and `gdn` too. Tests that need several GPUs start their own processes when one process sees all GPUs. Run them with the `SLURM_*` task variables unset.
+Run the tests of `tests/cross_family/<family>/` the same way, in an environment that has every family they import. For example, `tests/cross_family/causal_conv1d/` needs `kda` and `gdn` too. Tests that need several GPUs start their own processes when one process sees all GPUs. Run them with the `SLURM_*` task variables unset.
 
 ## Upstream sync
 
@@ -245,7 +248,7 @@ The tool makes only mechanical changes:
 3. It installs the JIT shim and the API decorator.
 4. It changes the `package` field in each `build.json`.
 
-It also moves every test that imports another family to `integration/<family>/`, and reports the remaining `flashinfer` references.
+It also moves every test that imports another family to `tests/cross_family/<family>/`, and reports the remaining `flashinfer` references.
 
 A family update has two kinds of commits:
 
@@ -264,7 +267,7 @@ Kernel updates from FlashInfer then land one family at a time.
 
 ## Open items
 
-- **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `integration/` yet.
+- **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
 - **Architecture coverage.** The first import was validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** The protocol for the `causal_conv1d`/KDA/GDN KCP context begins at version 1.

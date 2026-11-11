@@ -9,7 +9,7 @@ Checks:
 3. Tests and benchmarks may import third-party reference implementations (``pytest``,
    ``flashinfer``, ``fla``, ...), but never a module of another family.  A ``cake_pplx``
    name that no family owns is allowed: it is a test that an old name stays removed.
-   Tests that need several families live in ``integration/``, which this check skips.
+   Tests that need several families live in ``tests/cross_family/``, which this check skips.
 4. With ``--base REF``: the change since ``REF`` touches at most one family.
 
 Usage::
