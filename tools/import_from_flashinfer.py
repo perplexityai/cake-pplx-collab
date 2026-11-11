@@ -278,6 +278,10 @@ def rewrite_backend_py(path: Path, package_root: Path, family: str) -> None:
         text,
     )
     text = text.replace('sys.modules["flashinfer.jit.cpp_ext"]', f'sys.modules[__package__ + "._cake_pplx_jit"]')
+    # Stack-level helpers skip the frames of "this package and the facade layer": that layer is cake_pplx now.
+    text = text.replace('name == "flashinfer"', 'name == "cake_pplx"').replace(
+        'name.startswith("flashinfer.")', 'name.startswith("cake_pplx.")'
+    )
     path.write_text(text, encoding="utf-8")
 
 
@@ -289,6 +293,8 @@ def rewrite_facade(path: Path, family: str) -> None:
         text,
     )
     text = re.sub(r"\bflashinfer_api\b", "cake_api", text)
+    text = re.sub(r"from \.utils import (?=[\w, (]*register_(?:custom|fake)_op)", f"from ._cake_pplx_api_{family} import ", text)
+    text = re.sub(r"from \.trace\.templates\.\w+ import", f"from ._cake_pplx_api_{family} import", text)
     path.write_text(text, encoding="utf-8")
 
 

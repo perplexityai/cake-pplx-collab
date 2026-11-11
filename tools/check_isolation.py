@@ -47,6 +47,15 @@ def imports_of(path: Path) -> list[tuple[int, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found += [(node.lineno, alias.name) for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 1 and path.parent.name == "cake_pplx":
+            # a facade's relative import: ``from ._backends.<module> import``, ``from .<module> import``
+            module = node.module or ""
+            if module.startswith("_backends."):
+                found.append((node.lineno, "cake_pplx." + module))
+            elif module:
+                found.append((node.lineno, "cake_pplx." + module))
+            else:
+                found += [(node.lineno, f"cake_pplx.{alias.name}") for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             if node.module == "cake_pplx":
                 found += [(node.lineno, f"cake_pplx.{alias.name}") for alias in node.names]
@@ -70,7 +79,9 @@ def check_family(family_dir: Path, owners: dict[str, str]) -> list[str]:
                 parts = name.split(".")
                 target = parts[2] if len(parts) > 2 and parts[1] == "_backends" else (parts[1] if len(parts) > 1 else "")
                 owner = owners.get(target)
-                if target not in mine and owner is not None:
+                if path.parent.name == "cake_pplx" and target not in mine and owner is None and not target.startswith("_cake_pplx_api"):
+                    errors.append(f"{family_dir.name}/{rel}:{line}: facade imports {name}, which no family provides")
+                elif target not in mine and owner is not None:
                     errors.append(f"{family_dir.name}/{rel}:{line}: imports {name}, which family {owner} owns")
             elif not runtime or top in sys.stdlib_module_names or top == "__future__":
                 continue
