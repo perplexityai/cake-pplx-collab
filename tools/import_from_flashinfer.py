@@ -287,15 +287,30 @@ def rewrite_facade(path: Path, family: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def attribute_modules(tree: ast.AST) -> set[str]:
+    """``cake_x`` / ``_backends.cake_x`` for every ``cake_pplx.<...>`` attribute chain in code."""
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        chain = []
+        current: ast.AST = node
+        while isinstance(current, ast.Attribute):
+            chain.append(current.attr)
+            current = current.value
+        if not (isinstance(current, ast.Name) and current.id == "cake_pplx"):
+            continue
+        chain.reverse()
+        if chain[0] == "_backends" and len(chain) > 1:
+            found.add("_backends." + chain[1])
+        elif re.fullmatch(r"_?cake_[a-z0-9_]+_train(?:_kcp)?|_cake_lm_head_train_knobs", chain[0]):
+            found.add(chain[0])
+    return found
+
+
 def fix_module_imports(text: str) -> str:
     """After rewriting, ``cake_pplx.<module>`` attribute use needs ``import cake_pplx.<module>``."""
-    used = sorted(
-        set(re.findall(r"(?<![\w.])cake_pplx\.(_?cake_[a-z0-9_]+_train(?:_kcp)?|_cake_lm_head_train_knobs)\b", text))
-        | set(
-            "_backends." + m
-            for m in re.findall(r"(?<![\w.])cake_pplx\._backends\.(cake_[a-z0-9_]+_train(?:_kcp)?)\b", text)
-        )
-    )
+    used = sorted(attribute_modules(ast.parse(text)))
     if not used:
         return text
     tree = ast.parse(text)
