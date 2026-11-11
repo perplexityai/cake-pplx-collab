@@ -311,14 +311,16 @@ def test_the_loader_imports_standalone_without_flashinfer() -> None:
     assert result.stdout.strip() == f"ok {PACKAGE_IMPORT} {records}"
 
 
-def test_the_loader_and_header_are_the_pinned_bytes_of_every_cake_package() -> None:
+def test_the_loader_jit_shim_and_header_are_the_same_bytes_in_both_mode_packages() -> None:
+    """The family's two mode packages (``cake_gqa_det_train`` and ``cake_gqa_nondet_train``) carry byte-identical
+    copies of the loader (``cake_build.py``), the JIT shim (``_cake_pplx_jit.py``) and the FFI check header."""
     _manifest_or_skip()
-    # Another package's copy, read from disk (not imported): the nondet GQA backend of this family, the sibling
+    # The other mode package's copy, read from disk (not imported): the nondet GQA backend of this family, the sibling
     # directory under ``cake_pplx/_backends``.  (Upstream compared with the KDA backend's copy; in cake_pplx each
     # family carries its own copy, and copies of different families may diverge.)
     other = PACKAGE_DIR.parent / "cake_gqa_nondet_train"
     assert other.is_dir(), other
-    for relative in ("cake_build.py", "csrc/cake_ffi_checks.h"):
+    for relative in ("cake_build.py", "_cake_pplx_jit.py", "csrc/cake_ffi_checks.h"):
         assert (PACKAGE_DIR / relative).read_bytes() == (
             other / relative
         ).read_bytes(), relative
@@ -340,17 +342,96 @@ def test_the_prebuilt_library_is_preferred() -> None:
             )
 
 
-def test_the_package_reads_no_environment_variable() -> None:
-    # The JIT shim (``_cake_pplx_jit.py``) stands in for ``flashinfer.jit``, which read its toolchain and cache
-    # variables outside the package upstream; every other module of the package reads none.
-    offenders = []
-    for path in sorted(PACKAGE_DIR.glob("*.py")):
-        if path.name == "_cake_pplx_jit.py":
+# The variables the JIT shim (``_cake_pplx_jit.py``) reads: it stands in for ``flashinfer.jit``, which read its
+# toolchain and cache variables outside the package upstream.
+JIT_SHIM_ENVIRONMENT_VARIABLES = frozenset(
+    {
+        "CUDA_HOME",
+        "CUDA_PATH",
+        "CAKE_PPLX_CACHE_DIR",
+        "CAKE_PPLX_NVCC",
+        "CXX",
+        "CAKE_PPLX_JIT_WORKERS",
+        "FLASHINFER_DISABLE_JIT",
+        "CAKE_PPLX_DISABLE_JIT",
+    }
+)
+
+
+def _environment_reads(tree: ast.AST) -> tuple[set[str], list[int]]:
+    """``(names, unresolved)``: the variable names ``tree`` reads through ``os.environ.get(...)``,
+    ``os.environ[...]``, ``... in os.environ`` or ``os.getenv(...)`` -- a string literal, or a loop variable over a
+    tuple / list of string literals -- and the lines of every other ``environ`` / ``getenv`` use."""
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def keys(expr: ast.AST, at: ast.AST) -> set[str] | None:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return {expr.value}
+        if isinstance(expr, ast.Name):
+            node = parents.get(at)
+            while node is not None:
+                if (
+                    isinstance(node, ast.For)
+                    and isinstance(node.target, ast.Name)
+                    and node.target.id == expr.id
+                    and isinstance(node.iter, (ast.Tuple, ast.List))
+                    and all(
+                        isinstance(e, ast.Constant) and isinstance(e.value, str)
+                        for e in node.iter.elts
+                    )
+                ):
+                    return {e.value for e in node.iter.elts}
+                node = parents.get(node)
+        return None
+
+    names: set[str] = set()
+    unresolved: list[int] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv")):
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv"):
-                offenders.append(f"{path.name}:{node.lineno}")
+        parent = parents.get(node)
+        found = None
+        if node.attr == "getenv":
+            if isinstance(parent, ast.Call) and parent.func is node and parent.args:
+                found = keys(parent.args[0], parent)
+        elif isinstance(parent, ast.Attribute) and parent.attr == "get":
+            call = parents.get(parent)
+            if isinstance(call, ast.Call) and call.func is parent and call.args:
+                found = keys(call.args[0], call)
+        elif isinstance(parent, ast.Subscript) and parent.value is node:
+            found = keys(parent.slice, parent)
+        elif (
+            isinstance(parent, ast.Compare)
+            and len(parent.ops) == 1
+            and isinstance(parent.ops[0], (ast.In, ast.NotIn))
+            and parent.comparators[0] is node
+        ):
+            found = keys(parent.left, parent)
+        if found is None:
+            unresolved.append(node.lineno)
+        else:
+            names |= found
+    return names, unresolved
+
+
+def test_the_package_reads_no_environment_variable() -> None:
+    """No module of the package reads an environment variable, except the JIT shim (``_cake_pplx_jit.py``), which
+    reads exactly :data:`JIT_SHIM_ENVIRONMENT_VARIABLES`, each by a literal name."""
+    offenders = []
+    shim = None
+    for path in sorted(PACKAGE_DIR.glob("*.py")):
+        names, unresolved = _environment_reads(ast.parse(path.read_text()))
+        if path.name == "_cake_pplx_jit.py":
+            shim = names
+            offenders += [f"{path.name}:{line} (variable not resolved)" for line in unresolved]
+        else:
+            offenders += [f"{path.name}:{line}" for line in unresolved]
+            offenders += [f"{path.name}: {name}" for name in sorted(names)]
     assert not offenders, offenders
+    assert shim == JIT_SHIM_ENVIRONMENT_VARIABLES, (
+        sorted(shim - JIT_SHIM_ENVIRONMENT_VARIABLES) if shim is not None else "no _cake_pplx_jit.py",
+        sorted(JIT_SHIM_ENVIRONMENT_VARIABLES - shim) if shim is not None else None,
+    )
 
 
 class _ExactTiles:
