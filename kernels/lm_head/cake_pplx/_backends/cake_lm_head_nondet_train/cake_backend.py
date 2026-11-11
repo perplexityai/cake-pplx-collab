@@ -4011,17 +4011,19 @@ def _temperature_rows(
     return value if row_index is None else value.index_select(0, row_index)
 
 
-# This package's directory, the flashinfer package's directory (its facade and decorators) when the package is
-# flashinfer's ``experimental/cake/cake_lm_head_nondet_train`` (a vendored copy skips its own directory only), and torch's
+# This package's directory, the ``cake_pplx`` namespace directory (the facade and its decorator) when the package is
+# ``cake_pplx/_backends/cake_lm_head_nondet_train`` (a vendored copy skips its own directory only), and torch's
 # (``Function.apply``, ``once_differentiable``, checkpoint and autocast wrappers): the frames a warning of this
 # package skips (:func:`_caller_stacklevel`).
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-_FLASHINFER_DIR = os.path.dirname(os.path.dirname(os.path.dirname(_PACKAGE_DIR)))
+_BACKENDS_DIR = os.path.dirname(_PACKAGE_DIR)
+_CAKE_PPLX_DIR = os.path.dirname(_BACKENDS_DIR)
 _TORCH_DIR = os.path.dirname(os.path.abspath(torch.__file__))
 _SKIPPED_DIRS = tuple(
     d + os.sep
-    for d in (_PACKAGE_DIR, _FLASHINFER_DIR, _TORCH_DIR)
-    if d != _FLASHINFER_DIR or os.path.basename(d) == "flashinfer"
+    for d in (_PACKAGE_DIR, _CAKE_PPLX_DIR, _TORCH_DIR)
+    if d != _CAKE_PPLX_DIR
+    or (os.path.basename(_BACKENDS_DIR) == "_backends" and os.path.basename(d) == "cake_pplx")
 )
 
 
