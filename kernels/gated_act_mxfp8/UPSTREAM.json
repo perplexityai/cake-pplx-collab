@@ -1,0 +1,27 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_gated_act_mxfp8_det_train": "flashinfer/experimental/cake/cake_gated_act_mxfp8_det_train"
+  },
+  "facades": {
+    "cake_gated_act_mxfp8_det_train": "flashinfer/cake_gated_act_mxfp8_det_train.py"
+  },
+  "tests": [
+    "tests/experimental/test_cake_gated_act_mxfp8_det_train.py",
+    "tests/experimental/test_cake_gated_act_mxfp8_det_train_api.py",
+    "tests/experimental/test_cake_gated_act_mxfp8_det_train_decomposed.py",
+    "tests/experimental/test_cake_gated_act_mxfp8_det_train_names.py",
+    "tests/experimental/test_helpers/cake_gated_act_mxfp8_det_train_reference.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_gated_act_mxfp8_det_train.py"
+  ],
+  "generators": {
+    "cake_gated_act_mxfp8_det_train": {
+      "cake_revision": "b41ea7927a64b5eaaf06de23457899995d3e50ed",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-09T14:36:53Z"
+    }
+  }
+}
