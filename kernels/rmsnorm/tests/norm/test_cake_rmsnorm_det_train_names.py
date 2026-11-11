@@ -27,10 +27,9 @@ resolves on the other.  No entry point of either package takes
 ``deterministic``: passing it raises ``TypeError``.  The names from before the
 rename fail at import: the former modules raise ``ModuleNotFoundError``, the
 former names raise ``ImportError`` (checked in fresh interpreters).  The
-``flashinfer`` top level serves the five det entry points and the module
-``cake_rmsnorm_nondet_train`` as rows of its lazy-export table
-(``flashinfer._LAZY_EXPORTS``), and no name of the non-deterministic package.
-Nothing loads a backend early (fresh interpreters): ``import flashinfer``
+``cake_pplx`` namespace package (PEP 420) binds no entry point of either
+package: its RMSNorm modules are exactly the two facades.
+Nothing loads a backend early (fresh interpreters): ``import cake_pplx``
 loads no RMSNorm module, importing a facade loads no backend package, and the
 first use of a facade's entry point or backend object loads that package's
 backend only; each lazily resolved name is the backend's object.  The facade
@@ -49,6 +48,7 @@ import functools
 import importlib
 import inspect
 import json
+import pkgutil
 import re
 import subprocess
 import sys
@@ -58,7 +58,7 @@ from pathlib import Path
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_rmsnorm_det_train as det_facade
 import cake_pplx.cake_rmsnorm_nondet_train as facade
 import cake_pplx._backends.cake_rmsnorm_det_train as det_backend
@@ -99,7 +99,8 @@ DET_NAMES = (
 # The ``__all__`` of the facade and of the backend package of each mode.
 NONDET_ALL = sorted([*CONSTANTS, *NONDET_NAMES])
 DET_ALL = sorted([*CONSTANTS, *DET_NAMES])
-# The names the ``flashinfer`` top level exports: five det entry points.
+# The five det entry points FlashInfer's top level re-exported; the
+# ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL_DET = (
     "CakeRMSNormDetFunction",
     "cake_rmsnorm_det",
@@ -107,25 +108,13 @@ TOP_LEVEL_DET = (
     "cake_rmsnorm_det_train_backward_workspace_bytes",
     "cake_rmsnorm_det_train_forward",
 )
-# Their rows of ``flashinfer._LAZY_EXPORTS`` (``name -> (module, attribute)``),
-# with the modules of both facades.
-TOP_LEVEL_ROWS = {
-    **{name: (".cake_rmsnorm_det_train", name) for name in TOP_LEVEL_DET},
-    "cake_rmsnorm_det_train": (".cake_rmsnorm_det_train", None),
-    "cake_rmsnorm_nondet_train": (".cake_rmsnorm_nondet_train", None),
-}
+# The RMSNorm modules of the ``cake_pplx`` namespace: the two facades.
+TOP_LEVEL_MODULES = ("cake_rmsnorm_det_train", "cake_rmsnorm_nondet_train")
 # The keys of another family that share the ``cake_rmsnorm`` prefix.
 OTHER_FAMILY_PREFIXES = ("cake_rmsnorm_silu_gate", "CakeRMSNormSiLUGate")
 # The RMSNorm modules: the two facades and the two backend packages (with
 # their submodules).
 RMSNORM_MODULES = (DET_FACADE, FACADE, DET_PACKAGE, PACKAGE)
-# The modules the RMSNorm rows of the lazy-export table may name.
-ROW_MODULES = (
-    ".cake_rmsnorm_det_train",
-    ".cake_rmsnorm_nondet_train",
-    DET_FACADE,
-    FACADE,
-)
 NAMESPACES = {
     "det_facade": (det_facade, "det"),
     "det_backend": (det_backend, "det"),
@@ -140,8 +129,8 @@ CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # The names from before the rename: they fail at import.
 OLD_MODULES = (
     "cake_pplx.cake_rmsnorm_train",
-    "flashinfer.cake_rmsnorm_train_backend",
-    "flashinfer.cake_rmsnorm_det_train_backend",
+    "cake_pplx.cake_rmsnorm_train_backend",
+    "cake_pplx.cake_rmsnorm_det_train_backend",
 )
 OLD_NONDET_NAMES = (
     "CakeRMSNormFunction",
@@ -465,25 +454,28 @@ def test_det_package_ignores_deterministic_algorithms(
     assert [str(item.message) for item in caught] == []
 
 
-# --------------------------------------------------------------------------- the flashinfer top level
+# --------------------------------------------------------------------------- the cake_pplx namespace
 
 
 @pytest.mark.parametrize("name", sorted({*NONDET_NAMES, *OLD_NAMES}))
 def test_top_level_binds_no_nondet_name(name: str) -> None:
-    assert not hasattr(flashinfer, name), name
-    assert name not in dir(flashinfer), name
+    assert not hasattr(cake_pplx, name), name
+    assert name not in dir(cake_pplx), name
 
 
 @pytest.mark.parametrize("name", TOP_LEVEL_DET)
-def test_top_level_det_name_is_the_det_object(name: str) -> None:
-    assert getattr(flashinfer, name) is getattr(det_facade, name), name
+def test_top_level_binds_no_det_name(name: str) -> None:
+    """The namespace package re-exports nothing: a det entry point is reached
+    through its facade only."""
+    assert not hasattr(cake_pplx, name), name
+    assert name not in dir(cake_pplx), name
 
 
 def test_top_level_modules() -> None:
     assert cake_pplx.cake_rmsnorm_nondet_train is facade
     assert cake_pplx.cake_rmsnorm_det_train is det_facade
     for old in OLD_MODULES:
-        assert not hasattr(flashinfer, old.rpartition(".")[2]), old
+        assert not hasattr(cake_pplx, old.rpartition(".")[2]), old
         assert old not in sys.modules, old
     assert sys.modules[FACADE] is not sys.modules[DET_FACADE]
     assert facade.CakeRMSNormNondetFunction is backend.CakeRMSNormNondetFunction
@@ -493,34 +485,28 @@ def test_top_level_modules() -> None:
     )
 
 
-def _rmsnorm_row(name: str, module_name: str) -> bool:
-    """Whether a row of ``flashinfer._LAZY_EXPORTS`` is RMSNorm's: it names an
-    RMSNorm facade, or its key has the ``cake_rmsnorm`` prefix of no other
-    family."""
-    if module_name in ROW_MODULES:
-        return True
-    prefixed = name.startswith(("cake_rmsnorm", "CakeRMSNorm"))
-    return prefixed and not name.startswith(OTHER_FAMILY_PREFIXES)
+def _rmsnorm_module(name: str) -> bool:
+    """Whether a module of the ``cake_pplx`` namespace is RMSNorm's: it has the
+    ``cake_rmsnorm`` prefix of no other family."""
+    return name.startswith("cake_rmsnorm") and not name.startswith(
+        OTHER_FAMILY_PREFIXES
+    )
 
 
-def test_top_level_rows_are_the_lazy_exports() -> None:
-    """The RMSNorm names of the top level are exactly the seven rows of
-    ``flashinfer._LAZY_EXPORTS``; ``dir(flashinfer)`` lists them and each
-    resolves to its facade's object (the two module rows to the facade
-    modules)."""
-    rows = flashinfer._LAZY_EXPORTS
-    family = {n: row for n, row in rows.items() if _rmsnorm_row(n, row[0])}
-    assert family == TOP_LEVEL_ROWS
-    for name in family:
+def test_top_level_modules_are_the_two_facades() -> None:
+    """The RMSNorm modules of the ``cake_pplx`` namespace are exactly the two
+    facades, each named with its mode word; no module from before the rename is
+    among them, and each resolves to its facade module."""
+    found = {
+        info.name
+        for info in pkgutil.iter_modules(cake_pplx.__path__)
+        if _rmsnorm_module(info.name)
+    }
+    assert found == set(TOP_LEVEL_MODULES), sorted(found)
+    for name in found:
         assert _carries(name, "det") or _carries(name, "nondet"), name
     removed = {*OLD_NAMES, *(old.rpartition(".")[2] for old in OLD_MODULES)}
-    assert not removed & set(rows), sorted(removed & set(rows))
-    listed = dir(flashinfer)
-    for name, (module_name, attribute) in TOP_LEVEL_ROWS.items():
-        assert name in listed, name
-        module = importlib.import_module(module_name, "flashinfer")
-        expected = module if attribute is None else getattr(module, attribute)
-        assert getattr(flashinfer, name) is expected, name
+    assert not removed & found, sorted(removed & found)
     assert cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det is det_facade.cake_rmsnorm_det
     assert cake_pplx.cake_rmsnorm_det_train is sys.modules[DET_FACADE]
     assert cake_pplx.cake_rmsnorm_nondet_train is sys.modules[FACADE]
@@ -626,11 +612,11 @@ def _owned(name: str, mode: str) -> bool:
     return name in (facade_name, package) or name.startswith(f"{package}.")
 
 
-def test_import_flashinfer_loads_no_rmsnorm_module() -> None:
-    """``import flashinfer`` (and ``dir(flashinfer)``) loads neither facade nor
-    backend: the RMSNorm names are bound on first access only."""
+def test_import_cake_pplx_loads_no_rmsnorm_module() -> None:
+    """``import cake_pplx`` (and ``dir(cake_pplx)``) loads neither facade nor
+    backend."""
     after_import, after_dir = _loaded_after(
-        "import flashinfer", "listed = dir(flashinfer)"
+        "import cake_pplx", "listed = dir(cake_pplx)"
     )
     assert after_import == [] and after_dir == []
 
@@ -672,13 +658,14 @@ def test_facade_loads_only_its_own_backend_on_first_use(mode: str, use: str) -> 
     assert [name for name in on_use if not _owned(name, mode)] == [], on_use
 
 
-def test_top_level_rows_load_their_facade_only() -> None:
-    """A top-level det entry point loads the det facade only, each module row
-    its facade only, and a backend object of a row its own backend."""
+def test_facade_modules_load_their_facade_only() -> None:
+    """A det entry point loads the det facade only, each facade module its
+    facade only, and a backend object of a facade its own backend."""
     on_import, det_entry, nondet_module, det_class = _loaded_after(
-        "import flashinfer",
+        "import cake_pplx",
+        "import cake_pplx.cake_rmsnorm_det_train\n"
         "cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det",
-        "cake_pplx.cake_rmsnorm_nondet_train",
+        "import cake_pplx.cake_rmsnorm_nondet_train",
         "cake_pplx.cake_rmsnorm_det_train.CakeRMSNormDetFunction",
     )
     assert on_import == []
@@ -688,11 +675,13 @@ def test_top_level_rows_load_their_facade_only() -> None:
     assert [name for name in det_class if not _owned(name, "det")] == [FACADE]
 
 
-def test_top_level_det_module_row_loads_the_det_facade_only() -> None:
-    """After a bare ``import flashinfer``, ``cake_pplx.cake_rmsnorm_det_train``
-    is the det facade module: the row loads that facade and no backend."""
+def test_det_facade_module_loads_the_det_facade_only() -> None:
+    """After a bare ``import cake_pplx``, importing
+    ``cake_pplx.cake_rmsnorm_det_train`` binds the det facade module: it loads
+    that facade and no backend."""
     on_import, det_module = _loaded_after(
-        "import flashinfer",
+        "import cake_pplx",
+        "import cake_pplx.cake_rmsnorm_det_train\n"
         f"assert cake_pplx.cake_rmsnorm_det_train is sys.modules['{DET_FACADE}']",
     )
     assert on_import == []
@@ -769,7 +758,7 @@ def test_nondet_package_dir_lists_its_own_names() -> None:
 
 
 # Import forms in a fresh interpreter: the submodule path first, the attributes
-# of flashinfer, the names and modules from before the rename, and a star
+# of the cake_pplx namespace, the names and modules from before the rename, and a star
 # import of the package.
 FRESH = {
     "submodule_first": (
@@ -779,12 +768,12 @@ FRESH = {
         "assert mine is not theirs and mine.MODULES is not theirs.MODULES\n"
         f"assert importlib.import_module('{FACADE}') is not importlib.import_module('{DET_FACADE}')\n"
     ),
-    "flashinfer_attributes": (
-        "import sys\nimport flashinfer\n"
-        f"assert flashinfer.{FACADE.rpartition('.')[2]} is sys.modules['{FACADE}']\n"
-        f"assert not hasattr(flashinfer, '{PAIRS[0][0]}')\n"
-        f"assert flashinfer.{DET_FACADE.rpartition('.')[2]} is sys.modules['{DET_FACADE}']\n"
-        f"assert flashinfer.{PAIRS[0][1]} is sys.modules['{DET_FACADE}'].{PAIRS[0][1]}\n"
+    "cake_pplx_attributes": (
+        f"import sys\nimport cake_pplx\nimport {FACADE}\nimport {DET_FACADE}\n"
+        f"assert cake_pplx.{FACADE.rpartition('.')[2]} is sys.modules['{FACADE}']\n"
+        f"assert not hasattr(cake_pplx, '{PAIRS[0][0]}')\n"
+        f"assert cake_pplx.{DET_FACADE.rpartition('.')[2]} is sys.modules['{DET_FACADE}']\n"
+        f"assert not hasattr(cake_pplx, '{PAIRS[0][1]}')\n"
         f"assert not hasattr(sys.modules['{DET_FACADE}'], '{PAIRS[0][0]}')\n"
     ),
     "old_modules_fail": (
@@ -798,7 +787,7 @@ FRESH = {
         "        raise AssertionError(f'{name} still imports')\n"
     ),
     "old_names_fail": (
-        f"for module, names in (('flashinfer', {OLD_NAMES!r}),"
+        f"for module, names in (('cake_pplx', {OLD_NAMES!r}),"
         f" ('{FACADE}', {OLD_NAMES!r}), ('{DET_FACADE}', {OLD_NAMES!r})):\n"
         "    for name in names:\n"
         "        try:\n"
@@ -807,7 +796,7 @@ FRESH = {
         "            assert f\"cannot import name '{name}'\" in str(e), e\n"
         "        else:\n"
         "            raise AssertionError(f'{module}.{name} still imports')\n"
-        "from flashinfer import cake_rmsnorm_det\n"
+        f"from {DET_FACADE} import cake_rmsnorm_det\n"
         f"from {FACADE} import cake_rmsnorm_nondet\n"
         "assert cake_rmsnorm_nondet is not cake_rmsnorm_det\n"
     ),

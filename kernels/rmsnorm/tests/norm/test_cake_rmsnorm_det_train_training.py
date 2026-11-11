@@ -896,12 +896,15 @@ _STANDALONE = textwrap.dedent(
     build = sys.modules[name + ".cake_build"]
     assert jit.MODULES and set(package.__all__) <= set(dir(package))
     library = next(iter(build.libraries_by_name()))
+    # The copy's own JIT shim imported above with flashinfer blocked; take it away to
+    # reach the path of a library that has neither a prebuilt file nor a JIT.
+    sys.modules[name + "._cake_pplx_jit"] = None
     try:
         build.load_library(library)
     except RuntimeError as exc:
-        assert "is not prebuilt" in str(exc) and "JIT is not available" in str(exc), exc
+        assert "is not prebuilt" in str(exc) and "the cake_pplx JIT shim is not available" in str(exc), exc
     else:
-        raise AssertionError("a library without a prebuilt file loaded with flashinfer blocked")
+        raise AssertionError("a library without a prebuilt file loaded without the JIT shim")
     leaked = sorted(m for m in sys.modules if m == "flashinfer" or m.startswith("flashinfer."))
     assert not leaked, leaked
     print("STANDALONE", name, "modules", len(jit.MODULES), "libraries", len(build.libraries_by_name()))
@@ -911,8 +914,9 @@ _STANDALONE = textwrap.dedent(
 
 def test_the_package_imports_standalone_under_another_name(tmp_path: Path) -> None:
     """A copy of the package (without ``aot/``) under another name imports in a fresh interpreter with
-    ``flashinfer`` blocked: every submodule loads, nothing of flashinfer is imported, and a library with no
-    prebuilt file raises the error naming the missing prebuilt and JIT instead of falling back silently."""
+    ``flashinfer`` blocked: every submodule (its own JIT shim included) loads, nothing of flashinfer is
+    imported, and without the JIT shim a library with no prebuilt file raises the error naming the missing
+    prebuilt and the JIT shim instead of falling back silently."""
 
     source = Path(loader.__file__).parent
     name = "vendored_cake_rmsnorm_det_train_copy"

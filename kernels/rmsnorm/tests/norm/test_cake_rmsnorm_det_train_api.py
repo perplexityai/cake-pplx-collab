@@ -30,7 +30,7 @@ import re
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx.cake_rmsnorm_det_train
 import cake_pplx._backends.cake_rmsnorm_det_train as backend
 from cake_pplx.cake_rmsnorm_det_train import (
     CakeRMSNormDetFunction,
@@ -44,8 +44,7 @@ from cake_pplx.cake_rmsnorm_det_train import (
     is_cake_rmsnorm_det_train_supported,
 )
 from cake_pplx._backends.cake_rmsnorm_det_train import cake_jit as loader
-from flashinfer.jit.env import has_flashinfer_jit_cache
-from flashinfer.utils import get_compute_capability
+from tests.cake.test_helpers.cake_jit_warmup import build_jit_specs
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WIDTHS = (
@@ -66,6 +65,10 @@ def _device() -> torch.device:
     return torch.device("cuda:0")
 
 
+def get_compute_capability(device: torch.device) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(device)
+
+
 def _supported() -> bool:
     return (
         torch.cuda.is_available()
@@ -80,11 +83,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(autouse=not has_flashinfer_jit_cache(), scope="module")
+@pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
     if _supported():
         arch = loader.arch_for_capability(get_compute_capability(_device()))
-        flashinfer.jit.build_jit_specs(loader.specs_for_arch(arch), verbose=False)
+        build_jit_specs(loader.specs_for_arch(arch))
     yield
 
 

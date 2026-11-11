@@ -1507,7 +1507,7 @@ def test_autograd_backward_checks_deterministic_algorithms_when_it_runs(
     messages = package_warnings(caught)
     assert len(messages) == 1, messages
     assert re.search(
-        r"flashinfer\.cake_rmsnorm_det_train\.cake_rmsnorm_det\b", messages[0]
+        r"cake_pplx\.cake_rmsnorm_det_train\.cake_rmsnorm_det\b", messages[0]
     ), messages[0]
     assert launched == expected, launched
     assert torch.equal(xa.grad, dx_off)

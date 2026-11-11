@@ -41,10 +41,9 @@ from typing import Optional
 import pytest
 import torch
 
-import flashinfer
 import cake_pplx.cake_rmsnorm_nondet_train
 import cake_pplx.cake_rmsnorm_det_train as det
-import flashinfer.experimental.cake as cake_namespace
+import cake_pplx._backends as cake_namespace
 import cake_pplx._backends.cake_rmsnorm_nondet_train as backend
 from cake_pplx.cake_rmsnorm_nondet_train import (
     CakeRMSNormNondetFunction,
@@ -56,8 +55,7 @@ from cake_pplx.cake_rmsnorm_nondet_train import (
     is_cake_rmsnorm_nondet_train_supported,
 )
 from cake_pplx._backends.cake_rmsnorm_nondet_train import cake_jit as loader
-from flashinfer.jit.env import has_flashinfer_jit_cache
-from flashinfer.utils import get_compute_capability
+from tests.cake.test_helpers.cake_jit_warmup import build_jit_specs
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WIDTHS = ((6144, 1e-5), (4096, 1e-5), (2048, 1e-6), (1536, 1e-6), (512, 1e-6))
@@ -78,6 +76,10 @@ def _device() -> torch.device:
     return torch.device("cuda:0")
 
 
+def get_compute_capability(device: torch.device) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(device)
+
+
 def _supported() -> bool:
     return (
         torch.cuda.is_available()
@@ -94,9 +96,9 @@ requires_device = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def warmup_jit():
-    if _supported() and not has_flashinfer_jit_cache():
+    if _supported():
         arch = loader.arch_for_capability(get_compute_capability(_device()))
-        flashinfer.jit.build_jit_specs(loader.specs_for_arch(arch), verbose=False)
+        build_jit_specs(loader.specs_for_arch(arch))
     yield
 
 
@@ -159,7 +161,7 @@ def test_entry_points_are_reached_through_the_module_only() -> None:
         is cake_rmsnorm_nondet_train_backward_workspace_bytes
     )
     assert module.CakeRMSNormNondetFunction is CakeRMSNormNondetFunction
-    # the top level binds none of these names, only the det package's
+    # the cake_pplx namespace binds none of these names
     for name in (
         "cake_rmsnorm_nondet",
         "cake_rmsnorm_nondet_train_forward",
@@ -167,7 +169,7 @@ def test_entry_points_are_reached_through_the_module_only() -> None:
         "cake_rmsnorm_nondet_train_backward_workspace_bytes",
         "CakeRMSNormNondetFunction",
     ):
-        assert not hasattr(flashinfer, name), name
+        assert not hasattr(cake_pplx, name), name
     assert cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det is det.cake_rmsnorm_det
     assert cake_pplx.cake_rmsnorm_det_train.CakeRMSNormDetFunction is det.CakeRMSNormDetFunction
 

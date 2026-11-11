@@ -55,8 +55,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# The package directories under ``cake_pplx/_backends/``.
-SOURCE = REPO_ROOT / "flashinfer" / "experimental" / "cake"
+# The package directories under ``cake_pplx/_backends/``: the directory of the
+# imported backend package (the installed one, or the source tree's).
+SOURCE = Path(
+    importlib.util.find_spec("cake_pplx._backends.cake_rmsnorm_nondet_train").origin
+).parent.parent
 NONDET = "cake_rmsnorm_nondet_train"
 DET = "cake_rmsnorm_det_train"
 PARENT = "vendored_cake_rmsnorm"
@@ -311,11 +314,16 @@ def _nvidia_smi_gpus() -> int:
     return sum(line.startswith("GPU ") for line in proc.stdout.splitlines())
 
 
+# FlashInfer's vendored gate; cake-pplx-collab does not ship it.
+GATE_SCRIPT = REPO_ROOT / "scripts" / "check_cake_build_manifests.py"
 requires_opt_in = pytest.mark.skipif(
-    os.environ.get("FLASHINFER_CAKE_VENDORED_SUITE") != "1" or _nvidia_smi_gpus() == 0,
+    os.environ.get("FLASHINFER_CAKE_VENDORED_SUITE") != "1"
+    or _nvidia_smi_gpus() == 0
+    or not GATE_SCRIPT.is_file(),
     reason=(
         "set FLASHINFER_CAKE_VENDORED_SUITE=1 on a GPU node with nvcc to build both "
-        "manifests with plain nvcc and run the backend suites against the vendored copies"
+        "manifests with plain nvcc and run the backend suites against the vendored "
+        f"copies; needs the vendored gate {GATE_SCRIPT} (not shipped by cake-pplx-collab)"
     ),
 )
 
@@ -330,7 +338,7 @@ def vendored_build(tmp_path_factory):
     proc = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts" / "check_cake_build_manifests.py"),
+            str(GATE_SCRIPT),
             "--vendored-gate",
             "--package",
             f"cake_pplx._backends.{DET}",
