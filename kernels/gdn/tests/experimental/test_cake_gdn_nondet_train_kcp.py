@@ -16,9 +16,10 @@ limitations under the License.
 CPU tests of the GDN KCP metadata layer of the NON-DETERMINISTIC package ``cake_pplx._backends.cake_gdn_nondet_train_kcp``
 (the counterpart of ``cake_gdn_det_train_kcp`` with the same contract and accuracy budgets, not its bitwise
 reproducibility):
-the package-local plan module against ``cake_kda_det_train_kcp.cake_kcp_plan`` (field-identical partitions and contexts on
-the step-0 rows with ``H := HV``; the KDA package is imported HERE only, never by the package), the per-rank crossing
-counts and exchange bytes against the rows of record, the table builders (pool addressing, segment lists, chains),
+the package-local plan module on the step-0 rows (its field identity with the KDA family's
+``cake_kda_det_train_kcp.cake_kcp_plan`` is the cross-family check of
+``integration/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp.py``; the package never imports a KDA package),
+the per-rank crossing counts and exchange bytes against the rows of record, the table builders (pool addressing, segment lists, chains),
 head ownership incl. the padded ``(HV, W) = (3, 2)`` case, the byte queries, the registry seed, an emulated multi-rank
 row (W ranks on threads), and the package's host orchestration on the fake backend
 (the CPU emulation of the programs) against the FP64 reference.  The mode is in the package name: no entry takes
@@ -39,10 +40,8 @@ without it), ``GDN_EVIDENCE_DIR`` (JSONL evidence records), the FP64 reference `
 from __future__ import annotations
 
 import ast
-import collections.abc
 import dataclasses
 import glob
-import hashlib
 import importlib
 import itertools
 import json
@@ -326,157 +325,6 @@ def _partition_inputs(row: dict) -> dict:
             "cut_points": row["cut_points"],
         }
     return {"cu_seqlens_global_cpu": cu, "world_size": W, "layout": row["fi_layout"]}
-
-
-def _plain(x):
-    """Dataclass / tensor / tuple -> JSON-like plain values (tensors as lists with their dtype)."""
-    if isinstance(x, torch.Tensor):
-        return {"dtype": str(x.dtype), "shape": list(x.shape), "values": x.tolist()}
-    # the contexts are plain classes listing their fields in ``_FIELDS``; the other plan objects are dataclasses
-    fields = getattr(type(x), "_FIELDS", None) or getattr(
-        x, "__dataclass_fields__", None
-    )
-    if fields is not None:
-        return {
-            f: _plain(getattr(x, f))
-            for f in fields
-            if not f.startswith("_") and f != "sequence"
-        }
-    if isinstance(
-        x, collections.abc.Mapping
-    ):  # dicts and the KDA module's lazily uploaded table mapping
-        return {str(k): _plain(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_plain(v) for v in x]
-    return x
-
-
-def _rename_h(x):
-    """The KDA module's ``H`` keys -> ``HV`` (the only naming difference between the two modules)."""
-    if isinstance(x, dict):
-        return {("HV" if k == "H" else k): _rename_h(v) for k, v in x.items()}
-    if isinstance(x, list):
-        return [_rename_h(v) for v in x]
-    return x
-
-
-def _context_record(ctx, HV: int) -> dict:
-    """Every field of a context and its head plan as plain values (the field-identity record)."""
-    rec = _plain(ctx)
-    rec.pop("partition", None)
-    rec.pop("group", None)
-    # the KDA module keeps the fragment table as host rows plus a lazily uploaded property and records its upload
-    # knobs; compare the table itself on both sides
-    for name in ("frag_rows", "upload", "table_cache"):
-        rec.pop(name, None)
-    rec["frag_table"] = _plain(ctx.frag_table)
-    rec["device"] = str(ctx.device)
-    rec["heads"] = _plain(ctx.heads(HV))
-    rec["describe"] = ctx.describe(HV)
-    return rec
-
-
-def _sha(obj) -> str:
-    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
-
-
-@ROWS
-@pytest.mark.parametrize("path", ROW_FILES, ids=ROW_IDS)
-def test_plan_parity_with_kda_on_rows(path, monkeypatch) -> None:
-    """Result 1: ``cake_gdn_nondet_train_kcp.cake_kcp_plan`` is field-identical to ``cake_kda_det_train_kcp.cake_kcp_plan`` on
-    every step-0 row (partition, every rank's context and head plan at ``H := HV``) and reproduces the row's recorded
-    fragment table.  Result 2: ``n_in`` / ``n_out`` / ``max_chain_fragments`` and the exchange bytes of
-    ``cake_gdn_nondet_train_kcp_comm_bytes`` equal the row JSON.  Both modules plan under the per-rank rule they share,
-    ``"wave_fill1"`` (the GDN default is the row rule, the KDA default its own tie rule; each is selected explicitly
-    here: the keyword-only ``p_rule`` on the GDN side, the private test hook on the KDA side)."""
-    # cross-family (the KDA family's plan module, the test only): runs where cake-pplx-kda is installed
-    kp = pytest.importorskip(
-        "cake_pplx._backends.cake_kda_det_train_kcp.cake_kcp_plan",
-        reason="cross-family check: needs the cake-pplx-kda distribution (integration/gdn)",
-    )
-    # the KDA module accepts its private test hook only after its opt-in (enable_test_knobs)
-    monkeypatch.setattr(kp, "_TEST_KNOBS_ENABLED", True)
-    with open(path) as fh:
-        row = json.load(fh)
-    H_qk, HV = (int(x) for x in row["heads"])
-    W = int(row["cp"])
-    args = _partition_inputs(row)
-    part = gp.cake_gdn_nondet_train_kcp_partition(**args)
-    kpart = kp.cake_kda_det_train_kcp_partition(**args)
-    assert part.to_dict() == kpart.to_dict(), "partition differs from the KDA module"
-    assert _plain(part.to_dict()["fragments"]) == row["fragments"], (
-        "partition differs from the row of record"
-    )  # JSON round trip: the row stores (prev, next) tuples as lists
-    assert [list(part.local_cu_seqlens(r)) for r in range(W)] == row["local_cu_seqlens"]
-    n_in, n_out = part.crossing_counts()
-    assert (
-        list(n_in) == row["crossing_in_per_rank"]
-        and list(n_out) == row["crossing_out_per_rank"]
-    )
-    assert part.max_chain_fragments() == row["max_chain_fragments"]
-    assert [len(c) for c in part.chains()] == row["chain_fragments_per_doc"]
-    kda_bytes = row.get("kda_plan_comm_bytes_H=HV")
-    if isinstance(kda_bytes, dict) and "error" in kda_bytes:
-        kda_bytes = None
-    per_rank, records = [], []
-    for r in range(W):
-        ctx = gp.cake_gdn_nondet_train_kcp_build_context(
-            part, None, r, CPU, 4, sm_count=SM_COUNT, p_rule="wave_fill1"
-        )  # the per-rank rule both modules share; the GDN default "row_cost" is tested on the rows below
-        kctx = kp.cake_kda_det_train_kcp_build_context(
-            kpart,
-            None,
-            r,
-            CPU,
-            4,
-            sm_count=SM_COUNT,
-            _kcp_test_knobs={"p_rule": "wave_fill1"},
-        )
-        mine, theirs = _context_record(ctx, HV), _rename_h(_context_record(kctx, HV))
-        records.append(mine)
-        assert mine == theirs, (
-            f"rank {r}: context / head plan differ from the KDA module (HV={HV})"
-        )
-        assert (ctx.n_in, ctx.n_out) == (n_in[r], n_out[r])
-        cb = gb.cake_gdn_nondet_train_kcp_comm_bytes(ctx, H_qk=H_qk, HV=HV, C=C_CONV)
-        entry = {
-            "rank": r,
-            "n_in": ctx.n_in,
-            "n_out": ctx.n_out,
-            "T_r": ctx.T_r,
-            "n_frag": ctx.n_frag,
-            "P": ctx.heads(HV).P,
-        }
-        entry.update({k: cb[k] for k in ("B1", "B2", "B3", "halo_fwd", "halo_bwd")})
-        if kda_bytes is not None:
-            # the rows were built with the KDA module's context at sm_count=1; the exchange bytes do not depend on P
-            assert {
-                k: cb[k] for k in ("B1", "B2", "B3", "halo_fwd", "halo_bwd")
-            } == kda_bytes[str(r)], (
-                f"rank {r}: exchange bytes differ from the row of record"
-            )
-            entry["rows_match"] = True
-        per_rank.append(entry)
-    _evidence(
-        "parity",
-        {
-            "row": row["row"],
-            "cp": W,
-            "layout": row["layout"],
-            "fla_padded": row["fla_padded"],
-            "H_qk": H_qk,
-            "HV": HV,
-            "total": row["padded_total"],
-            "fragments": sum(len(frs) for frs in part.fragments),
-            "n_in": list(n_in),
-            "n_out": list(n_out),
-            "max_chain_fragments": part.max_chain_fragments(),
-            "bytes_rows_match": kda_bytes is not None,
-            "per_rank": per_rank,
-            "context_sha256": _sha(records),
-            "equal": True,
-        },
-    )
 
 
 @ROWS
@@ -2156,8 +2004,9 @@ def test_package_imports_no_kda_and_no_environ() -> None:
     """The package never imports a KDA package (no module path or name containing ``cake_kda``) and reads no
     environment variable; the plan module imports torch, torch.distributed and dataclasses only.  The JIT shim
     ``_cake_pplx_jit.py`` (the stand-in for ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache
-    locations and is not covered."""
-    for path in sorted(p for p in PACKAGE_DIR.glob("*.py") if p.name != "_cake_pplx_jit.py"):
+    locations: it is exempt from the ``os`` / ``os.environ`` checks only, the KDA import check covers it."""
+    for path in sorted(PACKAGE_DIR.glob("*.py")):
+        jit_shim = path.name == "_cake_pplx_jit.py"
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -2169,10 +2018,11 @@ def test_package_imports_no_kda_and_no_environ() -> None:
                 assert not any("cake_kda" in n for n in names), (
                     f"{path.name} imports a KDA package"
                 )
-                assert "os" not in [
-                    a.name for a in node.names if isinstance(node, ast.Import)
-                ], f"{path.name} imports os"
-            if isinstance(node, ast.Attribute) and node.attr == "environ":
+                if not jit_shim:
+                    assert "os" not in [
+                        a.name for a in node.names if isinstance(node, ast.Import)
+                    ], f"{path.name} imports os"
+            if not jit_shim and isinstance(node, ast.Attribute) and node.attr == "environ":
                 raise AssertionError(f"{path.name} reads os.environ")
     plan_imports = {
         node.names[0].name if isinstance(node, ast.Import) else node.module

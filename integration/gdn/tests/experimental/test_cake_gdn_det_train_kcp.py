@@ -2129,10 +2129,13 @@ def test_package_imports_no_kda_and_no_environ() -> None:
     """The package never imports a KDA package (any ``cake_kda*`` module, by statement or by a literal
     ``importlib.import_module`` / ``__import__`` call) and reads no environment variable; the plan module imports
     torch, torch.distributed and dataclasses only.  The JIT shim ``_cake_pplx_jit.py`` (the stand-in for
-    ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache locations and is not covered."""
-    for path in sorted(p for p in PACKAGE_DIR.glob("*.py") if p.name != "_cake_pplx_jit.py"):
+    ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache locations: it is exempt from the
+    ``os`` / ``os.environ`` checks only, the KDA import check covers it."""
+    for path in sorted(PACKAGE_DIR.glob("*.py")):
         source = path.read_text()
         assert not _kda_imports(source), f"{path.name} imports a KDA package"
+        if path.name == "_cake_pplx_jit.py":
+            continue
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):

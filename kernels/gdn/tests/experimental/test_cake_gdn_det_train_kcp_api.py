@@ -983,12 +983,14 @@ def test_det_entries_take_no_deterministic_keyword() -> None:
 # package hygiene (no KDA package import; no os.environ; the host module's import allow-list)
 
 
-def _package_sources() -> list[pathlib.Path]:
+def _package_sources(*, jit_shim: bool = False) -> list[pathlib.Path]:
     # The JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit``, which lived outside the package: like it,
-    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the package's
-    # hygiene rules do not cover it.
+    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the environment and
+    # import allow-list rules do not cover it; the KDA import rule does (``jit_shim=True``).
     root = pathlib.Path(_mod().__file__).resolve().parent
-    files = sorted(p for p in root.glob("*.py") if p.name != "_cake_pplx_jit.py")
+    files = sorted(
+        p for p in root.glob("*.py") if jit_shim or p.name != "_cake_pplx_jit.py"
+    )
     assert files
     return files
 
@@ -1000,7 +1002,7 @@ def _facade_source() -> pathlib.Path:
 
 
 def test_package_never_imports_a_kda_package() -> None:
-    sources = _package_sources() + [_facade_source()]
+    sources = _package_sources(jit_shim=True) + [_facade_source()]
     # the package modules and the facade (not vacuous)
     assert len(sources) > 10, sources
     seen = 0

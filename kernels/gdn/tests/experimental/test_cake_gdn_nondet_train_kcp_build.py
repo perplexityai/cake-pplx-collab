@@ -18,8 +18,9 @@ GDN KCP training package ``cake_pplx._backends.cake_gdn_nondet_train_kcp``: the 
 ``build.json`` (schema ``cake-build/1``, the shipped programs, never a test-only one, digests over the listed sources),
 ``build.test.json`` (the test-only programs), the program names against the identity rule (prefix ``cake_gdn_train``,
 never a library name of the deterministic twin), the records against the frozen kernel ABIs, the loader's independence
-from ``flashinfer.jit`` (the prebuilt route) and the package's independence from the KDA training package.  Nothing is
-built or launched.  The generated files (``cake_build.py``, ``build.json``, ``build.test.json``, ``csrc/*.cu``) come
+from ``flashinfer.jit`` (the prebuilt route) and the package's independence from the KDA training package.  The pinned
+bytes of the loader and header against the KDA family's package are the cross-family check of
+``integration/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_build.py``.  Nothing is built or launched.  The generated files (``cake_build.py``, ``build.json``, ``build.test.json``, ``csrc/*.cu``) come
 from the export render: every test that needs one of them skips while it is absent.
 """
 
@@ -320,26 +321,6 @@ def test_the_loader_imports_standalone_without_flashinfer() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == f"ok {PACKAGE_IMPORT}"
-
-
-def test_the_loader_and_header_are_the_pinned_bytes_of_every_cake_package() -> None:
-    """``cake_build.py`` is byte-identical across the Cake packages (the manifest checker's rule); the binding checks
-    header too."""
-    _cake_build()
-    if not (PACKAGE_DIR / "csrc" / "cake_ffi_checks.h").is_file():
-        pytest.skip("csrc/cake_ffi_checks.h is not rendered into the package yet")
-    # cross-family (the KDA family's loader): runs where cake-pplx-kda is installed
-    kda_build = pytest.importorskip(
-        "cake_pplx._backends.cake_kda_det_train.cake_build",
-        reason="cross-family check: needs the cake-pplx-kda distribution (integration/gdn)",
-    )
-    kda_dir = Path(kda_build.__file__).parent
-    for relative in ("cake_build.py", "csrc/cake_ffi_checks.h"):
-        ours = (PACKAGE_DIR / relative).read_bytes()
-        theirs = (kda_dir / relative).read_bytes()
-        assert hashlib.sha256(ours).hexdigest() == hashlib.sha256(theirs).hexdigest(), (
-            relative
-        )
 
 
 def test_the_loader_and_header_are_the_same_bytes_in_every_gdn_package() -> None:
