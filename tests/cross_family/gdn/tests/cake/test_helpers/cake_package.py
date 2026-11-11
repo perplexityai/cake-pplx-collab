@@ -19,14 +19,14 @@ PACKAGES: dict[str, str] = {
     "cake_gdn_nondet_train_kcp": "cake_pplx._backends.cake_gdn_nondet_train_kcp",
     "cake_gdn_det_train": "cake_pplx._backends.cake_gdn_det_train",
     "cake_gdn_nondet_train": "cake_pplx._backends.cake_gdn_nondet_train",
-    # integration only: the KDA KCP packages (cake-pplx-kda), for the cross-family partition parity check
+    # cross-family only: the KDA KCP packages (cake-pplx-kda), for the cross-family partition parity check
     # (tests/cpu/test_cake_kcp_partition_parity.py)
     "cake_kda_det_train_kcp": "cake_pplx._backends.cake_kda_det_train_kcp",
     "cake_kda_nondet_train_kcp": "cake_pplx._backends.cake_kda_nondet_train_kcp",
-    # integration only: the KDA det package (cake-pplx-kda), for the pinned loader / header bytes
+    # cross-family only: the KDA det package (cake-pplx-kda), for the pinned loader / header bytes
     # (tests/experimental/test_cake_gdn_nondet_train_kcp_build.py)
     "cake_kda_det_train": "cake_pplx._backends.cake_kda_det_train",
-    # integration only: the causal-convolution det package (cake-pplx-causal-conv1d), for the C7 and whole-layer rows
+    # cross-family only: the causal-convolution det package (cake-pplx-causal-conv1d), for the C7 and whole-layer rows
     # (tests/experimental/test_cake_gdn_nondet_train_kcp_dist.py)
     "cake_causal_conv1d_det_train": "cake_pplx._backends.cake_causal_conv1d_det_train",
     # the non-deterministic GQA HD256 training package; its key carries the namespace

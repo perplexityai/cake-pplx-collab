@@ -18,7 +18,7 @@ CPU tests of the GDN KCP metadata layer of the NON-DETERMINISTIC package ``cake_
 reproducibility):
 the package-local plan module on the step-0 rows (its field identity with the KDA family's
 ``cake_kda_det_train_kcp.cake_kcp_plan`` is the cross-family check of
-``integration/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp.py``; the package never imports a KDA package),
+``tests/cross_family/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp.py``; the package never imports a KDA package),
 the per-rank crossing counts and exchange bytes against the rows of record, the table builders (pool addressing, segment lists, chains),
 head ownership incl. the padded ``(HV, W) = (3, 2)`` case, the byte queries, the registry seed, an emulated multi-rank
 row (W ranks on threads), and the package's host orchestration on the fake backend

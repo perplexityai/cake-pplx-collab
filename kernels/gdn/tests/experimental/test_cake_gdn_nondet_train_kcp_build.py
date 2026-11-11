@@ -20,7 +20,7 @@ GDN KCP training package ``cake_pplx._backends.cake_gdn_nondet_train_kcp``: the 
 never a library name of the deterministic twin), the records against the frozen kernel ABIs, the loader's independence
 from ``flashinfer.jit`` (the prebuilt route) and the package's independence from the KDA training package.  The pinned
 bytes of the loader and header against the KDA family's package are the cross-family check of
-``integration/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_build.py``.  Nothing is built or launched.  The generated files (``cake_build.py``, ``build.json``, ``build.test.json``, ``csrc/*.cu``) come
+``tests/cross_family/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_build.py``.  Nothing is built or launched.  The generated files (``cake_build.py``, ``build.json``, ``build.test.json``, ``csrc/*.cu``) come
 from the export render: every test that needs one of them skips while it is absent.
 """
 

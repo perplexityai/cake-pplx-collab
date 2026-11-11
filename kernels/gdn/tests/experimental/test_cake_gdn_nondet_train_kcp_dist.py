@@ -58,7 +58,7 @@ every pool and tape of the workspace filled with NaN in between; both rows withi
 ``P = 2`` where every rank plans ``P = 1`` and its fragments take it (judged by the forced ``P = 2`` cells), under
 NaN-filled allocations.  The rows that also need the causal_conv1d family -- the convolution
 halo row C7 and the whole-layer checkpoint rows (``test_layer_checkpoint_rows``, ``test_l2n_layer_checkpoint_rows``)
--- live in ``integration/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_dist.py``.
+-- live in ``tests/cross_family/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_dist.py``.
 
 Packed QKV (#7817): under ``layout="tma"`` the backward of strided packed views writes one packed dQKV row, and
 ``cake_gdn_nondet_train_kcp_packed_qkv_views`` hands it to a packed leaf without a concatenation (both within the budgets of the contiguous

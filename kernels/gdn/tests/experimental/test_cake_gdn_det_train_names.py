@@ -460,19 +460,10 @@ def _skipped_det_imports(path: Path) -> list[int]:
 def test_det_tests_import_the_det_packages_without_a_skip() -> None:
     root = Path(__file__).resolve().parents[2]
     # The KCP route's cross-family suites (``test_cake_gdn_det_train_kcp{,_build,_dist}.py``) and its benchmark live in
-    # ``integration/gdn`` of the same checkout (FlashInfer kept them beside the other det suites): the scan covers both
-    # trees, so run this test from the repository layout (``kernels/gdn`` beside ``integration/gdn``).
-    integration = root.parents[1] / "integration" / root.name
-    assert (integration / "tests" / "experimental").is_dir(), (
-        f"no {integration}: run from the repository layout"
-    )
-    files = sorted(
-        (root / "tests" / "experimental").glob("test_cake_gdn_det_train*.py")
-    ) + sorted(
-        (integration / "tests" / "experimental").glob("test_cake_gdn_det_train*.py")
-    )
-    files.append(integration / "benchmarks" / "bench_cake_gdn_det_train_kcp.py")
-    assert len(files) > 8, files
+    # ``tests/cross_family/gdn`` (FlashInfer kept them beside the other det suites).  The same check runs there
+    # (``test_cake_gdn_det_train_kcp_no_skip.py``), so each tree checks its own files and runs from a copy.
+    files = sorted((root / "tests" / "experimental").glob("test_cake_gdn_det_train*.py"))
+    assert len(files) > 7, files
     offenders = {p.name: lines for p in files if (lines := _skipped_det_imports(p))}
     assert not offenders, offenders
 
