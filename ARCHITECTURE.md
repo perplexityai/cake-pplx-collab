@@ -77,7 +77,7 @@ flowchart LR
   DKDA --> NS
   DRMS --> NS
   DCONV --> NS
-  DCONV -.->|"KCP context, KCP_CONTEXT_PROTOCOL"| DKDA
+  DCONV -.->|"KCP context"| DKDA
 ```
 
 ## Family index
@@ -176,12 +176,11 @@ Backend packages already import no other backend package. Kernel sources include
 There is one cross-family runtime contract. The `causal_conv1d` KCP route consumes the context object that the KDA or GDN KCP `..._build_context` function builds. An example is `CakeKDADetKcpContext`.
 
 - The contract is a documented duck-typed protocol.
-- It has a version integer, `KCP_CONTEXT_PROTOCOL`.
-- At run time, `causal_conv1d` checks the version. If the version does not match, it raises a clear error.
+- Planned, not implemented yet: a version integer, `KCP_CONTEXT_PROTOCOL`, that `causal_conv1d` checks at run time, raising a clear error on a mismatch. Until then, pin `causal_conv1d` with a `kda`/`gdn` commit that was tested together.
 - Tests that need another family live in `tests/cross_family/<family>/`, not in `kernels/<family>/tests/`. The import tool moves them there.
 - Run them in one environment that has the families they need, each at a chosen commit.
 
-If you change the context shape, increase `KCP_CONTEXT_PROTOCOL`. Then update the consumer side in a separate PR.
+If you change the context shape, update the consumer side in a separate PR and record the tested combination. Once `KCP_CONTEXT_PROTOCOL` exists, also increase it.
 
 ## Build and runtime
 
@@ -270,5 +269,5 @@ Kernel updates from FlashInfer then land one family at a time.
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
 - **Architecture coverage.** The first import was validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
-- **KCP context protocol.** The protocol for the `causal_conv1d`/KDA/GDN KCP context begins at version 1.
+- **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
 - **Environment variables.** The kernels keep their `FLASHINFER_*` knob names (for example `FLASHINFER_CAKE_DSA_*`). A rename to `CAKE_PPLX_*` is a later, per-family change.
