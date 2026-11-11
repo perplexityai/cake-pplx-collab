@@ -1,0 +1,39 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_dsa_indexer_det_train": "flashinfer/experimental/cake/cake_dsa_indexer_det_train",
+    "cake_dsa_indexer_nondet_train": "flashinfer/experimental/cake/cake_dsa_indexer_nondet_train"
+  },
+  "facades": {
+    "cake_dsa_indexer_det_train": "flashinfer/cake_dsa_indexer_det_train.py",
+    "cake_dsa_indexer_nondet_train": "flashinfer/cake_dsa_indexer_nondet_train.py"
+  },
+  "tests": [
+    "tests/experimental/test_cake_dsa_indexer_det_train.py",
+    "tests/experimental/test_cake_dsa_indexer_det_train_api.py",
+    "tests/experimental/test_cake_dsa_indexer_det_train_fp8.py",
+    "tests/experimental/test_cake_dsa_indexer_det_train_names.py",
+    "tests/experimental/test_cake_dsa_indexer_nondet_train.py",
+    "tests/experimental/test_cake_dsa_indexer_nondet_train_api.py",
+    "tests/experimental/test_cake_dsa_indexer_nondet_train_names.py",
+    "tests/experimental/test_cake_dsa_indexer_nondet_train_vs_det.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_dsa_indexer_det_train.py",
+    "benchmarks/bench_cake_dsa_indexer_nondet_train.py",
+    "benchmarks/diag_cake_dsa_indexer_det_train_sampling.py"
+  ],
+  "generators": {
+    "cake_dsa_indexer_det_train": {
+      "cake_revision": "af93cc21d2e0e3fe9bb74617601cae3eb417e381",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-09T11:24:43Z"
+    },
+    "cake_dsa_indexer_nondet_train": {
+      "cake_revision": "af93cc21d2e0e3fe9bb74617601cae3eb417e381",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-09T11:24:43Z"
+    }
+  }
+}
