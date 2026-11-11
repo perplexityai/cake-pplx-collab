@@ -45,10 +45,12 @@ pytestmark = pytest.mark.cpu_only
 FACADE = "cake_pplx.cake_dsa_sparse_attention_nondet_train"
 PACKAGE = "cake_pplx._backends.cake_dsa_sparse_attention_nondet_train"
 BACKEND = f"{PACKAGE}.cake_backend"
+# the modules before the rename (flashinfer.dsa_sparse_attention, flashinfer.experimental.cake_dsa_train) under the
+# cake_pplx prefix
 REMOVED_MODULES = (
-    "flashinfer.dsa_sparse_attention",
-    "flashinfer.experimental.cake_dsa_train",
-    "flashinfer.experimental.cake_dsa_train.cake_backend",
+    "cake_pplx.dsa_sparse_attention",
+    "cake_pplx._backends.cake_dsa_train",
+    "cake_pplx._backends.cake_dsa_train.cake_backend",
 )
 # Module constants keep their names (``DKV_DIRECT_ENV``, ...); every other public name has the mode word as one of
 # its words.
@@ -215,11 +217,11 @@ def test_old_names_are_gone(module_name: str) -> None:
 def test_entry_point_module_imports_no_backend() -> None:
     """In a fresh interpreter, importing the entry-point module imports nothing of the backend package (the
     containment rules of flashinfer/experimental/README.md); the first access of a re-exported autograd Function
-    imports it.  ``import flashinfer`` imports neither."""
+    imports it.  ``import cake_pplx`` (the namespace) imports neither."""
 
     code = f"""
 import sys
-import flashinfer
+import cake_pplx
 assert {FACADE!r} not in sys.modules
 assert not any(m.startswith({PACKAGE!r}) for m in sys.modules)
 import {FACADE} as facade
@@ -237,16 +239,16 @@ assert {BACKEND!r} in sys.modules
 def test_shared_mode_name_checks() -> None:
     """The shared #8928 checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
     and its place in every public name, no ``deterministic`` keyword, each object bound only under its own name in the
-    entry-point module, ``flashinfer``, the backend package and its ``cake_backend``, and the modules and names before
+    entry-point module, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``, and the modules and names before
     the rename failing at import in a fresh interpreter."""
 
-    import flashinfer
+    import cake_pplx
 
     facade = importlib.import_module(FACADE)
     backend = importlib.import_module(BACKEND)
     assert_cake_mode_module(
         facade,
-        namespaces=[flashinfer, importlib.import_module(PACKAGE), backend],
+        namespaces=[cake_pplx, importlib.import_module(PACKAGE), backend],
         forwards=[
             (new, getattr(backend, new))
             for _, new in RENAMED

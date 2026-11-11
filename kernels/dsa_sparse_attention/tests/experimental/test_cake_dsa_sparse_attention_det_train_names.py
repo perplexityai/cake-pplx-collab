@@ -119,7 +119,7 @@ def test_entry_point_module_imports_no_backend() -> None:
 
     code = f"""
 import sys
-import flashinfer
+import cake_pplx
 assert {FACADE!r} not in sys.modules
 assert not any(m.startswith({PACKAGE!r}) for m in sys.modules)
 import {FACADE} as facade
@@ -136,14 +136,14 @@ assert {BACKEND!r} in sys.modules
 
 def test_shared_mode_name_checks() -> None:
     """The shared #8928 checks over the entry-point module (mode word, no ``deterministic`` keyword, each object
-    bound only under its own name in the facade, ``flashinfer``, the backend package and its ``cake_backend``)."""
+    bound only under its own name in the facade, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``)."""
 
-    import flashinfer
+    import cake_pplx
 
     facade = importlib.import_module(FACADE)
     backend = importlib.import_module(BACKEND)
     assert_cake_mode_module(
         facade,
-        namespaces=[flashinfer, importlib.import_module(PACKAGE), backend],
+        namespaces=[cake_pplx, importlib.import_module(PACKAGE), backend],
         forwards=[(name, getattr(backend, name)) for name in ENTRIES],
     )

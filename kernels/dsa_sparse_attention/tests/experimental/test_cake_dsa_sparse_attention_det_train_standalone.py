@@ -17,7 +17,8 @@ A copy of ``cake_pplx/_backends/cake_dsa_sparse_attention_det_train`` must impor
 checks on its own (flashinfer-ai/flashinfer#6553): under another top-level name, in a ``python -I`` subprocess with
 ``flashinfer`` blocked (the form of a vendoring gate).  The package imports only itself, ``torch`` and ``tvm_ffi``:
 the API logging wrappers belong to the module ``cake_pplx.cake_dsa_sparse_attention_det_train``, a direct call of
-the package emits no warning, and the only ``flashinfer`` import is the JIT fallback of ``cake_build.py``.  The
+the package emits no warning, and no module of the package imports ``flashinfer`` (the JIT fallback of
+``cake_build.py`` imports the package's own ``_cake_pplx_jit`` shim, inside ``try`` / ``except ImportError``).  The
 backend carries no determinism alert and no warning machinery.  CPU-only: no GPU, no generated program and no JIT
 build is needed.
 """
@@ -177,9 +178,10 @@ def _imports_flashinfer(node):
     return False
 
 
-def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """No relative import climbs above the package, every ``flashinfer`` import sits in a ``try`` with an ``except
-    ImportError`` handler, and exactly one such guarded block exists: the JIT fallback in ``cake_build.py``."""
+def test_package_never_imports_flashinfer():
+    """No relative import climbs above the package and no module of the package imports ``flashinfer`` (in
+    FlashInfer the one allowed import was the guarded JIT fallback of ``cake_build.py``; here that fallback imports
+    the package's own ``_cake_pplx_jit`` shim, checked below to stay inside its ``try`` / ``except ImportError``)."""
     guards = {}
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -201,9 +203,22 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                     f"{path.name}:{node.lineno}: flashinfer import outside a try/except ImportError"
                 )
                 guards.setdefault(path.name, set()).add(guarded[node])
-    assert {name: len(lines) for name, lines in guards.items()} == {
-        "cake_build.py": 1
-    }, guards
+    assert guards == {}, guards
+    shim_guards = set()
+    tree = ast.parse((PACKAGE_DIR / "cake_build.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(
+            "ImportError" in _exception_names(h.type) for h in node.handlers
+        ):
+            for stmt in node.body:
+                for sub in ast.walk(stmt):
+                    if (
+                        isinstance(sub, ast.ImportFrom)
+                        and sub.level == 1
+                        and sub.module == "_cake_pplx_jit"
+                    ):
+                        shim_guards.add(node.lineno)
+    assert len(shim_guards) == 1, shim_guards
 
 
 def test_backend_has_no_determinism_alert():
