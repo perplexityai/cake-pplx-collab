@@ -52,7 +52,8 @@ jobs:
       - name: Install this family alone
         run: |
           python -m pip install --upgrade pip
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # the default (CUDA) build, as users install it; it imports and runs host code without a GPU
+          python -m pip install torch
           python -m pip install "./kernels/${{ matrix.family }}[test]"
       - name: Import every public module
         working-directory: /tmp
