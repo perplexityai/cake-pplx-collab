@@ -1,0 +1,42 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_mhc_det_train": "flashinfer/experimental/cake/cake_mhc_det_train",
+    "cake_mhc_nondet_train": "flashinfer/experimental/cake/cake_mhc_nondet_train"
+  },
+  "facades": {
+    "cake_mhc_det_train": "flashinfer/cake_mhc_det_train.py",
+    "cake_mhc_nondet_train": "flashinfer/cake_mhc_nondet_train.py"
+  },
+  "tests": [
+    "tests/cpu/mhc/test_cake_mhc_det_train_names.py",
+    "tests/cpu/mhc/test_cake_mhc_det_train_rules.py",
+    "tests/cpu/mhc/test_cake_mhc_det_train_rules_hidden.py",
+    "tests/cpu/mhc/test_cake_mhc_nondet_train_names.py",
+    "tests/experimental/test_cake_mhc_nondet_train.py",
+    "tests/experimental/test_cake_mhc_nondet_train_api.py",
+    "tests/experimental/test_cake_mhc_nondet_train_graphs.py",
+    "tests/experimental/test_cake_mhc_nondet_train_iters.py",
+    "tests/experimental/test_cake_mhc_nondet_train_rules.py",
+    "tests/experimental/test_cake_mhc_nondet_train_workspace.py",
+    "tests/mhc/test_cake_mhc_det_train.py",
+    "tests/mhc/test_cake_mhc_det_train_api.py",
+    "tests/mhc/test_cake_mhc_det_train_graphs.py",
+    "tests/mhc/test_cake_mhc_det_train_iters.py",
+    "tests/mhc/test_cake_mhc_det_train_workspace.py"
+  ],
+  "benchmarks": [],
+  "generators": {
+    "cake_mhc_det_train": {
+      "cake_revision": "ac1eca29cf3611c247205fb48510e46b0dcc6395",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-09T08:15:53Z"
+    },
+    "cake_mhc_nondet_train": {
+      "cake_revision": "ac1eca29cf3611c247205fb48510e46b0dcc6395",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-09T08:15:53Z"
+    }
+  }
+}
