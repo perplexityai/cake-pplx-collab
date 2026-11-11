@@ -206,6 +206,21 @@ def _backend_calls(fake, entry):
 # ---------------------------------------------------------------------------
 
 
+def test_alert_frames_skip_the_facade_directory():
+    """The backend's ``warn_only`` alert names the caller's frame: the directories its stack-level helper skips hold
+    the backend package and the directory of this public module (``cake_pplx/``, two levels above
+    ``_backends/<package>``), and not this test file's."""
+    import os
+
+    backend = importlib.import_module(
+        "cake_pplx._backends.cake_lm_head_nondet_train.cake_backend"
+    )
+    skipped = backend._SKIPPED_DIRS
+    assert os.path.dirname(os.path.abspath(public.__file__)) + os.sep in skipped, skipped
+    assert os.path.dirname(os.path.abspath(backend.__file__)) + os.sep in skipped, skipped
+    assert not os.path.abspath(__file__).startswith(skipped), skipped
+
+
 def test_entries_are_stable_apis():
     """Each entry is its own function (not the deterministic object), a stable API (no experimental marking), and
     the former dispatcher plumbing is gone."""
