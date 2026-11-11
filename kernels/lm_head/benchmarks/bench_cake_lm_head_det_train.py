@@ -96,9 +96,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import flashinfer  # noqa: E402
-from flashinfer import _cake_lm_head_train_knobs as _knobs  # noqa: E402
-from flashinfer.api_logging import ExperimentalWarning  # noqa: E402
+from cake_pplx import _cake_lm_head_train_knobs as _knobs  # noqa: E402
 from cake_pplx.cake_lm_head_det_train import (
     cake_lm_head_det_train_logprob,
     cake_lm_head_det_train_loss,
@@ -1006,13 +1004,9 @@ def main():
         device = torch.device("cuda", torch.cuda.current_device())
     torch.cuda.set_device(device)
     args.device = device
-    warnings.simplefilter(
-        "ignore", ExperimentalWarning
-    )  # the experimental banner of the public API
     env = dict(
         torch=torch.__version__,
-        flashinfer=getattr(flashinfer, "__version__", None)
-        or _version("flashinfer-python"),
+        flashinfer=_version("flashinfer-python"),  # the timer's package (flashinfer.testing)
         liger_kernel=_version("liger-kernel"),
         cut_cross_entropy=_version("cut-cross-entropy"),
         device=torch.cuda.get_device_name(),
