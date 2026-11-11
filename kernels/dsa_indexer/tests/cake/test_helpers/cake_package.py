@@ -16,8 +16,6 @@ from types import ModuleType
 PACKAGES: dict[str, str] = {
     "cake.cake_dsa_indexer_det_train": "cake_pplx._backends.cake_dsa_indexer_det_train",
     "cake.cake_dsa_indexer_nondet_train": "cake_pplx._backends.cake_dsa_indexer_nondet_train",
-    # the non-deterministic LM-head package; its key carries the namespace
-    # the non-deterministic GQA HD256 training package; its key carries the namespace
 }
 
 

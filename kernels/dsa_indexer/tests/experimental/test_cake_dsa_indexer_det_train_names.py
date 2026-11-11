@@ -18,9 +18,8 @@ Naming rules of flashinfer-ai/flashinfer#8928 for the deterministic Cake DSA ind
 The public module is ``cake_pplx.cake_dsa_indexer_det_train`` and its backend package
 ``cake_pplx._backends.cake_dsa_indexer_det_train``.  Every public name of the module (except ALL_CAPS
 module constants) carries the mode word ``det`` as a name token, no public callable takes ``deterministic=``, the
-previous names and package paths fail at import (no aliases), the SM120 serving entry
-``flashinfer.dsa_indexer.dsa_indexer_det_topk`` no longer routes ``backend="cake"``, and importing the module loads
-no backend (checked in a fresh interpreter).  CPU only.
+previous names and package paths fail at import (no aliases), and importing the module loads no backend (checked
+in a fresh interpreter).  CPU only.
 """
 
 from __future__ import annotations
@@ -32,10 +31,8 @@ import subprocess
 import sys
 
 import pytest
-import torch
 
 import cake_pplx.cake_dsa_indexer_det_train as facade
-import flashinfer.dsa_indexer as sm120_entry
 
 pytestmark = pytest.mark.cpu_only
 
@@ -48,18 +45,23 @@ FORWARDED = (
     "cake_dsa_indexer_det_train_topk",
     "cake_dsa_indexer_det_train_topk_workspace_size",
 )
-# package paths before #8928: they fail at import
+# package paths before #8928 (flashinfer.experimental.cake_dsa_indexer[_det]) under the cake_pplx prefix: they
+# fail at import
 OLD_MODULES = (
-    "flashinfer.experimental.cake_dsa_indexer_det",
-    "flashinfer.experimental.cake_dsa_indexer_det.cake_backend",
-    "flashinfer.experimental.cake_dsa_indexer",
-    "flashinfer.experimental.cake_dsa_indexer.cake_backend",
+    "cake_pplx.cake_dsa_indexer_det",
+    "cake_pplx.cake_dsa_indexer",
+    "cake_pplx._backends.cake_dsa_indexer_det",
+    "cake_pplx._backends.cake_dsa_indexer_det.cake_backend",
+    "cake_pplx._backends.cake_dsa_indexer",
+    "cake_pplx._backends.cake_dsa_indexer.cake_backend",
 )
-# (module, name) pairs before #8928: absent
+# (module, name) pairs before #8928: absent (the serving-module names, flashinfer.dsa_indexer.*, checked on the
+# facade, the module that took their place)
 OLD_NAMES = (
-    ("flashinfer.dsa_indexer", "dsa_indexer_det_topk_workspace_size"),
-    ("flashinfer.dsa_indexer", "dsa_indexer_topk"),
-    ("flashinfer.dsa_indexer", "dsa_indexer_topk_workspace_size"),
+    (FACADE, "dsa_indexer_det_topk"),
+    (FACADE, "dsa_indexer_det_topk_workspace_size"),
+    (FACADE, "dsa_indexer_topk"),
+    (FACADE, "dsa_indexer_topk_workspace_size"),
     (f"{BACKEND}.cake_backend", "dsa_indexer_det_topk"),
     (f"{BACKEND}.cake_backend", "dsa_indexer_det_workspace_size"),
     (f"{BACKEND}.cake_backend", "DSAIndexerRunner"),
@@ -176,30 +178,16 @@ def test_old_names_are_absent(module: str, name: str) -> None:
         exec(f"from {module} import {name}", {})
 
 
-def test_sm120_entry_no_longer_routes_cake() -> None:
-    q = torch.zeros((6, 32, 128), dtype=torch.bfloat16)
-    k = torch.zeros((10, 128), dtype=torch.bfloat16)
-    w = torch.zeros((6, 32), dtype=torch.float32)
-    cu_q = torch.tensor((0, 2, 6), dtype=torch.int32)
-    cu_k = torch.tensor((0, 3, 10), dtype=torch.int32)
-    with pytest.raises(ValueError, match=r"flashinfer\.cake_dsa_indexer_det_train"):
-        sm120_entry.dsa_indexer_det_topk(q, k, w, cu_q, cu_k, backend="cake")
-    with pytest.raises(TypeError, match="backend"):
-        sm120_entry.dsa_indexer_det_topk(q, k, w, cu_q, cu_k)
-    with pytest.raises(ValueError, match="sm120"):
-        sm120_entry.dsa_indexer_det_topk(q, k, w, cu_q, cu_k, backend="other")
-
-
 def test_import_loads_no_backend() -> None:
     code = f"""
 import json, sys
-import flashinfer
-after_flashinfer = sorted(m for m in sys.modules if m in ({FACADE!r}, {BACKEND!r}))
+import cake_pplx
+after_namespace = sorted(m for m in sys.modules if m in ({FACADE!r}, {BACKEND!r}))
 import {FACADE}
 after_facade = sorted(m for m in sys.modules if m.startswith({BACKEND!r}))
-print(json.dumps({{"after_flashinfer": after_flashinfer, "after_facade": after_facade}}))
+print(json.dumps({{"after_namespace": after_namespace, "after_facade": after_facade}}))
 """
-    assert _fresh(code) == {"after_flashinfer": [], "after_facade": []}
+    assert _fresh(code) == {"after_namespace": [], "after_facade": []}
 
 
 def test_the_manifest_names_the_package() -> None:

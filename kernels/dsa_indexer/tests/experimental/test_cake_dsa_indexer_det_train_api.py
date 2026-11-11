@@ -30,7 +30,6 @@ import warnings
 
 import pytest
 import torch
-from flashinfer.api_logging import ExperimentalWarning
 from cake_pplx.cake_dsa_indexer_det_train import (
     cake_dsa_indexer_det_train_topk,
     cake_dsa_indexer_det_train_topk_workspace_size,
@@ -77,7 +76,7 @@ def _run(inputs: ref.IndexerInputs, **extra):
     [cake_dsa_indexer_det_train_topk, cake_dsa_indexer_det_train_topk_workspace_size],
 )
 def test_public_api_is_stable(fn):
-    """#8928: the facades are stable APIs (no experimental marker, no ExperimentalWarning)."""
+    """#8928: the facades are stable APIs (no experimental marker, no warning)."""
     assert not getattr(fn, "is_experimental", False)
 
 
@@ -88,7 +87,8 @@ def test_public_entry_point_matches_backend_without_warning():
     )
     expected = _run(inputs)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        # no warning at all (FlashInfer checked its ExperimentalWarning; cake_api is a no-op decorator)
+        warnings.simplefilter("error")
         got = cake_dsa_indexer_det_train_topk(
             inputs.q,
             inputs.k,

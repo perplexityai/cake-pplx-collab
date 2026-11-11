@@ -200,13 +200,13 @@ def test_only_the_alert_reads_torch_mode() -> None:
 def test_import_loads_no_backend() -> None:
     code = f"""
 import json, sys
-import flashinfer
-after_flashinfer = sorted(m for m in sys.modules if m in ({FACADE!r}, {BACKEND!r}))
+import cake_pplx
+after_namespace = sorted(m for m in sys.modules if m in ({FACADE!r}, {BACKEND!r}))
 import {FACADE}
 after_facade = sorted(m for m in sys.modules if m.startswith({BACKEND!r}))
-print(json.dumps({{"after_flashinfer": after_flashinfer, "after_facade": after_facade}}))
+print(json.dumps({{"after_namespace": after_namespace, "after_facade": after_facade}}))
 """
-    assert _fresh(code) == {"after_flashinfer": [], "after_facade": []}
+    assert _fresh(code) == {"after_namespace": [], "after_facade": []}
 
 
 def test_the_manifest_names_the_package() -> None:
@@ -222,13 +222,13 @@ def test_the_manifest_names_the_package() -> None:
 def test_shared_mode_name_checks() -> None:
     """The shared #8928 checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
     and its place in every public name, no ``deterministic`` keyword, and each object bound only under its own name in
-    the entry-point module, ``flashinfer``, the backend package and its ``cake_backend``.  The module is new, so there
+    the entry-point module, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``.  The module is new, so there
     are no former modules or names to check."""
-    import flashinfer
+    import cake_pplx
 
     backend = _backend()
     assert_cake_mode_module(
         facade,
-        namespaces=[flashinfer, importlib.import_module(BACKEND), backend],
+        namespaces=[cake_pplx, importlib.import_module(BACKEND), backend],
         forwards=[(name, getattr(backend, name)) for name in FORWARDED],
     )
