@@ -1,0 +1,75 @@
+name: families
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  isolation:
+    runs-on: ubuntu-latest
+    outputs:
+      families: ${{ steps.changed.outputs.families }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Isolation rules
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python tools/check_isolation.py --base "origin/${{ github.base_ref }}"
+          else
+            python tools/check_isolation.py
+          fi
+      - name: Changed families
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+            list=$(git diff --name-only "$base...HEAD" | awk -F/ '$1=="kernels" && NF>2 {print $2}' | sort -u)
+          else
+            list=$(ls kernels 2>/dev/null || true)
+          fi
+          echo "families=$(printf '%s\n' $list | jq -R . | jq -cs 'map(select(length>0))')" >> "$GITHUB_OUTPUT"
+
+  family:
+    needs: isolation
+    timeout-minutes: 90
+    if: needs.isolation.outputs.families != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        family: ${{ fromJson(needs.isolation.outputs.families) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install this family alone
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "./kernels/${{ matrix.family }}[test]"
+      - name: Import every public module
+        working-directory: /tmp
+        run: |
+          python - <<'PY'
+          import importlib, pathlib
+          family = pathlib.Path("${{ github.workspace }}/kernels/${{ matrix.family }}/cake_pplx")
+          for path in sorted(family.glob("cake_*.py")):
+              importlib.import_module(f"cake_pplx.{path.stem}")
+              print("imported", path.stem)
+          PY
+      - name: Tests on a CPU runner (GPU tests skip)
+        # Run against the installed distribution: copy the tests out of the source tree.
+        run: |
+          src="kernels/${{ matrix.family }}"
+          run="$RUNNER_TEMP/tests-${{ matrix.family }}"
+          mkdir -p "$run"
+          cp -r "$src/tests" "$src/pyproject.toml" "$run/"
+          if [ -d "$src/benchmarks" ]; then cp -r "$src/benchmarks" "$run/"; fi
+          cd "$run" && python -m pytest -q -p no:cacheprovider -rfE tests
