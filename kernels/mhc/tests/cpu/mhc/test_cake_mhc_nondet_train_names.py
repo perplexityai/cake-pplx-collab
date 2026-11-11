@@ -29,7 +29,7 @@ import sys
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_mhc_nondet_train as module
 
 MODE = "nondet"
@@ -37,10 +37,10 @@ MODE = "nondet"
 # #8928, the former non-deterministic module): importing them fails.
 REMOVED_MODULES = (
     "cake_pplx.cake_mhc_train",
-    "flashinfer.cake_mhc_train_backend",
-    "flashinfer.cake_mhc_train_head_backend",
-    "flashinfer.cake_mhc_det_train_backend",
-    "flashinfer.cake_mhc_det_train_head_backend",
+    "cake_pplx.cake_mhc_train_backend",
+    "cake_pplx.cake_mhc_train_head_backend",
+    "cake_pplx.cake_mhc_det_train_backend",
+    "cake_pplx.cake_mhc_det_train_head_backend",
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
 )
@@ -122,20 +122,20 @@ def test_former_modules_fail_at_import() -> None:
 
 @pytest.mark.cpu_only
 def test_former_names_are_gone() -> None:
-    for owner in (module, flashinfer):
+    for owner in (module, cake_pplx):
         leftovers = [
             n
             for n in dir(owner)
             if n.startswith(REMOVED_PREFIXES) or n in REMOVED_NAMES
         ]
         assert not leftovers, (owner.__name__, leftovers)
-    # the mode has no top-level name: its module is imported by its full name (importing it binds the submodule
-    # attribute ``cake_pplx.cake_mhc_nondet_train``, which is the module, not a re-exported name)
+    # the mode has no name in the ``cake_pplx`` namespace: its module is imported by its full name (importing it
+    # binds the submodule attribute ``cake_pplx.cake_mhc_nondet_train``, which is the module, not a re-exported name)
     leftovers = [
         n
-        for n in dir(flashinfer)
+        for n in dir(cake_pplx)
         if "mhc" in n.lower()
         and MODE in n.lower()
-        and not inspect.ismodule(getattr(flashinfer, n))
+        and not inspect.ismodule(getattr(cake_pplx, n))
     ]
     assert not leftovers, leftovers

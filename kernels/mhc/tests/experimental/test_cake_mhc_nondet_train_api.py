@@ -16,7 +16,8 @@ limitations under the License.
 Tests of ``cake_pplx.cake_mhc_nondet_train``, the stable top-level module of
 the Cake four-stream mHC training kernels' package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (SM100 / SM103 / SM107;
-FlashInfer issue #8068): its entry points emit no ``ExperimentalWarning``.
+FlashInfer issue #8068): its entry points emit no warning (FlashInfer's
+``ExperimentalWarning`` included; the ``cake_api`` decorator emits none).
 
 The mode is part of the names: every entry point runs the package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (imported on the first
@@ -34,8 +35,8 @@ unchanged.  This module checks:
   ``TypeError`` of a ``deterministic`` keyword on every entry point, the
   workspace helpers' ``hidden`` default equal to the backend's
   ``cake_jit.HIDDEN``, the lazy import (in a fresh interpreter ``import
-  flashinfer`` and ``import cake_pplx.cake_mhc_nondet_train`` load no backend,
-  and the top level exposes no ``nondet`` name), the former module paths
+  cake_pplx`` and ``import cake_pplx.cake_mhc_nondet_train`` load no backend,
+  and the namespace exposes no ``nondet`` name), the former module paths
   failing at import, no import of the deterministic package by this module and
   none of the former fallback's state, each entry point's forwarding to the
   backend's (replaced by a recorder) with every argument unchanged, and the
@@ -56,11 +57,11 @@ unchanged.  This module checks:
   this package's layout) is refused; a deterministic prepare handle is refused
   by ``cake_mhc_nondet_train_finish``; on sm_100a / sm_103a a hidden size runs
   exactly where the deterministic package runs it; on sm_107a this package
-  runs hidden 4096 only;
-* training with this package composed with the model's deterministic head
-  (``cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det``, the stream mean
-  of the last layer): the gradients reach every leaf through the head and
-  equal the deterministic training and head's.
+  runs hidden 4096 only.
+
+Training with this package composed with the model's deterministic head
+(``cake_pplx.cake_mhc_head_det_train``, family ``mhc_head``) is checked in
+``integration/mhc/tests/experimental/test_cake_mhc_nondet_train_head.py``.
 
 The numerical contract of the package's backward is
 ``test_cake_mhc_nondet_train.py``'s.
@@ -81,12 +82,10 @@ from pathlib import Path
 import pytest
 import torch
 
+import cake_pplx.cake_mhc_det_train as det_facade
 import cake_pplx.cake_mhc_nondet_train as facade
 import cake_pplx._backends.cake_mhc_det_train as det_backend
 import cake_pplx._backends.cake_mhc_nondet_train as backend
-from flashinfer import cake_mhc_det_train as det_facade
-from flashinfer import cake_mhc_head_det_train as head_facade
-from flashinfer.api_logging import ExperimentalWarning
 from cake_pplx._backends.cake_mhc_det_train import cake_jit as det_loader
 from cake_pplx._backends.cake_mhc_nondet_train import cake_jit as loader
 
@@ -165,7 +164,7 @@ _FORMER_MODULES = (
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
     "cake_pplx.cake_mhc_train",
-    "flashinfer.cake_mhc_train_backend",
+    "cake_pplx.cake_mhc_train_backend",
 )
 
 
@@ -396,16 +395,15 @@ def _imports(path: Path) -> list[str]:
 
 @pytest.mark.cpu_only
 def test_top_level_does_not_import_the_module() -> None:
-    """``flashinfer/__init__.py`` imports neither this module nor the experimental package."""
-    imported = _imports(REPO / "flashinfer" / "__init__.py")
-    leaks = [
-        m
-        for m in imported
-        if m.startswith("experimental")
-        or "experimental.cake" in m
-        or "cake_mhc_nondet_train" in m
-    ]
-    assert not leaks, leaks
+    """``cake_pplx`` and ``cake_pplx._backends`` are PEP 420 namespace packages: no ``__init__.py`` of this family
+    imports this module or a backend package, and the imported namespace has no file."""
+    import cake_pplx
+    import cake_pplx._backends
+
+    for level in ("cake_pplx", "cake_pplx/_backends"):
+        assert not (REPO / level / "__init__.py").exists(), level
+    for namespace in (cake_pplx, cake_pplx._backends):
+        assert getattr(namespace, "__file__", None) is None, namespace
 
 
 _LAZY_CHILD = r"""
@@ -415,15 +413,15 @@ backend = sys.argv[1]
 
 
 def loaded():
-    return sorted(m for m in sys.modules if m == "flashinfer.experimental.cake" or m.startswith("cake_pplx._backends."))
+    return sorted(m for m in sys.modules if m.startswith("cake_pplx._backends."))
 
 
-import flashinfer
+import cake_pplx
 
 out = {
-    "flashinfer": loaded(),
+    "namespace": loaded(),
     "facade_loaded": "cake_pplx.cake_mhc_nondet_train" in sys.modules,
-    "mhc_nondet_names": sorted(n for n in dir(flashinfer) if "mhc" in n.lower() and "nondet" in n.lower()),
+    "mhc_nondet_names": sorted(n for n in dir(cake_pplx) if "mhc" in n.lower() and "nondet" in n.lower()),
 }
 import cake_pplx.cake_mhc_nondet_train as facade
 
@@ -439,12 +437,12 @@ print(json.dumps(out))
 
 @pytest.mark.cpu_only
 def test_the_backend_is_imported_on_first_use() -> None:
-    """In a fresh interpreter, ``import flashinfer`` loads nothing of ``flashinfer.experimental.cake`` and not this
-    module, and the top level exposes no mHC ``nondet`` name (other families' lazy rows may add theirs); ``import
+    """In a fresh interpreter, ``import cake_pplx`` loads no backend package and not this module, and the namespace
+    exposes no mHC ``nondet`` name; ``import
     cake_pplx.cake_mhc_nondet_train`` and reading an entry point load no backend either; the first lazily resolved
     attribute (``ARCHES``) imports the backend."""
     out = _run_child(_LAZY_CHILD, _BACKEND)
-    assert out["flashinfer"] == [], out
+    assert out["namespace"] == [], out
     assert out["facade_loaded"] is False, out
     assert out["mhc_nondet_names"] == [], out
     assert out["facade"] == [] and out["entry_point"] == [], out
@@ -481,7 +479,7 @@ def test_former_module_paths_fail_at_import() -> None:
 def test_module_imports_only_the_backend_on_first_use() -> None:
     """The module's source imports nothing of the deterministic package (no imported module or name contains
     ``cake_mhc_det_train``), imports the backend only inside a function (no module-level import of
-    ``flashinfer.experimental``), and defines and reads none of the former mode keyword's or fallback's names (the
+    ``cake_pplx._backends``), and defines and reads none of the former mode keyword's or fallback's names (the
     mode check, the once-per-process warning flag, the mode switch, the companion workspaces)."""
     path = Path(facade.__file__)
     det_imports = [m for m in _imports(path) if "cake_mhc_det_train" in m]
@@ -552,7 +550,7 @@ def test_finish_refuses_other_handles() -> None:
     included -- with one ``TypeError`` naming the deterministic finish."""
     det_handle = det_backend._MHCTrainHandle(None, ())
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         for handle in (det_handle, object(), None, (None, ())):
             with pytest.raises(TypeError, match=_exactly(_HANDLE_ERROR)):
                 facade.cake_mhc_nondet_train_finish("X", "B", handle)
@@ -906,7 +904,6 @@ def test_warn_only_runs_the_backend_without_a_warning(
         deterministic_algorithms(True, warn_only=True)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            warnings.simplefilter("error", ExperimentalWarning)
             got = [
                 t.clone()
                 for t in facade.cake_mhc_nondet_train_backward_finish(*_args(i))
@@ -999,7 +996,7 @@ def test_nondeterministic_workspace_helpers_reject_other_hidden_sizes() -> None:
     and in the backend (the sizes of the device's architecture are ``test_hidden_sizes_follow_the_device``'s)."""
     assert tuple(loader.HIDDEN_SIZES) == HIDDEN_SIZES
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         for name in _WORKSPACE_HELPERS:
             for module in (facade, backend):
                 for hidden in (6144, 2048, 4097, 0, -4096, True, 4096.0, "4096"):
@@ -1023,7 +1020,7 @@ def test_hidden_sizes_follow_the_device(hidden: int) -> None:
         assert det_facade.is_cake_mhc_det_train_supported(dev, hidden)
     i = _inputs(7, hidden=hidden) if exported else None
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         if not exported:
             for name in _WORKSPACE_HELPERS:
                 for module in (facade, backend):
@@ -1052,71 +1049,3 @@ def test_hidden_sizes_follow_the_device(hidden: int) -> None:
             assert ws.numel() == got and int(torch.count_nonzero(ws)) == 0, kind
         got = facade.cake_mhc_nondet_train_backward_finish(*_args(i))
         _assert_backward(got, _det_backward(i), f"H={hidden}")
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# The model's head
-
-
-def _head_connections(prepare, finish, i: dict, layers: list, **kwargs) -> tuple:
-    """Two connections of ``prepare`` / ``finish`` (``layers``: their ``(fn, scale, base)``; the branch ``B = U +
-    B_0``), then the model's head ``cake_mhc_head_det`` (the stream mean of the last connection's ``Y``) under
-    the loss ``sum(head * dU)``: ``(head output, [X.grad, *(fn, scale, base).grad per connection])``."""
-    X = i["X"].clone().requires_grad_(True)
-    params = [[p.clone().requires_grad_(True) for p in layer] for layer in layers]
-    x = X
-    for fn, scale, base in params:
-        U, handle = prepare(x, fn, scale, base, **kwargs)
-        x = finish(x, (U.float() + i["B"].float()).to(BF16), handle)
-    head = head_facade.cake_mhc_head_det(x)
-    (head.float() * i["dU"].float()).sum().backward()
-    return head.detach(), [X.grad, *[p.grad for layer in params for p in layer]]
-
-
-@requires_device
-@pytest.mark.parametrize("T", (7, 2049))
-@pytest.mark.parametrize("save_stats", (True, False))
-def test_nd_training_composes_with_the_stream_mean_head(
-    T: int, save_stats: bool, hidden: int
-) -> None:
-    """Training with this package feeding the model's deterministic head
-    (``cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det``, ``mean_i X[:, i, :]`` of the last connection's
-    four streams), at every hidden size the device routes: two connections, the head and a loss on its output.  The
-    gradients reach every leaf through the head (finite, non-zero), the connections' handles are the backend's, and
-    the head output and the ``X`` / ``scale`` / ``base`` gradients are bitwise those of the deterministic training
-    and the same head; each ``fn`` gradient is within FP32 rounding of the deterministic one (rel-L2 <=
-    ``DFN_REL_L2_MAX``)."""
-    if not head_facade.is_cake_mhc_head_det_train_supported(_device(), hidden):
-        pytest.skip(f"the head has no program of hidden {hidden} on {_arch()}")
-    i = _inputs(T, seed=SEED + 40, hidden=hidden)
-    second = _inputs(1, seed=SEED + 41, hidden=hidden)
-    layers = [[j[k] for k in ("fn", "scale", "base")] for j in (i, second)]
-    handles = []
-
-    def nd_prepare(*args, **kwargs):
-        U, handle = _nd_prepare(*args, **kwargs)
-        handles.append(handle)
-        return U, handle
-
-    head, grads = _head_connections(
-        nd_prepare, _nd_finish, i, layers, save_stats=save_stats
-    )
-    want_head, want = _head_connections(
-        det_facade.cake_mhc_det_train_prepare,
-        det_facade.cake_mhc_det_train_finish,
-        i,
-        layers,
-        save_stats=save_stats,
-    )
-    what = f"T={T} H={hidden} save_stats={save_stats}"
-    assert len(handles) == 2
-    assert all(isinstance(h, backend._MHCTrainHandle) for h in handles), what
-    assert head.shape == (T, hidden) and _same_bits(head, want_head), f"head {what}"
-    names = ["X", *(f"{k}[{c}]" for c in range(2) for k in ("fn", "scale", "base"))]
-    for name, g, w in zip(names, grads, want, strict=True):
-        assert g is not None and bool(torch.isfinite(g).all()), f"grad {name} {what}"
-        assert bool((g != 0).any()), f"grad {name} {what}: no gradient reached the leaf"
-        if name.startswith("fn"):
-            assert _rel_l2(g, w) <= DFN_REL_L2_MAX, f"grad {name} {what}"
-        else:
-            assert _same_bits(g, w), f"grad {name} {what}"

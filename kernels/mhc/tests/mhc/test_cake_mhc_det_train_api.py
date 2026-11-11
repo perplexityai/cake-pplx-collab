@@ -13,13 +13,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake four-stream mHC training
-kernels (SM100 / SM103 / SM107): the ``cake_pplx.cake_mhc_det_train`` facade and
-its re-exports from the ``flashinfer`` top-level package.  The facade's entry
-points are pass-throughs to the backend package
+Tests of the public surface of the Cake four-stream mHC training kernels
+(SM100 / SM103 / SM107): the ``cake_pplx.cake_mhc_det_train`` facade.  The
+facade's entry points are pass-throughs to the backend package
 ``cake_pplx._backends.cake_mhc_det_train``, imported on first use; this
-module checks that wiring (same objects at the top level, the backend's own
-objects for the lazily resolved names, same signatures and bits as the backend,
+module checks that wiring (the backend's own objects for the lazily resolved
+names, same signatures and bits as the backend,
 documented keyword arguments, the ``hidden`` keyword of the workspace helpers,
 no backend import before first use) at each hidden size (4096, 5120, 7168) the
 device exports, and leaves the numerical contract to
@@ -37,12 +36,15 @@ from pathlib import Path
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
 import cake_pplx._backends.cake_mhc_det_train as backend
-from flashinfer import cake_mhc_det_train as facade
+import cake_pplx.cake_mhc_det_train as facade
 from cake_pplx._backends.cake_mhc_det_train import cake_jit as loader
-from flashinfer.jit.env import has_flashinfer_jit_cache
-from flashinfer.utils import get_compute_capability
+
+
+def get_compute_capability(device: torch.device) -> tuple[int, int]:
+    return tuple(torch.cuda.get_device_capability(device))
+
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 ENTRY_POINTS = (
@@ -54,7 +56,7 @@ ENTRY_POINTS = (
     "cake_mhc_det_train_prepare",
     "cake_mhc_det_train_finish",
 )
-# The facade's own ``def``s re-exported at the top level besides the entry points.
+# The facade's own ``def``s besides the entry points.
 TOP_LEVEL_HELPERS = (
     "cake_mhc_det_train_forward_workspace_bytes",
     "cake_mhc_det_train_backward_workspace_bytes",
@@ -95,20 +97,17 @@ def _supported() -> bool:
 
 
 def test_top_level_exports_are_the_facade_objects() -> None:
-    """The top level re-exports the facade's ``def``s; the facade's lazily resolved names are the backend's objects,
-    and its own ``def``s are not (they forward to them)."""
+    """The facade exports its own ``def``s, which the ``cake_pplx`` namespace does not re-export; the facade's lazily
+    resolved names are the backend's objects, and its own ``def``s are not (they forward to them)."""
     assert backend.__name__ == BACKEND
     for name in ENTRY_POINTS + TOP_LEVEL_HELPERS:
-        assert getattr(flashinfer, name) is getattr(facade, name), name
+        assert name in facade.__all__, name
+        assert not hasattr(cake_pplx, name), name
         assert getattr(facade, name) is not getattr(backend, name), name
     for name in LAZY:
         assert name in facade.__all__ and name in dir(facade), name
         assert getattr(facade, name) is getattr(backend, name), name
     assert facade.SUPPORTED_COMPUTE_CAPABILITIES == SUPPORTED_CAPABILITIES
-    # The autograd classes are top-level names bound on first access (``flashinfer._LAZY_EXPORTS``).
-    for name in ("CakeMHCDetPrepareFunction", "CakeMHCDetFinishFunction"):
-        assert flashinfer._LAZY_EXPORTS[name] == (".cake_mhc_det_train", name), name
-        assert getattr(flashinfer, name) is getattr(backend, name), name
 
 
 _LAZY_CHILD = r"""
@@ -116,10 +115,9 @@ import json, sys
 
 backend = sys.argv[1]
 
-import flashinfer
-
-out = {"flashinfer": backend in sys.modules}
 import cake_pplx.cake_mhc_det_train as facade
+
+out = {"facade": backend in sys.modules}
 
 facade.cake_mhc_det_train_forward_prepare
 facade.cake_mhc_det_train_forward_workspace_bytes
@@ -131,7 +129,7 @@ print(json.dumps(out))
 
 
 def test_the_backend_is_imported_on_first_use() -> None:
-    """In a fresh interpreter, ``import flashinfer`` and reading the facade's entry points import no backend; the
+    """In a fresh interpreter, importing the facade and reading its entry points import no backend; the
     first lazily resolved attribute (``ARCHES``) imports it.  The facade's ``hidden`` default is the backend's."""
     proc = subprocess.run(
         [sys.executable, "-c", _LAZY_CHILD, BACKEND],
@@ -142,7 +140,7 @@ def test_the_backend_is_imported_on_first_use() -> None:
     )
     assert proc.returncode == 0, proc.stderr[-4000:]
     out = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert out == {"flashinfer": False, "entry_point": False, "lazy_attribute": True}
+    assert out == {"facade": False, "entry_point": False, "lazy_attribute": True}
     assert facade._HIDDEN == loader.HIDDEN == 4096
 
 
@@ -196,11 +194,14 @@ pytestmark_gpu = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(autouse=not has_flashinfer_jit_cache(), scope="module")
+@pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
+    # Build the local architecture's libraries that have no prebuilt file through the package's JIT shim; a
+    # prebuilt or cached library loads without compiling.
     if _supported():
         arch = loader.arch_for_capability(get_compute_capability(_device()))
-        flashinfer.jit.build_jit_specs(loader.specs_for_arch(arch), verbose=False)
+        for spec in loader.specs_for_arch(arch):
+            spec.build()
     yield
 
 

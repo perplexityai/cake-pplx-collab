@@ -15,8 +15,6 @@ from types import ModuleType
 # suite / package name -> import path of the package
 PACKAGES: dict[str, str] = {
     "cake.cake_mhc_det_train": "cake_pplx._backends.cake_mhc_det_train",
-    # the non-deterministic LM-head package; its key carries the namespace
-    # the non-deterministic GQA HD256 training package; its key carries the namespace
     "cake.cake_mhc_nondet_train": "cake_pplx._backends.cake_mhc_nondet_train",
 }
 

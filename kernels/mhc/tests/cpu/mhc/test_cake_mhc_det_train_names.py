@@ -19,9 +19,8 @@ package ``cake_pplx._backends.cake_mhc_det_train`` but the ALL_CAPS
 constants carries the mode token ``det`` (``Det`` in a class name), no public
 callable takes a ``deterministic`` keyword (the ``forward`` / ``backward`` of
 the autograd ``Function`` classes included), the former modules and names are
-gone (no module, no alias, no top-level name), and the package is wired at its
-path (test-helper key, package data, pre-commit exclude,
-manifest checker row).
+gone (no module, no alias, no ``cake_pplx`` namespace name), and the package is
+wired at its path (test-helper key, build manifest, package data).
 """
 
 import importlib
@@ -35,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 
 MODE = "det"
 MODULE = "cake_pplx.cake_mhc_det_train"
@@ -46,10 +45,10 @@ REPO = Path(__file__).resolve().parents[3]
 # #8928, the former non-deterministic module): importing them fails.
 REMOVED_MODULES = (
     "cake_pplx.cake_mhc_train",
-    "flashinfer.cake_mhc_train_backend",
-    "flashinfer.cake_mhc_train_head_backend",
-    "flashinfer.cake_mhc_det_train_backend",
-    "flashinfer.cake_mhc_det_train_head_backend",
+    "cake_pplx.cake_mhc_train_backend",
+    "cake_pplx.cake_mhc_train_head_backend",
+    "cake_pplx.cake_mhc_det_train_backend",
+    "cake_pplx.cake_mhc_det_train_head_backend",
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
 )
@@ -144,22 +143,21 @@ def test_former_names_are_gone() -> None:
             if n.startswith(REMOVED_PREFIXES) or n in REMOVED_NAMES
         ]
         assert not leftovers, (owner.__name__, leftovers)
-    leftovers = [n for n in dir(flashinfer) if n.startswith(REMOVED_PREFIXES)]
+    leftovers = [n for n in dir(cake_pplx) if n.startswith(REMOVED_PREFIXES)]
     assert not leftovers, leftovers
 
 
 @pytest.mark.cpu_only
 def test_package_wiring() -> None:
-    """The test-helper key, the build manifest's package, the package data, the
-    pre-commit exclude of the generated sources and the manifest checker's row name the package at its path; no
-    key, package data, exclude, checker row or module file is left at the former path."""
+    """The test-helper key, the build manifest's package and the package data name the package at its path; no key
+    or module file is left at the former path."""
     from tests.cake.test_helpers.cake_package import PACKAGES
 
     backend = importlib.import_module(BACKEND)
     directory = Path(backend.__file__).resolve().parent
     if directory != REPO.joinpath(*BACKEND.split(".")).resolve():
         pytest.skip(f"{BACKEND} is imported from {directory}, outside this checkout")
-    former = "flashinfer.cake_mhc_det_train_backend"
+    former = "cake_pplx.cake_mhc_det_train_backend"
     assert PACKAGES[KEY] == BACKEND and former not in PACKAGES.values()
     manifest = json.loads((directory / "build.json").read_text())
     assert manifest["package"] == BACKEND
@@ -168,38 +166,8 @@ def test_package_wiring() -> None:
     except ModuleNotFoundError:  # Python < 3.11
         tomllib = pytest.importorskip("tomli")
     data = tomllib.loads((REPO / "pyproject.toml").read_text())
-    package_data = data["tool"]["setuptools"]["package-data"]
-    assert package_data[BACKEND] == ["csrc/**", "build.json"]
-    assert former not in package_data
-    pre_commit = (REPO / ".pre-commit-config.yaml").read_text()
-    # pre-commit skips every generated source of the package (a per-package entry or the generic #8928 rule), still
-    # checks its Python modules; the former tree holds no sources (the shared exclude may still list its path)
-    exclude = re.compile(
-        next(ln for ln in pre_commit.splitlines() if ln.startswith("exclude:"))
-        .split(":", 1)[1]
-        .strip()
-    )
-    root, package_dir = REPO.resolve(), directory.resolve()
-    sources = [
-        p.relative_to(root).as_posix()
-        for p in sorted((package_dir / "csrc").rglob("*"))
-        if p.is_file()
-    ]
-    assert sources and all(exclude.search(p) for p in sources), [
-        p for p in sources if not exclude.search(p)
-    ]
-    assert not exclude.search(
-        (package_dir / "cake_jit.py").relative_to(root).as_posix()
-    )
-    assert not list((REPO / "flashinfer/cake_mhc_det_train_backend/csrc").glob("*"))
-    spec = importlib.util.spec_from_file_location(
-        "check_cake_build_manifests", REPO / "scripts" / "check_cake_build_manifests.py"
-    )
-    checker = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("check_cake_build_manifests", checker)
-    spec.loader.exec_module(checker)  # the checker never imports flashinfer
-    (entry,) = [p for p in checker.PACKAGES if p.name == BACKEND]
-    assert entry.path == "cake_pplx/_backends/cake_mhc_det_train"
-    assert former not in [p.name for p in checker.PACKAGES]
-    assert checker.suite_key(REPO, entry) == KEY
-    assert not list(REPO.joinpath(*former.split(".")).glob("*.py"))
+    # the distribution ships every package's build.json and csrc/ tree
+    package_data = data["tool"]["setuptools"]["package-data"]["*"]
+    assert "build.json" in package_data and "csrc/**/*" in package_data, package_data
+    assert list((directory / "csrc").rglob("*.cu")), directory
+    assert not REPO.joinpath(*former.split(".")).exists(), former

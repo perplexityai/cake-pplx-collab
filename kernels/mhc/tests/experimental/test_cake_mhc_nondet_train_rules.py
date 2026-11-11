@@ -95,9 +95,10 @@ deterministic registry's records, routes and record scalars of this package's
   deterministic column slab's; the rule under the former calibrations and the
   kernel test's screen), its
   call-time lookup and a workspace envelope that never runs its screen;
-* the package is standalone: no source file imports another flashinfer package
-  (the shared ``cake_build.py`` JIT fallback aside, inside a function), and a
-  copy under another name imports and plans with ``flashinfer`` blocked;
+* the package is standalone: no source file imports ``flashinfer`` or another
+  ``cake_pplx`` module (the shared ``cake_build.py`` falls back to the
+  package's own JIT shim inside a function), and a copy under another name
+  imports and plans with ``flashinfer`` blocked;
 * the mode policy without a device: the mode is part of the names (every
   exported name but the ALL_CAPS constants carries the ``nondet`` token), no
   public callable has a ``deterministic`` parameter (the autograd
@@ -112,8 +113,9 @@ deterministic registry's records, routes and record scalars of this package's
   every entry point forwards to this package's function of the same name with
   this package's parameters, the package is imported only on first use, and
   nothing is imported from the deterministic package;
-* the wiring: the test-helper key, the package data, the build-manifest
-  checker's row and ``build.json``.
+* the wiring: the test-helper key, the namespace, the package data and
+  ``build.json`` (the build-manifest checker's row where FlashInfer's
+  ``scripts/check_cake_build_manifests.py`` is beside this test).
 """
 
 from __future__ import annotations
@@ -141,7 +143,7 @@ PACKAGE_NAME = "cake_pplx._backends.cake_mhc_nondet_train"
 # The former import paths of this package: removed, with no alias.
 FORMER_PACKAGES = (
     "cake_pplx._backends.cake_mhc_train_backend",
-    "flashinfer.cake_mhc_train_backend",
+    "cake_pplx.cake_mhc_train_backend",
 )
 pkg = cake_package(KEY)
 nd = cake_package(KEY, "cake_jit")
@@ -3309,15 +3311,22 @@ def _imports(path: Path) -> list[tuple[ast.AST, bool]]:
 
 @pytest.mark.cpu_only
 def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
-    """No source file of the package imports from a parent package (``from ..``) or another flashinfer module; a
-    relative import names a module of the package itself; nothing imports by string.  The one exception is the
-    shared loader ``cake_build.py`` (byte-identical to the deterministic package's), whose JIT fallback imports
-    ``flashinfer.jit`` inside a function when no prebuilt library exists."""
+    """No source file of the package imports from a parent package (``from ..``), ``flashinfer`` or another
+    ``cake_pplx`` module; a relative import names a module of the package itself; nothing imports by string.  The
+    shared loader ``cake_build.py`` and the JIT shim ``_cake_pplx_jit.py`` are byte-identical to the deterministic
+    package's; the loader's JIT fallback imports the package's own shim inside a function when no prebuilt library
+    exists."""
     sources = sorted(PACKAGE_DIR.glob("*.py"))
-    assert {p.name for p in sources} == {"__init__.py", "cake_jit.py", "cake_build.py"}
-    assert (PACKAGE_DIR / "cake_build.py").read_bytes() == Path(
-        det_build.__file__
-    ).read_bytes()
+    assert {p.name for p in sources} == {
+        "__init__.py",
+        "cake_jit.py",
+        "cake_build.py",
+        "_cake_pplx_jit.py",
+    }
+    for name in ("cake_build.py", "_cake_pplx_jit.py"):
+        assert (PACKAGE_DIR / name).read_bytes() == (
+            Path(det_build.__file__).parent / name
+        ).read_bytes(), name
     jit_fallback = []
     for path in sources:
         text = path.read_text()
@@ -3329,6 +3338,12 @@ def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
                 names = [target] if target else [alias.name for alias in node.names]
                 for name in names:
                     assert (PACKAGE_DIR / f"{name}.py").is_file(), (path.name, name)
+                if target == "_cake_pplx_jit":
+                    assert path.name == "cake_build.py" and in_function, (
+                        path.name,
+                        node.lineno,
+                    )
+                    jit_fallback.append(target)
                 continue
             modules = (
                 [node.module]
@@ -3336,14 +3351,12 @@ def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
                 else [alias.name for alias in node.names]
             )
             for module in modules:
-                if module == "flashinfer" or module.startswith("flashinfer."):
-                    assert path.name == "cake_build.py" and in_function, (
-                        path.name,
-                        node.lineno,
-                        module,
-                    )
-                    assert module.startswith("flashinfer.jit."), (path.name, module)
-                    jit_fallback.append(module)
+                top = module.split(".")[0]
+                assert top not in ("flashinfer", "cake_pplx"), (
+                    path.name,
+                    node.lineno,
+                    module,
+                )
     assert jit_fallback, "the cake_build JIT fallback import was not found"
 
 
@@ -3500,24 +3513,27 @@ def test_facade_forwards_every_entry_point_to_the_package() -> None:
     parameters (names, kinds and defaults; the ``hidden`` default is the module's ``_HIDDEN``, this package's
     ``cake_jit.HIDDEN``).  Each body forwards to this package's function of the same name, read off ``_pkg()``, with
     every argument unchanged.  The package is imported only inside a function (no module-level import of
-    ``flashinfer.experimental``), no import names the deterministic package, and every name the module resolves on
+    ``cake_pplx._backends``), no import names the deterministic package, and every name the module resolves on
     first access (``_LAZY``) is an exported name of this package."""
     path = REPO / FACADE
     if not path.is_file():
         pytest.skip(f"{FACADE} is not beside this test (installed package)")
+    backend_imports = []
     for node, in_function in _imports(path):
         names = [alias.name for alias in node.names]
         if isinstance(node, ast.ImportFrom) and node.module:
             names.append(node.module)
         assert not [n for n in names if "cake_mhc_det_train" in n], (node.lineno, names)
-        # The dotted path of each imported object: ``experimental`` as a path component, not as a substring of a
-        # name (``from .api_logging import flashinfer_experimental_api`` imports nothing of the package).
+        # The dotted path of each imported object: ``_backends`` as a path component, not as a substring of a
+        # name (``from ._cake_pplx_api_mhc import cake_api`` imports nothing of the package).
         if isinstance(node, ast.ImportFrom):
             paths = [f"{node.module or ''}.{alias.name}" for alias in node.names]
         else:
             paths = [alias.name for alias in node.names]
-        if [p for p in paths if "experimental" in p.split(".")]:
+        if [p for p in paths if "_backends" in p.split(".")]:
             assert in_function, (node.lineno, paths)
+            backend_imports.append(paths)
+    assert backend_imports == [["_backends.cake_mhc_nondet_train"]], backend_imports
     tree = ast.parse(path.read_text(), filename=str(path))
     constants = {
         target.id: ast.literal_eval(node.value)
@@ -3712,47 +3728,26 @@ def test_no_entry_alerts_under_deterministic_algorithms(monkeypatch) -> None:
 
 @pytest.mark.cpu_only
 def test_package_wiring() -> None:
-    """The test-helper key, ``flashinfer.experimental.cake`` (a docstring only), the package data, the ignored
-    ``aot/`` directory and the pre-commit exclude of the generated sources; no key, package data, exclude or module
-    is left at the former paths (``cake_pplx._backends.cake_mhc_train_backend`` and its
-    ``cake_mhc_train`` module, the 0.7.3 ``flashinfer.cake_mhc_train_backend``)."""
+    """The test-helper key, the ``cake_pplx._backends`` namespace (PEP 420: no ``__init__.py``), the package data
+    and the ignored ``aot/`` directory; no key or module is left at the former paths
+    (``cake_pplx._backends.cake_mhc_train_backend`` and its ``cake_mhc_train`` module, the 0.7.3
+    ``cake_mhc_train_backend``)."""
     assert PACKAGES[KEY] == PACKAGE_NAME == pkg.__name__
     for former in FORMER_PACKAGES:
         assert former not in PACKAGES.values(), former
     assert not {"cake_mhc_train", "cake.cake_mhc_train"} & set(PACKAGES)
-    tree = ast.parse((REPO / "cake_pplx/_backends/__init__.py").read_text())
-    assert ast.get_docstring(tree)
-    assert len(tree.body) == 1, "flashinfer.experimental.cake holds a docstring only"
+    for level in ("cake_pplx", "cake_pplx/_backends"):
+        assert not (REPO / level / "__init__.py").exists(), level
     try:
         import tomllib
     except ModuleNotFoundError:  # Python < 3.11
         tomllib = pytest.importorskip("tomli")
     data = tomllib.loads((REPO / "pyproject.toml").read_text())
-    package_data = data["tool"]["setuptools"]["package-data"]
-    assert package_data[PACKAGE_NAME] == ["csrc/**", "build.json"]
-    for former in FORMER_PACKAGES:
-        assert former not in package_data, former
+    # the distribution ships every package's build.json and csrc/ tree
+    package_data = data["tool"]["setuptools"]["package-data"]["*"]
+    assert "build.json" in package_data and "csrc/**/*" in package_data, package_data
     assert "aot/" in (PACKAGE_DIR / ".gitignore").read_text().split()
-    pre_commit = (REPO / ".pre-commit-config.yaml").read_text()
-    # pre-commit skips every generated source of the package (a per-package entry or the generic #8928 rule), still
-    # checks its Python modules; the former tree holds no sources (the shared exclude may still list its path)
-    exclude = re.compile(
-        next(ln for ln in pre_commit.splitlines() if ln.startswith("exclude:"))
-        .split(":", 1)[1]
-        .strip()
-    )
-    root, package_dir = REPO.resolve(), PACKAGE_DIR.resolve()
-    sources = [
-        p.relative_to(root).as_posix()
-        for p in sorted((package_dir / "csrc").rglob("*"))
-        if p.is_file()
-    ]
-    assert sources and all(exclude.search(p) for p in sources), [
-        p for p in sources if not exclude.search(p)
-    ]
-    assert not exclude.search(
-        (package_dir / "cake_jit.py").relative_to(root).as_posix()
-    )
+    assert list((PACKAGE_DIR / "csrc").rglob("*.cu")), PACKAGE_DIR
     assert not list(
         (REPO / "cake_pplx/_backends/cake_mhc_train_backend/csrc").glob("*")
     )
