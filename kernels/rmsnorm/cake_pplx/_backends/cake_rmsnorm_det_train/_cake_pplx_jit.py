@@ -135,7 +135,10 @@ class JitSpec:
         cuda_home = get_cuda_path()
         version = get_cuda_version()
         includes = [f"-I{Path(p).resolve()}" for p in self.extra_include_paths]
-        includes += [f"-isystem{p}" for p in _system_includes(cuda_home)]
+        # nvcc takes the -isystem path as a separate argument ("-isystem<path>" is an
+        # unknown option to nvcc 13).
+        for p in _system_includes(cuda_home):
+            includes += ["-isystem", str(p)]
         cuda_flags = list(_DEFAULT_CUDA_FLAGS)
         if (version.major, version.minor) >= (12, 8):
             cuda_flags.append("-static-global-template-stub=false")
