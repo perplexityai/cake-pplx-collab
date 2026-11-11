@@ -40,6 +40,7 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
+import cake_pplx
 import cake_pplx.cake_rmsnorm_silu_gate_det_train as facade
 import cake_pplx._backends.cake_rmsnorm_silu_gate_det_train as backend
 from cake_pplx.cake_rmsnorm_silu_gate_det_train import (
@@ -213,8 +214,8 @@ def test_top_level_exports_are_the_facade():
         cake_pplx.cake_rmsnorm_silu_gate_det_train.cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes
         is cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes
     )
-    # the reset is the facade's and the backend's, not a top-level name
-    assert not hasattr(flashinfer, "cake_rmsnorm_silu_gate_det_train_reset_workspace")
+    # the reset is the facade's and the backend's, not a cake_pplx top-level name
+    assert not hasattr(cake_pplx, "cake_rmsnorm_silu_gate_det_train_reset_workspace")
     # the autograd class is the backend package's, reached through the facade
     # and the top level
     assert facade.CakeRMSNormSiLUGateDetFunction is CakeRMSNormSiLUGateDetFunction

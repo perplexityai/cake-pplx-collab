@@ -164,7 +164,7 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_rmsnorm_silu_gate_det_train as deterministic_facade
 import cake_pplx.cake_rmsnorm_silu_gate_nondet_train as facade
 import cake_pplx._backends.cake_rmsnorm_silu_gate_nondet_train as backend
@@ -738,12 +738,18 @@ def test_reset_workspace_passes_through(
 
 def test_backend_package_imports_no_other_flashinfer_package() -> None:
     """The backend package is standalone: no source file imports from a parent
-    package or another flashinfer module, and every relative import names a
-    module of the package.  The one exception is the shared loader
-    ``cake_build.py``, whose JIT fallback imports ``flashinfer.jit`` inside a
-    function when no prebuilt library exists."""
+    package, a flashinfer module or another ``cake_pplx`` module, and every
+    relative import names a module of the package.  The shared loader
+    ``cake_build.py`` reaches its JIT fallback, the package's own JIT shim
+    ``_cake_pplx_jit.py``, through a relative import inside a function when no
+    prebuilt library exists."""
     sources = sorted(BACKEND_DIR.glob("*.py"))
-    assert {p.name for p in sources} == {"__init__.py", "cake_build.py", "cake_jit.py"}
+    assert {p.name for p in sources} == {
+        "__init__.py",
+        "_cake_pplx_jit.py",
+        "cake_build.py",
+        "cake_jit.py",
+    }
     jit_fallback = []
     for path in sources:
         text = path.read_text()
@@ -765,6 +771,12 @@ def test_backend_package_imports_no_other_flashinfer_package() -> None:
                 )
                 for name in names:
                     assert (BACKEND_DIR / f"{name}.py").is_file(), (path.name, name)
+                if node.module == "_cake_pplx_jit":
+                    assert path.name == "cake_build.py" and id(node) in in_function, (
+                        path.name,
+                        node.lineno,
+                    )
+                    jit_fallback.append(node.module)
                 continue
             if isinstance(node, ast.ImportFrom):
                 modules = [node.module]
@@ -773,14 +785,12 @@ def test_backend_package_imports_no_other_flashinfer_package() -> None:
             else:
                 continue
             for module in modules:
-                if module == "flashinfer" or module.startswith("flashinfer."):
-                    assert path.name == "cake_build.py" and id(node) in in_function, (
+                for top in ("flashinfer", "cake_pplx"):
+                    assert module != top and not module.startswith(f"{top}."), (
                         path.name,
                         node.lineno,
                         module,
                     )
-                    assert module.startswith("flashinfer.jit."), (path.name, module)
-                    jit_fallback.append(module)
     assert jit_fallback, "the cake_build JIT fallback import was not found"
 
 

@@ -16,8 +16,8 @@ limitations under the License.
 Names of the Cake SiLU-gated RMSNorm training family, both modes.
 
 The mode is part of every public name, and only of the name.  For each mode
-(``det``, ``nondet``) the facade ``flashinfer.cake_rmsnorm_silu_gate_<mode>_train``
-(top level) and its backend package
+(``det``, ``nondet``) the facade ``cake_pplx.cake_rmsnorm_silu_gate_<mode>_train``
+and its backend package
 ``cake_pplx._backends.cake_rmsnorm_silu_gate_<mode>_train`` export the
 autograd functional ``cake_rmsnorm_silu_gate_<mode>``, the autograd class
 ``CakeRMSNormSiLUGate<Mode>Function``, the support query
@@ -28,17 +28,16 @@ module plus a verb.  Module constants are exempt by their pattern: an
 or alias included, carries the mode word.
 No entry point has a ``deterministic`` parameter.  The modules and names the
 family had before (``cake_pplx.cake_rmsnorm_silu_gate_train``, the packages
-``flashinfer.cake_rmsnorm_silu_gate_train_backend`` and
-``flashinfer.cake_rmsnorm_silu_gate_det_train_backend``, and the names without
+``cake_pplx.cake_rmsnorm_silu_gate_train_backend`` and
+``cake_pplx.cake_rmsnorm_silu_gate_det_train_backend``, and the names without
 a mode word) fail at import: no alias, no compat module, and no module
 ``__getattr__`` but the facades' own, which resolves exactly the three
 backend-owned names (the autograd class and the architecture constants).  Each
-facade imports its backend package on first use, so ``import flashinfer``
-loads no module of either backend package.  The family's ``flashinfer``
-top-level names are rows of the lazy-export table ``flashinfer._LAZY_EXPORTS``
-(bound on first access): each mode's facade module, its functional, forward,
-backward, workspace size and autograd class, all with a mode word (checked in
-this process and in fresh interpreters).  The shared checks of the
+facade imports its backend package on first use, so ``import cake_pplx``
+loads no module of either backend package.  The ``cake_pplx`` namespace
+package (PEP 420) binds no entry point: the family's names in it are exactly
+the two facade modules, each with a mode word (checked in this process and in
+fresh interpreters).  The shared checks of the
 mode-in-name rule (``tests/cake/test_helpers/cake_mode_names.py``) run over all four
 namespaces; the checks here add what is particular to this family.  The JIT
 library names of the backends (``cake_rmsnorm_silu_gate_train_<hash>`` and
@@ -51,6 +50,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import pkgutil
 import re
 import subprocess
 import sys
@@ -58,7 +58,7 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_rmsnorm_silu_gate_det_train as det_facade
 import cake_pplx.cake_rmsnorm_silu_gate_nondet_train as nd_facade
 import cake_pplx._backends.cake_rmsnorm_silu_gate_det_train as det_backend
@@ -69,7 +69,7 @@ pytestmark = pytest.mark.cpu_only
 
 OP = "cake_rmsnorm_silu_gate"
 MODES = ("det", "nondet")
-FACADE = {mode: f"flashinfer.{OP}_{mode}_train" for mode in MODES}
+FACADE = {mode: f"cake_pplx.{OP}_{mode}_train" for mode in MODES}
 BACKEND = {mode: f"cake_pplx._backends.{OP}_{mode}_train" for mode in MODES}
 NAMESPACES = {
     ("det", "facade"): det_facade,
@@ -105,8 +105,8 @@ def _public_names(mode: str) -> set:
 
 
 PUBLIC = {mode: _public_names(mode) for mode in MODES}
-# The names of the family the ``flashinfer`` top level exports (rows of its
-# lazy-export table, besides the facade modules).
+# The names of the family FlashInfer's top level re-exported (besides the
+# facade modules); the ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL = {
     mode: {
         f"{OP}_{mode}",
@@ -117,20 +117,13 @@ TOP_LEVEL = {
     }
     for mode in MODES
 }
-# The family's rows of ``flashinfer._LAZY_EXPORTS``: name -> (module, attribute).
-ROWS = {
-    **{f"{OP}_{mode}_train": (f".{OP}_{mode}_train", None) for mode in MODES},
-    **{
-        name: (f".{OP}_{mode}_train", name)
-        for mode in MODES
-        for name in TOP_LEVEL[mode]
-    },
-}
+# The family's modules in the ``cake_pplx`` namespace: the two facades.
+FACADE_MODULES = {f"{OP}_{mode}_train" for mode in MODES}
 # The modules and packages the family had before the mode-in-name rule.
 OLD_MODULES = (
     "cake_pplx.cake_rmsnorm_silu_gate_train",
-    "flashinfer.cake_rmsnorm_silu_gate_train_backend",
-    "flashinfer.cake_rmsnorm_silu_gate_det_train_backend",
+    "cake_pplx.cake_rmsnorm_silu_gate_train_backend",
+    "cake_pplx.cake_rmsnorm_silu_gate_det_train_backend",
 )
 # The names the family had without a mode word.
 OLD_NAMES = (
@@ -235,7 +228,7 @@ def test_shared_mode_name_checks(key) -> None:
     over each namespace: the mode word and its place in every public name; no
     entry point binds a ``deterministic`` keyword (the functions, and the
     autograd class's ``forward`` and ``backward``); the namespace, the
-    ``flashinfer`` top level (its lazy-export rows included) and, for a facade,
+    ``cake_pplx`` namespace package and, for a facade,
     its backend package bind each object of the namespace only under its own
     name; and in a fresh interpreter the former modules fail at import, and so
     do the former names from the namespace (and, with a facade, from the top
@@ -246,7 +239,7 @@ def test_shared_mode_name_checks(key) -> None:
         backend = NAMESPACES[(mode, "backend")]
         assert_cake_mode_module(
             module,
-            namespaces=[flashinfer, backend],
+            namespaces=[cake_pplx, backend],
             forwards=[
                 (name, getattr(backend, name))
                 for name in sorted(PUBLIC[mode] - {CLASS[mode]})
@@ -254,14 +247,14 @@ def test_shared_mode_name_checks(key) -> None:
             old_modules=OLD_MODULES,
             old_names=[
                 (path, name)
-                for path in ("flashinfer", module.__name__)
+                for path in ("cake_pplx", module.__name__)
                 for name in OLD_NAMES
             ],
         )
     else:
         assert_cake_mode_module(
             module,
-            namespaces=[flashinfer],
+            namespaces=[cake_pplx],
             old_names=[(module.__name__, name) for name in OLD_NAMES],
         )
 
@@ -334,13 +327,15 @@ def test_star_import_binds_only_the_mode_names(key) -> None:
 
 @pytest.mark.parametrize("mode", MODES)
 def test_modules_sit_at_their_places(mode: str) -> None:
-    """The facade sits at the ``flashinfer`` top level, the backend package at
-    ``cake_pplx/_backends/<module>/`` with its own build files."""
-    root = Path(flashinfer.__file__).parent
+    """The facade sits at the top of a ``cake_pplx`` namespace portion, the
+    backend package at ``cake_pplx/_backends/<module>/`` of the same portion
+    with its own build files."""
     facade = importlib.import_module(FACADE[mode])
     backend = importlib.import_module(BACKEND[mode])
+    root = Path(facade.__file__).parent
+    assert root in {Path(path) for path in cake_pplx.__path__}, root
     assert Path(facade.__file__) == root / f"{OP}_{mode}_train.py"
-    package = root / "experimental" / "cake" / f"{OP}_{mode}_train"
+    package = root / "_backends" / f"{OP}_{mode}_train"
     assert Path(backend.__file__) == package / "__init__.py"
     files = {p.name for p in package.iterdir() if p.name != "__pycache__"}
     assert {"__init__.py", "cake_build.py", "cake_jit.py", "build.json", "csrc"} <= (
@@ -423,59 +418,59 @@ def test_old_module_fails_at_import(module: str) -> None:
         importlib.import_module(module)
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(f"{module}.cake_jit")
-    assert not hasattr(flashinfer, module.rpartition(".")[2]), module
+    assert not hasattr(cake_pplx, module.rpartition(".")[2]), module
 
 
 @pytest.mark.parametrize("name", OLD_NAMES)
 def test_old_name_fails_at_import(name: str) -> None:
-    assert not hasattr(flashinfer, name), name
-    for module in ("flashinfer", FACADE["det"], FACADE["nondet"]):
+    assert not hasattr(cake_pplx, name), name
+    for module in ("cake_pplx", FACADE["det"], FACADE["nondet"]):
         with pytest.raises(ImportError):
             exec(f"from {module} import {name}", {})
 
 
 def test_top_level_binds_only_mode_names() -> None:
-    """The family's top-level names are exactly its lazy-export rows, and each
-    resolves to its facade's object (both autograd classes included)."""
-    rows = {
-        name: tuple(row)
-        for name, row in flashinfer._LAZY_EXPORTS.items()
-        if FAMILY.search(name)
+    """The family's modules in the ``cake_pplx`` namespace are exactly the two
+    facades; the namespace binds them under their own names (each resolving to
+    its facade) and binds none of the family's entry points or classes."""
+    found = {
+        info.name
+        for info in pkgutil.iter_modules(cake_pplx.__path__)
+        if FAMILY.search(info.name) and not info.name.startswith("_")
     }
-    assert rows == ROWS, sorted(rows)
-    family = {name for name in dir(flashinfer) if FAMILY.search(name)}
-    assert family == set(ROWS), sorted(family)
-    assert {name for name in vars(flashinfer) if FAMILY.search(name)} <= set(ROWS)
+    assert found == FACADE_MODULES, sorted(found)
+    assert {
+        name
+        for name in vars(cake_pplx)
+        if FAMILY.search(name) and not name.startswith("_")
+    } <= FACADE_MODULES
     for mode in MODES:
         facade = importlib.import_module(FACADE[mode])
-        for name in TOP_LEVEL[mode]:
-            assert getattr(flashinfer, name) is getattr(facade, name), name
-        assert getattr(flashinfer, CLASS[mode]) is getattr(
-            importlib.import_module(BACKEND[mode]), CLASS[mode]
-        )
-        assert getattr(flashinfer, f"{OP}_{mode}_train") is facade
+        for name in (*TOP_LEVEL[mode], CLASS[mode]):
+            assert not hasattr(cake_pplx, name), name
+        assert getattr(cake_pplx, f"{OP}_{mode}_train") is facade
 
 
-# Each import form in a fresh interpreter: a plain ``import flashinfer`` (it
-# binds none of the family's names; each binds on first access), the backend
+# Each import form in a fresh interpreter: a plain ``import cake_pplx`` (it
+# binds none of the family's names; importing a facade binds its module), the backend
 # packages on first use, and the backend submodules first.  The old modules and
 # names fail in the fresh interpreter of the shared check
 # (test_shared_mode_name_checks).
 FRESH = {
     "top_level": (
-        "import re, flashinfer\n"
+        "import importlib, re, cake_pplx\n"
         "def family(names):\n"
-        "    return sorted(n for n in names if re.search("
+        "    return sorted(n for n in names if not n.startswith('_') and re.search("
         "r'rmsnorm_silu_gate|RMSNormSiLUGate', n))\n"
-        f"want = {sorted(ROWS)!r}\n"
-        "assert family(vars(flashinfer)) == [], family(vars(flashinfer))\n"
-        "assert family(dir(flashinfer)) == want, family(dir(flashinfer))\n"
+        f"want = {sorted(FACADE_MODULES)!r}\n"
+        "assert family(vars(cake_pplx)) == [], family(vars(cake_pplx))\n"
+        "assert family(dir(cake_pplx)) == [], family(dir(cake_pplx))\n"
         "for n in want:\n"
-        "    getattr(flashinfer, n)\n"
-        "assert family(vars(flashinfer)) == want, family(vars(flashinfer))\n"
+        "    importlib.import_module('cake_pplx.' + n)\n"
+        "assert family(vars(cake_pplx)) == want, family(vars(cake_pplx))\n"
     ),
     "backends_load_on_first_use": (
-        "import sys, flashinfer\n"
+        "import sys, cake_pplx\n"
         "def loaded():\n"
         "    return sorted(m for m in sys.modules if m.startswith("
         f"('{BACKEND['det']}', '{BACKEND['nondet']}')))\n"
