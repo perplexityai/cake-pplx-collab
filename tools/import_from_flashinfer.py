@@ -466,8 +466,7 @@ Install this family alone, pinned to a commit:
 pip install "{distribution} @ git+https://github.com/perplexityai/cake-pplx-collab@<sha>#subdirectory=kernels/{family}"
 ```
 
-Imported from FlashInfer `{src_commit[:12]}`; see `UPSTREAM.json`. The repository rules are in
-[`ARCHITECTURE.md`](../../ARCHITECTURE.md).
+The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
 """,
         encoding="utf-8",
     )
