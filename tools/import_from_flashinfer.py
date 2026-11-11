@@ -493,14 +493,58 @@ def bench_closure(src: Path, roots: list[str]) -> list[str]:
     return sorted(seen)
 
 
+MODULE_PATH = re.compile(r"cake_pplx\.(?:_backends\.)?(_?cake_[a-z0-9_]+_train(?:_kcp)?)(?:\.\w+)*")
+
+
+def referenced_modules(path: Path) -> set[str]:
+    """Cake modules ``path`` really uses: import statements (at any depth) and string
+    literals that are exactly a module path (``importlib.import_module(...)``, tables)."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set()
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module)
+            if node.module in ("cake_pplx", "cake_pplx._backends"):
+                names += [f"{node.module}.{a.name}" for a in node.names]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if MODULE_PATH.fullmatch(node.value):
+                names.append(node.value)
+    found = set()
+    for name in names:
+        match = MODULE_PATH.match(name)
+        if match:
+            found.add(match.group(1))
+    return found
+
+
 def foreign_imports(path: Path, family: str, owners: dict[str, str]) -> list[str]:
-    """``cake_pplx`` modules of other families that ``path`` imports (anywhere in the file)."""
-    found = []
-    for match in re.finditer(r"cake_pplx\.(?:_backends\.)?(_?cake_[a-z0-9_]+_train(?:_kcp)?)\b", path.read_text(encoding="utf-8")):
-        owner = owners.get(match.group(1))
-        if owner is not None and owner != family:
-            found.append(match.group(1))
-    return sorted(set(found))
+    """``cake_pplx`` modules of other families that ``path`` uses."""
+    return sorted(m for m in referenced_modules(path) if owners.get(m) not in (None, family))
+
+
+TABLE_ENTRY = re.compile(r'^\s*"[^"]+"\s*:\s*"((?:flashinfer|cake_pplx)[\w.]*)"\s*,\s*$')
+
+
+def trim_tables(path: Path, family: str, owners: dict[str, str]) -> None:
+    """Drop ``"key": "<module path>",`` table rows that name another family's module or a
+    FlashInfer module (shared test-helper registries list every package)."""
+    lines = path.read_text(encoding="utf-8").split("\n")
+    kept = []
+    for line in lines:
+        match = TABLE_ENTRY.match(line)
+        if match:
+            value = match.group(1)
+            own = MODULE_PATH.match(value)
+            if value.startswith("flashinfer") or (own and owners.get(own.group(1)) not in (None, family)):
+                continue
+        kept.append(line)
+    if kept != lines:
+        path.write_text("\n".join(kept), encoding="utf-8")
 
 
 def local_test_imports(path: Path, rel: str) -> set[str]:
@@ -565,6 +609,8 @@ def import_family(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / rel, target)
         rewrite_test(target, exports)
+        if "/test_helpers/" in rel:
+            trim_tables(target, family, owners)
 
     # Tests and benchmarks that need another family move to integration/<family>/, together with
     # every file that imports a moved one; the helpers they use are copied along.
