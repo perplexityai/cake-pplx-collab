@@ -2207,8 +2207,8 @@ def _run_rank_conv(
     """C7 on one rank: ``y`` / ``dx`` / ``dweight`` of the rank's tokens against the FP64 oracle of the whole pack,
     ``y`` bitwise equal to the single-rank conv of the whole pack on the rank's tokens, repeat bitwise, and the
     halo-row gradients delivered to the predecessor ranks (rank 0 / 1: 1 / 2 tokens of document 0)."""
-    from flashinfer import cake_causal_conv1d_det_train as conv
-    from flashinfer import cake_causal_conv1d_det_train_kcp as conv_kcp
+    from cake_pplx import cake_causal_conv1d_det_train as conv
+    from cake_pplx import cake_causal_conv1d_det_train_kcp as conv_kcp
 
     part, cu = _partition(row)
     ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
@@ -2297,7 +2297,7 @@ def _run_rank_conv(
 
 
 def test_conv_halo_row(slurm) -> None:
-    """C7: FlashInfer's ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing): ``y`` / ``dx`` /
+    """C7: the causal_conv1d family's ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing): ``y`` / ``dx`` /
     ``dweight`` vs FP64 on every rank, ``y`` bitwise the single-rank conv, history rows from two predecessor ranks,
     an empty predecessor and a document start.  Runs under Slurm with >= 4 ranks."""
     if slurm is None:
@@ -2359,7 +2359,7 @@ def _run_rank_layer(
     caller's norm)."""
     import inspect
 
-    from flashinfer import cake_causal_conv1d_det_train_kcp as conv_kcp
+    from cake_pplx import cake_causal_conv1d_det_train_kcp as conv_kcp
 
     H_qk, HV = row.heads
     C = (2 * H_qk + HV) * 128

@@ -19,6 +19,10 @@ PACKAGES: dict[str, str] = {
     "cake_gdn_nondet_train_kcp": "cake_pplx._backends.cake_gdn_nondet_train_kcp",
     "cake_gdn_det_train": "cake_pplx._backends.cake_gdn_det_train",
     "cake_gdn_nondet_train": "cake_pplx._backends.cake_gdn_nondet_train",
+    # integration only: the KDA KCP packages (cake-pplx-kda), for the cross-family partition parity check
+    # (tests/cpu/test_cake_kcp_partition_parity.py)
+    "cake_kda_det_train_kcp": "cake_pplx._backends.cake_kda_det_train_kcp",
+    "cake_kda_nondet_train_kcp": "cake_pplx._backends.cake_kda_nondet_train_kcp",
     # the non-deterministic GQA HD256 training package; its key carries the namespace
 }
 

@@ -86,8 +86,8 @@ and writes one JSON per (row, layout, CP) under ``--out-dir`` with every per-ite
 rank), the files every arm ran from, the host map and the exact argv.
 
 Inputs are drawn on the device from one seeded generator (``--seed``): every rank draws the same whole-pack tensors
-and keeps its fragments.  No environment variable selects anything; the FlashInfer tree importable first
-(``PYTHONPATH``) is the one measured (this checkout only when none is importable).
+and keeps its fragments.  No environment variable selects anything; the cake_pplx installation importable first
+(``PYTHONPATH``) is the one measured (this checkout's ``kernels/gdn`` only when none is importable).
 
 Examples::
 
@@ -123,12 +123,12 @@ import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 if (
-    importlib.util.find_spec("flashinfer") is None
-):  # no FlashInfer tree on PYTHONPATH: this checkout's
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    importlib.util.find_spec("cake_pplx.cake_gdn_nondet_train_kcp") is None
+):  # no cake-pplx-gdn installed: this checkout's kernels/gdn
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "kernels" / "gdn"))
 
-import flashinfer  # noqa: E402
-from flashinfer import cake_causal_conv1d_det_train_kcp as conv_api  # noqa: E402
+import cake_pplx  # noqa: E402
+from cake_pplx import cake_causal_conv1d_det_train_kcp as conv_api  # noqa: E402  (cake-pplx-causal-conv1d)
 
 BASE_ARMS = ("det", "nondet")
 # CUDA-graph replay arms: the route each one runs
@@ -1618,7 +1618,7 @@ def _env(
         "uuid": str(getattr(props, "uuid", "")),
         "pid": os.getpid(),
         "files": {
-            "flashinfer": flashinfer.__file__,
+            "cake_pplx": list(cake_pplx.__path__),
             "conv": conv_api.__file__,
             **{kind: route.modules() for kind, route in routes.items()},
             **({"sota": lib.files} if lib is not None else {}),

@@ -2109,13 +2109,13 @@ def _kda_imports(source: str) -> list[int]:
 def test_the_kda_import_scan_sees_dynamic_imports() -> None:
     """The scan of :func:`test_package_imports_no_kda_and_no_environ` rejects a literal dynamic import of a KDA package
     (``importlib.import_module``, ``import_module``, ``__import__``) as well as an import statement."""
-    kda = "flashinfer.experimental.cake_kda_det_train_kcp.cake_kcp_plan"
+    kda = "cake_pplx._backends.cake_kda_det_train_kcp.cake_kcp_plan"
     for line in (
         f"import importlib\nm = importlib.import_module({kda!r})\n",
         f"from importlib import import_module\nm = import_module(name={kda!r})\n",
         f"m = __import__({kda!r})\n",
         f"import {kda}\n",
-        "from flashinfer.experimental import cake_kda_det_train\n",
+        "from cake_pplx._backends import cake_kda_det_train\n",
     ):
         assert _kda_imports(line), line
     for line in (
@@ -2128,8 +2128,9 @@ def test_the_kda_import_scan_sees_dynamic_imports() -> None:
 def test_package_imports_no_kda_and_no_environ() -> None:
     """The package never imports a KDA package (any ``cake_kda*`` module, by statement or by a literal
     ``importlib.import_module`` / ``__import__`` call) and reads no environment variable; the plan module imports
-    torch, torch.distributed and dataclasses only."""
-    for path in sorted(PACKAGE_DIR.glob("*.py")):
+    torch, torch.distributed and dataclasses only.  The JIT shim ``_cake_pplx_jit.py`` (the stand-in for
+    ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache locations and is not covered."""
+    for path in sorted(p for p in PACKAGE_DIR.glob("*.py") if p.name != "_cake_pplx_jit.py"):
         source = path.read_text()
         assert not _kda_imports(source), f"{path.name} imports a KDA package"
         tree = ast.parse(source)
