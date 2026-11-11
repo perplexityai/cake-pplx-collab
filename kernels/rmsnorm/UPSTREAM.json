@@ -1,0 +1,46 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_rmsnorm_det_train": "flashinfer/experimental/cake/cake_rmsnorm_det_train",
+    "cake_rmsnorm_nondet_train": "flashinfer/experimental/cake/cake_rmsnorm_nondet_train"
+  },
+  "facades": {
+    "cake_rmsnorm_det_train": "flashinfer/cake_rmsnorm_det_train.py",
+    "cake_rmsnorm_nondet_train": "flashinfer/cake_rmsnorm_nondet_train.py"
+  },
+  "tests": [
+    "tests/norm/test_cake_rmsnorm_det_train.py",
+    "tests/norm/test_cake_rmsnorm_det_train_api.py",
+    "tests/norm/test_cake_rmsnorm_det_train_names.py",
+    "tests/norm/test_cake_rmsnorm_det_train_pairs.py",
+    "tests/norm/test_cake_rmsnorm_det_train_stall.py",
+    "tests/norm/test_cake_rmsnorm_det_train_training.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_all_sm.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_api.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_ckpt.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_dist.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_pairs.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_stall.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_vendored.py",
+    "tests/norm/test_cake_rmsnorm_nondet_train_windows.py",
+    "tests/norm/test_helpers/cake_rmsnorm_train_reference.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_rmsnorm_det_train.py",
+    "benchmarks/bench_cake_rmsnorm_nondet_train.py"
+  ],
+  "generators": {
+    "cake_rmsnorm_det_train": {
+      "cake_revision": "af865e0e52d13ea58919fce298834efcb77a9048",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T12:49:50Z"
+    },
+    "cake_rmsnorm_nondet_train": {
+      "cake_revision": "b10d84ae04defb6e167dbbe3fd0688e2bbd73576",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-03T22:38:00Z"
+    }
+  }
+}
