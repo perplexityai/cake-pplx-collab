@@ -207,7 +207,7 @@ Build paths:
 
 - Each PR runs the isolation check.
 - A path-filtered matrix runs only the families that changed.
-- For each changed family, CI installs only that family from the PR head, with the CPU build of torch. Then it imports every public module and runs all tests of that family on the CPU runner, outside the source tree. Tests that need a GPU skip.
+- For each changed family, CI installs only that family from the PR head, with the default (CUDA) build of torch. Then it imports every public module and runs all tests of that family on the CPU runner, outside the source tree. Tests that need a GPU skip.
 - Actions are pinned to full commit SHAs (organization policy).
 - GPU tests and `integration/` tests are not in the GitHub CI yet. Run them on Blackwell machines (`sm_100a`, `sm_103a`, `sm_107a`) before you merge a family change.
 
