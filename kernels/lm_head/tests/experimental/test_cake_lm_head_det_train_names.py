@@ -35,7 +35,6 @@ import pytest
 import torch
 
 import cake_pplx.cake_lm_head_det_train as public
-from flashinfer.api_logging import ExperimentalWarning
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 
 pytestmark = pytest.mark.cpu_only
@@ -78,11 +77,11 @@ FORWARDED = {
 # Package paths that no longer import: the deterministic package before this module's name and its alias
 # package before the det naming.
 REMOVED_MODULES = (
-    "flashinfer.experimental.cake_lm_head_det_loss.cake_backend",
-    "flashinfer.experimental.cake_lm_head_det_loss.cake_support",
-    "flashinfer.experimental.cake_lm_head_loss.cake_backend",
+    "cake_pplx._backends.cake_lm_head_det_loss.cake_backend",
+    "cake_pplx._backends.cake_lm_head_det_loss.cake_support",
+    "cake_pplx._backends.cake_lm_head_loss.cake_backend",
 )
-# The former entries of the deterministic facade (``flashinfer.chunked_lm_head`` before this module).
+# The former entries of the deterministic facade (``chunked_lm_head`` before this module).
 REMOVED_ENTRIES = (
     "chunked_lm_head_det_loss",
     "chunked_lm_head_det_logprob",
@@ -205,15 +204,15 @@ def test_removed_package_paths_do_not_import(name):
 
 def test_former_entries_fail_at_import():
     """In a fresh interpreter, no former deterministic entry and no entry of this module imports from
-    ``flashinfer.chunked_lm_head`` (a removed module; its non-deterministic entries are now
-    ``cake_pplx.cake_lm_head_nondet_train``)."""
+    ``cake_pplx.chunked_lm_head`` (the former module's name under ``cake_pplx``; its non-deterministic entries are
+    now ``cake_pplx.cake_lm_head_nondet_train``)."""
     names = REMOVED_ENTRIES + ENTRIES
     code = (
         "import json\n"
         "result = {}\n"
         f"for name in {names!r}:\n"
         "    try:\n"
-        "        exec(f'from flashinfer.chunked_lm_head import {name}')\n"
+        "        exec(f'from cake_pplx.chunked_lm_head import {name}')\n"
         "        result[name] = 'imported'\n"
         "    except ImportError as exc:\n"
         "        result[name] = type(exc).__name__\n"
@@ -374,7 +373,6 @@ def test_torch_deterministic_mode_raises_no_alert(warn_only):
         torch.use_deterministic_algorithms(True, warn_only=warn_only)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            warnings.simplefilter("ignore", ExperimentalWarning)
             loss = _backend("cake_backend").cake_lm_head_det_train_loss(
                 X,
                 W,
@@ -399,12 +397,17 @@ def test_package_identity_and_build_identity():
     assert _backend("cake_jit").library_stem("x") == "cake_lm_head_det_loss_x"
 
 
-def test_flashinfer_reexports_no_former_name():
-    """In a fresh interpreter, ``flashinfer`` exports no name of the former deterministic facade or package."""
+def test_cake_pplx_holds_no_former_name():
+    """In a fresh interpreter, neither the ``cake_pplx`` namespace nor ``cake_pplx._backends`` holds a module or
+    binds a name of the former deterministic facade or package (both are PEP 420 namespaces, so their modules are
+    the names they offer); the listing does find this module and its package."""
     code = (
-        "import json\n"
-        "import flashinfer\n"
-        "names = set(dir(flashinfer)) | set(getattr(flashinfer, '__all__', ()))\n"
-        "print(json.dumps(sorted(n for n in names if 'chunked_lm_head' in n or 'cake_lm_head_det_loss' in n)))\n"
+        "import json, pkgutil\n"
+        "import cake_pplx, cake_pplx._backends\n"
+        "spaces = (cake_pplx, cake_pplx._backends)\n"
+        "names = {m.name for p in spaces for m in pkgutil.iter_modules(p.__path__)}\n"
+        "names |= {n for p in spaces for n in dir(p)}\n"
+        "former = sorted(n for n in names if 'chunked_lm_head' in n or 'cake_lm_head_det_loss' in n)\n"
+        "print(json.dumps(dict(former=former, listed='cake_lm_head_det_train' in names)))\n"
     )
-    assert _fresh(code) == []
+    assert _fresh(code) == dict(former=[], listed=True)

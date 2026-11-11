@@ -76,10 +76,9 @@ FORWARDED = {
 # Module paths that no longer import: the former entry module, a module of the backend package before this
 # module's name, and of the alias package removed with the deterministic rename.
 REMOVED_MODULES = (
-    "flashinfer.chunked_lm_head",
+    "cake_pplx.chunked_lm_head",
     "cake_pplx._backends.cake_lm_head_loss.cake_backend",
     "cake_pplx._backends.cake_lm_head_loss.cake_support",
-    "flashinfer.experimental.cake_lm_head_loss.cake_backend",
 )
 # Former names that the backend modules no longer define or export (no aliases).
 REMOVED_NAMES = {
@@ -330,9 +329,9 @@ def test_facade_reads_no_torch_mode_and_imports_no_deterministic_module():
         for n in tree.body
         if isinstance(n, ast.ImportFrom)
     }
-    assert not [m for m in top if "experimental" in m], top
-    local = [m for m in imported if "experimental" in m]
-    assert local == [".experimental.cake.cake_lm_head_nondet_train"] * 3, local
+    assert not [m for m in top if "_backends" in m], top
+    local = [m for m in imported if "_backends" in m]
+    assert local == ["._backends.cake_lm_head_nondet_train"] * 3, local
 
 
 def test_package_identity_and_build_identity():
@@ -344,18 +343,20 @@ def test_package_identity_and_build_identity():
     assert _backend("cake_jit").library_stem("x") == "cake_lm_head_loss_x"
 
 
-def test_flashinfer_exports_the_module_lazily_and_no_former_name():
-    """In a fresh interpreter, ``import flashinfer`` binds no name of the former entry module or package and does
-    not import this module; ``cake_pplx.cake_lm_head_nondet_train`` is listed by ``dir`` and binds this module on
-    first access."""
+def test_cake_pplx_lists_the_module_lazily_and_no_former_name():
+    """In a fresh interpreter, importing the ``cake_pplx`` namespaces holds no module or name of the former entry
+    module or package and does not import this module; the namespace lists ``cake_lm_head_nondet_train``, and
+    importing it binds this module."""
     code = (
-        "import json, sys\n"
-        "import flashinfer\n"
-        "names = set(dir(flashinfer)) | set(getattr(flashinfer, '__all__', ()))\n"
+        "import importlib, json, pkgutil, sys\n"
+        "import cake_pplx, cake_pplx._backends\n"
+        "spaces = (cake_pplx, cake_pplx._backends)\n"
+        "names = {m.name for p in spaces for m in pkgutil.iter_modules(p.__path__)}\n"
+        "names |= {n for p in spaces for n in dir(p)}\n"
         "former = sorted(n for n in names if 'chunked_lm_head' in n or 'cake_lm_head_loss' in n)\n"
         "loaded = 'cake_pplx.cake_lm_head_nondet_train' in sys.modules\n"
-        "listed = 'cake_lm_head_nondet_train' in dir(flashinfer)\n"
-        "module = cake_pplx.cake_lm_head_nondet_train\n"
+        "listed = 'cake_lm_head_nondet_train' in {m.name for m in pkgutil.iter_modules(cake_pplx.__path__)}\n"
+        "module = importlib.import_module('cake_pplx.cake_lm_head_nondet_train')\n"
         "print(json.dumps(dict(former=former, loaded=loaded, listed=listed, name=module.__name__)))\n"
     )
     assert _fresh(code) == dict(

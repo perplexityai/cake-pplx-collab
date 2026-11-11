@@ -39,7 +39,6 @@ import torch.utils.checkpoint
 
 import cake_pplx._cake_lm_head_train_knobs as knobs
 import cake_pplx.cake_lm_head_det_train as public
-from flashinfer.api_logging import ExperimentalWarning
 from cake_pplx.cake_lm_head_det_train import (
     cake_lm_head_det_train_logprob,
     cake_lm_head_det_train_loss,
@@ -98,7 +97,7 @@ def test_public_api_is_stable():
     X, W, labels = _host_call()
     # the public module serves the cake backend only
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         with pytest.raises(ValueError, match="backend"):
             cake_lm_head_det_train_loss(X, W, labels, loss_div=1.0, backend="reference")
     with pytest.raises(ValueError, match="backend"):
@@ -170,7 +169,6 @@ def test_public_api_memory_and_count_keywords(monkeypatch):
         )
     X, W, labels = _host_call()
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ExperimentalWarning)
         cake_lm_head_det_train_loss(
             X,
             W,
@@ -202,7 +200,6 @@ def test_public_api_memory_and_count_keywords(monkeypatch):
     for grad_mode in (True, False):
         seen.clear()
         with warnings.catch_warnings(), torch.set_grad_enabled(grad_mode):
-            warnings.simplefilter("ignore", ExperimentalWarning)
             cake_lm_head_det_train_loss(X, trained, labels, loss_div=1.0)
             cake_lm_head_det_train_logprob(X, trained, labels)
         assert set(seen) == {"opt_in_loss", "opt_in_logprob"}, (grad_mode, seen)
@@ -213,7 +210,6 @@ def test_public_api_memory_and_count_keywords(monkeypatch):
     # check_num_valid_rows=True without a count: ValueError before either backend entry runs
     seen.clear()
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ExperimentalWarning)
         for fn, kw in (
             (cake_lm_head_det_train_loss, dict(loss_div=1.0)),
             (cake_lm_head_det_train_logprob, {}),
@@ -234,7 +230,7 @@ def test_public_api_memory_and_count_keywords(monkeypatch):
         is False
     )
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         with pytest.raises(ValueError, match="CUDA device"):
             public.cake_lm_head_det_train_preload("cpu")
 
@@ -294,7 +290,6 @@ def test_public_api_temperature_keywords(monkeypatch):
     X, W, labels = _host_call()
     tau = torch.full((4,), 0.7)
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ExperimentalWarning)
         cake_lm_head_det_train_logprob(X, W, labels)
         assert "temperature" not in seen["logprob"][1]
         assert "check_temperature" not in seen["logprob"][1]
@@ -477,7 +472,6 @@ def test_gemm_tuning_default_env(monkeypatch):
         _knobs()
     assert knobs.GEMM_TUNING_ENV in str(info.value)
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ExperimentalWarning)
         with pytest.raises(ValueError, match=knobs.GEMM_TUNING_ENV):
             cake_lm_head_det_train_loss(X, W, labels, loss_div=1.0)
         with pytest.raises(ValueError, match=knobs.GEMM_TUNING_ENV):
@@ -623,7 +617,6 @@ def test_device_env_switches_reach_the_backend(monkeypatch):
         streams.clear()
         bound.clear()
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ExperimentalWarning)
             loss, logp = cake_lm_head_det_train_loss(
                 X,
                 W,
@@ -689,7 +682,6 @@ def test_device_temperature_through_the_public_entry(monkeypatch):
         X = inp.X.detach().requires_grad_(True)
         W = inp.W.detach().requires_grad_(True)
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ExperimentalWarning)
             kw.setdefault("backend", "cake")
             if fn is cake_lm_head_det_train_logprob:
                 kw.setdefault("memory_mode", "fast")
@@ -714,7 +706,6 @@ def test_device_temperature_through_the_public_entry(monkeypatch):
     plain = run(cake_lm_head_det_train_logprob)
     same(plain, run(cake_lm_head_det_train_logprob, temperature=1.0), "one")
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore", ExperimentalWarning)
         public.cake_lm_head_det_train_preload(temperature=True)
     same(
         run(
@@ -772,7 +763,6 @@ def test_device_public_entry_places_the_gradients(monkeypatch):
 
         launched.clear()
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ExperimentalWarning)
             if kind == "no_grad":
                 with torch.no_grad():
                     loss = head(X, W)
@@ -829,7 +819,6 @@ def test_device_public_default_step_peak_within_the_head_bytes(monkeypatch, entr
         torch.cuda.reset_peak_memory_stats()
         base = torch.cuda.memory_allocated()
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ExperimentalWarning)
             if entry == "loss":
                 loss, logp = cake_lm_head_det_train_loss(
                     X,
@@ -883,7 +872,6 @@ def test_device_public_logprob_keeps_one_chunk_with_a_frozen_weight(monkeypatch)
         X = inp.X.detach().requires_grad_(True)
         W = inp.W.detach().requires_grad_(train_w)
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ExperimentalWarning)
             logp = cake_lm_head_det_train_logprob(
                 X, W, inp.labels, chunk_size=4096, **kw
             )
@@ -900,7 +888,6 @@ def test_device_public_logprob_keeps_one_chunk_with_a_frozen_weight(monkeypatch)
             assert applied, train_w
             applied.clear()
             with torch.no_grad(), warnings.catch_warnings():
-                warnings.simplefilter("ignore", ExperimentalWarning)
                 lp = cake_lm_head_det_train_logprob(
                     inp.X, inp.W, inp.labels, chunk_size=4096
                 )

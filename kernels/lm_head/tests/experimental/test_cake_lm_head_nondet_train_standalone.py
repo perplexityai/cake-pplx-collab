@@ -278,11 +278,16 @@ def _imports_flashinfer(node):
     return False
 
 
-def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """The package imports nothing from the rest of FlashInfer: no relative import
-    climbs above the package (``from .. import``), every ``flashinfer`` import sits
-    in the body of a ``try`` with an ``except ImportError`` handler, and exactly
-    one such guarded block exists -- the JIT fallback in ``cake_build.py``."""
+def _imports_jit_shim(node):
+    return isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "_cake_pplx_jit"
+
+
+def test_package_imports_no_flashinfer_and_guards_the_jit_shim():
+    """The package imports nothing outside itself: no relative import climbs above
+    the package (``from .. import``), no module imports ``flashinfer``, every import
+    of the package's JIT shim (``._cake_pplx_jit``) sits in the body of a ``try``
+    with an ``except ImportError`` handler, and exactly one such guarded block
+    exists -- the JIT fallback in ``cake_build.py``."""
     guards = {}
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -299,9 +304,12 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _imports_flashinfer(node):
+            assert not _imports_flashinfer(node), (
+                f"{path.name}:{node.lineno}: flashinfer import"
+            )
+            if _imports_jit_shim(node):
                 assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a "
+                    f"{path.name}:{node.lineno}: JIT shim import outside a "
                     "try/except ImportError"
                 )
                 guards.setdefault(path.name, set()).add(guarded[node])

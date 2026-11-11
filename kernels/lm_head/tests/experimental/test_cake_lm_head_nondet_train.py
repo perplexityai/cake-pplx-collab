@@ -1927,8 +1927,12 @@ def test_binding_keys_cover_the_options_of_the_plan():
 
 def test_package_reads_no_environment_variable():
     """The package takes every switch as a keyword or a programmatic setter; no module of it reads the
-    environment (the public entries own the ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` fallbacks)."""
+    environment (the public entries own the ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` fallbacks).  The JIT shim
+    (``_cake_pplx_jit.py``) stands in for ``flashinfer.jit``, which read its toolchain and cache variables outside the
+    package upstream; it is left out."""
     for path in sorted(PACKAGE_DIR.glob("*.py")):
+        if path.name == "_cake_pplx_jit.py":
+            continue
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
