@@ -11,5 +11,4 @@ Install this family alone, pinned to a commit:
 pip install "cake-pplx-rmsnorm-silu-gate @ git+https://github.com/perplexityai/cake-pplx-collab@<sha>#subdirectory=kernels/rmsnorm_silu_gate"
 ```
 
-Imported from FlashInfer `c5c39b0e87f0`; see `UPSTREAM.json`. The repository rules are in
-[`ARCHITECTURE.md`](../../ARCHITECTURE.md).
+The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
