@@ -287,17 +287,11 @@ def test_the_loader_imports_standalone_without_flashinfer() -> None:
 
 def test_the_loader_and_header_are_the_pinned_bytes_of_every_cake_package() -> None:
     _manifest_or_skip()
-    # Another package's copy, read from the repository (not imported: the vendored gate blocks flashinfer): the
-    # KDA det backend's, wherever the KDA rename (#8928) has put its directory.
-    experimental = Path(__file__).resolve().parents[2] / "flashinfer/experimental"
-    other = next(
-        path
-        for path in (
-            experimental / "cake" / "cake_kda_det_train",
-            experimental / "cake_kda_det_train",
-        )
-        if path.is_dir()
-    )
+    # Another package's copy, read from disk (not imported): the det GQA backend of this family, the sibling
+    # directory under ``cake_pplx/_backends``.  (Upstream compared with the KDA backend's copy; in cake_pplx each
+    # family carries its own copy, and copies of different families may diverge.)
+    other = PACKAGE_DIR.parent / "cake_gqa_det_train"
+    assert other.is_dir(), other
     for relative in ("cake_build.py", "csrc/cake_ffi_checks.h"):
         assert (PACKAGE_DIR / relative).read_bytes() == (
             other / relative
@@ -321,8 +315,12 @@ def test_the_prebuilt_library_is_preferred() -> None:
 
 
 def test_the_package_reads_no_environment_variable() -> None:
+    # The JIT shim (``_cake_pplx_jit.py``) stands in for ``flashinfer.jit``, which read its toolchain and cache
+    # variables outside the package upstream; every other module of the package reads none.
     offenders = []
     for path in sorted(PACKAGE_DIR.glob("*.py")):
+        if path.name == "_cake_pplx_jit.py":
+            continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv"):
                 offenders.append(f"{path.name}:{node.lineno}")

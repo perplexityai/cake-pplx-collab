@@ -35,7 +35,8 @@ from pathlib import Path
 import pytest
 import torch
 
-import flashinfer
+import cake_pplx
+import cake_pplx._backends
 import cake_pplx.cake_gqa_nondet_train as public
 from tests.cake.test_helpers.cake_mode_names import (
     assert_mode_names,
@@ -71,11 +72,11 @@ FORWARDED = (
 ) + REEXPORTED
 # Module paths that no longer import: the former facade and the former backend package.
 REMOVED_MODULES = (
-    "flashinfer.gqa_train",
-    "flashinfer.experimental.cake_gqa_train.cake_backend",
-    "flashinfer.experimental.cake_gqa_train.cake_jit",
+    "cake_pplx.gqa_train",
+    "cake_pplx._backends.cake_gqa_train.cake_backend",
+    "cake_pplx._backends.cake_gqa_train.cake_jit",
 )
-# The former facade entries (``flashinfer.gqa_train``).
+# The former facade entries (``gqa_train``).
 REMOVED_ENTRIES = (
     "varlen_gqa_attention",
     "varlen_gqa_attention_fwd",
@@ -125,7 +126,7 @@ def test_removed_module_paths_do_not_import(name):
 
 
 def test_former_entries_are_gone():
-    """No former entry is an attribute of the facade, the backend package or ``flashinfer`` (fresh interpreter)."""
+    """No former entry is an attribute of the facade, the backend package or the ``cake_pplx`` namespaces (fresh interpreter)."""
     for name in REMOVED_ENTRIES:
         assert not hasattr(public, name), name
     for name in REMOVED_NAMES:
@@ -133,13 +134,16 @@ def test_former_entries_are_gone():
             assert not hasattr(module, name), (module.__name__, name)
             assert name not in module.__all__, (module.__name__, name)
     code = (
-        "import json\n"
-        "import flashinfer\n"
-        "names = set(dir(flashinfer)) | set(getattr(flashinfer, '__all__', ()))\n"
+        "import json, pkgutil\n"
+        "import cake_pplx, cake_pplx._backends\n"
+        "spaces = (cake_pplx, cake_pplx._backends)\n"
+        "names = {m.name for p in spaces for m in pkgutil.iter_modules(p.__path__)}\n"
+        "names |= {n for p in spaces for n in dir(p)}\n"
         f"former = {REMOVED_ENTRIES!r} + ('gqa_train',)\n"
-        "print(json.dumps(sorted(n for n in names if n in former or 'gqa_train' in n)))\n"
+        "print(json.dumps(dict(former=sorted(n for n in names if n in former or 'gqa_train' in n),\n"
+        "    listed='cake_gqa_nondet_train' in names)))\n"
     )
-    assert _fresh(code) == []
+    assert _fresh(code) == dict(former=[], listed=True)
 
 
 def test_facade_all_is_the_entries_and_reexports():
@@ -158,7 +162,7 @@ def test_facade_all_is_the_entries_and_reexports():
 
 def test_the_shared_mode_rules_hold():
     """The #8928 rules shared by every family (``tests.cake.test_helpers.cake_mode_names``): the facade's public names
-    carry ``nondet`` after the op, no entry point takes ``deterministic``, ``flashinfer``, the backend package and
+    carry ``nondet`` after the op, no entry point takes ``deterministic``, the ``cake_pplx`` namespaces, the backend package and
     ``cake_backend`` bind each facade object and each backend object a facade entry calls only under the facade's
     name, and the former module paths and names fail at import in a fresh interpreter.
 
@@ -167,7 +171,7 @@ def test_the_shared_mode_rules_hold():
     is a type, not an entry point (calling it raises ``TypeError``).  ``test_no_entry_takes_a_mode_keyword`` covers
     the entry points by their own signatures."""
     package, backend = _backend(), _backend("cake_backend")
-    old_names = [("flashinfer", "gqa_train")]
+    old_names = [("cake_pplx", "gqa_train")]
     old_names += [
         ("cake_pplx.cake_gqa_nondet_train", name) for name in REMOVED_ENTRIES
     ]
@@ -182,13 +186,13 @@ def test_the_shared_mode_rules_hold():
     )
     assert_same_object_same_name(
         public,
-        (flashinfer, package, backend),
+        (cake_pplx, cake_pplx._backends, package, backend),
         forwards=[
             (name, getattr(backend, name)) for name in FORWARDED if name in ENTRIES
         ],
     )
     assert_old_names_fail(
-        REMOVED_MODULES + ("flashinfer.experimental.cake_gqa_train",),
+        REMOVED_MODULES + ("cake_pplx._backends.cake_gqa_train",),
         old_names,
         cwd=Path(__file__).resolve().parents[2],
     )

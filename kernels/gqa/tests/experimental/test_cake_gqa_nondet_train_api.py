@@ -37,7 +37,6 @@ import pytest
 import torch
 
 import cake_pplx.cake_gqa_nondet_train as api
-from flashinfer.api_logging import ExperimentalWarning
 
 BACKEND = "cake_pplx._backends.cake_gqa_nondet_train"
 ENTRY_POINTS = (
@@ -163,7 +162,7 @@ def test_entry_points_return_the_backend_results() -> None:
 
     q, k, v, dout, cu_q, cu_k = _inputs((300, 77), (1000, 0), device)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         out, lse = api.cake_gqa_nondet_train_forward(
             q, k, v, cu_q, cu_k, softmax_scale=SCALE
         )
@@ -241,7 +240,7 @@ def test_autograd_dkv_forms(form) -> None:
 
     leaves = [t.clone().requires_grad_() for t in (q, k, v)]
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.simplefilter("error")
         out = api.cake_gqa_nondet(
             *leaves,
             cu_q,
