@@ -135,7 +135,8 @@ class JitSpec:
         cuda_home = get_cuda_path()
         version = get_cuda_version()
         includes = [f"-I{Path(p).resolve()}" for p in self.extra_include_paths]
-        includes += [f"-isystem{p}" for p in _system_includes(cuda_home)]
+        # nvcc rejects the joined "-isystem<dir>" form: pass the option and the directory separately.
+        includes += [arg for p in _system_includes(cuda_home) for arg in ("-isystem", str(p))]
         cuda_flags = list(_DEFAULT_CUDA_FLAGS)
         if (version.major, version.minor) >= (12, 8):
             cuda_flags.append("-static-global-template-stub=false")

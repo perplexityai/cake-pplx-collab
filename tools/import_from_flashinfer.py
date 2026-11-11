@@ -172,6 +172,11 @@ REWRITES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bflashinfer/experimental/cake/"), "cake_pplx/_backends/"),
     (re.compile(r"from \.experimental\.cake\."), "from ._backends."),
     (re.compile(r"from \.experimental\.cake import"), "from ._backends import"),
+    (re.compile(r"from flashinfer\.experimental\.cake import"), "from cake_pplx._backends import"),
+    (re.compile(r"from flashinfer import (_?cake_[a-z0-9_]*_train(?:_kcp)?)\b(?=\s+as\b|\s*$)", re.M), r"from cake_pplx import \1"),
+    # regex-escaped module paths inside test patterns, e.g. r"flashinfer\.cake_rmsnorm_det_train"
+    (re.compile(r"\bflashinfer\\\.experimental\\\.cake\\\."), lambda m: "cake_pplx\\._backends\\."),
+    (re.compile(r"\bflashinfer\\\.(?=_?cake_[a-z0-9_]*_train)"), lambda m: "cake_pplx\\."),
     (re.compile(r"\bflashinfer\.(_?cake_[a-z0-9_]*_train(?:_kcp)?)\b"), r"cake_pplx.\1"),
     (re.compile(r"\bflashinfer\.(_cake_lm_head_train_knobs)"), r"cake_pplx.\1"),
     (re.compile(r"\bflashinfer/(_?cake_[a-z0-9_]+_train[a-z0-9_]*\.py)"), r"cake_pplx/\1"),
@@ -388,6 +393,8 @@ def write_metadata(dest: Path, family: str, selection: dict[str, list[str]], src
     dependencies = ["torch", tvm_ffi_requirement(packages)]
     if "cuda.bindings" in runtime_text:
         dependencies.append("cuda-python")
+    if "load_inline" in runtime_text:
+        dependencies.append("ninja")
     distribution = "cake-pplx-" + family.replace("_", "-")
     if not (dest / "VERSION").exists():
         (dest / "VERSION").write_text("0.1.0\n", encoding="utf-8")
@@ -424,6 +431,10 @@ namespaces = true
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "cpu_only: runs without a GPU",
+    "node_exclusive: needs the whole node",
+]
 """,
         encoding="utf-8",
     )
@@ -491,6 +502,21 @@ def module_owners(src: Path) -> dict[str, str]:
         for name in selection["packages"] + selection["facades"]:
             owners[name] = family
     return owners
+
+
+def data_files(src: Path, files: list[str]) -> list[str]:
+    """Tracked non-Python files next to a copied test whose names start with its stem
+    (golden data such as ``test_x_golden.json`` beside ``test_x.py``)."""
+    found = set()
+    for rel in files:
+        path = Path(rel)
+        if path.suffix != ".py" or path.name == "__init__.py":
+            continue
+        for other in tracked_files(src, str(path.parent)):
+            candidate = Path(other)
+            if candidate.parent == path.parent and candidate.suffix != ".py" and candidate.name.startswith(path.stem):
+                found.add(other)
+    return sorted(found - set(files))
 
 
 def bench_closure(src: Path, roots: list[str]) -> list[str]:
@@ -630,10 +656,13 @@ def import_family(
     (dest / "cake_pplx" / f"_cake_pplx_api_{family}.py").write_text(api, encoding="utf-8")
 
     files = test_closure(src, selection["tests"]) + bench_closure(src, selection["benchmarks"])
+    files += data_files(src, files)
     for rel in files:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / rel, target)
+        if not rel.endswith(".py"):
+            continue
         rewrite_test(target, exports)
         if "/test_helpers/" in rel:
             trim_tables(target, family, owners)
@@ -654,6 +683,11 @@ def import_family(
             if local_test_imports(dest / rel, rel) & set(moved):
                 moved[rel] = ["(imports a moved module)"]
                 changed = True
+    for rel in list(moved):
+        stem, parent = Path(rel).stem, Path(rel).parent
+        for other in files:
+            if not other.endswith(".py") and Path(other).parent == parent and Path(other).name.startswith(stem):
+                moved.setdefault(other, [f"(data of {rel})"])
     for rel in moved:
         target = integration / rel
         target.parent.mkdir(parents=True, exist_ok=True)
