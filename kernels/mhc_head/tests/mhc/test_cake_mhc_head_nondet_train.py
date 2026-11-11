@@ -45,10 +45,14 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
-import flashinfer
-from flashinfer import cake_mhc_head_det_train as det_facade
-from flashinfer import cake_mhc_head_nondet_train as facade
-from flashinfer.utils import get_compute_capability
+import cake_pplx
+import cake_pplx.cake_mhc_head_det_train as det_facade
+import cake_pplx.cake_mhc_head_nondet_train as facade
+
+
+def get_compute_capability(device: torch.device) -> tuple[int, int]:
+    return tuple(torch.cuda.get_device_capability(device))
+
 
 # The hidden sizes each supported compute capability serves.
 HIDDEN_BY_CAPABILITY = {
@@ -322,10 +326,10 @@ def test_autograd_matches_torch(hidden: int) -> None:
     ref.mean(dim=1).float().sum().backward()
     _assert_bitwise(ours.grad, ref.grad)
     assert facade.CakeMHCHeadNondetFunction.apply(X).shape == (513, hidden)
-    # The mode has no top-level name: the module is imported by its full name.
-    assert not hasattr(flashinfer, "cake_mhc_head_nondet")
-    assert not hasattr(flashinfer, "cake_mhc_head_nondet_train_forward")
-    assert "CakeMHCHeadNondetFunction" not in flashinfer._LAZY_EXPORTS
+    # The mode has no name in the ``cake_pplx`` namespace: the module is imported by its full name.
+    assert not hasattr(cake_pplx, "cake_mhc_head_nondet")
+    assert not hasattr(cake_pplx, "cake_mhc_head_nondet_train_forward")
+    assert not hasattr(cake_pplx, "CakeMHCHeadNondetFunction")
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)

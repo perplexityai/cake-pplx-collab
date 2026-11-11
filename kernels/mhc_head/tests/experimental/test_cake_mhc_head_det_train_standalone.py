@@ -20,9 +20,10 @@ and reach its host-side checks on its own: under another top-level name, in a
 ``python -I`` subprocess with ``flashinfer`` blocked (the form of a vendoring
 gate, ``scripts/check_cake_build_manifests.py --vendored-gate``).  The package
 imports only itself, ``torch`` and ``tvm_ffi``; the public entry points
-``cake_pplx.cake_mhc_head_det_train.*`` add only FlashInfer's API logging, so
-a direct call of the package emits no warning, and the only ``flashinfer``
-import is the JIT fallback of ``cake_build.py``.  The copy keeps ``csrc/``, so
+``cake_pplx.cake_mhc_head_det_train.*`` add only the no-op ``cake_api``
+decorator, so a direct call of the package emits no warning, no module imports
+``flashinfer``, and the JIT fallback of ``cake_build.py`` imports the package's
+own JIT shim ``_cake_pplx_jit.py``.  The copy keeps ``csrc/``, so
 the subprocess also checks what a vendoring builder compiles: every
 ``build.json`` library is the build of one registry record for one of the
 record's architectures, routed on that architecture (``ROUTES[arch][role][hidden]``
@@ -264,11 +265,19 @@ def _imports_flashinfer(node):
     return False
 
 
+def _imports_the_jit_shim(node):
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "_cake_pplx_jit"
+    )
+
+
 def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """The package imports nothing from the rest of FlashInfer: no relative import
-    climbs above the package (``from .. import``), every ``flashinfer`` import sits
-    in the body of a ``try`` with an ``except ImportError`` handler, and exactly
-    one such guarded block exists -- the JIT fallback in ``cake_build.py``."""
+    """The package imports nothing outside itself: no relative import climbs above the package (``from .. import``),
+    no module imports ``flashinfer``, and the one import of the package's JIT shim (``from ._cake_pplx_jit import``,
+    which replaces FlashInfer's JIT) sits in the body of a ``try`` with an ``except ImportError`` handler -- the JIT
+    fallback in ``cake_build.py``."""
     guards = {}
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -285,9 +294,12 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _imports_flashinfer(node):
+            assert not _imports_flashinfer(node), (
+                f"{path.name}:{node.lineno}: flashinfer import"
+            )
+            if _imports_the_jit_shim(node):
                 assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a "
+                    f"{path.name}:{node.lineno}: JIT shim import outside a "
                     "try/except ImportError"
                 )
                 guards.setdefault(path.name, set()).add(guarded[node])

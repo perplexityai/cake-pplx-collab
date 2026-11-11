@@ -20,12 +20,12 @@ exported by the module and by its backend package
 constants carries the mode token ``nondet`` (``Nondet`` in a class name), no
 public callable takes a ``deterministic`` keyword (the ``forward`` /
 ``backward`` of the autograd ``Function`` class included), the former mHC
-modules and names are gone, the top level of ``flashinfer`` has no mHC
+modules and names are gone, the ``cake_pplx`` namespace has no mHC
 ``nondet`` name, the module imports its backend on first use only, the backend
 never imports the deterministic head package, its registry (records and
 routes) is the deterministic head's under the library stem
 ``cake_mhc_train_head_*``, and the package is wired at its path (test-helper
-key, package data, pre-commit exclude, manifest checker row).
+key, build manifest, package data).
 """
 
 import ast
@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 
 MODE = "nondet"
 MODULE = "cake_pplx.cake_mhc_head_nondet_train"
@@ -55,10 +55,10 @@ STEM = "cake_mhc_train_head_"
 # #8928, the former non-deterministic module): importing them fails.
 REMOVED_MODULES = (
     "cake_pplx.cake_mhc_train",
-    "flashinfer.cake_mhc_train_backend",
-    "flashinfer.cake_mhc_train_head_backend",
-    "flashinfer.cake_mhc_det_train_backend",
-    "flashinfer.cake_mhc_det_train_head_backend",
+    "cake_pplx.cake_mhc_train_backend",
+    "cake_pplx.cake_mhc_train_head_backend",
+    "cake_pplx.cake_mhc_det_train_backend",
+    "cake_pplx.cake_mhc_det_train_head_backend",
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
 )
@@ -165,27 +165,24 @@ def test_former_modules_fail_at_import() -> None:
 def test_former_names_are_gone_and_no_top_level_name() -> None:
     module = importlib.import_module(MODULE)
     backend = importlib.import_module(BACKEND)
-    for owner in (module, backend, flashinfer):
+    for owner in (module, backend, cake_pplx):
         leftovers = [
             n
             for n in dir(owner)
             if n.startswith(REMOVED_PREFIXES) or n in REMOVED_NAMES
         ]
         assert not leftovers, (owner.__name__, leftovers)
-    # the mode has no top-level name: its module is imported by its full name (importing it binds the submodule
-    # attribute ``cake_pplx.cake_mhc_head_nondet_train``, which is the module, not a re-exported name)
+    # the mode has no name in the ``cake_pplx`` namespace: its module is imported by its full name (importing it
+    # binds the submodule attribute ``cake_pplx.cake_mhc_head_nondet_train``, which is the module, not a re-exported
+    # name)
     leftovers = [
         n
-        for n in dir(flashinfer)
+        for n in dir(cake_pplx)
         if "mhc" in n.lower()
         and MODE in n.lower()
-        and not inspect.ismodule(getattr(flashinfer, n))
+        and not inspect.ismodule(getattr(cake_pplx, n))
     ]
     assert not leftovers, leftovers
-    lazy = [
-        n for n in flashinfer._LAZY_EXPORTS if "mhc" in n.lower() and MODE in n.lower()
-    ]
-    assert not lazy, lazy
 
 
 _LAZY_CHILD = r"""
@@ -193,11 +190,11 @@ import json, sys
 
 module_name, backend, det_backend = sys.argv[1:4]
 
-import flashinfer
+import cake_pplx
 
 out = {
-    "flashinfer": [m for m in (module_name, backend) if m in sys.modules],
-    "top_level": sorted(n for n in dir(flashinfer) if "mhc" in n.lower() and "nondet" in n.lower()),
+    "namespace": [m for m in (module_name, backend) if m in sys.modules],
+    "top_level": sorted(n for n in dir(cake_pplx) if "mhc" in n.lower() and "nondet" in n.lower()),
 }
 import cake_pplx.cake_mhc_head_nondet_train as module
 
@@ -212,7 +209,7 @@ print(json.dumps(out))
 
 @pytest.mark.cpu_only
 def test_the_backend_is_imported_on_first_use() -> None:
-    """In a fresh interpreter, ``import flashinfer`` imports neither this module nor its backend and exposes no mHC
+    """In a fresh interpreter, ``import cake_pplx`` imports neither this module nor its backend and exposes no mHC
     ``nondet`` name; importing the module and reading an entry point import no backend; the first lazily resolved
     attribute (``ARCHES``) imports it; and the backend's modules never import the deterministic head package."""
     proc = subprocess.run(
@@ -224,7 +221,7 @@ def test_the_backend_is_imported_on_first_use() -> None:
     assert proc.returncode == 0, proc.stderr[-4000:]
     out = json.loads(proc.stdout.strip().splitlines()[-1])
     assert out == {
-        "flashinfer": [],
+        "namespace": [],
         "top_level": [],
         "entry_point": False,
         "lazy_attribute": True,
@@ -319,9 +316,8 @@ def test_the_registry_is_the_det_head_registry_renamed() -> None:
 
 @pytest.mark.cpu_only
 def test_package_wiring() -> None:
-    """The test-helper key, the build manifest's package and libraries, the package data,
-    the pre-commit exclude of the generated sources and the manifest checker's row name the package
-    at its path."""
+    """The test-helper key, the build manifest's package and libraries and the package data name the package at
+    its path."""
     from tests.cake.test_helpers.cake_package import PACKAGES
 
     directory = _backend_dir()
@@ -341,34 +337,7 @@ def test_package_wiring() -> None:
     except ModuleNotFoundError:  # Python < 3.11
         tomllib = pytest.importorskip("tomli")
     data = tomllib.loads((REPO / "pyproject.toml").read_text())
-    package_data = data["tool"]["setuptools"]["package-data"]
-    assert package_data[BACKEND] == ["csrc/**", "build.json"]
-    pre_commit = (REPO / ".pre-commit-config.yaml").read_text()
-    # pre-commit skips every generated source of the package (the generic #8928 rule), still checks its Python
-    # modules
-    exclude = re.compile(
-        next(ln for ln in pre_commit.splitlines() if ln.startswith("exclude:"))
-        .split(":", 1)[1]
-        .strip()
-    )
-    root, package_dir = REPO.resolve(), directory.resolve()
-    sources = [
-        p.relative_to(root).as_posix()
-        for p in sorted((package_dir / "csrc").rglob("*"))
-        if p.is_file()
-    ]
-    assert sources and all(exclude.search(p) for p in sources), [
-        p for p in sources if not exclude.search(p)
-    ]
-    assert not exclude.search(
-        (package_dir / "cake_jit.py").relative_to(root).as_posix()
-    )
-    spec = importlib.util.spec_from_file_location(
-        "check_cake_build_manifests", REPO / "scripts" / "check_cake_build_manifests.py"
-    )
-    checker = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("check_cake_build_manifests", checker)
-    spec.loader.exec_module(checker)  # the checker never imports flashinfer
-    (entry,) = [p for p in checker.PACKAGES if p.name == BACKEND]
-    assert entry.path == "cake_pplx/_backends/cake_mhc_head_nondet_train"
-    assert checker.suite_key(REPO, entry) == KEY
+    # the distribution ships every package's build.json and csrc/ tree
+    package_data = data["tool"]["setuptools"]["package-data"]["*"]
+    assert "build.json" in package_data and "csrc/**/*" in package_data, package_data
+    assert list((directory / "csrc").rglob("*.cu")), directory

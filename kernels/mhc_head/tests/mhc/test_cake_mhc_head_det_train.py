@@ -32,10 +32,14 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
-import flashinfer
-import cake_pplx.cake_mhc_head_det_train
-from flashinfer import cake_mhc_head_det_train as facade
-from flashinfer.utils import get_compute_capability
+import cake_pplx
+import cake_pplx._backends.cake_mhc_head_det_train as backend
+import cake_pplx.cake_mhc_head_det_train as facade
+
+
+def get_compute_capability(device: torch.device) -> tuple[int, int]:
+    return tuple(torch.cuda.get_device_capability(device))
+
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 HIDDEN = (4096, 5120, 7168)
@@ -257,12 +261,11 @@ def test_autograd_matches_torch(hidden: int) -> None:
     facade.cake_mhc_head_det(ours).float().sum().backward()
     ref.mean(dim=1).float().sum().backward()
     _assert_bitwise(ours.grad, ref.grad)
-    assert cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det is facade.cake_mhc_head_det
-    assert flashinfer._LAZY_EXPORTS["CakeMHCHeadDetFunction"] == (
-        ".cake_mhc_head_det_train",
-        "CakeMHCHeadDetFunction",
-    )
-    assert cake_pplx.cake_mhc_head_det_train.CakeMHCHeadDetFunction is facade.CakeMHCHeadDetFunction
+    # The ``cake_pplx`` namespace re-exports nothing; the facade resolves the autograd class lazily to the
+    # backend's object.
+    assert not hasattr(cake_pplx, "cake_mhc_head_det")
+    assert "CakeMHCHeadDetFunction" in facade.__all__
+    assert facade.CakeMHCHeadDetFunction is backend.CakeMHCHeadDetFunction
 
 
 @pytest.mark.parametrize("use_reentrant", [False, True])
