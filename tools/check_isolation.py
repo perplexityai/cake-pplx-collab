@@ -50,8 +50,8 @@ def imports_of(path: Path) -> list[tuple[int, str]]:
         elif isinstance(node, ast.ImportFrom) and node.level == 1 and path.parent.name == "cake_pplx":
             # a facade's relative import: ``from ._backends.<module> import``, ``from .<module> import``
             module = node.module or ""
-            if module.startswith("_backends."):
-                found.append((node.lineno, "cake_pplx." + module))
+            if module == "_backends":
+                found += [(node.lineno, f"cake_pplx._backends.{alias.name}") for alias in node.names]
             elif module:
                 found.append((node.lineno, "cake_pplx." + module))
             else:
