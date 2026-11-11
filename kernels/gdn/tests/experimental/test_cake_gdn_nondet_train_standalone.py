@@ -19,8 +19,9 @@ Standalone-import tests of the Cake non-deterministic GDN chunked-training packa
 A copy of the package directory must import and reach its host-side checks on its own: under another top-level
 name, in a ``python -I`` subprocess with ``flashinfer`` blocked (the form of a vendoring gate,
 ``scripts/check_cake_build_manifests.py --vendored-gate``), with its manifest read by its own loader.  The package
-imports only itself, ``torch`` and ``tvm_ffi``: the only ``flashinfer`` import is the JIT fallback of
-``cake_build.py``, it reads no environment variable (every control is a keyword argument), and the backend test
+imports only itself, ``torch`` and ``tvm_ffi`` and nothing from ``flashinfer``: the JIT fallback of ``cake_build.py``
+imports the package's own JIT shim ``_cake_pplx_jit.py`` (the stand-in for ``flashinfer.jit``), the package reads no
+environment variable outside that shim (every control is a keyword argument), and the backend test
 files of the package import it through ``tests.cake.test_helpers.cake_package`` only, so a vendoring build runs them
 against its own copy.  The facade ``cake_pplx.cake_gdn_nondet_train`` is covered by
 ``test_cake_gdn_nondet_train_api.py``.  CPU only: no GPU, no compiled library and no JIT build is needed.
@@ -193,9 +194,18 @@ def _python_files() -> list[Path]:
     return sorted(PACKAGE_DIR.glob("*.py"))
 
 
-def test_package_names_flashinfer_only_in_the_jit_fallback() -> None:
-    """No relative import climbs above the package, and every ``flashinfer`` import sits in the body of a ``try``
-    with an ``except ImportError`` handler: exactly one such block, the JIT fallback of ``cake_build.py``."""
+# The package's JIT shim: the stand-in for ``flashinfer.jit`` (which lived outside the package upstream).
+JIT_SHIM = "_cake_pplx_jit"
+
+
+def _jit_shim_import(node) -> bool:
+    return isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == JIT_SHIM
+
+
+def test_package_imports_its_jit_shim_only_in_the_jit_fallback() -> None:
+    """No relative import climbs above the package, nothing imports ``flashinfer``, and every import of the JIT shim
+    sits in the body of a ``try`` with an ``except ImportError`` handler: exactly one such block, the JIT fallback of
+    ``cake_build.py`` (upstream, the same block imported ``flashinfer.jit``)."""
     guards: dict[str, set[int]] = {}
     for path in _python_files():
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -212,9 +222,10 @@ def test_package_names_flashinfer_only_in_the_jit_fallback() -> None:
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _flashinfer_import(node):
+            assert not _flashinfer_import(node), f"{path.name}:{node.lineno}: flashinfer import"
+            if _jit_shim_import(node):
                 assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a try/except ImportError"
+                    f"{path.name}:{node.lineno}: JIT shim import outside a try/except ImportError"
                 )
                 guards.setdefault(path.name, set()).add(guarded[node])
     assert {name: len(lines) for name, lines in guards.items()} == {
@@ -223,9 +234,13 @@ def test_package_names_flashinfer_only_in_the_jit_fallback() -> None:
 
 
 def test_the_package_reads_no_environment_variable() -> None:
-    """Every control is a keyword argument: no module of the package reads ``os.environ`` or ``os.getenv``."""
+    """Every control is a keyword argument: no module of the package reads ``os.environ`` or ``os.getenv``.  The JIT
+    shim is the exception: like ``flashinfer.jit`` it reads the toolkit and cache locations (``CUDA_HOME``,
+    ``CAKE_PPLX_CACHE_DIR``), never a kernel control."""
     offenders = []
     for path in _python_files():
+        if path.stem == JIT_SHIM:
+            continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if (

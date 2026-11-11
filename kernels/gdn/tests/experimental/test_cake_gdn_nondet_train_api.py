@@ -16,7 +16,7 @@ limitations under the License.
 Tests of the public surface of the facade ``cake_pplx.cake_gdn_nondet_train`` of the non-deterministic GDN
 chunked-training package ``cake_pplx._backends.cake_gdn_nondet_train`` (the package's own names are tested in
 its backend suite ``test_cake_gdn_nondet_train.py``).  On the CPU: importing the facade does not import the package
-before first use; the exact facade names, each with the word ``nondet``; the facade is a stable API (``@flashinfer_api``
+before first use; the exact facade names, each with the word ``nondet``; the facade is a stable API (``@cake_api``
 entries, not marked experimental, a first call warns of nothing); the old names and the old module path gone; no
 ``deterministic`` keyword (passing one is a ``TypeError``); the support query returns a ``bool``.  On a device: the
 facade runs unchanged under PyTorch's deterministic algorithms, strict and ``warn_only`` (no alert, no warning, no
@@ -179,7 +179,7 @@ def test_the_old_module_path_does_not_import() -> None:
 
 
 def test_the_facade_is_a_stable_api() -> None:
-    # real ``@flashinfer_api`` defs of the facade module, not marked by the experimental-API decorator (it sets
+    # real ``@cake_api`` defs of the facade module, not marked by the experimental-API decorator (it sets
     # ``is_experimental`` and ``experimental_feature`` and puts a ``.. warning::`` banner first in the docstring)
     facade = _facade()
     for name in ("cake_gdn_nondet", "is_cake_gdn_nondet_train_supported"):

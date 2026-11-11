@@ -21,8 +21,9 @@ packages export carries the mode word ``det`` as a token, right after the op (co
 and are not exported); no entry binds a ``deterministic`` keyword (``inspect.signature(obj).bind_partial(
 deterministic=False)`` raises ``TypeError``, the autograd ``Function.forward`` / ``backward`` included; the KCP
 entries that take the option fields through ``**`` declare them in their signatures, so no signature has a ``**``
-parameter); the former module paths do not import, and no namespace (the ``flashinfer`` top level, the facades, the
-backend packages and their modules) binds a former name.  Importing a facade loads no backend module until first use
+parameter); the former module paths do not import, and no namespace (the ``cake_pplx`` and ``cake_pplx._backends``
+namespace packages -- FlashInfer's top level before the move --, the facades, the backend packages and their modules)
+binds a former name.  Importing a facade loads no backend module until first use
 (checked in fresh interpreters).  The mode-word and keyword checks, and one check of each facade with no exemption
 (``assert_cake_mode_module``), are the shared ones of ``tests/cake/test_helpers/cake_mode_names.py``.
 """
@@ -39,7 +40,8 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
+import cake_pplx._backends
 from tests.cake.test_helpers.cake_mode_names import (
     assert_cake_mode_module,
     assert_mode_names,
@@ -65,13 +67,16 @@ KCP_SUBMODULES = (
     "cake_options",
     "cake_tables",
 )
+# FlashInfer's former paths (``flashinfer.experimental.cake_gdn_det_train[_kcp]``, ``flashinfer.gdn_train``,
+# ``flashinfer.experimental.cake_gdn_train``) at the cake_pplx import prefix.
 REMOVED_MODULES = (
-    "flashinfer.experimental.cake_gdn_det_train",
-    *(f"flashinfer.experimental.cake_gdn_det_train.{m}" for m in SUBMODULES),
-    "flashinfer.experimental.cake_gdn_det_train_kcp",
-    *(f"flashinfer.experimental.cake_gdn_det_train_kcp.{m}" for m in KCP_SUBMODULES),
-    "flashinfer.gdn_train",
-    "flashinfer.experimental.cake_gdn_train",
+    "cake_pplx.experimental",
+    "cake_pplx.gdn_train",
+    "cake_pplx.cake_gdn_train",
+    "cake_pplx._backends.cake_gdn_train",
+    *(f"cake_pplx._backends.cake_gdn_train.{m}" for m in SUBMODULES),
+    "cake_pplx._backends.cake_gdn_train_kcp",
+    *(f"cake_pplx._backends.cake_gdn_train_kcp.{m}" for m in KCP_SUBMODULES),
 )
 
 FACADE_ALL = ("CakeGDNDetFunction", "cake_gdn_det", "is_cake_gdn_det_train_supported")
@@ -177,9 +182,6 @@ FORMER_NAMES = (
     + tuple(old for old, _ in KCP_RENAMES)
     + NO_DET_NAMES
 )
-# Former Cake names that FlashInfer's own (non-Cake) stable API also uses at the top level: there the name must bind
-# that API's object, never a Cake one.
-STABLE_TOP_LEVEL = {"chunk_gated_delta_rule": "flashinfer.gdn_prefill"}
 # The facade functions that call the package function of their name (the shared check ties the package object to
 # the facade name through these pairs).
 FORWARDS = ("cake_gdn_det",)
@@ -220,7 +222,8 @@ def test_the_shared_check_reads_the_mode_word_by_token() -> None:
 
 def _namespaces() -> dict[str, object]:
     out = {
-        "flashinfer": flashinfer,
+        "cake_pplx": cake_pplx,
+        "cake_pplx._backends": cake_pplx._backends,
         FACADE: importlib.import_module(FACADE),
         KCP_FACADE: importlib.import_module(KCP_FACADE),
         PACKAGE: importlib.import_module(PACKAGE),
@@ -272,27 +275,28 @@ def test_former_module_paths_do_not_import(name: str) -> None:
 
 
 def test_former_package_directories_are_gone() -> None:
-    # gone, or holding only untracked build leftovers: no module, manifest or source
-    experimental = Path(flashinfer.__file__).parent / "experimental"
-    for name in ("cake_gdn_det_train", "cake_gdn_det_train_kcp", "cake_gdn_train"):
-        directory = experimental / name
+    # gone, or holding only untracked build leftovers: no module, manifest or source (FlashInfer's
+    # ``flashinfer/experimental/cake_gdn_*`` directories, at the cake_pplx layout)
+    backends = Path(importlib.import_module(PACKAGE).__file__).resolve().parents[1]
+    assert backends.name == "_backends", backends
+    for directory in (
+        backends / "cake_gdn_train",
+        backends / "cake_gdn_train_kcp",
+        backends.parent / "experimental",
+        backends.parent / "gdn_train",
+    ):
         if directory.exists():
             kept = sorted(
                 p.name for p in directory.iterdir() if p.name not in LEFTOVER_ENTRIES
             )
-            assert kept == [], (name, kept)
-    assert (experimental / "cake" / "cake_gdn_det_train" / "build.json").is_file()
-    assert (experimental / "cake" / "cake_gdn_det_train_kcp" / "build.json").is_file()
+            assert kept == [], (directory, kept)
+    assert (backends / "cake_gdn_det_train" / "build.json").is_file()
+    assert (backends / "cake_gdn_det_train_kcp" / "build.json").is_file()
 
 
 @pytest.mark.parametrize("name", FORMER_NAMES)
 def test_no_namespace_binds_a_former_name(name: str) -> None:
     for module_name, module in _namespaces().items():
-        if module_name == "flashinfer" and name in STABLE_TOP_LEVEL:
-            # absent when that API's import is skipped
-            obj = getattr(module, name, None)
-            assert obj is None or obj.__module__ == STABLE_TOP_LEVEL[name], name
-            continue
         assert not hasattr(module, name), (module_name, name)
         assert name not in getattr(module, "__all__", ()), (module_name, name)
 
@@ -389,7 +393,7 @@ def test_the_facade_follows_the_shared_mode_name_rules(
     facade: str, package: str, submodules, forwards
 ) -> None:
     # the shared check of one facade with no exemption: the mode word right after the op, no ``deterministic`` at any
-    # signature, each object bound under its facade name only (the flashinfer top level, the backend package and its
+    # signature, each object bound under its facade name only (the cake_pplx namespaces, the backend package and its
     # modules), and the former module paths and names failing at import in a fresh interpreter
     module = importlib.import_module(facade)
     pkg = importlib.import_module(package)
@@ -397,7 +401,8 @@ def test_the_facade_follows_the_shared_mode_name_rules(
         module,
         "det",
         namespaces=[
-            flashinfer,
+            cake_pplx,
+            cake_pplx._backends,
             pkg,
             *(importlib.import_module(f"{package}.{sub}") for sub in submodules),
         ],
@@ -457,32 +462,34 @@ def test_det_tests_import_the_det_packages_without_a_skip() -> None:
     files = sorted(
         (root / "tests" / "experimental").glob("test_cake_gdn_det_train*.py")
     )
-    files.append(root / "benchmarks" / "bench_cake_gdn_det_train_kcp.py")
-    assert len(files) > 8
+    # the KCP route's cross-family suites (``test_cake_gdn_det_train_kcp{,_build,_dist}.py``) and its benchmark moved
+    # to ``integration/gdn``; the eight det suites of this distribution remain
+    bench = root / "benchmarks" / "bench_cake_gdn_det_train_kcp.py"
+    if bench.is_file():
+        files.append(bench)
+    assert len(files) >= 8, files
     offenders = {p.name: lines for p in files if (lines := _skipped_det_imports(p))}
     assert not offenders, offenders
 
 
-# Fresh interpreter: importing the facades (or flashinfer) loads no backend module; the backend loads on first
-# attribute access of a lazy type.
+# Fresh interpreter: importing the facades (or the cake_pplx namespace) loads no backend module; the backend loads on
+# first attribute access of a lazy type.
 _LAZY_CHECK = """
 import importlib.util
 import sys
 
 {imports}
-backend = [m for m in sys.modules if m.startswith(("cake_pplx._backends.cake_gdn_det_train",
-                                                   "flashinfer.experimental.cake_gdn_det_train"))]
+backend = [m for m in sys.modules if m.startswith("cake_pplx._backends.cake_gdn_det_train")]
 assert not backend, backend
-for old in ("flashinfer.experimental.cake_gdn_det_train", "flashinfer.experimental.cake_gdn_det_train_kcp"):
+for old in ("cake_pplx._backends.cake_gdn_train", "cake_pplx._backends.cake_gdn_train_kcp"):
     # absent, or an empty namespace package (a leftover untracked directory of an earlier build)
     spec = importlib.util.find_spec(old)
     assert spec is None or (spec.origin in (None, "namespace") and spec.submodule_search_locations), old
-import flashinfer
+import cake_pplx
+import cake_pplx._backends
 for old in {former!r}:
-    if old in {stable!r}:
-        assert getattr(getattr(flashinfer, old, None), "__module__", {stable!r}[old]) == {stable!r}[old], old
-    else:
-        assert not hasattr(flashinfer, old), old
+    assert not hasattr(cake_pplx, old), old
+    assert not hasattr(cake_pplx._backends, old), old
 import cake_pplx.cake_gdn_det_train as facade
 import cake_pplx.cake_gdn_det_train_kcp as kcp_facade
 assert facade.CakeGDNDetFunction.__name__ == "CakeGDNDetFunction"
@@ -493,7 +500,7 @@ print("GDN_DET_NAMES_OK")
 """
 
 IMPORTS = {
-    "flashinfer": "import flashinfer",
+    "namespace": "import cake_pplx\nimport cake_pplx._backends",
     "facade": f"import {FACADE}",
     "kcp_facade": f"import {KCP_FACADE}",
     "facade_names": f"from {FACADE} import cake_gdn_det, is_cake_gdn_det_train_supported\n"
@@ -503,9 +510,7 @@ IMPORTS = {
 
 @pytest.mark.parametrize("form", sorted(IMPORTS))
 def test_facade_imports_load_no_backend_until_first_use(form: str) -> None:
-    code = _LAZY_CHECK.format(
-        imports=IMPORTS[form], former=FORMER_NAMES, stable=STABLE_TOP_LEVEL
-    )
+    code = _LAZY_CHECK.format(imports=IMPORTS[form], former=FORMER_NAMES)
     r = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=600
     )

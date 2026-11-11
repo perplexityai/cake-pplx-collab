@@ -14,7 +14,7 @@ The mode names (FlashInfer #8928) of the two NON-DETERMINISTIC GDN facades, ``ca
 (single rank) and ``cake_pplx.cake_gdn_nondet_train_kcp`` (context-parallel), through the shared check
 ``tests/cake/test_helpers/cake_mode_names.assert_cake_mode_module``, with no exemption: every public name carries the word
 ``nondet`` right after the op, no public callable binds ``deterministic=`` at its signature, the facade, the
-``flashinfer`` top level and the backend package and modules bind each object under its facade name only, and the
+``cake_pplx`` namespaces and the backend package and modules bind each object under its facade name only, and the
 former module paths and names fail at import in a fresh interpreter.  CPU only: nothing launches.
 """
 
@@ -67,7 +67,7 @@ KCP_FORWARDS = (
 )
 KCP_OLD_MODULES = (
     "cake_pplx.cake_gdn_train_kcp",
-    "flashinfer.experimental.cake_gdn_train_kcp",
+    "cake_pplx._backends.cake_gdn_train_kcp",  # FlashInfer's flashinfer.experimental.cake_gdn_train_kcp
 )
 KCP_OLD_NAMES = (
     "chunk_gdn_kcp",
@@ -91,7 +91,8 @@ KCP_OLD_NAMES = (
 
 
 def _check(facade: str, package: str, submodules, forwards, old_modules, old_names):
-    import flashinfer
+    import cake_pplx
+    import cake_pplx._backends
 
     module = importlib.import_module(facade)
     pkg = importlib.import_module(package)
@@ -99,7 +100,8 @@ def _check(facade: str, package: str, submodules, forwards, old_modules, old_nam
         module,
         "nondet",
         namespaces=[
-            flashinfer,
+            cake_pplx,
+            cake_pplx._backends,
             pkg,
             *(importlib.import_module(f"{package}.{sub}") for sub in submodules),
         ],

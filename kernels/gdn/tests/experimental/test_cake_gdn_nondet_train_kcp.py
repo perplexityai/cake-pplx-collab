@@ -389,9 +389,11 @@ def test_plan_parity_with_kda_on_rows(path, monkeypatch) -> None:
     ``cake_gdn_nondet_train_kcp_comm_bytes`` equal the row JSON.  Both modules plan under the per-rank rule they share,
     ``"wave_fill1"`` (the GDN default is the row rule, the KDA default its own tie rule; each is selected explicitly
     here: the keyword-only ``p_rule`` on the GDN side, the private test hook on the KDA side)."""
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    kp = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_plan")  # the test only
+    # cross-family (the KDA family's plan module, the test only): runs where cake-pplx-kda is installed
+    kp = pytest.importorskip(
+        "cake_pplx._backends.cake_kda_det_train_kcp.cake_kcp_plan",
+        reason="cross-family check: needs the cake-pplx-kda distribution (integration/gdn)",
+    )
     # the KDA module accepts its private test hook only after its opt-in (enable_test_knobs)
     monkeypatch.setattr(kp, "_TEST_KNOBS_ENABLED", True)
     with open(path) as fh:
@@ -2152,8 +2154,10 @@ def test_registry_seed() -> None:
 
 def test_package_imports_no_kda_and_no_environ() -> None:
     """The package never imports a KDA package (no module path or name containing ``cake_kda``) and reads no
-    environment variable; the plan module imports torch, torch.distributed and dataclasses only."""
-    for path in sorted(PACKAGE_DIR.glob("*.py")):
+    environment variable; the plan module imports torch, torch.distributed and dataclasses only.  The JIT shim
+    ``_cake_pplx_jit.py`` (the stand-in for ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache
+    locations and is not covered."""
+    for path in sorted(p for p in PACKAGE_DIR.glob("*.py") if p.name != "_cake_pplx_jit.py"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):

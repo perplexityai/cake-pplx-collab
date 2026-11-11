@@ -13,12 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake deterministic GDN chunked-training facade ``cake_pplx.cake_gdn_det_train``
+Public-API tests of the Cake deterministic GDN chunked-training facade ``cake_pplx.cake_gdn_det_train``
 over the backend package ``cake_pplx._backends.cake_gdn_det_train``.
 
-The backend suite ``test_cake_gdn_det_train.py`` imports only the package.  This file covers what needs flashinfer
-itself: the facade's names (the mode-word names only), a stable API (no experimental marking, no
-``ExperimentalWarning``), the package signature and every argument it forwards, no ``deterministic`` keyword and the
+The backend suite ``test_cake_gdn_det_train.py`` imports only the package.  This file covers the facade: the facade's names (the mode-word names only), a stable API (no experimental marking, no
+experimental-API warning), the package signature and every argument it forwards, no ``deterministic`` keyword and the
 support query, without a device; and on SM100 / SM103 /
 SM107 the facade's results against the package's (bitwise) and under ``torch.use_deterministic_algorithms(True)``
 (no alert, bitwise the same).
@@ -34,8 +33,7 @@ import pytest
 import torch
 
 import cake_pplx.cake_gdn_det_train as facade
-from flashinfer.api_logging import ExperimentalWarning
-from flashinfer.experimental.cake import cake_gdn_det_train as pkg
+from cake_pplx._backends import cake_gdn_det_train as pkg
 from cake_pplx._backends.cake_gdn_det_train import cake_backend
 from tests.cake.test_helpers.cake_mode_names import assert_mode_names
 
@@ -59,9 +57,10 @@ FORMER_NAMES = (
 
 
 def _call(fn, *args, **kwargs):
-    # a stable API: an ExperimentalWarning would raise
+    # a stable API: an experimental-API warning would raise (FlashInfer's ExperimentalWarning came from its
+    # ``@flashinfer_experimental_api`` decorator, whose message names "experimental"; cake_pplx has no such decorator)
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        warnings.filterwarnings("error", message=".*experimental")
         return fn(*args, **kwargs)
 
 
@@ -86,9 +85,9 @@ def test_the_entry_point_is_a_stable_api(monkeypatch: pytest.MonkeyPatch) -> Non
     assert _call(fn, *(None,) * 5) == "cake_gdn_det"
 
 
-def test_every_facade_function_is_a_flashinfer_api_def() -> None:
-    # the public functions of the facade module are real defs decorated with ``@flashinfer_api`` (the support query
-    # too); the decorator returns the function unchanged while logging is off, so the check reads the source
+def test_every_facade_function_is_a_cake_api_def() -> None:
+    # the public functions of the facade module are real defs decorated with ``@cake_api`` (the support query
+    # too); the decorator returns the function unchanged, so the check reads the source
     tree = ast.parse(Path(facade.__file__).read_text())
     decorators = {
         node.name: [ast.unparse(d) for d in node.decorator_list]
@@ -96,7 +95,7 @@ def test_every_facade_function_is_a_flashinfer_api_def() -> None:
         if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
     }
     assert sorted(decorators) == sorted(n for n in FACADE_NAMES if n[0].islower())
-    assert all(d == ["flashinfer_api"] for d in decorators.values()), decorators
+    assert all(d == ["cake_api"] for d in decorators.values()), decorators
 
 
 def test_the_entry_point_takes_the_package_signature() -> None:

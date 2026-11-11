@@ -615,8 +615,8 @@ def test_facade_exposes_the_contract_names_keyword_only() -> None:
     ):
         for p in _after(inspect.signature(fn), "ctx"):
             assert p.kind is p.KEYWORD_ONLY, (fn.__name__, p.name)
-    # every public function of the facade module is a real def decorated with ``@flashinfer_api`` (the support query
-    # too); the decorator returns the function unchanged while logging is off, so the check reads the source
+    # every public function of the facade module is a real def decorated with ``@cake_api`` (the support query
+    # too); the decorator returns the function unchanged, so the check reads the source
     tree = ast.parse(pathlib.Path(facade.__file__).read_text())
     decorators = {
         node.name: [ast.unparse(d) for d in node.decorator_list]
@@ -627,7 +627,7 @@ def test_facade_exposes_the_contract_names_keyword_only() -> None:
     # under it the entries of OPTION_KEYWORD_ENTRIES carry the facade's ``_forwards_keywords``, which declares the
     # keywords they hand to the package (``test_option_keyword_entries_declare_every_option_field``)
     for name, found in decorators.items():
-        want = ["flashinfer_api"]
+        want = ["cake_api"]
         if name in OPTION_KEYWORD_ENTRIES:
             want.append("_forwards_keywords")
         assert found == want, (name, found)
@@ -654,8 +654,6 @@ def test_facade_entries_raise_no_experimental_warning(
 ) -> None:
     import warnings  # noqa: PLC0415
 
-    from flashinfer.api_logging import ExperimentalWarning  # noqa: PLC0415
-
     facade = importlib.import_module("cake_pplx.cake_gdn_det_train_kcp")
     pkg = _mod()
     monkeypatch.setattr(
@@ -665,7 +663,8 @@ def test_facade_entries_raise_no_experimental_warning(
         pkg, "cake_gdn_det_train_kcp_packed_qkv_views", lambda qkv, **kw: ("ran", qkv)
     )
     with warnings.catch_warnings():
-        warnings.simplefilter("error", ExperimentalWarning)
+        # FlashInfer's ExperimentalWarning came from its experimental-API decorator (message names "experimental")
+        warnings.filterwarnings("error", message=".*experimental")
         ctx = object()
         assert facade.cake_gdn_det_train_kcp_comm_bytes(ctx, H_qk=16, HV=48) == {
             "ran": ctx
@@ -709,9 +708,10 @@ LEGACY_SUBMODULES = (
     "cake_tables",
 )
 LEGACY_MODULES = (
-    "flashinfer.gdn_train",
-    "flashinfer.experimental.cake_gdn_train",
-    *(f"flashinfer.experimental.cake_gdn_train.{sub}" for sub in LEGACY_SUBMODULES),
+    "cake_pplx.gdn_train",
+    "cake_pplx.cake_gdn_train",
+    "cake_pplx._backends.cake_gdn_train",
+    *(f"cake_pplx._backends.cake_gdn_train.{sub}" for sub in LEGACY_SUBMODULES),
 )
 LEGACY_NAMES = (
     "kcp_partition",
@@ -770,7 +770,7 @@ OPTION_KEYWORD_ENTRIES = frozenset(
 
 def _own_keyword_only(fn, name: str) -> set[str]:
     """The keyword-only parameters that the def of ``fn`` names itself, read from its code object (through a
-    ``functools.wraps`` wrapper of ``@flashinfer_api`` at a raised log level), not from its declared signature."""
+    ``functools.wraps`` wrapper, should the API decorator ever wrap), not from its declared signature."""
     raw = inspect.unwrap(
         fn,
         stop=lambda f: getattr(getattr(f, "__code__", None), "co_name", None) == name,
@@ -878,7 +878,8 @@ def test_importing_the_facade_does_not_import_the_package() -> None:
 
 
 def test_legacy_names_are_removed() -> None:
-    """``flashinfer.gdn_train`` and ``flashinfer.experimental.cake_gdn_train`` (and its modules) do not import, and no
+    """``cake_pplx.gdn_train``, ``cake_pplx.cake_gdn_train`` and ``cake_pplx._backends.cake_gdn_train`` (and its modules)
+    do not import (FlashInfer's ``flashinfer.gdn_train`` / ``flashinfer.experimental.cake_gdn_train``), and no
     module of the deterministic route binds a pre-rename name.  A checkout may keep an untracked leftover of a former
     package directory (``aot/``, ``__pycache__``), which Python imports as an empty namespace package: such a leftover
     holds no module and none of the former names."""
@@ -983,8 +984,11 @@ def test_det_entries_take_no_deterministic_keyword() -> None:
 
 
 def _package_sources() -> list[pathlib.Path]:
+    # The JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit``, which lived outside the package: like it,
+    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the package's
+    # hygiene rules do not cover it.
     root = pathlib.Path(_mod().__file__).resolve().parent
-    files = sorted(root.glob("*.py"))
+    files = sorted(p for p in root.glob("*.py") if p.name != "_cake_pplx_jit.py")
     assert files
     return files
 

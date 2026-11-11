@@ -14,7 +14,7 @@ CPU tests of the public surface of the NON-DETERMINISTIC context-parallel packed
 ``cake_pplx._backends.cake_gdn_nondet_train_kcp`` and of its facade ``cake_pplx.cake_gdn_nondet_train_kcp`` (this
 package only; the deterministic counterpart is ``cake_pplx.cake_gdn_det_train_kcp``): the options validator
 (``cake_options``), the keyword-only signatures, the facade's and the package's exact public names (each with the
-word ``nondet``; the former names and module paths fail at import), the facade as a stable API (``@flashinfer_api``
+word ``nondet``; the former names and module paths fail at import), the facade as a stable API (``@cake_api``
 entries, not marked experimental, a first call warns of nothing), the numerical mode (in the name only: no entry
 takes ``deterministic``, a stray keyword is a ``TypeError``; every launch being fixed-order, nothing alerts, reroutes
 or warns under ``torch.use_deterministic_algorithms``; no context, partition or options field holds the mode), the
@@ -770,7 +770,7 @@ def test_importing_the_facade_does_not_import_the_package() -> None:
 
 
 def test_the_facade_is_a_stable_api() -> None:
-    # real ``@flashinfer_api`` defs of the facade module, not marked by the experimental-API decorator (it sets
+    # real ``@cake_api`` defs of the facade module, not marked by the experimental-API decorator (it sets
     # ``is_experimental`` and ``experimental_feature`` and puts a ``.. warning::`` banner first in the docstring)
     facade = importlib.import_module(FACADE)
     for name in FACADE_FUNCTIONS:
@@ -779,9 +779,9 @@ def test_the_facade_is_a_stable_api() -> None:
         assert not getattr(entry, "is_experimental", False), name
         assert not hasattr(entry, "experimental_feature"), name
         assert not entry.__doc__.lstrip().startswith(".. warning::"), name
-    # the source: every entry is a top-level def with the one decorator ``@flashinfer_api`` (at the default log level
-    # the decorator returns the function itself, so only the source shows it), the only name taken from
-    # ``api_logging``; under it the entries of OPTION_KEYWORD_ENTRIES carry the facade's ``_forwards_keywords``, which
+    # the source: every entry is a top-level def with the one decorator ``@cake_api`` (the decorator returns the
+    # function itself, so only the source shows it), the only name taken from ``_cake_pplx_api_gdn`` (the family's
+    # stand-in for FlashInfer's ``api_logging``); under it the entries of OPTION_KEYWORD_ENTRIES carry the facade's ``_forwards_keywords``, which
     # declares the keywords they hand to the package (``test_option_keyword_entries_declare_every_option_field``)
     tree = ast.parse(_facade_source().read_text())
     decorators = {
@@ -790,17 +790,17 @@ def test_the_facade_is_a_stable_api() -> None:
         if isinstance(node, ast.FunctionDef)
     }
     for name in FACADE_FUNCTIONS:
-        want = ["flashinfer_api"]
+        want = ["cake_api"]
         if name in OPTION_KEYWORD_ENTRIES:
             want.append("_forwards_keywords")
         assert decorators.get(name) == want, (name, decorators.get(name))
     imported = [
         alias.name
         for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "api_logging"
+        if isinstance(node, ast.ImportFrom) and node.module == "_cake_pplx_api_gdn"
         for alias in node.names
     ]
-    assert imported == ["flashinfer_api"], imported
+    assert imported == ["cake_api"], imported
     # a fresh interpreter, since the experimental-API decorator warns on the first call of a process only: the first
     # call of every facade entry, with a keyword the entry does not take, fails with a TypeError on host operands
     # (at the signature, or in the package before any work for the entries that take ``**knobs`` / ``**kw``) and
@@ -919,7 +919,7 @@ OLD_NAMES = frozenset(
 # The former module paths of this route: they fail at import (no alias, no shim).
 OLD_MODULES = (
     "cake_pplx.cake_gdn_train_kcp",
-    "flashinfer.experimental.cake_gdn_train_kcp",
+    "cake_pplx._backends.cake_gdn_train_kcp",
 )
 SUBMODULES = (
     "cake_backend",
@@ -957,7 +957,7 @@ def test_no_module_of_the_package_or_the_facade_binds_an_old_name() -> None:
 
 
 def test_the_former_modules_fail_at_import() -> None:
-    """``cake_pplx.cake_gdn_train_kcp`` and ``flashinfer.experimental.cake_gdn_train_kcp`` raise
+    """``cake_pplx.cake_gdn_train_kcp`` and ``cake_pplx._backends.cake_gdn_train_kcp`` raise
     ``ModuleNotFoundError``.  A checkout may keep an untracked leftover of the former package directory (``aot/``,
     ``__pycache__``), which Python imports as an empty namespace package: such a leftover holds no module and none of
     the former names."""
@@ -1156,7 +1156,7 @@ def test_no_public_callable_takes_a_deterministic_parameter() -> None:
 
 def _own_keyword_only(fn, name: str) -> set[str]:
     """The keyword-only parameters that the def of ``fn`` names itself, read from its code object (through a
-    ``functools.wraps`` wrapper of ``@flashinfer_api`` at a raised log level), not from its declared signature."""
+    ``functools.wraps`` wrapper, should the API decorator ever wrap), not from its declared signature."""
     raw = inspect.unwrap(
         fn,
         stop=lambda f: getattr(getattr(f, "__code__", None), "co_name", None) == name,
@@ -1470,7 +1470,7 @@ def test_facade_never_imports_the_deterministic_package() -> None:
         "import sys\n"
         "import torch\n"
         f"import {FACADE} as facade\n"
-        "import flashinfer.experimental.cake\n"
+        "import cake_pplx._backends\n"
         "before = {m for m in sys.modules if 'cake_gdn_det' in m}\n"
         "pkg = facade._pkg()\n"
         f"for name in {FACADE_ENTRIES!r}:\n"
@@ -2085,13 +2085,15 @@ def test_the_context_holds_no_mode() -> None:
 
 # ----------------------------------------------------------------------------------------------------------------
 # standalone (flashinfer #6553): the package imports itself, torch, torch.distributed, tvm_ffi and the standard
-# library only, and names no library of its deterministic twin
+# library only, and names no library of its deterministic twin.  The package's JIT shim ``_cake_pplx_jit.py`` (the
+# stand-in for ``flashinfer.jit``, which lived outside the package) is not part of this rule: see ``_package_sources``.
 
 
-def test_the_package_imports_no_other_flashinfer_package() -> None:
-    """No import of ``flashinfer`` outside the package (relative imports one level deep only) and none of the twin;
-    the one exception is the pinned loader's JIT route (``cake_build.py``: ``flashinfer.jit.*`` inside a function).
-    Every other absolute import is the standard library, ``torch``, ``torch.distributed`` or ``tvm_ffi``."""
+def test_the_package_imports_no_other_package() -> None:
+    """No import of ``flashinfer`` at all and nothing outside the package (relative imports one level deep only), none
+    of the twin; the pinned loader's JIT route (``cake_build.py``) imports the package's own shim ``._cake_pplx_jit``
+    inside a function.  Every other absolute import is the standard library, ``torch``, ``torch.distributed`` or
+    ``tvm_ffi``."""
     stdlib = set(sys.stdlib_module_names)
     for path in _package_sources():
         tree = ast.parse(path.read_text())
@@ -2099,6 +2101,11 @@ def test_the_package_imports_no_other_flashinfer_package() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level:
                 assert node.level == 1, (path.name, node.lineno, node.level)
+                if node.module == "_cake_pplx_jit":  # the JIT route: the loader only, inside a function
+                    assert path.name == "cake_build.py" and id(node) not in top_level, (
+                        path.name,
+                        node.lineno,
+                    )
                 continue
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
@@ -2109,13 +2116,7 @@ def test_the_package_imports_no_other_flashinfer_package() -> None:
             for name in names:
                 assert "cake_gdn_det" not in name, (path.name, node.lineno, name)
                 head = name.split(".")[0]
-                if head == "flashinfer":
-                    assert (
-                        path.name == "cake_build.py"
-                        and name.startswith("flashinfer.jit.")
-                        and id(node) not in top_level
-                    ), (path.name, node.lineno, name)
-                    continue
+                assert head != "flashinfer", (path.name, node.lineno, name)
                 assert head in stdlib or name in (
                     "torch",
                     "torch.distributed",
@@ -2168,8 +2169,11 @@ def test_the_registry_names_no_library_of_the_deterministic_twin() -> None:
 
 
 def _package_sources() -> list[pathlib.Path]:
+    # The JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit``, which lived outside the package: like it,
+    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the package's
+    # hygiene rules do not cover it.
     root = pathlib.Path(_mod().__file__).resolve().parent
-    files = sorted(root.glob("*.py"))
+    files = sorted(p for p in root.glob("*.py") if p.name != "_cake_pplx_jit.py")
     assert files
     return files
 

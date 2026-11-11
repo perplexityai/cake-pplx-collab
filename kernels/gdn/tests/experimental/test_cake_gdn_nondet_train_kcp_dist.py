@@ -149,10 +149,14 @@ def _det_mod(sub: str | None = None):
 def _conv_mod(sub: str | None = None):
     """The deterministic causal-convolution package (or its ``kcp`` module) through the test-helper registry: the
     entries ``cake_causal_conv1d_det`` / ``is_cake_causal_conv1d_det_train_supported`` and
-    ``kcp.cake_causal_conv1d_det_kcp`` that its facades forward to."""
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    return cake_package("cake_causal_conv1d_det_train", sub)
+    ``kcp.cake_causal_conv1d_det_kcp`` that its facades forward to.  Cross-family: the package belongs to the
+    cake-pplx-causal-conv1d distribution, so the rows that need it skip where that distribution is not installed (they
+    run in the integration environment, ``integration/gdn``)."""
+    path = "cake_pplx._backends.cake_causal_conv1d_det_train"
+    return pytest.importorskip(
+        path if sub is None else f"{path}.{sub}",
+        reason="cross-family check: needs the cake-pplx-causal-conv1d distribution (integration/gdn)",
+    )
 
 
 kcp = _mod("cake_kcp")

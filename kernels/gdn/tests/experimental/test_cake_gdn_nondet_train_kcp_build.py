@@ -282,8 +282,12 @@ def test_the_package_imports_nothing_from_the_kda_training_package() -> None:
 
 
 def test_the_package_reads_no_environment_variable() -> None:
+    # the JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit`` (outside the package upstream): like it, it
+    # reads the toolkit and cache locations (CUDA_HOME, CAKE_PPLX_CACHE_DIR), never a kernel control
     offenders = []
     for path in _python_files():
+        if path.name == "_cake_pplx_jit.py":
+            continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if (
@@ -324,17 +328,31 @@ def test_the_loader_and_header_are_the_pinned_bytes_of_every_cake_package() -> N
     _cake_build()
     if not (PACKAGE_DIR / "csrc" / "cake_ffi_checks.h").is_file():
         pytest.skip("csrc/cake_ffi_checks.h is not rendered into the package yet")
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    kda_dir = Path(
-        cake_package("cake.cake_kda_det_train", "cake_build").__file__
-    ).parent
+    # cross-family (the KDA family's loader): runs where cake-pplx-kda is installed
+    kda_build = pytest.importorskip(
+        "cake_pplx._backends.cake_kda_det_train.cake_build",
+        reason="cross-family check: needs the cake-pplx-kda distribution (integration/gdn)",
+    )
+    kda_dir = Path(kda_build.__file__).parent
     for relative in ("cake_build.py", "csrc/cake_ffi_checks.h"):
         ours = (PACKAGE_DIR / relative).read_bytes()
         theirs = (kda_dir / relative).read_bytes()
         assert hashlib.sha256(ours).hexdigest() == hashlib.sha256(theirs).hexdigest(), (
             relative
         )
+
+
+def test_the_loader_and_header_are_the_same_bytes_in_every_gdn_package() -> None:
+    """The in-family half of the pinned-bytes rule, with no other family installed: ``cake_build.py`` and
+    ``csrc/cake_ffi_checks.h`` are byte-identical across the GDN packages of this distribution."""
+    _cake_build()
+    from tests.cake.test_helpers.cake_package import PACKAGES
+
+    dirs = [Path(importlib.import_module(path).__file__).parent for path in PACKAGES.values()]
+    assert len(dirs) == 4, dirs
+    for relative in ("cake_build.py", "csrc/cake_ffi_checks.h"):
+        digests = {hashlib.sha256((d / relative).read_bytes()).hexdigest() for d in dirs}
+        assert len(digests) == 1, (relative, digests)
 
 
 # ----------------------------------------------------------------------------------------------------------------
