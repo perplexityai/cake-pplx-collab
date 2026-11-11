@@ -167,11 +167,83 @@ REWRITES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bflashinfer/experimental/cake/"), "cake_pplx/_backends/"),
     (re.compile(r"from \.experimental\.cake\."), "from ._backends."),
     (re.compile(r"from \.experimental\.cake import"), "from ._backends import"),
-    (re.compile(r"\bflashinfer\.(_?cake_[a-z0-9_]+_train)"), r"cake_pplx.\1"),
+    (re.compile(r"\bflashinfer\.(_?cake_[a-z0-9_]*_train(?:_kcp)?)\b"), r"cake_pplx.\1"),
     (re.compile(r"\bflashinfer\.(_cake_lm_head_train_knobs)"), r"cake_pplx.\1"),
     (re.compile(r"\bflashinfer/(_?cake_[a-z0-9_]+_train[a-z0-9_]*\.py)"), r"cake_pplx/\1"),
-    (re.compile(r"from flashinfer import (_?cake_[a-z0-9_]+_train)"), r"from cake_pplx import \1"),
 ]
+
+def new_module(upstream: str) -> str:
+    """``.cake_x`` / ``.experimental.cake.y`` (relative to ``flashinfer``) -> the ``cake_pplx`` module."""
+    name = upstream.lstrip(".")
+    if name.startswith("experimental.cake."):
+        return "cake_pplx._backends." + name[len("experimental.cake.") :]
+    return "cake_pplx." + name
+
+
+def export_map(src: Path) -> dict[str, tuple[str, str | None]]:
+    """Top-level ``flashinfer.<name>`` Cake training exports -> (``cake_pplx`` module, attribute or None)."""
+    tree = ast.parse((src / "flashinfer" / "__init__.py").read_text(encoding="utf-8"))
+    exports: dict[str, tuple[str, str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "_LAZY_EXPORTS":
+            value = node.value
+        elif isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "_LAZY_EXPORTS" for t in node.targets):
+            value = node.value
+        else:
+            value = None
+        if isinstance(value, ast.Dict):
+            for key, item in zip(value.keys, value.values):
+                if isinstance(key, ast.Constant) and isinstance(item, ast.Tuple) and len(item.elts) == 2:
+                    module, attribute = (getattr(e, "value", None) for e in item.elts)
+                    if isinstance(module, str) and re.search(r"cake_[a-z0-9_]+_train", module):
+                        exports[key.value] = (new_module(module), attribute)
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module and re.match(
+            r"(?:experimental\.cake\.)?_?cake_[a-z0-9_]+_train", node.module
+        ):
+            for alias in node.names:
+                exports[alias.asname or alias.name] = (new_module("." + node.module), alias.name)
+    return exports
+
+
+def rewrite_flashinfer_imports(text: str, exports: dict[str, tuple[str, str | None]]) -> str:
+    """``from flashinfer import <cake export>`` -> imports from the owning ``cake_pplx`` module."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return text
+    lines = text.split("\n")
+    edits = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "flashinfer"):
+            continue
+        moved = [a for a in node.names if a.name in exports]
+        if not moved:
+            continue
+        kept = [a for a in node.names if a.name not in exports]
+        indent = re.match(r"\s*", lines[node.lineno - 1]).group(0)
+        new = []
+        if kept:
+            new.append(
+                indent
+                + "from flashinfer import "
+                + ", ".join(a.name + (f" as {a.asname}" if a.asname else "") for a in kept)
+            )
+        for alias in moved:
+            module, attribute = exports[alias.name]
+            local = alias.asname or alias.name
+            if attribute is None:
+                new.append(f"{indent}import {module} as {local}")
+            else:
+                new.append(f"{indent}from {module} import {attribute}" + (f" as {local}" if local != attribute else ""))
+        edits.append((node.lineno, node.end_lineno, new))
+    for start, end, new in sorted(edits, reverse=True):
+        lines[start - 1 : end] = new
+    text = "\n".join(lines)
+    for name, (module, attribute) in sorted(exports.items(), key=lambda kv: -len(kv[0])):
+        target = module if attribute is None else f"{module}.{attribute}"
+        text = re.sub(r"(?<![\w.])flashinfer\." + re.escape(name) + r"\b", target, text)
+    return text
+
 
 JIT_IMPORT_OLD = (
     "        from flashinfer.jit.core import gen_jit_spec\n"
@@ -217,7 +289,13 @@ def rewrite_facade(path: Path, family: str) -> None:
 
 def fix_module_imports(text: str) -> str:
     """After rewriting, ``cake_pplx.<module>`` attribute use needs ``import cake_pplx.<module>``."""
-    used = sorted(set(re.findall(r"(?<![\w.])cake_pplx\.(_?cake_[a-z0-9_]+)\b", text)))
+    used = sorted(
+        set(re.findall(r"(?<![\w.])cake_pplx\.(_?cake_[a-z0-9_]+_train(?:_kcp)?|_cake_lm_head_train_knobs)\b", text))
+        | set(
+            "_backends." + m
+            for m in re.findall(r"(?<![\w.])cake_pplx\._backends\.(cake_[a-z0-9_]+_train(?:_kcp)?)\b", text)
+        )
+    )
     if not used:
         return text
     tree = ast.parse(text)
@@ -254,13 +332,9 @@ def fix_module_imports(text: str) -> str:
     return text
 
 
-def rewrite_test(path: Path) -> None:
-    text = rewrite_text(path.read_text(encoding="utf-8"))
-    text = re.sub(
-        r"from flashinfer import (?:\(\s*)?((?:_?cake_[a-z0-9_]+_train[a-z0-9_]*\s*,?\s*)+)\)?",
-        lambda m: "from cake_pplx import " + m.group(1).strip().rstrip(","),
-        text,
-    )
+def rewrite_test(path: Path, exports: dict[str, tuple[str, str | None]]) -> None:
+    text = rewrite_flashinfer_imports(path.read_text(encoding="utf-8"), exports)
+    text = rewrite_text(text)
     try:
         text = fix_module_imports(text)
     except SyntaxError:
@@ -383,14 +457,85 @@ def copy_tree(src: Path, dest: Path) -> None:
     shutil.copytree(src, dest, ignore=lambda d, names: [n for n in names if n in SKIP_DIRS or n.endswith(".so")])
 
 
-def import_family(src: Path, family: str, kernels: Path) -> dict[str, object]:
+def module_owners(src: Path) -> dict[str, str]:
+    """Every upstream Cake training module name (facade or backend package) -> its family."""
+    owners = {}
+    for family in FAMILIES:
+        selection = select(src, family)
+        for name in selection["packages"] + selection["facades"]:
+            owners[name] = family
+    return owners
+
+
+def bench_closure(src: Path, roots: list[str]) -> list[str]:
+    """``roots`` plus the sibling ``benchmarks/<name>.py`` modules they import by bare name, transitively."""
+    seen: set[str] = set()
+    todo = list(roots)
+    while todo:
+        rel = todo.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        try:
+            tree = ast.parse((src / rel).read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            for name in names:
+                candidate = Path("benchmarks") / f"{name.split('.')[0]}.py"
+                if (src / candidate).is_file():
+                    todo.append(str(candidate))
+    return sorted(seen)
+
+
+def foreign_imports(path: Path, family: str, owners: dict[str, str]) -> list[str]:
+    """``cake_pplx`` modules of other families that ``path`` imports (anywhere in the file)."""
+    found = []
+    for match in re.finditer(r"cake_pplx\.(?:_backends\.)?(_?cake_[a-z0-9_]+_train(?:_kcp)?)\b", path.read_text(encoding="utf-8")):
+        owner = owners.get(match.group(1))
+        if owner is not None and owner != family:
+            found.append(match.group(1))
+    return sorted(set(found))
+
+
+def local_test_imports(path: Path, rel: str) -> set[str]:
+    """Repository-relative files of the ``tests.*`` / sibling-benchmark modules ``path`` imports."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set()
+    out = set()
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+        for name in names:
+            if name.startswith("tests."):
+                out.add(str(Path(*name.split(".")).with_suffix(".py")))
+            elif rel.startswith("benchmarks/"):
+                out.add(f"benchmarks/{name.split('.')[0]}.py")
+    return out
+
+
+def import_family(
+    src: Path, family: str, kernels: Path, exports: dict[str, tuple[str, str | None]], owners: dict[str, str]
+) -> dict[str, object]:
     selection = select(src, family)
     if not selection["packages"]:
         raise RuntimeError(f"{family}: no backend packages under {src}/flashinfer/experimental/cake")
     dest = kernels / family
+    integration = kernels.parent / "integration" / family
     version = (dest / "VERSION").read_text(encoding="utf-8") if (dest / "VERSION").exists() else None
     for sub in ("cake_pplx", "tests", "benchmarks"):
         shutil.rmtree(dest / sub, ignore_errors=True)
+    shutil.rmtree(integration, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     if version is not None:
         (dest / "VERSION").write_text(version, encoding="utf-8")
@@ -402,6 +547,7 @@ def import_family(src: Path, family: str, kernels: Path) -> dict[str, object]:
         shutil.copy2(TEMPLATES / "_cake_pplx_jit.py", target / "_cake_pplx_jit.py")
         for path in target.rglob("*.py"):
             rewrite_backend_py(path, target, family)
+            path.write_text(rewrite_flashinfer_imports(path.read_text(encoding="utf-8"), exports), encoding="utf-8")
         for path in list(target.rglob("*.md")) + [target / "build.json", target / "build.test.json"]:
             if path.is_file():
                 path.write_text(rewrite_text(path.read_text(encoding="utf-8")), encoding="utf-8")
@@ -409,35 +555,57 @@ def import_family(src: Path, family: str, kernels: Path) -> dict[str, object]:
         target = dest / "cake_pplx" / f"{name}.py"
         shutil.copy2(src / "flashinfer" / f"{name}.py", target)
         rewrite_facade(target, family)
+        target.write_text(rewrite_flashinfer_imports(target.read_text(encoding="utf-8"), exports), encoding="utf-8")
     api = (TEMPLATES / "_cake_pplx_api.py").read_text(encoding="utf-8")
     (dest / "cake_pplx" / f"_cake_pplx_api_{family}.py").write_text(api, encoding="utf-8")
-    tests = test_closure(src, selection["tests"])
-    for rel in tests:
+
+    files = test_closure(src, selection["tests"]) + bench_closure(src, selection["benchmarks"])
+    for rel in files:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / rel, target)
-        rewrite_test(target)
-    for rel in selection["benchmarks"]:
-        target = dest / rel
+        rewrite_test(target, exports)
+
+    # Tests and benchmarks that need another family move to integration/<family>/, together with
+    # every file that imports a moved one; the helpers they use are copied along.
+    moved: dict[str, list[str]] = {}
+    for rel in files:
+        foreign = foreign_imports(dest / rel, family, owners)
+        if foreign:
+            moved[rel] = foreign
+    changed = True
+    while changed:
+        changed = False
+        for rel in files:
+            if rel in moved or not (dest / rel).is_file() or rel.endswith("__init__.py"):
+                continue
+            if local_test_imports(dest / rel, rel) & set(moved):
+                moved[rel] = ["(imports a moved module)"]
+                changed = True
+    for rel in moved:
+        target = integration / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src / rel, target)
-        rewrite_test(target)
+        shutil.move(str(dest / rel), target)
+    for rel in moved:
+        for helper in local_test_imports(integration / rel, rel):
+            if (dest / helper).is_file() and not (integration / helper).exists():
+                (integration / helper).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dest / helper, integration / helper)
+    for init in [f for f in files if f.endswith("__init__.py")]:
+        for rel in moved:
+            if Path(rel).is_relative_to(Path(init).parent) and not (integration / init).exists():
+                (integration / init).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dest / init, integration / init)
+
     write_metadata(dest, family, selection, git_head(src))
     report = residual_report(dest)
-    foreign = sorted(
-        {
-            f
-            for f in tests
-            if family_of_name(f) not in (None, family)
-        }
-    )
     return {
         "family": family,
         "packages": selection["packages"],
         "facades": selection["facades"],
         "tests": len(selection["tests"]),
-        "test_closure": len(tests),
-        "foreign_test_files": foreign,
+        "files": len(files),
+        "moved_to_integration": moved,
         "benchmarks": len(selection["benchmarks"]),
         "residual_runtime": report["runtime"],
         "residual_tests": report["tests"],
@@ -454,15 +622,17 @@ def main() -> int:
     parser.add_argument("--report", type=Path, help="write the JSON import report here")
     args = parser.parse_args()
     families = FAMILIES if args.all else args.family
-    results = [import_family(args.src.resolve(), family, args.dest.resolve()) for family in families]
+    src = args.src.resolve()
+    exports = export_map(src)
+    owners = module_owners(src)
+    results = [import_family(src, family, args.dest.resolve(), exports, owners) for family in families]
     for result in results:
         print(
             f"{result['family']}: {len(result['packages'])} packages, {len(result['facades'])} facades, "
-            f"{result['tests']} tests ({result['test_closure']} files with helpers), {result['benchmarks']} benchmarks, "
+            f"{result['tests']} tests + {result['benchmarks']} benchmarks ({result['files']} files with helpers), "
+            f"{len(result['moved_to_integration'])} moved to integration/, "
             f"residual flashinfer refs: runtime {len(result['residual_runtime'])}, tests {len(result['residual_tests'])}"
         )
-        if result["foreign_test_files"]:
-            print(f"  helpers named after other families: {result['foreign_test_files']}")
     if args.report:
         args.report.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     return 0
