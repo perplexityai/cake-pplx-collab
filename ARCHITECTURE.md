@@ -208,7 +208,19 @@ Build paths:
 - Each PR runs the isolation check.
 - A path-filtered matrix runs only the families that changed.
 - For each changed family, CI installs only that family from the PR head. Then it runs the CPU tests of that family.
-- GPU tests run on Blackwell runners (`sm_100a`, `sm_103a`, `sm_107a`).
+- GPU tests and `integration/` tests are not in the GitHub CI yet. Run them on Blackwell machines (`sm_100a`, `sm_103a`, `sm_107a`) before you merge a family change.
+
+## Running tests
+
+Run the tests of a family against the installed distribution, not the source tree. Copy `tests/` (and the `pyproject.toml`) to a directory outside `kernels/<family>/`, then run pytest there.
+
+```bash
+pip install "./kernels/kda[test]"
+cp -r kernels/kda/tests kernels/kda/pyproject.toml /tmp/kda-tests/
+cd /tmp/kda-tests && python -m pytest -p no:cacheprovider tests
+```
+
+Run the tests of `integration/<family>/` the same way, in an environment that has every family they import. For example, `integration/causal_conv1d/` needs `kda` and `gdn` too. Tests that need several GPUs start their own processes when one process sees all GPUs. Run them with the `SLURM_*` task variables unset.
 
 ## Upstream sync
 
@@ -250,7 +262,8 @@ Kernel updates from FlashInfer then land one family at a time.
 
 ## Open items
 
-- **GPU CI.** The GPU CI runners are not yet configured.
+- **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `integration/` yet.
+- **Architecture coverage.** The first import was validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** The protocol for the `causal_conv1d`/KDA/GDN KCP context begins at version 1.
 - **Environment variables.** The kernels keep their `FLASHINFER_*` knob names (for example `FLASHINFER_CAKE_DSA_*`). A rename to `CAKE_PPLX_*` is a later, per-family change.
