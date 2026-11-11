@@ -55,7 +55,7 @@ FAMILIES = [
 # Extra top-level FlashInfer modules that belong to one family.
 EXTRA_MODULES = {"lm_head": ["_cake_lm_head_train_knobs"]}
 
-# Upstream tests that exercise several families; they go to ``integration/``.
+# Upstream tests that exercise several families; they go to ``tests/cross_family/``.
 CROSS_FAMILY_TESTS = {
     "tests/cpu/cake/test_cake_kcp_partition_parity.py",
 }
@@ -627,11 +627,11 @@ def import_family(
     if not selection["packages"]:
         raise RuntimeError(f"{family}: no backend packages under {src}/flashinfer/experimental/cake")
     dest = kernels / family
-    integration = kernels.parent / "integration" / family
+    cross_family = kernels.parent / "tests" / "cross_family" / family
     version = (dest / "VERSION").read_text(encoding="utf-8") if (dest / "VERSION").exists() else None
     for sub in ("cake_pplx", "tests", "benchmarks"):
         shutil.rmtree(dest / sub, ignore_errors=True)
-    shutil.rmtree(integration, ignore_errors=True)
+    shutil.rmtree(cross_family, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     if version is not None:
         (dest / "VERSION").write_text(version, encoding="utf-8")
@@ -667,7 +667,7 @@ def import_family(
         if "/test_helpers/" in rel:
             trim_tables(target, family, owners)
 
-    # Tests and benchmarks that need another family move to integration/<family>/, together with
+    # Tests and benchmarks that need another family move to tests/cross_family/<family>/, together with
     # every file that imports a moved one; the helpers they use are copied along.
     moved: dict[str, list[str]] = {}
     for rel in files:
@@ -689,19 +689,19 @@ def import_family(
             if not other.endswith(".py") and Path(other).parent == parent and Path(other).name.startswith(stem):
                 moved.setdefault(other, [f"(data of {rel})"])
     for rel in moved:
-        target = integration / rel
+        target = cross_family / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(dest / rel), target)
     for rel in moved:
-        for helper in local_test_imports(integration / rel, rel):
-            if (dest / helper).is_file() and not (integration / helper).exists():
-                (integration / helper).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dest / helper, integration / helper)
+        for helper in local_test_imports(cross_family / rel, rel):
+            if (dest / helper).is_file() and not (cross_family / helper).exists():
+                (cross_family / helper).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dest / helper, cross_family / helper)
     for init in [f for f in files if f.endswith("__init__.py")]:
         for rel in moved:
-            if Path(rel).is_relative_to(Path(init).parent) and not (integration / init).exists():
-                (integration / init).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dest / init, integration / init)
+            if Path(rel).is_relative_to(Path(init).parent) and not (cross_family / init).exists():
+                (cross_family / init).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(dest / init, cross_family / init)
 
     write_metadata(dest, family, selection, git_head(src))
     report = residual_report(dest)
@@ -711,7 +711,7 @@ def import_family(
         "facades": selection["facades"],
         "tests": len(selection["tests"]),
         "files": len(files),
-        "moved_to_integration": moved,
+        "moved_to_cross_family": moved,
         "benchmarks": len(selection["benchmarks"]),
         "residual_runtime": report["runtime"],
         "residual_tests": report["tests"],
@@ -736,7 +736,7 @@ def main() -> int:
         print(
             f"{result['family']}: {len(result['packages'])} packages, {len(result['facades'])} facades, "
             f"{result['tests']} tests + {result['benchmarks']} benchmarks ({result['files']} files with helpers), "
-            f"{len(result['moved_to_integration'])} moved to integration/, "
+            f"{len(result['moved_to_cross_family'])} moved to tests/cross_family/, "
             f"residual flashinfer refs: runtime {len(result['residual_runtime'])}, tests {len(result['residual_tests'])}"
         )
     if args.report:
