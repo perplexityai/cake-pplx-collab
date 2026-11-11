@@ -54,7 +54,7 @@ import torch
 
 import cake_pplx.cake_kda_det_train as det_api
 import cake_pplx.cake_kda_nondet_train as nd_api
-from flashinfer.experimental.cake import cake_kda_nondet_train as pkg
+from cake_pplx._backends import cake_kda_nondet_train as pkg
 from cake_pplx._backends.cake_kda_det_train import cake_backend as det_backend
 from cake_pplx._backends.cake_kda_det_train import cake_jit as det_jit
 from cake_pplx._backends.cake_kda_nondet_train import cake_backend, cake_jit
@@ -561,7 +561,7 @@ def test_importing_the_package_imports_no_deterministic_module() -> None:
     of either would let a launch reach a deterministic program), nor this package's facade."""
     code = (
         "import json, sys\n"
-        "import flashinfer\n"
+        "import cake_pplx\n"
         "before = set(sys.modules)\n"
         "import cake_pplx._backends.cake_kda_nondet_train\n"
         "from cake_pplx._backends.cake_kda_nondet_train import cake_backend, cake_build, cake_jit\n"

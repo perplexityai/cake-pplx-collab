@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_kda_det_train_kcp as kcp_api
 from tests.cake.test_helpers.cake_mode_names import (
     assert_cake_mode_module,
@@ -49,7 +49,7 @@ pytestmark = pytest.mark.cpu_only
 
 PACKAGE = "cake_pplx._backends.cake_kda_det_train_kcp"
 # the package path before the move under cake_pplx/_backends/ (#8928 rule 1): no alias
-PREVIOUS_PACKAGE = "flashinfer.experimental.cake_kda_det_train_kcp"
+PREVIOUS_PACKAGE = "cake_pplx.experimental.cake_kda_det_train_kcp"
 
 # the entry points of cake_pplx.cake_kda_det_train_kcp
 FACADE_NAMES = (
@@ -246,7 +246,7 @@ def test_facade_follows_the_cake_mode_names() -> None:
         kcp_api,
         "det",
         namespaces=[
-            flashinfer,
+            cake_pplx,
             importlib.import_module(PACKAGE),
             *(_backend(m) for m in ("cake_kcp", "cake_kcp_plan")),
         ],

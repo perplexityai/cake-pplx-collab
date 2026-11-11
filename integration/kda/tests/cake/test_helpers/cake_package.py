@@ -19,6 +19,8 @@ PACKAGES: dict[str, str] = {
     "cake.cake_kda_nondet_train": "cake_pplx._backends.cake_kda_nondet_train",
     "cake.cake_kda_det_train_kcp": "cake_pplx._backends.cake_kda_det_train_kcp",
     "cake.cake_kda_nondet_train_kcp": "cake_pplx._backends.cake_kda_nondet_train_kcp",
+    # the causal_conv1d family (its KCP route consumes the KDA KCP context): integration tests only
+    "cake_causal_conv1d_det_train": "cake_pplx._backends.cake_causal_conv1d_det_train",
     # the non-deterministic GQA HD256 training package; its key carries the namespace
 }
 

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_kda_nondet_train_kcp as kcp_api
 from tests.cake.test_helpers.cake_mode_names import (
     assert_cake_mode_module,
@@ -48,7 +48,7 @@ FACADE = "cake_pplx.cake_kda_nondet_train_kcp"
 PACKAGE = "cake_pplx._backends.cake_kda_nondet_train_kcp"
 # the module and the package before #8928 (rule 1): no alias
 OLD_FACADE = "cake_pplx.cake_kda_train_kcp"
-OLD_PACKAGE = "flashinfer.experimental.cake_kda_train_kcp"
+OLD_PACKAGE = "cake_pplx._backends.cake_kda_train_kcp"
 SUBMODULES = ("cake_kcp", "cake_kcp_plan", "cake_kcp_jit", "cake_build")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -138,7 +138,7 @@ def test_facade_follows_the_cake_mode_names() -> None:
         kcp_api,
         "nondet",
         namespaces=[
-            flashinfer,
+            cake_pplx,
             importlib.import_module(PACKAGE),
             *(_backend(m) for m in ("cake_kcp", "cake_kcp_plan")),
         ],

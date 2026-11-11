@@ -40,9 +40,9 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_kda_nondet_train as nd_api
-from flashinfer.experimental.cake import cake_kda_nondet_train as package
+from cake_pplx._backends import cake_kda_nondet_train as package
 from cake_pplx._backends.cake_kda_nondet_train import (
     cake_backend,
     cake_jit,
@@ -131,7 +131,7 @@ def test_facade_follows_the_cake_mode_names() -> None:
     assert_cake_mode_module(
         nd_api,
         "nondet",
-        namespaces=[flashinfer, package],
+        namespaces=[cake_pplx, package],
         forwards=FORWARDS,
         old_modules=OLD_MODULES,
         old_names=OLD_NAMES,

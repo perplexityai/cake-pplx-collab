@@ -41,9 +41,9 @@ from pathlib import Path
 
 import pytest
 
-import flashinfer
+import cake_pplx
 import cake_pplx.cake_kda_det_train as det_api
-from flashinfer.experimental.cake import cake_kda_det_train as package
+from cake_pplx._backends import cake_kda_det_train as package
 from cake_pplx._backends.cake_kda_det_train import (
     cake_backend,
     cake_jit,
@@ -59,8 +59,8 @@ pytestmark = pytest.mark.cpu_only
 
 FACADE = "cake_pplx.cake_kda_det_train"
 NEW_PACKAGE = "cake_pplx._backends.cake_kda_det_train"
-PREVIOUS_PACKAGE = "flashinfer.experimental.cake_kda_det_train"
-OLD_PACKAGE = "flashinfer.experimental.cake_kda_train"
+PREVIOUS_PACKAGE = "cake_pplx.experimental.cake_kda_det_train"
+OLD_PACKAGE = "cake_pplx._backends.cake_kda_train"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 # the det package's modules, read from its directory
@@ -128,7 +128,7 @@ FORWARDS = (
 OLD_MODULES = (
     PREVIOUS_PACKAGE,
     *(f"{PREVIOUS_PACKAGE}.{m}" for m in ("cake_backend", "cake_build", "cake_jit")),
-    "flashinfer.kda_train",
+    "cake_pplx.kda_train",
     OLD_PACKAGE,
     *(
         f"{OLD_PACKAGE}.{m}"
@@ -158,7 +158,7 @@ def test_facade_follows_the_cake_mode_names() -> None:
     assert_cake_mode_module(
         det_api,
         "det",
-        namespaces=[flashinfer, package],
+        namespaces=[cake_pplx, package],
         forwards=FORWARDS,
         old_modules=OLD_MODULES,
         old_names=OLD_NAMES,

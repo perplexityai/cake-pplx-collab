@@ -1117,7 +1117,7 @@ def test_the_package_never_imports_a_deterministic_package() -> None:
     facade = pathlib.Path(kcp_api.__file__).resolve()
     for node in ast.walk(ast.parse(facade.read_text())):
         if isinstance(node, ast.ImportFrom) and node.level:
-            module = "flashinfer" + ("." + node.module if node.module else "")
+            module = "cake_pplx" + ("." + node.module if node.module else "")
             assert not _forbidden(module), (node.lineno, module)
             for a in node.names:
                 assert not _forbidden(a.name), (node.lineno, module, a.name)
@@ -1164,6 +1164,8 @@ def test_the_package_reads_no_environment_variable() -> None:
             ):
                 if path.name == "cake_build.py":
                     continue  # the shared loader (byte copy of every Cake package's) reads its build cache paths
+                if path.name == "_cake_pplx_jit.py":
+                    continue  # the JIT build shim (replaces flashinfer.jit) reads the toolchain and cache paths
                 raise AssertionError(
                     f"{path.name}: reads the environment ({node.attr})"
                 )

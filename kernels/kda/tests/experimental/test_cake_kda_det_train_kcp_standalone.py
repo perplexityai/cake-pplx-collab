@@ -38,10 +38,11 @@ SINGLE_RANK_MODULES = ("cake_backend", "cake_build", "cake_jit")
 
 
 def _cake_root() -> Path:
-    """``flashinfer/experimental/cake`` of the FlashInfer under test, found without importing ``flashinfer``."""
-    spec = importlib.util.find_spec("flashinfer")
+    """``cake_pplx/_backends`` of the installed package under test, found without importing it (``find_spec``
+    imports only the PEP 420 namespace parents ``cake_pplx`` and ``cake_pplx._backends``)."""
+    spec = importlib.util.find_spec(f"cake_pplx._backends.{PACKAGE}")
     assert spec is not None and spec.submodule_search_locations
-    return Path(next(iter(spec.submodule_search_locations))) / "experimental" / "cake"
+    return Path(next(iter(spec.submodule_search_locations))).parent
 
 
 # Runs in the subprocess: blocks ``flashinfer``, imports the copy of the package and its modules, resolves the
@@ -50,6 +51,8 @@ def _cake_root() -> Path:
 _PROBE = """
 import importlib, json, sys
 sys.modules["flashinfer"] = None
+# the installed cake_pplx namespace is blocked too: the copy must not reach the installed package
+sys.modules["cake_pplx"] = None
 root, package = sys.argv[1], sys.argv[2]
 sys.path.insert(0, root)
 importlib.import_module(package)
