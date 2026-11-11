@@ -547,8 +547,8 @@ def test_autograd_node_returns_one_gradient_slot_per_input(
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# the KDA reference against the shared GDN reference (cake_l2n of the gdn family) is an integration test now:
-# integration/kda/tests/experimental/test_cake_kda_det_train_l2n_gdn_reference.py
+# the KDA reference against the shared GDN reference (cake_l2n of the gdn family) is a cross-family test now:
+# tests/cross_family/kda/tests/experimental/test_cake_kda_det_train_l2n_gdn_reference.py
 
 
 def _bits(x: torch.Tensor) -> torch.Tensor:
