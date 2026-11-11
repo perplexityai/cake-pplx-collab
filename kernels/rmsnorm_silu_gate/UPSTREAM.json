@@ -1,0 +1,37 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_rmsnorm_silu_gate_det_train": "flashinfer/experimental/cake/cake_rmsnorm_silu_gate_det_train",
+    "cake_rmsnorm_silu_gate_nondet_train": "flashinfer/experimental/cake/cake_rmsnorm_silu_gate_nondet_train"
+  },
+  "facades": {
+    "cake_rmsnorm_silu_gate_det_train": "flashinfer/cake_rmsnorm_silu_gate_det_train.py",
+    "cake_rmsnorm_silu_gate_nondet_train": "flashinfer/cake_rmsnorm_silu_gate_nondet_train.py"
+  },
+  "tests": [
+    "tests/norm/test_cake_rmsnorm_silu_gate_det_train.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_det_train_api.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_det_train_names.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_det_train_stall.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_nondet_train.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_api.py",
+    "tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_stall.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_rmsnorm_silu_gate_det_train.py",
+    "benchmarks/bench_cake_rmsnorm_silu_gate_nondet_train.py"
+  ],
+  "generators": {
+    "cake_rmsnorm_silu_gate_det_train": {
+      "cake_revision": "af865e0e52d13ea58919fce298834efcb77a9048",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T12:49:50Z"
+    },
+    "cake_rmsnorm_silu_gate_nondet_train": {
+      "cake_revision": "83fe008708622dae655f2923d6d1e87e58a4b4e0",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T14:20:52Z"
+    }
+  }
+}
