@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Check that every family under ``kernels/`` stands alone (ARCHITECTURE.md, "Isolation rules").
+
+Checks:
+
+1. No ``__init__.py`` at the namespace levels ``cake_pplx/`` and ``cake_pplx/_backends/``.
+2. Runtime code (``cake_pplx/``) imports only its own family's ``cake_pplx`` modules, the
+   standard library, ``torch``, ``tvm_ffi``, ``numpy`` and ``cuda`` (cuda-python).
+3. Tests and benchmarks may also import ``pytest``, their own ``tests`` package and
+   ``flashinfer`` (an optional inference reference only), never another family.
+4. With ``--base REF``: the change since ``REF`` touches at most one family.
+
+Usage::
+
+    python tools/check_isolation.py
+    python tools/check_isolation.py --base origin/main
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+KERNELS = ROOT / "kernels"
+RUNTIME_ALLOWED = {"torch", "tvm_ffi", "numpy", "cuda"}
+TEST_ALLOWED = RUNTIME_ALLOWED | {"pytest", "tests", "flashinfer", "triton", "benchmarks"}
+
+
+def own_modules(family_dir: Path) -> set[str]:
+    package = family_dir / "cake_pplx"
+    names = {p.stem for p in package.glob("*.py")}
+    names |= {p.name for p in (package / "_backends").iterdir() if p.is_dir()} if (package / "_backends").is_dir() else set()
+    return names
+
+
+def imports_of(path: Path) -> list[tuple[int, str]]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError as exc:
+        return [(exc.lineno or 0, f"<syntax error: {exc.msg}>")]
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found += [(node.lineno, alias.name) for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module == "cake_pplx":
+                found += [(node.lineno, f"cake_pplx.{alias.name}") for alias in node.names]
+            else:
+                found.append((node.lineno, node.module))
+    return found
+
+
+def check_family(family_dir: Path) -> list[str]:
+    errors = []
+    for level in ("cake_pplx", "cake_pplx/_backends"):
+        if (family_dir / level / "__init__.py").exists():
+            errors.append(f"{family_dir.name}: {level}/__init__.py breaks the shared namespace")
+    mine = own_modules(family_dir)
+    for path in sorted(family_dir.rglob("*.py")):
+        rel = path.relative_to(family_dir)
+        runtime = rel.parts[0] == "cake_pplx"
+        allowed = RUNTIME_ALLOWED if runtime else TEST_ALLOWED
+        for line, name in imports_of(path):
+            top = name.split(".")[0]
+            if top == "cake_pplx":
+                parts = name.split(".")
+                target = parts[2] if len(parts) > 2 and parts[1] == "_backends" else (parts[1] if len(parts) > 1 else "")
+                if target not in mine:
+                    errors.append(f"{family_dir.name}/{rel}:{line}: imports {name}, which another family owns")
+            elif top in sys.stdlib_module_names or top == "__future__":
+                continue
+            elif top not in allowed:
+                errors.append(f"{family_dir.name}/{rel}:{line}: imports {name} ({'runtime' if runtime else 'test'} code)")
+    return errors
+
+
+def changed_families(base: str) -> set[str]:
+    out = subprocess.run(
+        ["git", "-C", str(ROOT), "diff", "--name-only", f"{base}...HEAD"], capture_output=True, text=True, check=True
+    ).stdout
+    return {Path(line).parts[1] for line in out.splitlines() if line.startswith("kernels/") and len(Path(line).parts) > 2}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--base", help="fail if the change since this ref touches more than one family")
+    args = parser.parse_args()
+    errors = []
+    families = sorted(p for p in KERNELS.iterdir() if p.is_dir()) if KERNELS.is_dir() else []
+    for family_dir in families:
+        errors += check_family(family_dir)
+    if args.base:
+        touched = changed_families(args.base)
+        if len(touched) > 1:
+            errors.append(f"one family per change: this change touches {sorted(touched)}")
+    for error in errors:
+        print(error)
+    print(f"checked {len(families)} families: {len(errors)} problems")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
