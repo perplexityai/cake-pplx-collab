@@ -23,7 +23,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
 | lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 
-gdn, gqa and lm_head are still in review and are not on `main` yet. Their install lines work after those pull requests merge.
+lm_head is still in review and is not on `main` yet. Its install line works after that pull request merges.
 
 Each family's source is in `kernels/<family>/`. Distribution names use hyphens, and the subdirectory names use underscores. pip treats `-` and `_` in distribution names as the same character.
 
