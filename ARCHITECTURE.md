@@ -44,7 +44,7 @@ kernels/
       cake_<op>_<mode>_train[_kcp].py          # public facades
       _backends/cake_<op>_<mode>_train[_kcp]/  # kernels, build.json, csrc/
     tests/  benchmarks/
-integration/        # optional cross-family tests on a pinned combination
+integration/<family>/  # tests that need another family, run on a pinned combination
 tools/              # check_isolation.py, import_from_flashinfer.py, release helper
 .github/workflows/
 ```
@@ -175,8 +175,8 @@ There is one cross-family runtime contract. The `causal_conv1d` KCP route consum
 - The contract is a documented duck-typed protocol.
 - It has a version integer, `KCP_CONTEXT_PROTOCOL`.
 - At run time, `causal_conv1d` checks the version. If the version does not match, it raises a clear error.
-- Family tests use a local stand-in context. They do not import KDA or GDN.
-- Real cross-family checks live in `integration/`. They install a selected set of family commits.
+- Tests that need another family live in `integration/<family>/`, not in `kernels/<family>/tests/`. The import tool moves them there.
+- Run them in one environment that has the families they need, each at a chosen commit.
 
 If you change the context shape, increase `KCP_CONTEXT_PROTOCOL`. Then update the consumer side in a separate PR.
 
@@ -231,6 +231,13 @@ The tool makes only mechanical changes:
 3. It installs the JIT shim and the API decorator.
 4. It changes the `package` field in each `build.json`.
 
+It also moves every test that imports another family to `integration/<family>/`, and reports the remaining `flashinfer` references.
+
+A family update has two kinds of commits:
+
+1. One mechanical commit made by the tool. Review it by re-running the tool.
+2. Adaptation commits made by hand, for example tests that checked FlashInfer packaging. After a new import, re-apply them with `git cherry-pick` or by hand.
+
 Kernel updates from FlashInfer then land one family at a time.
 
 ## Release a family
@@ -246,3 +253,4 @@ Kernel updates from FlashInfer then land one family at a time.
 - **GPU CI.** The GPU CI runners are not yet configured.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** The protocol for the `causal_conv1d`/KDA/GDN KCP context begins at version 1.
+- **Environment variables.** The kernels keep their `FLASHINFER_*` knob names (for example `FLASHINFER_CAKE_DSA_*`). A rename to `CAKE_PPLX_*` is a later, per-family change.
