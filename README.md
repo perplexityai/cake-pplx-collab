@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. The kernels moved here from FlashInfer. [flashinfer-ai/flashinfer#9326](https://github.com/flashinfer-ai/flashinfer/pull/9326), a draft pull request, removes them from FlashInfer. Their names follow [flashinfer-ai/flashinfer#8928](https://github.com/flashinfer-ai/flashinfer/issues/8928). The source commit is [flashinfer-ai/flashinfer@c5c39b0e87f027011c86881aa2935a83e1ce53e7](https://github.com/flashinfer-ai/flashinfer/commit/c5c39b0e87f027011c86881aa2935a83e1ce53e7). There are 14 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others. FlashInfer is not required.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 14 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -60,16 +60,7 @@ y.backward(torch.randn_like(y))   # x.grad BF16, w.grad in w.dtype
 
 The first call compiles the kernels (see [JIT build and cache](#jit-build-and-cache)). Each family section in [docs/API.md](docs/API.md) includes a fuller example.
 
-### Migrating from FlashInfer
-
-Only the import prefix changes:
-
-| FlashInfer | cake-pplx-collab |
-|---|---|
-| `flashinfer.<module>` | `cake_pplx.<module>` |
-| `flashinfer.experimental.cake.<module>` | `cake_pplx._backends.<module>` |
-
-For example, `from flashinfer.cake_kda_det_train import cake_kda_det` becomes `from cake_pplx.cake_kda_det_train import cake_kda_det`. The `cake_pplx` namespace does not re-export anything, so import each module by its full name. Names that FlashInfer had already removed have no alias here. The caveats for each family in docs/API.md list them.
+Import each module by its full name: the `cake_pplx` namespace does not re-export anything.
 
 ## Requirements
 
@@ -93,11 +84,11 @@ Kernels are compiled just in time (JIT) with `nvcc` on first use. The build read
 | `CUDA_HOME` / `CUDA_PATH` | CUDA toolkit root. Otherwise `nvcc` on `PATH`, or `/usr/local/cuda`. |
 | `CXX` | Host compiler. Default: `c++`. |
 | `CAKE_PPLX_JIT_WORKERS` | Number of parallel compile jobs. Default: `min(8, cpu_count)`. |
-| `CAKE_PPLX_DISABLE_JIT` or `FLASHINFER_DISABLE_JIT` | Disables JIT. Only prebuilt `aot/` libraries load, and a missing library raises `RuntimeError`. |
+| `CAKE_PPLX_DISABLE_JIT` | Disables JIT. Only prebuilt `aot/` libraries load, and a missing library raises `RuntimeError`. |
 
-Any non-empty value of `CAKE_PPLX_DISABLE_JIT` or `FLASHINFER_DISABLE_JIT`, including `0`, disables the JIT. Exception: moe_grouped_gemm also builds a small queue-split probe with `tvm_ffi.cpp.load_inline` (needs `ninja` and `nvcc`), outside `build.json` and these variables. If that build fails, the kernel uses the even split and the output bits do not change.
+Any non-empty value of `CAKE_PPLX_DISABLE_JIT`, including `0`, disables the JIT. Exception: moe_grouped_gemm also builds a small queue-split probe with `tvm_ffi.cpp.load_inline` (needs `ninja` and `nvcc`), outside `build.json` and these variables. If that build fails, the kernel uses the even split and the output bits do not change.
 
-Environment variables named `FLASHINFER_*` that kernels read (for example `FLASHINFER_CAKE_DSA_*` and `FLASHINFER_CAKE_LM_HEAD_LOSS_*`) keep their names for now. Before you capture a CUDA graph, run one eager call so that no JIT build happens during capture.
+Before you capture a CUDA graph, run one eager call so that no JIT build happens during capture.
 
 ## Cross-family combinations
 
