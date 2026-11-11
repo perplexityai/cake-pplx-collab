@@ -36,7 +36,7 @@ pytestmark = pytest.mark.cpu_only
 pytest.importorskip("tvm_ffi")  # the backend package imports it at module level
 
 MODULE = "cake_moe_grouped_gemm_det_train"
-FACADE = f"flashinfer.{MODULE}"
+FACADE = f"cake_pplx.{MODULE}"
 PACKAGE = f"cake_pplx._backends.{MODULE}"
 # public name -> the backend submodule that defines it ("" = the package root)
 PUBLIC = {
@@ -56,18 +56,18 @@ MODE = "det"  # the mode token of every public name
 # The import paths of this family before #8928 and before its deterministic-family
 # rename (no alias module).
 REMOVED_MODULES = (
-    "flashinfer.experimental.cake_moe_grouped_det_gemm",
-    "flashinfer.experimental.cake_moe_grouped_det_gemm.cake_autograd",
-    "flashinfer.experimental.cake_moe_grouped_det_gemm.cake_backend",
-    "flashinfer.experimental.cake_moe_grouped_det_gemm.cake_build",
-    "flashinfer.experimental.cake_moe_grouped_det_gemm.cake_jit",
-    "flashinfer.grouped_mm.cake_det",
-    "flashinfer.experimental.cake_moe_grouped_gemm",
-    "flashinfer.experimental.cake_moe_grouped_gemm.cake_autograd",
-    "flashinfer.experimental.cake_moe_grouped_gemm.cake_backend",
-    "flashinfer.experimental.cake_moe_grouped_gemm.cake_build",
-    "flashinfer.experimental.cake_moe_grouped_gemm.cake_jit",
-    "flashinfer.grouped_mm.cake",
+    "cake_pplx._backends.cake_moe_grouped_det_gemm",
+    "cake_pplx._backends.cake_moe_grouped_det_gemm.cake_autograd",
+    "cake_pplx._backends.cake_moe_grouped_det_gemm.cake_backend",
+    "cake_pplx._backends.cake_moe_grouped_det_gemm.cake_build",
+    "cake_pplx._backends.cake_moe_grouped_det_gemm.cake_jit",
+    "cake_pplx.grouped_mm.cake_det",
+    "cake_pplx._backends.cake_moe_grouped_gemm",
+    "cake_pplx._backends.cake_moe_grouped_gemm.cake_autograd",
+    "cake_pplx._backends.cake_moe_grouped_gemm.cake_backend",
+    "cake_pplx._backends.cake_moe_grouped_gemm.cake_build",
+    "cake_pplx._backends.cake_moe_grouped_gemm.cake_jit",
+    "cake_pplx.grouped_mm.cake",
 )
 # The names of the deterministic objects before #8928, and the det-free aliases
 # they had before the deterministic-family rename.
@@ -96,9 +96,10 @@ EXTRA_FORMER_NAMES = {
     f"{PACKAGE}.cake_backend": ("grouped_mm_bf16_cake",),
 }
 # The modules that must have none of the former names.
+# (``flashinfer.grouped_mm`` is a FlashInfer module with no cake_pplx counterpart;
+# the ``cake_pplx`` namespace package stands for the ``flashinfer`` top level.)
 NAME_HOSTS = (
-    "flashinfer",
-    "flashinfer.grouped_mm",
+    "cake_pplx",
     FACADE,
     PACKAGE,
     f"{PACKAGE}.cake_autograd",
@@ -108,12 +109,10 @@ FORMER_HELPER_KEYS = (
     "cake_moe_grouped_det_gemm",
     "cake_moe_grouped_gemm",
 )
-# Hand-offs into the package outside the ``__all__`` lists: the stable
-# ``grouped_mm_bf16(..., backend="cake")`` and the backend function it calls.
-HANDOFFS = (
-    ("flashinfer.grouped_mm", "grouped_mm_bf16"),
-    (f"{PACKAGE}.cake_backend", "grouped_det_mm_bf16_cake"),
-)
+# Hand-offs into the package outside the ``__all__`` lists: the backend function
+# that FlashInfer's stable ``grouped_mm_bf16(..., backend="cake")`` calls (the
+# stable FlashInfer entry itself is not part of cake_pplx).
+HANDOFFS = ((f"{PACKAGE}.cake_backend", "grouped_det_mm_bf16_cake"),)
 
 
 def _module(name):
@@ -142,8 +141,12 @@ def _public_objects():
 def _leftover_directory(path):
     """The directory that the former import path ``path`` names in this checkout (it
     exists only as a development leftover)."""
-    root = Path(_module("flashinfer").__file__).parent
-    return root.joinpath(*path.split(".")[1:])
+    # ``cake_pplx`` is a PEP 420 namespace package: look in each of its portions.
+    parts = path.split(".")[1:]
+    for root in _module("cake_pplx").__path__:
+        if Path(root).joinpath(*parts).is_dir():
+            return Path(root).joinpath(*parts)
+    return Path(next(iter(_module("cake_pplx").__path__))).joinpath(*parts)
 
 
 @pytest.mark.parametrize("path", REMOVED_MODULES)
@@ -171,7 +174,7 @@ def test_removed_module_paths_do_not_import(path):
 @pytest.mark.parametrize("module_name", NAME_HOSTS)
 def test_former_names_are_gone(module_name):
     """No former name resolves on the module, the package and its submodules,
-    ``flashinfer.grouped_mm`` or ``flashinfer``: ``getattr`` raises
+    or the ``cake_pplx`` namespace: ``getattr`` raises
     ``AttributeError``, ``from ... import`` raises ``ImportError``, and neither
     ``__all__`` nor ``dir()`` lists it."""
     module = _module(module_name)
@@ -282,32 +285,27 @@ def test_the_objects_are_named_after_themselves(name):
     assert inspect.unwrap(entry).__module__ == FACADE
 
 
-def test_flashinfer_binds_the_names_on_first_access():
-    """``flashinfer`` binds every name of the module, and no other name of it, through
-    a row of ``flashinfer._LAZY_EXPORTS`` (on first access, so ``import flashinfer``
-    loads no backend); the module itself has no row."""
-    import flashinfer
+def test_the_namespace_binds_only_the_module():
+    """``cake_pplx`` is a PEP 420 namespace package (no ``__init__.py``, so no
+    re-export table): it binds the module as its submodule only, and none of the
+    module's names is reachable as ``cake_pplx.<name>``."""
+    import cake_pplx
 
-    rows = {
-        name: row
-        for name, row in flashinfer._LAZY_EXPORTS.items()
-        if row[0] == f".{MODULE}"
-    }
-    facade = _module(FACADE)
-    assert rows == {name: (f".{MODULE}", name) for name in facade.__all__}
-    for name in facade.__all__:
-        assert getattr(flashinfer, name) is getattr(facade, name), name
+    assert getattr(cake_pplx, "__file__", None) is None
+    assert getattr(cake_pplx, MODULE) is _module(FACADE)
+    for name in _module(FACADE).__all__:
+        assert not hasattr(cake_pplx, name), name
 
 
 def test_the_shared_mode_name_checks():
     """The shared Cake mode-name checks (``tests/cake/test_helpers/cake_mode_names.py``):
     the mode word in every public name and in order, no ``deterministic``
-    argument, one name per object across ``flashinfer``, the module and its
+    argument, one name per object across ``cake_pplx``, the module and its
     backend, and the former paths and names failing at import in a fresh
     interpreter."""
     from tests.cake.test_helpers.cake_mode_names import assert_cake_mode_module
 
-    import flashinfer
+    import cake_pplx
 
     forwards = [
         (name, getattr(_module(f"{PACKAGE}.{sub}" if sub else PACKAGE), name))
@@ -322,7 +320,7 @@ def test_the_shared_mode_name_checks():
         _module(FACADE),
         MODE,
         namespaces=(
-            flashinfer,
+            cake_pplx,
             _module(PACKAGE),
             _module(f"{PACKAGE}.cake_autograd"),
             _module(f"{PACKAGE}.cake_backend"),
@@ -330,5 +328,4 @@ def test_the_shared_mode_name_checks():
         forwards=forwards,
         old_modules=REMOVED_MODULES,
         old_names=former,
-        cwd=Path(flashinfer.__file__).resolve().parent.parent,
     )

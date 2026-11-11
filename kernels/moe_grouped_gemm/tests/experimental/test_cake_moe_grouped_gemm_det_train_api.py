@@ -13,13 +13,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the deterministic Cake MoE grouped GEMM module.
+cake_pplx public-API tests of the deterministic Cake MoE grouped GEMM module.
 
 The entry points of the module ``cake_pplx.cake_moe_grouped_gemm_det_train``
 (``cake_moe_grouped_gemm_det_train_{forward,dgrad,wgrad}``, the
 ``cake_moe_grouped_gemm_det_train_prepare_*`` builders and the autograd entry
-``cake_moe_grouped_gemm_det``) and the entry point
-``flashinfer.grouped_mm.grouped_mm_bf16(..., backend="cake")`` hand off to the backend
+``cake_moe_grouped_gemm_det``) and the backend function
+``cake_backend.grouped_det_mm_bf16_cake`` (which FlashInfer's
+``grouped_mm_bf16(..., backend="cake")`` calls) hand off to the backend
 package ``cake_pplx._backends.cake_moe_grouped_gemm_det_train``.  This suite
 covers the module's entry points on CPU -- stable APIs with no experimental marking and
 no warning, the signatures and docstrings they share with the package functions, the
@@ -51,7 +52,6 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
-import flashinfer.api_logging as api_logging
 import cake_pplx._backends.cake_moe_grouped_gemm_det_train as pkg
 import cake_pplx.cake_moe_grouped_gemm_det_train as facade
 from cake_pplx._backends.cake_moe_grouped_gemm_det_train import (
@@ -112,8 +112,8 @@ def _run_cpu_subprocess(code):
 
 
 def test_facade_entry_points_are_stable_handoffs():
-    """``cake_pplx.cake_moe_grouped_gemm_det_train.<name>`` is a stable FlashInfer
-    API (``@flashinfer_api``; no experimental marking) with the signature and the
+    """``cake_pplx.cake_moe_grouped_gemm_det_train.<name>`` is a stable API
+    (``@cake_api``; no experimental marking) with the signature and the
     docstring of the package function of the same name, and is listed in the
     module's ``__all__``.  The two types of the module are the package's classes,
     resolved on first access."""
@@ -205,11 +205,10 @@ def test_facade_entry_points_do_not_warn():
 def test_importing_the_facade_does_not_import_the_package():
     """``cake_pplx.cake_moe_grouped_gemm_det_train`` reaches the package through
     deferred imports only (experimental containment): a fresh interpreter that
-    imports it (and ``flashinfer.grouped_mm``) has the facade loaded and no module of
+    imports it has the facade loaded and no module of
     ``cake_pplx._backends.cake_moe_grouped_gemm_det_train``."""
     code = (
         "import json, sys\n"
-        "import flashinfer.grouped_mm\n"
         "import cake_pplx.cake_moe_grouped_gemm_det_train\n"
         "print(json.dumps(sorted(m for m in sys.modules"
         " if 'cake_moe_grouped' in m)))\n"
@@ -237,8 +236,8 @@ print(json.dumps([answers, loaded]))
 
 
 def test_support_query_is_false_off_cuda():
-    """``is_cake_moe_grouped_gemm_det_train_supported`` is a stable FlashInfer API
-    (``@flashinfer_api``; not marked experimental) that is ``False`` without CUDA
+    """``is_cake_moe_grouped_gemm_det_train_supported`` is a stable API
+    (``@cake_api``; not marked experimental) that is ``False`` without CUDA
     (the default device, an explicit CUDA device, a CPU device) and then imports
     none of the package; a device that is not CUDA is ``False`` on any host."""
     answers, loaded = json.loads(_run_cpu_subprocess(_SUPPORT_OFF_CUDA))
@@ -411,6 +410,17 @@ def test_torch_deterministic_mode_changes_nothing_for_det_entries(name):
 # ---------------------------------------------------------------------------
 # The stable route grouped_mm_bf16(..., backend="cake") (GPU)
 # ---------------------------------------------------------------------------
+# FlashInfer's ``grouped_mm_bf16(a, b, m_indptr, out=out, out_dtype=out_dtype,
+# tactic=tactic, backend="cake")`` warns once that the backend is experimental and
+# calls ``cake_backend.grouped_det_mm_bf16_cake`` with the same arguments; cake_pplx
+# has no ``grouped_mm`` module, so these tests call that handoff directly.
+
+
+def grouped_mm_bf16(a, b, m_indptr, out=None, out_dtype=torch.bfloat16, tactic=-1, backend="cake"):
+    assert backend == "cake"
+    return cb.grouped_det_mm_bf16_cake(
+        a, b, m_indptr, out=out, out_dtype=out_dtype, tactic=tactic
+    )
 
 
 def _require_program(op, out_dtype=None):
@@ -471,12 +481,9 @@ def _assert_bf16_close(out, ref):
 
 def test_grouped_mm_bf16_cake_backend_matches_reference():
     device = _require_program("fwd")
-    from flashinfer.grouped_mm import grouped_mm_bf16
 
     x, w, _g, _offs = _inputs(RAGGED_E6, 1024, 512, device)
     out = grouped_mm_bf16(x, w, _m_indptr(RAGGED_E6, device), backend="cake")
-    # naming the backend is the opt-in: the (API, backend) pair has warned once
-    assert ("grouped_mm_bf16", "cake") in api_logging._WARNED_EXPERIMENTAL_BACKENDS
     assert out.shape == (sum(RAGGED_E6), 1024) and out.dtype == torch.bfloat16
     _assert_bf16_close(out, _reference_fwd(x, w, RAGGED_E6))
     # rows past m_indptr[-1] belong to no group and are left untouched
@@ -491,7 +498,6 @@ def test_grouped_mm_bf16_cake_backend_matches_reference():
 
 def test_grouped_mm_bf16_cake_backend_rejects_unsupported_options():
     device = _require_program("fwd")
-    from flashinfer.grouped_mm import grouped_mm_bf16
 
     x, w, _g, _offs = _inputs(RAGGED_E4, 512, 256, device)
     m_indptr = _m_indptr(RAGGED_E4, device)

@@ -11,6 +11,8 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "torch",
     "apache-tvm-ffi>=0.1.11,<0.2",
+    # tvm_ffi.cpp.load_inline (the queue-split probe of both backends) builds with ninja
+    "ninja",
 ]
 
 [project.optional-dependencies]
@@ -30,3 +32,6 @@ namespaces = true
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "cpu_only: identifies tests that do not use any GPU; does not change test behavior",
+]

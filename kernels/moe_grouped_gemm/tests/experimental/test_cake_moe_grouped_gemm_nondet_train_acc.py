@@ -49,10 +49,10 @@ synccheck``.
 """
 
 import contextlib
+import importlib
 import importlib.util
 import inspect
 import os
-import re
 import shutil
 import sys
 import types
@@ -315,17 +315,10 @@ def _doc_matrix_row(path, label):
 
 def test_docs_list_the_shipped_acc_builds():
     """The README feature-matrix row ``wgrad accumulate, fused`` names, per architecture,
-    the twin forms of ``SHIPPED_ACC_STAGES`` for an fp32 ``out`` only (no bf16), and the
-    rst feature row says fp32 and lists the same forms by their short names."""
+    the twin forms of ``SHIPPED_ACC_STAGES`` for an fp32 ``out`` only (no bf16)."""
     (route,) = SHIPPED_ACC_STAGES
-    readme = os.path.join(
-        _REPO,
-        "flashinfer",
-        "experimental",
-        "cake",
-        "cake_moe_grouped_gemm_nondet_train",
-        "README.md",
-    )
+    # the package's own README (installed with it as package data)
+    readme = os.path.join(os.path.dirname(os.path.abspath(cb.__file__)), "README.md")
     row = _doc_matrix_row(readme, "`wgrad` accumulate, fused")
     cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
     label, per_arch = cells[0], cells[1:]
@@ -336,21 +329,8 @@ def test_docs_list_the_shipped_acc_builds():
             name + ACC for name in cell.replace("`", "").replace(" ", "").split(",")
         }
         assert forms == set(SHIPPED_ACC_STAGES[route][arch]), (arch, cell)
-    rst = os.path.join(_REPO, "docs", "api", "cake_moe_grouped_gemm_nondet_train.rst")
-    line = _doc_matrix_row(rst, "``wgrad`` accumulate, fused")
-    label, rest = line.split("``out``", 1)
-    assert "fp32" in label and "bf16" not in line, line
-    short = {
-        "main_halves_acc": "planned",
-        "main_wave_halves_acc": "wave",
-        "main_halves_k256t_acc": "k256t",
-        "main_halves_queue_acc": "queue",
-    }
-    cells = re.split(r"\s{2,}", rest.strip())
-    assert len(cells) == len(cake_jit.ARCHES), line
-    for arch, cell in zip(cake_jit.ARCHES, cells, strict=True):
-        want = sorted(short[stage] for stage in SHIPPED_ACC_STAGES[route][arch])
-        assert sorted(part.strip() for part in cell.split(",")) == want, (arch, line)
+    # (FlashInfer's ``docs/api/cake_moe_grouped_gemm_nondet_train.rst`` feature row
+    # is not part of cake_pplx; the package README above is the shipped doc.)
 
 
 def test_acc_stages_are_builds_of_their_twins():
@@ -783,10 +763,12 @@ def test_acc_library_loadable_is_the_loader_rule(name, stage, arch, monkeypatch)
         monkeypatch.setattr(cb, "_jit_cuda_version", lambda toolkit=toolkit: toolkit)
         assert cb.acc_library_loadable(name, stage, arch) is want, (prebuilt, toolkit)
     with pytest.MonkeyPatch.context() as mp:
-        # FlashInfer's JIT is not importable (a prebuilt-only or vendored copy): the real
-        # ``cake_build._jit_toolchain`` path, whose error names a manifest library.
+        # The package's JIT shim is not importable (a prebuilt-only or vendored copy):
+        # the real ``cake_build._jit_toolchain`` path, whose error names a manifest
+        # library.
         mp.delenv("FLASHINFER_DISABLE_JIT", raising=False)
-        mp.setitem(sys.modules, "flashinfer.jit.core", None)
+        mp.delenv("CAKE_PPLX_DISABLE_JIT", raising=False)
+        mp.setitem(sys.modules, f"{cb.__package__}._cake_pplx_jit", None)
         assert toolkit_of_process.__wrapped__() is None
 
 
@@ -796,7 +778,9 @@ def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
     back to PyTorch's CUDA version), or when that path cannot be resolved (an ``OSError``),
     ``_jit_cuda_version`` is None and an accumulate build that is not prebuilt cannot load
     (the call composes, ``"min_cuda"``)."""
-    cpp_ext = pytest.importorskip("flashinfer.jit.cpp_ext")
+    # the package's JIT shim (``_cake_pplx_jit``), which replaces FlashInfer's
+    # ``flashinfer.jit.cpp_ext`` toolchain queries
+    cpp_ext = importlib.import_module(f"{cb.__package__}._cake_pplx_jit")
     toolkit = cb._jit_cuda_version.__wrapped__
     monkeypatch.setattr(
         cpp_ext, "get_cuda_version", lambda: types.SimpleNamespace(major=99, minor=0)
@@ -805,6 +789,7 @@ def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(cb, "_jit_cuda_version", toolkit)
     monkeypatch.setattr(cb, "prebuilt_path", lambda lib: _Path(False))
     monkeypatch.delenv("FLASHINFER_DISABLE_JIT", raising=False)
+    monkeypatch.delenv("CAKE_PPLX_DISABLE_JIT", raising=False)
     shipped = _shipped_bindings()
     assert toolkit() is None  # no bin/nvcc
     assert not any(cb.acc_library_loadable(*binding) for binding in shipped)
@@ -813,10 +798,11 @@ def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
     nvcc.write_text("")
     assert toolkit() == (99, 0)
     assert all(cb.acc_library_loadable(*binding) for binding in shipped)
-    monkeypatch.setenv("FLASHINFER_DISABLE_JIT", "1")
-    assert toolkit() is None
-    assert not any(cb.acc_library_loadable(*binding) for binding in shipped)
-    monkeypatch.delenv("FLASHINFER_DISABLE_JIT")
+    for variable in ("FLASHINFER_DISABLE_JIT", "CAKE_PPLX_DISABLE_JIT"):
+        monkeypatch.setenv(variable, "1")
+        assert toolkit() is None
+        assert not any(cb.acc_library_loadable(*binding) for binding in shipped)
+        monkeypatch.delenv(variable)
 
     def no_which():
         raise FileNotFoundError("which")

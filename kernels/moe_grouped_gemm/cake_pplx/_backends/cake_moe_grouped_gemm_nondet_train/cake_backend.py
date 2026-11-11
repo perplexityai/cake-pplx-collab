@@ -458,10 +458,11 @@ def acc_stage_served(out_dtype: str, arch: str) -> bool:
 def _jit_cuda_version() -> Optional[tuple[int, int]]:
     """``(major, minor)`` of the toolkit FlashInfer's JIT builds with, the version ``cake_build.jit_spec``
     holds an entry's ``min_cuda`` against; None when the loader cannot build: FlashInfer's JIT is not
-    importable, ``FLASHINFER_DISABLE_JIT`` is set, or the CUDA path has no ``bin/nvcc`` (FlashInfer's
+    importable, ``FLASHINFER_DISABLE_JIT`` or ``CAKE_PPLX_DISABLE_JIT`` is set, or the CUDA path has no ``bin/nvcc`` (FlashInfer's
     version query then reports PyTorch's CUDA version, which compiles nothing) or cannot be resolved.
     Asked once per process."""
-    if os.environ.get("FLASHINFER_DISABLE_JIT"):
+    # The package's JIT shim refuses to build under either variable; so does this query.
+    if os.environ.get("FLASHINFER_DISABLE_JIT") or os.environ.get("CAKE_PPLX_DISABLE_JIT"):
         return None
     try:
         # Any manifest library: the name only labels the error when the JIT is not importable.

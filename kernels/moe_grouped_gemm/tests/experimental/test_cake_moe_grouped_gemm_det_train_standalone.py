@@ -21,8 +21,8 @@ reach its host-side checks on its own: under another top-level name, in a
 gate).  The package imports only itself, ``torch`` and ``tvm_ffi``: the API
 logging wrappers belong to the module ``cake_pplx.cake_moe_grouped_gemm_det_train``
 (covered by ``test_cake_moe_grouped_gemm_det_train_api.py``), a direct call of the
-package emits no warning, and the only ``flashinfer`` import is the JIT fallback of
-``cake_build.py``.  CPU-only: no GPU, no generated program and no JIT build is
+package emits no warning, it imports no ``flashinfer`` module at all, and the
+only guarded import is the JIT-shim fallback of ``cake_build.py``.  CPU-only: no GPU, no generated program and no JIT build is
 needed, so every test here runs on every lane.
 """
 
@@ -199,10 +199,19 @@ def _imports_flashinfer(node):
     return False
 
 
+def _imports_jit_shim(node):
+    return (
+        isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "_cake_pplx_jit"
+    )
+
+
 def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """The package imports nothing from the rest of FlashInfer: no relative import
-    climbs above the package (``from .. import``), every ``flashinfer`` import sits
-    in the body of a ``try`` with an ``except ImportError`` handler, exactly one
+    """The package imports nothing outside itself: no relative import climbs above
+    the package (``from .. import``), no ``flashinfer`` import remains, every import
+    of the package's JIT shim (``_cake_pplx_jit``, which replaces FlashInfer's JIT)
+    sits in the body of a ``try`` with an ``except ImportError`` handler, exactly one
     such guarded block exists -- the JIT fallback in ``cake_build.py`` -- and the
     package carries no ``_experimental.py`` of its own helpers."""
     assert not (PACKAGE_DIR / "_experimental.py").exists()
@@ -222,9 +231,12 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _imports_flashinfer(node):
+            assert not _imports_flashinfer(node), (
+                f"{path.name}:{node.lineno}: flashinfer import"
+            )
+            if _imports_jit_shim(node):
                 assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a "
+                    f"{path.name}:{node.lineno}: JIT shim import outside a "
                     "try/except ImportError"
                 )
                 guards.setdefault(path.name, set()).add(guarded[node])

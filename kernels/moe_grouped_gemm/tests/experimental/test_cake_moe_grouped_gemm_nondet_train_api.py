@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the non-deterministic Cake MoE grouped GEMM.
+cake_pplx public-API tests of the non-deterministic Cake MoE grouped GEMM.
 
 The module ``cake_pplx.cake_moe_grouped_gemm_nondet_train`` and the package
 ``cake_pplx._backends.cake_moe_grouped_gemm_nondet_train`` it hands off to
@@ -59,7 +59,6 @@ pytest.importorskip("tvm_ffi")  # cake_backend imports it at module level
 import cake_pplx.cake_moe_grouped_gemm_nondet_train as facade
 import cake_pplx._backends.cake_moe_grouped_gemm_det_train as det_pkg
 import cake_pplx._backends.cake_moe_grouped_gemm_nondet_train as pkg
-import flashinfer.grouped_mm as grouped_mm
 from cake_pplx._backends.cake_moe_grouped_gemm_det_train import (
     cake_autograd as det_autograd,
 )
@@ -191,7 +190,7 @@ def _tripwires(monkeypatch):
 
 def test_facade_entry_points_are_stable_handoffs():
     """``cake_pplx.cake_moe_grouped_gemm_nondet_train.<name>`` is a stable
-    FlashInfer API (``@flashinfer_api``; no experimental marking) with the signature
+    API (``@cake_api``; no experimental marking) with the signature
     (no ``deterministic`` parameter) and the docstring of the package function of the
     same name, and is listed in the module's ``__all__``.  The two types of the module
     are the package's classes, resolved on first access."""
@@ -254,7 +253,7 @@ def test_facade_has_no_deterministic_route():
     for name in ("_FALLBACK_WARNED", "_deterministic", "_caller_stacklevel"):
         assert not hasattr(facade, name), name
     source = Path(facade.__file__).read_text()
-    assert "experimental.cake.cake_moe_grouped_gemm_det_train" not in source
+    assert "_backends.cake_moe_grouped_gemm_det_train" not in source
     assert "raise NotImplementedError" not in source
 
 
@@ -357,7 +356,6 @@ def test_importing_the_facade_imports_neither_package():
     code = (
         "import json, sys\n"
         "import cake_pplx.cake_moe_grouped_gemm_nondet_train\n"
-        "import flashinfer.grouped_mm\n"
         "print(json.dumps(sorted(m for m in sys.modules"
         " if m.startswith('cake_pplx._backends.cake_moe_grouped_gemm_det_train')"
         " or m.startswith("
@@ -385,7 +383,7 @@ print(json.dumps([answers, loaded]))
 
 def test_support_query_is_false_off_cuda():
     """``is_cake_moe_grouped_gemm_nondet_train_supported`` is a stable FlashInfer API
-    (``@flashinfer_api``; not marked experimental) that is ``False`` without CUDA
+    (``@cake_api``; not marked experimental) that is ``False`` without CUDA
     (the default device, an explicit CUDA device, a CPU device) and then imports
     none of the package; a device that is not CUDA is ``False`` on any host."""
     answers, loaded = json.loads(_run_cpu_subprocess(_SUPPORT_OFF_CUDA))
@@ -690,15 +688,15 @@ def test_weight_gradient_alerts_with_the_entry_name(via, accumulate, monkeypatch
 
 def test_package_has_no_stable_api_handoff():
     """``grouped_mm_bf16(backend="cake")`` stays on the deterministic package: the new
-    package has no handoff function for it."""
+    package has no handoff function for it, and the deterministic package has.
+    (FlashInfer's ``grouped_mm`` module, which imports the handoff, is not part of
+    cake_pplx.)"""
     for name in ("grouped_mm_bf16_cake", "grouped_det_mm_bf16_cake"):
         assert not hasattr(cb, name), name
-    source = Path(grouped_mm.core.__file__).read_text()
-    assert (
-        "experimental.cake.cake_moe_grouped_gemm_det_train.cake_backend import"
-        in source
+    assert hasattr(
+        importlib.import_module(f"{det_pkg.__name__}.cake_backend"),
+        "grouped_det_mm_bf16_cake",
     )
-    assert "experimental.cake.cake_moe_grouped_gemm_nondet_train" not in source
 
 
 # ---------------------------------------------------------------------------
