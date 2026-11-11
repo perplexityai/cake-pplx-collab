@@ -1,0 +1,36 @@
+{
+  "source": "https://github.com/flashinfer-ai/flashinfer",
+  "commit": "c5c39b0e87f027011c86881aa2935a83e1ce53e7",
+  "packages": {
+    "cake_gqa_det_train": "flashinfer/experimental/cake/cake_gqa_det_train",
+    "cake_gqa_nondet_train": "flashinfer/experimental/cake/cake_gqa_nondet_train"
+  },
+  "facades": {
+    "cake_gqa_det_train": "flashinfer/cake_gqa_det_train.py",
+    "cake_gqa_nondet_train": "flashinfer/cake_gqa_nondet_train.py"
+  },
+  "tests": [
+    "tests/experimental/test_cake_gqa_det_train.py",
+    "tests/experimental/test_cake_gqa_det_train_api.py",
+    "tests/experimental/test_cake_gqa_det_train_names.py",
+    "tests/experimental/test_cake_gqa_nondet_train.py",
+    "tests/experimental/test_cake_gqa_nondet_train_api.py",
+    "tests/experimental/test_cake_gqa_nondet_train_names.py"
+  ],
+  "benchmarks": [
+    "benchmarks/bench_cake_gqa_det_train.py",
+    "benchmarks/bench_cake_gqa_nondet_train.py"
+  ],
+  "generators": {
+    "cake_gqa_det_train": {
+      "cake_revision": "59c300edb34782b5972536a740ad3fbbc437b61c",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T17:36:54Z"
+    },
+    "cake_gqa_nondet_train": {
+      "cake_revision": "59c300edb34782b5972536a740ad3fbbc437b61c",
+      "cuda": "13.4.92",
+      "rendered_at": "2026-11-07T17:36:54Z"
+    }
+  }
+}
