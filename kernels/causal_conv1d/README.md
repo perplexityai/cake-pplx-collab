@@ -13,5 +13,4 @@ Install this family alone, pinned to a commit:
 pip install "cake-pplx-causal-conv1d @ git+https://github.com/perplexityai/cake-pplx-collab@<sha>#subdirectory=kernels/causal_conv1d"
 ```
 
-Imported from FlashInfer `c5c39b0e87f0`; see `UPSTREAM.json`. The repository rules are in
-[`ARCHITECTURE.md`](../../ARCHITECTURE.md).
+The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
