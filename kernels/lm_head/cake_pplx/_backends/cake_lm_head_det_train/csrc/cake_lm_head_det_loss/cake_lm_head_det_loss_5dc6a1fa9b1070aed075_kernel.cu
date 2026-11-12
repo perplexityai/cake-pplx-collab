@@ -290,8 +290,15 @@ kernel_cake_lm_head_det_loss_5dc6a1fa9b1070aed075(const __grid_constant__ CUtens
                     int bid_n = local / group_size;
                     int ld_off_m = bid_m * 128;
                     int ld_off_n = bid_n * 256 + cta_rank * 128;
+                    int group_0 = ld_item_i * 2 / (group_m * (ldc / 256));
+                    int first_m_0 = group_0 * group_m;
+                    int remaining_0 = m_tiles - first_m_0;
+                    int group_size_0 = ((remaining_0 >= group_m) ? group_m : remaining_0);
+                    int local_0 = ld_item_i * 2 % (group_m * (ldc / 256));
+                    int bid_m_0 = first_m_0 + local_0 % group_size_0;
+                    int bid_n_0 = local_0 / group_size_0;
                     int live_rows = CNT[0];
-                    int live = (((bid_m >> 1) * 256 < live_rows) ? k_iters : 0);
+                    int live = (((bid_m_0 >> 1) * 256 < live_rows) ? k_iters : 0);
                     int ld_steps = live;
                     #pragma unroll 1
                     for (int ld_k = 0; ld_k < ld_steps; ld_k++) {
