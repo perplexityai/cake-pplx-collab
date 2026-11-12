@@ -21,7 +21,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_lm_head_loss_48134805ead9ce0f7416(float* __restrict__ term, double* __restrict__ loss_acc, float* __restrict__ loss_out, int rows_c, int first_chunk, int last_chunk, int mode, float loss_div);
+extern "C" __global__ void kernel_cake_lm_head_loss_48134805ead9ce0f7416(float* __restrict__ term, float* __restrict__ loss_acc, float* __restrict__ loss_out, int rows_c, int first_chunk, int last_chunk, int mode, float loss_div);
 
 namespace cake_binding_kernel_cake_lm_head_loss_48134805ead9ce0f7416 {
 
@@ -42,7 +42,7 @@ void Run(TensorView a_term, TensorView a_loss_acc, TensorView a_loss_out, int64_
   check_cuda_tensor(a_term, "term");
   check_dtype(a_term, DLDataType{kDLFloat, 32, 1}, "term");
   check_cuda_tensor(a_loss_acc, "loss_acc");
-  check_dtype(a_loss_acc, DLDataType{kDLFloat, 64, 1}, "loss_acc");
+  check_dtype(a_loss_acc, DLDataType{kDLFloat, 32, 1}, "loss_acc");
   check_cuda_tensor(a_loss_out, "loss_out");
   check_dtype(a_loss_out, DLDataType{kDLFloat, 32, 1}, "loss_out");
   TVM_FFI_CHECK(a_rows_c >= -2147483648LL && a_rows_c <= 2147483647LL, ValueError)

@@ -152,10 +152,10 @@ kernel_cake_lm_head_loss_aee298db0b852a88517a(float* __restrict__ PU, float* __r
     }
     if (blockIdx.x == 0) {
         if (tid == 0) {
-            double terms[4];
+            float terms[4];
             #pragma unroll
             for (int t_1 = 0; t_1 < 4; t_1++) {
-                terms[t_1] = (double)0.0f;
+                terms[t_1] = 0.0f;
                 if (t_1 < T) {
                     long long yl = labels[t_1];
                     float _log_8 = logf(stat[2 * t_1 + 1]);
@@ -174,11 +174,87 @@ kernel_cake_lm_head_loss_aee298db0b852a88517a(float* __restrict__ PU, float* __r
                     ROWS[2 * t_1 + 1] = dt;
                     LOGP[t_1] = logp;
                     LAB[t_1] = yl;
-                    terms[t_1] = (double)logp;
+                    terms[t_1] = logp;
                 }
             }
-            double total = terms[0] + terms[2] + (terms[1] + terms[3]);
-            LOSS[0] = (float)(((double)0.0f - total) / (double)loss_div);
+            float ts_s;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_s) : "f"(terms[0]), "f"(terms[2]));
+            float ts_bb;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(ts_bb) : "f"(ts_s), "f"(terms[0]));
+            float _sub_10;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(ts_s), "f"(ts_bb));
+            float _sub_9;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_9) : "f"(terms[0]), "f"(_sub_10));
+            float _sub_11;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_11) : "f"(terms[2]), "f"(ts_bb));
+            float ts_e;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_e) : "f"(_sub_9), "f"(_sub_11));
+            float ts_s_0;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_s_0) : "f"(terms[1]), "f"(terms[3]));
+            float ts_bb_0;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(ts_bb_0) : "f"(ts_s_0), "f"(terms[1]));
+            float _sub_13;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_13) : "f"(ts_s_0), "f"(ts_bb_0));
+            float _sub_12;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_12) : "f"(terms[1]), "f"(_sub_13));
+            float _sub_14;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_14) : "f"(terms[3]), "f"(ts_bb_0));
+            float ts_e_0;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_e_0) : "f"(_sub_12), "f"(_sub_14));
+            float hi = ts_s;
+            float lo = ts_e;
+            float ts_s_1;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_s_1) : "f"(hi), "f"(ts_s_0));
+            float ts_bb_1;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(ts_bb_1) : "f"(ts_s_1), "f"(hi));
+            float _sub_16;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_16) : "f"(ts_s_1), "f"(ts_bb_1));
+            float _sub_15;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_15) : "f"(hi), "f"(_sub_16));
+            float _sub_17;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_17) : "f"(ts_s_0), "f"(ts_bb_1));
+            float ts_e_1;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_e_1) : "f"(_sub_15), "f"(_sub_17));
+            float _add_18;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_18) : "f"(lo), "f"(ts_e_0));
+            float pm_c;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(pm_c) : "f"(_add_18), "f"(ts_e_1));
+            float ts_s_2;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_s_2) : "f"(ts_s_1), "f"(pm_c));
+            float ts_bb_2;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(ts_bb_2) : "f"(ts_s_2), "f"(ts_s_1));
+            float _sub_20;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_20) : "f"(ts_s_2), "f"(ts_bb_2));
+            float _sub_19;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_19) : "f"(ts_s_1), "f"(_sub_20));
+            float _sub_21;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_21) : "f"(pm_c), "f"(ts_bb_2));
+            float ts_e_2;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(ts_e_2) : "f"(_sub_19), "f"(_sub_21));
+            hi = ts_s_2;
+            lo = ts_e_2;
+            float pd_q = __fdiv_rn(hi, loss_div);
+            float _neg_22;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_22) : "f"(pd_q));
+            float pd_r;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(pd_r) : "f"(_neg_22), "f"(loss_div), "f"(hi));
+            float _add_23;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_23) : "f"(pd_r), "f"(lo));
+            float pd_e = __fdiv_rn(_add_23, loss_div);
+            float quo;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(quo) : "f"(pd_q), "f"(pd_e));
+            float _add_24;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_24) : "f"(ts_s), "f"(ts_s_0));
+            float plain = __fdiv_rn(_add_24, loss_div);
+            float _abs_26;
+            asm("abs.f32 %0, %1;" : "=f"(_abs_26) : "f"(quo));
+            uint32_t _setp_25_bits;
+            asm("{ .reg .pred p; setp.lt.f32 p, %1, %2; selp.u32 %0, 1, 0, p; }" : "=r"(_setp_25_bits) : "f"(_abs_26), "f"(CUDART_INF_F));
+            bool _setp_25 = _setp_25_bits != 0;
+            float fin = ((_setp_25) ? quo : plain);
+            float _sub_27;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_27) : "f"(0.0f), "f"(fin));
+            LOSS[0] = _sub_27;
         }
     }
 }
