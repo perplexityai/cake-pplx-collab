@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The module names the mode (flashinfer-ai/flashinfer#8928): the entry-point module (a stable API)
+The module names the mode: the entry-point module (a stable API)
 ``cake_pplx.cake_dsa_sparse_attention_det_train`` and its backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_det_train``.  Every public name of the entry-point module
 (its ``__all__``) has the mode word ``det`` as one of its words (the name split at ``_`` and at CamelCase boundaries)
@@ -110,7 +110,7 @@ def test_facade_reads_no_dkv_direct_variable() -> None:
 
     facade = importlib.import_module(FACADE)
     assert not hasattr(facade, "DKV_DIRECT_ENV")
-    assert "FLASHINFER_CAKE_DSA_DKV_DIRECT" not in inspect.getsource(facade)
+    assert "CAKE_PPLX_DSA_DKV_DIRECT" not in inspect.getsource(facade)
 
 
 def test_entry_point_module_imports_no_backend() -> None:
@@ -135,7 +135,7 @@ assert {BACKEND!r} in sys.modules
 
 
 def test_shared_mode_name_checks() -> None:
-    """The shared #8928 checks over the entry-point module (mode word, no ``deterministic`` keyword, each object
+    """The shared naming checks over the entry-point module (mode word, no ``deterministic`` keyword, each object
     bound only under its own name in the facade, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``)."""
 
     import cake_pplx

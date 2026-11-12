@@ -4,7 +4,7 @@ Backend package of `cake_pplx.cake_dsa_sparse_attention_nondet_train`, the
 non-deterministic package of the native 64-query-head DeepSeek Sparse Attention
 training kernels (top-k sparse MLA with absorbed queries; GLM-5.2 geometry:
 64 heads, 512 latent + 64 rope query/key dimensions, 512 value dimensions,
-top-k 2048).  Tracking issue: flashinfer-ai/flashinfer#5657.
+top-k 2048).
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_nondet_train` are
 stable APIs; this backend package is experimental (no compatibility guarantee
@@ -12,13 +12,14 @@ for its own helpers).  SM100 (B200 / GB200) is the acceptance architecture of
 the native kernels and
 SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
 the acceptance architecture of the packed / strided-layout extension
-(flashinfer-ai/flashinfer#5675) and is compiled from the same sources with an
+and is compiled from the same sources with an
 nvcc that emits `compute_107a`.  The feature does not participate in
 automatic backend selection, autotuning or trace-apply.  Its libraries are
-loaded prebuilt from `aot/` when the package ships them and JIT-built by
-FlashInfer from `build.json` otherwise (see "Layout of this package").
+loaded prebuilt from `aot/` when the package ships them and JIT-built through
+the package's JIT shim from `build.json` otherwise (see "Layout of this
+package").
 
-## Mode and names (flashinfer-ai/flashinfer#8928)
+## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
 keyword.  This is the `nondet` package: the forward and `dq` are fixed-order,
@@ -42,23 +43,21 @@ bit run to run.
 Run to run, with identical inputs on the same GPU, and the error of each output
 against an FP64 reference: relative L2 / worst element over max |reference|,
 median of 5 runs at T 1024, S 8192, top-k 2048 (B200; rope form, then NoPE
-form), next to the same error of the package at FlashInfer `2e989556`:
+form):
 
-| Output | Run to run | Error vs FP64 | Error at `2e989556` |
-|---|---|---|---|
-| `out` | repeats bit for bit | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 |
-| `lse` | repeats bit for bit | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 |
-| the `o_lo` residual (forward) | repeats bit for bit | (internal) | (internal) |
-| `dq_latent`; the NoPE `dq` | repeats bit for bit | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 |
-| `dq_rope` | repeats bit for bit | 2.35e-3 / 4.35e-3 | 2.35e-3 / 4.35e-3 |
-| `dkv_latent`; the NoPE `dkv` (fresh, or the `kv` gradient) | may vary (unordered FP32 atomic adds) | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 |
-| `dk_rope` | may vary (unordered FP32 atomic adds) | 1.66e-3 / 1.93e-3 | 1.66e-3 / 1.93e-3 |
-| the rows accumulated into `dkv_acc` | may vary (unordered FP32 atomic adds) | as `dkv_latent` / `dk_rope` | as `dkv_latent` / `dk_rope` |
+| Output | Run to run | Error vs FP64 |
+|---|---|---|
+| `out` | repeats bit for bit | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 |
+| `lse` | repeats bit for bit | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 |
+| the `o_lo` residual (forward) | repeats bit for bit | (internal) |
+| `dq_latent`; the NoPE `dq` | repeats bit for bit | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 |
+| `dq_rope` | repeats bit for bit | 2.35e-3 / 4.35e-3 |
+| `dkv_latent`; the NoPE `dkv` (fresh, or the `kv` gradient) | may vary (unordered FP32 atomic adds) | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 |
+| `dk_rope` | may vary (unordered FP32 atomic adds) | 1.66e-3 / 1.93e-3 |
+| the rows accumulated into `dkv_acc` | may vary (unordered FP32 atomic adds) | as `dkv_latent` / `dk_rope` |
 
 | Before | Now |
 |---|---|
-| `flashinfer.dsa_sparse_attention` | `cake_pplx.cake_dsa_sparse_attention_nondet_train` |
-| `flashinfer.experimental.cake_dsa_train` | `cake_pplx._backends.cake_dsa_sparse_attention_nondet_train` |
 | `dsa_sparse_attention` | `cake_dsa_sparse_attention_nondet` |
 | `dsa_sparse_attention_varlen` | `cake_dsa_sparse_attention_nondet_varlen` |
 | `dsa_sparse_attention_nope` | `cake_dsa_sparse_attention_nondet_nope` |
@@ -68,7 +67,7 @@ form), next to the same error of the package at FlashInfer `2e989556`:
 | `DSASparseAttentionNopeVarlenFunction` | `CakeDSASparseAttentionNondetNopeVarlenFunction` |
 
 The names before the rename are removed (no aliases); importing their modules
-fails.  The environment variables `FLASHINFER_CAKE_DSA_*`, the backend's
+fails.  The environment variables `CAKE_PPLX_DSA_*`, the backend's
 internal helpers (`forward`, `backward`, `prepare_dsa_train`, ...) and the
 generated library, program and kernel names keep their names.
 
@@ -159,7 +158,7 @@ out = cake_dsa_sparse_attention_nondet_varlen(
 
 The kernels read the query operands through TMA descriptors encoded from the
 tensor's own strides and gather the key operands by row stride, so the
-trainer's packed layouts (flashinfer-ai/flashinfer#5675) are consumed in place
+trainer's packed layouts are consumed in place
 -- no `.contiguous()`, `cat` or copy on the host:
 
 * `q_rope` may be the `192:256` channel slice of the pre-absorption
@@ -195,8 +194,7 @@ dkv_acc=, dkv_dst_map=)`, the public entries and the autograd `Function`
 (`CakeDSASparseAttentionNondetFunction.apply(q_latent, q_rope, kv_latent, k_rope, indices,
 topk_length, softmax_scale, key_passes, dkv_acc, dkv_dst_map, num_segments)`)
 accumulate the dK/dV gradients directly into a caller-provided FP32 buffer
-instead of returning `dkv_latent` / `dk_rope` (flashinfer-ai/flashinfer#5675:
-the packed dKV of a trainer, with the repeated / remapped rows of a
+instead of returning `dkv_latent` / `dk_rope` (the packed dKV of a trainer, with the repeated / remapped rows of a
 context-parallel window):
 
 * `dkv_acc`: FP32 `[S_dst, >= 576]` -- the latent gradient is added into columns
@@ -216,8 +214,8 @@ context-parallel window):
   entry points (default `False`) validates the values on every call when
   `True` (one device synchronization) and raises `ValueError` on a violation;
   leave it off in production.  The backend reads no environment variable:
-  flashinfer's public wrapper `cake_pplx.cake_dsa_sparse_attention_nondet_train` maps
-  `FLASHINFER_CAKE_DSA_CHECK_DST_MAP` onto the keyword when the caller leaves
+  the public wrapper `cake_pplx.cake_dsa_sparse_attention_nondet_train` maps
+  `CAKE_PPLX_DSA_CHECK_DST_MAP` onto the keyword when the caller leaves
   it at `None`.
 * Through the autograd entries `dkv_acc` may also be a zero-argument callable
   that returns the accumulator, or an `(accumulator, dkv_dst_map)` pair; the
@@ -229,7 +227,7 @@ context-parallel window):
   placeholder for an absent `topk_length`, so non-reentrant
   `torch.utils.checkpoint` can match the recomputed tensors by position) and
   keep nothing else of size on `ctx`: after a checkpointed forward the entries
-  retain ~0 MiB (flashinfer-ai/flashinfer#7039).  Saved-tensor hooks such as
+  retain ~0 MiB.  Saved-tensor hooks such as
   `torch.autograd.graph.save_on_cpu` may hand the index rows back in another
   layout (a column slice or an offset view comes back contiguous); the NoPE
   backward then plans over the rows it receives.  A tensor `dkv_acc` (and
@@ -269,8 +267,8 @@ the host takes the direct path by the size rule the record carries
 (`dkv_direct`: `min_keys_per_query`, 4 -- direct iff `S >= 4 T`) whenever
 `dkv_acc` is given; the keyword `dkv_direct` of the entry points (default
 `None` = the rule) forces (`True`) or disables (`False`) it, and the resolved
-value is part of the binding key (flashinfer's public wrapper maps
-`FLASHINFER_CAKE_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
+value is part of the binding key (the public wrapper maps
+`CAKE_PPLX_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
 leaves it at `None`).  Both
 paths add the same FP32 contributions into the same rows in another summation
 order; dq is bitwise the same.  Without the natural stages every `dkv_acc`
@@ -283,8 +281,8 @@ resolved once per input geometry (shapes, strides, dtypes, device, alignment
 and the call options): the prepared runner carves its scratch from the
 workspace it is given; the eager entry points keep the resolved plans in a
 bounded, lock-protected cache (`BINDING_CACHE`, 64 entries by default,
-`BINDING_CACHE.configure(capacity=...)` resizes it -- flashinfer's public
-wrapper applies `FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY` through it
+`BINDING_CACHE.configure(capacity=...)` resizes it -- the public
+wrapper applies `CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` through it
 when that variable is set; least recently used first out; a plan owns only the
 full-length `topk_length` vector it materializes when the caller passes none)
 and, per call, allocate the outputs
@@ -526,7 +524,7 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   outputs, `o_lo`, the global index rows, the lengths -- through
   `ctx.save_for_backward` (seven tensors in a fixed order) and keep only
   options, geometry keys and the caller-owned accumulator on `ctx`, so a
-  checkpointed forward retains nothing (flashinfer-ai/flashinfer#7039).
+  checkpointed forward retains nothing.
 * `dout` may be a head-major view (strides `[512, T * 512, 1]`) or any strided
   `[T, 64, 512]` view under the layout rules of `q` (unit channel stride, token
   and head strides multiples of 8 elements, 16-byte base): it is read in place
@@ -673,7 +671,7 @@ reports that gap).
   path.  `cake_build.load_library(name)` loads the prebuilt library when
   `aot/` holds it (next to the builder's `aot/build_info.json` sidecar, which
   must agree with the library's exported `build_cuda_version()`) and otherwise
-  JIT-builds the entry through FlashInfer (`gen_jit_spec`, sources
+  JIT-builds the entry through the package's JIT shim (`gen_jit_spec`, sources
   digest-verified first; `sm_107a` needs an nvcc that lists `compute_107`).
   `aot/` is never tracked (`.gitignore`).
 * `cake_launch.py` -- generated positional launchers and grid functions over
@@ -684,7 +682,7 @@ reports that gap).
   non-determinism alert of the backward (`_alert_nondeterministic`).
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include
   (tensor-argument checks, `TVM_FFI_CHECK_CUDA_ERROR`, `build_cuda_version`),
-  shipped by the export so the package compiles without FlashInfer's `csrc/`.
+  shipped with the package so that it compiles from its own `csrc/` alone.
 * `csrc/cake_dsa_h64_train/` -- generated kernel and binding translation units:
   one pair per kernel (the main stage and its key-range-pass form each carry
   their natural-layout variant as the compile-line specialization
@@ -722,9 +720,9 @@ the rope program) and its own key-range-pass and direct-accumulation policies
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability
 10.0 / 10.3 / 10.7 device) and `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_api.py`
-(the flashinfer public entry points, the environment variables the wrapper
+(the public entry points, the environment variables the wrapper
 resolves into this package's keyword switches and the behaviour under
 `torch.use_deterministic_algorithms`); the CPU-only
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_names.py`
-checks the names of #8928.  Benchmark:
+checks the public names.  Benchmark:
 `benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py`.

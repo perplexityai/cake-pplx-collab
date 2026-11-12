@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,13 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 A copy of ``cake_pplx/_backends/cake_dsa_sparse_attention_det_train`` must import and reach its host-side
-checks on its own (flashinfer-ai/flashinfer#6553): under another top-level name, in a ``python -I`` subprocess with
-``flashinfer`` blocked (the form of a vendoring gate).  The package imports only itself, ``torch`` and ``tvm_ffi``:
-the API logging wrappers belong to the module ``cake_pplx.cake_dsa_sparse_attention_det_train``, a direct call of
-the package emits no warning, and no module of the package imports ``flashinfer`` (the JIT fallback of
-``cake_build.py`` imports the package's own ``_cake_pplx_jit`` shim, inside ``try`` / ``except ImportError``).  The
-backend carries no determinism alert and no warning machinery.  CPU-only: no GPU, no generated program and no JIT
-build is needed.
+checks on its own: under another top-level name, in an isolated ``python -I`` subprocess (the form of a vendoring
+gate).  The package imports only itself, ``torch`` and ``tvm_ffi``: the API logging wrappers belong to the module
+``cake_pplx.cake_dsa_sparse_attention_det_train``, a direct call of the package emits no warning, and no relative
+import leaves the package (the JIT fallback of ``cake_build.py`` imports the package's own ``_cake_pplx_jit`` shim,
+inside ``try`` / ``except ImportError``).  The backend carries no determinism alert and no warning machinery.
+CPU-only: no GPU, no generated program and no JIT build is needed.
 """
 
 import ast
@@ -57,7 +56,6 @@ def _dependency_paths():
 
 _ISOLATED = """
 import importlib
-import importlib.abc
 import os
 import sys
 import warnings
@@ -67,16 +65,6 @@ for p in sys.argv[3:]:
     if p not in sys.path:
         sys.path.append(p)
 
-
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, PKG_ROOT)
 
 import torch
@@ -128,19 +116,14 @@ with warnings.catch_warnings(record=True) as rec:
     assert not cb.carve_fits(1, 4096, 4096)
     assert cb.accumulator_region_layout(S, S)["total"] > 0
 assert not rec, [f"{w.category.__name__}: {w.message}" for w in rec]
-
-leaked = sorted(
-    k for k in sys.modules if (k == "flashinfer" and sys.modules[k] is not None) or k.startswith("flashinfer.")
-)
-assert not leaked, leaked
 print("OK")
 """
 
 
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path):
-    """A copy of the package under another top-level name imports in a ``python -I`` subprocess with ``flashinfer``
-    blocked, resolves its entry points, launch tables and planning helpers, raises the host-side ``ValueError`` of
-    its checks on CPU operands without emitting a warning, and loads no ``flashinfer`` module."""
+def test_vendored_copy_imports_in_isolation(tmp_path):
+    """A copy of the package under another top-level name imports in a ``python -I`` subprocess, resolves its entry
+    points, launch tables and planning helpers, and raises the host-side ``ValueError`` of its checks on CPU operands
+    without emitting a warning."""
     root = tmp_path / "site"
     shutil.copytree(
         PACKAGE_DIR,
@@ -167,43 +150,16 @@ def _exception_names(expr):
     return [expr.id] if isinstance(expr, ast.Name) else []
 
 
-def _imports_flashinfer(node):
-    if isinstance(node, ast.Import):
-        return any(
-            a.name == "flashinfer" or a.name.startswith("flashinfer.")
-            for a in node.names
-        )
-    if isinstance(node, ast.ImportFrom) and not node.level and node.module:
-        return node.module == "flashinfer" or node.module.startswith("flashinfer.")
-    return False
-
-
-def test_package_never_imports_flashinfer():
-    """No relative import climbs above the package and no module of the package imports ``flashinfer`` (in
-    FlashInfer the one allowed import was the guarded JIT fallback of ``cake_build.py``; here that fallback imports
-    the package's own ``_cake_pplx_jit`` shim, checked below to stay inside its ``try`` / ``except ImportError``)."""
-    guards = {}
+def test_package_imports_stay_inside_the_package():
+    """No relative import climbs above the package, and the JIT fallback of ``cake_build.py`` imports the package's
+    own ``_cake_pplx_jit`` shim inside exactly one ``try`` / ``except ImportError``."""
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
-        guarded = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Try) and any(
-                "ImportError" in _exception_names(h.type) for h in node.handlers
-            ):
-                for stmt in node.body:
-                    for sub in ast.walk(stmt):
-                        guarded[sub] = node.lineno
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            if _imports_flashinfer(node):
-                assert node in guarded, (
-                    f"{path.name}:{node.lineno}: flashinfer import outside a try/except ImportError"
-                )
-                guards.setdefault(path.name, set()).add(guarded[node])
-    assert guards == {}, guards
     shim_guards = set()
     tree = ast.parse((PACKAGE_DIR / "cake_build.py").read_text())
     for node in ast.walk(tree):

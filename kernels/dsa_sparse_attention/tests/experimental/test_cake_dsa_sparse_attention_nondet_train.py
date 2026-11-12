@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,9 +44,9 @@ from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_refe
 from tests.cake.test_helpers.cake_package import cake_package
 
 # The backend suite names its package once, through the shared alias helper, and imports nothing else from
-# flashinfer: a build that vendors the package under another import path runs it unchanged after pointing the
-# ``PACKAGES`` entry at its own package.  The flashinfer public entry points and the environment variables the
-# flashinfer wrapper resolves into the package's keyword switches are covered by ``test_cake_dsa_sparse_attention_nondet_train_api.py``.
+# cake_pplx: a build that vendors the package under another import path runs it unchanged after pointing the
+# ``PACKAGES`` entry at its own package.  The public entry points and the environment variables the
+# public wrapper resolves into the package's keyword switches are covered by ``test_cake_dsa_sparse_attention_nondet_train_api.py``.
 cake_backend = cake_package(
     "cake.cake_dsa_sparse_attention_nondet_train", "cake_backend"
 )
@@ -723,7 +723,7 @@ def test_binding_cache_is_least_recently_used_and_bounded_by_capacity():
 
 def test_binding_cache_capacity_from_environment():
     """The cache takes its capacity from the constructor or from ``configure`` (``None`` = the default of 64, a
-    positive integer otherwise); the backend reads no environment variable -- the flashinfer wrapper maps its
+    positive integer otherwise); the backend reads no environment variable -- the public wrapper maps its
     capacity variable onto ``configure`` (covered by the public-API suite)."""
     default = cake_backend.BINDING_CACHE_DEFAULT_CAPACITY
     assert cake_backend._BindingCache().capacity == default == 64
@@ -1670,8 +1670,8 @@ def test_indices_column_slice_matches_the_plain_tensor(pad):
     assert max(rel_l2(g_plain[2], g_view[2]), rel_l2(g_plain[3], g_view[3])) < 1e-3
 
 
-# --- Packed / strided trainer layouts and causal varlen offsetting (flashinfer-ai/flashinfer#5675) ---
-# Packed / strided trainer layouts and the causal tail-of-prefix varlen rule (flashinfer-ai/flashinfer#5675).  The
+# --- Packed / strided trainer layouts and causal varlen offsetting ---
+# Packed / strided trainer layouts and the causal tail-of-prefix varlen rule.  The
 # kernels take the head / token strides of the query operands and the key row stride from the tensors (TMA descriptors
 # encoded from the view; k_rope as storage alias + element offset + row stride), so a view changes descriptor fields
 # only: out, lse, o_lo and dQ must be bitwise identical to the contiguous path; dK / dV are FP32 reductions whose order
@@ -1958,8 +1958,8 @@ def test_dkv_dst_map_value_check_is_opt_in():
 
 
 # --- end of the packed / strided layout block ---
-# --- Packed fp32 dK/dV accumulation and destination mapping (flashinfer-ai/flashinfer#5675) ---
-# Packed FP32 dK/dV accumulation into a caller-provided buffer with an optional destination-row map (issue #5675).
+# --- Packed fp32 dK/dV accumulation and destination mapping ---
+# Packed FP32 dK/dV accumulation into a caller-provided buffer with an optional destination-row map.
 # Comparisons across two backward calls use a tolerance: their FP32 reductions run in another order.
 ACC_REL_L2 = 1e-4
 
@@ -2575,7 +2575,7 @@ NOPE_DELTA_ARGS = (
     "grid_z",
 )
 NOPE_SLOT_WIDTHS = (1, 64, 67, 256, 512, 1024, 2177)
-NOPE_LARGE_TESTS_ENV = "FLASHINFER_CAKE_DSA_NOPE_LARGE_TESTS"
+NOPE_LARGE_TESTS_ENV = "CAKE_PPLX_DSA_NOPE_LARGE_TESTS"
 # Fixed rel-L2 table of the iid 4k x 4k, K_slots 2176 configuration and the element-wise output tolerance of the
 # NoPE acceptance.  out and dkv: the frozen rope-path figures of the same geometry times a 2 % noise band.  dq: the
 # FP64-emulated BF16 rounding floor measured on the same geometry and inputs at scale 1/16 (0.2231 %) times the same
@@ -4471,8 +4471,7 @@ def test_nope_autograd_backward_is_settled_at_forward_and_launches_delta_first(
     """The autograd wrappers settle the backward at forward time (``ctx.nope_prep``: the binding key without
     ``dout``, the options, the accumulator validated once and kept as a ctx attribute in its tensor form) and save
     seven tensors in a fixed order (``q``, ``kv``, ``out``, ``lse``, ``o_lo``, the index rows, the lengths or a
-    zero-size placeholder: everything of size the backward reads, so a checkpointed forward retains nothing,
-    flashinfer-ai/flashinfer#7039).  The first backward of a geometry looks its binding up (a miss: one plan) and
+    zero-size placeholder: everything of size the backward reads, so a checkpointed forward retains nothing).  The first backward of a geometry looks its binding up (a miss: one plan) and
     remembers it; a later backward with a ``dout`` of that layout runs it with no lookup.  The backward allocates
     ``delta`` and launches the delta stage first; ``dq``, the other fresh buffers and the zero fills of the buffers
     the call owns follow, then the remaining stages.  The accumulator check precedes every launch."""
@@ -5961,7 +5960,7 @@ def test_nope_backward_32k_x_256k_skewed_per_row_dq_p99():
     :func:`_check_dq_rows_nope`), the row-error distribution within its emulated floor's, ``out`` and ``dq`` within
     1.02x and ``dkv`` within 1.05x their BF16-P/dS numerics floors.  The FP64 reference streams over 256-row chunks and
     takes minutes: opt in with
-    ``FLASHINFER_CAKE_DSA_NOPE_LARGE_TESTS=1``."""
+    ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
     if os.environ.get(NOPE_LARGE_TESTS_ENV, "") != "1":
         pytest.skip(
             f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 32k x 256k per-row p99 case (minutes of FP64 reference)"
@@ -7576,10 +7575,10 @@ def test_nope_autograd_backward_on_masked_rows_in_raw_order_matches_the_referenc
 
 
 def test_nope_issue_repro_rows_match_their_stable_twin_bitwise_large():
-    """Opt-in (``FLASHINFER_CAKE_DSA_NOPE_LARGE_TESTS=1``): the issue's construction at full size -- one 16384-token
+    """Opt-in (``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``): the hole-layout repro's construction at full size -- one 16384-token
     document, 1024 front keys, a gap to column 2048, four tail keys, K_slots 2176 -- through the public varlen entry
     is bitwise its stable twin (``compacted_twin``) on ``out`` / ``lse`` / ``dq`` with ``dkv`` within the atomics
-    spread; the issue's descending-sorted twin regroups the keys across tiles and stays within the fp32-noise class."""
+    spread; the repro's descending-sorted twin regroups the keys across tiles and stays within the fp32-noise class."""
     if not os.environ.get(NOPE_LARGE_TESTS_ENV):
         pytest.skip(f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 16k-row constructions")
     _require_nope_compacting_stage()
@@ -8699,7 +8698,7 @@ def test_rope_varlen_repeated_calls_reuse_the_binding_bitwise_and_pin_nothing():
     assert torch.cuda.memory_allocated() - live < inp.total_q * 4
 
 
-# --- activation checkpointing (flashinfer-ai/flashinfer#7039): the autograd entries keep nothing alive after a
+# --- activation checkpointing: the autograd entries keep nothing alive after a
 # non-reentrant checkpointed forward, their outputs and gradients are those of the eager pair, and the backward is
 # recompute-safe (GPU) ---
 
@@ -8708,14 +8707,14 @@ def test_rope_varlen_repeated_calls_reuse_the_binding_bitwise_and_pin_nothing():
 # non-reentrant checkpointing only tensors passed through ``ctx.save_for_backward`` are freed after the forward and
 # recomputed; a tensor kept as a ``ctx`` attribute (or on a returned handle) stays alive for every layer at once.
 CKPT_RETAINED_LIMIT_MIB = 2.0
-# the test shape of the issue's construction: one causal segment, each query attends to its last W keys
+# the test shape of the recorded checkpointing construction: one causal segment, each query attends to its last W keys
 CKPT_T, CKPT_W = 2048, 256
-CKPT_DST_ROWS = 32768  # the CP-gather style destination buffer (the issue's 262144-row accumulator, scaled)
-# ``FLASHINFER_CAKE_DSA_CKPT_DIGESTS``: a JSON written by ``work/bench/ckpt_retained.py --shape small`` with the
+CKPT_DST_ROWS = 32768  # the CP-gather style destination buffer (the recorded 262144-row accumulator, scaled)
+# ``CAKE_PPLX_DSA_CKPT_DIGESTS``: a JSON written by ``work/bench/ckpt_retained.py --shape small`` with the
 # reference package (the same inputs: generator seed 0, the same tensor order); when set, the eager outputs and
 # gradients of this package must digest-match it (the cross-package bitwise evidence) and the eager peak memory must
 # not exceed its ``eager_peak_mib`` (allocator granularity allowed)
-CKPT_DIGESTS_ENV = "FLASHINFER_CAKE_DSA_CKPT_DIGESTS"
+CKPT_DIGESTS_ENV = "CAKE_PPLX_DSA_CKPT_DIGESTS"
 MIB = 2**20
 
 
@@ -8726,7 +8725,7 @@ def _sha16(t):
 
 
 def _ckpt_retained_mib(fn, *inputs) -> float:
-    """The issue's ``retained()``: ``memory_allocated`` kept after a checkpointed forward, less the output storage."""
+    """The recorded ``retained()`` measurement: ``memory_allocated`` kept after a checkpointed forward, less the output storage."""
     torch.cuda.synchronize()
     before = torch.cuda.memory_allocated()
     out = checkpoint(fn, *inputs, use_reentrant=False)
@@ -8801,7 +8800,7 @@ def _kv_leaf_indices(name):
 
 
 def _ckpt_entry(name, inp, *, acc_form=None, dst_map=False):
-    """``(fn, leaves, acc)`` of one autograd entry over the issue's construction: ``fn(*leaves) -> out``.  With
+    """``(fn, leaves, acc)`` of one autograd entry over the recorded checkpointing construction: ``fn(*leaves) -> out``.  With
     ``acc_form`` the FP32 accumulator ``acc`` (zeroed by the caller per step) is passed in that form; ``dst_map``
     adds the destination map into the ``CKPT_DST_ROWS``-row buffer (NoPE varlen only)."""
     S = int(inp.kv.shape[0])
@@ -8906,7 +8905,7 @@ def _ckpt_case_name(case):
 
 @pytest.mark.parametrize("case", _ckpt_case_ids(), ids=_ckpt_case_name)
 def test_ckpt_autograd_entries_keep_nothing_alive_after_a_checkpointed_forward(case):
-    """The issue's measurement on every autograd entry (the NoPE varlen entry at the issue's construction, the flat
+    """The recorded measurement on every autograd entry (the NoPE varlen entry at the recorded construction, the flat
     NoPE entry, the rotary flat and varlen Functions), with and without the caller's FP32 accumulator (and the
     destination map into a CP-gather buffer): after ``checkpoint(fn, *inputs, use_reentrant=False)`` the entry
     keeps at most ``CKPT_RETAINED_LIMIT_MIB`` beyond its output -- no ``o_lo``, no index rows or lengths, no
@@ -8937,7 +8936,7 @@ def test_ckpt_outputs_and_gradients_match_the_eager_pair_and_the_reference_diges
     """Under checkpointing every entry gives the eager pair's ``out`` and query gradients bitwise and its key-side
     gradients within the FP32 summation spread (the fresh ``dkv`` path, the ``dkv_acc`` accumulate path and the
     ``dkv_dst_map`` path alike), with the accumulator zero-filled between the checkpointed forward and its backward
-    as a trainer does.  With ``FLASHINFER_CAKE_DSA_CKPT_DIGESTS`` set, the eager ``out`` / ``dq`` digests also equal
+    as a trainer does.  With ``CAKE_PPLX_DSA_CKPT_DIGESTS`` set, the eager ``out`` / ``dq`` digests also equal
     the reference package's on the same inputs (``work/bench/ckpt_retained.py --shape small``)."""
     name, form, dst = case
     inp = _ckpt_inputs()
@@ -9025,7 +9024,7 @@ def test_ckpt_backward_is_recompute_safe_after_an_unrelated_forward(name):
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_ckpt_eager_peak_memory_is_not_above_the_reference_package(name):
     """The eager (non-checkpointed) forward + backward of every entry allocates no more above the inputs than the
-    reference package measured on the same construction (``FLASHINFER_CAKE_DSA_CKPT_DIGESTS``: ``eager_peak_mib`` of
+    reference package measured on the same construction (``CAKE_PPLX_DSA_CKPT_DIGESTS``: ``eager_peak_mib`` of
     ``work/bench/ckpt_retained.py --shape small``; allocator granularity allowed).  Without the recording the peak
     is measured and reported only."""
     inp = _ckpt_inputs()

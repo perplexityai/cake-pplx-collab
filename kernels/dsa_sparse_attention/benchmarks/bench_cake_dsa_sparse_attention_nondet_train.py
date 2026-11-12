@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,14 +24,14 @@ document of 4k .. 128k tokens, context-parallel tails (4k queries over 64k /
 128k keys), packed context-parallel all-gather-KV problems (32k queries over
 256k keys as 1 .. 32 equal documents, and eight skewed documents) and
 CP-rank spreads (32k queries over 64k / 128k / 192k keys), plus the GLM-5.2
-trainer rows of issue #5675 (``packed_glm_a`` -- the recorded eight-segment
+trainer rows (``packed_glm_a`` -- the recorded eight-segment
 batch, ``packed_glm_b``, ``packed_glm_a_s704``, ``tail_2123x67923``,
 ``doc_16231``, ``doc_4095``, ``doc_4097``).  Optional baselines when
 importable: FlashMLA sparse forward + cuDNN frontend sparse attention backward
 (``flash_mla``, ``cudnn.DSA``) and the FA sparse-MLA kernels
 (``flash_attn.cute.flash_attn_varlen_func`` with ``gather_kv_indices``).
 
-Layouts (issue #5675).  Every row can run in the trainer's packed / strided
+Layouts.  Every row can run in the trainer's packed / strided
 layouts (``--q-layout``, ``--kv-stride``, ``--dkv-acc``, ``--dkv-dst-map``;
 the GLM-5.2 rows default to them and ``--preset`` selects one of them): the
 canonical tensors of ``make_inputs`` are copied INTO a pre-absorption query
@@ -47,9 +47,10 @@ contiguous copies / cat and the ``index_add_`` / ``+=`` accumulation into
 allocated inside the timed step of every arm, so it counts in time and in the
 peak memory alike.
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and
-a cold L2 between iterations (per-iteration GPU span); medians over
-``--steps`` iterations.  ``--accuracy`` adds the relative-L2 comparison against
+Timing: :func:`median_ms`, CUPTI activity tracing through ``torch.profiler``
+with a cold L2 between iterations (per-iteration GPU span: the first start to
+the last end of the GPU activities the call launches; CUDA events where the
+profiler records no GPU activity); medians over ``--steps`` iterations.  ``--accuracy`` adds the relative-L2 comparison against
 the chunked FP64 reference (iid 4k x 4k and peaked-attention cases; with a
 destination map the reference dK/dV is mapped the same way).
 
@@ -122,7 +123,6 @@ from cake_pplx._backends.cake_dsa_sparse_attention_nondet_train import (  # noqa
     cake_backend,
     cake_jit,
 )
-from flashinfer.testing import bench_gpu_time  # noqa: E402
 from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (  # noqa: E402
     D_LATENT,
     D_QK,
@@ -156,7 +156,7 @@ _RATIOS = [1, 1, 2, 2, 4, 4, 8, 10]
 ROWS["skewed8"] = ([1024 * r for r in _RATIOS], [8192 * r for r in _RATIOS])
 for _s in (65536, 131072, 196608):
     ROWS[f"spread_32k_{_s}"] = ([32768], [_s])
-# GLM-5.2 trainer rows (issue #5675).  packed_glm_a is the recorded batch: eight
+# GLM-5.2 trainer rows.  packed_glm_a is the recorded batch: eight
 # segments alternating a full document and the tail of a long prefix,
 #   cu_seqlens_q = [0, 1777, 3532, 5655, 7765, 9888, 11998, 14121, 16231]
 #   cu_seqlens_k = [0, 1777, 58619, 60742, 128665, 130788, 198711, 200834, 268757]
@@ -180,14 +180,14 @@ ROWS["doc_16231"] = ([16231], [16231])  # one document at the recorded token cou
 ROWS["doc_4095"] = ([4095], [4095])  # tile / chunk boundary
 ROWS["doc_4097"] = ([4097], [4097])
 # the same rows with ``dout`` in the recorded trainer layout (head-major: strides ``[512, Tq * 512, 1]``, the view an
-# output projection hands back); the contiguous rows above are their controls.  Issue #7041 ask 2: the rope backward
+# output projection hands back); the contiguous rows above are their controls.  The rope backward
 # reads this view in place (its delta stage carries the strides); a package that copies it pays the copy here.
 ROWS["packed_glm_a_hm"] = GLM_A
 ROWS["doc_16231_hm"] = ([16231], [16231])
 ROW_DOUT_LAYOUT = {"packed_glm_a_hm": "head_major", "doc_16231_hm": "head_major"}
 
 
-# GB200 trainer-trace rows (round 2 of issue #5675): the recorded dK/dV destination buffers have FEWER rows than the
+# GB200 trainer-trace rows (the second trace round): the recorded dK/dV destination buffers have FEWER rows than the
 # KV buffer (268,757 key rows into 260,611 fp32 rows for batch a, 267,520 into 259,412 for batch b -- 3.03 % of the key
 # rows share a destination), and the backward runs in 4096-query chunks over the whole packed key row.
 GLM_DST_ROWS = {"glm_a": (GLM_A[1], 260611), "glm_b": (GLM_B[1], 259412)}
@@ -325,9 +325,9 @@ def _nope_row(
 ):
     """One NoPE row: document lengths, the physical slot width, the index structure
     (``pooled``: P four-token pools plus the causal tail of the open pool; ``iid``: random
-    causal top-k; the hole layouts of issue #7041 -- ``pooled_fixed_tail``: the pooled draw
+    causal top-k; the repro's hole layouts -- ``pooled_fixed_tail``: the pooled draw
     with the open pool's tail at the fixed column ``4 P`` and ``-1`` between the last filled
-    pool and that column, ``repro_gap``: the issue's rows, 1024 front keys, a gap to column
+    pool and that column, ``repro_gap``: the repro's rows, 1024 front keys, a gap to column
     2048, four tail keys, ``repro_compact_issue``: their descending-sorted twin), the pool
     capacity (default: the width's recorded capacity), the ``dout`` layout (default
     ``head_major``, the recorded trainer strides ``[512, Tq * 512, 1]``;
@@ -403,14 +403,14 @@ for _n in (4096, 16384, 65536):
     NOPE_ROWS[f"nope_doc_{_n}"] = _nope_row([_n], [_n])
 for _k in (128, 256, 512, 1024):
     NOPE_ROWS[f"nope_doc_16384_k{_k}"] = _nope_row([16384], [16384], k_slots=_k)
-# Hole rows of issue #7041 (the rows above are valid-first: the no-regression set).  Every hole row has its stable
+# Hole rows of the hole-layout repro (the rows above are valid-first: the no-regression set).  Every hole row has its stable
 # twin (``_compact_stable`` / ``_compact``: the same keys per row, valid-first) as the baseline-side control: the
 # gate is t_cand(row) / t_base(twin).  Selector assumptions: ``pooled_fixed_tail`` writes the ascending four-token
 # pools from column 0 (512 pools x 4 tokens in columns 0..2047 at K_slots 2176), ``-1`` where a document has fewer
 # pools, and the open pool's causal tail at column 2048 only when the position is not the last token of its pool
-# (``pos % 4 != 3``); ``repro_gap`` is the issue's construction (position ``pos = seq_k - seq_q + i``: keys
+# (``pos % 4 != 3``); ``repro_gap`` is the repro's construction (position ``pos = seq_k - seq_q + i``: keys
 # ``pos - 4 - j`` for j < 1024 in columns 0..1023, keys ``pos - j`` for j < 4 at columns 2048..2051, ``-1`` elsewhere).
-# R1: the issue's 16k document.  R2: a 4-document 262k pack as context-parallel rank 0 sees it (each document a
+# R1: the repro's 16k document.  R2: a 4-document 262k pack as context-parallel rank 0 sees it (each document a
 # 2048-token head segment and a 2048-token tail of its 65536-token prefix).  R2': the recorded GLM-5.3 batch with the
 # fixed-column tail.  R3: 264 documents of 992 tokens (528 segments of 31 queries: the pooled selector fills at most
 # 248 pools per document, so three quarters of the slots are the gap to column 2048).
@@ -514,10 +514,121 @@ ACCURACY_CASES = {
 SEED = 1701
 
 
+_ITERATION_RANGE = "cake_bench_iteration_"
+_L2_FLUSH: dict = {}
+_TIMER = {"fallbacks": 0}
+
+
+def _flush_l2(device):
+    """Overwrite a buffer twice the size of the device's L2 so that the next call starts with a cold L2."""
+    buffer = _L2_FLUSH.get(device)
+    if buffer is None:
+        l2_bytes = getattr(torch.cuda.get_device_properties(device), "L2_cache_size", 0)
+        buffer = torch.empty(
+            2 * (l2_bytes or (128 << 20)), dtype=torch.uint8, device=device
+        )
+        _L2_FLUSH[device] = buffer
+    buffer.zero_()
+
+
+def _span_ns(event):
+    """``(start, end)`` of a profiler event in ns."""
+    if hasattr(event, "start_ns"):
+        start = event.start_ns()
+        return start, start + event.duration_ns()
+    start = event.start_us() * 1000
+    return start, start + event.duration_us() * 1000
+
+
+def _cupti_times(fn, reps, warmup):
+    """Per-iteration GPU spans (ms) from the CUPTI activity records of ``torch.profiler``, or None when an iteration
+    has no recorded GPU activity.
+
+    Every iteration flushes the L2, then calls ``fn`` inside a ``record_function`` range.  The CUDA runtime / driver
+    calls that start inside that range name (by CUPTI correlation id) the GPU activities of the iteration; its span runs
+    from the first start to the last end of those activities."""
+    from torch.profiler import ProfilerActivity, profile, record_function
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        _flush_l2(device)
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for i in range(reps):
+            _flush_l2(device)
+            with record_function(f"{_ITERATION_RANGE}{i}"):
+                fn()
+        torch.cuda.synchronize()
+    events = list(prof.profiler.kineto_results.events())
+    cpu, gpu = torch.autograd.DeviceType.CPU, torch.autograd.DeviceType.CUDA
+    ranges = {}
+    launches = []
+    activities = {}
+    for event in events:
+        name = event.name()
+        if event.device_type() == cpu:
+            if name.startswith(_ITERATION_RANGE):
+                ranges[int(name[len(_ITERATION_RANGE) :])] = _span_ns(event)
+            elif name.startswith("cu") and event.correlation_id() > 0:
+                launches.append((_span_ns(event)[0], event.correlation_id()))
+        elif event.device_type() == gpu and event.correlation_id() > 0:
+            activities.setdefault(event.correlation_id(), []).append(_span_ns(event))
+    times = []
+    for i in range(reps):
+        if i not in ranges:
+            return None
+        lo, hi = ranges[i]
+        spans = [
+            span
+            for start, corr in launches
+            if lo <= start <= hi
+            for span in activities.get(corr, ())
+        ]
+        if not spans:
+            return None
+        times.append(
+            (max(end for _, end in spans) - min(start for start, _ in spans)) / 1e6
+        )
+    return times
+
+
+def _cuda_event_times(fn, reps, warmup):
+    """Per-iteration CUDA-event spans (ms), the L2 flushed before every iteration."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        _flush_l2(device)
+        fn()
+    torch.cuda.synchronize()
+    pairs = []
+    for _ in range(reps):
+        _flush_l2(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        pairs.append((start, end))
+    torch.cuda.synchronize()
+    return [start.elapsed_time(end) for start, end in pairs]
+
+
 def median_ms(fn, steps):
-    times = bench_gpu_time(
-        fn, dry_run_iters=3, repeat_iters=steps, enable_cupti=True, cold_l2_cache=True
-    )
+    """Median per-iteration GPU span (ms) of ``steps`` calls after three warm-up calls, a cold L2 before every call:
+    CUPTI activity through ``torch.profiler``, CUDA events where the profiler records no GPU activity."""
+    try:
+        times = _cupti_times(fn, steps, 3)
+        reason = "the profiler recorded no GPU activity of an iteration"
+    except Exception as exc:  # noqa: BLE001 - any profiler failure selects the CUDA-event fallback
+        times, reason = None, f"{type(exc).__name__}: {exc}"
+    if times is None:
+        _TIMER["fallbacks"] += 1
+        if _TIMER["fallbacks"] == 1:
+            print(
+                f"WARNING: CUPTI timing unavailable ({reason}). Falling back to CUDA events.",
+                flush=True,
+            )
+        times = _cuda_event_times(fn, steps, 3)
     return float(statistics.median(times))
 
 
@@ -526,7 +637,7 @@ def gib(nbytes):
 
 
 # ---------------------------------------------------------------------------
-# Layouts (issue #5675)
+# Layouts
 # ---------------------------------------------------------------------------
 
 
@@ -1059,7 +1170,7 @@ ARMS = {
 
 
 def _glue_compacts():
-    """Whether this package's torch glue can compact (``offset_gather_kv_indices(..., compact=True)``, issue #7041);
+    """Whether this package's torch glue can compact (``offset_gather_kv_indices(..., compact=True)``);
     an older package keeps the position-preserving rows (its own behaviour, what the baseline arm measures)."""
     return (
         "compact" in inspect.signature(cake_backend.offset_gather_kv_indices).parameters
@@ -1116,7 +1227,7 @@ def _bridge_dkv_direct(device, num_queries, num_kv):
 
 
 def _planner_key_passes(inp, chunk, program=None):
-    """The FlashInfer planner's backward key-pass decisions for a row (host side, no launch):
+    """The planner's backward key-pass decisions for a row (host side, no launch):
     the pass count of the whole-row backward, of each ``chunk``-query backward chunk, the
     policy's token chunk and the architecture rule it applied.  ``program=None`` is the RoPE
     record (the bridge arm), else the named program's record (the native arm)."""
@@ -1247,7 +1358,7 @@ class ArmCakeNope:
         return dict(dq=dq, dkv=st["dkv_acc"])
 
     def issue_step(self):
-        """The issue's step (#7041): forward + ``autograd.grad`` to ``q`` and ``kv`` with a fresh ``dkv``."""
+        """The hole-layout repro's step: forward + ``autograd.grad`` to ``q`` and ``kv`` with a fresh ``dkv``."""
         kv = self._kv_leaf()
         out, _ = self._call(self.q, kv, None)
         return torch.autograd.grad(out, (self.q, kv), self.inp.dout)
@@ -1270,7 +1381,7 @@ class ArmCakeNope:
         eager NoPE entries are not available).  The eager forward and the per-chunk global
         rows and lengths are prepared once, on the first call: the timed region is the
         chunked backward alone, so that a package whose torch glue does more per call (the
-        compacting glue of #7041) is compared on its kernels; the glue's own cost is the
+        compacting glue) is compared on its kernels; the glue's own cost is the
         index-glue table."""
         fwd = getattr(cake_backend, "forward_nope", None)
         bwd = getattr(cake_backend, "backward_nope", None)
@@ -1780,7 +1891,7 @@ def measure_perf(arm, steps):
 
 
 def issue_median_ms(fn, reps=10):
-    """The timing protocol of issue #7041: ``reps`` timed calls, each after a synchronize and a 20M-cycle
+    """The timing protocol of the hole-layout repro: ``reps`` timed calls, each after a synchronize and a 20M-cycle
     ``torch.cuda._sleep``, CUDA events around the call, ``sorted()[reps // 2]``."""
     start, end = (
         torch.cuda.Event(enable_timing=True),
@@ -1806,7 +1917,7 @@ def measure_perf_nope(arm, inp, steps, *, issue_protocol=False):
     backward) and the recompute step (two forwards + backward, activation checkpointing),
     plus the peak memory above the inputs, the workspace, the planner's ``key_passes``
     (Cake arms: the whole row and each chunk) and the row's geometry columns.
-    ``issue_protocol`` adds the issue's own measurement (#7041: forward + ``autograd.grad``
+    ``issue_protocol`` adds the hole-layout repro's own measurement (forward + ``autograd.grad``
     to ``q`` and ``kv`` with a fresh ``dkv``, and the no-grad forward, under
     :func:`issue_median_ms`) for the arms that expose ``issue_step``.
     """
@@ -2473,7 +2584,7 @@ def _kernel_table(fn):
 
 
 def run_index_glue(args, results):
-    """Index preparation alone on the rope rows (issue #7041 ask 3): the torch glue
+    """Index preparation alone on the rope rows: the torch glue
     (``offset_gather_kv_indices(..., return_topk_length=True)``, the path the rope varlen entry
     replaces), the compacting twin (``compact=True``) and the on-device stage
     (``nope_globalize_indices(..., compact=True)``) -- CUPTI kernel-only medians, host
@@ -2669,7 +2780,7 @@ def main():
     parser.add_argument(
         "--issue-protocol",
         action="store_true",
-        help="NoPE rows: add the measurement of issue #7041 (forward + autograd.grad to q and kv, "
+        help="NoPE rows: add the measurement of the hole-layout repro (forward + autograd.grad to q and kv, "
         "10 reps after a 20M-cycle _sleep, sorted()[5]) beside the CUPTI medians",
     )
     parser.add_argument(

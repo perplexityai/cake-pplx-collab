@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -71,9 +71,8 @@ from ._cake_pplx_api_dsa_sparse_attention import cake_api
 # of the backend contract, the workspace, launch binding, autograd wrappers and
 # JIT registration live in
 # cake_pplx._backends.cake_dsa_sparse_attention_nondet_train, which this
-# core module imports on first use only (the containment rules of
-# flashinfer/experimental/README.md): importing this module loads nothing from
-# the experimental tree.  The backend takes every switch as a keyword argument
+# core module imports on first use only: importing this module loads nothing
+# from the backend package.  The backend takes every switch as a keyword argument
 # and reads no environment variable; the variables below are this module's A/B
 # knobs, resolved here and passed down.
 
@@ -100,18 +99,18 @@ _FROM_BACKEND = (
 # ``auto`` (default): the registered record's size rule decides whether a
 # backward with ``dkv_acc`` accumulates directly from the main stage; ``1``
 # forces the direct path, ``0`` the accumulate-and-cast path.
-DKV_DIRECT_ENV = "FLASHINFER_CAKE_DSA_DKV_DIRECT"
+DKV_DIRECT_ENV = "CAKE_PPLX_DSA_DKV_DIRECT"
 # Unset, empty or ``0`` (default): the values of ``dkv_dst_map`` are not
 # checked; anything else validates them on every backward (one device sync).
-CHECK_DST_MAP_ENV = "FLASHINFER_CAKE_DSA_CHECK_DST_MAP"
+CHECK_DST_MAP_ENV = "CAKE_PPLX_DSA_CHECK_DST_MAP"
 # A positive integer: the capacity of the backend's binding cache (64 by
 # default).  Read when this module is imported, applied when it first reaches
 # the backend.
-BINDING_CACHE_CAPACITY_ENV = "FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY"
+BINDING_CACHE_CAPACITY_ENV = "CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY"
 
 
 def _dkv_direct_from_environment() -> Optional[bool]:
-    """``FLASHINFER_CAKE_DSA_DKV_DIRECT`` as the backend's ``dkv_direct`` keyword:
+    """``CAKE_PPLX_DSA_DKV_DIRECT`` as the backend's ``dkv_direct`` keyword:
     ``auto`` (default) is ``None`` (the record's size rule), ``1`` is ``True``
     (direct whenever the program registers the natural stages), ``0`` is
     ``False`` (never).  Any other value raises ``ValueError``."""
@@ -122,14 +121,14 @@ def _dkv_direct_from_environment() -> Optional[bool]:
 
 
 def _check_dst_map_from_environment() -> bool:
-    """``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` as the backend's ``check_dst_map``
+    """``CAKE_PPLX_DSA_CHECK_DST_MAP`` as the backend's ``check_dst_map``
     keyword: unset, empty or ``0`` is ``False`` (default), anything else
     ``True``."""
     return os.environ.get(CHECK_DST_MAP_ENV, "0") not in ("", "0")
 
 
 def _binding_cache_capacity_from_environment() -> Optional[int]:
-    """``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` as a positive integer,
+    """``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` as a positive integer,
     or ``None`` when unset or blank (the backend's configured capacity stays).
     Anything else raises ``ValueError``."""
     raw = os.environ.get(BINDING_CACHE_CAPACITY_ENV)
@@ -264,7 +263,7 @@ def cake_dsa_sparse_attention_nondet(
     dkv_direct : Optional[bool]
         How the backward accumulates dK / dV into ``dkv_acc`` when the
         registered program has the natural-layout main stages.  ``None``
-        (default) reads ``FLASHINFER_CAKE_DSA_DKV_DIRECT``: ``auto`` (its
+        (default) reads ``CAKE_PPLX_DSA_DKV_DIRECT``: ``auto`` (its
         default) applies the record's size rule -- the main stage adds into
         the caller's packed rows directly (no workspace accumulators, zero
         fill or cast launch) when the row has at least
@@ -279,7 +278,7 @@ def cake_dsa_sparse_attention_nondet(
         Validate the values of ``dkv_dst_map`` (every destination row in
         ``[0, S_dst)``) on every backward, at the cost of one device
         synchronization, raising ``ValueError`` on a violation.  ``None``
-        (default) reads ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP``: unset, empty or
+        (default) reads ``CAKE_PPLX_DSA_CHECK_DST_MAP``: unset, empty or
         ``0`` (its default) means no check, anything else enables it.  ``True``
         / ``False`` decide explicitly and ignore the variable.  Leave it off in
         production.
@@ -311,7 +310,7 @@ def cake_dsa_sparse_attention_nondet(
     argument plans with freshly allocated outputs
     (``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train.cake_backend.BINDING_CACHE``, 64
     bindings by default, least recently used first out;
-    ``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` -- a positive integer,
+    ``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` -- a positive integer,
     read when this module is imported -- sets the capacity through
     ``BINDING_CACHE.configure(capacity=...)``).
     """
@@ -402,12 +401,12 @@ def cake_dsa_sparse_attention_nondet_varlen(
         on).
     dkv_direct : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_nondet`: ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_DKV_DIRECT`` (``auto`` = the record's size rule,
+        ``CAKE_PPLX_DSA_DKV_DIRECT`` (``auto`` = the record's size rule,
         ``1`` / ``0`` = force / disable the direct accumulation into
         ``dkv_acc``); ``True`` / ``False`` decide explicitly.
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_nondet`: ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` (unset, empty or ``0`` = no
+        ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (unset, empty or ``0`` = no
         check); ``True`` validates the values of ``dkv_dst_map`` on every
         backward, ``False`` never does.
     """
@@ -533,7 +532,7 @@ def cake_dsa_sparse_attention_nondet_nope(
         How the backward accumulates ``dK + dV`` into its natural FP32 buffer
         (``dkv_acc`` or the fresh ``dkv``) when the registered program has the
         natural-layout main stages.  ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_DKV_DIRECT``: ``auto`` (its default) applies the
+        ``CAKE_PPLX_DSA_DKV_DIRECT``: ``auto`` (its default) applies the
         record's rule -- the main stage adds into the buffer directly (no
         permuted accumulator, no cast launch) when the row has at least
         ``dkv_direct.min_keys_per_query`` keys per query token, 1 for this
@@ -548,7 +547,7 @@ def cake_dsa_sparse_attention_nondet_nope(
     check_dst_map : Optional[bool]
         Validate the values of ``dkv_dst_map`` on every backward (one device
         synchronization), raising ``ValueError`` on a violation.  ``None``
-        (default) reads ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` (unset, empty
+        (default) reads ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (unset, empty
         or ``0`` = no check); ``True`` / ``False`` decide explicitly.
 
     Returns
@@ -701,11 +700,11 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         enforce causality itself.
     dkv_direct : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_nondet_nope`: ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_DKV_DIRECT``; ``True`` / ``False`` decide
+        ``CAKE_PPLX_DSA_DKV_DIRECT``; ``True`` / ``False`` decide
         explicitly.
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_nondet_nope`: ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP``; ``True`` validates the values of
+        ``CAKE_PPLX_DSA_CHECK_DST_MAP``; ``True`` validates the values of
         ``dkv_dst_map`` on every backward, ``False`` never does.
     """
     if dkv_direct is None:

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -558,7 +558,7 @@ _PACKAGE = __name__.rpartition(".")[0]
 
 
 def _caller_stacklevel() -> int:
-    """The ``stacklevel`` of the nearest frame outside this package and flashinfer, for a warning issued by the
+    """The ``stacklevel`` of the nearest frame outside this package and ``cake_pplx``, for a warning issued by the
     function that calls this one: the caller of the entry point, also through the facade and its decorators (an
     autograd backward reports the autograd frame that called it)."""
     frame = inspect.currentframe()

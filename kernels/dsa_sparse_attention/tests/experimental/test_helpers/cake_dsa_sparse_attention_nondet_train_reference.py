@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -621,7 +621,7 @@ def pooled_topk_local(
     slots between ``4 * n_sel`` and ``tail_col`` stay ``-1``.  A row then has holes iff it
     holds fewer than ``pools`` complete pools (``pos < 4 * pools - 1``) and a tail exists
     (``pos % 4 != 3``): 3/4 of the rows of a short document, 36-38 % of a CP rank that
-    holds document starts -- the fractions the issue reports (37 % / 76 %), which is the
+    holds document starts -- the fractions the hole-layout repro reports (37 % / 76 %), which is the
     evidence for this layout; the trainer's real slot layout is not public.  Needs
     ``4 * pools <= tail_col`` and ``tail_col + 3 <= topk``.
     """
@@ -698,14 +698,14 @@ def repro_gap_local(
     tail_col: int = 2048,
     twin: Optional[str] = None,
 ) -> torch.Tensor:
-    """The index rows of the issue's repro (FlashInfer #7041, ask 1) for one document, generalised to a query
-    segment that is the tail of its key prefix (``pos = seq_k - seq_q + i``; the issue has ``seq_q == seq_k``).
+    """The index rows of the hole-layout repro for one document, generalised to a query
+    segment that is the tail of its key prefix (``pos = seq_k - seq_q + i``; the repro has ``seq_q == seq_k``).
 
     Row ``i``: the ``front`` keys ``pos - tail - j`` (``j < front``, ``-1`` where negative) in columns
     ``0:front`` -- descending key ids --, ``-1`` in ``front:tail_col``, the ``tail`` newest keys ``pos - j`` at
     columns ``tail_col:tail_col + tail``, ``-1`` after; valid count ``min(pos + 1, front + tail)``.  Rows with
     ``pos >= front + tail - 1`` have a hole gap of exactly ``tail_col - front`` slots (16 tiles of 64 at the
-    issue's 1024 .. 2047).  ``twin="issue"`` returns the issue's own compacted twin instead: the same keys sorted
+    repro's 1024 .. 2047).  ``twin="issue"`` returns the repro's own compacted twin instead: the same keys sorted
     in descending order into columns ``0:front + tail`` -- NOT the stable compaction of the hole row
     (``[front..., tail...]``, :func:`compact_rows`), which reorders nothing within the two runs.
     """
@@ -800,9 +800,9 @@ class NopeInputs:
         )
 
 
-# Index structures of ``make_nope_inputs``: the two valid-first draws and the three hole layouts of FlashInfer
-# #7041 (``pooled_fixed_tail``: the pool keys in ascending order, the open pool's causal tail at the fixed column
-# ``4 * pools``; ``repro_gap``: the issue's repro rows; ``repro_compact_issue``: the issue's descending-sorted
+# Index structures of ``make_nope_inputs``: the two valid-first draws and the three hole layouts of the
+# hole-layout repro (``pooled_fixed_tail``: the pool keys in ascending order, the open pool's causal tail at the fixed column
+# ``4 * pools``; ``repro_gap``: the repro rows; ``repro_compact_issue``: the repro's descending-sorted
 # twin of those rows, valid-first).
 NOPE_INDEX_KINDS = (
     "pooled",
@@ -834,7 +834,7 @@ def make_nope_inputs(
     :func:`causal_topk_local` (``min(pos + 1, topk)`` distinct keys); both are valid-first.
     The hole layouts (:data:`NOPE_INDEX_KINDS`): ``"pooled_fixed_tail"`` is the pooled draw
     with the open pool's tail at the fixed column ``4 * pools`` (:func:`pooled_topk_local`
-    with ``tail_col``), ``"repro_gap"`` the issue's repro rows (:func:`repro_gap_local`:
+    with ``tail_col``), ``"repro_gap"`` the repro rows (:func:`repro_gap_local`:
     1024 front keys, a gap to column 2048, 4 tail keys; ``topk >= 2052``) and
     ``"repro_compact_issue"`` their descending-sorted twin.  ``topk_length`` is the valid
     count of every row (what a compacting entry produces; on valid-first rows also the
