@@ -11,7 +11,8 @@ The public module `cake_pplx.cake_lm_head_det_train` is a stable API
 experimental, with no compatibility guarantee for its internal modules.
 SM100 (B200 / GB200) is the acceptance architecture; SM103 (B300 / GB300) and
 SM107 (R200) are compiled from the same sources (SM107 runs SM103's programs,
-built for `sm_107a`, under SM103's dispatch rules except the logits rasters,
+built for `sm_107a`, except the support logits gather GEMM, which has its own
+`sm_107a` program, under SM103's dispatch rules except the logits rasters,
 the long-chunk `dX` ring and the whole-chunk `dX` split).  The feature does
 not participate in automatic backend selection, autotuning or trace-apply.
 Its libraries are loaded prebuilt from `aot/` when the package ships them and
@@ -1362,7 +1363,8 @@ per index width, the two row stages, the gather and scatter of the dense form,
 the support logits gather GEMM and the segment gather-accumulate dX / dW /
 combine kernels in their BF16 and FP32-accumulate modes), exported from the
 kernel snapshot named in the pull request.  The `sm_107a` record registers
-every stage of the `sm_103a` record; its rule tables take the `sm_103a`
+every stage of the `sm_103a` record (the support logits gather GEMM from its
+own `sm_107a` configuration); its rule tables take the `sm_103a`
 entries except the logits rasters (`LOGITS_LONG_RASTER_GROUPS`; the logits slot
 of `RASTER_WIDE_GROUPS` keeps the record's 32), the long-chunk `dX` ring
 (`DX_LONG_CHUNK_STAGES`) and the whole-chunk `dX` split, which follows
@@ -1382,14 +1384,15 @@ the package imports in an isolated interpreter and raises its host-side errors;
 copy's libraries on a GPU node).  Benchmark:
 `benchmarks/bench_cake_lm_head_det_train.py`.
 
-Toolchain note: the package needs CUDA 12.9 or newer.  Every `build.json`
-entry has `min_cuda` 12.9 (`common.requires.cuda_toolkit.min` is 12.9), and
+Toolchain note: the package needs CUDA 12.9 or newer.  Every `sm_100a` and
+`sm_103a` entry of `build.json` has `min_cuda` 12.9
+(`common.requires.cuda_toolkit.min` is 12.9), and
 the loader refuses an older toolkit: `cake_build.jit_spec` raises and the JIT
 spec lists leave the entry out.  CUDA 12.8's ptxas cannot build the 256-bit
 global loads and stores (`ld.global.v8.b32` / `st.global.v8.b32`) of eight
 `sm_100a` programs, the logits GEMM among them ("Illegal vector size: 8");
-`sm_103a` needs 12.9 and `sm_107a` 13.4 by their architecture floors (every
-`sm_107a` entry has `min_cuda` 13.4).
+`sm_103a` needs 12.9 and `sm_107a` 13.5 by their architecture floors (every
+`sm_107a` entry has `min_cuda` 13.5).
 
 The `sm_100a` 2-CTA GEMM producer loops (logits, dX and dW) have two orders,
 and the toolkit that compiles them selects one.  Built by nvcc 12.9 or 13.0,
