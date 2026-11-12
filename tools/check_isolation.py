@@ -7,7 +7,7 @@ Checks:
 2. Runtime code (``cake_pplx/``) imports only its own family's ``cake_pplx`` modules, the
    standard library, ``torch``, ``tvm_ffi``, ``numpy`` and ``cuda`` (cuda-python).
 3. Tests and benchmarks may import third-party reference implementations (``pytest``,
-   ``flashinfer``, ``fla``, ...), but never a module of another family.  A ``cake_pplx``
+   ``fla``, ``flash_attn``, ...), but never a module of another family.  A ``cake_pplx``
    name that no family owns is allowed: it is a test that an old name stays removed.
    Tests that need several families live in ``tests/cross_family/``, which this check skips.
 4. With ``--base REF``: the change since ``REF`` touches at most one family.
