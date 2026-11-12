@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 
 Names and modes of the two Cake fused BF16 RMSNorm training packages (no device).
 
-The mode is part of the name, and only of the name (flashinfer issue #8928).
+The mode is part of the name, and only of the name.
 The deterministic package (the ``cake_pplx.cake_rmsnorm_det_train`` facade and
 its backend ``cake_pplx._backends.cake_rmsnorm_det_train``) and the
 non-deterministic package (the ``cake_pplx.cake_rmsnorm_nondet_train`` facade
@@ -99,7 +99,7 @@ DET_NAMES = (
 # The ``__all__`` of the facade and of the backend package of each mode.
 NONDET_ALL = sorted([*CONSTANTS, *NONDET_NAMES])
 DET_ALL = sorted([*CONSTANTS, *DET_NAMES])
-# The five det entry points FlashInfer's top level re-exported; the
+# The five det entry points of the facade; the
 # ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL_DET = (
     "CakeRMSNormDetFunction",

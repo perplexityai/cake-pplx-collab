@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,10 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake fused BF16 RMSNorm training
+Tests of the public surface of the Cake fused BF16 RMSNorm training
 package with the non-deterministic weight gradient: the
-``cake_pplx.cake_rmsnorm_nondet_train`` facade (the only way to reach it: the
-``flashinfer`` top level binds none of its names), the absent
+``cake_pplx.cake_rmsnorm_nondet_train`` facade (the only way to reach it), the absent
 ``deterministic`` keyword (the mode is part of the name only; passing it is
 Python's ``TypeError``), the interplay with
 ``torch.use_deterministic_algorithms`` (only the backward and the autograd

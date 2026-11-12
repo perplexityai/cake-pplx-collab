@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ Mode and dispatch rules:
   naming ``cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det``.  The
   workspace helpers, :func:`cake_rmsnorm_nondet_train_route_key` and
   :func:`is_cake_rmsnorm_nondet_train_supported` never consult the setting.
-* The ``flashinfer`` top level binds none of this package's names; reach it
+* The ``cake_pplx`` namespace binds none of this package's names; reach it
   as the module ``cake_pplx.cake_rmsnorm_nondet_train``.
 * There are no aliases: no name here resolves to an object of the
   deterministic package, and the names of the former ``cake_rmsnorm_train``
@@ -179,7 +179,7 @@ from ._cake_pplx_api_rmsnorm import cake_api
 
 
 # The backend package is imported on first use and cached: importing this module does not
-# import ``flashinfer.experimental``, and a call does not repeat the import.
+# import the backend package, and a call does not repeat the import.
 @functools.cache
 def _backend():
     from ._backends import cake_rmsnorm_nondet_train as backend  # noqa: PLC0415 - the backend package, imported on first use

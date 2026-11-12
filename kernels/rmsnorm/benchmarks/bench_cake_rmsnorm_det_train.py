@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,15 +16,15 @@ limitations under the License.
 Benchmark of the Cake fused BF16 RMSNorm training kernels against the
 training-side comparators: ``torch.compile`` (inductor) of the FP32-promoted
 formula, eager autograd of the same formula, ``torch.nn.functional.rms_norm``
-autograd, Liger Kernel (when installed) and, for the forward only,
-``flashinfer.norm.rmsnorm``.
+autograd and Liger Kernel (when installed).
 
 Every row reports forward, backward (including the final dw reduction) and
 their sum in microseconds plus the achieved GB/s over the logical byte volume
 (forward ``4TH + 4T``, backward ``6TH + 4T + 4 * n_chunks * H``; the residual
-routes add ``4TH`` / ``2TH``).  Timing uses CUPTI kernel activity with a cold
-L2 (``flashinfer.testing.bench_gpu_time(enable_cupti=True)``); multi-kernel
-comparators report the sum of their kernels' GPU time.
+routes add ``4TH`` / ``2TH``).  Timing uses CUPTI device activity records
+(through ``torch.profiler``) with a cold L2 (a buffer of twice the L2 size is
+rewritten before every call); multi-kernel comparators report the sum of their
+kernels' GPU time.
 
 Example::
 
@@ -42,7 +42,6 @@ from typing import Callable, Optional
 
 import torch
 
-import flashinfer
 from cake_pplx.cake_rmsnorm_det_train import (
     cake_rmsnorm_det_train_backward,
     cake_rmsnorm_det_train_backward_workspace,
@@ -50,22 +49,85 @@ from cake_pplx.cake_rmsnorm_det_train import (
     is_cake_rmsnorm_det_train_supported,
 )
 from cake_pplx._backends.cake_rmsnorm_det_train import cake_jit as loader
-from flashinfer.testing import bench_gpu_time
 
 WIDTHS = ((6144, 1e-5), (4096, 1e-5), (2048, 1e-6), (1536, 1e-6), (512, 1e-6))
 EPS = {hidden: eps for hidden, eps in WIDTHS}
 ROWS = (256, 1024, 4096, 16172, 16231, 32768, 65536)
 
 
+WARMUP_CALLS = 10
+TIMED_CALLS = 100
+
+
 def _median_ms(samples) -> float:
     return float(statistics.median(list(samples)))
+
+
+def _sentinel() -> None:
+    """Launch ATen's one-cycle spin kernel, which marks call boundaries in the trace."""
+    torch.cuda._sleep(1)
+
+
+def _is_sentinel(name: str) -> bool:
+    return "::spin_kernel(" in name
+
+
+def _cupti_call_times_ms(
+    fn: Callable[[], object], *, warmup: int = WARMUP_CALLS, calls: int = TIMED_CALLS
+) -> list[float]:
+    """GPU time (ms) of each timed call of ``fn``: the summed durations of its CUDA
+    activity records (kernels, memsets, memcpys), with L2 flushed before each call.
+
+    Every call runs between two sentinel kernels; the first record after a
+    sentinel is the L2 flush and is not counted.
+    """
+
+    device = torch.cuda.current_device()
+    l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+    flush = torch.empty(max(2 * l2_bytes, 1 << 20), dtype=torch.uint8, device="cuda")
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CUDA]
+    ) as profile:
+        _sentinel()
+        for _ in range(calls):
+            flush.fill_(1)
+            fn()
+            _sentinel()
+        torch.cuda.synchronize()
+    records = sorted(
+        (
+            event
+            for event in profile.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+        ),
+        key=lambda event: event.time_range.start,
+    )
+    times: list[float] = []
+    current: Optional[list] = None
+    for event in records:
+        if _is_sentinel(event.name):
+            if current is not None:
+                times.append(
+                    sum(e.time_range.end - e.time_range.start for e in current[1:]) / 1e3
+                )
+            current = []
+        elif current is not None:
+            current.append(event)
+    if len(times) != calls:
+        raise RuntimeError(
+            f"the profiler returned {len(times)} complete calls of {calls}; "
+            "CUPTI lost device records"
+        )
+    return times
 
 
 def _time(fn: Callable[[], object]) -> float:
     """Median GPU time (ms) of ``fn`` over its kernels, cold L2, CUPTI."""
 
-    times = bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True)
-    return _median_ms(times)
+    return _median_ms(_cupti_call_times_ms(fn))
 
 
 def _rmsnorm_fp32(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
@@ -232,22 +294,6 @@ class Liger(Comparator):
         return fwd, bwd
 
 
-class FlashInferForward(Comparator):
-    name = "flashinfer.rmsnorm(fwd)"
-    forward_only = True
-
-    def make(self, x, w, eps, u=None):
-        if u is not None:
-            raise NotImplementedError("forward-only comparator without residual fusion")
-        out = torch.empty_like(x)
-
-        def fwd():
-            flashinfer.norm.rmsnorm(x, w, eps, out=out)
-            return out
-
-        return fwd, None
-
-
 class Cake(Comparator):
     name = "cake"
 
@@ -291,7 +337,6 @@ COMPARATORS = (
     EagerFp32(),
     EagerFRmsNorm(),
     Liger(),
-    FlashInferForward(),
 )
 
 

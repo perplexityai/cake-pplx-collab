@@ -1,10 +1,9 @@
 """Ahead-of-time JIT warm-up for the backend suites.
 
-It replaces FlashInfer's ``flashinfer.jit.build_jit_specs`` warm-up: the specs a
-backend's ``cake_jit.specs_for_arch`` returns are the package's own JIT shim
-specs (``_cake_pplx_jit.JitSpec``), and each ``build()`` compiles one library
-into ``$CAKE_PPLX_CACHE_DIR`` (a cached library returns at once).  The builds
-run in parallel threads, as FlashInfer's ninja warm-up did.
+The specs a backend's ``cake_jit.specs_for_arch`` returns are the package's own
+JIT shim specs (``_cake_pplx_jit.JitSpec``), and each ``build()`` compiles one
+library into ``$CAKE_PPLX_CACHE_DIR`` (a cached library returns at once).  The
+builds run in parallel threads.
 """
 
 from __future__ import annotations

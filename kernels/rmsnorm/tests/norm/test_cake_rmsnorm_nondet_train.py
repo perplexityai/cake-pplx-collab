@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -51,8 +51,8 @@ argument validation.  The build manifest's
 per-architecture CUDA floors and flags are checked without a device.
 
 This suite exercises the backend packages alone, through
-``tests.cake.test_helpers.cake_package``; the facade and the ``flashinfer`` top
-level are ``test_cake_rmsnorm_nondet_train_api.py``'s.
+``tests.cake.test_helpers.cake_package``; the facade is
+``test_cake_rmsnorm_nondet_train_api.py``'s.
 """
 
 from __future__ import annotations

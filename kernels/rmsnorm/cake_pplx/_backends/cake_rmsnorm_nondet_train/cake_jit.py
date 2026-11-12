@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ launch / selection / chunking rules and the kernel-parameter -> logical-argument
 map.  What to compile -- sources, digests, nvcc flags -- is recorded once in
 ``build.json`` next to this file; :mod:`.cake_build` serves the library
 ``<library>_<arch>`` from a prebuilt ``aot/`` file when a builder compiled it
-and otherwise through FlashInfer's JIT from the same sources and flags,
+and otherwise through its JIT shim from the same sources and flags,
 verifying every source digest before the first build.
 
 A route is the ordered list of module records one public call may launch.
@@ -4341,7 +4341,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 4096,
         },
     },
-    # sm_100a H512 bf16 weight: (1280, 4096] FI bench ratio < 1 against the det pair in both sessions (B200); above T 4096 the deterministic package's det pairs run for dw accuracy: this kernel's 16-step FP32 dw windows put its worst dw error at up to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200 (rows of stride 576)
+    # sm_100a H512 bf16 weight: (1280, 4096] benchmark ratio < 1 against the det pair in both sessions (B200); above T 4096 the deterministic package's det pairs run for dw accuracy: this kernel's 16-step FP32 dw windows put its worst dw error at up to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200 (rows of stride 576)
     "cake_rmsnorm_train_d0bde38aa443d42a5f04": {
         "arches": [
             "sm_100a",
@@ -4537,7 +4537,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 49152,
         },
     },
-    # sm_100a H1536 f32 weight: (32768, 75776] above T 32768 for dw accuracy (the det pair's worst dw error exceeds the FP32 eager reference's at T 33280 on B200, 0.6840 against 0.6219 of the per-element budget); backward time 0.941-0.965x the det pair's at T 32769, 33280, 34816 and 36864 in two timing sessions, FI bench ratio < 1 against the det pair in both sessions above T 36864 (B200); up to T 75776 its worst dw element stays within 0.793 of the per-element budget at every sampled T (every 256th row from 32768 to 65536 and every 64th from 65536 to 75776, worst of 120 inputs of each of three families in both rstd forms) on B200; it exceeds the budget at T 108736 (1.060); the twosum form of this kernel runs above T 75776; the twosum form takes 1.05x to 1.12x this kernel's backward time from T 32769 to 75776 (B200)
+    # sm_100a H1536 f32 weight: (32768, 75776] above T 32768 for dw accuracy (the det pair's worst dw error exceeds the FP32 eager reference's at T 33280 on B200, 0.6840 against 0.6219 of the per-element budget); backward time 0.941-0.965x the det pair's at T 32769, 33280, 34816 and 36864 in two timing sessions, benchmark ratio < 1 against the det pair in both sessions above T 36864 (B200); up to T 75776 its worst dw element stays within 0.793 of the per-element budget at every sampled T (every 256th row from 32768 to 65536 and every 64th from 65536 to 75776, worst of 120 inputs of each of three families in both rstd forms) on B200; it exceeds the budget at T 108736 (1.060); the twosum form of this kernel runs above T 75776; the twosum form takes 1.05x to 1.12x this kernel's backward time from T 32769 to 75776 (B200)
     "cake_rmsnorm_train_4b6981c10fd40a9d8aec__32768_75776": {
         "arches": [
             "sm_100a",
@@ -4736,7 +4736,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (42496, 65536] FI bench ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.751 of the per-element budget at every sampled T from 5633 to 65536 (75 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 72 of them) on B200; its worst dw error was 1.07x the deterministic package's median FP64 error over 5 repeats at T 65536 on B200 (concentrated inputs); below T 42496 the deterministic package's det pair runs for dw accuracy; the twosum form of this kernel runs above T 65536
+    # sm_100a H6144 bf16 weight: (42496, 65536] benchmark ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.751 of the per-element budget at every sampled T from 5633 to 65536 (75 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 72 of them) on B200; its worst dw error was 1.07x the deterministic package's median FP64 error over 5 repeats at T 65536 on B200 (concentrated inputs); below T 42496 the deterministic package's det pair runs for dw accuracy; the twosum form of this kernel runs above T 65536
     "cake_rmsnorm_train_9433061da18b2db4299d__42496_65536": {
         "arches": [
             "sm_100a",
@@ -4934,7 +4934,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 196608,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (1408, 65536] the twosum help single kernel 1609f796 at stages=3, for speed with the dw arithmetic of 1609f796, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 3fbfdd75 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.16x to 1.97x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 1409 to 65536 it took 1.04x to 1.05x the time of the program FlashInfer e14ddfd9 runs at T <= 2048, 1.01x to 1.02x at T 3072 to 4096 and 0.97x to 0.99x from T 6144 (1609f796: 0.98x to 1.09x), with the dw error of 1609f796
+    # sm_100a H6144 residual bf16 weight: (1408, 65536] the twosum help single kernel 1609f796 at stages=3, for speed with the dw arithmetic of 1609f796, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 3fbfdd75 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.16x to 1.97x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 1409 to 65536 it took 1.04x to 1.05x the time of the program this package's previous version runs at T <= 2048, 1.01x to 1.02x at T 3072 to 4096 and 0.97x to 0.99x from T 6144 (1609f796: 0.98x to 1.09x), with the dw error of 1609f796
     "cake_rmsnorm_train_eb332e8c97f6387027c6__1408_65536": {
         "arches": [
             "sm_100a",
@@ -5033,7 +5033,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 196608,
         },
     },
-    # sm_100a H6144 residual f32 weight: (1408, 65536] FI bench ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.723 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 1409 to 65536 (168 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 167 of them) on B200; the twosum form of this kernel runs above T 65536
+    # sm_100a H6144 residual f32 weight: (1408, 65536] benchmark ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.723 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 1409 to 65536 (168 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 167 of them) on B200; the twosum form of this kernel runs above T 65536
     "cake_rmsnorm_train_a640d0b799889f785ad5__1408_65536": {
         "arches": [
             "sm_100a",
@@ -5166,7 +5166,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 bf16 weight: (64, 336] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 bf16 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_64e6aa82bb2c6d4ea978__64_336": {
         "arches": [
             "sm_100a",
@@ -5234,7 +5234,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (64, 336] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 f32 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_17493054fed5409b6df9__64_336": {
         "arches": [
             "sm_100a",
@@ -5370,7 +5370,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (64, 1792] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H4096 f32 weight: (64, 1792] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_8616070567821eaa3e35__64_1792": {
         "arches": [
             "sm_100a",
@@ -5506,7 +5506,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (64, 1152] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 bf16 weight: (64, 1152] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_44508df7dab2ab688f85__64_1152": {
         "arches": [
             "sm_100a",
@@ -5574,7 +5574,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 f32 weight: (64, 1168] FI bench ratio < 1 against the det pair in both sessions (B200); the det pair runs above T 1168 (faster from T 1184 in every session, 1.05x at T 1408); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 f32 weight: (64, 1168] benchmark ratio < 1 against the det pair in both sessions (B200); the det pair runs above T 1168 (faster from T 1184 in every session, 1.05x at T 1408); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_b3e6531e46667901ab91__64_1168": {
         "arches": [
             "sm_100a",
@@ -5642,7 +5642,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (64, 1408] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual bf16 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_864e84f3d874f850c091__64_1408": {
         "arches": [
             "sm_100a",
@@ -5710,7 +5710,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual f32 weight: (64, 1408] FI bench ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual f32 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
     "cake_rmsnorm_train_71d36617003ab7742a77__64_1408": {
         "arches": [
             "sm_100a",
@@ -5744,7 +5744,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (4608, 16384] the twosum help single kernel c67fc8b9 with evict_last loads and without r_ahead, for speed with the dw arithmetic of c67fc8b9, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 15e157d2 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.10x to 2.30x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 4609 to 16384 it took 1.00x to 1.04x the time of the program FlashInfer e14ddfd9 runs (c67fc8b9: 1.01x to 1.06x), with the dw error of c67fc8b9 (q <= 0.987 of the deterministic package's program at FlashInfer 2e989556)
+    # sm_100a H4096 bf16 weight: (4608, 16384] the twosum help single kernel c67fc8b9 with evict_last loads and without r_ahead, for speed with the dw arithmetic of c67fc8b9, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 15e157d2 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.10x to 2.30x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 4609 to 16384 it took 1.00x to 1.04x the time of the program this package's previous version runs (c67fc8b9: 1.01x to 1.06x), with the dw error of c67fc8b9 (q <= 0.987 of the deterministic package's program in its earlier version)
     "cake_rmsnorm_train_2443b1f0183048c47b15__4608_16384": {
         "arches": [
             "sm_100a",
@@ -5777,7 +5777,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_100a H4096 bf16 weight: (16384, 36864] the twosum help single kernel c67fc8b9 with evict_last loads, for speed with the dw arithmetic of c67fc8b9 (the reason of (4608, 16384]): on B200 (CUDA graph replay, cold L2, paired rounds) it took 0.99x to 1.01x the time of the program FlashInfer e14ddfd9 runs from T 20480 to 36864 (c67fc8b9: 1.01x to 1.06x over T 4609 to 36864), with the dw error of c67fc8b9 (q <= 0.987)
+    # sm_100a H4096 bf16 weight: (16384, 36864] the twosum help single kernel c67fc8b9 with evict_last loads, for speed with the dw arithmetic of c67fc8b9 (the reason of (4608, 16384]): on B200 (CUDA graph replay, cold L2, paired rounds) it took 0.99x to 1.01x the time of the program this package's previous version runs from T 20480 to 36864 (c67fc8b9: 1.01x to 1.06x over T 4609 to 36864), with the dw error of c67fc8b9 (q <= 0.987)
     "cake_rmsnorm_train_03f6488b89b5f9ae3db5__16384_36864": {
         "arches": [
             "sm_100a",
@@ -5810,7 +5810,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_100a H4096 f32 weight: (3584, 36864] FI bench ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H4096 f32 weight: (3584, 36864] benchmark ratio < 1 against the det pair in both sessions (B200)
     "cake_rmsnorm_train_f7573bcb748c0784f3ec": {
         "arches": [
             "sm_100a",
@@ -5876,7 +5876,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_100a H2048 bf16 weight: (7168, 11264] FI bench ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 bf16 weight: (7168, 11264] benchmark ratio < 1 against the det pair in both sessions (B200)
     "cake_rmsnorm_train_0fa4f255caf709d09f66": {
         "arches": [
             "sm_100a",
@@ -5941,7 +5941,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H2048 f32 weight: (15403, 45056] FI bench ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 f32 weight: (15403, 45056] benchmark ratio < 1 against the det pair in both sessions (B200)
     "cake_rmsnorm_train_ba7dbf6a07744268705e": {
         "arches": [
             "sm_100a",
@@ -6040,7 +6040,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_103a H5120 bf16 weight: (61952, 393216] above T 61952 for dw accuracy (both weight dtypes switch at T 61952: the FP32-weight route's compensated det pair, the same dw computation, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.588 of the budget at the sampled T from 61953 to 131072 on GB300 (3 x 60 inputs, kernel and torch rstd); its FP32-weight twin, the same dw computation, 0.688 at 73 sampled T from 61953 to 131072, 1.16 times the twosum single's speed in the FI bench (GB300, 4 sessions); up to T 393216, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.993 of it); at T 524288 it is 1.100 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144 and 393216, kernel and torch rstd)
+    # sm_103a H5120 bf16 weight: (61952, 393216] above T 61952 for dw accuracy (both weight dtypes switch at T 61952: the FP32-weight route's compensated det pair, the same dw computation, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.588 of the budget at the sampled T from 61953 to 131072 on GB300 (3 x 60 inputs, kernel and torch rstd); its FP32-weight twin, the same dw computation, 0.688 at 73 sampled T from 61953 to 131072, 1.16 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 393216, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.993 of it); at T 524288 it is 1.100 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144 and 393216, kernel and torch rstd)
     "cake_rmsnorm_train_b523a764b029e5ca1aaf__61952_393216": {
         "arches": [
             "sm_103a",
@@ -6106,7 +6106,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 81920,
         },
     },
-    # sm_103a H5120 f32 weight: (61952, 196608] above T 61952 for dw accuracy (the compensated det pair, from T 5120, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.688 of the budget at 73 sampled T from 61953 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.18 times the twosum single's speed in the FI bench (GB300, 4 sessions); up to T 196608, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.700 of it); at T 262144 it is 1.004 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144, kernel and torch rstd)
+    # sm_103a H5120 f32 weight: (61952, 196608] above T 61952 for dw accuracy (the compensated det pair, from T 5120, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.688 of the budget at 73 sampled T from 61953 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.18 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 196608, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.700 of it); at T 262144 it is 1.004 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144, kernel and torch rstd)
     "cake_rmsnorm_train_90598c14b4e396f5c8b0__61952_196608": {
         "arches": [
             "sm_103a",
@@ -6342,7 +6342,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (320, 1824] FI bench ratio < 1 against the det pair in both sessions (GB300; 0.95x at T 1824); the det pair runs above T 1824 (1.03x faster at T 1832 to 1856)
+    # sm_103a H6144 residual f32 weight: (320, 1824] benchmark ratio < 1 against the det pair in both sessions (GB300; 0.95x at T 1824); the det pair runs above T 1824 (1.03x faster at T 1832 to 1856)
     "cake_rmsnorm_train_71d36617003ab7742a77__320_1824": {
         "arches": [
             "sm_103a",
@@ -6376,7 +6376,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (7168, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.6 to 555 us at T 7169 to 131072, 0.80x to 0.81x the time of the twosum single kernel c07ab5f1 that FlashInfer main runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.047x that of the deterministic package's program at FlashInfer 2e989556, except 1.133x at T 8192 (saturated_lo inputs), equal to c07ab5f1's there
+    # sm_107a H6144 residual bf16 weight: (7168, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.6 to 555 us at T 7169 to 131072, 0.80x to 0.81x the time of the twosum single kernel c07ab5f1 that this package's previous version runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.047x that of the deterministic package's program in its earlier version, except 1.133x at T 8192 (saturated_lo inputs), equal to c07ab5f1's there
     "cake_rmsnorm_train_16c5f0465183f87c5229__7168_131072": {
         "arches": [
             "sm_107a",
@@ -6443,7 +6443,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 196608,
         },
     },
-    # sm_107a H6144 residual f32 weight: (7168, 131072] the FP32-weight twin of the pair-row single kernel of the BF16-weight route (table_slots 4; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.0 to 556 us at T 7169 to 131072, 0.78x to 0.82x the time of the twosum single kernel e655055e that FlashInfer main runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.025x that of the deterministic package's program at FlashInfer 2e989556
+    # sm_107a H6144 residual f32 weight: (7168, 131072] the FP32-weight twin of the pair-row single kernel of the BF16-weight route (table_slots 4; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.0 to 556 us at T 7169 to 131072, 0.78x to 0.82x the time of the twosum single kernel e655055e that this package's previous version runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.025x that of the deterministic package's program in its earlier version
     "cake_rmsnorm_train_999d4acb1d1a4e0cbef0__7168_131072": {
         "arches": [
             "sm_107a",
@@ -6788,7 +6788,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 4096,
         },
     },
-    # sm_100a H256 f32 weight: (92160, 864240] the deterministic package's det pair of these rows (main kernel c4c89f0d and fixed-order dw reduce b4b63d5b with that package's host plan, det record (80896, 1572864]), renamed into this package and cut to this window (the BF16-weight route cuts its pair at 524288 rows); from 524288 rows for speed: on B200 its backward took 0.887x to 0.899x the time of the twosum single 7c2aa4b4 at 524304 to 864240 rows (FI bench, L2 flushed before every call, two runs), and it is the program the deterministic package at FlashInfer 2e989556 runs there
+    # sm_100a H256 f32 weight: (92160, 864240] the deterministic package's det pair of these rows (main kernel c4c89f0d and fixed-order dw reduce b4b63d5b with that package's host plan, det record (80896, 1572864]), renamed into this package and cut to this window (the BF16-weight route cuts its pair at 524288 rows); from 524288 rows for speed: on B200 its backward took 0.887x to 0.899x the time of the twosum single 7c2aa4b4 at 524304 to 864240 rows (benchmark, L2 flushed before every call, two runs), and it is the program the deterministic package in its earlier version runs there
     "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__92160_864240": {
         "arches": [
             "sm_100a",
@@ -6820,7 +6820,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H6144 residual bf16 weight: (1920, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 25.7 to 909 us at T 1921 to 131072, 0.84x to 0.94x the time of the programs FlashInfer e14ddfd9 runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program at FlashInfer 2e989556
+    # sm_103a H6144 residual bf16 weight: (1920, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 25.7 to 909 us at T 1921 to 131072, 0.84x to 0.94x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program in its earlier version
     "cake_rmsnorm_train_601fb35c90bc116731b1__1920_131072": {
         "arches": [
             "sm_103a",
@@ -6886,7 +6886,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 98304,
         },
     },
-    # sm_103a H6144 residual f32 weight: (1824, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 24.3 to 907 us at T 1825 to 131072, 0.85x to 0.92x the time of the programs FlashInfer e14ddfd9 runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program at FlashInfer 2e989556; the FP32-weight twin computes the BF16-weight program's dw
+    # sm_103a H6144 residual f32 weight: (1824, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 24.3 to 907 us at T 1825 to 131072, 0.85x to 0.92x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program in its earlier version; the FP32-weight twin computes the BF16-weight program's dw
     "cake_rmsnorm_train_cf1cf64436893a2a2d03__1824_131072": {
         "arches": [
             "sm_103a",
@@ -7328,7 +7328,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H4096 bf16 weight: (10239, 65536] the pair-row single kernel with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; 128-thread CTAs of 32 items, two per SM, 128 helper CTAs) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 125.89 us and 237.73 us at T 32768 and 65536, 0.953x and 0.938x the time of the programs FlashInfer main runs there (the det pair 35a0b0ca, the twosum single 8250eb92), with a dw error (relative L2 or worst element, the larger over six input families) of 0.975x and 0.860x that of the deterministic package's program at FlashInfer 2e989556; from T 10240 to 32768, where the det pair 35a0b0ca ran before, its backward took 0.940x to 0.959x the det pair's time on GB300 (FI bench, L2 flushed before every call, two runs at T 10240, 12288, 14928, 15288, 15566, 16114, 16164, 16384, 16385, 18432, 20480, 24576, 28672 and 32768), with a dw error of at most 0.979x the median of the deterministic package's program at FlashInfer 2e989556 (six input families, three seeds, five repeats) at the gated T; the dw gate has not sampled T 10240 yet: it passes at T 8192 and 12288 next to it, and the worst dw element stays within 0.0006 of the per-element budget at T 8192 and 16384 (0.125 and 0.173 against the FP64-rstd reference); below T 10240 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at T 4097, 4608 and 8192
+    # sm_103a H4096 bf16 weight: (10239, 65536] the pair-row single kernel with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; 128-thread CTAs of 32 items, two per SM, 128 helper CTAs) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 125.89 us and 237.73 us at T 32768 and 65536, 0.953x and 0.938x the time of the programs this package's previous version runs there (the det pair 35a0b0ca, the twosum single 8250eb92), with a dw error (relative L2 or worst element, the larger over six input families) of 0.975x and 0.860x that of the deterministic package's program in its earlier version; from T 10240 to 32768, where the det pair 35a0b0ca ran before, its backward took 0.940x to 0.959x the det pair's time on GB300 (benchmark, L2 flushed before every call, two runs at T 10240, 12288, 14928, 15288, 15566, 16114, 16164, 16384, 16385, 18432, 20480, 24576, 28672 and 32768), with a dw error of at most 0.979x the median of the deterministic package's program in its earlier version (six input families, three seeds, five repeats) at the gated T; the dw gate has not sampled T 10240 yet: it passes at T 8192 and 12288 next to it, and the worst dw element stays within 0.0006 of the per-element budget at T 8192 and 16384 (0.125 and 0.173 against the FP64-rstd reference); below T 10240 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at T 4097, 4608 and 8192
     "cake_rmsnorm_train_06e5f7e09e42d1108365__10239_65536": {
         "arches": [
             "sm_103a",
@@ -7362,7 +7362,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "part_row_bytes": 32768,
         },
     },
-    # sm_103a H4096 bf16 weight: (65536, 262144] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 196 to 952 us at T 50688 to 262144, 0.97x to 0.98x the time of the programs FlashInfer e14ddfd9 runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.86x that of the deterministic package's program at FlashInfer 2e989556
+    # sm_103a H4096 bf16 weight: (65536, 262144] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 196 to 952 us at T 50688 to 262144, 0.97x to 0.98x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.86x that of the deterministic package's program in its earlier version
     "cake_rmsnorm_train_3e6231b66942e510fdae__65536_262144": {
         "arches": [
             "sm_103a",
@@ -7395,7 +7395,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "part_row_bytes": 32768,
         },
     },
-    # sm_103a H4096 bf16 weight: (262144, inf] the twosum single above T 262144, the top of the pair-row single's measured range, for dw accuracy (above T 50176 the det pair's worst dw element exceeds the per-element budget at T 50688 on GB300, 1.032 of it); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 393216 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd); the kblock single, 1.01 times its speed in the FI bench (GB300, 4 sessions), put its worst dw error at 1.36x the deterministic package's median FP64 error over 5 repeats at T 65536 on GB300 (concentrated inputs, one of three seeds): its 8-row FP32 blocks have the deterministic package's error, at block boundaries that change from run to run
+    # sm_103a H4096 bf16 weight: (262144, inf] the twosum single above T 262144, the top of the pair-row single's measured range, for dw accuracy (above T 50176 the det pair's worst dw element exceeds the per-element budget at T 50688 on GB300, 1.032 of it); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 393216 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd); the kblock single, 1.01 times its speed in the benchmark (GB300, 4 sessions), put its worst dw error at 1.36x the deterministic package's median FP64 error over 5 repeats at T 65536 on GB300 (concentrated inputs, one of three seeds): its 8-row FP32 blocks have the deterministic package's error, at block boundaries that change from run to run
     "cake_rmsnorm_train_8c8bebecc5b08454b6a0__262144_inf": {
         "arches": [
             "sm_103a",
@@ -7527,7 +7527,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_107a H4096 f32 weight: (24064, 65536] the deterministic package's compensated det pair of these rows (main kernel fa3d4fc5, the FP32-weight twin of 99a01f2a, and fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the single kernel a1f537fc it replaces (FlashInfer e14ddfd9 runs the same one there) put its worst dw error at 1.340x, 1.244x and 1.547x the median FP64 error of the deterministic package at FlashInfer 2e989556 (its fa3d4fc5 pair) over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_lo and concentrated inputs); the deterministic package at FlashInfer 2e989556 runs this pair at every T above 24064, the deterministic package now up to T 50176; its time and its worst dw error in this window are not measured yet
+    # sm_107a H4096 f32 weight: (24064, 65536] the deterministic package's compensated det pair of these rows (main kernel fa3d4fc5, the FP32-weight twin of 99a01f2a, and fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the single kernel a1f537fc it replaces (this package's previous version runs the same one there) put its worst dw error at 1.340x, 1.244x and 1.547x the median FP64 error of the deterministic package in its earlier version (its fa3d4fc5 pair) over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_lo and concentrated inputs); the deterministic package in its earlier version runs this pair at every T above 24064, the deterministic package now up to T 50176; its time and its worst dw error in this window are not measured yet
     "cake_rmsnorm_train_fa3d4fc5dbd76348b31a__24064_65536": {
         "arches": [
             "sm_107a",
@@ -7592,7 +7592,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_107a H6144 bf16 weight: (30720, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 110 to 434 us at T 30721 to 131072, 0.87x to 0.90x the time of the twosum single kernel 083b5f2e that FlashInfer main runs there (0.97x that of the deterministic package's program at T 32768 and 65536), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.963x that of the deterministic package's program at FlashInfer 2e989556, equal to 083b5f2e's
+    # sm_107a H6144 bf16 weight: (30720, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 110 to 434 us at T 30721 to 131072, 0.87x to 0.90x the time of the twosum single kernel 083b5f2e that this package's previous version runs there (0.97x that of the deterministic package's program at T 32768 and 65536), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.963x that of the deterministic package's program in its earlier version, equal to 083b5f2e's
     "cake_rmsnorm_train_3edefef1a5b4b9561a13__30720_131072": {
         "arches": [
             "sm_107a",
@@ -7725,7 +7725,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 196608,
         },
     },
-    # sm_103a H4096 f32 weight: (65536, 262144] above the det pairs of FlashInfer 2e989556 (faster up to T 65536 on GB300; not measured above); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.670 of the budget at 71 sampled T from 9217 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.01 to 1.07 times the twosum single's speed in the FI bench (GB300, 4 sessions); up to T 262144, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.933 of it); at T 393216 it is 1.038 of it (GB300, 3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H4096 f32 weight: (65536, 262144] above the det pairs of the deterministic package's earlier version (faster up to T 65536 on GB300; not measured above); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.670 of the budget at 71 sampled T from 9217 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.01 to 1.07 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 262144, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.933 of it); at T 393216 it is 1.038 of it (GB300, 3 x 120 inputs per T, kernel and torch rstd)
     "cake_rmsnorm_train_2911faf7a786144495a6__65536_262144": {
         "arches": [
             "sm_103a",
@@ -7825,7 +7825,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_103a H6144 bf16 weight: (24575, 65536] the pair-row single kernel with 96 helper CTAs and its chunk table cut for 6 slots per SM (table_slots 6: more, shorter chunks than CTAs, the grid unchanged) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 183.78 us and 351.71 us at T 32768 and 65536, 0.969x and 0.962x the time of the programs FlashInfer main runs there (the det pair 322574af, the kblock single 87e0b860), with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.961x that of the deterministic package's program at FlashInfer 2e989556; from T 24576 to 32768, where the det pair 322574af ran before, its backward took 0.972x to 0.980x the det pair's time on GB300 (FI bench, L2 flushed before every call, two runs at T 24576, 28672 and 32768), with a dw error of at most 0.907x the median of the deterministic package's program at FlashInfer 2e989556 (six input families, three seeds, five repeats); below T 24576 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at some sampled T
+    # sm_103a H6144 bf16 weight: (24575, 65536] the pair-row single kernel with 96 helper CTAs and its chunk table cut for 6 slots per SM (table_slots 6: more, shorter chunks than CTAs, the grid unchanged) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 183.78 us and 351.71 us at T 32768 and 65536, 0.969x and 0.962x the time of the programs this package's previous version runs there (the det pair 322574af, the kblock single 87e0b860), with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.961x that of the deterministic package's program in its earlier version; from T 24576 to 32768, where the det pair 322574af ran before, its backward took 0.972x to 0.980x the det pair's time on GB300 (benchmark, L2 flushed before every call, two runs at T 24576, 28672 and 32768), with a dw error of at most 0.907x the median of the deterministic package's program in its earlier version (six input families, three seeds, five repeats); below T 24576 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at some sampled T
     "cake_rmsnorm_train_f5806bd223b2ad27230a__24575_65536": {
         "arches": [
             "sm_103a",
@@ -7859,7 +7859,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "part_row_bytes": 49152,
         },
     },
-    # sm_103a H6144 bf16 weight: (65536, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 315 to 699 us at T 57345 to 131072, 0.97x to 0.99x the time of the programs FlashInfer e14ddfd9 runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.972x that of the deterministic package's program at FlashInfer 2e989556
+    # sm_103a H6144 bf16 weight: (65536, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 315 to 699 us at T 57345 to 131072, 0.97x to 0.99x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.972x that of the deterministic package's program in its earlier version
     "cake_rmsnorm_train_7236b7379272c82c7614__65536_131072": {
         "arches": [
             "sm_103a",
@@ -8079,7 +8079,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_107a H2048 bf16 weight: (50688, 65536] the deterministic package's det pair of these rows (its compensated program over 8-row blocks: main kernel 694decfb and fixed-order dw reduce c4d8be67 with that package's host plan, det record (50688, inf]), renamed into this package and cut to this window, for speed: on R200 with 212 SMs its backward took 0.831x to 0.854x the time of the twosum single 1a3df5ac at the sampled T from 50689 to 65536 (FI bench, L2 flushed before every call, two runs), its worst dw element stays within 0.58 of the per-element budget at T 50689, 57344 and 65536 (212 SMs, 45 inputs), and it is the program the deterministic package at FlashInfer 2e989556 runs there
+    # sm_107a H2048 bf16 weight: (50688, 65536] the deterministic package's det pair of these rows (its compensated program over 8-row blocks: main kernel 694decfb and fixed-order dw reduce c4d8be67 with that package's host plan, det record (50688, inf]), renamed into this package and cut to this window, for speed: on R200 with 212 SMs its backward took 0.831x to 0.854x the time of the twosum single 1a3df5ac at the sampled T from 50689 to 65536 (benchmark, L2 flushed before every call, two runs), its worst dw element stays within 0.58 of the per-element budget at T 50689, 57344 and 65536 (212 SMs, 45 inputs), and it is the program the deterministic package in its earlier version runs there
     "cake_rmsnorm_train_694decfb79ba96468f62__50688_65536": {
         "arches": [
             "sm_107a",
@@ -8134,7 +8134,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H2048 bf16 weight: (65536, inf] above T 65536, the largest token count the dw gate against the deterministic package at FlashInfer 2e989556 samples on this route (the compensated det pair 694decfb runs below, from T 50688); twosum: exact per-thread dw sums
+    # sm_107a H2048 bf16 weight: (65536, inf] above T 65536, the largest token count the dw gate against the deterministic package in its earlier version samples on this route (the compensated det pair 694decfb runs below, from T 50688); twosum: exact per-thread dw sums
     "cake_rmsnorm_train_1a3df5ac020055477581__65536_inf": {
         "arches": [
             "sm_107a",
@@ -8365,7 +8365,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 16384,
         },
     },
-    # sm_100a H2048 bf16 weight: (58880, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 3 stages): from T 58880 to 65536 for dw accuracy, it replaces the single kernel 0fa4f255, whose FP32 dw sums over windows of 16 steps put its worst dw error at 1.20x the median FP64 error of the det pair the deterministic package ran there at FlashInfer 2e989556 over 5 repeats at T 65536 on B200 (saturated_hi inputs); that det pair (0cb817d1 + d0960be9) reaches 0.883 of the per-element budget at T 59392 on B200, above this package's 0.85 det pair margin; above T 65536 it replaces the twosum single 83f905ff for speed up to T 131072; worst dw element 0.7531 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd), not yet sampled from T 58881 to 65536; above T 131072, beyond the sampled token counts, the twosum single 83f905ff keeps the window; backward time 0.86 to 0.87 times the replaced single's above T 65536 (B200)
+    # sm_100a H2048 bf16 weight: (58880, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 3 stages): from T 58880 to 65536 for dw accuracy, it replaces the single kernel 0fa4f255, whose FP32 dw sums over windows of 16 steps put its worst dw error at 1.20x the median FP64 error of the det pair the deterministic package ran there in its earlier version over 5 repeats at T 65536 on B200 (saturated_hi inputs); that det pair (0cb817d1 + d0960be9) reaches 0.883 of the per-element budget at T 59392 on B200, above this package's 0.85 det pair margin; above T 65536 it replaces the twosum single 83f905ff for speed up to T 131072; worst dw element 0.7531 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd), not yet sampled from T 58881 to 65536; above T 131072, beyond the sampled token counts, the twosum single 83f905ff keeps the window; backward time 0.86 to 0.87 times the replaced single's above T 65536 (B200)
     "cake_rmsnorm_train_8b8cf4f5b82e77554908": {
         "arches": [
             "sm_100a",
@@ -8649,7 +8649,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 5ef5f1f1, the FP32-weight twin of 7122dbcd, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which FlashInfer e14ddfd9 runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (FlashInfer 2e989556) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
+    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 5ef5f1f1, the FP32-weight twin of 7122dbcd, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which this package's previous version runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (its earlier version) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
     "cake_rmsnorm_train_5ef5f1f13ed8f2b994c4__44032_65536": {
         "arches": [
             "sm_100a",
@@ -9096,7 +9096,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H512 bf16 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 26] and the pair of (26, 1024] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB, FI main) (their time 1.18x to 1.33x its); the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 26 on B200, 0.0062 against 0.0061 of the per-element budget)
+    # sm_100a H512 bf16 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 26] and the pair of (26, 1024] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB) (their time 1.18x to 1.33x its); the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 26 on B200, 0.0062 against 0.0061 of the per-element budget)
     "cake_rmsnorm_train_5f3e3fccaea795d0a806__16_227": {
         "arches": [
             "sm_100a",
@@ -10539,7 +10539,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (49152, inf] above T 49152, where the det pair stops; kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.807 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), 1.74 to 1.87 times the FP64-row single's speed in the FI bench (R200, 4 sessions)
+    # sm_107a H5120 bf16 weight: (49152, inf] above T 49152, where the det pair stops; kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.807 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), 1.74 to 1.87 times the FP64-row single's speed in the benchmark (R200, 4 sessions)
     "cake_rmsnorm_train_56634f53e6456b34f76f": {
         "arches": [
             "sm_107a",
@@ -10572,7 +10572,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 163840,
         },
     },
-    # sm_107a H5120 f32 weight: (32767, 131072] the pair-row single kernel in its kblock form (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers, pipe) with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 99.6 to 363 us at T 32768 to 131072, 0.93x to 0.95x the time of the det pair de0cf457 + cdcd68d9 (up to T 49152) and of the kblock single kernel 6cedccdf (above) it replaces, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.08x that of the deterministic package's program at FlashInfer 2e989556; at T 20480 it reaches 1.13x, so the det pair keeps the window below; only the FP32-weight twin ships
+    # sm_107a H5120 f32 weight: (32767, 131072] the pair-row single kernel in its kblock form (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers, pipe) with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 99.6 to 363 us at T 32768 to 131072, 0.93x to 0.95x the time of the det pair de0cf457 + cdcd68d9 (up to T 49152) and of the kblock single kernel 6cedccdf (above) it replaces, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.08x that of the deterministic package's program in its earlier version; at T 20480 it reaches 1.13x, so the det pair keeps the window below; only the FP32-weight twin ships
     "cake_rmsnorm_train_9cdd6eef6888b2a1dd6a__32767_131072": {
         "arches": [
             "sm_107a",
@@ -10606,7 +10606,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "part_row_bytes": 40960,
         },
     },
-    # sm_107a H5120 f32 weight: (131072, inf] above the pair-row single's measured range (9cdd6eef runs (32767, 131072]); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.719 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.66 to 1.78 times the FP64-row single's speed in the FI bench (R200, 4 sessions)
+    # sm_107a H5120 f32 weight: (131072, inf] above the pair-row single's measured range (9cdd6eef runs (32767, 131072]); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.719 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.66 to 1.78 times the FP64-row single's speed in the benchmark (R200, 4 sessions)
     "cake_rmsnorm_train_6cedccdf3a58f23f260f__131072_inf": {
         "arches": [
             "sm_107a",
@@ -10639,7 +10639,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 163840,
         },
     },
-    # sm_100a H512 f32 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 292] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB, FI main) (its time 1.30x to 1.41x); the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 288 on B200, 0.0521 against 0.0409 of the per-element budget, and the FP64-accumulating single kernel this route runs above T 960 exceeds it at T 4, 0.0033 against 0.0032; with the kernel-tests harness inputs included the det pair's worst dw error exceeds it at T 292, 0.0558 against 0.0554)
+    # sm_100a H512 f32 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 292] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB) (its time 1.30x to 1.41x); the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 288 on B200, 0.0521 against 0.0409 of the per-element budget, and the FP64-accumulating single kernel this route runs above T 960 exceeds it at T 4, 0.0033 against 0.0032; with the kernel-tests harness inputs included the det pair's worst dw error exceeds it at T 292, 0.0558 against 0.0554)
     "cake_rmsnorm_train_942503b80a21f22cd392__16_227": {
         "arches": [
             "sm_100a",
@@ -14303,7 +14303,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (4096, 48640] the FP32-weight det pair the deterministic package ran at FlashInfer 2e989556 up to its edge T 48640 (main kernel 626aed74, dw reduce fcbfa14d with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.961x, 0.986x, 0.989x and 0.987x the time of the kblock single kernel 2911faf7, which FlashInfer main runs above T 9216, at T 10240, 16384, 32768 and 40960 (7 rounds, A/A within 0.9982 to 1.0024); the deterministic package now runs its row-issuer program below T 32768
+    # sm_103a H4096 f32 weight: (4096, 48640] the FP32-weight det pair the deterministic package ran in its earlier version up to its edge T 48640 (main kernel 626aed74, dw reduce fcbfa14d with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.961x, 0.986x, 0.989x and 0.987x the time of the kblock single kernel 2911faf7, which this package's previous version runs above T 9216, at T 10240, 16384, 32768 and 40960 (7 rounds, A/A within 0.9982 to 1.0024); the deterministic package now runs its row-issuer program below T 32768
     "cake_rmsnorm_train_626aed743358c27513f1__4096_48640": {
         "arches": [
             "sm_103a",
@@ -14335,7 +14335,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (48640, 65536] the FP32-weight det pair the deterministic package ran above T 48640 at FlashInfer 2e989556 (main kernel cb164a27, the FP32-weight twin of 850eec3a, and dw reduce 5d75ea5f with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.976x and 0.980x the time of the kblock single kernel 2911faf7 at T 49152 and 65536 (7 rounds); the deterministic package now cuts it at T 51200
+    # sm_103a H4096 f32 weight: (48640, 65536] the FP32-weight det pair the deterministic package ran above T 48640 in its earlier version (main kernel cb164a27, the FP32-weight twin of 850eec3a, and dw reduce 5d75ea5f with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.976x and 0.980x the time of the kblock single kernel 2911faf7 at T 49152 and 65536 (7 rounds); the deterministic package now cuts it at T 51200
     "cake_rmsnorm_train_cb164a27c0157ed0712d__48640_65536": {
         "arches": [
             "sm_103a",
@@ -14660,7 +14660,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 64 its backward took 4.70 and 4.74 us against 6.00 and 5.98 us of the fixed-claim form it replaces and a forward and backward call 7.28 and 7.55 us against 8.40 and 8.64 us (GB300, FI bench, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 64 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); at T 96, 128, 256, 448 and from 640 to 1024 a forward and backward call or a checkpointed step was slower than with the det pair of the window above in both runs (8.80 and 8.70 us against 8.62 and 8.66 us for a forward and backward call at T 96), so that pair runs above T 64; the edge 16 against the window below is not measured yet
+    # sm_103a H5120 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 64 its backward took 4.70 and 4.74 us against 6.00 and 5.98 us of the fixed-claim form it replaces and a forward and backward call 7.28 and 7.55 us against 8.40 and 8.64 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 64 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); at T 96, 128, 256, 448 and from 640 to 1024 a forward and backward call or a checkpointed step was slower than with the det pair of the window above in both runs (8.80 and 8.70 us against 8.62 and 8.66 us for a forward and backward call at T 96), so that pair runs above T 64; the edge 16 against the window below is not measured yet
     "cake_rmsnorm_train_505283a5225ac45bc095__16_64": {
         "arches": [
             "sm_103a",
@@ -14833,7 +14833,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 f32 weight: (16, 192] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 192 its backward took 6.94 and 6.88 us against 7.68 and 7.65 us of the det pair it replaces and a forward and backward call 9.71 and 9.76 us against 9.94 and 9.86 us (GB300, FI bench, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 192 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.73x the det pair's at T 64 (GB300, kernel-tests harness); at T 256 and from 640 to 1024 a forward and backward call and a checkpointed step were slower than with the det pair of the window above in both runs (10.68 and 10.64 us against 10.45 and 10.14 us for a forward and backward call at T 256), so that pair runs above T 192; the edge 16 against the window below is not measured yet
+    # sm_103a H5120 f32 weight: (16, 192] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 192 its backward took 6.94 and 6.88 us against 7.68 and 7.65 us of the det pair it replaces and a forward and backward call 9.71 and 9.76 us against 9.94 and 9.86 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 192 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.73x the det pair's at T 64 (GB300, kernel-tests harness); at T 256 and from 640 to 1024 a forward and backward call and a checkpointed step were slower than with the det pair of the window above in both runs (10.68 and 10.64 us against 10.45 and 10.14 us for a forward and backward call at T 256), so that pair runs above T 192; the edge 16 against the window below is not measured yet
     "cake_rmsnorm_train_3a7bd162c370762719b3__16_192": {
         "arches": [
             "sm_103a",
@@ -15006,7 +15006,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 bf16 weight: (16, 896] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 896 its backward took 13.97 us against 15.25 us of the det pair it replaces and a forward and backward call 19.58 us against 20.16 us (GB300, FI bench, CUDA-graph span, L2 flushed before every call), and no sampled T from 24 to 896 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.75x the det pair's at T 64 (GB300, kernel-tests harness); at T 1024 its backward was still faster (14.94 us against 16.08 and 16.19 us in two runs) but a checkpointed step was slower in both runs (26.46 and 26.61 us against 25.95 and 25.87 us), so the det pair of the window above runs above T 896; the edge 16 against the window below is not measured yet
+    # sm_103a H6144 bf16 weight: (16, 896] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 896 its backward took 13.97 us against 15.25 us of the det pair it replaces and a forward and backward call 19.58 us against 20.16 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call), and no sampled T from 24 to 896 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.75x the det pair's at T 64 (GB300, kernel-tests harness); at T 1024 its backward was still faster (14.94 us against 16.08 and 16.19 us in two runs) but a checkpointed step was slower in both runs (26.46 and 26.61 us against 25.95 and 25.87 us), so the det pair of the window above runs above T 896; the edge 16 against the window below is not measured yet
     "cake_rmsnorm_train_38b1c6bc8fa558bccc49__16_896": {
         "arches": [
             "sm_103a",
@@ -15225,7 +15225,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 f32 weight: (16, 1024] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 1024 its backward took 14.72 and 14.62 us against 16.10 and 16.19 us of the det pair it replaces and a forward and backward call 21.06 and 21.24 us against 21.63 and 21.26 us (GB300, FI bench, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 1024 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); above T 1024 the det pair of the window above runs, faster from T 1536 in an earlier FI bench run without the L2 flush (18.43 us against 19.31 us of this program); the edge 16 against the window below is not measured yet
+    # sm_103a H6144 f32 weight: (16, 1024] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 1024 its backward took 14.72 and 14.62 us against 16.10 and 16.19 us of the det pair it replaces and a forward and backward call 21.06 and 21.24 us against 21.63 and 21.26 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 1024 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); above T 1024 the det pair of the window above runs, faster from T 1536 in an earlier benchmark run without the L2 flush (18.43 us against 19.31 us of this program); the edge 16 against the window below is not measured yet
     "cake_rmsnorm_train_017091c7827bdc8c95d5__16_1024": {
         "arches": [
             "sm_103a",
@@ -15321,7 +15321,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H6144 residual bf16 weight: (56, 304] the deterministic package's column-task program of these token counts (96 column tasks; that package runs it from T 0 to 1216), in place of the det pair 0dcdc563 + 2e8d2128, a whole-SM program that program replaced in that package: FlashInfer's all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families)
+    # sm_103a H6144 residual bf16 weight: (56, 304] the deterministic package's column-task program of these token counts (96 column tasks; that package runs it from T 0 to 1216), in place of the det pair 0dcdc563 + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families)
     "cake_rmsnorm_train_07135550fae8b07bb82c__56_304": {
         "arches": [
             "sm_103a",
@@ -15355,7 +15355,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 570eec50 of the deterministic package's column-task program 07135550 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: FlashInfer's all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
+    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 570eec50 of the deterministic package's column-task program 07135550 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
     "cake_rmsnorm_train_570eec506ed94f36f062__48_320": {
         "arches": [
             "sm_103a",
@@ -16018,7 +16018,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's compensated det pair of these rows (main kernel 99a01f2a: block-compensated in-chunk dw sums over 8-step blocks; fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the plain det pair ee4a9053 + 10e24516 it replaced in (24064, 36864] put its worst dw error at 1.25x to 2.00x the deterministic package's median FP64 error over 5 repeats at T 32768 on R200 with 212 SMs (normal, cancel, concentrated, saturated_hi and saturated_lo inputs), and the single kernel f11a8616 it replaced in (36864, 65536] (FlashInfer e14ddfd9 runs the same one there) put its worst dw error at 1.321x, 1.127x and 1.410x the median FP64 error of the deterministic package at FlashInfer 2e989556 over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_hi and concentrated inputs), where this pair stays at 1.000x; the deterministic package at FlashInfer 2e989556 runs this pair at every T above 24064, the deterministic package now up to T 50176, above which its worst dw error passes 0.8 of the per-element budget on sm_107a; its time in this window is not measured yet; the pair-row single aed93ac9 runs above it, to T 65536, for speed
+    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's compensated det pair of these rows (main kernel 99a01f2a: block-compensated in-chunk dw sums over 8-step blocks; fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the plain det pair ee4a9053 + 10e24516 it replaced in (24064, 36864] put its worst dw error at 1.25x to 2.00x the deterministic package's median FP64 error over 5 repeats at T 32768 on R200 with 212 SMs (normal, cancel, concentrated, saturated_hi and saturated_lo inputs), and the single kernel f11a8616 it replaced in (36864, 65536] (this package's previous version runs the same one there) put its worst dw error at 1.321x, 1.127x and 1.410x the median FP64 error of the deterministic package in its earlier version over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_hi and concentrated inputs), where this pair stays at 1.000x; the deterministic package in its earlier version runs this pair at every T above 24064, the deterministic package now up to T 50176, above which its worst dw error passes 0.8 of the per-element budget on sm_107a; its time in this window is not measured yet; the pair-row single aed93ac9 runs above it, to T 65536, for speed
     "cake_rmsnorm_train_99a01f2a850874718c3f__24064_24576": {
         "arches": [
             "sm_107a",
@@ -16050,7 +16050,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (24576, 65536] the pair-row single kernel (32 items, one row per issue, two CTAs per SM) with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 256 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 63.9 to 150 us at T 24577 to 65536, 0.96x to 0.98x the time of the deterministic package's compensated det pair 99a01f2a + 10e24516 it replaces (the single kernels FlashInfer e14ddfd9 runs there exceed 1.1x the deterministic package's dw error), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.93x that of the deterministic package's program at FlashInfer 2e989556 (that det pair)
+    # sm_107a H4096 bf16 weight: (24576, 65536] the pair-row single kernel (32 items, one row per issue, two CTAs per SM) with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 256 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 63.9 to 150 us at T 24577 to 65536, 0.96x to 0.98x the time of the deterministic package's compensated det pair 99a01f2a + 10e24516 it replaces (the single kernels this package's previous version runs there exceed 1.1x the deterministic package's dw error), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.93x that of the deterministic package's program in its earlier version (that det pair)
     "cake_rmsnorm_train_aed93ac9e4828f1b8b47__24576_65536": {
         "arches": [
             "sm_107a",
@@ -20581,7 +20581,7 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
+    The prebuilt ``aot/`` library when a builder compiled it, else the
     JIT build of the same sources and flags (``cake_build.load_library``).
     """
 
@@ -20590,7 +20590,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library without a prebuilt file (for
-    ahead-of-time warm-up through FlashInfer's ``build_jit_specs``)."""
+    ahead-of-time warm-up)."""
 
     return cake_build.jit_specs(arch)
 
