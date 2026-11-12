@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,8 +24,8 @@ launch record, its grid rule, the workspace buffers of the backward and the
 kernel-parameter -> logical-argument map.  What to compile -- sources,
 digests, nvcc flags -- is recorded once in ``build.json`` next to this file;
 :mod:`.cake_build` serves the library ``<library>_<arch>`` from a prebuilt
-``aot/`` file when a builder compiled it and otherwise through FlashInfer's
-JIT from the same sources and flags, verifying every source digest before the
+``aot/`` file when a builder compiled it and otherwise through the package's
+JIT shim from the same sources and flags, verifying every source digest before the
 first build.
 
 A role is one kernel of a call: ``fwd`` (the forward: ``rstd`` from
@@ -130,7 +130,7 @@ backward (whose BF16 band a call with ``compute_grad_weight=False`` also
 takes) is one thread-block cluster of 16 CTAs that sums the weight gradient
 on chip in a fixed order and rounds it once, with no workspace: the exact
 tiny backward (``<role>_t512``: 4 teams of the 128-thread CTA of the
-deterministic backward at FlashInfer ``2e989556`` a CTA, up to 512 rows; the
+deterministic backward at ``2e989556`` a CTA, up to 512 rows; the
 weight gradient that pair's bits) and, for a BF16 weight gradient, the short
 backward (``bwd_bf16_short``: 256-thread CTAs with the row-claims backward's
 row arithmetic, each CTA finishing 8 columns from every CTA's FP32 partials
@@ -2129,7 +2129,7 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # per SM): its CTA ``b`` runs the chunks ``b``, ``b + grid``, ... whatever
 # other kernels hold, so beside a kernel that holds some SMs its call ends
 # about one CTA's chunks late, within the bound of the SMs held plus one row
-# block a CTA (FlashInfer issue #7548, item 1) only up to about 4 blocks a
+# block a CTA only up to about 4 blocks a
 # CTA; past it a claimed backward runs.  A BF16 weight gradient runs, past
 # its small-row bands, the fused backward (``_fused``, whose CTAs claim their
 # blocks) and the repeatable backward (``_rep``, the same schedule with the
@@ -2515,8 +2515,8 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
-    JIT build of the same sources and flags (``cake_build.load_library``).
+    The prebuilt ``aot/`` library when a builder compiled it, else the JIT
+    build of the same sources and flags (``cake_build.load_library``).
     """
 
     return cake_build.load_library(library_name(name, arch))
@@ -2524,7 +2524,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library without a prebuilt file (for
-    ahead-of-time warm-up through FlashInfer's ``build_jit_specs``)."""
+    ahead-of-time warm-up)."""
 
     return cake_build.jit_specs(arch)
 

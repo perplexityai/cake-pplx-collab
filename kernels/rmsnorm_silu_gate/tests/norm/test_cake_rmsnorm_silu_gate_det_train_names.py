@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -105,8 +105,8 @@ def _public_names(mode: str) -> set:
 
 
 PUBLIC = {mode: _public_names(mode) for mode in MODES}
-# The names of the family FlashInfer's top level re-exported (besides the
-# facade modules); the ``cake_pplx`` namespace package binds none of them.
+# The family's public entry points and autograd class (besides the facade
+# modules); the ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL = {
     mode: {
         f"{OP}_{mode}",
@@ -393,7 +393,7 @@ def test_the_two_modes_are_separate_modules() -> None:
 
 
 def test_facade_objects() -> None:
-    """Each facade's functions are its own ``flashinfer_api`` defs; its other
+    """Each facade's functions are its own ``cake_api`` defs; its other
     names (the autograd class and the architecture constants) are its
     backend's objects."""
     for facade, backend, mode in (

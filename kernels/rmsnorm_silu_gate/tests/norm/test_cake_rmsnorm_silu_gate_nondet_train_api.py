@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,10 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake SiLU-gated RMSNorm training
+Tests of the public surface of the Cake SiLU-gated RMSNorm training
 package with the non-deterministic weight gradient (``nondet``): the
-``cake_pplx.cake_rmsnorm_silu_gate_nondet_train`` facade, its re-export from
-the ``flashinfer`` top level, and its interplay with
+``cake_pplx.cake_rmsnorm_silu_gate_nondet_train`` facade and its interplay with
 ``torch.use_deterministic_algorithms``.
 
 The mode is part of every name.  Every entry point of the facade and of the
@@ -53,7 +52,7 @@ bits.  Nor is
 ``y``: the forward computes ``rstd`` and the SiLU gate with approximate FP32
 intrinsics.  Nor, near rounding boundaries, is ``dw``: the chunked backwards
 add the chunk partials of the weight gradient of the deterministic package
-at FlashInfer ``2e989556`` exactly, as integers, and the fused and the
+at ``2e989556`` exactly, as integers, and the fused and the
 row-claims backwards add FP32 runs of rows in FP64.  So every output is also
 compared with the deterministic package through an error budget against the
 backend suite's FP64 reference (:func:`assert_error_within_det`):
@@ -62,8 +61,7 @@ relative to the reference's largest magnitude are each at most
 ``DET_ERROR_RATIO`` (1.1) times the deterministic package's, and 0 where the
 deterministic package's is 0; an FP32 weight gradient is held instead to the
 deterministic package's within the backend suite's weight-gradient budget
-(its 1.1x bound is against the deterministic package of FlashInfer
-``2e989556``, whose FP32 ``dw`` this package's repeats bit for bit except
+(its 1.1x bound is against the deterministic package at ``2e989556``, whose FP32 ``dw`` this package's repeats bit for bit except
 where the exact sum lies within that package's FP64 sum's error of a rounding
 boundary; the in-tree deterministic package's FP32 ``dw`` need not be these
 bits).  The deterministic outputs come from that
@@ -79,8 +77,7 @@ package's public forward and backward only.  This module checks:
   recorders), the autograd function in both directions (its backward naming
   itself for the alert), the support query and the
   workspace reset, the backend's standalone form (no import of another
-  flashinfer package; a copy under another name imports with flashinfer
-  blocked), and the strides the backend passes for one-head and other inputs
+  ``cake_pplx`` module; a copy under another name imports), and the strides the backend passes for one-head and other inputs
   (a single head's stride as 128, so packed one-head rows pass the kernels'
   packed-rows test);
 * on a device: the alert of an autograd node whose backward runs the fused
@@ -736,9 +733,9 @@ def test_reset_workspace_passes_through(
     assert resets == [(ws, {})] * 3
 
 
-def test_backend_package_imports_no_other_flashinfer_package() -> None:
+def test_backend_package_imports_no_other_package() -> None:
     """The backend package is standalone: no source file imports from a parent
-    package, a flashinfer module or another ``cake_pplx`` module, and every
+    package or another ``cake_pplx`` module, and every
     relative import names a module of the package.  The shared loader
     ``cake_build.py`` reaches its JIT fallback, the package's own JIT shim
     ``_cake_pplx_jit.py``, through a relative import inside a function when no
@@ -785,28 +782,17 @@ def test_backend_package_imports_no_other_flashinfer_package() -> None:
             else:
                 continue
             for module in modules:
-                for top in ("flashinfer", "cake_pplx"):
-                    assert module != top and not module.startswith(f"{top}."), (
-                        path.name,
-                        node.lineno,
-                        module,
-                    )
+                assert module != "cake_pplx" and not module.startswith("cake_pplx."), (
+                    path.name,
+                    node.lineno,
+                    module,
+                )
     assert jit_fallback, "the cake_build JIT fallback import was not found"
 
 
 _VENDORED_CHILD = r"""
-import importlib, importlib.abc, json, sys
+import importlib, json, sys
 
-
-class Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError("flashinfer is blocked: " + name)
-        return None
-
-
-sys.meta_path.insert(0, Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, sys.argv[1])
 import torch
 
@@ -828,19 +814,14 @@ try:
     package.cake_rmsnorm_silu_gate_nondet_train_forward(x, x, x[0])
 except ValueError as error:
     out["cpu"] = str(error)
-out["flashinfer"] = sorted(
-    name for name, module in sys.modules.items()
-    if module is not None and (name == "flashinfer" or name.startswith("flashinfer."))
-)
 print(json.dumps(out))
 """
 
 
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path: Path) -> None:
+def test_vendored_copy_imports(tmp_path: Path) -> None:
     """The backend package copied under another top-level name (the vendored
     gate's first step, without its sources) imports, answers its support query,
-    takes no mode keyword and refuses a CPU tensor in an interpreter where every
-    ``flashinfer`` import raises; no flashinfer module is loaded."""
+    takes no mode keyword and refuses a CPU tensor."""
     neutral = "vendored_cake_rmsnorm_silu_gate_nondet_train"
     shutil.copytree(
         BACKEND_DIR,
@@ -857,7 +838,6 @@ def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path: Path) -> None:
     tail = "\n".join((run.stdout + run.stderr).strip().splitlines()[-8:])
     assert run.returncode == 0, tail
     out = json.loads(run.stdout.strip().splitlines()[-1])
-    assert out["flashinfer"] == [], out["flashinfer"]
     assert out["supported_cpu"] is False
     assert out["all"] == sorted(backend.__all__)
     assert "deterministic" in out["mode_keyword"], out["mode_keyword"]
@@ -3232,8 +3212,7 @@ def test_subnormal_weight_gradient_within_the_floored_budget(
             f"dw beyond the floored budget by {excess.max().item():.3e}"
         )
         assert not bool(ws.any()), "the workspace is not zero"
-    # an FP32 dw is held to the floored budget above, as FlashInfer main's
-    # suite holds it: the weight-gradient budget against the deterministic dw
+    # an FP32 dw is held to the floored budget above: the weight-gradient budget against the deterministic dw
     # does not hold below the normal range
     outputs = ("dx", "dz", "dw") if dw_dtype == torch.bfloat16 else ("dx", "dz")
     for what, got, det, ref in zip(

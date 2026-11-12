@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Stall regression of the Cake SiLU-gated RMSNorm training forward and backward
-beside a kernel resident on another stream (the concurrent-launch contract of
-issues #7038 and #7548).
+beside a kernel resident on another stream (the concurrent-launch contract).
 
 Every forward module (one per architecture, and one for packed rows where
 routed) has the same grid rule.  Below ``persistent_from_rows_per_sm`` rows
@@ -36,12 +35,12 @@ slower) and below the stall this test guards against, a wait of milliseconds
 behind the resident kernel.  ``y``, ``dx``, ``dz`` and ``dw`` are bitwise
 equal across the alone and busy calls.
 
-The forward and the backward beside a kernel resident on every SM (issue
-#7548, item 2) with the maximum-shared-memory carveout: at ``ALL_SM_TOKENS``
+The forward and the backward beside a kernel resident on every SM with the
+maximum-shared-memory carveout: at ``ALL_SM_TOKENS``
 each starts beside it and costs at most ``MAX_ALL_SM_EXTRA_MS`` more than
 alone, far below the side kernel's ``ALL_SM_SPIN_MS`` lifetime.  The forward
-beside a side kernel that holds ``k`` of the ``N`` SMs (issue #7548, item 1;
-1 x 128, 16 x 640 and 32 x 640 side CTAs): busy / alone is at most
+beside a side kernel that holds ``k`` of the ``N`` SMs (1 x 128,
+16 x 640 and 32 x 640 side CTAs): busy / alone is at most
 ``N / (N - k)``, plus the share of one CTA's blocks in the call (a CTA whose
 slot the side kernel holds walks all of its blocks once it starts), plus
 ``PROPORTIONAL_SLACK``, at the token counts that give each CTA slot the most
@@ -177,7 +176,7 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
     )
 
 
-# Issue #7548: a side kernel whose CTAs each record their SM and start time
+# A side kernel whose CTAs each record their SM and start time
 # and spin ``ALL_SM_SPIN_MS`` of wall time (``%globaltimer``).  A call that
 # waits for it takes the rest of that lifetime; one that starts beside it costs
 # at most ``MAX_ALL_SM_EXTRA_MS`` more than alone.

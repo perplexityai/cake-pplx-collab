@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,9 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake SiLU-gated RMSNorm training
+Tests of the public surface of the Cake SiLU-gated RMSNorm training
 kernels (SM100 / SM103 / SM107): the ``cake_pplx.cake_rmsnorm_silu_gate_det_train``
-facade and its re-export from the ``flashinfer`` top-level package.  The
+facade, reached through the ``cake_pplx`` namespace.  The
 facade's entry points are pass-throughs to
 ``cake_pplx._backends.cake_rmsnorm_silu_gate_det_train``; this
 module checks that identity (same objects at the top level, same bits as the
@@ -27,7 +27,7 @@ tensor of one size for every row count that
 ``cake_rmsnorm_silu_gate_det_train_reset_workspace`` zeroes again, and the
 backward and the reset refuse the non-deterministic package's workspaces (FP64
 or ``uint8``), the backward also in a call with no rows.  The reset is not a
-``flashinfer`` top-level name.  The numerical contract is
+``cake_pplx`` top-level name.  The numerical contract is
 ``test_cake_rmsnorm_silu_gate_det_train.py``'s.
 """
 

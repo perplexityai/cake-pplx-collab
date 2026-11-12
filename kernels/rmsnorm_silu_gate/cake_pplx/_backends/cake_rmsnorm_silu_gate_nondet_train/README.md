@@ -12,7 +12,7 @@ The public module is a stable API; this backend package is experimental (its
 own names carry no compatibility guarantee).  It ships programs for `sm_100a`
 (B200 / GB200), `sm_103a` (B300 / GB300) and `sm_107a` (R200).  The feature
 does not take part in automatic backend selection, autotuning or trace-apply.
-Its libraries are JIT-built by FlashInfer from `build.json`.
+Its libraries are JIT-built by the package's JIT shim from `build.json`.
 
 ## What each output promises
 
@@ -64,7 +64,7 @@ from run to run as well, and the BF16 static and claimed programs ship
 routed, but no band runs them.
 
 The BF16 bands up to 512 rows follow measurements of a checkpointed training
-step (FlashInfer's benchmark timer, cold L2).  On GB300 (`sm_103a`) the step
+step (a CUPTI kernel timer, cold L2).  On GB300 (`sm_103a`) the step
 with the short backward (`bwd_bf16_short`) is 7.8 % .. 14.8 % faster than
 with the faster of the exact tiny backward and the row-claims backward at
 48 .. 256 rows (13.1 % .. 18.7 % faster than with the exact tiny backward),
@@ -72,7 +72,7 @@ and the row-claims backward saves 6.9 % .. 13.1 % of the step against the
 exact tiny backward at 336 .. 512 rows (at least 3 %), so `sm_103a` runs no
 BF16 exact tiny backward and its next band starts at 257 rows.  On
 B200 (`sm_100a`) the steps with the short and with the exact tiny backward
-are within 3 % of each other at up to 256 rows, and under FlashInfer's
+are within 3 % of each other at up to 256 rows, and under that
 benchmark timer the short backward alone is the faster of the two at every
 row count up to 256.  On R200 (`sm_107a`) the step with the exact tiny
 backward takes 2.9 % .. 6.4 % longer than with the short backward at
@@ -94,7 +94,7 @@ the tensor's largest finite magnitude (in every band); the deterministic
 package's backward need not give these bits, but in the fused and the
 repeatable bands `dx` and `dz` are its bits.  Outside the short backward's
 band (a BF16 `dw` up to 256 rows), the fused band and the repeatable band
-`dw` is the bits of the deterministic package at FlashInfer commit
+`dw` is the bits of the deterministic package at commit
 2e989556, except where the exact sum lies within that package's FP64 sum's
 error of a rounding boundary; the `dw` of the deterministic package in this
 tree need not be these bits.  In the fused band `dw` is that program's own
@@ -108,7 +108,7 @@ bits on every call, which need not be the deterministic package's.
 | `y` | `rstd` with `rsqrt.approx`, the sigmoid with `ex2.approx` and `rcp.approx` (the split gate), FP32 products, one rounding to BF16 | bit for bit | within one BF16 ulp plus 1/64 BF16 ulp of the tensor's largest magnitude; at most 1.1 times the deterministic package's |
 | `dx` | one row arithmetic in every backward program but the fused and the repeatable ones (the same bits in every other band); in those two bands the deterministic package's | bit for bit | within one BF16 ulp plus 1/64 BF16 ulp of the tensor's largest magnitude (cancellation); at most 1.1 times the deterministic package's |
 | `dz` | one row arithmetic in every backward program but the fused and the repeatable ones (the same bits in every other band); in those two bands the deterministic package's | bit for bit | within one BF16 ulp plus 1/64 BF16 ulp of the tensor's largest magnitude; at most 1.1 times the deterministic package's |
-| `dw` (FP32; BF16 outside the short, the fused and the repeatable bands) | the FP32 chunk partials of the deterministic backward at FlashInfer 2e989556, summed exactly in 64-bit integer windows (in the exact tiny backward's bands: on chip in that pair's order in FP64), rounded to FP32 from the FP64 value of that sum, then to BF16 for a BF16 `dw` | bit for bit | within the deterministic budget `abs(dw64) * 2^-7 + sum(abs(terms)) * 2^-20`; a BF16 `dw` at most 1.1 times the deterministic package's; an FP32 `dw` at most 1.1 times the deterministic package's at FlashInfer 2e989556 (the same bits) and within the budget `abs(dw_det) * 2^-7 + sum(abs(terms)) * 2^-20` of the deterministic package's in this tree; in every band a column with an infinite or NaN term has the FP64 reference's class (`+inf`, `-inf` or `NaN`), also when the row count is not a multiple of the row block |
+| `dw` (FP32; BF16 outside the short, the fused and the repeatable bands) | the FP32 chunk partials of the deterministic backward at 2e989556, summed exactly in 64-bit integer windows (in the exact tiny backward's bands: on chip in that pair's order in FP64), rounded to FP32 from the FP64 value of that sum, then to BF16 for a BF16 `dw` | bit for bit | within the deterministic budget `abs(dw64) * 2^-7 + sum(abs(terms)) * 2^-20`; a BF16 `dw` at most 1.1 times the deterministic package's; an FP32 `dw` at most 1.1 times the deterministic package's at 2e989556 (the same bits) and within the budget `abs(dw_det) * 2^-7 + sum(abs(terms)) * 2^-20` of the deterministic package's in this tree; in every band a column with an infinite or NaN term has the FP64 reference's class (`+inf`, `-inf` or `NaN`), also when the row count is not a multiple of the row block |
 | `dw` (BF16 in the short backward's band) | each CTA's FP32 partial of its 16-row blocks (the row-claims backward's row arithmetic); CTA `r` adds every CTA's partials of the columns `8r` .. `8r + 7` in rank order in FP64 and rounds the sum to FP32, then to BF16 | bit for bit | the same budget, the same 1.1 times bound and the same class rule as the row above |
 | `dw` (BF16 in the fused band) | each thread's FP32 runs of at most 16 rows folded into FP32 two-sum pairs; each CTA adds its column sums to 4 FP64 accumulator copies with atomics in an order that depends on scheduling; the CTA that arrives last rounds the FP64 sum to FP32, then to BF16 | its last bits may vary | the same budget, the same 1.1 times bound and the same class rule as the row above |
 | `dw` (BF16 in the repeatable band) | the deterministic package's backward in this tree: each thread's FP32 runs of at most 16 rows of a chunk folded into FP32 two-sum pairs, each CTA adding its pairs exactly into 64-bit fixed-point digits in the workspace; the CTA that arrives last rounds each column's exact sum once to FP32, then to BF16 | bit for bit (the rows and the SM count fix the chunks) | the deterministic package's bits in this tree, so its error: within the deterministic budget above, and the 1.1 times bound holds with a ratio of 1 |
@@ -119,7 +119,7 @@ absolute error relative to the largest reference value.  The tests in this
 tree compare with the deterministic package in this tree: every output but
 an FP32 `dw` against the 1.1 times bound, an FP32 `dw` against the budget
 above (its 1.1 times bound holds against the deterministic package at
-FlashInfer 2e989556, whose FP32 `dw` bits it repeats in every band except
+2e989556, whose FP32 `dw` bits it repeats in every band except
 where the exact sum lies within that package's FP64 sum's error of a rounding
 boundary; the measured tables below compare with that package).  The tests also check
 every output against the explicit eager operation (FP32 arithmetic, one final
@@ -132,7 +132,7 @@ Measured errors against an FP64 reference computed from the BF16 inputs, on
 normal inputs at three training shapes `[T, H, 128]`: `x`, `z` and `dy`
 standard normal, the weight 1 + 0.5 times standard normal, all rounded to
 BF16, `eps` = 1e-6, seed 0.  Each cell gives this package / the deterministic
-package at FlashInfer commit 2e989556.  This package's value is the largest
+package at commit 2e989556.  This package's value is the largest
 over 10 runs, which gave the same bits every time; the deterministic package's
 value is the median over 5 runs with equal bits.  `y`, `dx` and `dz` come from
 the calls with a BF16 weight gradient; the calls with an FP32 weight gradient
@@ -232,7 +232,7 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | `fwd_pipe` (`sm_100a`, `sm_103a`) | pipelined forward: the deterministic package's forward program (the same build and grid) with a gate that does not flush (`split_gate`): 128 threads, 8 lanes a row, one CTA per 16-row block below 8192 rows per SM, from there whole waves of 6 CTAs per SM, each CTA at most 2 blocks, a thread loading its row of the CTA's next block while it computes the current one, `x` and `z` loaded with the L2 `evict_first` policy | its forward bands |
 | `fwd_pipe_packed` (`sm_107a`) | the pipelined forward of packed rows (the deterministic package's packed-rows program on `sm_107a` with a gate that does not flush: the pipelined forward's schedule with four sum chains, `rsqrt.approx.ftz` and one 32-byte store a lane) | its band of `FORWARD_BANDS` (packed rows, fewer than `PACKED_ROWS`) |
 | `bwd_bf16_short` | short backward (a BF16 weight gradient; every architecture): one cluster of 16 CTAs of 256 threads, 16 lanes a row, CTA `r` running the 16-row blocks `r`, `r + 16`, ... with the row-claims backward's row arithmetic; CTA `r` adds every CTA's FP32 partials of the columns `8r` .. `8r + 7` in rank order in FP64 (a fixed order), no workspace | the rows of its band (at most 256) |
-| `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, the chunk partials of the deterministic backward at FlashInfer 2e989556 summed on chip in its reduction order, no workspace | the rows of its band (at most 512) |
+| `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, the chunk partials of the deterministic backward at 2e989556 summed on chip in its reduction order, no workspace | the rows of its band (at most 512) |
 | `bwd_bf16_fused` | fused backward (a BF16 weight gradient; every architecture): the deterministic package's fused backward's schedule and row arithmetic (the approximate gate and `rstd`, the next-block L2 prefetch up to the architecture's share of blocks a CTA): 256 threads, 16 lanes a row, 16-row blocks, at most 4 CTAs per SM, which claim the blocks in chunks when there are more blocks than CTAs (`dx` and `dz` the deterministic package's bits at any grid); each thread's FP32 runs of at most 16 rows folded into FP32 two-sum pairs, each CTA's column sums added to 4 FP64 accumulator copies with atomics, the CTA that arrives last rounding the sum once | its backward band, up to 1000 rows per SM (`sm_107a`: past 64, up to 256 rows per SM) |
 | `bwd_bf16_rep` | repeatable backward (a BF16 weight gradient; every architecture): the deterministic package's backward program (its build `{"math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads": 256}`) under this package's name: 256 threads, 16 lanes a row, 16-row blocks, at most 4 CTAs per SM claiming the blocks in chunks whose rows are fixed by the row count and the grid; each chunk's weight-gradient terms added exactly into fixed-point digits in the workspace, the CTA that arrives last rounding the sum once (the deterministic package's `dx`, `dz` and `dw` bits, the same for the rows and the SM count) | its backward bands, past 1000 rows per SM (`sm_107a`: past 512 rows, up to 64 rows per SM, and past 256 rows per SM) |
 | `bwd_bf16_rep_long` | the repeatable backward's long program (every architecture): the deterministic package's look-ahead program (its build `{"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads": 256}`) under this package's name: the repeatable backward in a loop that loads a block's rows while the previous block's row math runs, with its grid, block schedule, FP32 operations in the same order and workspace, so its bits | packed rows of the last repeatable band from `LONG_BACKWARD_ROWS_PER_SM` rows per SM (2560 on `sm_100a` and `sm_103a`, 1536 on `sm_107a`) |
@@ -327,8 +327,7 @@ and 513 to 13568 rows on a 212-SM R200, and the BF16 fused band 513 to
 148000 rows on a 148-SM B200 and 13569 to 54272 rows on a 212-SM R200.
 
 The chunked backwards (static and claimed) cut the rows into 8-row blocks and
-the blocks into the chunks of the deterministic backward at FlashInfer
-2e989556: `blocks_per_chunk =
+the blocks into the chunks of the deterministic backward at 2e989556: `blocks_per_chunk =
 max(1, ceil(blocks / 8192))`, `chunks = ceil(blocks / blocks_per_chunk)`, and
 launch `min(chunks, 8 * SMs)` CTAs of 128 threads (15616 bytes of dynamic
 shared memory each).  The claimed backward lets a CTA slowed by a kernel on
@@ -355,7 +354,7 @@ The autograd function (`cake_rmsnorm_silu_gate_nondet`) saves `x`, `z` and
 `weight` by reference through `save_for_backward`, and `eps` as a Python
 float.  It saves no `rstd` and no other intermediate, so beyond its inputs it
 keeps 0 bytes, and a non-reentrant checkpointed forward keeps nothing but its
-output (FlashInfer issue #7039).  The saved tensors are the caller's own: `x`
+output.  The saved tensors are the caller's own: `x`
 and `z` hold `T * H * 128` BF16 values (`T * H * 256` bytes each) and
 `weight` 128 BF16 values (256 bytes).  A backward's workspace (below) is not
 saved state: no tensor of it is kept by the autograd node.
@@ -453,8 +452,8 @@ captured call.  With none ready, the graph zero-fills a workspace of its own.
 
 The package imports only itself, `torch` and `tvm_ffi`, and, when installed,
 cuda-python's `cuda.bindings.runtime` for CUDA Graph capture ids (without it,
-each captured call takes its own reserve workspace); its only `flashinfer`
-import is the JIT fallback of `cake_build.py`.
+each captured call takes its own reserve workspace); the JIT fallback of
+`cake_build.py` imports the package's own JIT shim (`_cake_pplx_jit.py`).
 
 ## Tests
 

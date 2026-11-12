@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@ Backend of :mod:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train`: the
 Cake SiLU-gated RMSNorm training forward / backward (SM100 / SM103 / SM107) of
 the non-deterministic family, as one self-contained package (host API bodies,
 the ``cake_jit`` registry, the pinned ``cake_build`` loader and the generated
-CUDA sources under ``csrc/``).  It imports nothing from other flashinfer
+CUDA sources under ``csrc/``).  It imports nothing from other ``cake_pplx``
 packages and ships its own copy of every program it launches.  The
-``@flashinfer_api`` decorations and the user-facing documentation live in
+``@cake_api`` decorations and the user-facing documentation live in
 :mod:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train`; import that module.  The
 deterministic package is ``cake_pplx.cake_rmsnorm_silu_gate_det_train``: no
 call of this package runs it.
@@ -51,7 +51,7 @@ with one row arithmetic in every band but the fused and the repeatable ones
 finite magnitude; the deterministic package's backward need not give these
 bits; in those two bands they are the deterministic package's bits) and
 computes the FP32 partial of
-each chunk of rows as the deterministic backward at FlashInfer ``2e989556``
+each chunk of rows as the deterministic backward at ``2e989556``
 does; it adds the partials
 exactly, as signed 64-bit integer windows of the FP32 values (an addition of
 integers does not depend on its order), and rounds the exact sum once into
@@ -149,7 +149,7 @@ Host design (the input layout rules are the deterministic package's):
   :func:`cake_rmsnorm_silu_gate_nondet_train_reset_workspace` after anything
   else wrote into it (a launch that did not complete, another use of the
   buffer); the kernel never needs a reset between its own calls.
-- Saved state (FlashInfer issue #7039): the autograd function saves only
+- Saved state: the autograd function saves only
   ``x``, ``z`` and ``weight``, by reference, through ``save_for_backward``
   (``T * H * 256`` bytes each for ``x`` and ``z``, 256 bytes for ``weight``,
   all the caller's tensors) and ``eps`` as a Python float; no ``rstd`` or
@@ -267,7 +267,7 @@ Host design (the input layout rules are the deterministic package's):
   ``r + 16``, ....  No kernel is cooperative; no
   call synchronizes the host or the device, and every kernel runs on the
   current torch stream.
-- Beside kernels resident on other streams (FlashInfer issue #7548): a kernel
+- Beside kernels resident on other streams: a kernel
   holding every SM with a small shared-memory carveout delays the start of a
   kernel whose CTAs need more shared memory than is left, until it exits;
   :mod:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train` documents the remedy.
@@ -1059,7 +1059,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     One kernel (``cake_jit.BACKWARD_BANDS`` picks the module by
     architecture, weight-gradient dtype and rows).  The FP32 bands past the
     small-row one run at most ``ctas_per_sm`` CTAs per SM over the chunks of
-    rows of the deterministic backward at FlashInfer ``2e989556`` (a static
+    rows of the deterministic backward at ``2e989556`` (a static
     backward, CTA ``b`` running the chunks ``b``, ``b + grid``, ..., or, in
     the last band, the claimed backward, whose CTAs claim runs of chunks from
     the workspace's claim counter): ``dx`` and ``dz`` are one row arithmetic
