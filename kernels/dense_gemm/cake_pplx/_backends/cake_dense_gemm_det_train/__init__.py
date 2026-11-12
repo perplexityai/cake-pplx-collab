@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ limitations under the License.
 # Cake backend: the GLM-5.2 dense projection GEMMs for training
 # (BF16 operands, FP32 accumulation, BF16 or FP32 output, strided views, ragged
 # token counts, batched head projections) and the FP32 router-gate GEMM through
-# split-BF16x3 tensor-core emulation, on SM100 / SM103 / SM107
-# (flashinfer-ai/flashinfer#5677), deterministic.  Host planning, argument-plan
+# split-BF16x3 tensor-core emulation, on SM100 / SM103 / SM107,
+# deterministic.  Host planning, argument-plan
 # binding, the prepared allocation-free launches, the eager entry points, JIT
 # registration and the generated sources live in this package; the public module
 # is cake_pplx.cake_dense_gemm_det_train.

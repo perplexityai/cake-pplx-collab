@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# The names of the non-deterministic Cake dense GEMMs (flashinfer-ai/flashinfer#8928): the public module
+# The names of the non-deterministic Cake dense GEMMs: the public module
 # ``cake_pplx.cake_dense_gemm_nondet_train`` carries the mode word in every public name, no entry point takes a
 # ``deterministic=`` keyword (nor any ``**kwargs``), the projection planner's keyword-only knobs are the deterministic
 # planner's public ones plus ``splits`` and ``chains``, the former names and import paths are gone (no alias, no
@@ -64,8 +64,7 @@ PUBLIC = {
 # The callables among them (functions and classes; the module constants are not) and the functions.
 CALLABLES = sorted(n for n in PUBLIC if not re.fullmatch(r"[A-Z][A-Z0-9_]*", n))
 FUNCTIONS = sorted(n for n in CALLABLES if not n[0].isupper())
-# The former import paths: the package and its modules (``flashinfer.experimental.<package>`` before the move,
-# under the cake_pplx prefix).
+# The former import paths: the package and its modules under their former names.
 FORMER_MODULES = (
     "cake_pplx._backends.dense_projection_gemm.cake_backend",
     "cake_pplx._backends.dense_projection_gemm.cake_jit",
@@ -111,7 +110,7 @@ REMOVED = {
         "DET_PROGRAM_PREFIX",
     ),
 }
-# Every public name the backend module defined before #8046 (FlashInfer c472a430: functions, classes and constants).
+# Every public name the backend module defined in its earlier form (functions, classes and constants).
 # The backend defines five of them itself (helpers and constants of its own programs); every other one is absent: no
 # alias and no read-through to the deterministic package.
 # fmt: off
@@ -145,7 +144,7 @@ OWN_FORMER_NAMES = frozenset(
         "router_symbol",
     }
 )
-# Names of the deterministic backend (former and #8928 spellings) and two names no module has: none is reachable here.
+# Names of the deterministic backend (former and current spellings) and two names no module has: none is reachable here.
 UNREACHABLE = (
     "projection_det_forward",
     "DetGemmPlan",
@@ -165,7 +164,7 @@ OWN_KNOBS = {"splits", "chains"}
 
 
 def mode_word_violations(name: str, *, op: str, mode: str) -> list[str]:
-    """Why the public name ``name`` of the module ``flashinfer.cake_<op>_<mode>_train`` breaks the #8928 naming rules;
+    """Why the public name ``name`` of the module ``cake_pplx.cake_<op>_<mode>_train`` breaks the naming rules;
     empty when it follows them.  Self-contained (it reads no state of this test module), so another family can copy
     it as is.
 
@@ -216,7 +215,7 @@ def _keyword_only(fn) -> set[str]:
 
 
 def test_the_shared_mode_name_checks():
-    """The shared #8928 checks (tests/cake/test_helpers/cake_mode_names.py): mode word and stem, no ``deterministic``
+    """The shared naming checks (tests/cake/test_helpers/cake_mode_names.py): mode word and stem, no ``deterministic``
     keyword, one name per object across the module, the backend modules and the ``cake_pplx`` namespace package,
     and the former paths and names failing at import in a fresh interpreter."""
     import cake_pplx
@@ -425,7 +424,7 @@ def test_the_former_names_are_removed(submodule, names):
 
 @pytest.mark.parametrize("name", FORMER_BACKEND_NAMES)
 def test_no_backend_name_from_before_8046_reads_through(name):
-    """A name the backend had before #8046 is this package's own object (defined in its module) or absent."""
+    """A name the backend had in its earlier form is this package's own object (defined in its module) or absent."""
     backend = importlib.import_module(f"{BACKEND}.cake_backend")
     if name in OWN_FORMER_NAMES:
         obj = vars(backend)[name]

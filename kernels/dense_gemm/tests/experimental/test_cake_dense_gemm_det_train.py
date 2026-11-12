@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ import torch
 from tests.cake.test_helpers.cake_package import cake_package
 
 # Backend suite: the package is named once, through ``cake_package``; nothing else
-# of flashinfer is imported here.
+# of cake_pplx is imported here.
 cake_backend = cake_package("cake_dense_gemm_det_train", "cake_backend")
 cake_build = cake_package("cake_dense_gemm_det_train", "cake_build")
 cake_jit = cake_package("cake_dense_gemm_det_train", "cake_jit")
@@ -723,9 +723,9 @@ def _eight_warp_program(cake_template, plan, arch):
 
 
 def _unserved_sync_store(arch, cake_template, plan):
-    """The FlashInfer-only synchronised TMA-store gate (``cake_backend._serves``): the launcher's plan is a
+    """The package-only synchronised TMA-store gate (``cake_backend._serves``): the launcher's plan is a
     synchronised stream-K bf16 TMA-store program (``_tma<slots>_sks``) whose epilogue the row's rule does not name
-    (the bf16 short-K default), which the registry does not serve; ``plan`` is the FlashInfer plan of the same row."""
+    (the bf16 short-K default), which the registry does not serve; ``plan`` is this package's plan of the same row."""
     knobs = cake_backend._template_knobs(cake_template)
     if not knobs or not (knobs["sk_sync"] and knobs["epi"] == "tma") or plan.out_f32:
         return False
@@ -748,7 +748,7 @@ def _assert_mirrors_cake(plan, cake_template, where, arch, rule=None):
     batched small-M swap on a tiny T outside the export contract, a measured rule whose template exists only for
     the contract's T, a synchronised TMA-store program the row reaches through the short-K epilogue default
     (``_unserved_sync_store``), or a default tail-T instance no contract row of this architecture produced -- all of which
-    the Cake host JIT-compiles) the FlashInfer planner must have fallen back onto a generated program.  A rule that
+    the Cake host JIT-compiles) this package's planner must have fallen back onto a generated program.  A rule that
     pins ``htail`` names its ``_ht`` program on every device and T (``_rule_program``); a rule of record that carries
     the eight-warp CTA form names its eight-warp program (``_eight_warp_program``: the launcher's plans carry no
     ``form``).  Where the launcher swapped such a row (the batched small-M swap on a tiny T: a transposed template),
@@ -3797,7 +3797,7 @@ def test_round33_pro_knob(T):
     with pytest.raises(ValueError, match="needs the cluster pair"):
         instance_key(a_mn=False, b_mn=True, block_n=128, out_f32=True, cta1=True, pro=7)
     # through the planner (kw107 = the sm_107a device facts): a pair row without a rule plans the architecture default (pro 7), a cta1 rule
-    # zeroes it, a caller-forced value is admitted or refused by instance_key, and the FlashInfer-only registry fallback that drops a row's
+    # zeroes it, a caller-forced value is admitted or refused by instance_key, and the package-only registry fallback that drops a row's
     # measured rule keeps the architecture default (a rule-less plan of a pair row is a ``_pro7`` program; the rule's pro 15 goes with the rule)
     kw = dict(sm_count=148, l2_bytes=L2_BYTES, arch="sm_100a", _fallback=False)
     kw107 = dict(sm_count=212, l2_bytes=L2_BYTES, arch="sm_107a", _fallback=False)
@@ -4130,7 +4130,7 @@ def test_round24_ovr_knob(T, monkeypatch):
     # (2) the reverse direction (Cake 95da40d6e8 L2745-L2746, `if ovr and ovl and not rule_ovl: ovr = False` inside the rule read of ovr): a
     # caller-forced ovl=True on the sm_107a o_proj fwd row (rule {cta_rows 256, htail, ovr, cgrp, group_m 8}) drops the rule's ovr - the
     # rule's cgrp / htail / group_m stay and the plan is the `_ov_ht_cg` program of test_round21_cgrp_knob, not a ValueError (ovl + ovr);
-    # without this mirror every forced-ovl planner call on these rows raises in FlashInfer while the Cake launcher plans the `_ov` program
+    # without this mirror every forced-ovl planner call on these rows raises in this package while the Cake launcher plans the `_ov` program
     kw107 = dict(sm_count=212, l2_bytes=L2_BYTES, arch="sm_107a", _fallback=False)
     o107 = _views("proj", "o_proj", "fwd", "bf16", T)
     forced_ovl, *_ = cake_dense_gemm_det_train_projection_plan(
@@ -9742,8 +9742,8 @@ def test_gb_t_exact_wgrad_rules_plan_their_programs(arch, monkeypatch):
 def test_gb_t_exact_wgrad_ht_min_tail_keeps_the_148_sm_tail_whole(monkeypatch):
     """The sm_103a 5120 -> 17408 / 17408 -> 5120 weight-gradient keys at T 16172 (680 pair tiles) carry
     ``ht_min_tail`` 16: on 148 SMs (74 pairs) the 14-tile tail stays in whole tiles - the ``_ht`` program runs its
-    whole-tile plan, where the 28 half items measured slower than FI main - while 152 SMs (tail 72, no half-item fit)
-    and 160 SMs (tail 40, 80 half items) plan exactly as without the field; no other rule carries it."""
+    whole-tile plan, where the 28 half items measured slower than whole tiles - while 152 SMs (tail 72, no half-item
+    fit) and 160 SMs (tail 40, 80 half items) plan exactly as without the field; no other rule carries it."""
     monkeypatch.setattr(cake_backend, "_DUMMIES", {})
     keys = sorted(key for key, rule in ROW_RULES.items() if "ht_min_tail" in rule)
     assert keys == sorted(
@@ -11870,7 +11870,7 @@ def test_sm107a_212_tranche_rules_plan_their_programs(monkeypatch, key):
 
 
 # The token tiers of the sm_107a 212-SM tranche (cake_backend.ROW_RULE_MIN_T): key -> ((bound, rule), ...).  Under a
-# bound the key plans the row with the tier's rule (FlashInfer main's rule of the row, or no rule; the fp32 5120 -> 5120
+# bound the key plans the row with the tier's rule (the row's rule before the tranche, or no rule; the fp32 5120 -> 5120
 # weight gradient with no rule up to T 257); from the floor (the last bound) on, the tranche rule.  T = M of a forward /
 # input gradient, K of a weight gradient.
 # fmt: off
@@ -11908,7 +11908,7 @@ def test_sm107a_212_tranche_floor_table():
 def test_sm107a_212_tranche_token_floors(monkeypatch, key):
     """At T 1, each tier bound - 1, each bound and 16172 on the 212- and 216-SM parts: under a bound the plan equals the
     row's plan with the tier's rule in place of the key's (no key for ``{}``); from the floor on it equals the tranche
-    rule's plan and differs from the plan with FlashInfer main's rule of the row (no key for ``{}``)."""
+    rule's plan and differs from the plan with the row's rule before the tranche (no key for ``{}``)."""
     tiers = cake_backend.ROW_RULE_MIN_T[key]
     main_rule = tiers[-1][1]
     _rule, K, N, op, out_dtype, _program = SM107A_212_TRANCHE[key]

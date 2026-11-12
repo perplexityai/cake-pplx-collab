@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@ limitations under the License.
 Cake backend of ``cake_pplx.cake_dense_gemm_nondet_train``, non-deterministic: the GLM-5.2 dense projection GEMMs
 for training (K1) and the FP32 router-gate GEMM (K2) on SM100 / SM103 / SM107.
 
-The deterministic implementation is the package ``cake_dense_gemm_det_train`` (flashinfer-ai/flashinfer#5677 and
-#7043; public module ``cake_pplx.cake_dense_gemm_det_train``): its stream-K and split-K reductions add the partials
+The deterministic implementation is the package ``cake_dense_gemm_det_train`` (public module
+``cake_pplx.cake_dense_gemm_det_train``): its stream-K and split-K reductions add the partials
 in a fixed order, so every result is bitwise reproducible run to run.  This package keeps that package's operations,
 view contract, dtypes, accuracy budgets and host paths (prepared and convenience) and adds programs whose split-K
 reductions add the partials in the order they finish.  The products, the FP32 accumulation, the rounding points (an
@@ -109,7 +109,7 @@ package's entry point of the same operation (the same program, the same bits).  
 ``CakeDenseGemmDetRouterLaunch``).  A row that runs a program of this package
 never goes to the deterministic package.  The deterministic package is imported at run time as this package's
 sibling (the top-level package ``cake_dense_gemm_det_train`` when this package is vendored as a top-level package),
-never through an absolute ``flashinfer`` import; a copy under another name is bound with
+never through an absolute import; a copy under another name is bound with
 :func:`use_deterministic_backend`.  The deterministic package never imports this one, and this module re-exports no
 name of it.  :func:`cake_dense_gemm_nondet_train_convenience_cache_clear` clears the convenience caches and workspace arenas of both packages; a
 convenience-path call that this package launches from its arenas, captured into a CUDA graph, stays valid until then
@@ -141,7 +141,6 @@ from . import cake_jit
 # This package's own registry and loader, re-exported (its programs only).
 from .cake_jit import KERNELS as KERNELS
 from .cake_jit import MODULES as MODULES
-from .cake_jit import TRACKING_ISSUE as TRACKING_ISSUE
 from .cake_jit import arg_plan_of as arg_plan_of
 from .cake_jit import (
     load_cake_dense_projection_gemm_module as load_cake_dense_projection_gemm_module,
@@ -172,7 +171,7 @@ _DET_ENTRIES = (
 
 def use_deterministic_backend(module: ModuleType) -> None:
     """Bind the deterministic package's ``cake_backend`` module explicitly.  The deterministic package is this
-    package's sibling and is resolved on first use, in a FlashInfer tree and in a vendored tree that ships
+    package's sibling and is resolved on first use, in ``cake_pplx._backends`` and in a vendored tree that ships
     ``cake_dense_gemm_det_train`` next to this package (both top-level packages, or both in one parent package); a
     vendored tree that holds it under another name binds its ``cake_backend`` here before the first call that
     needs it.  Binding drops this package's convenience caches and arenas (:func:`_drop_convenience_entries`): their
@@ -1009,7 +1008,7 @@ K1_ONE_SPLIT_RANGES_BY_SM: dict[
 #: reference element) in every one of 20 runs of 10 seeds at every measured token count.  The protocol, the measured
 #: token counts and the times are in the cluster tables of the README.
 #:
-#: Accuracy against the reference implementation (FlashInfer commit ``2e989556``): a cluster of three CTAs sums a
+#: Accuracy against the reference implementation: a cluster of three CTAs sums a
 #: tile's token reduction in three partials in rank order, so it repeats bit for bit, but on the rows whose reference
 #: adds the two halves of that reduction (``4096 -> 32 / 48 / 64 / 128`` and ``5120 -> 32 / 48``) it does not cancel a
 #: mirrored input exactly: its relative error on such an input was 5.8 to 8.7 times the reference's median at 16231
@@ -1305,18 +1304,19 @@ _K1_PARITY_SM107A_208: dict[tuple[int, int], tuple[tuple[int, int, Any, Any], ..
     ),
 }
 #: The 212-SM ranges: the ranges above and the ones past 40961 tokens, rechecked where they ran slower than the routing
-#: they replaced (this package's A/B against FI main on a 212-SM R200 part) per range and K-block parity against every
-#: token count measured on that part under the same accuracy check (FI main's program where it met the check at every
-#: measured count of the range, else the fastest program that did; two ranges keep FI main's program although it
-#: missed the check at some counts: ``4096 -> 512`` at the odd counts from 24577 to 32767 tokens and ``5120 -> 512`` at
-#: the odd counts from 40962 tokens).  ``4096 -> 512`` runs the deterministic program at the odd counts from 24577
-#: tokens, FI main's program up to 32767 tokens: it met the check at 24577, 28673, 30721 and 32641 tokens and missed it
-#: at 25601 (1.12 times); below 24577 four chains stay (it missed the check at 16385 and 20001 tokens, up to 1.15
-#: times).  ``4096 -> 1024`` runs the deterministic program at the even counts from 24576 tokens (FI main's program
-#: up to 32767 tokens, where it met the check at every measured even count; FI main's three chains from 32768 tokens
-#: missed it; 0.94 to 0.98 times the time of two chains).  ``5120 -> 1024`` runs four chains from 16170 to 16172 tokens
-#: (FI main's program at 16172 tokens; they met the check at all three counts and missed it at 16300 and 16385).
-#: ``5120 -> 512`` keeps FI main's routing from 40962 tokens (two splits: the bits of the deterministic program at the
+#: they replaced (this package's A/B against the former routing on a 212-SM R200 part) per range and K-block parity
+#: against every token count measured on that part under the same accuracy check (the former program where it met the
+#: check at every measured count of the range, else the fastest program that did; two ranges keep the former program
+#: although it missed the check at some counts: ``4096 -> 512`` at the odd counts from 24577 to 32767 tokens and
+#: ``5120 -> 512`` at the odd counts from 40962 tokens).  ``4096 -> 512`` runs the deterministic program at the odd
+#: counts from 24577 tokens, the former program up to 32767 tokens: it met the check at 24577, 28673, 30721 and 32641
+#: tokens and missed it at 25601 (1.12 times); below 24577 four chains stay (it missed the check at 16385 and 20001
+#: tokens, up to 1.15 times).  ``4096 -> 1024`` runs the deterministic program at the even counts from 24576 tokens (the
+#: former program up to 32767 tokens, where it met the check at every measured even count; the former three chains from
+#: 32768 tokens missed it; 0.94 to 0.98 times the time of two chains).  ``5120 -> 1024`` runs four chains from 16170 to
+#: 16172 tokens (the former program at 16172 tokens; they met the check at all three counts and missed it at 16300 and
+#: 16385).
+#: ``5120 -> 512`` keeps the former routing from 40962 tokens (two splits: the bits of the deterministic program at the
 #: even counts; at the odd counts they missed the check at 40962 and 57345 tokens, up to 1.83 times, and met it at 49153
 #: and 65409).
 _K1_PARITY_SM107A_212: dict[tuple[int, int], tuple[tuple[int, int, Any, Any], ...]] = {
@@ -1608,9 +1608,10 @@ K1_FORWARD_SINGLE_CTA_KNOBS: dict[str, Any] = {
 #: deterministic plan ``kk_n256_ht_cg_pro15`` of these rows in every paired group of three runs of this package's A/B
 #: against it, eager and in CUDA graph replays; there they run ``kk_n192_m256_hen_s5_pro15`` (0.934 to 0.960 times the
 #: time of the deterministic plan, 17 paired groups, eager and graph; ``4096 -> 512`` at 16384 tokens, at 1.007 times
-#: its time in eager launches in this package's A/B against FI main, keeps it), and ``5120 -> 32`` / ``48`` / ``64`` and
-#: ``8192 -> 128`` run ``kk_n128_hen_pro15`` instead of the deterministic plan's ``kk_n128_hen_pro7`` (0.979 to 0.989
-#: times its time, 17 of 17 groups, on two R200 parts), at 16172, 16231 and 16384 tokens; the same bits as that plan.
+#: its time in eager launches in this package's A/B against the former routing, keeps it), and ``5120 -> 32`` / ``48`` /
+#: ``64`` and ``8192 -> 128`` run ``kk_n128_hen_pro15`` instead of the deterministic plan's ``kk_n128_hen_pro7``
+#: (0.979 to 0.989 times its time, 17 of 17 groups, on two R200 parts), at 16172, 16231 and 16384 tokens; the same bits
+#: as that plan.
 # fmt: off
 K1_FORWARD_RULES_BY_SM: dict[
     tuple[str, int], dict[tuple[int, int, int], Union[dict[str, Any], str]]
@@ -3020,7 +3021,7 @@ class _VerdictTable(dict):
 #:
 #: A ``"det_s<n>"`` window runs the weight gradient on the deterministic program at ``n`` splits
 #: (:func:`router_det_splits`): the partials added in a fixed order, so the result repeats bit for bit.  Its accuracy
-#: was checked against the reference implementation (FlashInfer commit ``2e989556``) on six input kinds (random
+#: was checked against the reference implementation on six input kinds (random
 #: normal, long sums, mirrored and permuted cancellation, concentrated values, values near the largest magnitude):
 #: within 1.1 times the reference's median error on every kind.  Hidden 6144 takes six splits from 16129 to 16384
 #: tokens, where the deterministic package's three splits missed that check on every kind (up to 2.0 times) and six,

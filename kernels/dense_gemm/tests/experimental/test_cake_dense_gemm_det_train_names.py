@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# The names of the deterministic Cake dense GEMMs (flashinfer-ai/flashinfer#8928): the public module
+# The names of the deterministic Cake dense GEMMs: the public module
 # ``cake_pplx.cake_dense_gemm_det_train`` carries the mode word in every public name, no entry point takes a
 # ``deterministic=`` keyword, the former names and import paths are gone (no alias), the module imports its backend
 # only on first use, the deterministic entry points never consult the PyTorch deterministic-algorithms setting,
@@ -61,8 +61,7 @@ PUBLIC = {
     "CakeDenseGemmDetRouterLaunch",
     "cake_dense_gemm_det_train_convenience_cache_clear",
 }
-# The former import paths: the package and its modules (``flashinfer.experimental.<package>`` before the move,
-# under the cake_pplx prefix).
+# The former import paths: the package and its modules under their former names.
 FORMER_MODULES = (
     "cake_pplx._backends.dense_projection_det_gemm.cake_backend",
     "cake_pplx._backends.dense_projection_det_gemm.cake_jit",
@@ -137,7 +136,7 @@ def _run(code: str) -> subprocess.CompletedProcess:
 
 
 def test_the_shared_mode_name_checks():
-    """The shared #8928 checks (tests/cake/test_helpers/cake_mode_names.py): mode word and stem, no ``deterministic``
+    """The shared naming checks (tests/cake/test_helpers/cake_mode_names.py): mode word and stem, no ``deterministic``
     keyword, one name per object across the module, the backend modules and the ``cake_pplx`` namespace package,
     and the former paths and names failing at import in a fresh interpreter."""
     import cake_pplx

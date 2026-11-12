@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake backend: the GLM-5.2 dense projection GEMMs for training and the FP32
-router-gate GEMM on SM100 / SM103 / SM107 (flashinfer-ai/flashinfer#5677).
+router-gate GEMM on SM100 / SM103 / SM107.
 
 K1 -- dense projection GEMM (BF16 operands, FP32 accumulation)
 --------------------------------------------------------------
@@ -121,7 +121,6 @@ import tvm_ffi
 from .cake_jit import (
     KERNELS,
     MODULES,
-    TRACKING_ISSUE,
     arg_plan_of,
     load_cake_dense_projection_det_gemm_module,
     select_module,
@@ -1295,12 +1294,12 @@ def swap_small_m(L: int, M: int, N: int, transposed_out: bool) -> bool:
     return L > 1 and not transposed_out and M <= 256 and N >= 2 * M
 
 
-#: FlashInfer-only: the architectures on which an unbatched weight gradient with a narrow output (``N <= 64`` columns
+#: Package-only: the architectures on which an unbatched weight gradient with a narrow output (``N <= 64`` columns
 #: against ``4096 <= M <= 8192`` rows, ``K >= 256``) and no measured rule was measured faster swapped (see
 #: :func:`_single_wgrad_swap`).
 _NARROW_N_SWAP_ARCHES = ("sm_100a", "sm_103a")
 
-#: FlashInfer-only: the smallest token count ``K`` at which a keyed unbatched weight gradient runs swapped, by
+#: Package-only: the smallest token count ``K`` at which a keyed unbatched weight gradient runs swapped, by
 #: ``(arch, M, N, out_f32)`` of the generic call (see :func:`_single_wgrad_swap`).  On sm_107a (212 SMs) the 6144 -> 576
 #: bf16 weight gradient ran the swapped plan 0.91x at T 2048 and 4096 and 1.18x to 1.46x from T 6144 to 40961.
 _SINGLE_WGRAD_SWAP_MIN_K = {("sm_107a", 576, 6144, False): 6144}
@@ -1309,7 +1308,7 @@ _SINGLE_WGRAD_SWAP_MIN_K = {("sm_107a", 576, 6144, False): 6144}
 def _single_wgrad_swap(
     arch: str, M: int, N: int, K: int, a_mn: bool, b_mn: bool, out_f32: bool
 ) -> bool:
-    """FlashInfer-only: an unbatched (``L == 1``) call with both operands MN-major and no transposed store is the
+    """Package-only: an unbatched (``L == 1``) call with both operands MN-major and no transposed store is the
     weight gradient ``G.T @ X`` of :func:`cake_dense_gemm_det_train_projection_wgrad` with ``G = A.T`` (``M`` output
     rows) and ``X = B`` (``N`` columns).  It runs the swapped ``X.T @ G`` with the transposed store
 
@@ -1948,8 +1947,8 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_103a', False, True, False, False, False, 5120, 17408, 16172): {"cta_rows": 256, "ovl": True, "htail": True, "cgrp": True, "group_m": 12, "epi": 'tma', "slots": 1},
     # the serpentine K walk over blocks of 76 items (``kser`` 76: see the 12288 -> 4096 forward at T 16172)
     ('sm_103a', False, True, False, False, False, 4096, 12288, 16172): {"cta_rows": 256, "ovr": True, "htail": True, "cgrp": True, "group_m": 16, "kser": 76},
-    #      (the two weight gradients carry ht_min_tail 16, a FlashInfer-only planner refinement: their 680-tile rows keep
-    #      a tail under 16 tiles whole - 148 SMs, 14 tiles, measured slower as 28 half items than FI main - and plan as
+    #      (the two weight gradients carry ht_min_tail 16, a package-only planner refinement: their 680-tile rows keep
+    #      a tail under 16 tiles whole - 148 SMs, 14 tiles, measured slower as 28 half items than whole - and plan as
     #      before on 152 SMs (no half-item fit) and 160 SMs (40 tiles, 80 half items))
     ('sm_103a', True, True, False, False, False, 5120, 16172, 17408): {"cta_rows": 256, "htail": True, "epi": 'tma', "slots": 1, "group_m": 12, "ht_min_tail": 16},
     ('sm_103a', True, True, False, False, False, 17408, 16172, 5120): {"cta_rows": 256, "htail": True, "epi": 'tma', "slots": 1, "group_m": 12, "ht_min_tail": 16},
@@ -1988,12 +1987,12 @@ ARCH_RULE_DEFAULTS: dict[str, dict] = {
 # always wins (either weight-gradient orientation); sm_100a and sm_107a inherit nothing.
 RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 
-# FlashInfer-only token tiers of ragged ``ROW_RULES`` keys of the sm_107a 212-SM tranche (measured at T 16172 - 16384):
+# Package-only token tiers of ragged ``ROW_RULES`` keys of the sm_107a 212-SM tranche (measured at T 16172 - 16384):
 # ``key -> ((bound, rule), ...)`` in ascending ``bound``.  At a token count T (``M`` of a forward / input-gradient key,
 # ``K`` of a weight-gradient key) below a tier's ``bound``, the first such tier's ``rule`` plans the row in place of the
 # key's; the last ``bound`` is the key's floor, from which on the key's own rule applies.  A tier rule is the rule
-# FlashInfer main planned the row with (``{}``: none); the fp32 5120 -> 5120 weight gradient plans with no rule up to
-# T 257.  The counts are the R200 A/B of every plan the tranche changed against FlashInfer main (212 SMs, CUPTI cold
+# the row planned with before the tranche (``{}``: none); the fp32 5120 -> 5120 weight gradient plans with no rule up to
+# T 257.  The counts are the R200 A/B of every plan the tranche changed against the plan before it (212 SMs, CUPTI cold
 # L2, 2026-11-08).  An exact (N, K, M) key has no tiers.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
@@ -2038,7 +2037,7 @@ def _measured_row_rule(
     """The row's own ``ROW_RULES`` entry without the architecture defaults: the exact (N, K, M) rule, else the
     ragged-M (N, K, None) rule, else the ragged-K (N, None, M) rule, else the parent architecture's entry
     (``RULE_PARENT``: sm_103a reads the sm_100a table for the rows its lanes did not measure), else empty (the lookup
-    of Cake ``row_rule``; FlashInfer-only split so the registry fallback can drop the MEASURED rule alone, see
+    of Cake ``row_rule``; package-only split so the registry fallback can drop the MEASURED rule alone, see
     ``cake_dense_gemm_det_train_projection_plan``).  A ragged key with token tiers (``ROW_RULE_MIN_T``) yields the
     first tier whose bound exceeds the token count (``M`` of a ragged-M key, ``K`` of a ragged-K key)."""
     ident = (arch, bool(a_mn), bool(b_mn), bool(out_f32), bool(out_t), bool(batched))
@@ -2442,7 +2441,7 @@ class CakeDenseGemmDetProjectionPlan:
     sk_units: int
     iters_per_unit: int
     template: str
-    # FlashInfer-only (see ``cake_dense_gemm_det_train_projection_plan``): the batched small-M swap was undone / the row's
+    # Package-only (see ``cake_dense_gemm_det_train_projection_plan``): the batched small-M swap was undone / the row's
     # measured rule was dropped because the planned instance is not a generated program of this architecture
     # (the Cake host JIT-compiles it)
     swap_fallback: bool = False
@@ -2530,7 +2529,7 @@ class CakeDenseGemmDetProjectionPlan:
     # an odd block of P items descending (P = ``sm_pairs``: the wave guard keeps the rule's value on devices with P
     # pairs only) - a program knob, no launch argument, no plan arithmetic (0 = off)
     kser: int = 0
-    # FlashInfer-only: the rule's exact-wave BLOCK_N (224) yielded to the default tile because the device's CTA pairs do
+    # Package-only: the rule's exact-wave BLOCK_N (224) yielded to the default tile because the device's CTA pairs do
     # not fit its tiles in whole waves and the default tile needs fewer waves (``exact_waves``)
     wave_fallback: bool = False
 
@@ -2949,7 +2948,7 @@ def cake_dense_gemm_det_train_projection_plan(
     it, fixed run to run.
     [Cake K1 kernel host L1234-L1358]
 
-    One FlashInfer-only deviation: the Cake host applies ``swap_small_m`` unconditionally because it compiles
+    One package-only deviation: the Cake host applies ``swap_small_m`` unconditionally because it compiles
     the swapped instance on demand, while this package can only launch the generated programs registered for
     ``arch``.  When the plan resolves to an unregistered instance (a batched forward / input gradient with a
     tiny T that engages the swap, or a per-row rule whose template was only generated for the contract's T),
@@ -2963,7 +2962,7 @@ def cake_dense_gemm_det_train_projection_plan(
     without any generated program on ``arch`` keeps an unregistered plan (the launch binding raises
     ``NotImplementedError`` naming it).  ``_fallback=False`` returns the pure mirror (unit tests of the planner).
 
-    A second FlashInfer-only deviation, the exact-wave gate (``plan.wave_fallback``): a rule's BLOCK_N 224
+    A second package-only deviation, the exact-wave gate (``plan.wave_fallback``): a rule's BLOCK_N 224
     (``EXACT_WAVE_BLOCK_N``) was measured for the whole-wave fit of its tiles on the 76-pair devices
     (:func:`exact_waves`); on a device whose pairs do not fit them in whole waves and where the default tile needs fewer
     waves (74 pairs of a 148-SM part: the 4096 x 4096 weight gradient's 152 tiles are 2.05 waves against 1.73, the
@@ -2971,7 +2970,7 @@ def cake_dense_gemm_det_train_projection_plan(
     stay, a caller-forced ``block_n`` is never touched, and the plan is the launcher's wherever the fit is exact or both
     tiles need the same waves (152 and 160 SMs).
 
-    A third FlashInfer-only deviation, the synchronised TMA-store gate (:func:`_serves`): the synchronised stream-K
+    A third package-only deviation, the synchronised TMA-store gate (:func:`_serves`): the synchronised stream-K
     programs that store their bf16 tiles through the TMA store (``_tma<slots>_sks``) were generated for measured
     rows whose rule names ``epi="tma"``; a ragged synchronised row whose short K (``K_TMA_BF16``) turns the bf16
     epilogue default to the TMA store plans the same symbol unmeasured, so the registry does not serve it there and
@@ -2979,7 +2978,7 @@ def cake_dense_gemm_det_train_projection_plan(
     is served, and the fp32-output programs (``_f32_tma<slots>_sks``: the TMA store by default at every K) are
     served as before.
 
-    A fourth FlashInfer-only deviation, the unbatched weight-gradient swap (:func:`_single_wgrad_swap`): an ``L == 1``
+    A fourth package-only deviation, the unbatched weight-gradient swap (:func:`_single_wgrad_swap`): an ``L == 1``
     call with both operands MN-major and no transposed store is the weight gradient ``G.T @ X``; where the rule table
     keys that row in the swapped orientation alone, the call is planned swapped like the batched small-M swap (and
     under the same registry fallback), so it runs the plan of :func:`cake_dense_gemm_det_train_projection_wgrad` for
@@ -3101,7 +3100,7 @@ def cake_dense_gemm_det_train_projection_plan(
     a_mn, a_desc = operand_view(A3, "A", k_axis=2)
     b_mn, b_desc = operand_view(B3, "B", k_axis=1)
     # Round 33: ``row_rule`` lays the row's MEASURED rule over the architecture's ``ARCH_RULE_DEFAULTS`` (the
-    # launcher's merge).  The FlashInfer-only rule fallback (``_use_rules=False``) drops the measured rule alone and
+    # launcher's merge).  The package-only rule fallback (``_use_rules=False``) drops the measured rule alone and
     # keeps the architecture default: it is what a row without a rule plans with, and the generated pair programs of
     # the architecture carry the default's ``_pro{n}`` form (the pro-0 pair programs are not registered since round 33).
     rule_dropped = (
@@ -3188,7 +3187,7 @@ def cake_dense_gemm_det_train_projection_plan(
         rule = {k: v for k, v in rule.items() if k != "stages"}
     wave_fallback = False
     if block_n is None and rule.get("block_n") == EXACT_WAVE_BLOCK_N:
-        # FlashInfer-only exact-wave gate: the rule's 224-column tile fills the measuring device's CTA pairs in whole
+        # Package-only exact-wave gate: the rule's 224-column tile fills the measuring device's CTA pairs in whole
         # waves (``exact_waves``); where the running device's pairs do not, and the default tile needs fewer waves, the
         # narrower tile would cost a nearly empty extra wave, so the rule's BLOCK_N yields (its other knobs stay)
         m_tiles_g = _ceil_div(M, int(cta_rows))
@@ -3419,7 +3418,7 @@ def cake_dense_gemm_det_train_projection_plan(
     htail_plan = False
     if htail:
         tail_h = pair_tiles % units if pair_tiles > units else pair_tiles
-        # FlashInfer-only refinement (like ROW_RULE_MIN_T): a rule's ``ht_min_tail`` keeps a tail of fewer tiles whole
+        # Package-only refinement (like ROW_RULE_MIN_T): a rule's ``ht_min_tail`` keeps a tail of fewer tiles whole
         # (the ``_ht`` program then runs its whole-tile plan); no field means any tail that fits
         htail_plan = (
             bool(tail_h)
@@ -3802,7 +3801,7 @@ def cake_dense_gemm_det_train_projection_plan(
 
 
 def _serves(arch: str, plan, caller_epi: Optional[str], use_rules: bool) -> bool:
-    """Whether the registry of ``arch`` serves ``plan`` as planned (FlashInfer-only, see
+    """Whether the registry of ``arch`` serves ``plan`` as planned (package-only, see
     ``cake_dense_gemm_det_train_projection_plan``): its program is generated, and a synchronised stream-K plan that stores its
     bf16 tiles through the TMA store (``_tma<slots>_sks``) has its epilogue named by the caller (``caller_epi``) or by
     the row's rule (``use_rules``: the merged row rule; else the architecture default).  Those bf16 programs were
@@ -5775,8 +5774,7 @@ def router_layout_class(a_mn: bool, b_mn: bool) -> str:
     if a_mn and b_mn:
         return "nn_t"
     raise NotImplementedError(
-        "cake_dense_gemm_det_train_router: an MN-major A with a K-major B has no registered instance "
-        f"(see {TRACKING_ISSUE})"
+        "cake_dense_gemm_det_train_router: an MN-major A with a K-major B has no registered instance"
     )
 
 

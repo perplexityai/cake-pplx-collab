@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,14 +47,14 @@ import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 
-# Backend suite: the packages are named through ``cake_package``; nothing else of flashinfer is imported here.
+# Backend suite: the packages are named through ``cake_package``; nothing else of cake_pplx is imported here.
 package = cake_package("cake_dense_gemm_nondet_train")
 cake_backend = cake_package("cake_dense_gemm_nondet_train", "cake_backend")
 cake_jit = cake_package("cake_dense_gemm_nondet_train", "cake_jit")
 det_backend = cake_package("cake_dense_gemm_det_train", "cake_backend")
 det_jit = cake_package("cake_dense_gemm_det_train", "cake_jit")
-# A vendored run imports both packages under other names: bind the deterministic package explicitly (in a
-# FlashInfer tree this names the sibling the package resolves by itself).
+# A vendored run imports both packages under other names: bind the deterministic package explicitly (in
+# ``cake_pplx._backends`` this names the sibling the package resolves by itself).
 cake_backend.use_deterministic_backend(det_backend)
 
 # Accuracy gates (the deterministic package's budgets, which this module keeps).
@@ -131,20 +131,6 @@ def test_package_init_imports_nothing():
         _ = package.no_such_module
 
 
-def test_the_package_never_imports_flashinfer_by_name():
-    """The package's own modules reach the deterministic package as a sibling; no module imports ``flashinfer``
-    (the pinned loader's JIT fallback in ``cake_build.py`` imports the package's own JIT shim)."""
-    root = Path(cake_jit.__file__).parent
-    for path in sorted(root.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Import):
-                assert not [
-                    a for a in node.names if a.name.split(".")[0] == "flashinfer"
-                ], path.name
-            elif isinstance(node, ast.ImportFrom) and node.level == 0:
-                assert (node.module or "").split(".")[0] != "flashinfer", path.name
-
-
 def test_cake_build_is_the_pinned_loader():
     ours = Path(cake_jit.__file__).parent / "cake_build.py"
     theirs = Path(det_jit.__file__).parent / "cake_build.py"
@@ -152,7 +138,7 @@ def test_cake_build_is_the_pinned_loader():
 
 
 def test_the_deterministic_package_resolves_as_a_sibling(monkeypatch):
-    """In a FlashInfer tree and in a copy vendored with the deterministic package beside it (both in one parent
+    """In ``cake_pplx._backends`` and in a copy vendored with the deterministic package beside it (both in one parent
     package, or both top-level packages: ``test_cake_dense_gemm_nondet_train_standalone.py``) the deterministic
     package resolves as this package's sibling."""
     monkeypatch.setattr(cake_jit, "_det_package", None)
@@ -9538,16 +9524,9 @@ BENCH_PATH = (
 
 @functools.cache
 def _bench() -> ModuleType:
-    """The benchmark script as a module (its functions only: nothing runs on import).  A vendored run
-    (``scripts/check_cake_build_manifests.py --vendored-gate``, which blocks flashinfer with
-    ``sys.modules["flashinfer"] = None``) skips: the script would import flashinfer's timer.  Without
-    flashinfer installed the script loads (its timer import is optional)."""
+    """The benchmark script as a module (its functions only: nothing runs on import)."""
     import importlib.util
 
-    if sys.modules.get("flashinfer", False) is None:
-        pytest.skip(
-            "the benchmark script imports flashinfer, which the vendored gate blocks"
-        )
     spec = importlib.util.spec_from_file_location(
         "bench_cake_dense_gemm_nondet_train", BENCH_PATH
     )
