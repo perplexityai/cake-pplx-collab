@@ -1,4 +1,4 @@
-# Copyright (c) 2026 by FlashInfer team.
+# Copyright (c) 2026, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,8 +37,7 @@ rows), each projection, with fwd, dgrad, the bf16 wgrad and the step.
 Arms: ``cake_det`` (the deterministic package,
 ``cake_pplx._backends.cake_moe_grouped_gemm_det_train``), ``cake_nondet``
 (``cake_pplx._backends.cake_moe_grouped_gemm_nondet_train``),
-``torch._grouped_mm``, a per-group cuBLAS loop with host-known bounds and
-``flashinfer.grouped_mm.grouped_mm_bf16`` (cuDNN; fwd / dgrad only); opt-in
+``torch._grouped_mm`` and a per-group cuBLAS loop with host-known bounds; opt-in
 ``cake_nondet_inforward``, ``cake_nondet`` through a direct
 ``CakeMoEGroupedGemmNondetFunction.apply(x, w, offs)``, whose forward GEMM launches
 inside ``forward`` so that a checkpoint always recomputes it (autograd rows only; when
@@ -122,7 +121,6 @@ from cake_pplx._backends.cake_moe_grouped_gemm_det_train import (
 from cake_pplx._backends.cake_moe_grouped_gemm_det_train.cake_autograd import (
     cake_moe_grouped_gemm_det,
 )
-from flashinfer.testing import bench_gpu_time
 
 PROJECTIONS = {"gate_up": (4096, 6144), "down": (6144, 2048)}  # (N, K)
 BLOCK = "gate_up_down"  # the expert block's projections: gate_up, silu(a) * b, down
@@ -176,7 +174,6 @@ ARMS = (
     "cake_nondet",
     "torch_grouped_mm",
     "per_expert_cublas",
-    "cudnn_grouped_mm",
 )
 ACC_ARMS = (
     "ovw",
@@ -592,28 +589,6 @@ def per_expert_cublas_arm(row, t):
     return run, None, f"{launches} GEMM launches, host-known bounds"
 
 
-def cudnn_grouped_mm_arm(row, t):
-    from flashinfer.grouped_mm import grouped_mm_bf16
-
-    op = row["op"]
-    _no_acc_rows(op)
-    if op == "wgrad" or op in AUTOGRAD_OPS:
-        raise NotImplementedError(
-            "grouped_mm_bf16 has no K-offset (weight gradient) form"
-        )
-    x, w, g, offs, out = t["x"], t["w"], t["g"], t["offs"], t["out"]
-    m_indptr = torch.cat((offs.new_zeros(1), offs))
-    a = x if op == "fwd" else g
-    b = w if op == "fwd" else w.transpose(1, 2)
-
-    def run():
-        grouped_mm_bf16(a, b, m_indptr, out=out, out_dtype=out.dtype, tactic=-1)
-
-    run()
-    torch.cuda.synchronize()
-    return run, None, "cuDNN heuristic plan (tactic=-1), W read in place"
-
-
 class _MainGradMm(torch.autograd.Function):
     """The caller-side Function of the ``mgF`` / ``mgO`` / ``det_acc`` arms: the forward and data
     gradient, and the weight gradient written by the caller into ``w.main_grad`` (``mgF``: this
@@ -837,7 +812,6 @@ ARM_BUILDERS = {
     "cake_nondet": cake_nondet_arm,
     "torch_grouped_mm": torch_grouped_mm_arm,
     "per_expert_cublas": per_expert_cublas_arm,
-    "cudnn_grouped_mm": cudnn_grouped_mm_arm,
     "cake_nondet_inforward": cake_nondet_inforward_arm,
     **{arm: _acc_arm(arm) for arm in ACC_ARMS},
 }
@@ -848,6 +822,99 @@ CAKE_BACKENDS = {
     **dict.fromkeys(ACC_ARMS, cb),
     **dict.fromkeys(DET_ACC_ARMS, det_cb),
 }
+
+
+_ITERATION_MARK = "cake_bench_iteration"
+
+
+def _l2_flush_buffer():
+    """A byte buffer twice the L2 size of the current device; zeroing it evicts the L2."""
+    l2_bytes = torch.cuda.get_device_properties(torch.cuda.current_device()).L2_cache_size
+    return torch.empty(
+        max(2 * l2_bytes, 1 << 20), dtype=torch.int8, device=torch.cuda.current_device()
+    )
+
+
+def bench_gpu_time(
+    fn, cold_l2_cache=True, enable_cupti=False, dry_run_ms=25.0, repeat_ms=100.0
+):
+    """Per-iteration GPU times of ``fn`` in milliseconds.
+
+    Five calls estimate the time of one call; ``fn`` then runs for about ``dry_run_ms``
+    untimed and for about ``repeat_ms`` timed (at least one iteration each).  With
+    ``cold_l2_cache`` a buffer twice the L2 size is zeroed before every call.  CUDA
+    events bracket each call; with ``enable_cupti`` the calls run under
+    ``torch.profiler`` (CUPTI) instead, synchronized one by one, and an iteration's time
+    is the span from the start of its first GPU activity to the end of its last.
+    """
+    flush = _l2_flush_buffer() if cold_l2_cache else None
+
+    def prepare():
+        if flush is not None:
+            flush.zero_()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    start.record()
+    for _ in range(5):
+        prepare()
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    per_call = max(start.elapsed_time(end) / 5, 1e-3)
+    dry_runs = max(1, int(dry_run_ms / per_call))
+    repeats = max(1, int(repeat_ms / per_call))
+    for _ in range(dry_runs):
+        prepare()
+        fn()
+    torch.cuda.synchronize()
+
+    if not enable_cupti:
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(repeats)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(repeats)]
+        for i in range(repeats):
+            prepare()
+            starts[i].record()
+            fn()
+            ends[i].record()
+        torch.cuda.synchronize()
+        return [s.elapsed_time(e) for s, e in zip(starts, ends)]
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as prof:
+        for _ in range(repeats):
+            prepare()
+            torch.cuda.synchronize()
+            with torch.profiler.record_function(_ITERATION_MARK):
+                fn()
+                torch.cuda.synchronize()
+    events = prof.events()
+    # Each iteration's GPU work starts after its CPU range opens and ends before the
+    # synchronization that closes it.
+    windows = sorted(
+        (e.time_range.start, e.time_range.end)
+        for e in events
+        if e.name == _ITERATION_MARK
+        and e.device_type == torch.autograd.DeviceType.CPU
+    )
+    activity = sorted(
+        (e.time_range.start, e.time_range.end)
+        for e in events
+        if e.device_type == torch.autograd.DeviceType.CUDA
+        and e.name != _ITERATION_MARK
+    )
+    times = []
+    for lo, hi in windows:
+        inside = [(s, t) for s, t in activity if lo <= s <= hi]
+        if not inside:
+            raise RuntimeError("an iteration recorded no GPU activity under CUPTI")
+        times.append((max(t for _, t in inside) - min(s for s, _ in inside)) / 1e3)
+    return times
 
 
 def _times_ms(fn, cupti):

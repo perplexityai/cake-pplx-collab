@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ from . import cake_build
 # ``build.json`` (see ``cake_build``), whose entry for a program is
 # ``<library>[<specialization tag>]_<arch>``; a program is built once per
 # (architecture, compile-line specialization), prebuilt under ``aot/`` or by
-# FlashInfer's JIT.
+# the package's JIT shim.
 #
 # ``ROUTES``: one record per public route -- ``fwd``, ``dgrad`` and
 # ``wgrad_{bf16,f32}_k{256,512}`` -- naming its architectures and
@@ -1229,6 +1229,6 @@ def load_module(
     program: str, arch: str, specializations: Optional[dict[str, Any]] = None
 ):
     """Load (once per program, exact target and specialization) one physical program: the prebuilt
-    library under ``aot/`` when the package ships it, else FlashInfer's JIT build of its ``build.json``
+    library under ``aot/`` when the package ships it, else the JIT shim's build of its ``build.json``
     entry."""
     return _load_module(program, arch, _specialization_items(specializations or {}))

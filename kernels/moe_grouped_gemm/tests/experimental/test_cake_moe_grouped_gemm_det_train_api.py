@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ The entry points of the module ``cake_pplx.cake_moe_grouped_gemm_det_train``
 (``cake_moe_grouped_gemm_det_train_{forward,dgrad,wgrad}``, the
 ``cake_moe_grouped_gemm_det_train_prepare_*`` builders and the autograd entry
 ``cake_moe_grouped_gemm_det``) and the backend function
-``cake_backend.grouped_det_mm_bf16_cake`` (which FlashInfer's
-``grouped_mm_bf16(..., backend="cake")`` calls) hand off to the backend
+``cake_backend.grouped_det_mm_bf16_cake`` (the ``grouped_mm_bf16``-shaped
+handoff of the forward) hand off to the backend
 package ``cake_pplx._backends.cake_moe_grouped_gemm_det_train``.  This suite
 covers the module's entry points on CPU -- stable APIs with no experimental marking and
 no warning, the signatures and docstrings they share with the package functions, the
@@ -117,7 +117,7 @@ def test_facade_entry_points_are_stable_handoffs():
     docstring of the package function of the same name, and is listed in the
     module's ``__all__``.  The two types of the module are the package's classes,
     resolved on first access."""
-    assert "flashinfer_experimental_api" not in Path(facade.__file__).read_text()
+    assert "experimental_api" not in Path(facade.__file__).read_text()
     for name in ENTRY_POINTS:
         entry, impl = getattr(facade, name), getattr(pkg, name)
         assert name in facade.__all__, name
@@ -410,10 +410,10 @@ def test_torch_deterministic_mode_changes_nothing_for_det_entries(name):
 # ---------------------------------------------------------------------------
 # The stable route grouped_mm_bf16(..., backend="cake") (GPU)
 # ---------------------------------------------------------------------------
-# FlashInfer's ``grouped_mm_bf16(a, b, m_indptr, out=out, out_dtype=out_dtype,
-# tactic=tactic, backend="cake")`` warns once that the backend is experimental and
-# calls ``cake_backend.grouped_det_mm_bf16_cake`` with the same arguments; cake_pplx
-# has no ``grouped_mm`` module, so these tests call that handoff directly.
+# ``grouped_mm_bf16(a, b, m_indptr, out=out, out_dtype=out_dtype, tactic=tactic,
+# backend="cake")`` hands off to ``cake_backend.grouped_det_mm_bf16_cake`` with the
+# same arguments; cake_pplx has no ``grouped_mm`` module, so these tests call that
+# handoff directly.
 
 
 def grouped_mm_bf16(a, b, m_indptr, out=None, out_dtype=torch.bfloat16, tactic=-1, backend="cake"):

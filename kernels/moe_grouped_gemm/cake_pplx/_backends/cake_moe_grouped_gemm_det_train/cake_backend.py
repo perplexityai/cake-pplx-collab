@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -129,7 +129,7 @@ in place) on the device's architecture and, when the plan splits its tail
 (``TAIL_REDUCE_ACC``) on the route of that tail (the 256-wide k tile's for
 ``main_halves_k256t``), which sums the ordered partials in their fixed order and
 adds the sum into C once; every such build's library can load by the loader's
-static rule (its prebuilt file under ``aot/``, else a FlashInfer JIT toolkit with
+static rule (its prebuilt file under ``aot/``, else the JIT shim's toolkit with
 ``nvcc``, JIT not disabled, at its ``build.json`` ``min_cuda``:
 :func:`acc_library_loadable`, nothing built or probed), and C is
 ``ACC_ALIGN``-byte aligned (its base, row pitch and expert pitch).  The programs
@@ -258,7 +258,7 @@ _PACKAGE = __name__.rpartition(".")[0]
 
 
 def _caller_stacklevel() -> int:
-    """The ``stacklevel`` of the nearest frame outside this package and flashinfer, for a warning issued by
+    """The ``stacklevel`` of the nearest frame outside this package and ``cake_pplx``, for a warning issued by
     the function that calls this one: the caller of the entry point, also through the facade and its
     decorators."""
     frame = inspect.currentframe()
@@ -315,21 +315,20 @@ def acc_stage_served(out_dtype: str, arch: str) -> bool:
 
 @functools.cache
 def _jit_cuda_version() -> Optional[tuple[int, int]]:
-    """``(major, minor)`` of the toolkit FlashInfer's JIT builds with, the version ``cake_build.jit_spec``
-    holds an entry's ``min_cuda`` against; None when the loader cannot build: FlashInfer's JIT is not
-    importable, ``FLASHINFER_DISABLE_JIT`` or ``CAKE_PPLX_DISABLE_JIT`` is set, or the CUDA path has no ``bin/nvcc`` (FlashInfer's
-    version query then reports PyTorch's CUDA version, which compiles nothing) or cannot be resolved.
+    """``(major, minor)`` of the toolkit the package's JIT shim builds with, the version ``cake_build.jit_spec``
+    holds an entry's ``min_cuda`` against; None when the loader cannot build: the JIT shim is not
+    importable, ``CAKE_PPLX_DISABLE_JIT`` is set, or the CUDA path has no ``bin/nvcc`` or cannot be
+    resolved.
     Asked once per process."""
-    # The package's JIT shim refuses to build under either variable; so does this query.
-    if os.environ.get("FLASHINFER_DISABLE_JIT") or os.environ.get("CAKE_PPLX_DISABLE_JIT"):
+    # The package's JIT shim refuses to build under this variable; so does this query.
+    if os.environ.get("CAKE_PPLX_DISABLE_JIT"):
         return None
     try:
         # Any manifest library: the name only labels the error when the JIT is not importable.
         _gen_jit_spec, get_cuda_version = _jit_toolchain(
             next(iter(libraries_by_name()))
         )
-        # _jit_toolchain imported FlashInfer's toolchain module; the package's only flashinfer
-        # import stays the JIT fallback of cake_build.py.
+        # _jit_toolchain imported the package's JIT shim; read its CUDA path from the loaded module.
         cpp_ext = sys.modules[__package__ + "._cake_pplx_jit"]
         if not Path(cpp_ext.get_cuda_path(), "bin", "nvcc").is_file():
             return None
@@ -340,7 +339,7 @@ def _jit_cuda_version() -> Optional[tuple[int, int]]:
 
 def acc_library_loadable(name: str, stage: str, arch: str) -> bool:
     """Whether the library of ``stage`` of route ``name`` on ``arch`` can load, by the loader's own static rule
-    (``cake_build.load_library``): its prebuilt file under ``aot/`` exists, or FlashInfer's JIT toolkit
+    (``cake_build.load_library``): its prebuilt file under ``aot/`` exists, or the JIT shim's toolkit
     (``nvcc`` present, JIT not disabled: :func:`_jit_cuda_version`) reaches the entry's ``build.json``
     ``min_cuda`` (``cake_build.jit_spec`` refuses a lower one).  Nothing is
     built, loaded or probed: an ahead-of-time build below an entry's floor ships no file for it, and a JIT
@@ -1806,8 +1805,8 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
                 "accumulate_min_cuda",
                 "cake_moe_grouped_gemm_det_train_prepare_wgrad(accumulate=True): the accumulate build of the "
                 f"{main_stage} stage or of its tail reduce on {arch} is neither prebuilt nor buildable by "
-                "FlashInfer's JIT "
-                "toolkit (not importable, FLASHINFER_DISABLE_JIT set, no nvcc, or below its build.json "
+                "the JIT shim's "
+                "toolkit (not importable, CAKE_PPLX_DISABLE_JIT set, no nvcc, or below its build.json "
                 "min_cuda), so the "
                 "weight gradient is written to a "
                 "scratch and added with out.add_ (the composed route, same bits, "
@@ -1902,7 +1901,7 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
 
 
 # ---------------------------------------------------------------------------
-# Stable-API handoff: flashinfer.grouped_mm.grouped_mm_bf16(..., backend="cake")
+# Handoff with the call shape of grouped_mm_bf16(a, b, m_indptr, out, out_dtype, tactic)
 # ---------------------------------------------------------------------------
 
 
@@ -1920,10 +1919,8 @@ def grouped_det_mm_bf16_cake(
     with ``a`` ``[cum_m, K]`` bf16, ``b`` ``[E, N, K]`` bf16 and ``m_indptr``
     ``[E + 1]`` int32 on the device (read by the kernel, never on the host).
     Only bfloat16 outputs are produced and there is no tactic index; rows of
-    ``a`` past ``m_indptr[-1]`` are left untouched in ``out``.  The
-    experimental-backend warning is emitted by
-    ``flashinfer.grouped_mm.grouped_mm_bf16`` when the backend is named; this
-    function emits none.
+    ``a`` past ``m_indptr[-1]`` are left untouched in ``out``.  This function
+    emits no warning.
     """
     if out is not None:
         out_dtype = out.dtype

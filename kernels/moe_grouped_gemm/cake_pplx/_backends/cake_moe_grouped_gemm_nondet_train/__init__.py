@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,13 +47,12 @@ limitations under the License.
 # ``cake_autograd``, the host planning and the prepare-once / launch-many surface
 # (``cake_moe_grouped_gemm_nondet_train_prepare_{forward,dgrad,wgrad}`` returning
 # a ``CakeMoEGroupedGemmNondetLaunch``) of ``cake_backend``, and the JIT
-# registration of the generated sources in ``cake_jit``.  The stable
-# ``flashinfer.grouped_mm.grouped_mm_bf16(..., backend="cake")`` stays on the
-# deterministic package.  The submodules are re-exported lazily and stay
-# unimported until first use, so importing this package is cheap.  The package
-# imports nothing from the rest of FlashInfer: only itself, ``torch`` and
-# ``tvm_ffi`` (the JIT fallback of ``cake_build`` imports ``flashinfer`` inside
-# ``try/except ImportError``).
+# registration of the generated sources in ``cake_jit``.  The
+# ``grouped_mm_bf16`` handoff stays in the deterministic package.  The
+# submodules are re-exported lazily and stay unimported until first use, so
+# importing this package is cheap.  The package imports only itself, ``torch``
+# and ``tvm_ffi`` (the JIT fallback of ``cake_build`` imports the package's JIT
+# shim ``_cake_pplx_jit`` inside ``try/except ImportError``).
 # ``offs`` may be given as ``[E]`` end offsets or as ``m_indptr`` ``[E + 1]``.
 
 from __future__ import annotations

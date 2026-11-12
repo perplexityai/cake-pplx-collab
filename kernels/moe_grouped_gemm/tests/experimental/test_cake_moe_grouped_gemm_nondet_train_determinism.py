@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ import torch
 import torch.utils.checkpoint
 
 # The backend suite ``base`` names the package through ``cake_package`` only; nothing
-# else of flashinfer is imported here.
+# else of ``cake_pplx`` is imported here.
 from tests.experimental import test_cake_moe_grouped_gemm_nondet_train as base
 
 pkg = base.pkg
@@ -83,7 +83,7 @@ cake_jit = base.cake_jit
 HOST_PLAN_CONSTANTS = cake_jit.HOST_PLAN_CONSTANTS
 
 REPEATS = 10  # launches per pre-state (zero bytes, then FILL_BYTE)
-RACE_REPEATS = 100  # the flashinfer-ai/flashinfer#6570 shape
+RACE_REPEATS = 100  # the #6570 race shape
 # The byte of the second pre-state, the one ``base._poison_tail_sums`` writes (0x5A).
 FILL_BYTE = base.GARBAGE_BYTE
 SPOT_ROWS = 64

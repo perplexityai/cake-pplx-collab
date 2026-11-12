@@ -1,4 +1,4 @@
-# Copyright (c) 2026 by FlashInfer team.
+# Copyright (c) 2026, NVIDIA CORPORATION.
 # SPDX-License-Identifier: Apache-2.0
 """Cake ragged BF16 MoE grouped GEMM (SM100 / SM103 / SM107), deterministic training module.
 
@@ -15,7 +15,7 @@ one raises ``TypeError``), and ``torch.use_deterministic_algorithms(True)``
 changes nothing here (no alert, no warning).  The non-deterministic module is
 :mod:`cake_pplx.cake_moe_grouped_gemm_nondet_train`.
 
-Each function below is a stable FlashInfer API (``@cake_api``; no
+Each function below is a stable ``cake_pplx`` API (``@cake_api``; no
 experimental marking): it carries the signature and the documentation of its
 namesake in the backend package
 :mod:`cake_pplx._backends.cake_moe_grouped_gemm_det_train` and hands

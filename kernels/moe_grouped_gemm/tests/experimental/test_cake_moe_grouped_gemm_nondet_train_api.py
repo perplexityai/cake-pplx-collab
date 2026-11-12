@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -194,7 +194,7 @@ def test_facade_entry_points_are_stable_handoffs():
     (no ``deterministic`` parameter) and the docstring of the package function of the
     same name, and is listed in the module's ``__all__``.  The two types of the module
     are the package's classes, resolved on first access."""
-    assert "flashinfer_experimental_api" not in Path(facade.__file__).read_text()
+    assert "experimental_api" not in Path(facade.__file__).read_text()
     for name in ENTRY_POINTS:
         entry, impl = getattr(facade, name), _package_function(name)
         assert name in facade.__all__, name
@@ -382,7 +382,7 @@ print(json.dumps([answers, loaded]))
 
 
 def test_support_query_is_false_off_cuda():
-    """``is_cake_moe_grouped_gemm_nondet_train_supported`` is a stable FlashInfer API
+    """``is_cake_moe_grouped_gemm_nondet_train_supported`` is a stable ``cake_pplx`` API
     (``@cake_api``; not marked experimental) that is ``False`` without CUDA
     (the default device, an explicit CUDA device, a CPU device) and then imports
     none of the package; a device that is not CUDA is ``False`` on any host."""
@@ -688,9 +688,7 @@ def test_weight_gradient_alerts_with_the_entry_name(via, accumulate, monkeypatch
 
 def test_package_has_no_stable_api_handoff():
     """``grouped_mm_bf16(backend="cake")`` stays on the deterministic package: the new
-    package has no handoff function for it, and the deterministic package has.
-    (FlashInfer's ``grouped_mm`` module, which imports the handoff, is not part of
-    cake_pplx.)"""
+    package has no handoff function for it, and the deterministic package has."""
     for name in ("grouped_mm_bf16_cake", "grouped_det_mm_bf16_cake"):
         assert not hasattr(cb, name), name
     assert hasattr(

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -79,8 +79,6 @@ EXTRA_FORMER_NAMES = {
     f"{PACKAGE}.cake_backend": ("_DET_ENTRIES", "_require_deterministic_false"),
 }
 # The modules that must have none of the former names.
-# (``flashinfer.grouped_mm`` is a FlashInfer module with no cake_pplx counterpart;
-# the ``cake_pplx`` namespace package stands for the ``flashinfer`` top level.)
 NAME_HOSTS = (
     "cake_pplx",
     FACADE,
