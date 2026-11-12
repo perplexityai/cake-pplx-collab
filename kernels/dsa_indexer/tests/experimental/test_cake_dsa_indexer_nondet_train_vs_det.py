@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # Parity of the experimental Cake non-deterministic DSA indexer top-k package with the deterministic one
-# (flashinfer-ai/flashinfer#8946, point 4): the non-deterministic package runs the deterministic package's BF16 scan
+# (set-equality semantics): the non-deterministic package runs the deterministic package's BF16 scan
 # programs and its plain split merge under the same host decisions, without the ordering pass.  So
 #
 # * its registry is the deterministic registry's BF16 scan keys plus the plain ``merge`` key, every program the
@@ -26,7 +26,7 @@ limitations under the License.
 #   rank-fused merge being the plain merge here;
 # * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) are this package's own
 #   (``_OWN_SAMPLING``: its ``sample_class_rule`` and the ``sample_long_rule`` the deterministic record has no field
-#   for), so that no #7549 rank input runs slower with sampling on than off (flashinfer-ai/flashinfer#7549).  Whether a
+#   for), so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.  Whether a
 #   call samples, and every other decision, stays the deterministic one;
 # * every row on a device is the deterministic row in another slot order: the valid slots in ascending id order
 #   (``_canonical``) are bit-identical to the deterministic row, ids, score bits, valid count and tail padding.
@@ -72,7 +72,7 @@ P2_T, P2_TKV = 16172, 267520
 
 
 # the policy fields this package sets on its own: the deterministic record has no ``sample_long_rule``, and on sm_107a
-# the sampled tile count and rank shift follow this package's class and long-unit rules (#7549)
+# the sampled tile count and rank shift follow this package's class and long-unit rules
 _OWN_FIELDS = ("sample_long_rule",)
 _OWN_SAMPLING = {"sm_107a": ("sample_class_rule", "sample_long_rule")}
 
@@ -440,9 +440,8 @@ def _sink(seg_q_len, seg_k_len, top_k, far_sample):
 _P1_Q, _P1_K = _lengths(P1_CU_SEQLENS_Q), _lengths(P1_CU_SEQLENS_K)
 # name -> build() -> (inputs, knobs).  Random rows (iid, peaked, causal offsets on both sides, ratio 2), the packed
 # causality geometries of the reference (offsets, ratio 2, empty segments, singletons, short rows, top_k 1 and 4096),
-# forced split and unsplit calls (padded rows included), the ratio-4 pooled top-512 rows of
-# flashinfer-ai/flashinfer#7549, top_k 4096, the attention-sink rows of flashinfer-ai/flashinfer#7042 under both
-# far-sample settings, the exact semantic cases (cutoff ties, signed zeros, all-equal scores, ...) and the two
+# forced split and unsplit calls (padded rows included), the ratio-4 pooled top-512 rows, top_k 4096, the
+# attention-sink rows under both far-sample settings, the exact semantic cases (cutoff ties, signed zeros, all-equal scores, ...) and the two
 # recorded token counts at their full key counts (no reference is computed here).
 _PARITY_CASES = {
     "random": _random([1100, 900, 1000], [1100, 20000, 1000], 2048, 1),

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ unchanged; ``--rows`` takes its row and group names, ``iid`` / ``sink`` /
 * ``nondet``: ``cake_pplx._backends.cake_dsa_indexer_nondet_train``
   -- the same scan programs and the plain split merge, without an ordering
   pass: every row holds the same set of (id, score bits) pairs in no
-  specified slot order (flashinfer-ai/flashinfer#8946, point 4).
+  specified slot order.
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
@@ -42,8 +42,9 @@ breaks the reference's structure checks (rows put in ascending id order) or,
 with ``--verify``, that fails the reference is flagged ``FAILED``: it gets no
 ``det / nondet`` ratio, and the script exits non-zero after writing its JSON.
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and a
-cold L2 between iterations (per-iteration GPU span of the whole operator);
+Timing: the deterministic benchmark's ``gpu_times``, CUPTI activity tracing
+through ``torch.profiler`` with a cold L2 between iterations (per-iteration GPU
+span of the whole operator);
 ``--cupti-required`` turns the CUDA-event fallback into a failure.  Every row
 is measured in three paired phases -- the arms in the given order (``AB``), in
 reverse order (``BA``) and interleaved one call at a time (``IL``) -- and the
@@ -70,15 +71,12 @@ import json
 import math
 import statistics
 import sys
-import warnings
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import flashinfer  # noqa: E402
-from flashinfer.api_logging import ExperimentalWarning  # noqa: E402
 from cake_pplx._backends.cake_dsa_indexer_nondet_train import (  # noqa: E402
     cake_backend as nondet_backend,
 )
@@ -459,11 +457,10 @@ def main():
     parser.add_argument(
         "--cupti-required",
         action="store_true",
-        help="fail when flashinfer.testing.bench_gpu_time falls back from CUPTI to CUDA events",
+        help="fail when the CUPTI timer (torch.profiler) falls back to CUDA events",
     )
     parser.add_argument("--json", default=None)
     args = parser.parse_args()
-    warnings.simplefilter("ignore", ExperimentalWarning)
     if torch.are_deterministic_algorithms_enabled():
         raise SystemExit(
             "torch.use_deterministic_algorithms(True) is set: every run of the nondet arms would alert"
@@ -522,7 +519,6 @@ def main():
                     compute_capability=f"{props.major}.{props.minor}",
                     cuda=torch.version.cuda,
                     torch=torch.__version__,
-                    flashinfer=str(Path(flashinfer.__file__).resolve().parent),
                     packages=dict(
                         det=str(Path(det_backend.__file__).resolve().parent),
                         nondet=str(Path(nondet_backend.__file__).resolve().parent),

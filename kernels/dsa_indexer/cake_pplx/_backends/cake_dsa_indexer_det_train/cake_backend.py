@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake backend: fused DSA indexer scoring + deterministic exact top-k selection
-for training on SM100 / SM103 / SM107 (flashinfer-ai/flashinfer#5676; target
-geometry: 32 indexer heads, head dimension 128, top-k 2048).
+for training on SM100 / SM103 / SM107 (target geometry: 32 indexer heads, head
+dimension 128, top-k 2048).
 
-Contract (the issue text is authoritative)
-------------------------------------------
+Contract
+--------
 * ``q [T, 32, 128]`` BF16 indexer queries after RoPE (contiguous); ``k [Tkv,
   128]`` BF16 packed keys after normalization and RoPE -- a row-strided view
   (the trainer's ``[:, :128]`` view of a packed ``[Tkv, 704]`` tensor) is
@@ -121,7 +121,6 @@ from .cake_jit import (
     PROGRAMS,
     STAGES,
     TICKET_TAIL_ARCHES,
-    TRACKING_ISSUE,
     load_program,
 )
 from .cake_policy import (
@@ -293,13 +292,13 @@ def _policy_for(arch: str, form: str) -> DispatchPolicy:
     if record is None:
         raise NotImplementedError(
             f"The generated DSA indexer top-k programs for {arch} are not registered in this checkout "
-            f"(registered: {sorted(POLICY)}; see {TRACKING_ISSUE})"
+            f"(registered: {sorted(POLICY)})"
         )
     if form == FP8:
         if not fp8_programs_for(arch) or arch not in POLICY_FP8:
             raise NotImplementedError(
                 f"The generated float8_e4m3fn DSA indexer top-k programs for {arch} are not registered in this "
-                f"checkout (see {TRACKING_ISSUE})"
+                "checkout"
             )
         record = fp8_policy_record(record, POLICY_FP8[arch])
     elif form != BF16:
@@ -339,13 +338,13 @@ def program_for(arch: str, key: str) -> str:
     if programs is None:
         raise NotImplementedError(
             f"The generated DSA indexer top-k programs for {arch} are not registered in this checkout "
-            f"(registered: {sorted(PROGRAM_KEYS)}; see {TRACKING_ISSUE})"
+            f"(registered: {sorted(PROGRAM_KEYS)})"
         )
     name = programs.get(key)
     if name is None:
         raise NotImplementedError(
             f"The host dispatch selected program {key!r} on {arch}, which this checkout does not register "
-            f"(registered on {arch}: {sorted(programs)}; see {TRACKING_ISSUE})"
+            f"(registered on {arch}: {sorted(programs)})"
         )
     return name
 

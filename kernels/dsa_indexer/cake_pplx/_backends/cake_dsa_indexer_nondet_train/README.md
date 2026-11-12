@@ -5,14 +5,14 @@ non-deterministic counterpart of `cake_pplx.cake_dsa_indexer_det_train`: the
 fused DSA (sparse attention) indexer of a training stack.  One device-side
 pipeline scores every visible key and selects the exact top-k with aligned
 scores.  The target geometry is 32 indexer heads, head dimension 128 and
-top-k 2048.  Tracking issue: flashinfer-ai/flashinfer#5676.
+top-k 2048.
 
 This package runs the deterministic package's BF16 scan programs and its plain
 split merge unchanged.  It leaves out the ordering pass, which is the
 deterministic package's finalize / rank finalize that sorts every row into
 ascending id order.  The scores are the same, and each row holds the same
 selected set in a different slot order.  The package implements the
-set-equality semantics of flashinfer-ai/flashinfer#8946 (point 4): per row,
+set-equality semantics: per row,
 the set of selected `(id, score bits)` pairs repeats bit for bit, but the slot
 order does not.
 
@@ -23,10 +23,10 @@ the primary target of the request.  SM100 (B200 / GB200) is the comparison
 architecture and SM103 (B300 / GB300) is the third target.  The feature does
 not take part in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when the package ships them.
-Otherwise FlashInfer JIT-builds them from `build.json` (see "Layout of this
-package").
+Otherwise the package's JIT shim builds them from `build.json` (see "Layout of
+this package").
 
-## Mode and names (flashinfer-ai/flashinfer#8928)
+## Mode and names
 
 Every public name carries the mode word `nondet`, and no entry point takes a
 `deterministic=` keyword.  The deterministic package is
@@ -282,7 +282,7 @@ mean key tiles per work unit: `(Tkv - T / (2 ratio)) / S / 128`.
 | descending walk | the descending-walk twin of the decided program (key kind `<kind>_desc`: the same unit, split, pair, tile unroll and fit form) where `desc_walk_kinds` names the physical kind for the call's sampling mode and the twin is registered (sm_103a: the `wide` unit with the sampled first threshold off); the plan, the knobs and the workspace stay |
 | tile-loop unroll | `tile_unroll_factor` when `tile_unroll_rule` names the program kind and `top_k` reaches its floor (yielding to the snake order where the rule says so) |
 | sampled first threshold on buffer-fitting units | when the mean unit tiles are at most `sample_fit_max_mean_tiles`, the mean segment offset leaves fitting units and the program kind is one of `sample_fit_kinds` (the kinds whose sampled-fit program the architecture registers; the split programs, for example, run their plain form on every call) |
-| sampled tiles and rank shift | tiles: `sample_tiles_tiny_units` up to `sample_dispatch_tiny_tiles_max` mean unit tiles, `sample_tiles_short_units` up to `sample_dispatch_mean_tiles_max`, else `sample_tiles_max`.  Shift: `sample_shift_rule[1]` permille where the record sets `sample_shift_rule` and `top_k >= sample_shift_rule[0]`, else `sample_shift_permille`.  Where the record sets `sample_class_rule` (sm_100a, sm_103a: `[8, 500]`; sm_107a: `[32, 500]`), the wide-unit programs take its shift on packed calls, and the tiny dispatch class (packed calls of at most 4096 queries per segment and at most `sample_dispatch_tiny_tiles_max` mean unit tiles) takes its shift, and its tile count where the mean unit holds more tiles than that count.  Where the record sets `sample_long_rule` (sm_107a: `[["l6"], 500]`), a call of more than `sample_dispatch_mean_tiles_max` mean unit tiles whose physical kind the rule names takes its shift.  On sm_107a these two rules keep every rank input of flashinfer-ai/flashinfer#7549 at or below its time with sampling off.  Explicit knobs override all of these.  Whether sampling is on enters the rules above.  The tile count and the shift are launch scalars only: they set how conservative the sampled first threshold is (a threshold that proves too aggressive is streamed again exactly), never the program, the capacity or the selected set.  Unsampled calls do not read the shift |
+| sampled tiles and rank shift | tiles: `sample_tiles_tiny_units` up to `sample_dispatch_tiny_tiles_max` mean unit tiles, `sample_tiles_short_units` up to `sample_dispatch_mean_tiles_max`, else `sample_tiles_max`.  Shift: `sample_shift_rule[1]` permille where the record sets `sample_shift_rule` and `top_k >= sample_shift_rule[0]`, else `sample_shift_permille`.  Where the record sets `sample_class_rule` (sm_100a, sm_103a: `[8, 500]`; sm_107a: `[32, 500]`), the wide-unit programs take its shift on packed calls, and the tiny dispatch class (packed calls of at most 4096 queries per segment and at most `sample_dispatch_tiny_tiles_max` mean unit tiles) takes its shift, and its tile count where the mean unit holds more tiles than that count.  Where the record sets `sample_long_rule` (sm_107a: `[["l6"], 500]`), a call of more than `sample_dispatch_mean_tiles_max` mean unit tiles whose physical kind the rule names takes its shift.  On sm_107a these two rules keep every rank input of the ratio-4 pooled selection at or below its time with sampling off.  Explicit knobs override all of these.  Whether sampling is on enters the rules above.  The tile count and the shift are launch scalars only: they set how conservative the sampled first threshold is (a threshold that proves too aggressive is streamed again exactly), never the program, the capacity or the selected set.  Unsampled calls do not read the shift |
 | candidate capacity | `candidate_multiplier` x `top_k` (`cand_mult_rule[1]` for long units), rounded up to whole tiles.  It is raised to `cand_cap_floor` slots, or to `cand_cap_floor_rule[1]` slots from `top_k >= cand_cap_floor_rule[0]` on where the record sets that rule.  On `sm_100a` the 16384-slot floor applies from `top_k = 1024` on and smaller `top_k` keep 8192; `sm_103a` keeps its 16384-slot floor on every `top_k`.  It is lowered to `cand_cap_ceiling` slots where the record sets one: the multiplier becomes `ceiling // top_k`, so the buffer stops growing with `top_k` once it holds the ceiling.  With the sampled first threshold off (`sample_tiles_max=0`), the `candidate_multiplier_unsampled` / `cand_mult_rule_unsampled` / `cand_cap_floor_unsampled` / `cand_cap_ceiling_unsampled` values apply instead.  An explicit `candidate_multiplier` knob replaces the multiplier |
 | check period | default `min(check_period_max, (cand_cap - top_k) // 128, cand_cap // check_period_cap_divisor)`, at least 1, or the kind's `check_period_kind_overrides` value clamped to the exactness bound; an explicit `check_period` must lie in `[1, limit]` (the kernel's headroom rule) |
 
@@ -334,7 +334,7 @@ before the record is frozen.
   `static_scan_kinds` would name the kinds whose programs keep the static
   unit enumeration and get no tail; no record names one.  So a call that
   shares the GPU with another stream slows with the SMs that stream holds,
-  not by a whole extra wave of work units (flashinfer-ai/flashinfer#7548).
+  not by a whole extra wave of work units.
   Every completed scan launch leaves the word at 0.  How the word is reset
   depends on the workspace:
   * Backend-owned workspace: the tail is zeroed once, when the runner is
@@ -403,7 +403,7 @@ host-shim namespace and the launch constants share one binding.  Each
   The launch geometry of a program (block, cluster, dynamic shared memory) is
   fixed in its binding.
 * `cake_build.py` + `build.json`: `cake_build.py` is the loader that every
-  Cake-exported FlashInfer package shares, byte for byte.  `build.json` is
+  Cake package shares, byte for byte.  `build.json` is
   this package's build manifest (schema `cake-build/1`) and the only record of
   what the package compiles.  It has one entry per program and architecture
   with its package-relative sources, nvcc flags, closure digest, per-source
@@ -411,12 +411,13 @@ host-shim namespace and the launch constants share one binding.  Each
   and the `tvm-ffi` requirement.  `cake_build.load_library(name)` loads the
   prebuilt library when `aot/` holds it, checked against the builder's
   `aot/build_info.json` and the library's own `build_cuda_version()`.
-  Otherwise it JIT-builds the entry through FlashInfer from the same sources
-  and flags.  The prebuilt path never imports `flashinfer`.
+  Otherwise it JIT-builds the entry through the package's JIT shim
+  (`_cake_pplx_jit.py`) from the same sources and flags.  The prebuilt path
+  never imports the JIT shim.
 * `csrc/cake_ffi_checks.h` holds the tvm-ffi / DLPack include set, the named
   tensor-argument checks and `cake_ffi_build_cuda_version()`, which the
-  generated launchers use.  The package compiles without FlashInfer's
-  `csrc/`.
+  generated launchers use.  The package compiles from its own `csrc/`
+  alone.
 * `cake_policy.py` is the dependency-free dispatch policy: program choice,
   capacity, check period, split count, the ticket static path and the
   workspace bound.
@@ -448,7 +449,7 @@ There are four test files:
   comparison with the deterministic package;
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_api.py`: the
   `cake_pplx.cake_dsa_indexer_nondet_train` entry points;
-* `tests/experimental/test_cake_dsa_indexer_nondet_train_names.py`: the #8928
+* `tests/experimental/test_cake_dsa_indexer_nondet_train_names.py`: the
   naming rules.
 
 They share the independent FP64 / FP32 reference in

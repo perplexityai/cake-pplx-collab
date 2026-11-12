@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,9 +18,8 @@ limitations under the License.
 
 Times the *complete operator* -- scoring, exact selection, ascending-id
 ordering, aligned scores and padding, including the workspace traffic -- of
-``cake_pplx._backends.cake_dsa_indexer_det_train`` against two torch + FlashInfer
-compositions of the same contract on representative rows (32 heads, head
-dimension 128, BF16 ``q`` / ``k``, FP32 ``w``, iid Gaussian inputs with a
+``cake_pplx._backends.cake_dsa_indexer_det_train`` on representative rows
+(32 heads, head dimension 128, BF16 ``q`` / ``k``, FP32 ``w``, iid Gaussian inputs with a
 peaked variant):
 
 * ``P1`` the recorded packed training call (``T = 16231``, ``Tkv = 268757``,
@@ -31,17 +30,15 @@ peaked variant):
   ``S4_peaked``; ``C1`` / ``C2`` context-parallel tails (4096 queries over 64k /
   128k keys); ``C3`` eight packed 2048 x 32768 segments; ``V1`` (``ratio = 2``),
   ``V2`` (top-k 256), ``V3`` (top-k 4096) at ``N = 65536``;
-* the top-512 rows of flashinfer-ai/flashinfer#7549 (its ratio-4 pooled
-  selection: top-512 pools over a 4-token pool layout, ``ratio = 4`` with the
-  keys pooled 4:1): ``V4`` the packed 4k .. 64k documents of ``Z3cp`` (zigzag
+* the top-512 rows of the ratio-4 pooled selection (top-512 pools over a
+  4-token pool layout, ``ratio = 4`` with the keys pooled 4:1): ``V4`` the packed 4k .. 64k documents of ``Z3cp`` (zigzag
   rank 0 of 16) pooled, ``V5`` the packed documents of ``Z3`` (full causal)
   pooled, ``V6`` one 262144-token document pooled, and ``V7`` one 65536-token
   document at top-k 512 without pooling; ``--rows pool`` names the group;
-* the attention-sink + local-band rows of flashinfer-ai/flashinfer#7042
-  (``tests/experimental/test_helpers/cake_dsa_indexer_reference.make_sink_inputs``, the
-  issue's generator): ``Z1`` one 262144-token document, context-parallel
-  zigzag rank 0 of 16 (queries ``[0, 8192)`` and ``[253952, 262144)``, the
-  issue's call), ``Z1k4096`` / ``Z1k256`` its top-k variants, ``Z2`` eight 32k
+* the attention-sink + local-band rows
+  (``tests/experimental/test_helpers/cake_dsa_indexer_reference.make_sink_inputs``):
+  ``Z1`` one 262144-token document, context-parallel zigzag rank 0 of 16
+  (queries ``[0, 8192)`` and ``[253952, 262144)``), ``Z1k4096`` / ``Z1k256`` its top-k variants, ``Z2`` eight 32k
   documents (full causal) and ``Z2cp`` their zigzag rank-0 halves, ``Z3`` a
   packed batch of 4k .. 64k documents and ``Z3cp`` its zigzag halves,
   ``P1sink`` the recorded ``P1`` geometry, ``S4sink`` / ``S6sink`` one 64k /
@@ -73,29 +70,20 @@ only where ``narrow`` is registered for the row's fit); the recorded
 ``forced_policy``), ``cake_main`` / ``cake_main_nosample`` (a
 second copy of the package loaded from ``--main-package DIR``, e.g. the
 ``cake_pplx/_backends/cake_dsa_indexer_det_train``
-directory of a FlashInfer main checkout (``flashinfer/experimental/cake_dsa_indexer_det``
-in a checkout before flashinfer-ai/flashinfer#8928), in the same process: the package is
+directory of a main checkout, in the same process: the package is
 self-contained -- relative imports, ``Path(__file__)`` manifest, JIT names
 salted by its own closure digests -- so both versions run on the same input
 tensors), ``cake_aa`` / ``cake_far_aa`` / ``cake_main_aa`` (the same arm prepared a second time:
-the in-process A/A band), ``chunked_pipeline`` (a reconstruction of the current
-training-stack path: chunked BF16 coarse scoring, coarse top-``(K + 256)`` with
-``flashinfer.top_k``, candidate gather, FP32 rescoring, sorting, padding) and
-``materialized_fp32`` (exact FP32 scores materialized per memory-bounded query
-chunk, ``flashinfer.top_k``, ascending-id ordering).  Both compositions use
-``flashinfer.top_k(deterministic=True, tie_break=LARGE)`` up to ``k = 2048``
-and the CUB backend with ``tie_break=LARGE`` above (the deterministic path is
-limited to 2048); they are speed references, not contract-exact oracles (their
-tie handling at signed zeros and their candidate margin differ from the
-contract).  Every pair of arms is compared bitwise (ids and score bits) on
+the in-process A/A band).  Every pair of arms is compared bitwise (ids and score bits) on
 every row and the verdicts are recorded (``same_bits``), together with a
 SHA-256 of each arm's ids and score bits for cross-process comparisons.
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and a
-cold L2 between iterations (per-iteration GPU span of the whole operator).
-Without ``cupti-python >= 13`` that timer silently falls back to CUDA events;
-``--cupti-required`` turns the fallback into a failure and the JSON records
-which timer ran (``timer``).
+Timing: :func:`gpu_times`, CUPTI activity tracing through ``torch.profiler``
+with a cold L2 between iterations (per-iteration GPU span of the whole
+operator: the first start to the last end of the GPU activities the call
+launches).  Where the profiler records no GPU activity that timer falls back
+to CUDA events; ``--cupti-required`` turns the fallback into a failure and the
+JSON records which timer ran (``timer``).
 Every row is measured in three paired phases -- the arms in the given order
 (``AB``), in reverse order (``BA``) and interleaved one call at a time
 (``IL``) -- and the medians of each phase and of all samples are reported
@@ -122,38 +110,22 @@ program with the wide decision's sampled first threshold and check period;
 ``cake_fp8_l6`` /
 ``cake_fp8_narrow`` on the l6 / narrow program on every row, and
 ``cake_l6_all`` the BF16 form on the l6 program where the architecture
-registers the l6 key the row composes), ``cake`` (the
+registers the l6 key the row composes) and ``cake`` (the
 BF16 form on the same data dequantized to BF16: ``q`` exactly, ``bf16(k * k_scale)``, the same ``w``,
-``softmax_scale = 1``), ``deepgemm_topk`` (stock DeepGEMM FP8 MQA logits with
-FP32 per-key scales and FP32 logits: ``deep_gemm.fp8_mqa_logits``, or
-``fp8_fp4_mqa_logits(..., logits_dtype=torch.float32)`` in builds without it;
-``clean_logits=True``, then ``flashinfer.top_k(deterministic=True,
-tie_break=LARGE)``) and ``deepgemm_ragged_topk`` (``fp8_mqa_logits`` with
-``clean_logits=False``, then ``flashinfer.top_k_ragged_transform(
-deterministic=True, tie_break=LARGE)`` over each row's visible keys); the
-DeepGEMM arms run one logits call and one top-k call per segment and are
-reported unavailable where ``deep_gemm`` does not import or the call fails.
+``softmax_scale = 1``).
 Timing boundary: a Cake arm's span is the complete operator (scan, merge,
-finalize into caller-owned outputs and workspace); a DeepGEMM arm's span is
-its logits allocation and kernel plus its top-k kernel per segment (the
-``deepgemm_topk`` arm also copies the row-padded logits to contiguous rows for
-``flashinfer.top_k``, recorded as ``logits_copied``; the ragged arm reads the
-padded rows in place), and the
-conversion of their output to the contract's ascending segment-local ids
-with aligned scores and ``-1`` / ``-inf`` padding (the score gather of the
-ragged arm included) is outside it.  ``same_bits`` / ``all_cake_arms_identical``
+finalize into caller-owned outputs and workspace).  ``same_bits`` / ``all_cake_arms_identical``
 compare the Cake arms of one form; the speed ratios are against ``cake_fp8``.
 
 Usage::
 
-    python benchmarks/bench_cake_dsa_indexer_det_train.py [--rows P1 S2 ...] [--arms cake,chunked_pipeline,materialized_fp32]
+    python benchmarks/bench_cake_dsa_indexer_det_train.py [--rows P1 S2 ...] [--arms cake,cake_nosample]
         [--reps 20] [--strided-k] [--verify] [--json out.json]
     python benchmarks/bench_cake_dsa_indexer_det_train.py --rows sink --arms cake,cake_nosample,cake_main,cake_main_nosample
         --main-package /path/to/main/cake_pplx/_backends/cake_dsa_indexer_det_train --cupti-required --json out.json
-        (a main checkout before flashinfer-ai/flashinfer#8928: --main-package /path/to/main/flashinfer/experimental/cake_dsa_indexer_det)
     python benchmarks/bench_cake_dsa_indexer_det_train.py --rows sink --arms cake,cake_far,cake_aa,cake_far_aa --cupti-required --json out.json
     python benchmarks/bench_cake_dsa_indexer_det_train.py --rows sink --arms cake,cake_wide,cake_l6,cake_pair_l6,cake_wide_c1 --cupti-required --json out.json
-    python benchmarks/bench_cake_dsa_indexer_det_train.py --form fp8 --rows fp8 --arms cake_fp8,cake,deepgemm_topk,deepgemm_ragged_topk
+    python benchmarks/bench_cake_dsa_indexer_det_train.py --form fp8 --rows fp8 --arms cake_fp8,cake,cake_fp8_aa
         --cupti-required --json out.json
 """
 
@@ -164,22 +136,16 @@ import importlib
 import importlib.util
 import itertools
 import json
-import os
 import statistics
 import sys
 import time
-import warnings
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import flashinfer  # noqa: E402
-from flashinfer.api_logging import ExperimentalWarning  # noqa: E402
 from cake_pplx._backends.cake_dsa_indexer_det_train import cake_backend  # noqa: E402
-from flashinfer.testing import bench_gpu_time  # noqa: E402
-from flashinfer.topk import TopKTieBreak  # noqa: E402
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref  # noqa: E402
 
 P1_CU_SEQLENS_Q = (0, 1777, 3532, 5655, 7765, 9888, 11998, 14121, 16231)
@@ -196,8 +162,6 @@ REFERENCE_GB200_MS = {
     524288: 2331.0,
     1048576: 11156.0,
 }
-DETERMINISTIC_TOPK_MAX_K = 2048
-COARSE_MARGIN = 256
 
 
 def _lengths(cu):
@@ -235,7 +199,7 @@ def _row(
     bound_seqlen=False,
 ):
     """``dist``: ``"iid"`` (``make_random_inputs``) or ``"sink"`` (``make_sink_inputs``); ``bound_seqlen`` passes
-    ``max_seqlen_k = max(seg_k)`` to the backend as the issue's call does (it sizes the rank finalize's bitmap pool
+    ``max_seqlen_k = max(seg_k)`` to the backend as the recorded call does (it sizes the rank finalize's bitmap pool
     only; bits are identical with and without it)."""
     return dict(
         seg_q=list(seg_q),
@@ -315,7 +279,7 @@ def _sink(seg_q, seg_k, **kw):
 
 
 _Z1_Q, _Z1_K = cp_zigzag_rank0(262144)
-ROWS["Z1"] = _sink(_Z1_Q, _Z1_K, note="#7042 repro: 262k document, CP16 zigzag rank 0")
+ROWS["Z1"] = _sink(_Z1_Q, _Z1_K, note="attention-sink repro: 262k document, CP16 zigzag rank 0")
 ROWS["Z1k4096"] = _sink(_Z1_Q, _Z1_K, top_k=4096, note="Z1 with top-k 4096")
 ROWS["Z1k256"] = _sink(_Z1_Q, _Z1_K, top_k=256, note="Z1 with top-k 256")
 ROWS["Z2"] = _sink(
@@ -350,8 +314,8 @@ SINK_ROWS = [n for n in ROWS if n not in IID_ROWS]
 
 
 def pooled(seg_q, seg_k, offsets=None, ratio=4):
-    """The ``ratio``:1 pooled key layout of a geometry (flashinfer-ai/flashinfer#7549's ratio-4 pooled selection): every
-    key segment shrinks to its pool count (``ceil(Lk / ratio)``) and the segment offsets stay in query tokens (query ``u``
+    """The ``ratio``:1 pooled key layout of a geometry (the ratio-4 pooled selection: top-512 pools over 4-token pools):
+    every key segment shrinks to its pool count (``ceil(Lk / ratio)``) and the segment offsets stay in query tokens (query ``u``
     of a segment with offset ``o`` sees the pools ``j < floor((o + u + 1) / ratio)``); ``ratio > 1`` makes the default
     offset 0, so a context-parallel chunk passes its token offset explicitly."""
     return [-(-v // ratio) for v in seg_k], offsets
@@ -376,7 +340,7 @@ ROWS["V4"] = _row(
     offsets=_Z3CP_POOL_OFF,
     seed=7604,
     reps=40,
-    note="packed 4k-64k documents, CP16 zigzag rank 0, 4-token pools, top-k 512 (#7549 pooled selection)",
+    note="packed 4k-64k documents, CP16 zigzag rank 0, 4-token pools, top-k 512 (ratio-4 pooled selection)",
 )
 ROWS["V5"] = _row(
     list(_PACK),
@@ -499,7 +463,7 @@ def build_fp8_inputs(name: str, device, strided_k: bool):
 
 
 # ---------------------------------------------------------------------------
-# A second copy of the package (the FI-main baseline) in the same process
+# A second copy of the package (the main baseline) in the same process
 # ---------------------------------------------------------------------------
 
 MAIN_PACKAGE_NAME = "cake_dsa_indexer_main"
@@ -512,7 +476,7 @@ def load_package_copy(directory: Path, name: str = MAIN_PACKAGE_NAME):
     The package imports only relatively (``from . import cake_build``, ``from .cake_jit import ...``), resolves its
     manifest and sources through ``Path(__file__)`` and names its JIT libraries ``<entry>_<closure_sha256[:20]>``,
     so a copy under another module name coexists with the installed package: each copy JIT-compiles its own
-    sources (digest-verified against its own ``build.json``) through the local FlashInfer toolchain.  Two entries
+    sources (digest-verified against its own ``build.json``) through the local JIT toolchain.  Two entries
     with the same closure digest and identical sources share one cached library (harmless); the same closure with
     different sources would reuse a stale library, which :func:`check_manifest_pair` refuses up front.
     """
@@ -570,44 +534,8 @@ def main_backend():
 
 
 # ---------------------------------------------------------------------------
-# Composition helpers shared by the two reference arms
+# Helpers shared with the sampling diagnostic
 # ---------------------------------------------------------------------------
-
-
-@contextlib.contextmanager
-def _topk_algo(algo):
-    previous = os.environ.pop("FLASHINFER_TOPK_ALGO", None)
-    if algo is not None:
-        os.environ["FLASHINFER_TOPK_ALGO"] = algo
-    try:
-        yield
-    finally:
-        os.environ.pop("FLASHINFER_TOPK_ALGO", None)
-        if previous is not None:
-            os.environ["FLASHINFER_TOPK_ALGO"] = previous
-
-
-def select_topk(x, k):
-    """Row-wise top-k (value desc, id desc): the deterministic FlashInfer path up to 2048, CUB above."""
-    if k <= DETERMINISTIC_TOPK_MAX_K:
-        return flashinfer.top_k(
-            x, k, sorted=False, deterministic=True, tie_break=TopKTieBreak.LARGE
-        )
-    with _topk_algo("cub"):
-        return flashinfer.top_k(
-            x, k, sorted=False, deterministic=False, tie_break=TopKTieBreak.LARGE
-        )
-
-
-def ascending_with_padding(ids, scores, valid):
-    big = torch.full_like(ids, 2**62)
-    key, perm = torch.sort(torch.where(valid, ids, big), dim=1)
-    pad = key == 2**62
-    out_ids = torch.where(pad, torch.full_like(key, -1), key).to(torch.int32)
-    out_scores = torch.where(
-        pad, torch.full_like(scores, float("-inf")), scores.gather(1, perm)
-    )
-    return out_ids, out_scores
 
 
 def _fp32_mm_supported(device) -> bool:
@@ -617,149 +545,6 @@ def _fp32_mm_supported(device) -> bool:
         return torch.mm(a, b, out_dtype=torch.float32).dtype == torch.float32
     except (TypeError, RuntimeError):
         return False
-
-
-def _segments(inputs):
-    q_starts, k_starts = inputs.query_starts(), inputs.key_starts()
-    visible = ref.visible_rows(inputs)
-    visible_cpu = visible.cpu()
-    for s in range(inputs.num_segments):
-        lq, lk = inputs.seg_q_len[s], inputs.seg_k_len[s]
-        if lq and lk:
-            yield q_starts[s], lq, k_starts[s], lk, visible, visible_cpu
-
-
-def chunked_pipeline(
-    inputs, *, query_chunk=2048, rescoring_chunk=512, coarse_bytes=2 << 30
-):
-    """Coarse BF16 scoring -> top-(K + 256) -> FP32 rescoring of the candidates -> sorts -> padding."""
-    dev = inputs.device
-    T, K = inputs.num_queries, inputs.top_k
-    scale = inputs.softmax_scale
-    out_ids = torch.full((T, K), -1, dtype=torch.int32, device=dev)
-    out_scores = torch.full((T, K), float("-inf"), dtype=torch.float32, device=dev)
-    k32 = inputs.k.to(torch.float32)
-    for q0, lq, k0, lk, visible, visible_cpu in _segments(inputs):
-        kT = inputs.k[k0 : k0 + lk].t()
-        for t0 in range(q0, q0 + lq, query_chunk):
-            t1 = min(q0 + lq, t0 + query_chunk)
-            c = t1 - t0
-            jmax = int(visible_cpu[t1 - 1])
-            if jmax == 0:
-                continue
-            coarse = torch.empty((c, jmax), dtype=torch.float32, device=dev)
-            sub = max(1, min(c, coarse_bytes // (ref.NUM_HEADS * jmax * 2)))
-            for r0 in range(0, c, sub):
-                r1 = min(c, r0 + sub)
-                m = r1 - r0
-                logits = torch.relu_(
-                    torch.mm(
-                        inputs.q[t0 + r0 : t0 + r1].reshape(
-                            m * ref.NUM_HEADS, ref.HEAD_DIM
-                        ),
-                        kT[:, :jmax],
-                    )
-                )
-                w_bf16 = inputs.w[t0 + r0 : t0 + r1].to(torch.bfloat16).unsqueeze(1)
-                coarse[r0:r1] = (
-                    torch.bmm(w_bf16, logits.view(m, ref.NUM_HEADS, jmax))
-                    .float()
-                    .squeeze(1)
-                )
-                del logits
-            ar = torch.arange(jmax, dtype=torch.int64, device=dev).unsqueeze(0)
-            coarse.masked_fill_(ar >= visible[t0:t1].unsqueeze(1), float("-inf"))
-            kc = min(K + COARSE_MARGIN, jmax)
-            _, cand = select_topk(coarse, kc)
-            del coarse
-            kk = min(K, kc)
-            for r0 in range(0, c, rescoring_chunk):
-                r1 = min(c, r0 + rescoring_chunk)
-                m = r1 - r0
-                ids = cand[r0:r1].to(torch.int64)
-                gathered = k32.index_select(0, (ids + k0).reshape(-1)).view(
-                    m, kc, ref.HEAD_DIM
-                )
-                with ref.fp32_ieee_matmul():
-                    logits = torch.relu_(
-                        torch.bmm(
-                            inputs.q[t0 + r0 : t0 + r1].float(),
-                            gathered.transpose(1, 2),
-                        ).mul_(scale)
-                    )
-                    sc = torch.bmm(
-                        inputs.w[t0 + r0 : t0 + r1].unsqueeze(1), logits
-                    ).squeeze(1)
-                del gathered, logits
-                valid = ids < visible[t0 + r0 : t0 + r1].unsqueeze(1)
-                sc = sc.masked_fill(~valid, float("-inf"))
-                ids_d, p1 = torch.sort(ids, dim=1, descending=True, stable=True)
-                _, p2 = torch.sort(
-                    sc.gather(1, p1) + 0.0, dim=1, descending=True, stable=True
-                )
-                p2 = p2[:, :kk]
-                o_ids, o_sc = ascending_with_padding(
-                    ids_d.gather(1, p2),
-                    sc.gather(1, p1).gather(1, p2),
-                    valid.gather(1, p1).gather(1, p2),
-                )
-                out_ids[t0 + r0 : t0 + r1, :kk] = o_ids
-                out_scores[t0 + r0 : t0 + r1, :kk] = o_sc
-    return out_ids, out_scores
-
-
-def materialized_fp32(
-    inputs, *, bytes_budget=2 << 30, min_rows=64, min_rows_budget=16 << 30
-):
-    """Exact FP32 scores per memory-bounded query chunk -> flashinfer top-k -> ascending-id ordering -> padding."""
-    dev = inputs.device
-    T, K = inputs.num_queries, inputs.top_k
-    scale = inputs.softmax_scale
-    out_ids = torch.full((T, K), -1, dtype=torch.int32, device=dev)
-    out_scores = torch.full((T, K), float("-inf"), dtype=torch.float32, device=dev)
-    fp32_out = _fp32_mm_supported(dev)
-    for q0, lq, k0, lk, visible, visible_cpu in _segments(inputs):
-        jmax_seg = int(visible_cpu[q0 + lq - 1])
-        if jmax_seg == 0:
-            continue
-        per_row = ref.NUM_HEADS * jmax_seg * 4 + jmax_seg * 8
-        rows = max(
-            1,
-            min(
-                lq,
-                max(bytes_budget // per_row, min(min_rows, min_rows_budget // per_row)),
-            ),
-        )
-        kT = inputs.k[k0 : k0 + lk].t()
-        for t0 in range(q0, q0 + lq, rows):
-            t1 = min(q0 + lq, t0 + rows)
-            m = t1 - t0
-            jmax = int(visible_cpu[t1 - 1])
-            if jmax == 0:
-                continue
-            q2d = inputs.q[t0:t1].reshape(m * ref.NUM_HEADS, ref.HEAD_DIM)
-            if fp32_out:
-                logits = torch.mm(q2d, kT[:, :jmax], out_dtype=torch.float32)
-            else:
-                with ref.fp32_ieee_matmul():
-                    logits = torch.mm(q2d.float(), kT[:, :jmax].float())
-            logits = torch.relu_(logits.mul_(scale))
-            with ref.fp32_ieee_matmul():
-                scores = torch.bmm(
-                    inputs.w[t0:t1].unsqueeze(1), logits.view(m, ref.NUM_HEADS, jmax)
-                ).squeeze(1)
-            del logits
-            ar = torch.arange(jmax, dtype=torch.int64, device=dev).unsqueeze(0)
-            vis_rows = visible[t0:t1].unsqueeze(1)
-            scores.masked_fill_(ar >= vis_rows, float("-inf"))
-            kk = min(K, jmax)
-            vals, ids = select_topk(scores, kk)
-            del scores
-            ids = ids.to(torch.int64)
-            o_ids, o_sc = ascending_with_padding(ids, vals, ids < vis_rows)
-            out_ids[t0:t1, :kk] = o_ids
-            out_scores[t0:t1, :kk] = o_sc
-    return out_ids, out_scores
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +582,7 @@ def row_extra(inputs) -> dict:
 def backend_api(backend, name: str, *previous: str):
     """The callable ``name`` of ``backend``; a baseline package copy that predates the current names (see
     ``--main-package``) provides the same callable under a previous name: one of ``previous`` (for example the
-    workspace bound's ``dsa_indexer_det_workspace_size`` before flashinfer-ai/flashinfer#8928), else the name
+    workspace bound's ``dsa_indexer_det_workspace_size`` before the rename), else the name
     without its first ``_det`` (``plan_dsa_indexer_det_topk`` -> ``plan_dsa_indexer_topk``)."""
     for candidate in (name, *previous):
         fn = getattr(backend, candidate, None)
@@ -996,197 +781,6 @@ class CakeArm(Arm):
         return ()
 
 
-class ChunkedPipelineArm(Arm):
-    name = "chunked_pipeline"
-
-    def __call__(self):
-        return chunked_pipeline(self.inputs)
-
-
-class MaterializedArm(Arm):
-    name = "materialized_fp32"
-
-    def __call__(self):
-        return materialized_fp32(self.inputs)
-
-
-def _aligned(t):
-    """``t`` contiguous at a 16-byte aligned address (DeepGEMM asserts it of its operands): a segment slice of a packed
-    call that starts off that alignment is copied once, when the arm is built."""
-    t = t.contiguous()
-    return t if t.data_ptr() % 16 == 0 else t.clone()
-
-
-def deep_gemm_fp8_mqa_logits(deep_gemm):
-    """DeepGEMM's FP8 MQA logits with FP32 per-key scales and FP32 logits as ``f(q, (k, k_scale), w, starts, ends, *,
-    clean_logits)``: ``fp8_mqa_logits`` where the build has it, else ``fp8_fp4_mqa_logits`` with an FP8 ``q`` (no
-    scale factors) and ``logits_dtype=torch.float32``.  A build whose call does not take these arguments (one that needs
-    block scale factors for FP8) fails at the arm's first call, which reports the arm unavailable."""
-    if hasattr(deep_gemm, "fp8_mqa_logits"):
-        return deep_gemm.fp8_mqa_logits
-    if not hasattr(deep_gemm, "fp8_fp4_mqa_logits"):
-        raise AttributeError(
-            "deep_gemm has neither fp8_mqa_logits nor fp8_fp4_mqa_logits"
-        )
-
-    def logits(q, kv, w, starts, ends, *, clean_logits):
-        return deep_gemm.fp8_fp4_mqa_logits(
-            q=(q, None),
-            kv=kv,
-            weights=w,
-            cu_seq_len_k_start=starts,
-            cu_seq_len_k_end=ends,
-            clean_logits=clean_logits,
-            max_seqlen_k=0,
-            logits_dtype=torch.float32,
-        )
-
-    return logits
-
-
-class DeepGemmArm(Arm):
-    """Stock DeepGEMM FP8 MQA logits (:func:`deep_gemm_fp8_mqa_logits`) per segment, then a FlashInfer exact
-    deterministic top-k (FP8 inputs only).
-
-    The timed call returns the raw per-segment outputs; :meth:`finish` converts them to the contract's ascending
-    segment-local ids with aligned scores and padding outside the timed span.  A first call in the constructor makes a
-    missing ``deep_gemm`` or an unsupported call an unavailable arm."""
-
-    name = "deepgemm_topk"
-    clean_logits = True
-    # True when DeepGEMM returned a row-padded logits view and the arm copied it to a contiguous [Lq, Lk] tensor
-    # inside the timed span (recorded per arm)
-    logits_copied = False
-
-    def __init__(self, inputs):
-        super().__init__(inputs)
-        if not inputs.fp8:
-            raise ValueError(
-                "the DeepGEMM arms take the FP8 form's inputs (--form fp8)"
-            )
-        if inputs.top_k > DETERMINISTIC_TOPK_MAX_K:
-            raise ValueError(
-                f"FlashInfer's deterministic top-k serves k <= {DETERMINISTIC_TOPK_MAX_K}"
-            )
-        import deep_gemm
-
-        self.logits = deep_gemm_fp8_mqa_logits(deep_gemm)
-        visible = ref.visible_rows(inputs).to(torch.int32)
-        self.segments = []
-        for q0, lq, k0, lk, _visible, _visible_cpu in _segments(inputs):
-            ends = _aligned(visible[q0 : q0 + lq])
-            self.segments.append(
-                dict(
-                    q0=q0,
-                    lq=lq,
-                    lk=lk,
-                    q=_aligned(inputs.q[q0 : q0 + lq]),
-                    kv=(
-                        _aligned(inputs.k[k0 : k0 + lk]),
-                        _aligned(inputs.k_scale[k0 : k0 + lk]),
-                    ),
-                    w=_aligned(inputs.w[q0 : q0 + lq]),
-                    starts=torch.zeros_like(ends),
-                    ends=ends,
-                )
-            )
-        self.finish(self())
-        torch.cuda.synchronize()
-
-    def _segment_logits(self, seg):
-        logits = self.logits(
-            seg["q"],
-            seg["kv"],
-            seg["w"],
-            seg["starts"],
-            seg["ends"],
-            clean_logits=self.clean_logits,
-        )[:, : seg["lk"]]
-        if not logits.is_contiguous():
-            self.logits_copied = True
-            logits = logits.contiguous()
-        return logits
-
-    def _segment_topk(self, seg, logits):
-        return select_topk(logits, min(self.inputs.top_k, seg["lk"]))
-
-    def __call__(self):
-        out = []
-        for seg in self.segments:
-            logits = self._segment_logits(seg)
-            out.extend((logits, *self._segment_topk(seg, logits)))
-        return tuple(out)
-
-    def _segment_result(self, seg, logits, first, second):
-        values, ids = first, second.to(torch.int64)
-        return ids, values, ids < seg["ends"].unsqueeze(1).to(torch.int64)
-
-    def outputs(self, out):
-        """The top-k results of every segment, each tensor once; the logits are the arm's working memory."""
-        unique = {}
-        for i in range(0, len(out), 3):
-            for t in out[i + 1 : i + 3]:
-                unique.setdefault(t.data_ptr(), t)
-        return list(unique.values())
-
-    def finish(self, out):
-        inputs = self.inputs
-        T, K, dev = inputs.num_queries, inputs.top_k, inputs.device
-        out_ids = torch.full((T, K), -1, dtype=torch.int32, device=dev)
-        out_scores = torch.full((T, K), float("-inf"), dtype=torch.float32, device=dev)
-        for i, seg in enumerate(self.segments):
-            logits, first, second = out[3 * i : 3 * i + 3]
-            ids, values, valid = self._segment_result(seg, logits, first, second)
-            o_ids, o_scores = ascending_with_padding(ids, values.float(), valid)
-            n = o_ids.shape[1]
-            out_ids[seg["q0"] : seg["q0"] + seg["lq"], :n] = o_ids
-            out_scores[seg["q0"] : seg["q0"] + seg["lq"], :n] = o_scores
-        return out_ids, out_scores
-
-
-class DeepGemmRaggedArm(DeepGemmArm):
-    """The DeepGEMM logits without the logits clean, then ``top_k_ragged_transform`` over each row's visible keys (ids
-    only: the scores are gathered from the logits in :meth:`finish`)."""
-
-    name = "deepgemm_ragged_topk"
-    clean_logits = False
-
-    def _segment_logits(self, seg):
-        """The logits buffer as DeepGEMM allocated it: ``top_k_ragged_transform`` reads ``[0, ends)`` of each row of a
-        contiguous ``(Lq, row_stride)`` input, so the row-padded buffer serves it without a copy."""
-        logits = self.logits(
-            seg["q"],
-            seg["kv"],
-            seg["w"],
-            seg["starts"],
-            seg["ends"],
-            clean_logits=self.clean_logits,
-        )
-        lq, stride = logits.shape[0], logits.stride(0)
-        needed = (logits.storage_offset() + lq * stride) * logits.element_size()
-        if logits.stride(1) == 1 and logits.untyped_storage().nbytes() >= needed:
-            return logits.as_strided((lq, stride), (stride, 1))
-        self.logits_copied = True
-        return logits[:, : seg["lk"]].contiguous()
-
-    def _segment_topk(self, seg, logits):
-        ids = flashinfer.top_k_ragged_transform(
-            logits,
-            seg["starts"],
-            seg["ends"],
-            self.inputs.top_k,
-            deterministic=True,
-            tie_break=TopKTieBreak.LARGE,
-        )
-        return ids, ids
-
-    def _segment_result(self, seg, logits, first, second):
-        ids = first.to(torch.int64)
-        valid = ids >= 0
-        values = logits.float().gather(1, ids.clamp_min(0))
-        return ids, values, valid
-
-
 NOSAMPLE = {"sample_tiles_max": 0}
 FAR = {"far_sample": 1}
 # forced dispatch records: registry fields replaced through ``forced_policy`` (these arms run the local package only).
@@ -1298,9 +892,7 @@ ARMS = {
     ),
     "cake_floor16k": _cake("cake_floor16k", policy=FLOOR16K),
     "cake_floor16k_aa": _cake("cake_floor16k_aa", policy=FLOOR16K),
-    ChunkedPipelineArm.name: ChunkedPipelineArm,
-    MaterializedArm.name: MaterializedArm,
-    # the FP8 form (``--form fp8``): the same runner on the FP8 inputs, and the DeepGEMM compositions
+    # the FP8 form (``--form fp8``): the same runner on the FP8 inputs
     "cake_fp8": _cake("cake_fp8"),
     "cake_fp8_aa": _cake("cake_fp8_aa"),
     "cake_fp8_nosample": _cake("cake_fp8_nosample", knobs=NOSAMPLE),
@@ -1311,8 +903,6 @@ ARMS = {
         "cake_fp8_wn", fp8_fallback=FP8_FALLBACK_NARROW, fp8_hidden=FP8_NO_WIDE
     ),
     "cake_l6_all": _cake("cake_l6_all", policy=L6_ALL),
-    DeepGemmArm.name: DeepGemmArm,
-    DeepGemmRaggedArm.name: DeepGemmRaggedArm,
 }
 MAIN_ARMS = ("cake_main", "cake_main_nosample", "cake_main_aa")
 # arms that take the FP8 inputs in ``--form fp8``; every other arm takes the same data dequantized to BF16
@@ -1324,20 +914,14 @@ FP8_ARMS = (
     "cake_fp8_narrow",
     "cake_fp8_w6",
     "cake_fp8_wn",
-    DeepGemmArm.name,
-    DeepGemmRaggedArm.name,
 )
 DEFAULT_ARMS = {
-    "bf16": "cake,chunked_pipeline,materialized_fp32",
-    "fp8": "cake_fp8,cake,deepgemm_topk,deepgemm_ragged_topk",
+    "bf16": "cake",
+    "fp8": "cake_fp8,cake",
 }
 TIMING_BOUNDARY = (
     "cake arms: the complete operator (scan, merge, finalize) of a prepared runner into caller-owned outputs and "
-    "workspace; deepgemm arms: per segment the fp8_mqa_logits call (its logits allocation included, and a contiguous "
-    "copy of row-padded logits where an arm records logits_copied: the dense top-k arm; the ragged arm reads the padded "
-    "rows in place) and the top-k call, without the conversion of their "
-    "output to ascending segment-local ids with aligned scores and padding; "
-    "CUPTI GPU span of every launched kernel per iteration, cold L2"
+    "workspace; CUPTI GPU span of every launched kernel per iteration, cold L2"
 )
 
 
@@ -1350,37 +934,122 @@ def arm_form(arm_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-FALLBACK_TEXT = "Falling back to CUDA events"  # flashinfer/testing/utils.py, bench_gpu_time_with_cupti
+FALLBACK_TEXT = "Falling back to CUDA events"
 TIMER = {"required": False, "fallbacks": 0, "calls": 0}
+_ITERATION_RANGE = "cake_bench_iteration_"
+_L2_FLUSH: dict = {}
+
+
+def _flush_l2(device):
+    """Overwrite a buffer twice the size of the device's L2 so that the next call starts with a cold L2."""
+    buffer = _L2_FLUSH.get(device)
+    if buffer is None:
+        l2_bytes = getattr(torch.cuda.get_device_properties(device), "L2_cache_size", 0)
+        buffer = torch.empty(
+            2 * (l2_bytes or (128 << 20)), dtype=torch.uint8, device=device
+        )
+        _L2_FLUSH[device] = buffer
+    buffer.zero_()
+
+
+def _span_ns(event):
+    """``(start, end)`` of a profiler event in ns."""
+    if hasattr(event, "start_ns"):
+        start = event.start_ns()
+        return start, start + event.duration_ns()
+    start = event.start_us() * 1000
+    return start, start + event.duration_us() * 1000
+
+
+def _cupti_times(fn, reps, warmup):
+    """Per-iteration GPU spans (ms) from the CUPTI activity records of ``torch.profiler``, or None when an iteration
+    has no recorded GPU activity.
+
+    Every iteration flushes the L2, then calls ``fn`` inside a ``record_function`` range.  The CUDA runtime / driver
+    calls that start inside that range name (by CUPTI correlation id) the GPU activities of the iteration; its span runs
+    from the first start to the last end of those activities."""
+    from torch.profiler import ProfilerActivity, profile, record_function
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        _flush_l2(device)
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for i in range(reps):
+            _flush_l2(device)
+            with record_function(f"{_ITERATION_RANGE}{i}"):
+                fn()
+        torch.cuda.synchronize()
+    events = list(prof.profiler.kineto_results.events())
+    cpu, gpu = torch.autograd.DeviceType.CPU, torch.autograd.DeviceType.CUDA
+    ranges = {}
+    launches = []
+    activities = {}
+    for event in events:
+        name = event.name()
+        if event.device_type() == cpu:
+            if name.startswith(_ITERATION_RANGE):
+                ranges[int(name[len(_ITERATION_RANGE) :])] = _span_ns(event)
+            elif name.startswith("cu") and event.correlation_id() > 0:
+                launches.append((_span_ns(event)[0], event.correlation_id()))
+        elif event.device_type() == gpu and event.correlation_id() > 0:
+            activities.setdefault(event.correlation_id(), []).append(_span_ns(event))
+    times = []
+    for i in range(reps):
+        if i not in ranges:
+            return None
+        lo, hi = ranges[i]
+        spans = [
+            span
+            for start, corr in launches
+            if lo <= start <= hi
+            for span in activities.get(corr, ())
+        ]
+        if not spans:
+            return None
+        times.append(
+            (max(end for _, end in spans) - min(start for start, _ in spans)) / 1e6
+        )
+    return times
+
+
+def _cuda_event_times(fn, reps, warmup):
+    """Per-iteration CUDA-event spans (ms), the L2 flushed before every iteration."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        _flush_l2(device)
+        fn()
+    torch.cuda.synchronize()
+    pairs = []
+    for _ in range(reps):
+        _flush_l2(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        pairs.append((start, end))
+    torch.cuda.synchronize()
+    return [start.elapsed_time(end) for start, end in pairs]
 
 
 def gpu_times(fn, reps, warmup):
-    """Per-iteration GPU spans (ms); records whether CUPTI or the CUDA-event fallback timed them."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        times = bench_gpu_time(
-            fn,
-            dry_run_iters=warmup,
-            repeat_iters=reps,
-            enable_cupti=True,
-            cold_l2_cache=True,
-        )
+    """Per-iteration GPU spans (ms) with a cold L2; records whether CUPTI or the CUDA-event fallback timed them."""
     TIMER["calls"] += 1
-    fallback = [w for w in caught if FALLBACK_TEXT in str(w.message)]
-    if fallback:
+    try:
+        times = _cupti_times(fn, reps, warmup)
+        reason = "the profiler recorded no GPU activity of an iteration"
+    except Exception as exc:  # noqa: BLE001 - any profiler failure selects the CUDA-event fallback
+        times, reason = None, f"{type(exc).__name__}: {exc}"
+    if times is None:
         TIMER["fallbacks"] += 1
-        message = str(fallback[0].message)
+        message = f"CUPTI timing unavailable ({reason}). {FALLBACK_TEXT}."
         if TIMER["required"]:
             raise SystemExit(f"--cupti-required: {message}")
         if TIMER["fallbacks"] == 1:
             print(f"WARNING: {message}", flush=True)
-    for w in caught:
-        if FALLBACK_TEXT not in str(w.message) and not issubclass(
-            w.category, ExperimentalWarning
-        ):
-            warnings.warn_explicit(
-                w.message, w.category, w.filename, w.lineno, source=w.source
-            )
+        times = _cuda_event_times(fn, reps, warmup)
     return [float(t) for t in times]
 
 
@@ -1494,8 +1163,6 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
         )
         record["gpu_ms"]["all"] = statistics.median(every)
         record["digest"] = result_digest(outputs[arm_name])
-        if isinstance(arm, DeepGemmArm):
-            record["logits_copied"] = arm.logits_copied
         if isinstance(arm, CakeArm):
             record["plan"] = arm.plan
             record["knobs"] = arm.knobs
@@ -1632,26 +1299,24 @@ def main():
         "--main-package",
         default=None,
         help=(
-            "directory of a second copy of the package (e.g. a FlashInfer main checkout's "
-            "cake_pplx/_backends/cake_dsa_indexer_det_train, or "
-            "flashinfer/experimental/cake_dsa_indexer_det in a checkout before #8928) for the cake_main arms"
+            "directory of a second copy of the package (e.g. a main checkout's "
+            "cake_pplx/_backends/cake_dsa_indexer_det_train) for the cake_main arms"
         ),
     )
     parser.add_argument(
         "--cupti-required",
         action="store_true",
-        help="fail when flashinfer.testing.bench_gpu_time falls back from CUPTI to CUDA events",
+        help="fail when the CUPTI timer (torch.profiler) falls back to CUDA events",
     )
     parser.add_argument("--json", default=None)
     args = parser.parse_args()
-    warnings.simplefilter("ignore", ExperimentalWarning)
     TIMER["required"] = bool(args.cupti_required)
     device = torch.device("cuda", torch.cuda.current_device())
     props = torch.cuda.get_device_properties(device)
     fp8 = args.form == "fp8"
     if fp8 and args.strided_k:
         raise SystemExit(
-            "--strided-k measures the BF16 rows: the FP8 mode's BF16 and DeepGEMM arms take contiguous keys"
+            "--strided-k measures the BF16 rows: the FP8 mode's BF16 arms take contiguous keys"
         )
     if args.rows is None:
         args.rows = FP8_ROWS if fp8 else DEFAULT_ROWS
@@ -1748,7 +1413,6 @@ def main():
                     timer=timer_record(),
                     packages=packages,
                     torch=torch.__version__,
-                    flashinfer=str(Path(flashinfer.__file__).resolve().parent),
                     arms=arms,
                     warmup=args.warmup,
                     reps=args.reps,

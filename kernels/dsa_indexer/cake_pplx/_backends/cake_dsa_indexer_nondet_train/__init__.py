@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,9 +15,8 @@ limitations under the License.
 """
 
 # Cake backend of cake_pplx.cake_dsa_indexer_nondet_train: fused DSA indexer scoring + exact top-k selection for
-# training whose selected set repeats per row while its slot order may vary (flashinfer-ai/flashinfer#8946, point 4;
-# the operator of flashinfer-ai/flashinfer#5676; target geometry: 32 indexer heads, head dimension 128, top-k 2048) on
-# SM100 / SM103 / SM107.  It runs the deterministic package's BF16 scan programs and its plain split merge and no
+# training whose selected set repeats per row while its slot order may vary (target geometry: 32 indexer heads, head
+# dimension 128, top-k 2048) on SM100 / SM103 / SM107.  It runs the deterministic package's BF16 scan programs and its plain split merge and no
 # ordering pass, and raises PyTorch's alert under ``torch.use_deterministic_algorithms(True)`` (a ``UserWarning``
 # with ``warn_only=True``) before an eager call's first allocation and before the first launch of every prepared
 # run.  The public entry points are

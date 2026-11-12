@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ from . import cake_build
 # to compile: one entry ``<library>_<arch>`` per program and architecture with
 # its sources, nvcc flags and digests.  ``cake_build.load_library`` serves the
 # prebuilt ``aot/<entry>.so`` when a builder compiled it and otherwise
-# JIT-builds the entry through FlashInfer.  ``ARG_PLANS`` holds the one
+# JIT-builds the entry through the package's JIT shim.  ``ARG_PLANS`` holds the one
 # argument order per stage role (``scan``: a persistent fused scoring /
 # selection program; ``merge``: the split-range merge; ``finalize``: the
 # ascending-id row sort by CUB block radix sort; ``finalize_rank``: the same
@@ -1296,7 +1296,7 @@ POLICY: dict[str, dict[str, Any]] = {
 # FP8 split counts stay as measured (no split-resident rule) whatever the BF16
 # split rule becomes.  The sm_107a FP8 record keeps no sampling class or
 # long-unit rule (sample_class_rule, sample_long_rule): the BF16 record's
-# #7549 rules were measured on the BF16 ticket programs.  Nor does it run a
+# sampling rules were measured on the BF16 ticket programs.  Nor does it run a
 # longest-first copy (lsf_programs False): its FP8 programs keep the static unit
 # enumeration, which draws no tickets to order, while the BF16 record runs the
 # :lsf copies of its l6 ticket programs.
@@ -1364,7 +1364,6 @@ POLICY_FP8: dict[str, dict[str, Any]] = {
         "snake_l6_fallback_waves": None,
     },
 }
-TRACKING_ISSUE = "flashinfer-ai/flashinfer#5676"
 
 
 def library_name(program: str, arch: str) -> str:

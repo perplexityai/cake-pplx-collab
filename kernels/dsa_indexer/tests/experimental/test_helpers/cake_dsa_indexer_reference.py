@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,9 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Independent reference for the DSA indexer top-k contract
-(flashinfer-ai/flashinfer#5676): input generators, an FP64 / FP32 scorer, the
-exact global selection with the issue's tie rule, the accumulation-error
+Independent reference for the DSA indexer top-k contract: input generators, an FP64 / FP32 scorer, the
+exact global selection with the contract's tie rule, the accumulation-error
 bound and the judgement of a result against the reference.  Shared by
 ``tests/experimental/test_cake_dsa_indexer_det_train.py``,
 ``tests/experimental/test_cake_dsa_indexer_det_train_fp8.py``,
@@ -26,7 +25,7 @@ Nothing here knows how the kernels partition queries or keys.
 
 Input generators.  ``make_random_inputs`` draws iid Gaussian ``q`` / ``k``
 (optionally ``peaked``); ``make_sink_inputs`` draws the attention-sink +
-local-band statistics of flashinfer-ai/flashinfer#7042 (key 0 boosted along a
+local-band statistics (key 0 boosted along a
 shared direction, log-spaced sinusoid position features shared by every query
 and its nearby keys, positive ``w``), the distribution on which the sampled
 first threshold of the generated program is stress-tested.
@@ -156,7 +155,7 @@ def effective_offsets(seg_q_len, seg_k_len, q_causal_offsets, ratio: int) -> lis
 
 
 def visible_scalar(offset: int, position: int, ratio: int, num_keys: int) -> int:
-    """Visible keys of one query by the issue's rule (Python ``//`` is a true floor)."""
+    """Visible keys of one query by the contract's rule (Python ``//`` is a true floor)."""
     return max(0, min(int(num_keys), (int(offset) + int(position) + 1) // int(ratio)))
 
 
@@ -508,9 +507,9 @@ def make_sink_inputs(
     n_freq: int = SINK_NUM_FREQUENCIES,
     label: str = "",
 ) -> IndexerInputs:
-    """Attention-sink + local-band inputs (flashinfer-ai/flashinfer#7042, the GLM-5.2 layer-6 indexer statistics).
+    """Attention-sink + local-band inputs (the GLM-5.2 layer-6 indexer statistics).
 
-    The issue's generator, byte for byte, generalised to several segments: position features ``z(pos)`` are 32
+    The recorded generator, generalised to several segments: position features ``z(pos)`` are 32
     random-phase ``(cos, sin)`` pairs at the log-spaced frequencies ``2**-3 .. 2**-17`` over ``sqrt(32)``,
     zero-padded to 128; a unit direction ``s`` is shared by every query (``+ sink * s``) and boosted on key 0 of
     every segment (``+ key0_boost * s``); ``q = noise * N + local * z(q_pos) + sink * s``,
@@ -1411,7 +1410,7 @@ def select_reference(
     key_chunk: Optional[int] = None,
     chunk_bytes: int = CHUNK_BYTES,
 ) -> ReferenceSelection:
-    """Exact global selection per row with the issue's tie rule, memory-bounded over keys.
+    """Exact global selection per row with the contract's tie rule, memory-bounded over keys.
 
     Ranking uses the FP64 score.  ``query_chunk`` / ``key_chunk`` change only
     the work partition: with ``order="sequential"`` the result is bitwise

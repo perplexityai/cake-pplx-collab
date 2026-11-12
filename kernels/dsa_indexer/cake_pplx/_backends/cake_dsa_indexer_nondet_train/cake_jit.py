@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ from . import cake_build
 # to compile: one entry ``<library>_<arch>`` per program and architecture with
 # its sources, nvcc flags and digests.  ``cake_build.load_library`` serves the
 # prebuilt ``aot/<entry>.so`` when a builder compiled it and otherwise
-# JIT-builds the entry through FlashInfer.  ``ARG_PLANS`` holds the one
+# JIT-builds the entry through the package's JIT shim.  ``ARG_PLANS`` holds the one
 # argument order per stage role (``scan``: a persistent fused scoring /
 # selection program; ``merge``: the split-range merge), ``PROGRAMS`` every
 # program once with its role, its architecture-free ``library`` stem and its
@@ -751,7 +751,6 @@ POLICY: dict[str, dict[str, Any]] = {
         "check_period_kind_overrides": {},
     },
 }
-TRACKING_ISSUE = "flashinfer-ai/flashinfer#5676"
 
 
 def library_name(program: str, arch: str) -> str:

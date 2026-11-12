@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Naming rules of flashinfer-ai/flashinfer#8928 for the deterministic Cake DSA indexer.
+Naming rules for the deterministic Cake DSA indexer.
 
 The public module is ``cake_pplx.cake_dsa_indexer_det_train`` and its backend package
 ``cake_pplx._backends.cake_dsa_indexer_det_train``.  Every public name of the module (except ALL_CAPS
@@ -45,8 +45,7 @@ FORWARDED = (
     "cake_dsa_indexer_det_train_topk",
     "cake_dsa_indexer_det_train_topk_workspace_size",
 )
-# package paths before #8928 (flashinfer.experimental.cake_dsa_indexer[_det]) under the cake_pplx prefix: they
-# fail at import
+# previous package paths (cake_dsa_indexer[_det]) under the cake_pplx prefix: they fail at import
 OLD_MODULES = (
     "cake_pplx.cake_dsa_indexer_det",
     "cake_pplx.cake_dsa_indexer",
@@ -55,8 +54,8 @@ OLD_MODULES = (
     "cake_pplx._backends.cake_dsa_indexer",
     "cake_pplx._backends.cake_dsa_indexer.cake_backend",
 )
-# (module, name) pairs before #8928: absent (the serving-module names, flashinfer.dsa_indexer.*, checked on the
-# facade, the module that took their place)
+# previous (module, name) pairs: absent (the serving-module names, checked on the facade, the module that took their
+# place)
 OLD_NAMES = (
     (FACADE, "dsa_indexer_det_topk"),
     (FACADE, "dsa_indexer_det_topk_workspace_size"),

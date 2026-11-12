@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,8 +15,7 @@ limitations under the License.
 """
 
 # Cake backend of cake_pplx.cake_dsa_indexer_det_train: fused DSA indexer scoring + deterministic
-# exact top-k selection for training (flashinfer-ai/flashinfer#5676; target geometry: 32 indexer heads,
-# head dimension 128, top-k 2048) on SM100 / SM103 / SM107.  The public entry points are
+# exact top-k selection for training (target geometry: 32 indexer heads, head dimension 128, top-k 2048) on SM100 / SM103 / SM107.  The public entry points are
 # ``cake_pplx.cake_dsa_indexer_det_train.cake_dsa_indexer_det_train_topk`` and
 # ``cake_dsa_indexer_det_train_topk_workspace_size``; the host binding, workspace policy, JIT registration and
 # the generated kernel sources live in this package.

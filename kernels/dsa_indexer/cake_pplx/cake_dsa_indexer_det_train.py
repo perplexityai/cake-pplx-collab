@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 Deterministic Cake DSA indexer top-k for training (SM100 / SM103 / SM107).
 
 Every public name carries the mode word ``det``; no entry point takes a
-``deterministic=`` keyword (flashinfer-ai/flashinfer#8928).  The
+``deterministic=`` keyword.  The
 non-deterministic counterpart is ``cake_pplx.cake_dsa_indexer_nondet_train``,
 which leaves the slot order of each row unspecified.
 
