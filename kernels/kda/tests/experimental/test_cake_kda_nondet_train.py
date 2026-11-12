@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 from tests.cake.test_helpers.cake_package import cake_package
 
 # The backend suite names its package once, through the shared alias helper, and imports nothing else from
-# flashinfer: a build that vendors the package under another import path runs it unchanged after pointing the
+# cake_pplx: a build that vendors the package under another import path runs it unchanged after pointing the
 # ``PACKAGES`` entry at its own package.  The public entry points of ``cake_pplx.cake_kda_nondet_train`` are covered by
 # ``test_cake_kda_nondet_train_api.py``.
 cake_backend = cake_package("cake.cake_kda_nondet_train", "cake_backend")
@@ -2030,9 +2030,9 @@ def test_the_l2n_leaf_admits_exactly_when_the_calls_mode_is_listed() -> None:
         cake_jit._admits({"kind": "l2n"}, **scalars)
 
 
-# The rules of the copied records before the deterministic package's fused Q/K L2 norm class (FlashInfer #8277 at
-# 20a67232, the rules this package copied until #7817; the raw class's records had the same rules as their g
-# records).  Every record whose rule now reads the l2n leaf is listed.
+# The rules of the copied records before the deterministic package's fused Q/K L2 norm class (the rules this
+# package copied until the in-kernel Q/K L2 norm; the raw class's records had the same rules as their g records).
+# Every record whose rule now reads the l2n leaf is listed.
 _PRE_L2N_FWD_INTRA = {
     "kind": "any_of",
     "rules": [
@@ -4284,7 +4284,7 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
             assert (
                 hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"][source]
             ), source
-            assert "by FlashInfer team" in "\n".join(
+            assert "Copyright (c) 2026, NVIDIA CORPORATION." in "\n".join(
                 path.read_text().splitlines()[:3]
             ), source
     expected = {

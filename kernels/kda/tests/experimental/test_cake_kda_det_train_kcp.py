@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -4601,7 +4601,7 @@ def test_gpu_graph_replay_is_bitwise(device, monkeypatch, graph_cap, walk_form) 
     backend = cake_kcp.get_backend()
     programs = backend.programs() if hasattr(backend, "programs") else None
     cap_programs = cake_kcp.WALK_CAP_PROGRAMS.get(cake_kcp.WALK_GEOMETRY_DEFAULT, ())
-    capped = isinstance(programs, cake_kcp._FiPrograms) and bool(cap_programs)
+    capped = isinstance(programs, cake_kcp._PackagePrograms) and bool(cap_programs)
 
     def n_capped(rec) -> int:
         """The call's launches under the cap: full-width launches of the capped programs (``walk_forms``)."""
@@ -4674,7 +4674,7 @@ def test_gpu_graph_replay_is_bitwise(device, monkeypatch, graph_cap, walk_form) 
         eager_cc(recs0[0]),
         eager_cc(recs0[1]),
     ), recs0
-    if isinstance(programs, cake_kcp._FiPrograms):
+    if isinstance(programs, cake_kcp._PackagePrograms):
         # the forward's state walk is the fused kcp_fwdh_o (no tape program: never capped); the tape walks are the
         # backward's
         assert any(
@@ -4824,7 +4824,7 @@ def test_gpu_graph_replay_is_bitwise(device, monkeypatch, graph_cap, walk_form) 
 
 
 class _FakeJit:
-    """A program provider's registry double for the CPU tests of :class:`cake_kcp._FiPrograms`: records every launch."""
+    """A program provider's registry double for the CPU tests of :class:`cake_kcp._PackagePrograms`: records every launch."""
 
     def __init__(self) -> None:
         self.launched: list[tuple] = []
@@ -4851,7 +4851,7 @@ def test_capped_launch_without_cudart_degrades(monkeypatch) -> None:
     monkeypatch.setattr(cake_kcp, "_capturing", lambda: False)
     stats0 = dict(cake_kcp.CACHE_CONFIG_STATS)
     jit = _FakeJit()
-    programs = cake_kcp._FiPrograms(jit)
+    programs = cake_kcp._PackagePrograms(jit)
     call = _fake_call(cake_kcp.WALK_GEOMETRY_DEFAULT)
     program = cake_kcp.WALK_CAP_PROGRAMS[cake_kcp.WALK_GEOMETRY_DEFAULT][0]
     with pytest.warns(RuntimeWarning, match="libcudart_bogus_cake3837") as rec:
@@ -4909,7 +4909,7 @@ def test_capped_launch_skips_the_bracket_inside_a_capture(monkeypatch) -> None:
 
     monkeypatch.setattr(cake_kcp, "walk_device_cache_config", fake_set)
     jit = _FakeJit()
-    programs = cake_kcp._FiPrograms(jit)
+    programs = cake_kcp._PackagePrograms(jit)
     program = cake_kcp.WALK_CAP_PROGRAMS[cake_kcp.WALK_GEOMETRY_DEFAULT][0]
     stats0 = dict(cake_kcp.CACHE_CONFIG_STATS)
     monkeypatch.setattr(cake_kcp, "_capturing", lambda: True)
@@ -4989,7 +4989,7 @@ def test_spec3_probe_is_a_keyword_and_the_package_reads_no_environment_switch(
         if not name.endswith(".py"):
             continue
         if name == "_cake_pplx_jit.py":
-            # the JIT build shim (it replaces flashinfer.jit, which lived outside the package) reads the
+            # the JIT build shim reads the
             # toolchain and cache locations (CUDA_HOME, CAKE_PPLX_CACHE_DIR), no kernel switch
             continue
         with open(os.path.join(package, name), encoding="utf-8") as f:
@@ -5414,7 +5414,7 @@ def test_host_trim_kernel_backend_run_skips_the_discarded_abi() -> None:
             transfer_walk="bf16x3_hw64",
         )
 
-    backend = cake_kcp.KernelBackend(programs=cake_kcp._FiPrograms(FakeJit()))
+    backend = cake_kcp.KernelBackend(programs=cake_kcp._PackagePrograms(FakeJit()))
     c1 = call(1)
     args = {
         "family": "fwd",
@@ -5948,7 +5948,7 @@ def test_capped_launch_sets_the_node_attribute_inside_a_capture(monkeypatch) -> 
     _fake_stream(monkeypatch)
     stats0 = dict(cake_kcp.CACHE_CONFIG_STATS)
     jit = _FakeJit()
-    programs = cake_kcp._FiPrograms(jit)
+    programs = cake_kcp._PackagePrograms(jit)
     program = cake_kcp.WALK_CAP_PROGRAMS[cake_kcp.WALK_GEOMETRY_DEFAULT][0]
     call = _fake_node_call("node_attr")
     programs.launch(program, [], grid=4, device_index=0, args={"_call": call})
@@ -6021,7 +6021,7 @@ def test_capped_launch_sets_the_node_attribute_inside_a_capture(monkeypatch) -> 
     # a failing set inside the capture raises (the capture then falls back to the eager path, recorded by _graph_capture)
     bad = _FakeGraphRt(rc_set=1)
     monkeypatch.setattr(cake_kcp, "_CUDART_CACHE", {"rt": bad, "graph": bad})
-    programs2 = cake_kcp._FiPrograms(_FakeJit())
+    programs2 = cake_kcp._PackagePrograms(_FakeJit())
     with pytest.raises(RuntimeError, match="cudaGraphKernelNodeSetAttribute"):
         programs2.launch(
             program,
@@ -6063,7 +6063,7 @@ def test_capped_launch_sets_the_node_attribute_inside_a_capture(monkeypatch) -> 
     assert programs2.capture_skips == skips0 + 2 and programs2.node_attrs == 0
     # without the graph entry points: unavailable, and the launch takes the capture-skip form
     monkeypatch.setattr(cake_kcp, "_CUDART_CACHE", {"rt": object(), "graph": None})
-    programs3 = cake_kcp._FiPrograms(_FakeJit())
+    programs3 = cake_kcp._PackagePrograms(_FakeJit())
     plain = _fake_node_call("node_attr")
     programs3.launch(program, [], grid=4, device_index=0, args={"_call": plain})
     assert (

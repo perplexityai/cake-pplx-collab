@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ in total (unequal lengths with unaligned tails), or one ``--lengths`` packing
 (explicit comma-separated document lengths), and ``--heads`` heads; each
 Cake arm allocates its workspace once per row and reuses it, so the timed
 closures allocate nothing.  Timing uses CUPTI kernel activity with a cold L2
-(``flashinfer.testing.bench_gpu_time(enable_cupti=True, cold_l2_cache=True)``):
+(the torch profiler, :func:`bench_gpu_time`):
 the median over the timed calls of the summed GPU time of a boundary's
 kernels, in milliseconds.  The arms run interleaved: ``--rounds`` rounds, each
 timing every arm and boundary once, the arm order reversed on every other
@@ -122,8 +122,7 @@ that corrupts the CUDA context still stops the run).
 call on its stream (CUDA events; the median of seven calls after three
 warm-ups) alone and with a one-thread kernel (``torch.cuda._sleep``) resident
 on another stream, alternating, and their ratio (the concurrent-launch
-measurement of FlashInfer issue #7038, after the merged causal conv1d and
-RMSNorm SiLU-gate benchmarks).  The side kernel is launched first, the call
+measurement).  The side kernel is launched first, the call
 after a short sleep on its own stream, and it spins for at least twice the
 call's warm-up latency (``side_covered``: it was still running when every
 call beside it ended).  Information, not a gate.
@@ -141,6 +140,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import bisect
 import gc
 import itertools
 import json
@@ -162,7 +162,6 @@ from cake_pplx._backends.cake_kda_nondet_train import cake_jit  # noqa: E402
 from cake_pplx._backends.cake_kda_det_train import (  # noqa: E402
     cake_backend as det_backend,
 )
-from flashinfer.testing import bench_gpu_time  # noqa: E402
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (  # noqa: E402
     D,
     LOWER_BOUND,
@@ -210,28 +209,91 @@ def split_docs(seqlen: int, docs: int) -> tuple[int, ...]:
     return tuple(lengths)
 
 
+# Cold-L2 GPU timing.  Each timed call follows a write of a buffer twice the L2 size and a device synchronization;
+# the calls run for about COLD_L2_DRY_RUN_MS untimed, then for about COLD_L2_REPEAT_MS (at least COLD_L2_MIN_CALLS
+# calls) under the torch profiler, each inside its own profiler range closed after a device synchronization.
+COLD_L2_DRY_RUN_MS = 25.0
+COLD_L2_REPEAT_MS = 100.0
+COLD_L2_MIN_CALLS = 10
+COLD_L2_RANGE = "cake_bench_cold_l2_call"
+
+
+def bench_gpu_time(fn: Callable[[], object]) -> list[float]:
+    """Per-call GPU time of ``fn`` in milliseconds with a cold L2: the summed duration of the CUDA activity (kernels,
+    memsets, copies) whose start lies inside the call's profiler range, from the torch profiler's CUPTI activity;
+    CUDA-event time of each call when the torch build has no kineto profiler."""
+    from torch.autograd import DeviceType
+    from torch.profiler import ProfilerActivity, profile, record_function
+
+    device = torch.cuda.current_device()
+    l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+    flush = torch.empty(max(2 * l2_bytes, 1 << 20), dtype=torch.int8, device="cuda")
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    torch.cuda.synchronize()
+    start.record()
+    fn()
+    end.record()
+    torch.cuda.synchronize()
+    estimate_ms = max(start.elapsed_time(end), 1e-3)
+    for _ in range(max(1, int(COLD_L2_DRY_RUN_MS / estimate_ms))):
+        fn()
+    calls = max(COLD_L2_MIN_CALLS, int(COLD_L2_REPEAT_MS / estimate_ms))
+    if not torch.autograd.kineto_available():
+        samples = []
+        for _ in range(calls):
+            flush.zero_()
+            torch.cuda.synchronize()
+            start.record()
+            fn()
+            end.record()
+            torch.cuda.synchronize()
+            samples.append(start.elapsed_time(end))
+        return samples
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for _ in range(calls):
+            flush.zero_()
+            torch.cuda.synchronize()
+            with record_function(COLD_L2_RANGE):
+                fn()
+                torch.cuda.synchronize()
+    events = prof.events()
+    ranges = sorted(
+        (e.time_range.start, e.time_range.end)
+        for e in events
+        if e.name == COLD_L2_RANGE and e.device_type == DeviceType.CPU
+    )
+    if len(ranges) != calls:
+        raise RuntimeError(f"the profiler recorded {len(ranges)} of {calls} timed calls")
+    totals_us = [0.0] * calls
+    for e in events:
+        # device activity only; a profiler range's own GPU-side span (gpu_user_annotation, the same name) is not work
+        if e.device_type != DeviceType.CUDA or e.name == COLD_L2_RANGE or getattr(e, "is_user_annotation", False):
+            continue
+        t = e.time_range.start
+        i = bisect.bisect_right(ranges, (t, math.inf)) - 1
+        if i >= 0 and t <= ranges[i][1]:
+            totals_us[i] += e.time_range.elapsed_us()
+    if not any(totals_us):
+        raise RuntimeError("the profiler recorded no CUDA activity (CUPTI unavailable)")
+    return [us / 1000.0 for us in totals_us]
+
+
 def _median_ms(samples) -> float:
     return float(statistics.median(list(samples)))
 
 
 def _time(fn: Callable[[], object]) -> float:
-    return _median_ms(bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True))
+    return _median_ms(bench_gpu_time(fn))
 
 
 def _timer() -> str:
-    """What ``bench_gpu_time(enable_cupti=True)`` measures here: CUPTI kernel time
-    when ``cupti-python`` >= 13 imports, else its fallback, CUDA-event time."""
-    try:
-        from importlib.metadata import version
-
-        from cupti import cupti  # noqa: F401
-
-        cupti_version = version("cupti-python")
-    except Exception:
-        return "CUDA events (cupti-python unavailable)"
-    if int(cupti_version.split(".")[0]) < 13:
-        return f"CUDA events (cupti-python {cupti_version} < 13)"
-    return f"CUPTI kernel time (cupti-python {cupti_version})"
+    """What :func:`bench_gpu_time` measures here: CUPTI kernel time through the
+    torch profiler when the torch build has kineto, else CUDA-event time."""
+    if not torch.autograd.kineto_available():
+        return f"CUDA events (torch {torch.__version__} without kineto)"
+    return f"CUPTI kernel time (torch profiler, torch {torch.__version__})"
 
 
 def _fla_version() -> str | None:

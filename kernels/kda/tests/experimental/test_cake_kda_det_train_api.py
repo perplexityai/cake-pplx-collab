@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake packed KDA chunked training package
+Public-API tests of the Cake packed KDA chunked training package
 (``cake_pplx._backends.cake_kda_det_train``).
 
-The backend suite ``test_cake_kda_det_train.py`` imports only the package.  This file covers what needs flashinfer
+The backend suite ``test_cake_kda_det_train.py`` imports only the package.  This file covers what needs ``cake_pplx``
 itself: the public entry points ``cake_pplx.cake_kda_det_train.cake_kda_det_train_forward`` /
 ``cake_kda_det_train_backward`` / ``cake_kda_det`` (the keywords they forward and the default scale) and the workspace / byte helpers next to them.  The KCP entry points are covered by
 ``test_cake_kda_det_train_kcp_api.py``.

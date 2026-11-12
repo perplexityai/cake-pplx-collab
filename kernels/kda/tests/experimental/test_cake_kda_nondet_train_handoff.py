@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ exactly where ``HANDOFF_HEADS``, ``HANDOFF_VERIFIED``, the size bounds (``HANDOF
 and torch's recompute, capture, compile and dispatch-mode state as the hand-off reads it.
 
 Like the backend suite it names its package through the shared alias helper and imports nothing else from
-flashinfer.
+``cake_pplx``.
 """
 
 import contextlib

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -1203,7 +1203,7 @@ def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
 # A single seed per row is not a usable statistic for these H-element sums (the per-seed ratio KCP / single-rank of
 # dA_log spans 0.3-3.7 on both routes at W > 1).  Negative controls: the raw arm with its error stretched 1.25x, and
 # with the largest per-rank partial left out of the sum, must fail.  Minutes per row: env-gated, run on compute.
-ENV_KCP_PROTOCOL = "FLASHINFER_CAKE_KDA_TRAIN_KCP_RAW_GATE_ACCURACY"
+ENV_KCP_PROTOCOL = "CAKE_PPLX_KDA_TRAIN_KCP_RAW_GATE_ACCURACY"
 ENV_KCP_PROTOCOL_REQUIRE_FLA = ENV_KCP_PROTOCOL + "_REQUIRE_FLA"
 PROTOCOL_ROWS = [
     ((3000,), 4, 2, "zigzag_per_document"),

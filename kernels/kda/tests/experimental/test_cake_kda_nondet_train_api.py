@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,10 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake non-deterministic packed KDA chunked training package
+Public-API tests of the Cake non-deterministic packed KDA chunked training package
 (``cake_pplx._backends.cake_kda_nondet_train``).
 
-The backend suite ``test_cake_kda_nondet_train.py`` imports only the package.  This file covers what needs flashinfer
+The backend suite ``test_cake_kda_nondet_train.py`` imports only the package.  This file covers what needs ``cake_pplx``
 itself and the package's boundary with the deterministic package.  On the CPU: the public entry points
 ``cake_pplx.cake_kda_nondet_train.cake_kda_nondet_train_forward`` / ``cake_kda_nondet_train_backward`` /
 ``cake_kda_nondet`` forward every keyword to the package entry of the same name (the package entries replaced by
@@ -65,7 +65,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FLASHINFER_DIR = Path(nd_api.__file__).resolve().parent
+CAKE_PPLX_DIR = Path(nd_api.__file__).resolve().parent
 GRAD_ORDER = ("dq", "dk", "dv", "dbeta", "dg")  # the order the backward returns
 # facade entry -> its twin in the deterministic facade (the same parameters; cake_kda_nondet adds checkpoint_handoff)
 DET_TWIN = {
@@ -177,13 +177,13 @@ def _run_cpu_subprocess(code: str) -> str:
     return proc.stdout.strip().splitlines()[-1]
 
 
-def _flashinfer_warnings(records) -> list[str]:
-    """The warnings of ``records`` raised from flashinfer code or naming a deterministic implementation (torch's
+def _cake_pplx_warnings(records) -> list[str]:
+    """The warnings of ``records`` raised from cake_pplx code or naming a deterministic implementation (torch's
     non-determinism alert in ``warn_only`` mode)."""
     found = []
     for w in records:
         try:
-            inside = Path(w.filename).resolve().is_relative_to(FLASHINFER_DIR)
+            inside = Path(w.filename).resolve().is_relative_to(CAKE_PPLX_DIR)
         except (OSError, ValueError):
             inside = False
         if inside or "deterministic" in str(w.message):
@@ -1685,7 +1685,7 @@ def test_torch_deterministic_mode_runs_this_package(
     ``CakeKDANondetFunction``, every launch of a caller workspace a record of this package's registry (a program of
     its own library prefix) and the deterministic package launches nothing; the results are the bits of the calls
     with torch's mode off, ``dg`` included, with and without a caller workspace; no call raises and none warns (no
-    warning from flashinfer code, none naming a missing deterministic implementation)."""
+    warning from cake_pplx code, none naming a missing deterministic implementation)."""
     device = _device_or_skip()
     lengths, heads = (129, 63), 16
     S, N = sum(lengths), len(lengths)
@@ -1742,7 +1742,7 @@ def test_torch_deterministic_mode_runs_this_package(
     assert _bits_equal(o, out_want)
     for leaf, want in zip(leaves, _leaf_grads(grads_want), strict=True):
         assert _bits_equal(leaf.grad, want), warn_only
-    assert _flashinfer_warnings(rec) == []
+    assert _cake_pplx_warnings(rec) == []
 
 
 def test_autograd_node_keeps_its_package_under_torch_deterministic_mode() -> None:
@@ -1785,7 +1785,7 @@ def test_autograd_node_keeps_its_package_under_torch_deterministic_mode() -> Non
             warnings.simplefilter("always")
             o.backward(dout)
             torch.cuda.synchronize(device)
-        assert _flashinfer_warnings(rec) == [], det
+        assert _cake_pplx_warnings(rec) == [], det
         for leaf, ref in zip(leaves, _leaf_grads(want[det]), strict=True):
             assert _bits_equal(leaf.grad, ref), det
 

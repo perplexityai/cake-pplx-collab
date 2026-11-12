@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -261,8 +261,8 @@ the same ABI) for the orchestration tests.
 Semantics and contracts follow the KCP design note (its sections 3.5, 3.6, 6.4,
 6.5, 7.2-7.5, 9, 10 and 16).
 
-Checkpoint recompute without the state exchange (FlashInfer issue #7815; the
-GDN twin is #7818): with ``cake_kda_det_kcp(..., recompute_handle=)``
+Checkpoint recompute without the state exchange (the GDN KCP package has the
+same mode): with ``cake_kda_det_kcp(..., recompute_handle=)``
 (:class:`CakeKDADetKcpRecomputeHandle`, or any object with an ``entries`` dict) the
 original forward exchanges as always and stores its incoming states ``S_in``
 (the saved set's own tensor, key ``"kda"``; with ``checkpoint_keep="transfer"``
@@ -273,7 +273,7 @@ no c1 / c2 (no ring hop), no wait, no owner merge, no summary walk at ``P = 1``
 The backward is unchanged (``checkpoint_keep="states"``, the default, runs it
 with ``save_transfer=False``: bitwise the default form).
 
-Raw gate mode (FlashInfer issue #7816; ``use_gate_in_kernel=True`` with
+Raw gate mode (``use_gate_in_kernel=True`` with
 ``A_log`` / ``dt_bias`` / ``lower_bound`` on the three entry points, the
 single-rank keywords): ``g`` is this rank's raw BF16 gate (a strided view under
 the single-rank rule, never copied) and the local stages run the plan's raw
@@ -296,7 +296,7 @@ saved set and a recompute handle's fingerprint record the mode (and the lower
 bound); a call in another mode is refused.  A raw-mode workspace runs the replay
 local arena (``local_arena="lean"`` is refused in this mode).
 
-In-kernel Q / K L2 norm (FlashInfer issue #7817; keyword-only
+In-kernel Q / K L2 norm (keyword-only
 ``use_qk_l2norm_in_kernel=False`` on the three entry points, the workspace and
 the byte queries, never an :class:`CakeKDADetKcpOptions` field): with ``True`` the
 local stages normalize ``q`` and ``k`` per token and per 128-channel head,
@@ -401,7 +401,7 @@ COLS_RULE_CHAINS = 24  # D1 threshold (DECISIONS.md D1: <= 24 concurrent chains 
 # the earlier lists and launches (the offset / staging lists in segment order, the runtime's own occupancy); "lpt_chains" =
 # every walk list in LPT order (longest segment first, ties by segment number; the tape lists already are); "one_cta_per_sm" =
 # the K1 / K2 kernels (115712 B of dynamic shared memory: two CTAs fit an SM only at the full 228 KiB carveout) launched at
-# one CTA per SM (the device cache-config preference bracketing the launch, see _FiPrograms; host side, no kernel change);
+# one CTA per SM (the device cache-config preference bracketing the launch, see _PackagePrograms; host side, no kernel change);
 # "tape_one_cta_per_sm" = the same cap for the tape kernels only (fwdh_tape / dhu_tape: the step-0 probe found co-resident
 # tape CTAs thrash while co-resident offset CTAs hide each other's latency); "lpt_*" = the LPT order plus that cap.  Order and
 # placement never touch a bit: every CTA walks its own (segment, head) chain (the kernels' map is walk_seg[b // (nv H)], head
@@ -862,7 +862,7 @@ class Backend:
     name = "abstract"
     dtypes: dict[str, torch.dtype] = dict(CONTRACT_DTYPES)
     local_stages = True
-    path = "fi-rendered"  # recorded with every result: fake (emulation), direct (bring-up), fi-rendered (the package)
+    path = "package-rendered"  # recorded with every result: fake (emulation), direct (bring-up), package-rendered (the package)
 
     def run(
         self, name: str, args: dict[str, Any]
@@ -1204,7 +1204,7 @@ class KernelBackend(Backend):
         programs: Any | None = None,
         *,
         cols_per_cta: int | None = None,
-        path: str = "fi-rendered",
+        path: str = "package-rendered",
     ) -> None:
         self._programs = programs
         if cols_per_cta is not None and (
@@ -1229,7 +1229,7 @@ class KernelBackend(Backend):
         if self._programs is None:
             from . import cake_kcp_jit  # noqa: PLC0415 - H3's registry; optional at import time
 
-            self._programs = _FiPrograms(cake_kcp_jit)
+            self._programs = _PackagePrograms(cake_kcp_jit)
         return self._programs
 
     # -- device tables (small int tables, cached by content)
@@ -1560,7 +1560,7 @@ class KernelBackend(Backend):
         programs = self.programs()
         jit = getattr(programs, "jit", None)
         if (
-            not isinstance(programs, _FiPrograms)
+            not isinstance(programs, _PackagePrograms)
             or jit is None
             or hasattr(jit, "launch_kcp")
             or not hasattr(jit, "run_program")
@@ -1843,7 +1843,7 @@ def merge_cols_per_cta(ncols: int, n_chains: int, rule: str) -> int | None:
 
 # Kernel parameter names of the frozen ABIs (K1 a217181fa, K2 a217181fa with its fuse_dv1 builds' aqk_tma (the
 # internal Aqk rows) at the fifth parameter, where the earlier builds read dv1, K3 0637ec9f4, K4 eaa97cf5e): the logical
-# vocabulary of the registry records when the FI-rendered provider launches by name.
+# vocabulary of the registry records when the package-rendered provider launches by name.
 ABI_PARAMS = {
     "fwdh_offset": (
         "w_tma",
@@ -2166,7 +2166,7 @@ def _cudart_graph_available() -> Any | None:
 def capture_kernel_node(device_index: int) -> dict[str, Any]:
     """The kernel node just captured on the current stream of ``device_index`` (the kernel-node cap): the stream-capture-info call must
     report an active capture whose next operation depends on exactly one node, and that node must be a kernel node (the launch
-    issued right before this call).  Returns the evidence record with the node handle; raises ``RuntimeError`` otherwise (:meth:`_FiPrograms.cap_captured_node`
+    issued right before this call).  Returns the evidence record with the node handle; raises ``RuntimeError`` otherwise (:meth:`_PackagePrograms.cap_captured_node`
     catches it: the launch stays uncapped and the capture goes on)."""
     rt = _cudart_graph_available()
     if rt is None:
@@ -2583,8 +2583,8 @@ def walk_device_cache_config(device_index: int, config: int | None) -> dict[str,
     }
 
 
-class _FiPrograms:
-    """The FI-rendered program provider: H3's :mod:`.cake_kcp_jit` registry, through whichever entry it exports:
+class _PackagePrograms:
+    """The package-rendered program provider: H3's :mod:`.cake_kcp_jit` registry, through whichever entry it exports:
     ``launch_kcp(program, abi, *, grid, device_index, precision_mode, transfer_walk)`` (positional ABI), else
     ``run_program(name, args, device_index=)`` (the abstract launch ``args`` of :class:`CakeKDADetKcpCall` — H3's 09:59Z form),
     else ``run_module(record, values, grid=(x, 1, 1), device_index=)`` with ``values`` keyed by :data:`ABI_PARAMS`
@@ -2599,7 +2599,7 @@ class _FiPrograms:
     captured call's form is :func:`_graph_cap_bracket`'s; ``capture_skips`` counts such launches) and without a loadable
     CUDA runtime the capped programs launch bare after one warning (``unavailable`` counts them)."""
 
-    path = "fi-rendered"
+    path = "package-rendered"
 
     def __init__(self, jit: Any) -> None:
         self.jit = jit
@@ -6476,7 +6476,7 @@ def _backward_window(
 # ``torch.distributed.destroy_process_group()`` (a graph holding a NCCL collective blocks ``ncclCommDestroy``).
 #
 # Cache-config preference under replay (a probe showed cudaDeviceSetCacheConfig inside a capture
-# invalidates it): the per-launch bracket of the capped tape programs (_FiPrograms.launch) is never issued inside a stream
+# invalidates it): the per-launch bracket of the capped tape programs (_PackagePrograms.launch) is never issued inside a stream
 # capture.  The knob ``graph_cap`` selects the captured call's form: "node_attr" (the default of record) puts the one-CTA-per-SM
 # carveout on each captured tape kernel node as a launch
 # attribute right after its launch is captured, so that the replayed graph itself carries the cap; "node_attr_post" sets the
@@ -6631,7 +6631,7 @@ def _graph_capture(
             programs = programs_of() if callable(programs_of) else None
             call.scratch["node_attr_applied"] = (
                 programs.apply_node_caps(call)
-                if isinstance(programs, _FiPrograms)
+                if isinstance(programs, _PackagePrograms)
                 else 0
             )
             g.instantiate()

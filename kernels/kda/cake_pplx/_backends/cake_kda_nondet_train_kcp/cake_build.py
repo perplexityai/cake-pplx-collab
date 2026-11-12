@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,18 +13,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Library loader of one Cake-generated FlashInfer package.
+Library loader of one Cake-generated ``cake_pplx`` backend package.
 
 ``build.json`` (schema ``cake-build/1``) next to this file is the only record
 of what the package compiles: one entry per ``<program>[_<spec>]_<arch>``
 library with its package-relative CUDA sources, nvcc flags, toolkit-conditional
 flags and digests.  A library is served from ``aot/<name>.so`` when a builder
-(a vendoring consumer's build rules, or FlashInfer's
-``scripts/check_cake_build_manifests.py``) has compiled it from the manifest,
-and otherwise through FlashInfer's JIT from the same sources and flags.
+(a vendoring consumer's build rules) has compiled it from the manifest, and
+otherwise through the package's JIT shim (``_cake_pplx_jit.py``) from the
+same sources and flags.
 
-The prebuilt path never imports ``flashinfer``, so the package stays usable in
-a process without a FlashInfer installation.  A builder that fills ``aot/``
+The prebuilt path never imports the JIT shim, so the package stays usable in
+a process without a CUDA toolkit.  A builder that fills ``aot/``
 also writes the sidecar ``aot/build_info.json`` (schema ``cake-build-info/1``:
 ``{"schema", "cuda": "13.0.88", "cudart_version": 13000, "arches": [...]}``,
 ``arches`` naming every architecture the builder compiled).  Every prebuilt
@@ -136,7 +136,7 @@ def _conditional_flags(items: list[Any], cuda: tuple[int, int]) -> list[str]:
 
 
 def _jit_toolchain(name: str) -> tuple[Any, Any]:
-    """``(gen_jit_spec, get_cuda_version)`` of the local FlashInfer, or the error."""
+    """``(gen_jit_spec, get_cuda_version)`` of the package's JIT shim, or the error."""
     try:
         from ._cake_pplx_jit import gen_jit_spec, get_cuda_version
     except ImportError as exc:
@@ -180,13 +180,13 @@ def _verified_sources(entry: dict[str, Any]) -> list[Path]:
 
 
 def jit_spec(name: str) -> Any:
-    """FlashInfer's ``JitSpecNvcc`` of ``name``, built from the manifest entry.
+    """The JIT shim's ``JitSpec`` of ``name``, built from the manifest entry.
 
     Sources are digest-verified here and only here, so a modified or partially
     delivered source tree fails closed before anything compiles.  The spec name
     carries the closure digest: a changed closure never reuses a stale JIT cache
     entry.  Flags are ``arch_flags[arch]`` + the entry's ``nvcc_flags`` + the
-    ``nvcc_flags_if`` items matching the local toolkit; FlashInfer's JIT adds
+    ``nvcc_flags_if`` items matching the local toolkit; the JIT shim adds
     its own defaults (``-O3``, ``-fPIC``, ...), so ``common.nvcc_flags`` are not
     repeated here.  A toolkit below the entry's ``min_cuda`` raises.
     """
@@ -223,11 +223,11 @@ def jit_specs(arch: str) -> list[Any]:
     """JIT specifications of the ``arch`` libraries still to build locally.
 
     The entries without a prebuilt file that the local toolkit can build: the
-    list feeds ``flashinfer.jit.build_jit_specs`` warm-ups, so an entry whose
+    list feeds JIT warm-up builds, so an entry whose
     ``min_cuda`` exceeds the local toolkit is left out (the manifest check
     script's "skip min_cuda > toolkit" rule), while :func:`jit_spec` on that
     entry by name still raises.  When every ``arch`` library is prebuilt the
-    list is empty and ``flashinfer`` is not imported.
+    list is empty and the JIT shim is not imported.
     """
     pending = [name for name in _names_of(arch) if not prebuilt_path(name).is_file()]
     if not pending:
@@ -303,8 +303,8 @@ def record_cuda_version(arch: str) -> tuple[int, int]:
     :func:`load_library` does.
 
     JIT path, when nothing is prebuilt or the builder did not compile
-    ``arch``: the local toolkit of FlashInfer's JIT (``RuntimeError`` in a
-    process without a FlashInfer installation).  Call it for the architecture
+    ``arch``: the local toolkit of the JIT shim (``RuntimeError`` when the
+    shim cannot be imported).  Call it for the architecture
     you are about to load.
     """
     names = _names_of(arch)

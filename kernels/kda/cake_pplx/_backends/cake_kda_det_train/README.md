@@ -4,15 +4,15 @@ Experimental backend for the packed Kimi Delta Attention (KDA) chunked
 training forward and backward in the GLM-5.3-Flash geometry: head dimension
 128 for `q`, `k`, `v` and the gate, chunk length 64, per-document zero initial
 state, `H` heads per call (1 to 64), one packed batch of documents described by
-`cu_seqlens`.  Tracking issue: flashinfer-ai/flashinfer#6485.
+`cu_seqlens`.
 
 Both the API and the backend are experimental: no compatibility guarantee.
 SM100 (B200 / GB200) and SM103 (B300 / GB300) are the acceptance architectures
 of the kernels; SM107 (Rubin R200) is compiled from the same sources with an
 nvcc that emits `compute_107a`.  The feature does not participate in automatic
 backend selection, autotuning or trace-apply.  Its libraries are loaded
-prebuilt from `aot/` when the package ships them and JIT-built by FlashInfer
-from `build.json` otherwise (see "Layout of this package").
+prebuilt from `aot/` when the package ships them and JIT-built by the
+package's JIT shim (`_cake_pplx_jit.py`) from `build.json` otherwise (see "Layout of this package").
 
 The path is deterministic: the same inputs, hardware and plan give bitwise
 the same outputs and gradients.  det entries are always deterministic (no deterministic keyword). The non-deterministic package is cake_pplx.cake_kda_nondet_train / cake_kda_nondet_train_kcp; its entries take no mode keyword.
@@ -674,14 +674,14 @@ README.
   `glm_intra_v18` on `sm_107a`, `glm_intra` and `gate_epilogue` on `sm_100a`) with its two translation units, digests, nvcc flags
   (`--use_fast_math`), closure digest and `aot/<name>.so` path.
   `cake_build.load_library(name)` loads the prebuilt library when `aot/` holds
-  it and otherwise JIT-builds the entry through FlashInfer (`gen_jit_spec`,
+  it and otherwise JIT-builds the entry through the JIT shim (`gen_jit_spec`,
   sources digest-verified first; `sm_107a` needs an nvcc that lists
   `compute_107`).  `aot/` is never tracked (`.gitignore`).
 * `cake_backend.py` -- operand checks, the host plan, the arena workspace and
   its lifetime tables, the saved set, the forward and backward launch
   sequences, the autograd `Function` and the byte queries.
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include,
-  shipped by the export so the package compiles without FlashInfer's `csrc/`.
+  shipped with the package so it compiles without another `csrc/` tree.
 * `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu` -- the generated device
   and binding translation units of the 65 programs, shared by the
   architectures a program ships on (per-architecture lines under `#if

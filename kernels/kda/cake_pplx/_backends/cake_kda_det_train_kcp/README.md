@@ -556,7 +556,7 @@ package's chunk stages and reads its registry.  `build.json` and
 ["cake_kda_det_train"]` (directory names).  `_single_rank.py` finds the
 sibling by name from this package's parent, so vendor the two directories
 together, either as siblings under one parent package or both as top-level
-packages.  Importing them needs no `flashinfer`.
+packages.
 
 ## Status
 
@@ -569,7 +569,7 @@ registries and manifests, no device needed),
 `tests/experimental/test_cake_kda_det_train_kcp.py` (the per-rank path),
 `tests/experimental/test_cake_kda_det_train_kcp_dist.py` (multi-GPU rows),
 `tests/experimental/test_cake_kda_det_train_kcp_standalone.py` (the two
-vendored layouts without `flashinfer`) and
+vendored layouts) and
 `tests/experimental/test_cake_kda_det_train_kcp_api.py` (the public entry
 points and the previous names); benchmark
 `benchmarks/bench_cake_kda_det_train_kcp.py` (`torchrun`, one process per

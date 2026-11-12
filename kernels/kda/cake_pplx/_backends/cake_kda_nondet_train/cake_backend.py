@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -6378,7 +6378,7 @@ def _handoff_key(p: Plan, scale: float) -> tuple:
 @functools.cache
 def _handoff_toolkit(arch: str) -> str | None:
     """``"major.minor"`` of the Cake build toolkit of ``arch``'s libraries (``cake_build.record_cuda_version``: the
-    prebuilt sidecar, else FlashInfer's JIT toolkit), ``None`` when it cannot be read ("auto" then stays off)."""
+    prebuilt sidecar, else the JIT shim's toolkit), ``None`` when it cannot be read ("auto" then stays off)."""
     try:
         from . import cake_build
 
@@ -6438,7 +6438,7 @@ def _handoff_rows_toolkit(twin: str, parent: str, prep: str, arch: str) -> str |
 def _one_build_toolkit(records: Sequence[str], arch: str) -> str | None:
     """The full toolkit version (``"major.minor.patch"``) of the one build of ``arch`` that serves every record of
     ``records``: all their libraries prebuilt (``aot/``: the builder's sidecar ``cuda`` of the first), or none of
-    them and no library of the package prebuilt (FlashInfer's JIT: its ``nvcc --version``).  ``None`` for a mixed
+    them and no library of the package prebuilt (the JIT shim: its ``nvcc --version``).  ``None`` for a mixed
     state, a version that cannot be read or any other exception (a record not delivered for ``arch`` too)."""
     try:
         from . import cake_build
@@ -6467,8 +6467,8 @@ def _full_version(text: str) -> str | None:
 
 
 def _jit_nvcc_version() -> str | None:
-    """``"major.minor.patch"`` of the ``nvcc`` FlashInfer's JIT compiles with (``V13.4.92`` in its ``--version``
-    text; FlashInfer's own version reads the release, ``13.4``, alone)."""
+    """``"major.minor.patch"`` of the ``nvcc`` the JIT shim compiles with (``V13.4.92`` in its ``--version``
+    text)."""
     from ._cake_pplx_jit import get_cuda_path
 
     nvcc = os.path.join(get_cuda_path(), "bin", "nvcc")

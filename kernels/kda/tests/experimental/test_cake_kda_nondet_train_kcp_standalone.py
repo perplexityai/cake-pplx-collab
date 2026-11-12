@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,12 +13,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The Cake non-deterministic KCP KDA package vendored without FlashInfer (its README "Vendoring"): the package and its
+The Cake non-deterministic KCP KDA package vendored (its README "Vendoring"): the package and its
 single-rank sibling ``cake_kda_nondet_train`` (``common.requires.packages`` of its manifests) are copied in two
 layouts -- both as top-level packages, and as siblings under the namespace parent ``vendored_x`` -- and imported in a
-subprocess where ``flashinfer`` cannot be imported.  The sibling must resolve to the copy, and ``_single_rank`` names
-the non-deterministic sibling, the one package its manifests declare (never the deterministic ``cake_kda_det_train``,
-whose programs a wrong name would launch with no import error).  No device is needed; nothing is built or launched.
+subprocess where the installed ``cake_pplx`` cannot be imported.  The sibling must resolve to the copy, and
+``_single_rank`` names the non-deterministic sibling, the one package its manifests declare (never the deterministic
+``cake_kda_det_train``, whose programs a wrong name would launch with no import error).  No device is needed; nothing
+is built or launched.
 """
 
 from __future__ import annotations
@@ -47,13 +48,12 @@ def _cake_root() -> Path:
     return Path(next(iter(spec.submodule_search_locations))).parent
 
 
-# Runs in the subprocess: blocks ``flashinfer``, imports the copy of the package and its modules, resolves the
-# single-rank modules eagerly (``cake_kcp``, ``cake_kcp_jit``) and function-locally (``cake_kcp_plan``), and prints
-# where every module came from.
+# Runs in the subprocess: blocks the installed ``cake_pplx``, imports the copy of the package and its modules,
+# resolves the single-rank modules eagerly (``cake_kcp``, ``cake_kcp_jit``) and function-locally
+# (``cake_kcp_plan``), and prints where every module came from.
 _PROBE = """
 import importlib, json, sys
-sys.modules["flashinfer"] = None
-# the installed cake_pplx namespace is blocked too: the copy must not reach the installed package
+# the installed cake_pplx namespace is blocked: the copy must not reach the installed package
 sys.modules["cake_pplx"] = None
 root, package = sys.argv[1], sys.argv[2]
 sys.path.insert(0, root)
@@ -82,7 +82,6 @@ print(json.dumps({
     },
     "l2n_twin": plan.qk_l2norm_twin(next(iter(cake_jit.MODULES))),
     "det": sorted(k for k in sys.modules if "cake_kda_det_train" in k),
-    "flashinfer": sorted(k for k in sys.modules if k.startswith("flashinfer.") or (k == "flashinfer" and sys.modules[k] is not None)),
 }))
 """
 
@@ -111,7 +110,7 @@ def test_single_rank_names_the_declared_package() -> None:
 
 
 @pytest.mark.parametrize("parent", ["", "vendored_x"], ids=["top_level", "siblings"])
-def test_vendored_package_imports_without_flashinfer(
+def test_vendored_package_imports_from_the_copy(
     tmp_path: Path, parent: str
 ) -> None:
     cake = _cake_root()
@@ -138,7 +137,6 @@ def test_vendored_package_imports_without_flashinfer(
     assert out["name"] == (f"{parent}.{SINGLE_RANK}" if parent else SINGLE_RANK)
     # the sibling _single_rank resolves is the package the manifests declare
     assert [out["name"].rpartition(".")[2]] == common["requires"]["packages"]
-    assert out["flashinfer"] == []
     assert out["det"] == []
     assert isinstance(out["l2n_twin"], bool)
     ours, theirs = (where / PACKAGE).resolve(), (where / SINGLE_RANK).resolve()

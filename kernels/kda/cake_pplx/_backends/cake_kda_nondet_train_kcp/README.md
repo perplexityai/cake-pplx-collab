@@ -54,7 +54,7 @@ the modules of this package are their backend.
   here), and a workspace (`CakeKDANondetKcpWorkspace`) serves this package
   only.
 * The raw gate mode (`use_gate_in_kernel=True` with `A_log`, `dt_bias` and
-  `lower_bound`, FlashInfer #7816) runs on this package too ("Raw gate mode"
+  `lower_bound`) runs on this package too ("Raw gate mode"
   below): the rank's local stages take the single-rank package's raw records,
   the deterministic programs on every row (no `S1` row runs in this mode), so
   every output, the raw gate's gradient and the per-rank parameter partial
@@ -100,7 +100,7 @@ Every output repeats bit for bit: two calls on the same inputs and the same topo
 | dA_log (raw-gate mode) | 0.915-1.005 | 0.993-1.024 | 0.987 | 0.987 |
 | ddt_bias (raw-gate mode) | 0.996-1.152 | 0.961-1.001 | 0.998 | 0.998 |
 
-rel-L2 = ||x - ref|| / ||ref||; worst element = max|x - ref| / max|ref|.  Each cell is the range over the measured rows of the median over 5 seeds.  Ratio to det@2e989556 = median over seeds of this package / median over seeds of the deterministic package at FlashInfer 2e989556 on the same inputs (bound 1.1).  Ratio to single-rank = worst seed of this package / the single-rank package on the same inputs, rel-L2 (bound 1.10 for `out`, `dq`, `dk`, `dv`, `dg` and `dbeta`; reported for `dA_log` and `ddt_bias`, which hold one value per head).
+rel-L2 = ||x - ref|| / ||ref||; worst element = max|x - ref| / max|ref|.  Each cell is the range over the measured rows of the median over 5 seeds.  Ratio to det@2e989556 = median over seeds of this package / median over seeds of the deterministic package at revision 2e989556 on the same inputs (bound 1.1).  Ratio to single-rank = worst seed of this package / the single-rank package on the same inputs, rel-L2 (bound 1.10 for `out`, `dq`, `dk`, `dv`, `dg` and `dbeta`; reported for `dA_log` and `ddt_bias`, which hold one value per head).
 
 Three adversarial cells are above 1.1 at 5 seeds and within it over 25 seeds: CP8 `dbeta` worst element 1.154 at 5 seeds, 0.932 at 25 seeds; CP8 `ddt_bias` worst element 1.152 at 5 seeds, 1.026 at 25 seeds; CP16 `dA_log` rel-L2 1.137 at 5 seeds, 1.022 at 25 seeds.  The worst-element metric follows a single element per tensor, and `dA_log` holds one value per head (16 here); the deterministic package at 2e989556 itself varies 1.6-2.5x across seeds on these three rows.
 
@@ -1090,8 +1090,8 @@ that package's chunk stages and reads its registry.  `build.json` and
 sibling by name from this package's parent, so vendor the two directories
 together, either as siblings under one parent package or both as top-level
 packages.  Without the sibling, importing `cake_kcp` or `cake_kcp_jit` raises
-`ModuleNotFoundError` naming `cake_kda_nondet_train`.  Importing them needs
-no `flashinfer`: `flashinfer` is imported only on the JIT path.
+`ModuleNotFoundError` naming `cake_kda_nondet_train`.  The JIT shim
+(`_cake_pplx_jit.py`) is imported only on the JIT path.
 
 ## Status
 
@@ -1108,7 +1108,7 @@ registries and manifests, no device needed),
 `tests/experimental/test_cake_kda_nondet_train_kcp_dist.py` (multi-GPU rows, with
 the comparison against the deterministic package),
 `tests/experimental/test_cake_kda_nondet_train_kcp_standalone.py` (the two
-vendored layouts without `flashinfer`),
+vendored layouts),
 `tests/experimental/test_cake_kda_nondet_train_kcp_api.py` (the public entry
 points, the names and the import isolation),
 `tests/experimental/test_cake_kda_nondet_train_kcp_handoff.py` (the checkpoint
