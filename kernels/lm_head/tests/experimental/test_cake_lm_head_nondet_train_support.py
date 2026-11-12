@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Candidate-support entries (https://github.com/flashinfer-ai/flashinfer/issues/7636) of the non-deterministic LM-head
+Candidate-support entries of the non-deterministic LM-head
 package ``cake_pplx._backends.cake_lm_head_nondet_train``:
 ``cake_lm_head_nondet_train_support_logprob`` / ``cake_lm_head_nondet_train_support_kl`` take no ``deterministic``, raise
 PyTorch's deterministic-algorithms alert in their backward before a dense dX of more than one K slice (every other

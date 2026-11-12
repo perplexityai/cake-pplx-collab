@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ limitations under the License.
 # Experimental Cake backend: chunked large-vocabulary LM-head projection +
 # log-sum-exp / cross-entropy / policy-gradient loss with a memory-bounded
 # backward (every vocabulary-sized intermediate spans at most one token chunk)
-# for training on SM100 / SM103 (flashinfer-ai/flashinfer#5680, tracker #4642).
+# for training on SM100 / SM103.
 # The public entry points are ``cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_loss``,
 # ``cake_lm_head_det_train_logprob`` and the candidate-support entries
 # ``cake_lm_head_det_train_support_logprob`` / ``cake_lm_head_det_train_support_kl``; the

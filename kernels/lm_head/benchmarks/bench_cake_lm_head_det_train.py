@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -54,8 +54,8 @@ Memory form (``--memory-mode default|fast|budget``): the ``memory_mode`` the
 automatic form).  ``--ignore-frac``: the fraction of ignored rows of every
 row's inputs (default: the inputs' five percent).
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and
-a cold L2 between iterations (per-iteration GPU span); medians over
+Timing: the local ``bench_gpu_time`` with CUPTI activity tracing (``torch.profiler``)
+and a cold L2 between iterations (per-iteration GPU span); medians over
 ``--steps`` iterations.  Memory: the peak allocation above the live tensors
 during the forward and during the backward, and the bytes the forward leaves
 alive for the backward (saved state) -- the timed backward retains the graph --
@@ -70,7 +70,7 @@ the larger), and ``step_miss_ms``, the step time with the caches cleared before
 every step.  ``--accuracy`` adds the error report of
 every arm against the chunked FP64 oracle and its ratio to the unchunked
 PyTorch path (the 1.05x gate of the tests).  The JSON carries an ``env`` record
-(torch / flashinfer / liger-kernel / cut-cross-entropy versions, device name
+(torch / liger-kernel / cut-cross-entropy versions, device name
 and compute capability).
 
 Usage::
@@ -93,6 +93,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import torch
+import torch.profiler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -102,7 +103,6 @@ from cake_pplx.cake_lm_head_det_train import (
     cake_lm_head_det_train_loss,
 )  # noqa: E402
 from cake_pplx._backends.cake_lm_head_det_train import cake_backend  # noqa: E402
-from flashinfer.testing import bench_gpu_time  # noqa: E402
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (  # noqa: E402
     DEFAULT_H,
     DEFAULT_LOSS_DIV,
@@ -143,10 +143,36 @@ H, V = DEFAULT_H, DEFAULT_V
 LOSS_DIV = DEFAULT_LOSS_DIV
 
 
-def median_ms(fn, steps):
-    times = bench_gpu_time(
-        fn, dry_run_iters=3, repeat_iters=steps, enable_cupti=True, cold_l2_cache=True
+def bench_gpu_time(fn, *, dry_run_iters: int, repeat_iters: int) -> list[float]:
+    """Per-iteration GPU span of ``fn`` in ms: the first kernel's start to the last kernel's end of one call, read
+    from CUPTI activity records through ``torch.profiler`` (GPU activity only, one profiled call at a time).  Before
+    every call the L2 cache is flushed by writing a buffer of at least twice its size, outside the profiled span
+    (cold L2); ``dry_run_iters`` untimed calls run first."""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    flush = torch.empty(
+        max(2 * getattr(props, "L2_cache_size", 0), 256 << 20), dtype=torch.int8, device="cuda"
     )
+    for _ in range(dry_run_iters):
+        fn()
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(repeat_iters):
+        flush.zero_()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            fn()
+            torch.cuda.synchronize()
+        spans = [
+            e.time_range for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA
+        ]
+        if not spans:
+            raise RuntimeError("the profiler recorded no GPU activity of the timed call")
+        times.append((max(s.end for s in spans) - min(s.start for s in spans)) / 1e3)
+    return times
+
+
+def median_ms(fn, steps):
+    times = bench_gpu_time(fn, dry_run_iters=3, repeat_iters=steps)
     return float(statistics.median(times))
 
 
@@ -557,7 +583,7 @@ class ArmCake(ArmAutograd):
         )
 
     def versions(self):
-        # the switches this arm runs with: the public module's resolution of its FLASHINFER_CAKE_LM_HEAD_LOSS_*
+        # the switches this arm runs with: the public module's resolution of its CAKE_PPLX_LM_HEAD_LOSS_*
         # variables (every keyword left at None), which it passes down to the backend
         switches = _knobs.resolve_knobs(
             compact_rows=None,
@@ -1006,7 +1032,6 @@ def main():
     args.device = device
     env = dict(
         torch=torch.__version__,
-        flashinfer=_version("flashinfer-python"),  # the timer's package (flashinfer.testing)
         liger_kernel=_version("liger-kernel"),
         cut_cross_entropy=_version("cut-cross-entropy"),
         device=torch.cuda.get_device_name(),

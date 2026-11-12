@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Seeded inputs, the masked FP64 oracle and the masked PyTorch baseline (B0) of the candidate-support
-LM-head problem (flashinfer-ai/flashinfer#7636): ``X [T, H]`` BF16, ``W [V, H]`` BF16, a ragged support
+LM-head problem: ``X [T, H]`` BF16, ``W [V, H]`` BF16, a ragged support
 ``support_ids [M]`` / ``support_offsets [T + 1]``, optional int64 labels (``-100`` = ignored), an optional
 detached FP32 teacher ``[M]`` and a temperature (``None``, a scalar or an FP32 ``[T]`` tensor).
 

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Host tests of the candidate-support entry points (flashinfer-ai/flashinfer#7636) of the Cake LM-head package:
+Host tests of the candidate-support entry points of the Cake LM-head package:
 the argument contract, the validation stage's error word, the canonical FP32 sequence of the row stages and the
 reference backend against the masked FP64 oracle (gate: 1.05x the masked PyTorch baseline's error plus a floor).
 The package is reached through ``tests.cake.test_helpers.cake_package`` only.

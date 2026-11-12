@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake backend: chunked large-vocabulary LM-head projection + loss with a
-memory-bounded backward for training on SM100 / SM103 / SM107
-(https://github.com/flashinfer-ai/flashinfer/issues/5680), non-deterministic
+memory-bounded backward for training on SM100 / SM103 / SM107, non-deterministic
 form.
 
 This package is the backend of ``cake_pplx.cake_lm_head_nondet_train``, the
@@ -240,7 +239,7 @@ that it affects, ``None`` selecting the documented default (the
 smallest call through :func:`set_zero_weight_min_rows` and the loss entry's
 gradient placement through :func:`set_gradient_placement`.  This module reads
 no environment variable.
-FlashInfer's public facade (``cake_pplx.cake_lm_head_nondet_train``, through
+The public facade (``cake_pplx.cake_lm_head_nondet_train``, through
 ``cake_pplx._cake_lm_head_train_knobs``) owns the A/B environment variables
 of the first six and passes the resolved values down; it leaves the
 log-probability arms at their defaults.
@@ -361,7 +360,7 @@ _SMALL_T_KEEP = {"on": True}
 # at 16 rows and more (GB300 ``gemm_logits``: 0.47 ms at one row, 0.32 ms at 16 rows).  ``rows`` is
 # :data:`SMALL_PAD_ROWS_DEFAULT`, except for the log-probability entries (plain and with a temperature) on the
 # architectures of :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH`: on R200 (sm_107a) a log-probability call of 256 rows runs
-# below one of 16 to 64 rows (FlashInfer c8a4d8a2e + this padding, CUDA events, median of the timed rounds per arm,
+# below one of 16 to 64 rows (with this padding, CUDA events, median of the timed rounds per arm,
 # R200 dlcluster nodes, ms at 16 / 64 / 128 / 192 / 256 rows: T = 1 log-probability forward 0.352 / 0.359 / 0.366 / 0.252 /
 # 0.223, forward + backward 0.856 / 0.863 / 0.836 / 0.687 / 0.676; T = 1 temperature forward + backward 1.234 /
 # 1.262 / 1.225 / 0.997 / 1.009), while the loss entry keeps 16 rows there (its backward grows with the rows: 0.212 /
@@ -848,8 +847,8 @@ LOGITS_LONG_RASTER_GROUPS = {
 LOGITS_LONG_RASTER_MIN_ROWS = (
     3841  # 30 row tiles of 128 + 1: the first chunk size with 31 row tiles
 )
-# sm_107a is not listed: its long chunks keep the table ring depth (DX_WIDE_TILE_STAGES).  Timed on FlashInfer main
-# f2a5262c (#8612) with the sm_107a table entries patched in at run time (PyTorch 2.14.1+cu130, nvcc 13.4), CUPTI
+# sm_107a is not listed: its long chunks keep the table ring depth (DX_WIDE_TILE_STAGES).  Timed with the
+# sm_107a table entries patched in at run time (PyTorch 2.14.1+cu130, nvcc 13.4), CUPTI
 # per-launch cycles at z = 0, one run on each of three 212-SM R200 nodes, T 16231, C 8192, cross-entropy and plain /
 # temperature log-prob: the dX GEMM launches of a call took 18853-19014 kcycles in total on the 3-deep ring and
 # 17851-18145 kcycles on the 4-deep ring (the split-tail dX form the shipped tables select).
@@ -2225,7 +2224,7 @@ def counted_dx_slices(
 # --------------------------------------------------------------------------- valid-row compaction
 
 # The switches below are keyword arguments of the entry points (``None`` = the documented default, the constant each
-# ``*_default()`` returns); this module reads no environment variable.  FlashInfer's public facade
+# ``*_default()`` returns); this module reads no environment variable.  The public facade
 # (``cake_pplx.cake_lm_head_nondet_train``) owns the A/B environment variables of these switches and passes the
 # resolved values down.
 
@@ -3117,7 +3116,7 @@ def set_zero_weight_min_rows(rows: int) -> int:
 # architecture without a floor of its own (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).
 ZERO_DLOGP_MIN_ROWS_DEFAULT: Optional[int] = DEFAULT_CHUNK_SIZE + 1
 # Per-architecture default floors (valid rows); an architecture not listed uses :data:`ZERO_DLOGP_MIN_ROWS_DEFAULT`.
-# Timed on FlashInfer PR #8687 at its commit 6ab51864 (PyTorch 2.14.1+cu130, nvcc 13.4), plain and temperature
+# Timed with PyTorch 2.14.1+cu130 and nvcc 13.4, plain and temperature
 # log-probability, cooled and after an idle gap, against the same head with the skip off: ratio = time without the
 # skip / time with it, with its CI95.
 # B200 (sm_100a), floor 1946 valid rows (T = 2048 with 5 % ignored rows): with no zero-gradient row, of the backward,
@@ -3131,10 +3130,10 @@ ZERO_DLOGP_MIN_ROWS_DEFAULT: Optional[int] = DEFAULT_CHUNK_SIZE + 1
 # B200 (1946 and 3891 valid rows) and 8.8 % to 9.5 % faster on GB300 (3891 valid rows), each faster under the timing
 # rule.
 # R200 (sm_107a), floor 1946 valid rows with the two-slice counted dX rule (:data:`DX_COUNTED_MIN_SLICES_BY_ARCH`).
-# The two were chosen together by timing on FlashInfer main ed5b3885 with both set at run time (backward, step and
+# The two were chosen together by timing with both set at run time (backward, step and
 # checkpointed step of 1100, 1946 and 3891 valid rows: none slower on either R200 board), then timed in this code at
 # commit 237877ca (PyTorch 2.14.1+cu130, nvcc 13.4), cooled, against the same code without its two sm_107a entries
-# (FlashInfer main d3e87763: the generic floor and the slice rule's dX counts), the 212-SM and the 216-SM R200 board
+# (the generic floor and the slice rule's dX counts), the 212-SM and the 216-SM R200 board
 # each alone, two machines each: ratio = time without the entries / time with them, with its CI95.  Plain, per-token
 # and scalar temperature log-probability, T = 4600 to 65031 with 0, 16.6 % and 50 % zero-gradient rows (195 cells of
 # the forward, backward, step and checkpointed step per board): none is slower under the timing rule; 21 cells on the

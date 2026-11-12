@@ -4,10 +4,10 @@ Experimental backend for the chunked large-vocabulary LM-head projection with
 a fused log-sum-exp / cross-entropy / policy-gradient loss and a
 memory-bounded backward (GLM-5.2 geometry: hidden size 6144, vocabulary
 154880, irregular token counts such as 16231 or 16172 per step, default token
-chunk 4096).  Tracking issue: flashinfer-ai/flashinfer#5680.
+chunk 4096).
 
 The public module `cake_pplx.cake_lm_head_det_train` is a stable API
-(`@flashinfer_api`, no `ExperimentalWarning`); this backend package is
+(`@cake_api`, no `ExperimentalWarning`); this backend package is
 experimental, with no compatibility guarantee for its internal modules.
 SM100 (B200 / GB200) is the acceptance architecture; SM103 (B300 / GB300) and
 SM107 (R200) are compiled from the same sources (SM107 runs SM103's programs,
@@ -15,7 +15,7 @@ built for `sm_107a`, under SM103's dispatch rules except the logits rasters,
 the long-chunk `dX` ring and the whole-chunk `dX` split).  The feature does
 not participate in automatic backend selection, autotuning or trace-apply.
 Its libraries are loaded prebuilt from `aot/` when the package ships them and
-JIT-built by FlashInfer from `build.json` otherwise (see "Layout of this
+JIT-built through the package's JIT shim from `build.json` otherwise (see "Layout of this
 package").
 
 ## Public entry points (`cake_pplx/cake_lm_head_det_train.py`)
@@ -596,7 +596,7 @@ keyword.
   with the logp-only pass where it runs) and, when it does not fit and a
   budget plan does, runs as a `"budget"` call (without the hidden count).
   The package reads no environment variable; through the public facade the
-  `FLASHINFER_CAKE_LM_HEAD_LOSS_*` variables (`COMPACT_ROWS`,
+  `CAKE_PPLX_LM_HEAD_LOSS_*` variables (`COMPACT_ROWS`,
   `FUSE_DW_CAST`, `DX_FINALIZE`, `HIDDEN_COUNT`, `GEMM_TUNING`) set switches
   that are inputs of this rule -- an uncompacted default call keeps the fast
   form, `fuse_dw_cast=False` removes the fused candidates, the hidden count
@@ -1044,8 +1044,8 @@ and `backward_loss` take no `dw_stream`; `logprob_lbl` belongs to the
 log-probability forward and `logprob_dz` to its backward), `None` selecting the documented default
 (`cake_backend.compact_rows_default()` and friends return the constants); the
 autograd entries resolve every switch once in the forward.  **The package reads
-no environment variable.**  The `FLASHINFER_CAKE_LM_HEAD_LOSS_*` variables are
-FlashInfer's own A/B knobs, read only by the LM-head facades (through
+no environment variable.**  The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are
+the facades' own A/B knobs, read only by the LM-head facades (through
 `cake_pplx/_cake_lm_head_train_knobs.py`): a
 switch keyword left at `None` there falls back to its variable and the resolved
 value is passed down; the two binding-cache variables are read when that
@@ -1075,14 +1075,14 @@ loss entry"), each read once per call (no binding depends on them).
 
 | Keyword (backend default) | Variable read by `cake_pplx.cake_lm_head_det_train` | Parsing |
 | --- | --- | --- |
-| `compact_rows` (`True`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS` | `0` -> `False`, else `True` |
-| `fuse_dw_cast` (`True`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST` | `0` -> `False`, else `True` |
-| `dx_finalize` (`True`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_DX_FINALIZE` | `0` -> `False`, else `True` |
-| `dw_stream` (`"auto"`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM` | `0` / `false` / `off` / `no` -> `False`; `1` / `true` / `on` / `yes` -> `True`; else `"auto"` |
-| `hidden_count` (`True`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT` | `0` -> `False`, else `True` |
-| `gemm_tuning` (`{}`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING` | JSON object -> dict; unset / blank -> no knob; invalid -> `ValueError` |
-| `BINDING_CACHE.configure(enabled=...)` (`True`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE` | `0` -> disabled (read at import, applied on first use) |
-| `BINDING_CACHE.configure(capacity=...)` (`64`) | `FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY` | positive integer (read at import, applied on first use) |
+| `compact_rows` (`True`) | `CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS` | `0` -> `False`, else `True` |
+| `fuse_dw_cast` (`True`) | `CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST` | `0` -> `False`, else `True` |
+| `dx_finalize` (`True`) | `CAKE_PPLX_LM_HEAD_LOSS_DX_FINALIZE` | `0` -> `False`, else `True` |
+| `dw_stream` (`"auto"`) | `CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM` | `0` / `false` / `off` / `no` -> `False`; `1` / `true` / `on` / `yes` -> `True`; else `"auto"` |
+| `hidden_count` (`True`) | `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` | `0` -> `False`, else `True` |
+| `gemm_tuning` (`{}`) | `CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING` | JSON object -> dict; unset / blank -> no knob; invalid -> `ValueError` |
+| `BINDING_CACHE.configure(enabled=...)` (`True`) | `CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE` | `0` -> disabled (read at import, applied on first use) |
+| `BINDING_CACHE.configure(capacity=...)` (`64`) | `CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY` | positive integer (read at import, applied on first use) |
 | `cake_backend.set_zero_dlogp_min_rows(rows)` (per architecture: `1946` on sm_100a, `3891` on sm_103a, `4097` elsewhere) | none (process setting) | a log-probability backward of fewer valid rows runs without the zero-gradient row skip; an integer or `None` (the skip off) applies to every architecture; `ZERO_DLOGP_MIN_ROWS_ARCH_DEFAULT` restores the per-architecture default |
 | `cake_backend.set_zero_dlogp_temperature_dz_counted(counted)` (`True`) | none (process setting) | `True`: the skip's dz arm with a temperature runs `gemm_logits_dz_dcnt_tau`; `False`: `gemm_logits_dz_tau` over every row (the same outputs) |
 | `cake_backend.set_zero_weight_min_rows(rows)` (`4096`) | none (process setting) | a non-negative integer; a policy loss call of fewer rows `T` keeps its zero-weight rows in the chunk loop (`0`: every compacted policy call splits) |
@@ -1320,9 +1320,9 @@ workspace; the logits GEMM's output descriptor covers the chunk's rows only.
   toolchain-conditional `nvcc_flags_if`, see the toolchain note), closure
   digest and `aot/<name>.so` path.  `cake_build.load_library(name)` loads the
   prebuilt library when `aot/` holds it and otherwise JIT-builds the entry
-  through FlashInfer (`gen_jit_spec`, sources digest-verified first);
-  `cake_jit.specs_for_arch(arch)` lists the JIT specs of an architecture for
-  `flashinfer.jit.build_jit_specs`.
+  through the package's JIT shim `_cake_pplx_jit.py` (`gen_jit_spec`, sources
+  digest-verified first); `cake_jit.specs_for_arch(arch)` lists the JIT specs
+  of an architecture for an ahead-of-time warm-up.
 * `cake_support.py` -- the candidate-support entry points: their host checks,
   the shared temperature resolver's use, the plan of the pass forms, the
   launches of the support kernels and of the shipped GEMMs (dense form), the
@@ -1344,7 +1344,7 @@ workspace; the logits GEMM's output descriptor covers the chunk's rows only.
   forms, the fused casts and the two scale casts.  Equal bindings are one
   file whose kernel is `CAKE_KERNEL_SYMBOL`, likewise set per library;
   `csrc/cake_ffi_checks.h` -- the tvm-ffi tensor checks the bindings include
-  (shipped with the package, no FlashInfer header).
+  (shipped with the package, no external header).
   `.clang-format` disables formatting: the sources are identity-checked by
   the manifest's digests.
 
@@ -1376,7 +1376,7 @@ Tests: `tests/experimental/test_cake_lm_head_det_train.py` and the public-API su
 run on any device through the reference path; the device tests skip without a
 registered program or a compute capability 10.0 / 10.3 / 10.7 device), and the
 CPU-only `tests/experimental/test_cake_lm_head_det_train_standalone.py` (a copy of
-the package imports with `flashinfer` blocked and raises its host-side errors;
+the package imports in an isolated interpreter and raises its host-side errors;
 `scripts/check_cake_build_manifests.py --vendored-gate` builds and loads the
 copy's libraries on a GPU node).  Benchmark:
 `benchmarks/bench_cake_lm_head_det_train.py`.

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,10 +48,10 @@ from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
-# Backend suite: the package is named once, through ``cake_package``; nothing else of flashinfer is imported here (a
+# Backend suite: the package is named once, through ``cake_package``; nothing else of ``cake_pplx`` is imported here (a
 # build that vendors the package under another import path runs this file unchanged after pointing the ``PACKAGES``
 # entry at it).  The tests of the public entry points ``cake_pplx.cake_lm_head_det_train`` -- their experimental marking and
-# the FLASHINFER_CAKE_LM_HEAD_LOSS_* environment variables they read -- live in ``test_cake_lm_head_det_train_api.py``.
+# the CAKE_PPLX_LM_HEAD_LOSS_* environment variables they read -- live in ``test_cake_lm_head_det_train_api.py``.
 pkg = cake_package("cake.cake_lm_head_det_train")
 cake_backend = cake_package("cake.cake_lm_head_det_train", "cake_backend")
 # The opt-in forms (``memory_mode`` / ``num_valid_rows``); a call with neither keyword is ``cake_backend``'s, except a
@@ -384,7 +384,7 @@ def test_registry_records_are_well_formed():
         "scale_cast_f32",
         "scale_cast_scatter_bf16",
     )
-    # the temperature forms of the log-probability entry (flashinfer#7637) have tables of their own: a call
+    # the temperature forms of the log-probability entry have tables of their own: a call
     # without a temperature reads STAGES / GEMM_STAGES / ROW_STAGES / STAGE_TENSORS, which carry none of them
     assert set(cake_backend.TEMPERATURE_STAGES) == set(TAU_STAGES)
     assert (
@@ -1338,7 +1338,7 @@ def test_stage_variant_grammar():
             temperature=False,
         ),
     )
-    # the temperature forms of the log-probability entry (flashinfer#7637): the logits GEMM arms, the device-count
+    # the temperature forms of the log-probability entry: the logits GEMM arms, the device-count
     # logits GEMM with the statistics and row_finalize, suffix ``_tau`` last
     assert (
         cake_backend.stage_form("gemm_logits_lbl", temperature=True)
@@ -3233,7 +3233,7 @@ def test_reachable_variants_complete_the_rule_closure():
         | counted
     )
     assert len(cake_jit.STAGES) == 38
-    # no rule reaches a temperature form (the call's temperature selects it: flashinfer#7637)
+    # no rule reaches a temperature form (the call's temperature selects it)
     assert not set(TAU_STAGES) & (rv(bases, "sm_103a", 4) | rv(bases, "sm_100a", 4))
     assert (
         cake_backend.dx_max_slices(cake_jit.STAGES) == cake_backend.DX_K_SLICES_MAX == 4
@@ -6753,7 +6753,7 @@ def test_template_only_runner_never_launches():
             launch()
 
 
-_ISSUE_SHAPES = (  # (H, V, T) of flashinfer#7545; about a third of the labels ignored
+_ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),
     (6144, 154880, 16231),
@@ -7184,7 +7184,7 @@ def test_memory_plan_without_the_hidden_count():
 
 def test_memory_plan_budgets_the_valid_rows():
     """The budget covers the logits of the valid rows (``budget_rows``, default ``rows``) whatever rows the chunk loop
-    runs over: an uncompacted call (``rows = T``) with a third of the rows ignored (flashinfer#7545's H 6144, V 154880,
+    runs over: an uncompacted call (``rows = T``) with a third of the rows ignored (the issue's H 6144, V 154880,
     T 16384) budgets ``2 * T_v * V + 2 * V * H + 2 * T * H`` -- the budget of the compacted call with the same valid
     rows -- while its model still counts the ``T`` rows of its chunk loop: the form that fits the budget of all ``T``
     rows predicts a peak above it, and the plan picks a recompute form within it instead."""
@@ -10180,7 +10180,7 @@ def _budget_step(inp, C, entry, **kw):
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 @pytest.mark.parametrize("T", [4096, 16384])
 def test_device_budget_step_peak_within_the_head_bytes(glm_weight, entry, T):
-    """Inputs like flashinfer#7545's (a third of the labels ignored; one chunk and four): the budget step's peak --
+    """Inputs like the issue's (a third of the labels ignored; one chunk and four): the budget step's peak --
     forward through backward, outputs and gradients included, of the call that binds and of one from the remembered
     binding -- stays within the bytes of a head that materializes the BF16 logits of the valid rows
     (``2 * T_v * V + 2 * V * H + 2 * T * H``) and its outputs are bitwise the fast step's; the loss entry records a
@@ -10354,7 +10354,7 @@ def test_device_budget_with_fewer_valid_rows_than_a_chunk(entry, objective):
 def test_device_budget_uncompacted_with_ignored_rows(
     glm_weight, monkeypatch, entry, objective, given
 ):
-    """``compact_rows=False`` with a third of the labels ignored (flashinfer#7545's shape, T 16384, four chunks): the
+    """``compact_rows=False`` with a third of the labels ignored (the issue's shape, T 16384, four chunks): the
     chunk loop runs over every row while the budget stays that of the valid rows (``2 * T_v * V + 2 * V * H + 2 * T *
     H``; the caller's ``num_valid_rows`` or a count on the host) -- the plan of each entry (the loss entry's forward,
     the log-probability entry's backward) fits it, the budget step's peak (forward through backward, outputs and
@@ -10773,7 +10773,7 @@ def test_device_preload(glm_weight):
 
 
 # ---------------------------------------------------------------------------
-# Temperature of the log-probability entry (flashinfer#7637)
+# Temperature of the log-probability entry
 # ---------------------------------------------------------------------------
 #
 # ``temperature`` -- a positive finite Python number or CPU scalar, or an FP32 ``[T]`` tensor -- divides each row's
@@ -11182,7 +11182,7 @@ def test_temperature_keywords():
 
 
 def test_temperature_resolution():
-    """``_resolve_temperature(temperature, T, device, *, check=False)`` (shared with flashinfer#7636): ``None`` for no
+    """``_resolve_temperature(temperature, T, device, *, check=False)`` (shared with the candidate-support entries): ``None`` for no
     temperature and every value that rounds to FP32 1.0; ``("scalar", s)`` with ``s`` the FP32 value of a positive
     finite number or CPU scalar; ``("tensor", tau)`` with ``tau`` FP32 ``[T]`` holding the caller's values."""
     resolve = cake_backend._resolve_temperature
@@ -14490,7 +14490,7 @@ def test_auto_log_probability_functions_reuse_the_backend_forward():
     )
 
 
-# device layer: (H, T) of flashinfer#7545's shapes at V 154880, a third of the labels ignored, chunk 4096
+# device layer: (H, T) of the issue's shapes at V 154880, a third of the labels ignored, chunk 4096
 _AUTO_CELLS = ((6144, 16384), (4096, 16384), (6144, 4096))
 
 
@@ -14554,7 +14554,7 @@ def _record_hidden_counts(monkeypatch) -> list:
 def test_device_default_step_peak_within_the_head_bytes(
     glm_weight, monkeypatch, entry, H, T
 ):
-    """The default memory form (no ``memory_mode``: the automatic form) at flashinfer#7545's shapes: every step -- the
+    """The default memory form (no ``memory_mode``: the automatic form) at the issue's shapes: every step -- the
     call that binds, one from the remembered binding and one with another label mask (a binding cache miss) -- peaks
     within the bytes of a head that materializes the BF16 logits of the valid rows (``2 * T_v * V + 2 * V * H + 2 * T
     * H``; forward through a backward that frees the graph, outputs and gradients included) and gives the explicit
@@ -14757,7 +14757,7 @@ def _auto_checkpoint_step(inp, C, entry, kind):
 def test_device_default_checkpointed_step_within_the_head_bytes(
     glm_weight, entry, kind
 ):
-    """A checkpointed default step (no ``memory_mode``) at flashinfer#7545's shape (H 6144, T 16384, a third of the
+    """A checkpointed default step (no ``memory_mode``) at the issue's shape (H 6144, T 16384, a third of the
     labels ignored): bitwise the plain default step (integer views), and its peak stays within the head's bytes
     (``2 * T_v * V + 2 * V * H + 2 * T * H``) -- the loss entry's backward learns its budget form from the
     recomputation and releases the saved state early, as the plain step does; a reentrant checkpoint's first pass
@@ -14894,7 +14894,7 @@ def test_device_default_stays_fast_with_many_valid_rows(glm_weight, monkeypatch,
 
 
 def test_device_default_temperature_step_peak_within_the_head_bytes(glm_weight):
-    """The default log-probability call with a heterogeneous temperature at flashinfer#7545's shape (H 6144, T 16384, a
+    """The default log-probability call with a heterogeneous temperature at the issue's shape (H 6144, T 16384, a
     third of the labels ignored): the automatic temperature function's budget form gives the explicit fast form's bits
     (integer views) and peaks within the head's bytes."""
     _require_tau_program()
@@ -15513,7 +15513,7 @@ def test_device_default_uncompacted_call_without_a_count_stays_fast(
     glm_weight, monkeypatch, entry
 ):
     """An uncompacted default call without ``num_valid_rows`` (``compact_rows=False``; through the public entries
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS=0`` makes every call one) never counts its valid rows on the host: at a
+    ``CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS=0`` makes every call one) never counts its valid rows on the host: at a
     shape where a compacted default call switches (T 16384, a third of the labels ignored) it keeps the fast form (no
     loss plan, a ``None`` from the log-probability backward's rule), gives the explicit fast form's bits (integer
     views), and a call from the remembered binding runs its forward and backward without a host synchronization."""

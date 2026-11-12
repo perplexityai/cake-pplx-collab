@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,8 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Candidate-support LM-head log-probabilities and the detached-teacher forward KL
-(flashinfer-ai/flashinfer#7636): the projection ``z = X @ W^T`` normalized over a caller-supplied
+Candidate-support LM-head log-probabilities and the detached-teacher forward KL:
+the projection ``z = X @ W^T`` normalized over a caller-supplied
 ragged candidate set per token (sampling-mask replay, restricted-support self-distillation).
 
 Contract

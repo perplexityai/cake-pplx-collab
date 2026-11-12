@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1029,7 +1029,7 @@ def test_torch_deterministic_mode_alerts_before_a_k_sliced_dx(monkeypatch):
 
 def test_warn_only_alert_names_the_callers_frame():
     """Under ``warn_only=True`` the alert of an autograd entry's forward is attributed to the caller's frame: the
-    package's, flashinfer's and torch's frames (``Function.apply``) are skipped (forced K slices, reference
+    package's, the ``cake_pplx`` facade's and torch's frames (``Function.apply``) are skipped (forced K slices, reference
     backend)."""
     inp = _host_inputs(8, device=CPU)
     X = inp.X.detach().requires_grad_(True)
@@ -1927,9 +1927,8 @@ def test_binding_keys_cover_the_options_of_the_plan():
 
 def test_package_reads_no_environment_variable():
     """The package takes every switch as a keyword or a programmatic setter; no module of it reads the
-    environment (the public entries own the ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` fallbacks).  The JIT shim
-    (``_cake_pplx_jit.py``) stands in for ``flashinfer.jit``, which read its toolchain and cache variables outside the
-    package upstream; it is left out."""
+    environment (the public entries own the ``CAKE_PPLX_LM_HEAD_LOSS_*`` fallbacks).  The JIT shim
+    (``_cake_pplx_jit.py``) reads its toolchain and cache variables; it is left out."""
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         if path.name == "_cake_pplx_jit.py":
             continue
@@ -4555,7 +4554,7 @@ def _red_stage_pins(stage: str, k_slices: int = 4) -> dict:
 def test_device_loads_the_libraries_of_its_architecture():
     """On a registered device every stage of the device's record loads the library ``build.json`` builds for the
     device's architecture (``<library>_sm_107a`` on compute capability 10.7): the prebuilt one under ``aot/`` when
-    the package ships it, else FlashInfer's JIT build."""
+    the package ships it, else the JIT build."""
     _require_program(entry="loss")
     name, record = cake_backend.record_for(CUDA)
     arch = record["arch"]
@@ -5690,7 +5689,7 @@ def test_device_budget_vocab_major_block_labels(glm_weight, monkeypatch):
 def test_device_checkpointed_forward_keeps_no_more_than_the_deterministic_package(
     glm_weight,
 ):
-    """After a non-reentrant checkpointed forward (https://github.com/flashinfer-ai/flashinfer/issues/7039) the bytes
+    """After a non-reentrant checkpointed forward the bytes
     the graph keeps alive, and after its backward (graph released) the bytes left beyond the gradients, are no more
     than the deterministic package's for the same call, whatever each package forms in that forward (the FP32 gradient
     accumulators, kept until the backward, or the loss only); the outputs keep the deterministic package's ``loss`` /
@@ -11935,7 +11934,7 @@ def test_temperature_keywords():
 
 
 def test_temperature_resolution():
-    """``_resolve_temperature(temperature, T, device, *, check=False)`` (shared with flashinfer#7636): ``None`` for no
+    """``_resolve_temperature(temperature, T, device, *, check=False)`` (shared with the candidate-support entries): ``None`` for no
     temperature and every value that rounds to FP32 1.0; ``("scalar", s)`` with ``s`` the FP32 value of a positive
     finite number or CPU scalar; ``("tensor", tau)`` with ``tau`` FP32 ``[T]`` holding the caller's values."""
     resolve = cake_backend._resolve_temperature

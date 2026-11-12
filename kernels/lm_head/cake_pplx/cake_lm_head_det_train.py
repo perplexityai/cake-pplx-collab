@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin
 wrappers: validation of the backend contract, the chunk plans, the workspace,
 launch binding, autograd wrappers and JIT registration live in the
 experimental backend package ``cake_pplx._backends.cake_lm_head_det_train``,
-imported on first use.  The ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` variables are
+imported on first use.  The ``CAKE_PPLX_LM_HEAD_LOSS_*`` variables are
 this wrapper's A/B knobs (``cake_pplx/_cake_lm_head_train_knobs.py``): a
 switch keyword left at ``None`` falls back to its variable, and the resolved
 value is passed down.  The two binding-cache variables are read once, when
@@ -198,7 +198,7 @@ def cake_lm_head_det_train_loss(
         rows -- the same computation over fewer rows (per-row ``logp`` is
         bitwise that of the uncompacted path; the ``loss`` / ``dW`` reductions
         run over different chunk boundaries and differ by FP32 rounding).
-        ``None`` (default) reads ``FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS``
+        ``None`` (default) reads ``CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS``
         (on unless set to ``0``; the backend's own default is ``True``).
         Compaction costs one device synchronization per call, the valid-row
         count (the log-probability backward reuses the forward's index).
@@ -214,7 +214,7 @@ def cake_lm_head_det_train_loss(
         its rows of ``X`` are saved for the backward (an in-place write to
         ``X`` between the forward and the backward raises PyTorch's
         saved-tensor version error).  ``None`` (default) reads
-        ``FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST`` (on unless set to ``0``;
+        ``CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST`` (on unless set to ``0``;
         the backend's own default is ``True``).
     dx_finalize : bool, optional
         Add the K-slice slabs of a sliced ``dX`` GEMM with one fixed-order
@@ -222,7 +222,7 @@ def cake_lm_head_det_train_loss(
         pass (``bf16(g * dX_acc)`` on the valid rows, exact zeros elsewhere)
         instead of casting, zero-filling and scattering the compact rows; the
         same FP32 operations in the same order, so ``dX`` is bitwise the same.
-        ``None`` (default) reads ``FLASHINFER_CAKE_LM_HEAD_LOSS_DX_FINALIZE``
+        ``None`` (default) reads ``CAKE_PPLX_LM_HEAD_LOSS_DX_FINALIZE``
         (on unless set to ``0``; the backend's own default is ``True``).
     dw_stream : bool or str, optional
         Launch each chunk's weight-gradient accumulate GEMM on a per-device
@@ -232,7 +232,7 @@ def cake_lm_head_det_train_loss(
         more chunks, ``True`` for every multi-chunk call, ``False`` never; the
         same kernels in the same order per kernel, so every output is bitwise
         the same.  ``None`` (default) reads
-        ``FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM`` (``0`` / ``false`` / ``off``
+        ``CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM`` (``0`` / ``false`` / ``off``
         / ``no`` -> ``False``, ``1`` / ``true`` / ``on`` / ``yes`` -> ``True``,
         anything else -> ``"auto"``; the backend's own default is ``"auto"``).
     hidden_count : bool, optional
@@ -242,7 +242,7 @@ def cake_lm_head_det_train_loss(
         through a pinned cell and a CUDA event, instead of counting and
         indexing on the host before the first launch; the same kernels per
         row, so every output is bitwise the same.  ``None`` (default) reads
-        ``FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT`` (on unless set to ``0``;
+        ``CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT`` (on unless set to ``0``;
         the backend's own default is ``True``).
     gemm_tuning : dict, optional
         Explicit per-GEMM knobs, ``{"logits": {...}, "dx": {...}, "dw": {...}}``
@@ -250,7 +250,7 @@ def cake_lm_head_det_train_loss(
         ``None`` pins the default form), winning over the per-chunk rules for
         the knobs they name; a form the compiled program does not register
         fails closed.  ``None`` (default) reads
-        ``FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING`` as a JSON object (unset or
+        ``CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING`` as a JSON object (unset or
         blank: no explicit knob, the backend's own default; invalid JSON is a
         ``ValueError``).
     memory_mode : str, optional
@@ -289,7 +289,7 @@ def cake_lm_head_det_train_loss(
         belongs to ``cake_lm_head_det_train_logprob`` (a ``ValueError``
         here).  No environment variable selects the mode; the switches above
         (``compact_rows``, ``fuse_dw_cast``, ``dx_finalize``, ``hidden_count``,
-        ``gemm_tuning``, and their ``FLASHINFER_CAKE_LM_HEAD_LOSS_*``
+        ``gemm_tuning``, and their ``CAKE_PPLX_LM_HEAD_LOSS_*``
         variables) are inputs of the automatic form's rule.  The
         non-deterministic module ``cake_pplx.cake_lm_head_nondet_train``,
         whose entries refer to this description, has no automatic form: its
@@ -363,8 +363,8 @@ def cake_lm_head_det_train_loss(
     the calls through ``cake_backend_opt_in`` -- the default loss calls that
     form a weight gradient among them, and a log-probability backward in a
     budget form -- keep theirs in ``cake_backend_opt_in.BINDING_CACHE``).
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE=0`` disables both caches and
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY`` (a positive
+    ``CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE=0`` disables both caches and
+    ``CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY`` (a positive
     integer; default 64) sets their capacity: both are read when this module
     is imported and applied through ``BINDING_CACHE.configure`` on the first
     call that reaches each backend module; a later
@@ -534,7 +534,7 @@ def cake_lm_head_det_train_logprob(
     ``dW`` from its epilogue).  Arguments as in :func:`cake_lm_head_det_train_loss`,
     including the switches ``compact_rows``, ``fuse_dw_cast``, ``dx_finalize``,
     ``dw_stream``, ``hidden_count`` and ``gemm_tuning`` with the same defaults
-    (``None`` reads the same ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` variable; every
+    (``None`` reads the same ``CAKE_PPLX_LM_HEAD_LOSS_*`` variable; every
     switch is resolved once in the forward and the backward recomputes under
     the same values); ``dW`` is returned in BF16.  ``memory_mode``
     (``"budget"``: the backward's weight-gradient form within the same bound;

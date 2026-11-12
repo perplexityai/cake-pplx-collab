@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -170,12 +170,12 @@ def recorders(monkeypatch):
     monkeypatch.setattr(public, "_cake_backend_opt_in", lambda: fake["opt_in"])
     monkeypatch.setattr(public, "_cake_support", lambda: fake["support"])
     for name in (
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS",
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST",
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_DX_FINALIZE",
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM",
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT",
-        "FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING",
+        "CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS",
+        "CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST",
+        "CAKE_PPLX_LM_HEAD_LOSS_DX_FINALIZE",
+        "CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM",
+        "CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT",
+        "CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING",
     ):
         monkeypatch.delenv(name, raising=False)
     return fake
@@ -299,8 +299,8 @@ def test_entries_reach_the_backend(recorders, monkeypatch):
     environment like the deterministic entries do, and the opt-in module for ``memory_mode`` /
     ``num_valid_rows``."""
     fake = recorders
-    monkeypatch.setenv("FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS", "0")
-    monkeypatch.setenv("FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM", "on")
+    monkeypatch.setenv("CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS", "0")
+    monkeypatch.setenv("CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM", "on")
     X, W, labels = _host_call()
     loss = "cake_lm_head_nondet_train_loss"
     logprob = "cake_lm_head_nondet_train_logprob"
@@ -385,14 +385,14 @@ def test_torch_deterministic_mode_passes_a_k_slices_pin_unchanged(
     recorders, monkeypatch, entry, source
 ):
     """Under torch's deterministic algorithms a dX ``k_slices`` pin of any size (``gemm_tuning`` or
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING``) reaches the backend unchanged, without a warning."""
+    ``CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING``) reaches the backend unchanged, without a warning."""
     fake = recorders
     X, W, labels = _host_call()
     extra = dict(loss_div=1.0) if entry == "cake_lm_head_nondet_train_loss" else {}
     pinned = {"dx": {"k_slices": 8, "tile_n": 256}, "logits": {"group_m": 8}}
     if source == "environment":
         monkeypatch.setenv(
-            "FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING", json.dumps(pinned)
+            "CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING", json.dumps(pinned)
         )
     else:
         extra = dict(extra, gemm_tuning=pinned)
@@ -644,7 +644,7 @@ def test_keep_logits_mode_leaves_the_hidden_count_to_the_kept_form(
     recorders, monkeypatch
 ):
     """With ``memory_mode="keep_logits"`` a ``hidden_count`` left at ``None`` reaches the opt-in module as ``None`` (the
-    backend's kept-logits form decides) -- ``False`` when ``FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT`` is ``"0"`` -- and
+    backend's kept-logits form decides) -- ``False`` when ``CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT`` is ``"0"`` -- and
     an explicit value as given; every other call resolves it from the variable as before (on unless ``"0"``)."""
     fake = recorders
     X, W, labels = _host_call()
@@ -660,11 +660,11 @@ def test_keep_logits_mode_leaves_the_hidden_count_to_the_kept_form(
         assert got is value
     assert last_hidden_count("opt_in", memory_mode="fast") is True
     assert last_hidden_count("backend") is True
-    monkeypatch.setenv("FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT", "0")
+    monkeypatch.setenv("CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT", "0")
     assert last_hidden_count("opt_in", memory_mode="keep_logits") is False
     assert last_hidden_count("opt_in", memory_mode="fast") is False
     assert last_hidden_count("backend") is False
-    monkeypatch.setenv("FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT", "1")
+    monkeypatch.setenv("CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT", "1")
     assert last_hidden_count("opt_in", memory_mode="keep_logits") is None
     assert (
         last_hidden_count("opt_in", memory_mode="keep_logits", hidden_count=True)

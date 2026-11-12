@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 
 The A/B knobs shared by the Cake LM-head training facades
 (``cake_pplx.cake_lm_head_det_train`` and the non-deterministic one): the
-``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` environment variables, their parsing and the
+``CAKE_PPLX_LM_HEAD_LOSS_*`` environment variables, their parsing and the
 binding-cache configuration.  Private: no facade exports these names.
 
 The package backends take every switch as a keyword argument and read no
@@ -36,25 +36,25 @@ CHECK_WITHOUT_COUNT = (
 )
 
 # "0" turns valid-row compaction off (``compact_rows``); anything else: on.
-COMPACT_ROWS_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS"
+COMPACT_ROWS_ENV = "CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS"
 # "0" turns the fused weight-gradient cast off (``fuse_dw_cast``).
-FUSE_DW_CAST_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST"
+FUSE_DW_CAST_ENV = "CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST"
 # "0" turns the fused dX finalize off (``dx_finalize``).
-DX_FINALIZE_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_DX_FINALIZE"
+DX_FINALIZE_ENV = "CAKE_PPLX_LM_HEAD_LOSS_DX_FINALIZE"
 # "0" / "false" / "off" / "no": never; "1" / "true" / "on" / "yes": every
 # multi-chunk call; anything else (the default): "auto" (``dw_stream``).
-DW_STREAM_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM"
+DW_STREAM_ENV = "CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM"
 # "0" turns the hidden valid-row count off (``hidden_count``).
-HIDDEN_COUNT_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT"
+HIDDEN_COUNT_ENV = "CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT"
 # A JSON object of explicit per-GEMM knobs (``gemm_tuning``); unset / empty:
 # none.
-GEMM_TUNING_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING"
+GEMM_TUNING_ENV = "CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING"
 # "0" disables the backend's binding cache (read at import, applied on first
 # use).
-BINDING_CACHE_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE"
+BINDING_CACHE_ENV = "CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE"
 # Positive integer: the binding cache's capacity (read at import, applied on
 # first use; unset / blank: the backend's default of 64 bindings).
-BINDING_CACHE_CAPACITY_ENV = "FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY"
+BINDING_CACHE_CAPACITY_ENV = "CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY"
 
 DW_STREAM_OFF = ("0", "false", "off", "no")
 DW_STREAM_ON = ("1", "true", "on", "yes")
@@ -68,7 +68,7 @@ def env_switch(value: Optional[bool], name: str) -> bool:
 
 
 def env_dw_stream(value: Optional[Union[bool, str]]) -> Union[bool, str]:
-    """``value`` when given, else ``FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM`` as
+    """``value`` when given, else ``CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM`` as
     ``False`` (never), ``True`` (every multi-chunk call) or ``"auto"``."""
     if value is not None:
         return value
@@ -83,7 +83,7 @@ def env_dw_stream(value: Optional[Union[bool, str]]) -> Union[bool, str]:
 def env_gemm_tuning(
     value: Optional[Dict[str, Dict[str, Any]]],
 ) -> Optional[Dict[str, Dict[str, Any]]]:
-    """``value`` when given, else ``FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING`` parsed
+    """``value`` when given, else ``CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING`` parsed
     as a JSON object (``None`` when unset / blank; invalid JSON or a non-object is a
     ``ValueError``); the backend validates the knobs themselves."""
     if value is not None:

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,7 +30,8 @@ chunks of 2048 / 4096 / 8192 rows, plus the tail rows ``T`` = 1, 4095, 4097.  Pe
 * ``step``: the mode's public autograd entry, forward and backward;
 * ``ckpt``: ``torch.utils.checkpoint(..., use_reentrant=False)`` around the public entry, then its backward -- the
   2 x forward + backward of activation checkpointing;
-* ``*_us``: the GPU span of the phase's kernels (CUPTI activity, ``flashinfer.testing.bench_gpu_time``, cold L2);
+* ``*_us``: the GPU span of the phase's kernels (CUPTI activity through ``torch.profiler``, the local
+  ``bench_gpu_time``, cold L2);
 * ``peak_temp_bytes`` / ``retained_bytes``: the allocator's peak above the bytes held before a ``step`` and the bytes
   a forward leaves alive for its backward.
 
@@ -67,13 +68,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import torch
+import torch.profiler
 import torch.utils.checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cake_pplx.cake_lm_head_det_train as det_public
 import cake_pplx.cake_lm_head_nondet_train as public
-from flashinfer.testing import bench_gpu_time  # noqa: E402
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (  # noqa: E402
     DEFAULT_H,
     DEFAULT_V,
@@ -110,10 +111,36 @@ ROUNDS = 5
 STEPS = 10
 
 
-def _gpu_us(fn: Callable[[], object], steps: int) -> float:
-    times = bench_gpu_time(
-        fn, dry_run_iters=2, repeat_iters=steps, enable_cupti=True, cold_l2_cache=True
+def bench_gpu_time(fn, *, dry_run_iters: int, repeat_iters: int) -> list[float]:
+    """Per-iteration GPU span of ``fn`` in ms: the first kernel's start to the last kernel's end of one call, read
+    from CUPTI activity records through ``torch.profiler`` (GPU activity only, one profiled call at a time).  Before
+    every call the L2 cache is flushed by writing a buffer of at least twice its size, outside the profiled span
+    (cold L2); ``dry_run_iters`` untimed calls run first."""
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    flush = torch.empty(
+        max(2 * getattr(props, "L2_cache_size", 0), 256 << 20), dtype=torch.int8, device="cuda"
     )
+    for _ in range(dry_run_iters):
+        fn()
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(repeat_iters):
+        flush.zero_()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            fn()
+            torch.cuda.synchronize()
+        spans = [
+            e.time_range for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA
+        ]
+        if not spans:
+            raise RuntimeError("the profiler recorded no GPU activity of the timed call")
+        times.append((max(s.end for s in spans) - min(s.start for s in spans)) / 1e3)
+    return times
+
+
+def _gpu_us(fn: Callable[[], object], steps: int) -> float:
+    times = bench_gpu_time(fn, dry_run_iters=2, repeat_iters=steps)
     return 1e3 * float(statistics.median(times))
 
 
