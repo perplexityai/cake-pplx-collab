@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,8 +30,8 @@ Every row times, on identical generated inputs:
 - ``ckpt``: the same step measured: ``torch.utils.checkpoint(...,
   use_reentrant=False)`` of the forward, then the backward (which replays it).
 
-Timing uses CUPTI kernel activity with a cold L2
-(``flashinfer.testing.bench_gpu_time(enable_cupti=True)``); a comparator of
+Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, the
+median of 100 calls after 10 warm-up calls); a comparator of
 several kernels reports the sum of their GPU time, copies and initializations
 included.  Memory columns report the bytes autograd saves for the backward
 (``saved``) and the peak allocation of one forward plus backward beyond the
@@ -49,7 +49,7 @@ contiguous inputs run the packed-rows forward where one is routed).
 ``--side-stream`` adds, for the Cake kernels, the event-timed median of seven
 forward and seven backward calls beside a one-thread kernel resident on
 another stream over the median of seven calls alone (alternating), the
-concurrent-launch measurement of issue #7038.
+concurrent-launch measurement.
 
 Example::
 
@@ -77,22 +77,70 @@ from cake_pplx.cake_rmsnorm_silu_gate_det_train import (
 from cake_pplx._backends.cake_rmsnorm_silu_gate_det_train import (
     cake_jit as _loader,
 )
-from flashinfer.testing import bench_gpu_time
 
 D = 128
 # The side-stream measurement: a one-thread kernel resident for about 5 ms,
-# started after a 1M-cycle sleep on the main stream (issue #7038's repro).
+# started after a 1M-cycle sleep on the main stream.
 SIDE_SLEEP_CYCLES = 10_000_000
 PRE_SLEEP_CYCLES = 1_000_000
 SIDE_RUNS = 7
 
 
+def _cupti_call_ms(fn, *, dry_run_iters: int = 10, repeat_iters: int = 100) -> list[float]:
+    """Per-call GPU time of ``fn`` in milliseconds, the L2 cache flushed before
+    every call: the summed duration of the GPU activities (kernels, copies,
+    fills) that CUPTI records through ``torch.profiler`` between two sentinel
+    kernels, an autograd backward included.
+
+    Every timed call runs between two launches of ATen's one-cycle spin kernel;
+    the first record after a sentinel is the L2 flush and is not counted.
+    Device records are attributed by position, not by the host operation that
+    launched them, so kernels launched through the driver API count too.
+    """
+    l2_bytes = torch.cuda.get_device_properties(torch.cuda.current_device()).L2_cache_size
+    flush = torch.empty(max(2 * l2_bytes, 1 << 20), dtype=torch.uint8, device="cuda")
+    for _ in range(dry_run_iters):
+        flush.fill_(1)
+        fn()
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as profile:
+        torch.cuda._sleep(1)
+        for _ in range(repeat_iters):
+            flush.fill_(1)
+            fn()
+            torch.cuda._sleep(1)
+        torch.cuda.synchronize()
+    records = sorted(
+        (
+            event
+            for event in profile.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+        ),
+        key=lambda event: event.time_range.start,
+    )
+    call_us: list[float] = []
+    current = None
+    for event in records:
+        if "::spin_kernel(" in event.name:
+            if current is not None:
+                call_us.append(sum(e.time_range.end - e.time_range.start for e in current[1:]))
+            current = []
+        elif current is not None:
+            current.append(event)
+    if len(call_us) != repeat_iters:
+        raise RuntimeError(
+            f"the profiler returned {len(call_us)} complete calls of {repeat_iters}; "
+            "CUPTI lost device records"
+        )
+    if any(us <= 0 for us in call_us):
+        raise RuntimeError("CUPTI recorded no GPU activity for a timed call")
+    return [us / 1000.0 for us in call_us]
+
+
 def _time(fn: Callable[[], object]) -> float:
     """Median GPU time (ms) of ``fn`` over its kernels, cold L2, CUPTI."""
 
-    return float(
-        statistics.median(bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True))
-    )
+    return float(statistics.median(_cupti_call_ms(fn)))
 
 
 def _event_ms(call: Callable[[], object], side: Optional[torch.cuda.Stream]) -> float:

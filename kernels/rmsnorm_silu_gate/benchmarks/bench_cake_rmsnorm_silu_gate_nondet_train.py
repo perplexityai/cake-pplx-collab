@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ Its backward runs one cluster of 16 CTAs for few rows, else one kernel by bands
 of rows per SM (``cake_jit.BACKWARD_BANDS``).  A BF16 weight gradient (the one
 timed here) runs the short backward (one cluster, a fixed-order sum) up to 256
 rows and, on SM100 and SM107, the exact tiny backward (one cluster, the bits of
-the deterministic pair at FlashInfer 2e989556) up to 512 rows.  Past that, on
+the deterministic pair at 2e989556) up to 512 rows.  Past that, on
 SM100 and SM103, it runs the fused backward (256-thread CTAs of 16-row blocks,
 at most 4 per SM) up to 1000 rows per SM and the repeatable backward (its copy
 of the deterministic package's backward, the same grid; its ``dw`` repeats its
@@ -61,8 +61,8 @@ claimed backward past that.  At ``--heads 48`` the default token counts reach
 every forward kernel of packed rows and every BF16 backward kernel that a band
 of a 148-SM B200 runs (2048 tokens: the extra-long forward).
 
-Timing uses CUPTI kernel activity with a cold L2
-(``flashinfer.testing.bench_gpu_time(enable_cupti=True)``); each stage reports
+Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, 100
+calls after 10 warm-up calls); each stage reports
 the median and, as its variation, the samples' minimum, maximum and coefficient
 of variation; ``speedup`` is the deterministic median over the
 non-deterministic one.  Memory columns report the bytes autograd keeps for the backward
@@ -100,7 +100,6 @@ import torch.utils.checkpoint
 
 import cake_pplx.cake_rmsnorm_silu_gate_det_train as det
 import cake_pplx.cake_rmsnorm_silu_gate_nondet_train as nd
-from flashinfer.testing import bench_gpu_time
 
 D = 128
 # Each mode's entry points: the deterministic package's ``det`` names and the
@@ -137,13 +136,62 @@ STAGES = ("fwd", "bwd", "ckpt")
 TOKENS = (30193, 32737, 32388, 30000, 33000, 1, 5, 7, 16, 129, 1031, 2048, 4097)
 
 
+def _cupti_call_ms(fn, *, dry_run_iters: int = 10, repeat_iters: int = 100) -> list[float]:
+    """Per-call GPU time of ``fn`` in milliseconds, the L2 cache flushed before
+    every call: the summed duration of the GPU activities (kernels, copies,
+    fills) that CUPTI records through ``torch.profiler`` between two sentinel
+    kernels, an autograd backward included.
+
+    Every timed call runs between two launches of ATen's one-cycle spin kernel;
+    the first record after a sentinel is the L2 flush and is not counted.
+    Device records are attributed by position, not by the host operation that
+    launched them, so kernels launched through the driver API count too.
+    """
+    l2_bytes = torch.cuda.get_device_properties(torch.cuda.current_device()).L2_cache_size
+    flush = torch.empty(max(2 * l2_bytes, 1 << 20), dtype=torch.uint8, device="cuda")
+    for _ in range(dry_run_iters):
+        flush.fill_(1)
+        fn()
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as profile:
+        torch.cuda._sleep(1)
+        for _ in range(repeat_iters):
+            flush.fill_(1)
+            fn()
+            torch.cuda._sleep(1)
+        torch.cuda.synchronize()
+    records = sorted(
+        (
+            event
+            for event in profile.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+        ),
+        key=lambda event: event.time_range.start,
+    )
+    call_us: list[float] = []
+    current = None
+    for event in records:
+        if "::spin_kernel(" in event.name:
+            if current is not None:
+                call_us.append(sum(e.time_range.end - e.time_range.start for e in current[1:]))
+            current = []
+        elif current is not None:
+            current.append(event)
+    if len(call_us) != repeat_iters:
+        raise RuntimeError(
+            f"the profiler returned {len(call_us)} complete calls of {repeat_iters}; "
+            "CUPTI lost device records"
+        )
+    if any(us <= 0 for us in call_us):
+        raise RuntimeError("CUPTI recorded no GPU activity for a timed call")
+    return [us / 1000.0 for us in call_us]
+
+
 def _stats(fn: Callable[[], object]) -> dict:
     """Median, minimum, maximum (ms) and coefficient of variation of the GPU
     time of ``fn``'s kernels, CUPTI, cold L2."""
 
-    samples = [
-        float(t) for t in bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True)
-    ]
+    samples = [float(t) for t in _cupti_call_ms(fn)]
     mean = statistics.fmean(samples)
     return {
         "ms": statistics.median(samples),

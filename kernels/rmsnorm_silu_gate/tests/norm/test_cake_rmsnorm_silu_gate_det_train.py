@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,8 +45,8 @@ counts.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer.  The ``cake_pplx.cake_rmsnorm_silu_gate_det_train`` facade and the
-``flashinfer`` top-level exposure are covered by
+``cake_pplx``.  The ``cake_pplx.cake_rmsnorm_silu_gate_det_train`` facade is
+covered by
 ``test_cake_rmsnorm_silu_gate_det_train_api.py``.
 """
 

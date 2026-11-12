@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 
 Stall regression of the Cake SiLU-gated RMSNorm training forward and the
 non-deterministic (``nondet``) backward beside a kernel resident
-on another stream (the concurrent-launch contract of issues #7038 and #7548).
+on another stream (the concurrent-launch contract).
 
 The forward runs the program of its architecture's band of rows per SM:
 of ``FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows (row ``n`` at
@@ -105,7 +105,7 @@ at most ``MAX_RATIO`` times the median of seven calls alone, or at most
 ``MAX_EXTRA_MS`` above it.  The alone and busy calls alternate in pairs, so
 host launch gaps and clock drift hit both arms alike.
 
-The backward beside a kernel resident on every SM (issue #7548, item 2): each
+The backward beside a kernel resident on every SM: each
 CTA of the chunked backwards needs 15616 bytes of dynamic shared memory (the
 launch record's ``dynamic_smem_bytes``: the two halves of the 8 x 128 FP32
 fold buffer, 8192 bytes, the 7 64-bit windows of each of the 128 columns,
@@ -134,8 +134,8 @@ for the small-row backwards): there each must end at most
 ``MAX_ALL_SM_EXTRA_MS`` after the backward it replaces (the module of the
 role's first band past its small-row bands, at the same rows).
 
-The backward beside a side kernel that holds ``k`` of the ``N`` SMs (issue
-#7548, item 1): busy / alone is at most the proportional ``N / (N - k)``, plus
+The backward beside a side kernel that holds ``k`` of the ``N`` SMs: busy /
+alone is at most the proportional ``N / (N - k)``, plus
 the share in the call of one row block of each CTA of the module's grid (its
 CTAs, ``backward_ctas``, over its row blocks), plus ``PROPORTIONAL_SLACK``.
 The token counts give each CTA of a module's one-wave grid (``ctas_per_sm *
@@ -396,7 +396,7 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
     )
 
 
-# Issue #7548: a side kernel whose CTAs each record their SM and start time
+# A side kernel whose CTAs each record their SM and start time
 # and spin ``ALL_SM_SPIN_MS`` of wall time (``%globaltimer``).  A call that
 # waits for it takes the rest of that lifetime; one that starts beside it costs
 # at most ``MAX_ALL_SM_EXTRA_MS`` more than alone.

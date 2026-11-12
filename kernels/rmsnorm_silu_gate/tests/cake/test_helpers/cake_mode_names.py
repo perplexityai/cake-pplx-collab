@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright (c) 2026 by FlashInfer team
-"""Mode names of the Cake training modules (flashinfer issue #8928).
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION
+"""Mode names of the Cake training modules.
 
-A Cake training module is ``flashinfer.cake_<op>_<mode>_train[_kcp]``, its ``mode``
+A Cake training module is ``cake_pplx.cake_<op>_<mode>_train[_kcp]``, its ``mode``
 ``det`` or ``nondet``.  Its public names are its ``__all__`` or, without one, the
 public attributes defined in it (:func:`public_names`).  The checks:
 
@@ -19,7 +19,7 @@ public attributes defined in it (:func:`public_names`).  The checks:
   subclass, and no public method has a parameter named ``deterministic``.  A type
   alias (``Callable[[], Tensor]``, ``list[int]``) names a type and is skipped.
 * :func:`assert_same_object_same_name`: the module and the other namespaces given
-  (the ``flashinfer`` top level, the backend package or modules) bind the module, an
+  (the ``cake_pplx`` namespace, the backend package or modules) bind the module, an
   object of it or a backend object it forwards to (``forwards``) only under the name
   the module gives it, so no alias of an old name is left.  The module's lazy public
   names and the rows of a ``_LAZY_EXPORTS`` table count too.
@@ -27,7 +27,7 @@ public attributes defined in it (:func:`public_names`).  The checks:
   fresh interpreter.
 
 :func:`assert_cake_mode_module` runs all of them for one module and reports every
-failure in one ``AssertionError``.  This module imports neither flashinfer nor torch:
+failure in one ``AssertionError``.  This module imports no kernel package and no torch:
 a family's names test passes its modules in.
 
 Nothing here is keyed on the existence of ``cake_pplx._backends.<module>``:
@@ -136,7 +136,7 @@ def assert_same_object_same_name(
     """``module`` and ``namespaces`` bind ``module`` and each object of it only under
     its name in ``module``.
 
-    The module itself has the last part of its name (``flashinfer`` binds
+    The module itself has the last part of its name (a namespace binds
     ``cake_x_nondet_train`` under that name only, eagerly or lazily).  The objects of
     the module are its public callables, the functions they wrap (``__wrapped__``, as
     :func:`functools.wraps` sets) and the object of each ``(name, obj)`` pair of
@@ -152,7 +152,7 @@ def assert_same_object_same_name(
     names through its own module ``__getattr__`` as the submodules it serves from
     (the MoE grouped-GEMM backend package as its ``cake_backend`` and
     ``cake_autograd``).  A namespace that defines a dict ``_LAZY_EXPORTS``
-    (``name -> (module, attribute)``, as in ``flashinfer/__init__.py``) has its rows
+    (``name -> (module, attribute)``) has its rows
     read statically, nothing imported: a row whose module is ``module`` serves
     ``attribute`` under the same name, or with ``attribute`` None the module itself
     under the last part of the module's name; another name is an alias.  A relative
@@ -201,7 +201,7 @@ def assert_cake_mode_module(
     """All the checks for one public facade module, every failure in one report.
 
     ``namespaces`` are the other modules that bind objects of ``module``: the
-    ``flashinfer`` top level and the backend package or modules the facade forwards
+    ``cake_pplx`` namespace and the backend package or modules the facade forwards
     to or re-exports, each passed explicitly (nothing is found by path, see the
     module docstring; a lazy backend package as the submodules it serves from).
     ``forwards`` are the ``(public name, backend object)`` pairs of the facade

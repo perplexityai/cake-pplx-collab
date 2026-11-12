@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,9 +22,9 @@ shared by every token and head)::
     rstd = 1 / sqrt(mean(x^2) + eps)                     # FP32, approximate rsqrt
     y    = BF16(((x * rstd) * weight) * silu(z))         # FP32, one rounding
 
-This is ``RMSNorm(x) * weight * SiLU(z)``, not :func:`flashinfer.norm.fused_rmsnorm_silu`
-(``SiLU(RMSNorm(x))``).  The backward recomputes the statistics and the gate
-from ``x`` and ``z`` and returns BF16 ``dx`` and ``dz`` and the weight
+This is ``RMSNorm(x) * weight * SiLU(z)``, not ``SiLU(RMSNorm(x))``.  The
+backward recomputes the statistics and the gate from ``x`` and ``z`` and
+returns BF16 ``dx`` and ``dz`` and the weight
 gradient summed over every token and head (FP32 runs of at most 16 rows, added
 exactly in fixed point, rounded once to FP32), so repeated calls with the same row
 count on a device with the same SM count return the same bits.  The autograd
@@ -59,10 +59,8 @@ Mode and dispatch rules:
    ``cake_pplx._backends.cake_rmsnorm_silu_gate_nondet_train``)
    carries ``nondet``.  The module constants ``ARCHES`` and
    ``SUPPORTED_COMPUTE_CAPABILITIES`` are exempt: they keep their names,
-   without a mode word, in both modules and both backend packages.  The
-   ``flashinfer`` top level exports only names with a mode word.
-   Each module imports its backend package on first use (``import
-   flashinfer`` loads neither backend package); its autograd class and
+   without a mode word, in both modules and both backend packages.
+   Each module imports its backend package on first use; its autograd class and
    its architecture constants are the backend package's objects.
 2. No entry point takes a ``deterministic`` keyword: passing one is a
    ``TypeError``.  A call of one package never runs the other package.
@@ -84,8 +82,7 @@ Mode and dispatch rules:
    package's workspace (``ValueError``), also in a call with no rows.
 5. The former names are gone, with no alias or shim: the former modules fail
    at import, and the former names without a mode word are attributes of
-   neither ``flashinfer`` nor either module.  The SiLU-gated RMSNorm section
-   of ``docs/api/norm.rst`` maps each former name to its names in both modes.
+   neither module.
 
 Usage::
 
@@ -115,8 +112,7 @@ from ._cake_pplx_api_rmsnorm_silu_gate import cake_api
 # The entry points are real ``def``s here (public-API tooling reads the
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
-# imported on first use (flashinfer/experimental/README.md, "Containment
-# rules"), so ``import flashinfer`` loads no experimental module.
+# imported on first use.
 
 
 @functools.cache

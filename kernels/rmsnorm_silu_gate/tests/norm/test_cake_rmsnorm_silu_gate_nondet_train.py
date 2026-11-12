@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ workspace: one workspace per capture and capture stream, zero-filled outside
 the graph, no fill kernel in it; two such graphs replayed at the same time on
 two streams; the fill inside the graph past the graph-workspace limit), the
 autograd wrapper (non-reentrant checkpointing included), the state a
-checkpointed step keeps (FlashInfer issue #7039), the registry's routes (a
+checkpointed step keeps, the registry's routes (a
 module for every call, which the support query requires; none of the programs
 the package no longer ships), bands, chunks and grids (the first and the last
 rows of every band of ``BACKWARD_BANDS`` run the band's program; packed rows
@@ -86,10 +86,9 @@ refused naming both modes' workspaces.
 
 This suite exercises the package alone, named once through
 ``tests.cake.test_helpers.cake_package`` (so a vendored copy runs it unchanged), and
-imports nothing else from flashinfer.  The comparisons against the
+imports nothing else from ``cake_pplx``.  The comparisons against the
 deterministic package (each output's FP64 error at most 1.1 times the
-deterministic package's on the same inputs), the facade and the ``flashinfer``
-top level are ``test_cake_rmsnorm_silu_gate_nondet_train_api.py``'s.
+deterministic package's on the same inputs) and the facade are ``test_cake_rmsnorm_silu_gate_nondet_train_api.py``'s.
 """
 
 from __future__ import annotations
@@ -1967,7 +1966,7 @@ def test_registry_records_reference_the_build_manifest():
 
 # (rows, SMs, blocks per chunk, chunks, CTAs) of the static and the claimed
 # backwards: 8-row blocks, at most 8192 chunks of the fewest consecutive
-# blocks each (the chunks of the deterministic backward at FlashInfer 2e989556),
+# blocks each (the chunks of the deterministic backward at 2e989556),
 # at most 8 CTAs per SM.
 BACKWARD_GRIDS = [
     (1, 148, 1, 1, 1),
@@ -3531,7 +3530,7 @@ def test_calls_without_workspace_share_one_buffer_per_stream():
 
 
 def test_checkpointed_steps_keep_only_the_stream_workspace(monkeypatch):
-    """FlashInfer issue #7039: a non-reentrant checkpointed forward keeps nothing
+    """A non-reentrant checkpointed forward keeps nothing
     alive but its output, and once the first step has run, every checkpointed
     forward and backward leaves ``torch.cuda.memory_allocated()`` unchanged.  The
     buffers kept across steps are the workspace of the backward without a

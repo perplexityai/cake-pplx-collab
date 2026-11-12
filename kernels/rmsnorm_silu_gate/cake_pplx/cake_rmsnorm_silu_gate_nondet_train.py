@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -82,13 +82,13 @@ the repeatable backward.  The kernels are those of the standalone package
   runs a BF16 weight gradient or ``compute_grad_weight=False`` up to 256 rows;
   its weight gradient repeats its bits, which need not be the deterministic
   package's.  The exact tiny backward (the chunk partials of the deterministic
-  backward at FlashInfer 2e989556 in its reduction order: that pair's bits)
+  backward at 2e989556 in its reduction order: that pair's bits)
   runs an FP32 weight gradient up to 512 rows on every architecture and a BF16
   one (or ``compute_grad_weight=False``) from 257 up to 512 rows on SM100 and
   SM107.  Past those rows the rows (``T * H``) and the SM count pick the
   kernel by bands of rows per SM.  The chunked backwards of an FP32 weight
   gradient run over the chunks of rows of the deterministic backward at
-  FlashInfer 2e989556 (8-row blocks, ``max(1, ceil(blocks / 8192))`` blocks a
+  2e989556 (8-row blocks, ``max(1, ceil(blocks / 8192))`` blocks a
   chunk), at most 8 CTAs per SM: each chunk's FP32 weight-gradient partial is
   that backward's, and the partials are added exactly, as signed 64-bit
   integer windows of their FP32 values (an addition of integers does not
@@ -132,7 +132,7 @@ the repeatable backward.  The kernels are those of the standalone package
   ``dx``, ``dz`` and weight gradient are the deterministic package's bits,
   the same for the rows and the SM count: ``dx`` and ``dz`` within the bound
   above, the weight gradient not the sum of the chunk partials of the
-  deterministic backward at FlashInfer 2e989556 (within that package's
+  deterministic backward at 2e989556 (within that package's
   budget).  Packed rows (``grad_out``, ``x`` and ``z`` each with head stride
   128 and token stride ``H * 128``) run its copy of the deterministic
   package's look-ahead program, the same build, from 2560 rows per SM on
@@ -148,10 +148,8 @@ Mode and dispatch rules:
    ``cake_pplx._backends.cake_rmsnorm_silu_gate_nondet_train``)
    carries ``nondet``.  The module constants ``ARCHES`` and
    ``SUPPORTED_COMPUTE_CAPABILITIES`` are exempt: they keep their names,
-   without a mode word, in both modules and both backend packages.  The
-   ``flashinfer`` top level exports only names with a mode word.
-   Each module imports its backend package on first use (``import
-   flashinfer`` loads neither backend package); its autograd class and
+   without a mode word, in both modules and both backend packages.
+   Each module imports its backend package on first use; its autograd class and
    its architecture constants are the backend package's objects.
 2. No entry point takes a ``deterministic`` keyword: passing one is a
    ``TypeError``.  A call of one package never runs the other package.
@@ -169,8 +167,7 @@ Mode and dispatch rules:
    workspace (``ValueError``) in every call, also with no rows.
 5. The former names are gone, with no alias or shim: the former modules fail
    at import, and the former names without a mode word are attributes of
-   neither ``flashinfer`` nor either module.  The SiLU-gated RMSNorm section
-   of ``docs/api/norm.rst`` maps each former name to its names in both modes.
+   neither module.
 
 The non-deterministic backward's workspace
 (``cake_rmsnorm_silu_gate_nondet_train_backward_workspace(T * H, device)``, a
@@ -201,7 +198,7 @@ one per capture and capture stream from it and keeps it for the life of the
 process, so a replay launches no fill kernel (with none ready, the graph
 zero-fills a buffer of its own).
 
-Beside kernels resident on other streams (FlashInfer issue #7548): an SM
+Beside kernels resident on other streams: an SM
 serves a CTA only once it can switch to a shared-memory carveout that holds
 the CTA's dynamic shared memory, so a kernel on another stream whose CTAs hold
 every SM with a small carveout (for example a long-running kernel with little
@@ -236,8 +233,7 @@ import torch
 from ._cake_pplx_api_rmsnorm_silu_gate import cake_api
 
 
-# The backend package is imported on first use (flashinfer/experimental/README.md,
-# "Containment rules"), so ``import flashinfer`` loads no experimental module.
+# The backend package is imported on first use.
 @functools.cache
 def _backend() -> Any:
     from ._backends import cake_rmsnorm_silu_gate_nondet_train  # noqa: PLC0415 - the backend package, imported on first use
@@ -467,7 +463,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     the deterministic package's bits), within one BF16 ulp of the FP64 value
     plus 1/64 ulp of the tensor's largest finite magnitude (in every band).  A
     chunked backward (an FP32 ``dw``) runs over the chunks of rows of the
-    deterministic backward at FlashInfer 2e989556: each chunk's FP32
+    deterministic backward at 2e989556: each chunk's FP32
     weight-gradient partial is that backward's, and the partials are added
     exactly as 64-bit integer windows; the CTA that arrives last rounds the
     exact sum once into ``dw`` (adding
@@ -479,7 +475,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     with a BF16 ``dw`` or ``compute_grad_weight=False`` (the
     short backward, whose ``dw`` repeats its bits, which need not be the
     deterministic backward's), else up to 512 rows (the exact tiny backward,
-    the bits of the deterministic backward at FlashInfer 2e989556; SM103 runs
+    the bits of the deterministic backward at 2e989556; SM103 runs
     it for an FP32 ``dw`` only).  The fused band (a BF16 ``dw`` or
     ``compute_grad_weight=False`` past 512 rows on SM100 and past 256 rows on
     SM103 up to 1000 rows per SM, on SM107 past 64 up to 256 rows per SM; an
