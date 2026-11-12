@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake backend: chunked large-vocabulary LM-head projection + loss with a
-memory-bounded backward for training on SM100 / SM103 / SM107
-(flashinfer-ai/flashinfer#5680).
+memory-bounded backward for training on SM100 / SM103 / SM107.
 
 Contract
 --------
@@ -201,7 +200,7 @@ zero-gradient row skip through :func:`set_zero_dlogp_min_rows` /
 :func:`set_zero_dlogp_temperature_dz_counted` and the loss entry's zero-weight
 split through :func:`set_zero_weight_min_rows` / :func:`set_zero_weight_loss_mode`.
 This module reads no environment variable.
-FlashInfer's public wrapper (``cake_pplx.cake_lm_head_det_train``) owns the A/B
+The public wrapper (``cake_pplx.cake_lm_head_det_train``) owns the A/B
 environment variables of the first six and passes the resolved values down;
 it leaves the log-probability arms at their defaults.
 """
@@ -1737,7 +1736,7 @@ def _dx_reduce(values: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- valid-row compaction
 
 # The switches below are keyword arguments of the entry points (``None`` = the documented default, the constant each
-# ``*_default()`` returns); this module reads no environment variable.  FlashInfer's public wrapper
+# ``*_default()`` returns); this module reads no environment variable.  The public wrapper
 # (``cake_pplx.cake_lm_head_det_train``) owns the A/B environment variables of these switches and passes the resolved values
 # down.
 

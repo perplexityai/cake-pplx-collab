@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,13 +13,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake chunked LM-head + loss package.
+Public-API tests of the Cake chunked LM-head + loss package.
 
 The stable entry points ``cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_loss`` and
 ``cake_lm_head_det_train_logprob`` are thin wrappers over
 ``cake_pplx._backends.cake_lm_head_det_train.cake_backend``: they carry no experimental
-marking and emit no ``ExperimentalWarning``, accept ``backend="cake"`` only and own FlashInfer's A/B environment variables
-``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` -- a switch keyword left at ``None`` falls back to its
+marking and emit no ``ExperimentalWarning``, accept ``backend="cake"`` only and own the A/B environment variables
+``CAKE_PPLX_LM_HEAD_LOSS_*`` -- a switch keyword left at ``None`` falls back to its
 variable and the resolved value is passed down; the two binding-cache variables are
 read when the module is imported and applied when it first reaches the backend.  The
 tests here cover that wrapper: the (absent) marking, each variable's fallback and parsing, the
@@ -116,7 +116,7 @@ def test_public_api_switch_keywords():
                 name,
             )
             assert params[name].default is None, (fn.__name__, name)
-        assert "FLASHINFER_CAKE_LM_HEAD_LOSS_" in fn.__doc__
+        assert "CAKE_PPLX_LM_HEAD_LOSS_" in fn.__doc__
     for variable in (*ENV_OF.values(), *CACHE_ENVS):
         assert variable in cake_lm_head_det_train_loss.__doc__, variable
     for fn in (
@@ -127,7 +127,7 @@ def test_public_api_switch_keywords():
         assert all(params[name].default is None for name in SWITCHES), fn.__name__
     named = {v for k, v in vars(knobs).items() if k.endswith("_ENV")}
     assert named == set(ENV_OF.values()) | set(CACHE_ENVS)
-    assert all(v.startswith("FLASHINFER_CAKE_LM_HEAD_LOSS_") for v in named)
+    assert all(v.startswith("CAKE_PPLX_LM_HEAD_LOSS_") for v in named)
 
 
 def test_public_api_memory_and_count_keywords(monkeypatch):
@@ -578,9 +578,9 @@ def _require_program():
 
 
 def test_device_env_switches_reach_the_backend(monkeypatch):
-    """Through the public entry on the generated program: ``FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM=0`` moves the
+    """Through the public entry on the generated program: ``CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM=0`` moves the
     per-chunk weight-gradient accumulates back to the caller's stream (one stream entered instead of two on a
-    three-chunk call) and ``FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST=0`` binds the accumulate + flat cast instead of
+    three-chunk call) and ``CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST=0`` binds the accumulate + flat cast instead of
     the fused cast GEMM (its TMA-store form where :func:`dw_cast_tma_rule` routes the short last chunk); an explicit
     keyword wins over the variable; ``loss`` / ``logp`` / ``dX`` / ``dW`` are bitwise (integer views) the same under
     every setting.  The calls pin ``memory_mode="fast"`` (the default call of this shape takes a budget form, whose
@@ -794,7 +794,7 @@ def test_device_public_entry_places_the_gradients(monkeypatch):
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_public_default_step_peak_within_the_head_bytes(monkeypatch, entry):
-    """Through the public entry on the generated program, the default call (no ``memory_mode``) at flashinfer#7545's
+    """Through the public entry on the generated program, the default call (no ``memory_mode``) at the issue's
     shape (H 6144, V 154880, T 16384, a third of the labels ignored, chunk 4096): its training step -- the call that
     binds and one from the remembered binding, forward through a backward that frees the graph, outputs and gradients
     included -- peaks within the bytes of a head that materializes the BF16 logits of the valid rows

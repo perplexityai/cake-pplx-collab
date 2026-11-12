@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2446,7 +2446,7 @@ def select_module(arch: str) -> str:
     if not names:
         raise NotImplementedError(
             f"The generated chunked LM-head + loss program for {arch} is not "
-            "registered in this checkout yet (see flashinfer-ai/flashinfer#5680)"
+            "registered in this checkout yet"
         )
     if len(names) > 1:
         raise NotImplementedError(
@@ -2490,11 +2490,11 @@ def library_name(name: str, stage: str) -> str:
 @functools.cache
 def load_cake_lm_head_det_loss_module(name: str, stage: str):
     """Load (once per record and stage) the generated program of ``stage``: the prebuilt library under
-    ``aot/`` when the package ships it, else FlashInfer's JIT build of its ``build.json`` entry."""
+    ``aot/`` when the package ships it, else the JIT build of its ``build.json`` entry."""
     return cake_build.load_library(library_name(name, stage))
 
 
 def specs_for_arch(arch: str):
     """JIT specs of every ``build.json`` entry of ``arch`` without a prebuilt library (the
-    ``flashinfer.jit.build_jit_specs`` warm-up)."""
+    ahead-of-time warm-up)."""
     return cake_build.jit_specs(arch)

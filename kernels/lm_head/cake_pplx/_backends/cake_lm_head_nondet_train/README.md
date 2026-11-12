@@ -8,8 +8,7 @@ the gradients).  It is the backend of the public module
 (`cake_pplx/cake_lm_head_nondet_train.py`); the deterministic counterpart is
 `cake_pplx.cake_lm_head_det_train`, with the backend
 `cake_pplx._backends.cake_lm_head_det_train` (its README describes
-the shared contract, the kernels and the toolchain rules in full).  Tracking issue
-of the family: https://github.com/flashinfer-ai/flashinfer/issues/5680.
+the shared contract, the kernels and the toolchain rules in full).
 
 The public module is a stable API; this backend package is experimental (its
 own names carry no compatibility guarantee).  SM100 (B200 / GB200) is the
@@ -19,8 +18,8 @@ built for `sm_107a`, with SM103's GEMM tile rule tables except the long chunks'
 3-deep dX operand ring and the logits GEMM's long-chunk raster height; its zero-gradient row skip has a 1946-row floor and
 SM103's two-slice counted dX).  The feature does not participate in automatic
 backend selection, autotuning or trace-apply.  Its libraries are loaded
-prebuilt from `aot/` when the package ships them and JIT-built by FlashInfer
-from `build.json` otherwise (see "Layout of this package").
+prebuilt from `aot/` when the package ships them and JIT-built through the
+package's JIT shim from `build.json` otherwise (see "Layout of this package").
 
 ## Mode rules
 
@@ -61,7 +60,7 @@ The module's entries are `cake_lm_head_nondet_train_loss`,
 `cake_lm_head_nondet_train_logprob`, `cake_lm_head_nondet_train_preload`,
 `cake_lm_head_nondet_train_support_logprob` and
 `cake_lm_head_nondet_train_support_kl`.  They keep the argument checks and the
-`FLASHINFER_CAKE_LM_HEAD_LOSS_*` fallbacks of the switches
+`CAKE_PPLX_LM_HEAD_LOSS_*` fallbacks of the switches
 (`cake_pplx._cake_lm_head_train_knobs`, shared with the deterministic
 module).  The module imports this package lazily, at its first call, and
 imports no deterministic module.  The deterministic entries are
@@ -232,7 +231,7 @@ reports `2 * T * V` for the hidden valid-row count's `[T, V]` buffer) and
 * The public `cake_lm_head_nondet_train_logprob` passes
   `memory_mode="keep_logits"` unchanged to `cake_backend_opt_in`, with a
   `hidden_count` left at `None` passed as `None` (the kept form decides;
-  `False` when `FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT` is `"0"`), not
+  `False` when `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` is `"0"`), not
   resolved to the variable's default `True`, so `set_kept_logits_form`
   reaches public calls.
 
@@ -380,7 +379,7 @@ warps.
 
 ## Switches and environment variables
 
-The switches and the `FLASHINFER_CAKE_LM_HEAD_LOSS_*` variables are those of
+The switches and the `CAKE_PPLX_LM_HEAD_LOSS_*` variables are those of
 the deterministic package (its README's table): every switch is a keyword of
 the entries it affects, `None` selecting the documented default, and the
 package reads no environment variable.  `cake_pplx.cake_lm_head_nondet_train`
@@ -738,8 +737,8 @@ names are gone: importing them fails, and no alias is left.
 
 | Old | New |
 | --- | --- |
-| `flashinfer.chunked_lm_head.chunked_lm_head_{loss,logprob,preload,support_logprob,support_kl}(..., deterministic=False)` | `cake_pplx.cake_lm_head_nondet_train.cake_lm_head_nondet_train_{loss,logprob,preload,support_logprob,support_kl}(...)` |
-| `flashinfer.chunked_lm_head.chunked_lm_head_det_*`, and `chunked_lm_head_*(...)` without `deterministic=False` | `cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_*` (the deterministic module) |
+| `cake_pplx.chunked_lm_head.chunked_lm_head_{loss,logprob,preload,support_logprob,support_kl}(..., deterministic=False)` | `cake_pplx.cake_lm_head_nondet_train.cake_lm_head_nondet_train_{loss,logprob,preload,support_logprob,support_kl}(...)` |
+| `cake_pplx.chunked_lm_head.chunked_lm_head_det_*`, and `chunked_lm_head_*(...)` without `deterministic=False` | `cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_*` (the deterministic module) |
 | package `cake_pplx._backends.cake_lm_head_loss` | package `cake_pplx._backends.cake_lm_head_nondet_train` |
 | `cake_backend.chunked_lm_head_{loss,logprob,logprob_temperature,logprob_keep}`, the same three in `cake_backend_opt_in` | `cake_lm_head_nondet_train_{loss,logprob,logprob_temperature,logprob_keep}` |
 | `cake_backend_opt_in.preload` | `cake_backend_opt_in.cake_lm_head_nondet_train_preload` |
@@ -761,7 +760,7 @@ Unchanged: the internal helpers (`prepare_lm_head_loss`,
 identities (libraries `cake_lm_head_loss_<20 hex>_<arch>`, symbols
 `kernel_cake_lm_head_loss_<20 hex>`, sources `csrc/cake_lm_head_loss/`, the
 registry records `cake_lm_head_loss_sm_10{0,3,7}a`, the ABI `lm_head_loss_v2`)
-and the `FLASHINFER_CAKE_LM_HEAD_LOSS_*` environment variables.  No name of
+and the `CAKE_PPLX_LM_HEAD_LOSS_*` environment variables.  No name of
 the libraries the deterministic package shipped under the `cake_lm_head_loss`
 prefix before its `det` naming is reused.
 
@@ -790,8 +789,8 @@ prefix before its `det` naming is reused.
 * `.gitignore` -- `aot/` (prebuilt libraries and their `build_info.json`
   sidecar, built locally, never tracked).
 
-The package imports only itself, `torch` and `tvm_ffi`; its only `flashinfer`
-import is the JIT fallback of `cake_build.py`.
+The package imports only itself, `torch` and `tvm_ffi`; the JIT fallback of
+`cake_build.py` imports the package's own JIT shim `_cake_pplx_jit.py`.
 
 ## Status
 
@@ -823,8 +822,7 @@ import is the JIT fallback of `cake_build.py`.
   `sm_107a` record registers the `_lc` forms (the cast at the last live
   chunk, the `sm_103a` programs built for `sm_107a`) as well: its skip
   casts at the last live chunk, with the `dW` bits of the counted forms.
-* Temperature of the log-probability entry
-  (https://github.com/flashinfer-ai/flashinfer/issues/7637): the
+* Temperature of the log-probability entry: the
   deterministic package's four temperature forms per architecture (the row
   finalize one program for both) under this package's prefix, on `sm_100a`,
   `sm_103a` and `sm_107a` (the `sm_103a` programs).  The loss entry takes no
@@ -839,8 +837,8 @@ CUDA graph of the prepared runner and the kept logits),
 `test_cake_lm_head_nondet_train_api.py` (the public module),
 `test_cake_lm_head_nondet_train_names.py` (the names of the module and its
 backend objects),
-`test_cake_lm_head_nondet_train_standalone.py` (a copy imports with
-`flashinfer` blocked; the prebuilt path) and
+`test_cake_lm_head_nondet_train_standalone.py` (a copy imports in an
+isolated interpreter; the prebuilt path) and
 `test_cake_lm_head_nondet_train_support.py` (the candidate-support entries).
 Benchmark: `benchmarks/bench_cake_lm_head_nondet_train.py` (deterministic vs
 non-deterministic).

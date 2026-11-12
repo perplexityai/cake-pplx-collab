@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -58,7 +58,7 @@ wrappers: validation of the backend contract, the chunk plans, the workspace,
 launch binding, autograd wrappers and JIT registration live in the
 experimental backend package
 ``cake_pplx._backends.cake_lm_head_nondet_train``, imported on first
-use.  The ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` variables are this wrapper's A/B
+use.  The ``CAKE_PPLX_LM_HEAD_LOSS_*`` variables are this wrapper's A/B
 knobs (``cake_pplx/_cake_lm_head_train_knobs.py``, shared with the
 deterministic module): a switch keyword left at ``None`` falls back to its
 variable, and the resolved value is passed down (except ``hidden_count``
@@ -160,7 +160,7 @@ def cake_lm_head_nondet_train_loss(
 
     See :func:`cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_loss`
     for the computation, the arguments, the switches and their
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_*`` fallbacks, ``memory_mode``,
+    ``CAKE_PPLX_LM_HEAD_LOSS_*`` fallbacks, ``memory_mode``,
     ``num_valid_rows`` and the outputs, except as the module docstring notes
     (the dX reduction, the zero-weight row split and the one-pass call).
 
@@ -302,7 +302,7 @@ def cake_lm_head_nondet_train_logprob(
     ``memory_mode="keep_logits"`` a ``hidden_count`` left at ``None`` is
     passed down as ``None`` (the backend's kept-logits form decides, see
     its ``set_kept_logits_form``) unless
-    ``FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT`` is ``"0"`` (``False``).
+    ``CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT`` is ``"0"`` (``False``).
     """
     if backend != "cake":
         raise ValueError(

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +17,16 @@ Standalone-import tests of the non-deterministic Cake chunked LM-head + loss pac
 
 A copy of ``cake_pplx/_backends/cake_lm_head_nondet_train`` must import
 and reach its host-side checks on its own: under another top-level name, in a
-``python -I`` subprocess with ``flashinfer`` blocked (the form of a vendoring
-gate, ``scripts/check_cake_build_manifests.py --vendored-gate``).  The package
-imports only itself, ``torch`` and ``tvm_ffi`` (#6553 rule 1: nothing of the
-deterministic package or the rest of FlashInfer); the environment switches
+``python -I`` subprocess (the form of a vendoring gate,
+``scripts/check_cake_build_manifests.py --vendored-gate``).  The package
+imports only itself, ``torch`` and ``tvm_ffi`` (nothing of the deterministic
+package); the environment switches
 belong to the stable public entry points
 ``cake_pplx.cake_lm_head_nondet_train.cake_lm_head_nondet_train_loss`` /
 ``cake_lm_head_nondet_train_logprob`` (covered by
 ``test_cake_lm_head_nondet_train_api.py``), so a direct call of the package emits
-no warning, and the only ``flashinfer`` import is the JIT fallback of
-``cake_build.py``.  The prebuilt path: a builder's ``aot/<library>.so`` is the
+no warning, and the JIT fallback of ``cake_build.py`` imports the package's own
+JIT shim ``_cake_pplx_jit.py``.  The prebuilt path: a builder's ``aot/<library>.so`` is the
 library the loader serves first.  CPU-only: no GPU, no generated program and no
 JIT build is needed.
 """
@@ -53,7 +53,7 @@ VENDORED_NAME = "vendored_cake_lm_head_nondet_train"  # the copy's top-level nam
 
 
 # ---------------------------------------------------------------------------
-# A vendored copy, flashinfer blocked
+# A vendored copy in an isolated interpreter
 # ---------------------------------------------------------------------------
 
 
@@ -71,7 +71,6 @@ def _dependency_paths():
 
 _ISOLATED = """
 import importlib
-import importlib.abc
 import os
 import sys
 import warnings
@@ -80,17 +79,6 @@ PKG_ROOT, PKG_NAME = sys.argv[1], sys.argv[2]
 for p in sys.argv[3:]:
     if p not in sys.path:
         sys.path.append(p)
-
-
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, PKG_ROOT)
 
 import torch
@@ -215,26 +203,17 @@ for call in (
     else:
         raise AssertionError("an entry took the deterministic keyword")
 
-leaked = sorted(
-    k
-    for k in sys.modules
-    if (k == "flashinfer" and sys.modules[k] is not None)
-    or k.startswith("flashinfer.")
-)
-assert not leaked, leaked
 print("OK")
 """
 
 
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path):
+def test_vendored_copy_imports_standalone(tmp_path):
     """A copy of the package under another top-level name imports in a ``python -I``
-    subprocess with ``flashinfer`` blocked (meta-path finder plus
-    ``sys.modules["flashinfer"] = None``), resolves the public names of the backend
+    subprocess, resolves the public names of the backend
     and ``cake_support`` and the loader's ``__all__``, raises the host-side
     ``ValueError`` of twelve entry point calls on CPU operands (the temperature
-    checks among them) without emitting a warning of any kind, refuses a
-    ``deterministic`` keyword with ``TypeError``, and loads no ``flashinfer``
-    module."""
+    checks among them) without emitting a warning of any kind, and refuses a
+    ``deterministic`` keyword with ``TypeError``."""
     root = tmp_path / "site"
     shutil.copytree(
         PACKAGE_DIR,
@@ -267,24 +246,13 @@ def _exception_names(expr):
     return [expr.id] if isinstance(expr, ast.Name) else []
 
 
-def _imports_flashinfer(node):
-    if isinstance(node, ast.Import):
-        return any(
-            a.name == "flashinfer" or a.name.startswith("flashinfer.")
-            for a in node.names
-        )
-    if isinstance(node, ast.ImportFrom) and not node.level and node.module:
-        return node.module == "flashinfer" or node.module.startswith("flashinfer.")
-    return False
-
-
 def _imports_jit_shim(node):
     return isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "_cake_pplx_jit"
 
 
-def test_package_imports_no_flashinfer_and_guards_the_jit_shim():
-    """The package imports nothing outside itself: no relative import climbs above
-    the package (``from .. import``), no module imports ``flashinfer``, every import
+def test_package_guards_the_jit_shim():
+    """No relative import of the package climbs above the package
+    (``from .. import``), every import
     of the package's JIT shim (``._cake_pplx_jit``) sits in the body of a ``try``
     with an ``except ImportError`` handler, and exactly one such guarded block
     exists -- the JIT fallback in ``cake_build.py``."""
@@ -304,9 +272,6 @@ def test_package_imports_no_flashinfer_and_guards_the_jit_shim():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            assert not _imports_flashinfer(node), (
-                f"{path.name}:{node.lineno}: flashinfer import"
-            )
             if _imports_jit_shim(node):
                 assert node in guarded, (
                     f"{path.name}:{node.lineno}: JIT shim import outside a "
