@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -687,7 +687,7 @@ def test_lean_passes_knob_bytes_on_the_host() -> None:
     ctx = kp.cake_kda_nondet_train_kcp_build_context(
         part, None, 0, "cpu", 4, sm_count=152
     )
-    fi_kcp = pytest.importorskip("cake_pplx.cake_kda_nondet_train_kcp")
+    kcp_module = pytest.importorskip("cake_pplx.cake_kda_nondet_train_kcp")
     for H in (4, 64):
         p = cake_backend.plan(ctx.T_r, ctx.n_frag, H, ctx.sm_count)
         replay = kp.cake_kda_nondet_train_kcp_workspace_bytes(
@@ -714,14 +714,14 @@ def test_lean_passes_knob_bytes_on_the_host() -> None:
             assert got == default - lean2 + lean, (H, b)
             assert prev is None or got <= prev, (H, b, prev, got)
             assert (
-                fi_kcp.cake_kda_nondet_train_kcp_workspace_bytes(
+                kcp_module.cake_kda_nondet_train_kcp_workspace_bytes(
                     ctx, H=H, local_arena="lean", lean_passes=b
                 )
                 == got
             )
             prev = got
             print(f"LEAN_PASSES_HOST H={H} b={b} bytes={got} replay={replay}")
-        assert fi_kcp.cake_kda_nondet_train_kcp_workspace_bytes(ctx, H=H) == replay
+        assert kcp_module.cake_kda_nondet_train_kcp_workspace_bytes(ctx, H=H) == replay
         # no effect off the lean arena's rows: forward-only workspaces
         assert _lean(
             ctx=ctx, H=H, backward=False, lean_passes=1

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The KDA ``CakeKDADetKcpContext`` is one leaf of FSDP2's input walks (flashinfer issue #7914): the pre-forward hook of every
+The KDA ``CakeKDADetKcpContext`` is one leaf of FSDP2's input walks: the pre-forward hook of every
 ``fully_shard`` module walks each dataclass, dict, list and tuple of the module's arguments twice
 (``collect_grad_tensors`` / ``replace_grad_tensors``), so a context carried in per-layer metadata must not be one.
 The gate is structural: the number of nodes the walk visits is the same with a context of 80 fragments, of 2,048

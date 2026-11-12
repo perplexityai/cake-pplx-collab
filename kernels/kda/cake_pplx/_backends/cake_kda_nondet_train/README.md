@@ -4,7 +4,7 @@ Backend for the packed Kimi Delta Attention (KDA) chunked training forward
 and backward in the GLM-5.3-Flash geometry, the non-deterministic counterpart
 of the deterministic package `cake_pplx._backends.cake_kda_det_train`.
 The public API is the facade `cake_pplx.cake_kda_nondet_train`; this package
-is its backend, internal to FlashInfer.  The feature does not participate in
+is its backend, internal to `cake_pplx`.  The feature does not participate in
 automatic backend selection, autotuning or trace-apply.
 
 The operands, shapes, dtypes, saved set (versions 4 and 2), workspace, arena
@@ -65,8 +65,8 @@ written with the deterministic Function's raw gate arguments after
   run the deterministic package.  A future launch with an unordered reduction
   must raise PyTorch's non-determinism alert immediately before that launch.
 - This package runs the explicit FP32 gate and the raw gate mode
-  (`use_gate_in_kernel=True` with `A_log`, `dt_bias` and `lower_bound`,
-  FlashInfer #7816) under the deterministic package's contract for that mode
+  (`use_gate_in_kernel=True` with `A_log`, `dt_bias` and `lower_bound`)
+  under the deterministic package's contract for that mode
   (its README, "Raw gate mode"): the same operands, stride rule and refusals,
   the 7-tuple `(dq, dk, dv, dbeta, dg, dA_log, ddt_bias)` of `cake_kda_nondet_train_backward`,
   gradients to `g`, `A_log` and `dt_bias` from `cake_kda_nondet`, and one
@@ -79,7 +79,7 @@ written with the deterministic Function's raw gate arguments after
   field names); a backward in the other gate mode or with another
   `lower_bound` is refused.
 - This package runs the in-kernel q / k L2 norm (`use_qk_l2norm_in_kernel=True`,
-  raw `q` / `k` normalized inside the kernels, FlashInfer #7817) in either gate
+  raw `q` / `k` normalized inside the kernels) in either gate
   mode under the deterministic package's contract for it: the same keyword and
   modes (`cake_jit.L2N_MODES`: `"off"`, `"fused"`, and the `"fallback"` test
   route), operands, saved `qk_rstd`, workspace and byte queries.  The mode is
@@ -356,10 +356,10 @@ no l2n stage).
 
 ## Vendoring
 
-The package imports only itself, `torch` and `tvm_ffi`. It imports
-`flashinfer` only on the JIT path, for a library that is not prebuilt under
-`aot/` (`cake_build.py`, and the checkpoint hand-off's toolkit probe in
-`cake_backend.py`). The context-parallel package `cake_kda_nondet_train_kcp`
+The package imports only itself, `torch` and `tvm_ffi`. It imports its JIT
+shim (`_cake_pplx_jit.py`) only on the JIT path, for a library that is not
+prebuilt under `aot/` (`cake_build.py`, and the checkpoint hand-off's toolkit
+probe in `cake_backend.py`). The context-parallel package `cake_kda_nondet_train_kcp`
 requires this package as a sibling directory.
 
 ## Status

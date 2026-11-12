@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ Names of the Cake packed KDA chunked training package (non-deterministic, single
 The single-rank entry points live in ``cake_pplx.cake_kda_nondet_train`` and the package in
 ``cake_pplx._backends.cake_kda_nondet_train``.  The shared check of #8928
 (``tests.cake.test_helpers.cake_mode_names.assert_cake_mode_module``) covers the facade: every public name states
-the mode (``nondet``) right after the op, no entry takes a ``deterministic`` keyword, the facade, the ``flashinfer``
+the mode (``nondet``) right after the op, no entry takes a ``deterministic`` keyword, the facade, the ``cake_pplx``
 top level and the package bind each object under one name only, and the names before this scheme fail at import
 with no alias: the module ``cake_pplx.cake_kda_train``, the package ``cake_pplx._backends.cake_kda_train``
 and the ``chunk_kda*`` / ``ChunkKDAFunction`` / ``Kda*`` / ``kda_train_*`` names.  The same mode-word and keyword

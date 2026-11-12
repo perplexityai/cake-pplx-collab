@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -759,7 +759,7 @@ SINGLE_RANK_NAME = "cake_pplx._backends.cake_kda_det_train"
 
 
 def _manifest_checker():
-    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module (it never imports flashinfer)."""
+    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module."""
     path = REPO / "scripts" / "check_cake_build_manifests.py"
     if not path.is_file():
         pytest.skip(

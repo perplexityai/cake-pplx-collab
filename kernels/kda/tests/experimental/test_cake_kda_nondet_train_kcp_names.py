@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@ Names of the Cake context-parallel (KCP) packed KDA training package (non-determ
 The KCP entry points live in ``cake_pplx.cake_kda_nondet_train_kcp`` and the package in
 ``cake_pplx._backends.cake_kda_nondet_train_kcp``.  The shared check of #8928
 (``tests.cake.test_helpers.cake_mode_names.assert_cake_mode_module``) covers the facade: every public name states the mode
-(``nondet``) right after the op, no entry takes a ``deterministic`` keyword, the facade, the ``flashinfer`` top level,
+(``nondet``) right after the op, no entry takes a ``deterministic`` keyword, the facade, the ``cake_pplx`` top level,
 the package and its modules ``cake_kcp`` / ``cake_kcp_plan`` bind each object under one name only (the backend object
 each facade entry calls included), and the names before this scheme fail at import with no alias: the module
-``cake_pplx.cake_kda_train_kcp``, the package ``flashinfer.experimental.cake_kda_train_kcp`` and its modules, the
+``cake_pplx.cake_kda_train_kcp``, the package ``cake_pplx._backends.cake_kda_train_kcp`` and its modules, the
 package's names before #8928 (``chunk_kda_kcp``, ``WorkspaceKcp``, ``partition_kcp``, ...) and the names before the det
 rename (``KcpWorkspace``, ``chunk_kda_kcp_fwd``, ``kcp_partition``, ...).  The same mode-word and keyword checks run on
 the package.  What the facade does is ``test_cake_kda_nondet_train_kcp_api.py``'s.
@@ -132,7 +132,7 @@ def _backend(module: str):
 
 def test_facade_follows_the_cake_mode_names() -> None:
     # the shared check: the mode word, no ``deterministic`` keyword, each object bound under its facade name only
-    # (the facade, the flashinfer top level, the package and the modules it serves its names from, including the
+    # (the facade, the cake_pplx top level, the package and the modules it serves its names from, including the
     # backend object each entry calls) and the earlier names and package path failing at import
     assert_cake_mode_module(
         kcp_api,

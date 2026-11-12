@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,15 +49,15 @@ recorded as JSON.
 The protocol takes minutes per row, so the default suite skips it.  Run it on
 a compute node::
 
-    FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY=1 \\
-    FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_JSON=/path/raw_gate_accuracy.json \\
+    CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY=1 \\
+    CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_JSON=/path/raw_gate_accuracy.json \\
         pytest tests/experimental/test_cake_kda_det_train_raw_gate_accuracy.py
 
     python tests/experimental/test_cake_kda_det_train_raw_gate_accuracy.py --json /path/raw_gate_accuracy.json [--rows A B]
 
-``FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_ROWS=A,B`` (``--rows``) runs a
+``CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_ROWS=A,B`` (``--rows``) runs a
 subset of the family (``m`` stays the family's: the rows are independent, so
-jobs may split them); ``FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_REQUIRE_FLA=1``
+jobs may split them); ``CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_REQUIRE_FLA=1``
 (``--require-fla``) fails instead of leaving the ``E_F`` arm out, so split jobs
 declare the same ``m`` (and fails when ``FLA_COMMIT`` names another commit than
 the imported checkout's).  A row outside the device's family is an error, not a
@@ -105,10 +105,10 @@ from tests.cake.test_helpers.cake_package import cake_package  # noqa: E402
 cake_backend = cake_package("cake.cake_kda_det_train", "cake_backend")
 cake_jit = cake_package("cake.cake_kda_det_train", "cake_jit")
 
-ENV_RUN = "FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY"
-ENV_JSON = "FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_JSON"
-ENV_ROWS = "FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_ROWS"
-ENV_REQUIRE_FLA = "FLASHINFER_CAKE_KDA_TRAIN_RAW_GATE_ACCURACY_REQUIRE_FLA"
+ENV_RUN = "CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY"
+ENV_JSON = "CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_JSON"
+ENV_ROWS = "CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_ROWS"
+ENV_REQUIRE_FLA = "CAKE_PPLX_KDA_TRAIN_RAW_GATE_ACCURACY_REQUIRE_FLA"
 
 
 def _flag(name: str) -> bool:

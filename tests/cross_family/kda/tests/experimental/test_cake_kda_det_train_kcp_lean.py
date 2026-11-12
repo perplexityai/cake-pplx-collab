@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -277,7 +277,7 @@ def test_route_layout_registration_rules() -> None:
 # The single-rank parity rows: every layout mode of the single-rank module at every tail-pass count it takes and the
 # arena bytes of every arena option, over the architectures, head counts and geometries below (the serial and the
 # segmented routes, the dav rows H 9-15), one text line each; an error is part of the record (its type).  The same
-# rows of the base before the KCP lean layout (FlashInfer main cf6af475fddf6f09d8f958746e33b013f8bc2883) compare equal
+# rows of the base before the KCP lean layout (revision cf6af475fddf6f09d8f958746e33b013f8bc2883) compare equal
 # line for line (the lane's base-versus-branch run of this function on both trees).
 _PARITY_HEADS = (1, 2, 4, 8, 12, 16, 32, 64)
 _PARITY_PACKS = (
@@ -689,7 +689,7 @@ def test_lean_passes_knob_bytes_on_the_host() -> None:
     public byte query forwards both arguments)."""
     part = _part(PROXY_PACK)
     ctx = kp.cake_kda_det_train_kcp_build_context(part, None, 0, "cpu", 4, sm_count=152)
-    fi_kcp = pytest.importorskip("cake_pplx.cake_kda_det_train_kcp")
+    kcp_module = pytest.importorskip("cake_pplx.cake_kda_det_train_kcp")
     for H in (4, 64):
         p = cake_backend.plan(ctx.T_r, ctx.n_frag, H, ctx.sm_count)
         replay = kp.cake_kda_det_train_kcp_workspace_bytes(
@@ -716,14 +716,14 @@ def test_lean_passes_knob_bytes_on_the_host() -> None:
             assert got == default - lean2 + lean, (H, b)
             assert prev is None or got <= prev, (H, b, prev, got)
             assert (
-                fi_kcp.cake_kda_det_train_kcp_workspace_bytes(
+                kcp_module.cake_kda_det_train_kcp_workspace_bytes(
                     ctx, H=H, local_arena="lean", lean_passes=b
                 )
                 == got
             )
             prev = got
             print(f"LEAN_PASSES_HOST H={H} b={b} bytes={got} replay={replay}")
-        assert fi_kcp.cake_kda_det_train_kcp_workspace_bytes(ctx, H=H) == replay
+        assert kcp_module.cake_kda_det_train_kcp_workspace_bytes(ctx, H=H) == replay
         # no effect off the lean arena's rows: forward-only workspaces
         assert _lean(
             ctx=ctx, H=H, backward=False, lean_passes=1

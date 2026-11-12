@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,11 +18,11 @@ Names of the Cake packed KDA chunked training package (deterministic, single ran
 The single-rank entry points live in ``cake_pplx.cake_kda_det_train`` and the package in
 ``cake_pplx._backends.cake_kda_det_train``.  The shared check of #8928
 (``tests.cake.test_helpers.cake_mode_names.assert_cake_mode_module``) covers the facade: every public name states
-the mode (``det``) right after the op, no entry takes ``deterministic=``, the facade, the ``flashinfer`` top
+the mode (``det``) right after the op, no entry takes ``deterministic=``, the facade, the ``cake_pplx`` top
 level and the package bind each object under one name only, and the names before this scheme fail at import
-with no alias: the package path ``flashinfer.experimental.cake_kda_det_train``, the ``chunk_kda_det*`` /
+with no alias: the package path ``cake_pplx.experimental.cake_kda_det_train``, the ``chunk_kda_det*`` /
 ``ChunkKDADetFunction`` / ``KdaDet*`` / ``kda_det_train_*`` names, and the older names before the det rename
-(the module ``flashinfer.kda_train``, the package ``flashinfer.experimental.cake_kda_train``, the helper
+(the module ``cake_pplx.kda_train``, the package ``cake_pplx._backends.cake_kda_train``, the helper
 ``tests.test_helpers.cake_kda_train_reference``).  The same mode-word and keyword checks run on the package.
 This file adds what the shared check does not cover: the facade entries are stable (not experimental), the
 backend objects are defined under their names in ``cake_backend``, the host-plan helpers stay internal, the

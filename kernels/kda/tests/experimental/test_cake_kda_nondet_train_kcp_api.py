@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake non-deterministic context-parallel (KCP) packed KDA training package
+Public-API tests of the Cake non-deterministic context-parallel (KCP) packed KDA training package
 (``cake_pplx._backends.cake_kda_nondet_train_kcp``) and of its facade ``cake_pplx.cake_kda_nondet_train_kcp``,
 device-free.  The facade hands every call to this package with the caller's arguments, also under
 ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only=True``) and without a warning of its own; nothing
@@ -200,7 +200,7 @@ def test_facade_and_package_export_their_names() -> None:
 def test_facade_entries_are_stable_api(
     new: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # #8928: the facade is a stable top-level API (flashinfer_api, not flashinfer_experimental_api): no
+    # #8928: the facade is a stable top-level API (no experimental decorator): no
     # experimental marker, and a call emits no ExperimentalWarning.  Device-free: the backend entry is a recorder.
     fn = getattr(kcp_api, new)
     assert not getattr(fn, "is_experimental", False), new
@@ -1165,7 +1165,7 @@ def test_the_package_reads_no_environment_variable() -> None:
                 if path.name == "cake_build.py":
                     continue  # the shared loader (byte copy of every Cake package's) reads its build cache paths
                 if path.name == "_cake_pplx_jit.py":
-                    continue  # the JIT build shim (replaces flashinfer.jit) reads the toolchain and cache paths
+                    continue  # the JIT build shim reads the toolchain and cache paths
                 raise AssertionError(
                     f"{path.name}: reads the environment ({node.attr})"
                 )

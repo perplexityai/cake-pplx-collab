@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,11 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the Cake deterministic context-parallel (KCP) packed KDA training package
+Public-API tests of the Cake deterministic context-parallel (KCP) packed KDA training package
 (``cake_pplx._backends.cake_kda_det_train_kcp``), device-free: the keywords the entry points of
 ``cake_pplx.cake_kda_det_train_kcp`` forward, and the #8928 names.  The shared check of #8928
 (``tests.cake.test_helpers.cake_mode_names.assert_cake_mode_module``) covers the facade: the mode word right after the
-op, no ``deterministic`` keyword, each object bound under one name only (the facade, the ``flashinfer`` top level,
+op, no ``deterministic`` keyword, each object bound under one name only (the facade, the ``cake_pplx`` top level,
 the package and its modules) and the earlier names and package path failing at import; the package states the
 mode and takes no ``deterministic`` keyword either.  The three entries that take ``**options`` state the options
 in their signatures (keyword-only, the option keys of ``CakeKDADetKcpOptions``), checked against the options.
@@ -199,7 +199,7 @@ def test_facade_entries_carry_the_det_names(new: str) -> None:
 def test_facade_entries_are_stable_api(
     new: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # #8928: the facade is a stable top-level API (flashinfer_api, not flashinfer_experimental_api): no
+    # #8928: the facade is a stable top-level API (no experimental decorator): no
     # experimental marker, and a call emits no ExperimentalWarning.  Device-free: the backend entry is a recorder.
     fn = getattr(kcp_api, new)
     assert not getattr(fn, "is_experimental", False), new
@@ -240,7 +240,7 @@ def test_backend_definitions_carry_the_det_names(module: str, new: str) -> None:
 
 def test_facade_follows_the_cake_mode_names() -> None:
     # the shared check: the mode word, no ``deterministic`` keyword, each object bound under its facade name only
-    # (the facade, the flashinfer top level, the package and the modules it serves its names from, including the
+    # (the facade, the cake_pplx top level, the package and the modules it serves its names from, including the
     # backend object each entry calls) and the earlier names and package path failing at import
     assert_cake_mode_module(
         kcp_api,

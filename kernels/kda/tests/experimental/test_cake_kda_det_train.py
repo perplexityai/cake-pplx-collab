@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 from tests.cake.test_helpers.cake_package import cake_package
 
 # The backend suite names its package once, through the shared alias helper, and imports nothing else from
-# flashinfer: a build that vendors the package under another import path runs it unchanged after pointing the
+# cake_pplx: a build that vendors the package under another import path runs it unchanged after pointing the
 # ``PACKAGES`` entry at its own package.  The public entry points of ``cake_pplx.cake_kda_det_train`` are covered
 # by ``test_cake_kda_det_train_api.py``, the previous names by ``test_cake_kda_det_train_names.py``.
 cake_backend = cake_package("cake.cake_kda_det_train", "cake_backend")
@@ -3731,7 +3731,7 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
             assert (
                 hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"][source]
             ), source
-            assert "by FlashInfer team" in "\n".join(
+            assert "Copyright (c) 2026, NVIDIA CORPORATION." in "\n".join(
                 path.read_text().splitlines()[:3]
             ), source
     expected = {

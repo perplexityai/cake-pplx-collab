@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ its launch, the kernel-parameter -> logical-argument map and the argument plan
 of its ``run`` entry.  What to compile -- sources, digests, nvcc flags -- is
 recorded once in ``build.json`` next to this file; :mod:`.cake_build` serves
 the library from a prebuilt ``aot/`` file when a builder compiled it and
-otherwise through FlashInfer's JIT from the same sources and flags.
+otherwise through the package's JIT shim (``_cake_pplx_jit.py``) from the same sources and flags.
 
 The programs are the nine launches of the KCP composition
 (:data:`PROGRAMS`, the names :mod:`.cake_kcp` passes to :func:`run_program`):
@@ -362,7 +362,7 @@ WALK_HEADS_RULE: dict[str, tuple[tuple[int | None, str], ...]] = {
 
 # Filled mechanically by the exporter (the derived leaves ``kernel_symbol``, ``launch``, ``arg_plan``,
 # ``logical``); the host plan (``program``, ``variant``, ``select_rule``, ``grid_rule``, ``library``, ``arches``)
-# is written by hand.  Every value is a literal: FlashInfer's manifest checker and the exporter read this
+# is written by hand.  Every value is a literal: the manifest checker and the exporter read this
 # file with ``ast.literal_eval``.  Record names are the programs, suffixed with the variant where a program has
 # several records.
 MODULES: dict[str, dict[str, Any]] = {
@@ -1955,14 +1955,14 @@ def library_name(name: str, arch: str) -> str:
 @functools.cache
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``: the prebuilt ``aot/`` library when a
-    builder compiled it, else FlashInfer's JIT build of the same sources and flags (``cake_build.load_library``)."""
+    builder compiled it, else the JIT shim's build of the same sources and flags (``cake_build.load_library``)."""
     return cake_build.load_library(library_name(name, arch))
 
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library of the package's ``build.json`` without a prebuilt file (the
-    KCP programs and the chunk stages they run at the rank's shape; for ahead-of-time warm-up through FlashInfer's
-    ``build_jit_specs``)."""
+    KCP programs and the chunk stages they run at the rank's shape; for ahead-of-time warm-up builds,
+    ``JitSpec.build``)."""
     return cake_build.jit_specs(arch)
 
 
@@ -2169,7 +2169,7 @@ def _test_entry(library: str) -> dict[str, Any]:
 
 
 def test_jit_spec(library: str) -> Any:
-    """FlashInfer's JIT spec of a ``build.test.json`` library, derived exactly as ``cake_build.jit_spec`` derives
+    """The JIT shim's spec of a ``build.test.json`` library, derived exactly as ``cake_build.jit_spec`` derives
     one from ``build.json``: digest-verified sources, ``arch_flags[arch]`` + the entry's ``nvcc_flags`` + the
     ``nvcc_flags_if`` items the local toolkit matches, the closure digest in the spec name."""
     document = test_manifest()

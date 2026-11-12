@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1882,7 +1882,7 @@ class CakeKDANondetKcpContext:
 
     A plain frozen class, not a dataclass: the input walks of FSDP2's ``fully_shard`` hooks descend into every
     dataclass, dict, list and tuple of a module's arguments, so a dataclass context carried in per-layer metadata
-    was walked fragment by fragment on every call (flashinfer-ai/flashinfer#7914); this class is one leaf there.
+    was walked fragment by fragment on every call; this class is one leaf there.
     It keeps the former dataclass's keyword constructor (:attr:`_FIELDS` in order), repr, identity equality and
     ``dataclasses.FrozenInstanceError`` on attribute assignment."""
 
