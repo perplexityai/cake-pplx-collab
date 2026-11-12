@@ -27,12 +27,12 @@ arm was built (the runner's workspace and outputs included; the column the arms 
 ``repeat_bitwise`` (deterministic arms): two further steps give the same bits for ``out``, ``lse`` and every
 gradient.
 
-Rows ``p8949_rope`` / ``p8949_nope``: the flashinfer#8949 repro's problem (T 16384, S 65536, top-k 2048: key 0,
+Rows ``p8949_rope`` / ``p8949_nope``: the long-context repro problem (T 16384, S 65536, top-k 2048: key 0,
 one key from each of 1023 strata of the older prefix, the 1024 most recent keys; generator seed 0, N(0, 1) BF16)
 in the default layout (RoPE) and through the NoPE arms.
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and a cold L2 between iterations, medians
-over ``--steps`` iterations.
+Timing: the non-deterministic script's ``median_ms`` (CUPTI activity tracing through ``torch.profiler``, a cold L2
+between iterations), medians over ``--steps`` iterations.
 
 Usage::
 
@@ -85,12 +85,12 @@ DEFAULT_ROWS = (
     "nope_chunk_4096x269564",
     "p8949_nope",
 )
-# The flashinfer#8949 repro rows: name -> NoPE.
+# The long-context repro rows: name -> NoPE.
 P8949_ROWS = {"p8949_rope": False, "p8949_nope": True}
 
 
 def _p8949_indices(t, s, device, gen):
-    """The #8949 repro's index rows: key 0, one key from each of 1023 strata of the older prefix, the 1024 most
+    """The long-context repro's index rows: key 0, one key from each of 1023 strata of the older prefix, the 1024 most
     recent positions; distinct and causal (query ``i`` sits at position ``s - t + i``)."""
     pos = torch.arange(s - t, s, device=device)
     recent = pos[:, None] - torch.arange(1024, device=device)[None, :]
@@ -109,7 +109,7 @@ def _p8949_indices(t, s, device, gen):
 
 
 def make_p8949_inputs(nope, device, t=16384, s=65536):
-    """The #8949 repro's tensors (generator seed 0, N(0, 1) BF16 in the repro's draw order) in the input types of
+    """The long-context repro's tensors (generator seed 0, N(0, 1) BF16 in the repro's draw order) in the input types of
     the non-deterministic script (every slot valid: ``topk_length = 2048``)."""
     device = torch.device(device)
     gen = torch.Generator(device=device).manual_seed(0)

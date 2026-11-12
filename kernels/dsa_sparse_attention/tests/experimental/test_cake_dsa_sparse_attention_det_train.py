@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -958,7 +958,7 @@ def test_nope_runner_graph_replays_bit_for_bit(accumulate):
 
 
 # ---------------------------------------------------------------------------
-# Accuracy against FP64 at the issue shapes and on adversarial inputs, the recomputation of flagged rows,
+# Accuracy against FP64 at the repro shapes and on adversarial inputs, the recomputation of flagged rows,
 # non-finite inputs and host synchronization (GPU, needs the registered backward stages)
 # ---------------------------------------------------------------------------
 
@@ -1049,7 +1049,7 @@ def _check_nope_accuracy(case, dq, dkv, ref, *, nondet=None, dq_bitwise=False):
 
 
 def _p8949_indices(t, s, gen):
-    """The flashinfer#8949 repro's index rows: key 0, one key from each of 1023 strata of the older prefix and the
+    """The long-context repro's index rows: key 0, one key from each of 1023 strata of the older prefix and the
     1024 most recent positions (query ``i`` sits at position ``s - t + i``); distinct and causal."""
     pos = torch.arange(s - t, s, device="cuda")
     recent = pos[:, None] - torch.arange(1024, device="cuda")[None, :]
@@ -1068,7 +1068,7 @@ def _p8949_indices(t, s, gen):
 
 
 def _p8949_problem(nope, t=1024, s=8192):
-    """The flashinfer#8949 repro's tensors (generator seed 0, N(0, 1) BF16 in the repro's draw order) at the
+    """The long-context repro's tensors (generator seed 0, N(0, 1) BF16 in the repro's draw order) at the
     accuracy shape ``T = 1024``, ``S = 8192`` (top-k 2048, every slot valid)."""
     gen = torch.Generator(device="cuda").manual_seed(0)
 
@@ -1088,7 +1088,7 @@ def _p8949_problem(nope, t=1024, s=8192):
 
 
 def test_accuracy_issue_8949_shape():
-    """flashinfer#8949's accuracy shape (T 1024, S 8192, its index generator): every gradient within the floors and
+    """The long-context repro's accuracy shape (T 1024, S 8192, its index generator): every gradient within the floors and
     the fixed gates, the BF16 and FP32 dK/dV forms both; adding into a zeroed ``dkv_acc`` gives the FP32 form's
     bits (``+0.0 + v = v``)."""
     _require_program(backward=True)
@@ -1150,7 +1150,7 @@ def _glm_dst_map(num_kv: int) -> tuple[torch.Tensor, int]:
 
 
 def test_accuracy_issue_8946_glm52_packed_dkv_acc_with_map():
-    """flashinfer#8946's GLM-5.2 workload form: packed documents (context-parallel tails of longer prefixes), top-k
+    """The GLM-5.2 workload form: packed documents (context-parallel tails of longer prefixes), top-k
     2048, the FP32 ``dkv_acc`` addressed through ``dkv_dst_map`` with repeated destination rows.  ``dq`` within the
     floors and gates; ``dkv_acc`` (zeroed) against the FP64 gradient mapped by ``index_add_`` within the gates and
     the mapped BF16 floor; repeats bit for bit."""
@@ -1192,7 +1192,7 @@ def test_accuracy_issue_8946_glm52_packed_dkv_acc_with_map():
 
 
 def test_accuracy_issue_8946_glm53_flash_nope():
-    """flashinfer#8946's GLM-5.3-Flash NoPE form: the pooled index structure (four-token pools, 2176 slots), scale
+    """The GLM-5.3-Flash NoPE form: the pooled index structure (four-token pools, 2176 slots), scale
     1/16, fresh ``dkv`` and a zeroed ``dkv_acc`` (the same bits)."""
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
     inp = make_nope_inputs([2048, 2048], [8192, 4096], seed=SEED + 21)

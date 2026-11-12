@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# Backend package of ``cake_pplx.cake_dsa_sparse_attention_det_train`` (issue #8928): native 64-query-head
+# Backend package of ``cake_pplx.cake_dsa_sparse_attention_det_train``: native 64-query-head
 # DeepSeek Sparse Attention (top-k sparse MLA, absorbed queries) training forward and backward on SM100 / SM103 /
-# SM107 (flashinfer-ai/flashinfer#5657, tracker #4254), the deterministic package: every output repeats bit for bit
+# SM107, the deterministic package: every output repeats bit for bit
 # for the same inputs, architecture and package version (the dK / dV gradients accumulate as integers on per-row
 # power-of-two grids), and nothing raises or warns under ``torch.use_deterministic_algorithms(True)``.  The stable
 # entry points are ``cake_dsa_sparse_attention_det``, ``cake_dsa_sparse_attention_det_varlen``,

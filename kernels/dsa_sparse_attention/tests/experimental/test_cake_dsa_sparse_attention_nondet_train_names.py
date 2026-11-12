@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Public names of the Cake non-deterministic DSA sparse-attention training package (FlashInfer issue #8928).
+Public names of the Cake non-deterministic DSA sparse-attention training package.
 
 The module names the mode: the entry-point module (a stable API) ``cake_pplx.cake_dsa_sparse_attention_nondet_train``
 and its backend package ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train``.  Every public name of
@@ -45,8 +45,7 @@ pytestmark = pytest.mark.cpu_only
 FACADE = "cake_pplx.cake_dsa_sparse_attention_nondet_train"
 PACKAGE = "cake_pplx._backends.cake_dsa_sparse_attention_nondet_train"
 BACKEND = f"{PACKAGE}.cake_backend"
-# the modules before the rename (flashinfer.dsa_sparse_attention, flashinfer.experimental.cake_dsa_train) under the
-# cake_pplx prefix
+# the modules before the rename (dsa_sparse_attention, cake_dsa_train) under the cake_pplx prefix
 REMOVED_MODULES = (
     "cake_pplx.dsa_sparse_attention",
     "cake_pplx._backends.cake_dsa_train",
@@ -215,9 +214,8 @@ def test_old_names_are_gone(module_name: str) -> None:
 
 
 def test_entry_point_module_imports_no_backend() -> None:
-    """In a fresh interpreter, importing the entry-point module imports nothing of the backend package (the
-    containment rules of flashinfer/experimental/README.md); the first access of a re-exported autograd Function
-    imports it.  ``import cake_pplx`` (the namespace) imports neither."""
+    """In a fresh interpreter, importing the entry-point module imports nothing of the backend package; the first
+    access of a re-exported autograd Function imports it.  ``import cake_pplx`` (the namespace) imports neither."""
 
     code = f"""
 import sys
@@ -237,7 +235,7 @@ assert {BACKEND!r} in sys.modules
 
 
 def test_shared_mode_name_checks() -> None:
-    """The shared #8928 checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
+    """The shared naming checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
     and its place in every public name, no ``deterministic`` keyword, each object bound only under its own name in the
     entry-point module, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``, and the modules and names before
     the rename failing at import in a fresh interpreter."""

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,16 +13,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-flashinfer public-API tests of the CAKE DSA sparse-attention training package
+Public-API tests of the CAKE DSA sparse-attention training package
 (``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train``).
 
-The backend suite ``test_cake_dsa_sparse_attention_nondet_train.py`` imports only the package.  This file covers what needs flashinfer
-itself: the stable entry points of ``cake_pplx.cake_dsa_sparse_attention_nondet_train`` (``cake_dsa_sparse_attention_nondet``,
+The backend suite ``test_cake_dsa_sparse_attention_nondet_train.py`` imports only the package.  This file covers what needs the
+public entry-point module: the stable entry points of ``cake_pplx.cake_dsa_sparse_attention_nondet_train`` (``cake_dsa_sparse_attention_nondet``,
 ``cake_dsa_sparse_attention_nondet_varlen`` and the NoPE pair: their stable-API marking, the arguments they forward,
 autograd, the varlen glue through them and their behaviour under ``torch.use_deterministic_algorithms``) and the
 environment variables the wrapper resolves into the package's keyword switches --
-``FLASHINFER_CAKE_DSA_DKV_DIRECT`` (``dkv_direct``), ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` (``check_dst_map``) and
-``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` (``BINDING_CACHE.configure``).  The helpers shared with the
+``CAKE_PPLX_DSA_DKV_DIRECT`` (``dkv_direct``), ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (``check_dst_map``) and
+``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` (``BINDING_CACHE.configure``).  The helpers shared with the
 backend suite are repeated here: test modules do not import one another.
 """
 
@@ -364,7 +364,7 @@ def _non_causal_local_indices(inp, gen, *, masked_docs=()):
 
 
 def test_public_api_is_a_stable_api():
-    """The entry points are stable APIs (issue #8928): not marked experimental, and the docstring of every entry
+    """The entry points are stable APIs: not marked experimental, and the docstring of every entry
     point states its behaviour under ``torch.use_deterministic_algorithms``."""
     for fn in (
         cake_dsa_sparse_attention_nondet,
@@ -431,17 +431,17 @@ def test_zero_query_rows_return_empty_outputs_without_binding(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Environment variables of the flashinfer wrapper (the backend takes keywords only)
+# Environment variables of the public wrapper (the backend takes keywords only)
 # ---------------------------------------------------------------------------
 
 
 def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
-    """``FLASHINFER_CAKE_DSA_DKV_DIRECT`` is read by the public entry when ``dkv_direct`` is ``None``: unset, blank or
+    """``CAKE_PPLX_DSA_DKV_DIRECT`` is read by the public entry when ``dkv_direct`` is ``None``: unset, blank or
     ``auto`` resolve to ``None`` (the record's size rule), ``1`` to ``True`` (the direct path whenever the program
     registers the natural stages), ``0`` to ``False`` (the cast's accumulate path); any other value raises
     ``ValueError`` naming the variable before the backend is reached."""
     env = public_api.DKV_DIRECT_ENV
-    assert env == "FLASHINFER_CAKE_DSA_DKV_DIRECT"
+    assert env == "CAKE_PPLX_DSA_DKV_DIRECT"
     resolve = public_api._dkv_direct_from_environment
     monkeypatch.delenv(env, raising=False)
     assert resolve() is None
@@ -479,7 +479,7 @@ def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
 
 
 def test_dkv_direct_environment_selects_the_backward_path(monkeypatch):
-    """Through the public entry with ``dkv_acc`` and S >= 4 T: ``FLASHINFER_CAKE_DSA_DKV_DIRECT=0`` plans the cast
+    """Through the public entry with ``dkv_acc`` and S >= 4 T: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the cast
     path, ``1`` and ``auto`` the direct path (the record's rule picks it at S / T = 8), the three accumulate the same
     gradients, and an explicit ``dkv_direct`` keyword wins over the variable."""
     _require_direct_program()
@@ -527,12 +527,12 @@ def test_dkv_direct_environment_selects_the_backward_path(monkeypatch):
 
 
 def test_check_dst_map_environment_is_resolved_by_the_public_entry(monkeypatch):
-    """``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` is read by the public entry when ``check_dst_map`` is ``None``: unset,
+    """``CAKE_PPLX_DSA_CHECK_DST_MAP`` is read by the public entry when ``check_dst_map`` is ``None``: unset,
     empty or ``0`` leave the values of ``dkv_dst_map`` unchecked (the kernel does not range-check the map), anything
     else validates them in the backward and raises ``ValueError`` on a violation; an explicit keyword wins.  A call
     without query rows runs that validation on host tensors without launching."""
     env = public_api.CHECK_DST_MAP_ENV
-    assert env == "FLASHINFER_CAKE_DSA_CHECK_DST_MAP"
+    assert env == "CAKE_PPLX_DSA_CHECK_DST_MAP"
     q, kv, idx = _host_inputs(total_q=0, total_k=3, topk=5)
     ql, qr, kl, kr = (
         q[..., :D_LATENT],
@@ -579,7 +579,7 @@ def test_check_dst_map_environment_is_resolved_by_the_public_entry(monkeypatch):
 def test_check_dst_map_environment_checks_the_map_before_the_backward_launches(
     monkeypatch,
 ):
-    """On the device, ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP=1`` makes the public entry's backward validate the map it
+    """On the device, ``CAKE_PPLX_DSA_CHECK_DST_MAP=1`` makes the public entry's backward validate the map it
     is about to accumulate through: an in-range identity map passes and the step accumulates the same gradients as
     the unchecked step (the check is host validation), an out-of-range row raises ``ValueError`` from the backward."""
     _require_program(backward=True)
@@ -614,12 +614,12 @@ def test_check_dst_map_environment_checks_the_map_before_the_backward_launches(
 
 
 def test_binding_cache_capacity_environment_configures_the_backend_cache(monkeypatch):
-    """``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` is read when :mod:`cake_pplx.cake_dsa_sparse_attention_nondet_train` is
+    """``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` is read when :mod:`cake_pplx.cake_dsa_sparse_attention_nondet_train` is
     imported (a malformed value fails there, naming the variable) and applied to the backend's ``BINDING_CACHE``
     through ``configure`` when the module first reaches the backend (the import itself stays deferred); unset or
     blank leaves the configured capacity alone."""
     env = public_api.BINDING_CACHE_CAPACITY_ENV
-    assert env == "FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY"
+    assert env == "CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY"
     cache = cake_backend.BINDING_CACHE
     before = cache.capacity
     try:
@@ -1364,8 +1364,8 @@ def test_nope_zero_query_rows_return_empty_outputs_without_binding(monkeypatch):
 def test_nope_public_entries_resolve_the_environment_and_reject_other_backends(
     monkeypatch,
 ):
-    """The NoPE entries map the same variables as the rope entries (``FLASHINFER_CAKE_DSA_DKV_DIRECT`` into
-    ``dkv_direct``, ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` into ``check_dst_map``) and refuse another backend
+    """The NoPE entries map the same variables as the rope entries (``CAKE_PPLX_DSA_DKV_DIRECT`` into
+    ``dkv_direct``, ``CAKE_PPLX_DSA_CHECK_DST_MAP`` into ``check_dst_map``) and refuse another backend
     before reaching the package; the backend itself reads no variable."""
     q, kv, idx = _nope_host_inputs()
     cu_q = torch.tensor([0, 8], dtype=torch.int32)
@@ -1899,7 +1899,7 @@ def test_rope_varlen_entry_captures_into_a_cuda_graph():
 
 
 # ---------------------------------------------------------------------------
-# torch.use_deterministic_algorithms (issue #8928): this non-deterministic package raises PyTorch's alert at its
+# torch.use_deterministic_algorithms: this non-deterministic package raises PyTorch's alert at its
 # backward (the dK / dV FP32 atomics) and never at the forward; with warn_only=True it warns and runs its own
 # backward (there is no other package to fall back to)
 # ---------------------------------------------------------------------------

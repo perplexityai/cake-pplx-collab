@@ -2,9 +2,9 @@
 
 Every CAKE backend suite (``tests/experimental/test_cake_<package>.py``, ``tests/norm/test_cake_rmsnorm_det_train.py``, ``tests/norm/test_cake_rmsnorm_nondet_train.py``,
 ``tests/mhc/test_cake_mhc_det_train.py``, ``tests/experimental/test_mok_*.py``) imports its package through :func:`cake_package` and imports nothing else from
-flashinfer; the flashinfer public-API tests of a package live in its ``test_cake_<package>_api.py`` sibling.  A build
+cake_pplx; the public-API tests of a package live in its ``test_cake_<package>_api.py`` sibling.  A build
 that vendors a package under another import path runs the backend suite unchanged after pointing the entry of
-:data:`PACKAGES` at its own package (flashinfer issue #6553, ask 9).
+:data:`PACKAGES` at its own package.
 """
 
 from __future__ import annotations

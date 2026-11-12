@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -392,5 +392,5 @@ def library_name(stage: str, arch: str, program: str = PROGRAM) -> str:
 @functools.cache
 def load_cake_dsa_train_module(stage: str, arch: str, program: str = PROGRAM):
     """The loaded library of ``stage`` of ``program`` on ``arch``: prebuilt from ``aot/``
-    when the package ships it, otherwise JIT-built by FlashInfer from ``build.json``."""
+    when the package ships it, otherwise JIT-built through the package's JIT shim from ``build.json``."""
     return cake_build.load_library(library_name(stage, arch, program))

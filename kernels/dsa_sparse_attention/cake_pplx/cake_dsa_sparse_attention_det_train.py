@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -72,9 +72,8 @@ from ._cake_pplx_api_dsa_sparse_attention import cake_api
 # of the backend contract, the workspace, launch binding, autograd wrappers and
 # JIT registration live in
 # cake_pplx._backends.cake_dsa_sparse_attention_det_train, which this
-# core module imports on first use only (the containment rules of
-# flashinfer/experimental/README.md): importing this module loads nothing from
-# the experimental tree.  The backend takes every switch as a keyword argument
+# core module imports on first use only: importing this module loads nothing
+# from the backend package.  The backend takes every switch as a keyword argument
 # and reads no environment variable; the variables below are this module's
 # knobs, resolved here and passed down.
 
@@ -99,22 +98,22 @@ _FROM_BACKEND = (
 
 # Unset, empty or ``0`` (default): the values of ``dkv_dst_map`` are not
 # checked; anything else validates them on every backward (one device sync).
-CHECK_DST_MAP_ENV = "FLASHINFER_CAKE_DSA_CHECK_DST_MAP"
+CHECK_DST_MAP_ENV = "CAKE_PPLX_DSA_CHECK_DST_MAP"
 # A positive integer: the capacity of the backend's binding cache (64 by
 # default).  Read when this module is imported, applied when it first reaches
 # the backend.
-BINDING_CACHE_CAPACITY_ENV = "FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY"
+BINDING_CACHE_CAPACITY_ENV = "CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY"
 
 
 def _check_dst_map_from_environment() -> bool:
-    """``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` as the backend's ``check_dst_map``
+    """``CAKE_PPLX_DSA_CHECK_DST_MAP`` as the backend's ``check_dst_map``
     keyword: unset, empty or ``0`` is ``False`` (default), anything else
     ``True``."""
     return os.environ.get(CHECK_DST_MAP_ENV, "0") not in ("", "0")
 
 
 def _binding_cache_capacity_from_environment() -> Optional[int]:
-    """``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` as a positive integer,
+    """``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` as a positive integer,
     or ``None`` when unset or blank (the backend's configured capacity stays).
     Anything else raises ``ValueError``."""
     raw = os.environ.get(BINDING_CACHE_CAPACITY_ENV)
@@ -253,7 +252,7 @@ def cake_dsa_sparse_attention_det(
         ``[0, S_dst)``) on every backward, at the cost of one device
         synchronization, raising ``ValueError`` on a violation (skipped during
         CUDA graph capture).  ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP``: unset, empty or ``0`` (its
+        ``CAKE_PPLX_DSA_CHECK_DST_MAP``: unset, empty or ``0`` (its
         default) means no check, anything else enables it.  ``True`` /
         ``False`` decide explicitly and ignore the variable.
 
@@ -283,7 +282,7 @@ def cake_dsa_sparse_attention_det(
     outputs
     (``cake_pplx._backends.cake_dsa_sparse_attention_det_train.cake_backend.BINDING_CACHE``, 64
     bindings by default, least recently used first out;
-    ``FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY`` -- a positive integer,
+    ``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` -- a positive integer,
     read when this module is imported -- sets the capacity through
     ``BINDING_CACHE.configure(capacity=...)``).  No host synchronization
     unless ``check_dst_map`` asks for one.
@@ -371,7 +370,7 @@ def cake_dsa_sparse_attention_det_varlen(
         validated, without effect.
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`: ``None`` (default) reads
-        ``FLASHINFER_CAKE_DSA_CHECK_DST_MAP`` (unset, empty or ``0`` = no
+        ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (unset, empty or ``0`` = no
         check); ``True`` validates the values of ``dkv_dst_map`` on every
         backward, ``False`` never does.
     """

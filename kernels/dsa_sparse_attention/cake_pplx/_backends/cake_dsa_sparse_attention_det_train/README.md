@@ -3,18 +3,17 @@
 Backend package of `cake_pplx.cake_dsa_sparse_attention_det_train`, the
 deterministic package of the native 64-query-head DeepSeek Sparse Attention
 training kernels (top-k sparse MLA with absorbed queries; 64 heads, 512 latent +
-64 rope query/key dimensions, 512 value dimensions).  Tracking issue:
-flashinfer-ai/flashinfer#5657.
+64 rope query/key dimensions, 512 value dimensions).
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_det_train` are stable
 APIs; this backend package is experimental (no compatibility guarantee for its
 own helpers).  The libraries compile for `sm_100a`, `sm_103a` and `sm_107a`
 from the same sources.  The feature does not participate in automatic backend
 selection, autotuning or trace-apply.  Its libraries are loaded prebuilt from
-`aot/` when the package ships them and JIT-built by FlashInfer from
-`build.json` otherwise (see "Layout of this package").
+`aot/` when the package ships them and JIT-built through the package's JIT
+shim from `build.json` otherwise (see "Layout of this package").
 
-## Mode and names (flashinfer-ai/flashinfer#8928)
+## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
 keyword.  This is the `det` package: every output repeats bit for bit for the
@@ -39,8 +38,8 @@ The entries take the arguments of the non-deterministic entries.
 `key_passes` and `num_segments` select the key-range passes of the rope
 backward (see below); `dkv_direct` is accepted and validated as there and has
 no effect: the accumulation into `dkv_acc` has one form.  The facade reads
-`FLASHINFER_CAKE_DSA_CHECK_DST_MAP` and
-`FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY` (as the non-deterministic
+`CAKE_PPLX_DSA_CHECK_DST_MAP` and
+`CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` (as the non-deterministic
 facade does, for this package's own cache); the backend reads no environment
 variable.
 
@@ -222,7 +221,7 @@ zeroes them while it reads `o_lo`).
   `forward()`; a second `backward()` raises outside graph capture.
 * The kernels do not range-check `dkv_dst_map`; a value outside `[0, S_dst)`
   writes outside the region.  `check_dst_map=True` (or
-  `FLASHINFER_CAKE_DSA_CHECK_DST_MAP`) validates the values on every backward
+  `CAKE_PPLX_DSA_CHECK_DST_MAP`) validates the values on every backward
   at the cost of one device synchronization; the check is skipped during CUDA
   graph capture.
 
@@ -314,7 +313,8 @@ before either launch.
   `cake-build/1`): one entry per `<library>_<arch>` with its translation units,
   digests, nvcc flags, closure digest and `aot/<name>.so` path.
   `cake_build.load_library(name)` loads the prebuilt library when `aot/` holds
-  it and otherwise JIT-builds the entry through FlashInfer.  `aot/` is never
+  it and otherwise JIT-builds the entry through the package's JIT shim
+  (`_cake_pplx_jit.py`).  `aot/` is never
   tracked (`.gitignore`).
 * `cake_launch.py` -- generated positional launchers and grid functions over
   the kernels' own argument names (`STAGE_ARGS` / `LAUNCH` / `GRID` keyed by
@@ -323,7 +323,7 @@ before either launch.
   index offsetting, the prepared runners, the autograd Functions and the eager
   entry points.
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include,
-  shipped by the export so the package compiles without FlashInfer's `csrc/`.
+  shipped with the package so that it compiles from its own `csrc/` alone.
 * `csrc/cake_dsa_h64_det_train/` -- generated kernel and binding translation
   units, one pair per library, compiled once per library and architecture
   (`.clang-format` disables formatting: the sources are identity-checked by
@@ -331,7 +331,8 @@ before either launch.
   non-deterministic package's forward under this package's program names.
 
 The package imports only itself, `torch` and `tvm_ffi`; `cake_build.py`
-reaches FlashInfer only for the JIT fallback (flashinfer-ai/flashinfer#6553).
+imports the package's JIT shim (`_cake_pplx_jit.py`) only for the JIT
+fallback.
 
 ## Status
 
