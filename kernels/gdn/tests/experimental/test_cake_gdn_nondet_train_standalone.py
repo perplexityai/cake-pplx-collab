@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,10 @@ Standalone-import tests of the Cake non-deterministic GDN chunked-training packa
 (``cake_pplx._backends.cake_gdn_nondet_train``).
 
 A copy of the package directory must import and reach its host-side checks on its own: under another top-level
-name, in a ``python -I`` subprocess with ``flashinfer`` blocked (the form of a vendoring gate,
+name, in a ``python -I`` subprocess (the form of a vendoring gate,
 ``scripts/check_cake_build_manifests.py --vendored-gate``), with its manifest read by its own loader.  The package
-imports only itself, ``torch`` and ``tvm_ffi`` and nothing from ``flashinfer``: the JIT fallback of ``cake_build.py``
-imports the package's own JIT shim ``_cake_pplx_jit.py`` (the stand-in for ``flashinfer.jit``), the package reads no
+imports only itself, ``torch`` and ``tvm_ffi``: the JIT fallback of ``cake_build.py``
+imports the package's own JIT shim ``_cake_pplx_jit.py``, the package reads no
 environment variable outside that shim (every control is a keyword argument), and the backend test
 files of the package import it through ``tests.cake.test_helpers.cake_package`` only, so a vendoring build runs them
 against its own copy.  The facade ``cake_pplx.cake_gdn_nondet_train`` is covered by
@@ -59,7 +59,7 @@ VENDORED_NAME = (
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# A vendored copy, flashinfer blocked
+# A vendored copy
 
 
 def _dependency_paths() -> list[str]:
@@ -73,7 +73,6 @@ def _dependency_paths() -> list[str]:
 
 _ISOLATED = """
 import importlib
-import importlib.abc
 import os
 import sys
 import warnings
@@ -82,17 +81,6 @@ PKG_ROOT, PKG_NAME = sys.argv[1], sys.argv[2]
 for p in sys.argv[3:]:
     if p not in sys.path:
         sys.path.append(p)
-
-
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, PKG_ROOT)
 
 import torch
@@ -133,21 +121,14 @@ with warnings.catch_warnings(record=True) as rec:
         else:
             raise AssertionError("the entry took deterministic=")
 assert not rec, [f"{w.category.__name__}: {w.message}" for w in rec]
-
-leaked = sorted(
-    k for k in sys.modules if (k == "flashinfer" and sys.modules[k] is not None) or k.startswith("flashinfer.")
-)
-assert not leaked, leaked
 print("OK")
 """
 
 
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path) -> None:
-    """A copy of the package under another top-level name imports in a ``python -I`` subprocess with ``flashinfer``
-    blocked (meta-path finder plus ``sys.modules["flashinfer"] = None``), resolves its four names and its modules,
-    reads its ``cake-build/1`` manifest with its own loader, refuses host operands with ``ValueError`` and a
-    ``deterministic`` keyword with ``TypeError`` without a warning of any kind, and loads no ``flashinfer``
-    module."""
+def test_vendored_copy_imports_standalone(tmp_path) -> None:
+    """A copy of the package under another top-level name imports in a ``python -I`` subprocess, resolves its four
+    names and its modules, reads its ``cake-build/1`` manifest with its own loader, and refuses host operands with
+    ``ValueError`` and a ``deterministic`` keyword with ``TypeError`` without a warning of any kind."""
     root = tmp_path / "site"
     shutil.copytree(
         PACKAGE_DIR,
@@ -179,22 +160,11 @@ def _exception_names(expr) -> list[str]:
     return [expr.id] if isinstance(expr, ast.Name) else []
 
 
-def _flashinfer_import(node) -> bool:
-    if isinstance(node, ast.Import):
-        return any(
-            a.name == "flashinfer" or a.name.startswith("flashinfer.")
-            for a in node.names
-        )
-    if isinstance(node, ast.ImportFrom) and not node.level and node.module:
-        return node.module == "flashinfer" or node.module.startswith("flashinfer.")
-    return False
-
-
 def _python_files() -> list[Path]:
     return sorted(PACKAGE_DIR.glob("*.py"))
 
 
-# The package's JIT shim: the stand-in for ``flashinfer.jit`` (which lived outside the package upstream).
+# The package's JIT shim.
 JIT_SHIM = "_cake_pplx_jit"
 
 
@@ -203,9 +173,8 @@ def _jit_shim_import(node) -> bool:
 
 
 def test_package_imports_its_jit_shim_only_in_the_jit_fallback() -> None:
-    """No relative import climbs above the package, nothing imports ``flashinfer``, and every import of the JIT shim
-    sits in the body of a ``try`` with an ``except ImportError`` handler: exactly one such block, the JIT fallback of
-    ``cake_build.py`` (upstream, the same block imported ``flashinfer.jit``)."""
+    """No relative import climbs above the package, and every import of the JIT shim sits in the body of a ``try``
+    with an ``except ImportError`` handler: exactly one such block, the JIT fallback of ``cake_build.py``."""
     guards: dict[str, set[int]] = {}
     for path in _python_files():
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -222,7 +191,6 @@ def test_package_imports_its_jit_shim_only_in_the_jit_fallback() -> None:
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            assert not _flashinfer_import(node), f"{path.name}:{node.lineno}: flashinfer import"
             if _jit_shim_import(node):
                 assert node in guarded, (
                     f"{path.name}:{node.lineno}: JIT shim import outside a try/except ImportError"
@@ -235,7 +203,7 @@ def test_package_imports_its_jit_shim_only_in_the_jit_fallback() -> None:
 
 def test_the_package_reads_no_environment_variable() -> None:
     """Every control is a keyword argument: no module of the package reads ``os.environ`` or ``os.getenv``.  The JIT
-    shim is the exception: like ``flashinfer.jit`` it reads the toolkit and cache locations (``CUDA_HOME``,
+    shim is the exception: it reads the toolkit and cache locations (``CUDA_HOME``,
     ``CAKE_PPLX_CACHE_DIR``), never a kernel control."""
     offenders = []
     for path in _python_files():
@@ -258,17 +226,13 @@ def test_the_package_reads_no_environment_variable() -> None:
 
 @pytest.mark.parametrize("name", BACKEND_TESTS)
 def test_backend_tests_import_the_package_through_the_alias_helper(name: str) -> None:
-    """A backend test file imports nothing from ``flashinfer`` itself: it names its package through
-    ``tests.cake.test_helpers.cake_package``, so a vendoring build that points the helper at its own copy runs it
-    unchanged (the facade's tests live in ``test_cake_gdn_nondet_train_api.py``)."""
+    """A backend test file names its package through ``tests.cake.test_helpers.cake_package``, so a vendoring build
+    that points the helper at its own copy runs it unchanged (the facade's tests live in
+    ``test_cake_gdn_nondet_train_api.py``)."""
     path = TESTS_DIR / name
     if not path.is_file():
         pytest.skip(f"{name} is not in this tree")
     tree = ast.parse(path.read_text(), filename=str(path))
-    offenders = [
-        f"{name}:{node.lineno}" for node in ast.walk(tree) if _flashinfer_import(node)
-    ]
-    assert not offenders, offenders
     helper = [
         node
         for node in ast.walk(tree)

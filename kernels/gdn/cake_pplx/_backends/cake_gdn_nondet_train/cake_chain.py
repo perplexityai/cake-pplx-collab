@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -5808,7 +5808,7 @@ class CakeGDNNondetFunction(torch.autograd.Function):
 # --------------------------------------------------------------------------- #
 # q / k / v as the head views of one packed row: one autograd input, one packed gradient row
 # --------------------------------------------------------------------------- #
-# The customer layout (FlashInfer #7074): one BF16 row [..., T, (2 H + HV) x 128] per token, q / k / v its head views
+# The customer layout: one BF16 row [..., T, (2 H + HV) x 128] per token, q / k / v its head views
 # (``row.split((H * 128, H * 128, HV * 128), -1)``, each viewed as [B, T, heads, 128]).  Run on the views, autograd
 # would return dq / dk / dv as three tensors and the split's backward would copy them into a new row gradient.  With
 # the packed row as the one input instead, the backward allocates the row gradient and the cluster tails write dq /

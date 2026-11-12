@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ the same bits as with it off; every launch is fixed-order).  The multi-rank rows
 runtime contracts live in ``test_cake_gdn_nondet_train_kcp_dist.py``; the CPU plan, table, byte-query and fake-backend tests in
 ``test_cake_gdn_nondet_train_kcp.py``.  Every test needs a CUDA device the package supports and the rendered ``build.json``
 (skipped otherwise).  The suite imports the package through ``tests/cake/test_helpers/cake_package.py`` unconditionally (a
-broken import fails, never skips) and nothing else from flashinfer; the tests of the facade
+broken import fails, never skips) and nothing else from cake_pplx; the tests of the facade
 ``cake_pplx.cake_gdn_nondet_train_kcp`` live in ``test_cake_gdn_nondet_train_kcp_api.py``.
 """
 

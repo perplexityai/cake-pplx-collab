@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -421,7 +421,7 @@ def test_backward_refuses_the_non_deterministic_forwards_saved_set_and_workspace
     kcp = importlib.import_module(
         "cake_pplx._backends.cake_gdn_det_train_kcp.cake_kcp"
     )
-    # the non-deterministic package under its FlashInfer #8928 path and names; it ships with this package, so a
+    # the non-deterministic package under its mode-word path and names; it ships with this package, so a
     # package that does not import fails here, it is not skipped
     nd = cake_package("cake_gdn_nondet_train_kcp")
     cu = _cu((100, 640, 77))

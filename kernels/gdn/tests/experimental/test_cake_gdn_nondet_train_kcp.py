@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2003,7 +2003,7 @@ def test_registry_seed() -> None:
 def test_package_imports_no_kda_and_no_environ() -> None:
     """The package never imports a KDA package (no module path or name containing ``cake_kda``) and reads no
     environment variable; the plan module imports torch, torch.distributed and dataclasses only.  The JIT shim
-    ``_cake_pplx_jit.py`` (the stand-in for ``flashinfer.jit``, outside the package upstream) reads the toolkit / cache
+    ``_cake_pplx_jit.py`` reads the toolkit / cache
     locations: it is exempt from the ``os`` / ``os.environ`` checks only, the KDA import check covers it."""
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         jit_shim = path.name == "_cake_pplx_jit.py"

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ limitations under the License.
 # partition / context plan, the host orchestration, the options, the registry
 # and the generated sources live here.  This package imports itself, torch and
 # torch.distributed only (never a KDA package) and reads no environment
-# variable.  It exports the mode-word names of FlashInfer #8928 only
+# variable.  It exports the mode-word names only
 # (``cake_gdn_det_kcp``, ``CakeGDNDetKcp<Noun>``, ``cake_gdn_det_train_kcp_<verb>``):
 # the constants and backend controls (``SCALE``, ``LAST_CALL``,
 # ``set_backend``, ``make_options``, ...) stay in their modules (``cake_kcp``,

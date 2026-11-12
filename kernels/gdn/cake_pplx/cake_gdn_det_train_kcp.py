@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ training with precise cross-rank state passing (SM100 / SM103 / SM107), the
 Cake backend.
 
 Mode and dispatch rules: every name here carries the mode word ``det``
-(FlashInfer #8928: ``cake_gdn_det_kcp``, ``CakeGDNDetKcp<Noun>``,
+(``cake_gdn_det_kcp``, ``CakeGDNDetKcp<Noun>``,
 ``cake_gdn_det_train_kcp_<verb>``); none takes a ``deterministic`` keyword
 (passing one is a ``TypeError``).  ``torch.use_deterministic_algorithms``
 changes nothing here: every launch has a fixed order, so no alert is raised

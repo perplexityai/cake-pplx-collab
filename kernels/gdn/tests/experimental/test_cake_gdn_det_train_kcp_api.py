@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -663,7 +663,7 @@ def test_facade_entries_raise_no_experimental_warning(
         pkg, "cake_gdn_det_train_kcp_packed_qkv_views", lambda qkv, **kw: ("ran", qkv)
     )
     with warnings.catch_warnings():
-        # FlashInfer's ExperimentalWarning came from its experimental-API decorator (message names "experimental")
+        # an experimental-API warning would name "experimental"
         warnings.filterwarnings("error", message=".*experimental")
         ctx = object()
         assert facade.cake_gdn_det_train_kcp_comm_bytes(ctx, H_qk=16, HV=48) == {
@@ -879,7 +879,7 @@ def test_importing_the_facade_does_not_import_the_package() -> None:
 
 def test_legacy_names_are_removed() -> None:
     """``cake_pplx.gdn_train``, ``cake_pplx.cake_gdn_train`` and ``cake_pplx._backends.cake_gdn_train`` (and its modules)
-    do not import (FlashInfer's ``flashinfer.gdn_train`` / ``flashinfer.experimental.cake_gdn_train``), and no
+    do not import, and no
     module of the deterministic route binds a pre-rename name.  A checkout may keep an untracked leftover of a former
     package directory (``aot/``, ``__pycache__``), which Python imports as an empty namespace package: such a leftover
     holds no module and none of the former names."""
@@ -984,9 +984,8 @@ def test_det_entries_take_no_deterministic_keyword() -> None:
 
 
 def _package_sources(*, jit_shim: bool = False) -> list[pathlib.Path]:
-    # The JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit``, which lived outside the package: like it,
-    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the environment and
-    # import allow-list rules do not cover it; the KDA import rule does (``jit_shim=True``).
+    # The JIT shim ``_cake_pplx_jit.py`` reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and
+    # runs nvcc, so the environment and import allow-list rules do not cover it; the KDA import rule does (``jit_shim=True``).
     root = pathlib.Path(_mod().__file__).resolve().parent
     files = sorted(
         p for p in root.glob("*.py") if jit_shim or p.name != "_cake_pplx_jit.py"

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ Mode rules
   fallback.
 * The deterministic counterpart is ``cake_pplx.cake_gdn_det_train``.
 
-A stable FlashInfer API: thin ``@cake_api`` entry points that import the
+A stable API: thin ``@cake_api`` entry points that import the
 package on first use.  The host plan, the autograd Function and the generated
 kernels live in the package; this module forwards every argument.  Every plan
 pin is a keyword argument; no environment variable is read.

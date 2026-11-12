@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ limitations under the License.
 # registry and the generated sources live in the submodules, which keep their
 # internal names (``cake_kcp.SCALE``, ``cake_kcp.set_backend``,
 # ``cake_options.make_options``, ...).  This package imports itself, torch and
-# torch.distributed only (never another FlashInfer package, its deterministic
+# torch.distributed only (never another cake_pplx package, its deterministic
 # counterpart included) and reads no environment variable.
 
 from .cake_kcp import (

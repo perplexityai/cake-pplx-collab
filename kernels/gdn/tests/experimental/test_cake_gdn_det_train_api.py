@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -57,8 +57,8 @@ FORMER_NAMES = (
 
 
 def _call(fn, *args, **kwargs):
-    # a stable API: an experimental-API warning would raise (FlashInfer's ExperimentalWarning came from its
-    # ``@flashinfer_experimental_api`` decorator, whose message names "experimental"; cake_pplx has no such decorator)
+    # a stable API: an experimental-API warning (a message naming "experimental") would raise; cake_pplx has no
+    # experimental-API decorator
     with warnings.catch_warnings():
         warnings.filterwarnings("error", message=".*experimental")
         return fn(*args, **kwargs)

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Public names of the Cake deterministic GDN training routes (FlashInfer #8928).
+Public names of the Cake deterministic GDN training routes.
 
 The facades ``cake_pplx.cake_gdn_det_train`` and ``cake_pplx.cake_gdn_det_train_kcp`` sit at the top level and their
 backend packages at ``cake_pplx._backends.cake_gdn_det_train[_kcp]``.  Every name the facades and the backend
@@ -22,7 +22,7 @@ and are not exported); no entry binds a ``deterministic`` keyword (``inspect.sig
 deterministic=False)`` raises ``TypeError``, the autograd ``Function.forward`` / ``backward`` included; the KCP
 entries that take the option fields through ``**`` declare them in their signatures, so no signature has a ``**``
 parameter); the former module paths do not import, and no namespace (the ``cake_pplx`` and ``cake_pplx._backends``
-namespace packages -- FlashInfer's top level before the move --, the facades, the backend packages and their modules)
+namespace packages, the facades, the backend packages and their modules)
 binds a former name.  Importing a facade loads no backend module until first use
 (checked in fresh interpreters).  The mode-word and keyword checks, and one check of each facade with no exemption
 (``assert_cake_mode_module``), are the shared ones of ``tests/cake/test_helpers/cake_mode_names.py``.
@@ -67,8 +67,7 @@ KCP_SUBMODULES = (
     "cake_options",
     "cake_tables",
 )
-# FlashInfer's former paths (``flashinfer.experimental.cake_gdn_det_train[_kcp]``, ``flashinfer.gdn_train``,
-# ``flashinfer.experimental.cake_gdn_train``) at the cake_pplx import prefix.
+# The former module paths at the cake_pplx import prefix.
 REMOVED_MODULES = (
     "cake_pplx.experimental",
     "cake_pplx.gdn_train",
@@ -275,8 +274,8 @@ def test_former_module_paths_do_not_import(name: str) -> None:
 
 
 def test_former_package_directories_are_gone() -> None:
-    # gone, or holding only untracked build leftovers: no module, manifest or source (FlashInfer's
-    # ``flashinfer/experimental/cake_gdn_*`` directories, at the cake_pplx layout)
+    # gone, or holding only untracked build leftovers: no module, manifest or source (the former package
+    # directories, at the cake_pplx layout)
     backends = Path(importlib.import_module(PACKAGE).__file__).resolve().parents[1]
     assert backends.name == "_backends", backends
     for directory in (
@@ -460,7 +459,7 @@ def _skipped_det_imports(path: Path) -> list[int]:
 def test_det_tests_import_the_det_packages_without_a_skip() -> None:
     root = Path(__file__).resolve().parents[2]
     # The KCP route's cross-family suites (``test_cake_gdn_det_train_kcp{,_build,_dist}.py``) and its benchmark live in
-    # ``tests/cross_family/gdn`` (FlashInfer kept them beside the other det suites).  The same check runs there
+    # ``tests/cross_family/gdn``.  The same check runs there
     # (``test_cake_gdn_det_train_kcp_no_skip.py``), so each tree checks its own files and runs from a copy.
     files = sorted((root / "tests" / "experimental").glob("test_cake_gdn_det_train*.py"))
     assert len(files) > 7, files

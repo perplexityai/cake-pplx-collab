@@ -17,16 +17,16 @@ results are not bitwise equal to that package's.  It also takes the
 take, and runs it by default with `use_qk_l2norm_in_kernel=True` (see
 "Options").
 
-The facade `cake_pplx.cake_gdn_nondet_train_kcp` is a stable FlashInfer API:
-its entry points are `@flashinfer_api` functions.  This package, under
-`flashinfer.experimental.cake`, is its backend.
+The facade `cake_pplx.cake_gdn_nondet_train_kcp` is a stable API: its entry
+points are `@cake_api` functions.  This package, under `cake_pplx._backends`,
+is its backend.
 SM100 (B200 / GB200) and SM103 (B300 / GB300) are the acceptance architectures
 of the kernels; SM107 (R200) is compiled from the same sources with an nvcc
 that emits `compute_107a`.  The feature does not participate in automatic
 backend selection, autotuning or trace-apply.  Its libraries are loaded
-prebuilt from `aot/` when the package ships them and JIT-built by FlashInfer
-from `build.json` otherwise (see "Layout of this package").  The package
-imports nothing else from FlashInfer (neither the KDA training package nor its
+prebuilt from `aot/` when the package ships them and JIT-built by the
+package's JIT shim from `build.json` otherwise (see "Layout of this package").
+The package imports no other `cake_pplx` package (neither the KDA training package nor its
 deterministic counterpart: it ships its own copies of the programs it shares
 with that package) and reads no environment variable.
 
@@ -109,7 +109,7 @@ migrates to `cake_pplx.cake_gdn_det_train_kcp` (see its README).
 | former name | new name |
 |---|---|
 | `cake_pplx.cake_gdn_train_kcp` | `cake_pplx.cake_gdn_nondet_train_kcp` |
-| `flashinfer.experimental.cake_gdn_train_kcp` | `cake_pplx._backends.cake_gdn_nondet_train_kcp` |
+| `cake_pplx._backends.cake_gdn_train_kcp` | `cake_pplx._backends.cake_gdn_nondet_train_kcp` |
 | `chunk_gdn_kcp` | `cake_gdn_nondet_kcp` |
 | `ChunkGDNFunctionKcp` | `CakeGDNNondetKcpFunction` |
 | `chunk_gdn_fwd_kcp` / `chunk_gdn_bwd_kcp` | `cake_gdn_nondet_train_kcp_forward` / `cake_gdn_nondet_train_kcp_backward` |
@@ -665,7 +665,7 @@ resident on a side stream therefore delays one CTA, not the whole grid.
 |---|---|
 | `build.json` | the build manifest (schema `cake-build/1`): one entry per `<program>_<arch>` library with its sources, digests and nvcc flags; the only record of what the package compiles |
 | `build.test.json` | the test-only programs in the same form; never read by the shipped route |
-| `cake_build.py` | the manifest loader (byte-identical across the Cake packages): prebuilt `aot/` library first, FlashInfer JIT otherwise |
+| `cake_build.py` | the manifest loader (byte-identical across the Cake packages): prebuilt `aot/` library first, the JIT shim otherwise |
 | `cake_jit.py` | the registry: the records of every program (library stem, architectures, selection and grid rules, argument plan) |
 | `cake_backend.py` | device -> architecture map, library loading, the generic launch of one record |
 | `cake_kcp_plan.py`, `cake_tables.py`, `cake_bytes.py` | partition, context, ownership and halo plans, the CPU tables, the byte queries |

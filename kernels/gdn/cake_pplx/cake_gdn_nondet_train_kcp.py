@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ Mode
   there (a call that leaves ``save_mode`` unset), while calls without the norm
   default to ``"light"``.
 
-A stable FlashInfer API: thin ``@cake_api`` entry points that import the
+A stable API: thin ``@cake_api`` entry points that import the
 package on first use.  The partition / context plan, the host orchestration,
 the saved set, the autograd Function and the generated kernels live in the
 package; this module forwards every keyword.  Every switch is a keyword

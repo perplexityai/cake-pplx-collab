@@ -24,16 +24,16 @@ within the same budgets.
 On `sm_107a` a call may also take a deeper split table (see Chain); the
 outputs that depend on that table then match within the same budgets too.
 
-The facade `cake_pplx.cake_gdn_nondet_train` is a stable FlashInfer API: its
-entry points are `@flashinfer_api` functions.  This package, under
-`flashinfer.experimental.cake`, is its backend.
+The facade `cake_pplx.cake_gdn_nondet_train` is a stable API: its entry points
+are `@cake_api` functions.  This package, under `cake_pplx._backends`, is its
+backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
 CUDA 13.4 or newer.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
-JIT-built by FlashInfer from the sources and flags `build.json` records
-otherwise.  The package reads no environment variable.
+JIT-built by the package's JIT shim (`_cake_pplx_jit.py`) from the sources and
+flags `build.json` records otherwise.  The package reads no environment variable.
 
 ## Outputs
 
@@ -43,8 +43,7 @@ give the same bits, and a second backward into the same leaves adds exactly
 the first one's gradients.  No output of this version may vary.  The outputs
 need not be bitwise equal to the deterministic package's (see above).  The tables
 give the error of each output against an FP64 reference next to the error of
-the deterministic package as of FlashInfer commit `2e989556` (then
-`flashinfer.experimental.cake_gdn_det_train`, entry
+the deterministic package at revision `2e989556` (entry
 `chunk_gated_delta_rule_det`) on the same inputs.
 
 | output | run to run | FP64 error at the `(2, 6)` pack of 131,071 + 87,531 + 43,385 tokens on B200 (`sm_100a`, 148 SMs), this package / the deterministic package: rel-L2; worst | largest ratio to the deterministic package over 66 cases on B200: rel-L2; worst |
@@ -154,7 +153,7 @@ one raises `TypeError`.
 
 ## Opt-in
 
-Import the entry point explicitly; nothing in `flashinfer` imports this
+Import the entry point explicitly; nothing else in `cake_pplx` imports this
 package.
 
 ```python
@@ -198,15 +197,15 @@ of `cu_seqlens`, since reading them would synchronize the device.
 ## Deterministic and non-deterministic routes
 
 Packed GDN training has four Cake modules, one per (mode, parallelism).  Each
-facade sits at the top level of `flashinfer`; its backend package sits under
-`flashinfer.experimental.cake`:
+facade sits at the top level of `cake_pplx`; its backend package sits under
+`cake_pplx._backends`:
 
 | mode | one rank (this API, FLA signature) | context parallel (KCP) |
 |---|---|---|
 | `det` (deterministic) | `cake_pplx.cake_gdn_det_train` (`cake_gdn_det`) | `cake_pplx.cake_gdn_det_train_kcp` (`cake_gdn_det_kcp`) |
 | `nondet` (within the det budgets) | `cake_pplx.cake_gdn_nondet_train` (`cake_gdn_nondet`) | `cake_pplx.cake_gdn_nondet_train_kcp` (`cake_gdn_nondet_kcp`) |
 
-Each backend package is standalone: it imports nothing else from `flashinfer`
+Each backend package is standalone: it imports no other `cake_pplx` package
 and ships its own copy of every kernel it shares with another.  Nothing
 selects a package implicitly.
 
@@ -545,7 +544,7 @@ bound to the GPU-local Grace socket).  B200, GB200 and GB300 ran a build with
 this version's kernels, routes and bits; R200 ran an earlier build whose
 routes and plans on these rows, and bits under two of the three gate regimes,
 are this version's.  The deterministic
-package is that of FlashInfer commit `18c327b4` (on R200 `c8a4d8a2`, with the
+package is that of revision `18c327b4` (on R200 `c8a4d8a2`, with the
 same deterministic package).  It is not the accuracy baseline of Outputs: it
 carries that package's later kernel and table changes, and the deterministic
 package that ships beside this version differs from it in host code only.  A

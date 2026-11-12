@@ -33,24 +33,23 @@ from run to run for one layout and one plan.  Some stages run as two groups of s
 side stream; the groups write disjoint outputs, so this holds with one or two
 streams.
 
-The facade `cake_pplx.cake_gdn_det_train` is a stable FlashInfer API: its
-entry points are `@flashinfer_api` functions.  This package, under
-`flashinfer.experimental.cake`, is its backend.
+The facade `cake_pplx.cake_gdn_det_train` is a stable API: its entry points
+are `@cake_api` functions.  This package, under `cake_pplx._backends`, is its
+backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
 CUDA 13.4 or newer.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
-JIT-built by FlashInfer from the sources and flags `build.json` records
-otherwise.  The package reads no environment variable.
+JIT-built by the package's JIT shim (`_cake_pplx_jit.py`) from the sources and
+flags `build.json` records otherwise.  The package reads no environment variable.
 
 ## Opt-in
 
 Import the entry point explicitly from the facade
 `cake_pplx.cake_gdn_det_train` (it exports `cake_gdn_det`,
 `CakeGDNDetFunction` and `is_cake_gdn_det_train_supported`, and forwards every
-argument to this package); nothing in `flashinfer` imports this package
-otherwise.
+argument to this package); nothing else in `cake_pplx` imports this package.
 
 ```python
 from cake_pplx.cake_gdn_det_train import cake_gdn_det
@@ -270,16 +269,14 @@ per-stream ones.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.4 or newer).
 
-## Names (FlashInfer #8928)
+## Names
 
-The package moved from `flashinfer.experimental.cake_gdn_det_train` and its
-entries took the mode-word names below.  The former names and the former path
-were removed with no alias: importing them raises `ImportError`.  The library
+The entries carry the mode-word names below.  The former names were removed
+with no alias: importing them raises `ImportError`.  The library
 names, the program names and the kernels are unchanged.
 
 | former name | name |
 |---|---|
-| `flashinfer.experimental.cake_gdn_det_train` | `cake_pplx._backends.cake_gdn_det_train` |
 | `chunk_gated_delta_rule_det`, `chunk_gated_delta_rule` | `cake_gdn_det` |
 | `ChunkGatedDeltaRuleDetFunction`, `ChunkGatedDeltaRuleFunction` | `CakeGDNDetFunction` |
 | `gdn_chunk_det_forward`, `gdn_chunk_forward` | `cake_gdn_det_train_forward` |
