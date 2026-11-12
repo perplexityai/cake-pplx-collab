@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ grid, selection and workspace rules and the kernel-parameter -> logical-argument
 map.  What to compile -- sources, digests, nvcc flags -- is recorded once in
 ``build.json`` next to this file; :mod:`.cake_build` serves the library
 ``<library>_<arch>`` from a prebuilt ``aot/`` file when a builder compiled it
-and otherwise through FlashInfer's JIT from the same sources and flags,
+and otherwise through the package's JIT shim from the same sources and flags,
 verifying every source digest before the first build.
 
 A route is the ordered list of module records one public call launches:
@@ -10501,7 +10501,7 @@ RULES_T_VALUES = (
 # Rounds 2-7: the per-architecture dispatch of record. sm_103a (GB300) carries the forms paired on GB300 in
 # two sessions; sm_100a (B200) carries the forms the cross-architecture pairs kept on B200 (the "last paired-and-kept
 # form"); sm_107a (R200, the 3186-MHz HBM class of record) carries the forms its class-of-record sessions kept there.
-# Every table below is keyed by the architecture so that the nine copies of this text, the FlashInfer registry and the
+# Every table below is keyed by the architecture so that the nine copies of this text, the registry and the
 # rules table branch in one place; a missing architecture is an error, never a default.
 #
 # PK_BANDS: (above, at_most, P_K) overrides of the cost model's P_K; on sm_103a P_K = 16 for 8192 < T <= 16384 (the
@@ -10835,7 +10835,7 @@ BWD_ROW_BANDS = {
     "sm_107a": (),
 }
 # BWD_SLAB_PROGRAM: the column-slab pass's program per architecture outside every band of BWD_SLAB_BANDS. "dynr" = xrsg
-# + schedule="dynamic", regs_pool=160, tab="compact" (the kernel under SM contention, FlashInfer #7046 section 1; bitwise
+# + schedule="dynamic", regs_pool=160, tab="compact" (the kernel under SM contention; bitwise
 # with xrsg) on sm_100a and sm_103a outside the bands: the (slab, chunk) units are drawn first-come from a
 # self-resetting ticket word, so the CTAs a side load delays take fewer units, and the 160-register pool and the
 # compact token table leave room for a 128-thread side CTA on an SM. Unloaded the backward path with dynr / with xrsg
@@ -10872,7 +10872,7 @@ BWD_SLAB_BANDS = {
 # CTA one unit, no ticket drawn), its chunk count P is one of the listed values, or its P is a run's P with
 # above < T <= at_most, `replacement` is launched instead. On sm_100a ("dynl", "xrsg_p160", (), ((7, 1536, 1792),
 # (9, 2176, 2304), (7, 1920, 2240), (19, 2304, 2432), (19, 3584, 3648))) [K7N draft: the P = 9 / P = 19 exclusions
-# as runs; the other P = 9 runs pass the FlashInfer-level re-gate on the shipped dynl, the P = 19 run 2305-2432
+# as runs; the other P = 9 runs pass the package-level re-gate on the shipped dynl, the P = 19 run 2305-2432
 # does not (GB200 backward_finish 1.0101-1.0208)]:
 # at the one-round rows (P = 2 on 148 SMs, e.g. 1536, 2048, 2560, 3584) every form with the
 # 160-register pool and the compact token table took 1.0054-1.0118 of xrsg's backward path (the footprint; the claim
@@ -12539,8 +12539,8 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
-    JIT build of the same sources and flags (``cake_build.load_library``).
+    The prebuilt ``aot/`` library when a builder compiled it, else the JIT
+    build of the same sources and flags (``cake_build.load_library``).
     """
 
     from . import cake_build
@@ -12550,7 +12550,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library without a prebuilt file (for
-    ahead-of-time warm-up through FlashInfer's ``build_jit_specs``)."""
+    ahead-of-time warm-up)."""
 
     from . import cake_build
 

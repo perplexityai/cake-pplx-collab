@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -73,7 +73,7 @@ call or attribute access (importing this module imports no backend).  Every
 name this module exports carries the mode word ``det``
 (``cake_mhc_det_train_*``, ``CakeMHCDet*Function``) except the constants
 ``ARCHES`` and ``SUPPORTED_COMPUTE_CAPABILITIES``; former names have no alias
-(FlashInfer 0.7.3's ``cake_pplx.cake_mhc_train`` names,
+(the ``cake_pplx.cake_mhc_train`` names,
 ``CakeMHCDetTrain{Prepare,Finish}Function`` and ``route_key`` fail at import).
 The entry points take no ``deterministic`` keyword, give the same results
 under ``torch.use_deterministic_algorithms(True)`` and raise no alert.  The

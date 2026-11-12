@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 Workspace reuse across token counts of the Cake four-stream mHC training
 package ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096,
 5120 and 7168, 4 streams; SM100 / SM103 at the three hidden sizes, SM107 at
-4096; FlashInfer issue #8068), in the
+4096), in the
 form of ``test_cake_mhc_det_train_workspace.py``.  Every case runs at each
 hidden size the device's architecture routes, its buffers sized with
 ``hidden=``; a size it does not route is skipped.
@@ -52,7 +52,7 @@ realistic token-count sequences:
   properties at every replay;
 * the default workspaces (``workspace=None``: one buffer per hidden size and
   power-of-two token-count bucket) across the token counts of one bucket;
-* the sequence of FlashInfer issue #7763 (``backward_finish`` at 7832 tokens,
+* the reported sequence (``backward_finish`` at 7832 tokens,
   then at 7435 tokens, on the default workspace of a fresh process, and the
   reverse order), each sequence in its own process;
 * no default buffer is created during a CUDA graph capture (``ValueError``,
@@ -117,7 +117,7 @@ SEQUENCES = {
 }
 GRAPHS = ((4096, 3000), (8192, 4500), (16263, 14928))
 DEFAULT_BUCKETS = ((4096, 3000, 2100, 4096), (8192, 6000, 4500, 8192))
-# The backward token-count sequences of FlashInfer issue #7763 (one 8192-token default bucket).
+# The reported backward token-count sequences (one 8192-token default bucket).
 REPORTED_SEQUENCES = ((7832, 7435), (7435, 7832))
 # One caller workspace over token counts within and across the 64-token tiles, down to one token.
 RAGGED_SEQUENCE = (4096, 1, 777, 2049, 4096)

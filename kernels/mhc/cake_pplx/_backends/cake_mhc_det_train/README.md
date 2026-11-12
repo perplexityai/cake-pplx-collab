@@ -22,7 +22,7 @@ The defaults are `rms_eps = 1e-5`, `hc_eps = 1e-6` and 20 Sinkhorn iterations. Y
 
 - Every exported function and class name contains the mode word `det`; the constants `ARCHES` and `SUPPORTED_COMPUTE_CAPABILITIES` are the exceptions. The entry points take no `deterministic` keyword.
 - Under `torch.use_deterministic_algorithms(True)` the entry points give the same results and raise no alert.
-- The former names from FlashInfer 0.7.3 (`cake_pplx.cake_mhc_train`) have no alias.
+- The former names (`cake_pplx.cake_mhc_train`) have no alias.
 - The non-deterministic counterpart is `cake_pplx.cake_mhc_nondet_train`. The head, which takes the stream mean of the last layer, is `cake_pplx.cake_mhc_head_det_train`.
 - Importing `cake_pplx.cake_mhc_det_train` does not import a backend. The backend package loads on the first call or on the first access of a lazy name such as `ARCHES`.
 
@@ -157,12 +157,10 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 |---|---|
 | `__init__.py` | Entry points, autograd functions, host launch plans |
 | `cake_jit.py` | Host rules: module registry, routes per architecture and hidden size, token-count bands. The host plan is hand-maintained; the exporter rewrites the derived record fields. |
-| `cake_build.py` | Library loader. Serves `aot/<name>.so` when a builder compiled it from the manifest; this prebuilt path never imports `flashinfer`. Otherwise JIT-builds through FlashInfer from the same sources and flags. Written by the exporter; do not edit. |
+| `cake_build.py` | Library loader. Serves `aot/<name>.so` when a builder compiled it from the manifest. Otherwise JIT-builds through the package's JIT shim (`_cake_pplx_jit.py`) from the same sources and flags. Written by the exporter; do not edit. |
 | `build.json` | Manifest, schema `cake-build/1`. One entry per library and architecture (`<library>_<arch>`) with package-relative sources, nvcc flags (`-gencode` for `sm_100a` / `sm_103a` / `sm_107a`), toolkit-conditional flags and SHA-256 digests. Requires CUDA toolkit >= 12.8 for SM100, >= 12.9 for SM103 and >= 13.4 for SM107, and `apache-tvm-ffi >= 0.1.11, < 0.2`. |
 | `csrc/` | Generated CUDA: `<library>_kernel.cu` and `<library>_binding.cu` per library, plus the package-local `cake_ffi_checks.h`. Not hand-edited. |
 | `aot/` | Optional prebuilt libraries and the `build_info.json` sidecar. Not tracked. |
-
-FlashInfer's `scripts/check_cake_build_manifests.py` builds and checks the manifest.
 
 ## Status
 

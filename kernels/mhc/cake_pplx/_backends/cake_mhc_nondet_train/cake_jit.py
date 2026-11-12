@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -139,7 +139,7 @@ grid, selection and workspace rules and the kernel-parameter -> logical-argument
 map.  What to compile -- sources, digests, nvcc flags -- is recorded once in
 ``build.json`` next to this file; :mod:`.cake_build` serves the library
 ``<library>_<arch>`` from a prebuilt ``aot/`` file when a builder compiled it
-and otherwise through FlashInfer's JIT from the same sources and flags,
+and otherwise through the package's JIT shim from the same sources and flags,
 verifying every source digest before the first build.
 
 A route is the ordered list of module records one public call launches:
@@ -7459,7 +7459,7 @@ RULES_T_VALUES = (
 # Rounds 2-7: the per-architecture dispatch of record. sm_103a (GB300) carries the forms paired on GB300 in
 # two sessions; sm_100a (B200) carries the forms the cross-architecture pairs kept on B200 (the "last paired-and-kept
 # form"); sm_107a (R200, the 3186-MHz HBM class of record) carries the forms its class-of-record sessions kept there.
-# Every table below is keyed by the architecture so that the nine copies of this text, the FlashInfer registry and the
+# Every table below is keyed by the architecture so that the nine copies of this text, the registry and the
 # rules table branch in one place; a missing architecture is an error, never a default.
 #
 # PK_BANDS: (above, at_most, P_K) overrides of the cost model's P_K; on sm_103a P_K = 16 for 8192 < T <= 16384 (the
@@ -9521,8 +9521,8 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
-    JIT build of the same sources and flags (``cake_build.load_library``).
+    The prebuilt ``aot/`` library when a builder compiled it, else the JIT
+    build of the same sources and flags (``cake_build.load_library``).
     """
 
     from . import cake_build
@@ -9532,7 +9532,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library without a prebuilt file (for
-    ahead-of-time warm-up through FlashInfer's ``build_jit_specs``)."""
+    ahead-of-time warm-up)."""
 
     from . import cake_build
 

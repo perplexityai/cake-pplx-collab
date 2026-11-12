@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,8 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Names of the deterministic mHC training module ``cake_pplx.cake_mhc_det_train``
-(FlashInfer issue #8928): every name exported by the module and by its backend
+Names of the deterministic mHC training module ``cake_pplx.cake_mhc_det_train``:
+every name exported by the module and by its backend
 package ``cake_pplx._backends.cake_mhc_det_train`` but the ALL_CAPS
 constants carries the mode token ``det`` (``Det`` in a class name), no public
 callable takes a ``deterministic`` keyword (the ``forward`` / ``backward`` of
@@ -41,8 +41,8 @@ MODULE = "cake_pplx.cake_mhc_det_train"
 BACKEND = "cake_pplx._backends.cake_mhc_det_train"
 KEY = "cake.cake_mhc_det_train"
 REPO = Path(__file__).resolve().parents[3]
-# The former modules of the mHC training modes (FlashInfer 0.7.3's package names, the backend paths before
-# #8928, the former non-deterministic module): importing them fails.
+# The former modules of the mHC training modes (the former package names, the former backend paths, the former
+# non-deterministic module): importing them fails.
 REMOVED_MODULES = (
     "cake_pplx.cake_mhc_train",
     "cake_pplx.cake_mhc_train_backend",
@@ -52,8 +52,8 @@ REMOVED_MODULES = (
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
 )
-# The former names: their prefixes (0.7.3's names without the mode word, the classes and head names before
-# #8928) and the generic route helpers.
+# The former names: their prefixes (the names without the mode word, the class and head names before the
+# mode-in-name rule) and the generic route helpers.
 REMOVED_PREFIXES = (
     "cake_mhc_train_",
     "is_cake_mhc_train_",

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 Tests of the run-time Sinkhorn iteration count and the epsilons of the Cake
 four-stream mHC training package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (SM100 / SM103 /
-SM107; FlashInfer issue #8068), in
+SM107), in
 the form of ``test_cake_mhc_det_train_iters.py``.
 
 ``sinkhorn_iters`` is an integer from 1 to ``SINKHORN_ITERS_MAX`` (64).  The
