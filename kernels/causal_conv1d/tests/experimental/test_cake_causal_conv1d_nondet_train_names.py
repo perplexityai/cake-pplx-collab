@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Public names of the Cake non-deterministic causal conv1d + SiLU training package (FlashInfer issue #8928).
+Public names of the Cake non-deterministic causal conv1d + SiLU training package.
 
 The module names the mode: the entry-point modules (stable APIs) ``cake_pplx.cake_causal_conv1d_nondet_train`` and
 ``cake_pplx.cake_causal_conv1d_nondet_train_kcp`` and the package

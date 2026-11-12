@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 The KCP registry (``kcp_jit``) of the Cake causal convolution training package: the records against the frozen
 kernel ABIs and the identity rule, the routes and the selection by channel count, and the ``build.json`` entries of
 the KCP programs.  Each backward program ships twice: the cooperative build (route ``kcp_bwd``) and its ``split``
-build (route ``kcp_bwd_split``, FlashInfer issue #8365, built with ``pair=True``: the token arithmetic on packed
+build (route ``kcp_bwd_split``, built with ``pair=True``: the token arithmetic on packed
 ``f32x2`` channel pairs), an ordinary launch one SM short of co-resident (``reserve_sms``) whose ``dweight`` partial
 rows the zero-history package's fixed-order reduce program sums.  The tail-row program (route ``kcp_bwd_halo``) of the
 overlapped backward and the history-row program (route ``kcp_fwd_halo``) of the two-launch forward are routes of their
@@ -352,7 +352,7 @@ def test_build_manifest_lists_the_kcp_programs() -> None:
 
 @pytest.mark.cpu_only
 def test_backward_launch_form_selects_the_route(monkeypatch) -> None:
-    """The host's ``cooperative`` argument (FlashInfer issue #8365): ``None`` is the package default, a bool picks the
+    """The host's ``cooperative`` argument: ``None`` is the package default, a bool picks the
     ``kcp_bwd`` (cooperative) or ``kcp_bwd_split`` route, anything else is refused; the split records launch
     ``ctas_per_sm x (SMs - reserve_sms)`` CTAs (:func:`kcp._launch_grid`), the cooperative ones the co-resident count."""
 

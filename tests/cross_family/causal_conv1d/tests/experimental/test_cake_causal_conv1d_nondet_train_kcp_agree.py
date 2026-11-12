@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-CPU tests of the rank-agreement check of the non-deterministic conv KCP route (issue #8946: every rank of a call
+CPU tests of the rank-agreement check of the non-deterministic conv KCP route (every rank of a call
 passes the same partition and calls the same entry, mode and channel counts): the int64[8] fingerprint against an
 independent evaluation of its definition, one check per (context, phase), no check with one rank, the same error on
 every rank naming the ranks and fields that differ, and a refused first call inside a CUDA-graph capture.  The

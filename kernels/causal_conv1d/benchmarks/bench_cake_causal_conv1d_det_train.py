@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,9 +29,9 @@ microseconds plus the achieved GB/s over the logical byte volume (forward
 (``rows`` the FP32 partial rows of the grid of the backward program the row
 selects; the JSON names that program) for the partial workspace's round trip
 (+ ``8 C rows`` for the dbias slab with a bias); the tap bytes are counted at
-their dtype).  Timing uses CUPTI kernel activity with a cold L2
-(``flashinfer.testing.bench_gpu_time(enable_cupti=True)``); multi-kernel
-comparators report the sum of their kernels' GPU time.
+their dtype).  Timing uses CUPTI kernel activity (through the torch profiler)
+with a cold L2 (``gpu_times_cold_l2``); multi-kernel comparators report the
+span of their kernels' GPU time.
 
 The route of a run is chosen on the command line and applied to every
 comparator: ``--weight-dtype bfloat16`` (BF16 taps and a BF16 ``dweight``: the
@@ -47,12 +47,12 @@ multiple.
 
 ``--side-kernel`` adds, per row and comparator, the backward's wall latency on
 its stream (CUDA events, median of seven calls after three warm-ups) alone and
-with a kernel resident on another stream, and their ratio (FlashInfer issue
-#7038: a cooperative launch waits for such a kernel to finish; the Cake
-backward is two ordinary launches).  ``one-thread`` is the issue's recipe,
-one CTA of one thread (``torch.cuda._sleep``); ``nccl-like`` a spin kernel of
-8 CTAs x 512 threads, the footprint of a communication kernel, which takes
-slots from eight SMs so the displaced CTAs run in a later wave.  Information,
+with a kernel resident on another stream, and their ratio (a cooperative
+launch waits for such a kernel to finish; the Cake backward is two ordinary
+launches).  ``one-thread`` is one CTA of one thread (``torch.cuda._sleep``);
+``nccl-like`` a spin kernel of 8 CTAs x 512 threads, the footprint of a
+communication kernel, which takes slots from eight SMs so the displaced CTAs
+run in a later wave.  Information,
 not a gate: the kernel's own GPU time is unchanged either way.
 
 Example::
@@ -83,7 +83,6 @@ from cake_pplx.cake_causal_conv1d_det_train import (
 )
 from cake_pplx._backends.cake_causal_conv1d_det_train import BWD_GRID_MULTS
 from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as loader
-from flashinfer.testing import bench_gpu_time
 
 WIDTH = 4
 # The performance matrix: P1 (C = 512 over the packed token counts), P2 (S = 250340 over the channel counts,
@@ -179,10 +178,70 @@ def _median_ms(samples) -> float:
     return float(statistics.median(list(samples)))
 
 
+# Cold-L2 GPU timing (``gpu_times_cold_l2``): about ``TIMER_DRY_RUN_MS`` of warm-up calls, then about
+# ``TIMER_REPEAT_MS`` of timed calls (at most ``TIMER_MAX_REPEATS``), each behind an L2 flush, under the torch
+# profiler (CUPTI activity).  The flush is an in-place ``bitwise_not`` of an int32 buffer of twice the L2 size (at
+# least 256 MiB); no timed call launches a kernel of that name, so each flush marks the start of one call.
+TIMER_DRY_RUN_MS = 25.0
+TIMER_REPEAT_MS = 100.0
+TIMER_MAX_REPEATS = 1000
+TIMER_FLUSH_MARK = "bitwise_not"
+
+
+def gpu_times_cold_l2(fn: Callable[[], object]) -> list[float]:
+    """Per-call GPU times (ms) of ``fn`` with a cold L2: per call, the span from the start of its first device
+    activity to the end of its last one (CUPTI activity through the torch profiler)."""
+
+    from torch.autograd import DeviceType
+    from torch.profiler import ProfilerActivity, profile
+
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    flush_bytes = max(2 * int(getattr(props, "L2_cache_size", 0)), 256 << 20)
+    flush = torch.empty(flush_bytes // 4, dtype=torch.int32, device="cuda")
+    fn()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(5):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    per_call_ms = max(start.elapsed_time(end) / 5, 1e-3)
+    for _ in range(max(1, int(TIMER_DRY_RUN_MS / per_call_ms))):
+        flush.bitwise_not_()
+        fn()
+    repeats = min(TIMER_MAX_REPEATS, max(1, int(TIMER_REPEAT_MS / per_call_ms)))
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(repeats):
+            flush.bitwise_not_()
+            fn()
+        torch.cuda.synchronize()
+    events = sorted(
+        (e for e in prof.events() if e.device_type == DeviceType.CUDA),
+        key=lambda e: e.time_range.start,
+    )
+    calls: list[list] = []
+    for e in events:
+        if TIMER_FLUSH_MARK in e.name:
+            calls.append([])
+        elif calls:
+            calls[-1].append(e)
+    if len(calls) != repeats or not all(calls):
+        raise RuntimeError(
+            f"the profiler recorded {len(calls)} flushes for {repeats} timed calls, or a call without device activity"
+        )
+    return [
+        (max(e.time_range.end for e in c) - min(e.time_range.start for e in c)) / 1e3
+        for c in calls
+    ]
+
+
 def _time(fn: Callable[[], object]) -> float:
     """Median GPU time (ms) of ``fn`` over its kernels, cold L2, CUPTI."""
 
-    times = bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True)
+    times = gpu_times_cold_l2(fn)
     return _median_ms(times)
 
 

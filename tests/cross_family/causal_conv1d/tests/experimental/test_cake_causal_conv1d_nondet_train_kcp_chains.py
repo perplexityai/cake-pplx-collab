@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Context-parallel chains at 32 and 64 ranks (FlashInfer issue #7815): the per-document zigzag layout cuts every
+Context-parallel chains at 32 and 64 ranks: the per-document zigzag layout cuts every
 document into ``2 x W`` pieces, so at W = 64 a document is a chain of 128 fragments, and a short document's pieces are
 one or two tokens long, each reading its history rows from up to three predecessor ranks and its tail rows from up to
 three successor ranks.  One GPU emulates the ``W`` ranks one after the other: the package's halo exchange

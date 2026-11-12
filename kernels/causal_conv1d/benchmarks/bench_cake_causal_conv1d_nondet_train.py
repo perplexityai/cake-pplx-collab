@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ nudged off a multiple of 64).  Per row and mode:
 * ``ckpt``: ``torch.utils.checkpoint(..., use_reentrant=False)`` around the autograd entry, then its backward (two
   forwards and one backward, the autograd overhead included);
 * ``gpu_us``: the GPU time of the phase, cold L2.  ``fwd`` / ``bwd`` / ``step``: the span of the phase's kernels
-  (CUPTI activity; ``flashinfer.testing.bench_gpu_time(enable_cupti=True)``).  ``ckpt``: the autograd host time
+  (CUPTI activity through the torch profiler; ``gpu_times_cold_l2``).  ``ckpt``: the autograd host time
   exceeds its kernels' time, so a CUPTI span measures host gaps; instead the whole step is enqueued behind a spin
   kernel (the host finishes enqueuing before the GPU starts the step) and timed with CUDA events around it
   (``ckpt_ahead_late`` counts the samples whose enqueue outlasted the spin; 0 expected);
@@ -44,7 +44,7 @@ non-deterministic mode is faster), ``speedup_range`` the ``[min, max]`` of the p
 row (not a gate) records whether ``dx`` is bitwise equal between the modes and the largest relative ``dweight``
 difference.  The route is chosen as in the deterministic benchmark (``--weight-dtype``, ``--bias``,
 ``--silu-grad-preactivation``); ``--side-kernel`` adds the backward's wall latency beside a kernel resident on another
-stream (FlashInfer issues #7038 / #7548).
+stream.
 
 Non-Cake baselines (``--sota``, default ``all``; ``cake_causal_conv1d_baselines.py``): flash-linear-attention's
 ``causal_conv1d`` on its Triton (``fla``) and opt-in Gluon (``fla_gluon``) backends, Dao-AILab ``causal_conv1d_fn``
@@ -89,7 +89,6 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as nondet_backend
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     cake_jit as loader,
 )
-from flashinfer.testing import bench_gpu_time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -197,10 +196,70 @@ def _median(samples) -> float:
     return float(statistics.median(list(samples)))
 
 
+# Cold-L2 GPU timing (``gpu_times_cold_l2``): about ``TIMER_DRY_RUN_MS`` of warm-up calls, then about
+# ``TIMER_REPEAT_MS`` of timed calls (at most ``TIMER_MAX_REPEATS``), each behind an L2 flush, under the torch
+# profiler (CUPTI activity).  The flush is an in-place ``bitwise_not`` of an int32 buffer of twice the L2 size (at
+# least 256 MiB); no timed call launches a kernel of that name, so each flush marks the start of one call.
+TIMER_DRY_RUN_MS = 25.0
+TIMER_REPEAT_MS = 100.0
+TIMER_MAX_REPEATS = 1000
+TIMER_FLUSH_MARK = "bitwise_not"
+
+
+def gpu_times_cold_l2(fn: Callable[[], object]) -> list[float]:
+    """Per-call GPU times (ms) of ``fn`` with a cold L2: per call, the span from the start of its first device
+    activity to the end of its last one (CUPTI activity through the torch profiler)."""
+
+    from torch.autograd import DeviceType
+    from torch.profiler import ProfilerActivity, profile
+
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    flush_bytes = max(2 * int(getattr(props, "L2_cache_size", 0)), 256 << 20)
+    flush = torch.empty(flush_bytes // 4, dtype=torch.int32, device="cuda")
+    fn()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(5):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    per_call_ms = max(start.elapsed_time(end) / 5, 1e-3)
+    for _ in range(max(1, int(TIMER_DRY_RUN_MS / per_call_ms))):
+        flush.bitwise_not_()
+        fn()
+    repeats = min(TIMER_MAX_REPEATS, max(1, int(TIMER_REPEAT_MS / per_call_ms)))
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(repeats):
+            flush.bitwise_not_()
+            fn()
+        torch.cuda.synchronize()
+    events = sorted(
+        (e for e in prof.events() if e.device_type == DeviceType.CUDA),
+        key=lambda e: e.time_range.start,
+    )
+    calls: list[list] = []
+    for e in events:
+        if TIMER_FLUSH_MARK in e.name:
+            calls.append([])
+        elif calls:
+            calls[-1].append(e)
+    if len(calls) != repeats or not all(calls):
+        raise RuntimeError(
+            f"the profiler recorded {len(calls)} flushes for {repeats} timed calls, or a call without device activity"
+        )
+    return [
+        (max(e.time_range.end for e in c) - min(e.time_range.start for e in c)) / 1e3
+        for c in calls
+    ]
+
+
 def _gpu_ms(fn: Callable[[], object]) -> float:
     """Median GPU time (ms) of ``fn``'s kernels, cold L2, CUPTI."""
 
-    return _median(bench_gpu_time(fn, enable_cupti=True, cold_l2_cache=True))
+    return _median(gpu_times_cold_l2(fn))
 
 
 def _host_ms(fn: Callable[[], object], device: torch.device) -> tuple[float, float]:

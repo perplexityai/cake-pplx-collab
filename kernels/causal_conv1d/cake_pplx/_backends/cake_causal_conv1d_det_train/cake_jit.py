@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ record, grid rule, workspace rule and the kernel-parameter -> logical-argument
 map.  What to compile -- sources, digests, nvcc flags -- is recorded once in
 ``build.json`` next to this file; :mod:`.cake_build` serves the library
 ``<library>_<arch>`` from a prebuilt ``aot/`` file when a builder compiled it
-and otherwise through FlashInfer's JIT from the same sources and flags,
+and otherwise through the package's JIT (``_cake_pplx_jit``) from the same sources and flags,
 verifying every source digest before the first build.
 
 A route lists every program one public call may select.  The forward routes
@@ -81,7 +81,7 @@ the rows per channel in a fixed order and stores ``dw`` (and ``db``) in the
 dtypes ``flags`` names.  Until round 6 the backward was one cooperative launch
 whose grid-wide barrier preceded the same reduction in-kernel.  A cooperative
 grid cannot start while any kernel is resident on another stream -- NCCL
-collectives are, for most of a training backward (FlashInfer issue #7038) --
+collectives are, for most of a training backward --
 whereas an ordinary launch whose CTAs find no free slot runs them in a later
 wave.  ``grid_mult`` (``grid_rule["grid_mult"][arch]``) over-decomposes the
 token axis so that such a CTA trails by ``1 / grid_mult`` of a stream rather
@@ -4556,7 +4556,7 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
+    The prebuilt ``aot/`` library when a builder compiled it, else the package's
     JIT build of the same sources and flags (``cake_build.load_library``).
     """
 
@@ -4565,7 +4565,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library without a prebuilt file (for
-    ahead-of-time warm-up through FlashInfer's ``build_jit_specs``)."""
+    ahead-of-time warm-up: ``spec.build()`` of each)."""
 
     return cake_build.jit_specs(arch)
 

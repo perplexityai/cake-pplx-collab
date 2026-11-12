@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Single-GPU tests of ``cake_causal_conv1d_det_kcp`` (FlashInfer issue #6919): one process, world size 1, no process
+Single-GPU tests of ``cake_causal_conv1d_det_kcp``: one process, world size 1, no process
 group.  The rank holds every fragment of a partitioned problem (the halo exchange of one rank is the identity), so
 the history rows, the backward's head rows and the tail fold all run through the host flow.  Criteria:
 
@@ -32,9 +32,9 @@ the history rows, the backward's head rows and the tail fold all run through the
 (d) every output repeats bit for bit over ``REPEATS`` calls per launch form (``y``, ``hist``, ``dx``, ``dweight`` and
     the halo rows of both exchanges); a steady round issues no host-to-device copy, no synchronizing operation and no
     device allocation.
-(e) the KCP backend reads no environment variable, and a copy of the package imports with ``flashinfer`` blocked.
+(e) the KCP backend reads no environment variable, and a copy of the package imports standalone.
 
-(a) and (b) also run on the two production layers of FlashInfer issue #8365 (``ROWS_8365``: one rank's 32768 tokens at
+(a) and (b) also run on the two production layers (``ROWS_8365``: one rank's 32768 tokens at
 C = 10240 and 16384 tokens at C = 8192).  A ``CakeKDADetKcpContext`` is built with
 ``cake_kda_det_train_kcp_build_context`` of the KDA KCP plan module.
 """
@@ -84,7 +84,7 @@ ROWS = [
     ("one-token-frag", (65,), (64, 1), 256),
     ("wide", (5000, 7000), (1, 2, 4997, 7000), 8192),
 ]
-# One rank's tokens of the two production layers of FlashInfer issue #8365: 32768 tokens at C = 10240 (documents
+# One rank's tokens of the two production layers: 32768 tokens at C = 10240 (documents
 # 12000 / 9000 / 6000 / 3768 / 2000) and 16384 tokens at C = 8192 (9000 / 5000 / 2384), cut into fragments whose
 # boundaries are off multiples of 64 and inside documents, so the first document spans three fragments.  Kept out of
 # ``ROWS`` (other suites parametrize over it); the FP64 oracle of a row holds several 2.7 GB tensors.
@@ -610,7 +610,7 @@ def test_graph_replay_knob_is_bitwise(form) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Recompute handle (issues #7815 / #7818): torch's checkpoint recompute binds the history pool the original forward
+# Recompute handle: torch's checkpoint recompute binds the history pool the original forward
 # stored instead of gathering and exchanging it again.  One rank here (the exchange of one rank is the identity, so
 # the module's ``_exchange`` calls are counted instead of collectives: one in the original forward, one in the
 # backward, none in a recompute with a handle); the NCCL rows are in test_cake_causal_conv1d_det_train_kcp_dist.py.
@@ -964,7 +964,7 @@ def test_recompute_handle_both_host_paths(monkeypatch, host_trim) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The backward's launch forms (FlashInfer issue #8365): ``cooperative=True`` runs the cooperative ``kcp_bwd`` record,
+# The backward's launch forms: ``cooperative=True`` runs the cooperative ``kcp_bwd`` record,
 # ``cooperative=False`` the ``kcp_bwd_split`` record (an ordinary launch one SM short of co-resident) and its fixed-order
 # reduce program.  ``dx`` is bitwise the same in both forms; ``dweight`` is reproducible in each form and within the
 # FP64-oracle bound, its bits differ between the forms (each sums its own partial rows).
@@ -1248,7 +1248,7 @@ def test_steady_state_calls_do_not_block_or_allocate() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The backend reads no environment variable, and a copy of the package imports with flashinfer blocked.
+# The backend reads no environment variable, and a copy of the package imports standalone.
 
 
 def test_kcp_backend_reads_no_environment_variable() -> None:
@@ -1304,7 +1304,6 @@ def test_kcp_backend_reads_no_environment_variable() -> None:
 
 _VENDORED = """
 import importlib
-import importlib.abc
 import os
 import sys
 import types
@@ -1315,16 +1314,6 @@ for p in sys.argv[3:]:
     if p not in sys.path:
         sys.path.append(p)
 
-
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, PKG_ROOT)
 
 import torch
@@ -1365,20 +1354,15 @@ with warnings.catch_warnings(record=True) as rec:
         else:
             raise AssertionError("the host-side check must reject the call")
 assert not rec, [f"{w.category.__name__}: {w.message}" for w in rec]
-leaked = sorted(
-    k for k in sys.modules if (k == "flashinfer" and sys.modules[k] is not None) or k.startswith("flashinfer.")
-)
-assert not leaked, leaked
 print("OK")
 """
 
 
-def test_vendored_kcp_imports_with_flashinfer_blocked(tmp_path) -> None:
+def test_vendored_kcp_imports_standalone(tmp_path) -> None:
     """A copy of the package directory under another top-level name imports its KCP module in a ``python -I``
-    subprocess with ``flashinfer`` blocked (meta-path finder plus ``sys.modules["flashinfer"] = None``; no CUDA
-    device): ``kcp.__all__`` resolves, the ``kcp_jit`` registry loads, ``COOPERATIVE_DEFAULT`` is ``False``, the
-    private test hook needs no environment variable, six host-side refusals raise without a warning, and no
-    ``flashinfer`` module is loaded."""
+    subprocess (no CUDA device): ``kcp.__all__`` resolves, the ``kcp_jit`` registry loads, ``COOPERATIVE_DEFAULT`` is
+    ``False``, the private test hook needs no environment variable, and six host-side refusals raise without a
+    warning."""
     import os
     import shutil
     import site

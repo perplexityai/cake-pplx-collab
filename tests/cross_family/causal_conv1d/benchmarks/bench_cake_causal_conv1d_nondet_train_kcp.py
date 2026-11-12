@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,9 +42,9 @@ Phases per row and mode, each through the autograd entry with gradient-requiring
 
 Measures (on every rank; a row reports the slowest rank and the JSON keeps every rank's value):
 
-* ``gpu_us``: the CUDA-event span of the phase on the rank (``flashinfer.testing.bench_gpu_time``, cold L2, the same
-  iteration counts on every rank; CUDA events, not CUPTI: the CUPTI path finalizes CUPTI after every measurement,
-  and a finalize while the NCCL watchdog thread is inside a CUDA runtime call ends the process with SIGSEGV in
+* ``gpu_us``: the CUDA-event span of the phase on the rank (``_cuda_event_times``: an L2 flush, then CUDA events
+  around the call; cold L2, the same iteration counts on every rank; CUDA events, not CUPTI: a CUPTI finalize after
+  every measurement while the NCCL watchdog thread is inside a CUDA runtime call ends the process with SIGSEGV in
   ``cudaGetDevice``).  The exchange's NCCL kernels are in the span, so a rank's span includes its wait for its
   peers; a host-bound phase (the autograd host time above its kernels' time) also puts host gaps in it;
 * ``ahead_us``: the GPU time with the host enqueue hidden: after a barrier and an L2 flush, a spin kernel of the same
@@ -132,7 +132,6 @@ from cake_pplx.cake_kda_det_train_kcp import (  # noqa: E402
     cake_kda_det_train_kcp_build_context,
     cake_kda_det_train_kcp_partition,
 )
-from flashinfer.testing import bench_gpu_time  # noqa: E402
 
 WIDTH = 4
 SEED = 0
@@ -214,24 +213,39 @@ def _max_over_ranks(values: list[float], device: torch.device) -> list[float]:
     return t.tolist()
 
 
+def _cuda_event_times(fn: Callable[[], object]) -> list[float]:
+    """This rank's CUDA-event spans (ms) of ``GPU_SAMPLES`` calls of ``fn`` after ``GPU_WARMUPS`` warm-up calls, each
+    call behind an L2 flush (a zeroed buffer of twice the L2 size)."""
+
+    device = torch.cuda.current_device()
+    l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+    flush = torch.empty(2 * l2_bytes, dtype=torch.int8, device=device)
+    for _ in range(GPU_WARMUPS):
+        flush.zero_()
+        fn()
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(GPU_SAMPLES)]
+    ends = [torch.cuda.Event(enable_timing=True) for _ in range(GPU_SAMPLES)]
+    for start, end in zip(starts, ends):
+        flush.zero_()
+        start.record()
+        fn()
+        end.record()
+    torch.cuda.synchronize(device)
+    return [start.elapsed_time(end) for start, end in zip(starts, ends)]
+
+
 def _gpu_ms(fn: Callable[[], object]) -> list[float]:
     """Every rank's median CUDA-event span (ms) of ``fn``, cold L2; every rank runs the same iteration counts.
 
-    Not CUPTI: its per-measurement finalize races the NCCL watchdog thread's CUDA calls (SIGSEGV in ``cudaGetDevice``).
+    Not CUPTI: a per-measurement CUPTI finalize races the NCCL watchdog thread's CUDA calls (SIGSEGV in
+    ``cudaGetDevice``).
     """
 
-    times = bench_gpu_time(
-        fn,
-        enable_cupti=False,
-        cold_l2_cache=True,
-        dry_run_iters=GPU_WARMUPS,
-        repeat_iters=GPU_SAMPLES,
-        aggregate_op=list,
-    )
+    times = _cuda_event_times(fn)
     if dist.get_world_size() == 1:
         return [_median(times)]
-    # One list of every rank's value per iteration.
-    return [_median(per_rank) for per_rank in zip(*times, strict=True)]
+    # Every rank's list of samples, in rank order.
+    return [_median(per_rank) for per_rank in _gather(times)]
 
 
 def _wall_ms(fn: Callable[[], object], device: torch.device) -> tuple[float, float]:

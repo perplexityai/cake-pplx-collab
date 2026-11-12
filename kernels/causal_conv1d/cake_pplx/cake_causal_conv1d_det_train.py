@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ Graph, build every library of the device's architecture (the backend's
 ``cake_pplx._backends.cake_causal_conv1d_det_train.cake_jit.specs_for_arch``)
 so that no JIT build happens inside the capture; the captured graph holds the
 program selected for its shape and route.  The backend package is imported on
-first use: importing this module (or ``flashinfer``) loads none of it.
+first use: importing this module loads none of it.
 
 Usage::
 

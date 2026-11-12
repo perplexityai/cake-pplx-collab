@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -87,7 +87,7 @@ when a call needs a larger buffer, and kept alive after its graph is freed
 until a later capture on that stream replaces it; with capture id 0, also
 without ``cuda.bindings``, each captured call zeroes a buffer of its own).
 
-Two-launch forward (the deterministic KCP package's forward, FlashInfer #9225): the forward can run as a main
+Two-launch forward (the deterministic KCP package's forward): the forward can run as a main
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,
 a continuing fragment's first rows as at a document start: either this package's zero-history registry's single-rank
 ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C, S=S)``, the program the single-rank forward
@@ -147,7 +147,7 @@ caller's stream.  ``_set_test_knobs({"host_trim": 0})`` (a private test hook;
 the backend reads no environment variable) selects the previous host path for
 the A/B record.
 
-Backward grid beside a concurrent kernel (FlashInfer issue #8365): the main
+Backward grid beside a concurrent kernel: the main
 backward launches :func:`_bwd_grid`, ``ctas_per_sm x SM count`` CTAs less
 ``ctas_per_sm`` when the last channel-tile rank of that grid holds at least
 ``ctas_per_sm`` CTAs.  A kernel on another stream that keeps one SM's shared
@@ -166,8 +166,7 @@ bitwise, ``dweight`` within the same budget); the host cache and graph keys hold
 ``K >= 1`` raises ``ValueError`` (:data:`RESERVE_UNSUPPORTED`): there the reserved
 grid costs up to 1.055x the shipped grid unloaded (C 1024, 62585 tokens).
 
-Checkpoint recompute without the halo exchange (FlashInfer issues #7815 /
-#7818): with ``recompute_handle=``
+Checkpoint recompute without the halo exchange: with ``recompute_handle=``
 (:class:`CakeCausalConv1dNondetKcpRecomputeHandle`, or any object with an
 ``entries`` dict) the original forward exchanges as always and stores
 its history pool ``hist`` (the saved set's own tensor, key ``"conv"``) in the
@@ -180,7 +179,7 @@ rows).  The forward exchange is a collective: every rank of ``ctx.group`` passes
 a handle for the same call or none, created at the same checkpoint nesting
 level (no check is made; a mismatch hangs or corrupts data).
 
-Several convolutions of one layer (FlashInfer issue #7815): ``cake_causal_conv1d_nondet_kcp_multi(xs, weights, ctx)``
+Several convolutions of one layer: ``cake_causal_conv1d_nondet_kcp_multi(xs, weights, ctx)``
 runs the convolutions of ``n`` tensors that share the context (a layer's q, k and v) with one halo exchange per
 direction instead of ``n``: the tensors' send rows travel side by side in one ``all_to_all_single``; after the wait,
 when the backward runs the overlapped pair with more than one rank and all the tensors share one width, the tail-row
@@ -390,7 +389,7 @@ def _context(ctx: Any, *, device: torch.device, T_r: int) -> tuple[torch.Tensor,
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Rank agreement and one mode per collective (FlashInfer issue #8946): every rank of a call must pass a context built
+# Rank agreement and one mode per collective: every rank of a call must pass a context built
 # from the same partition and call the same entry (this package's nondet entry, single or multi) with the same
 # channel counts.  The first eager exchange of each (context, phase) -- phase "fwd" or "bwd" -- all-gathers one int64[8]
 # fingerprint per rank over ``ctx.group`` and compares them on the host (the call's only collective beyond the halo
@@ -488,8 +487,8 @@ def _agree(
         return
     if torch.cuda.is_current_stream_capturing():
         raise ValueError(
-            f"the first {phase} call of a KCP context ran inside a CUDA-graph capture: the rank-agreement check of "
-            "#8946 needs one eager call per context and phase before a capture"
+            f"the first {phase} call of a KCP context ran inside a CUDA-graph capture: the rank-agreement check "
+            "needs one eager call per context and phase before a capture"
         )
     mine = torch.tensor(
         _fingerprint(ctx, phase, channels, multi), dtype=torch.int64, device=device
@@ -515,7 +514,7 @@ def _agree(
             for rank, fields in bad
         )
         raise ValueError(
-            f"KCP rank agreement failed on the first {phase} call of this context (#8946: every rank passes the "
+            f"KCP rank agreement failed on the first {phase} call of this context (every rank passes the "
             f"same partition and calls the same entry, mode and channel counts): {detail}"
         )
     done.add(phase)
@@ -728,7 +727,7 @@ FWD_OVERLAPS = (None, 0, 1)
 FWD_OVERLAP_DEFAULT = None
 # The architectures whose single call runs the single-rank main program (``FWD_MAIN_ARCHS``) and launches its main
 # program before the exchange's wait (``FWD_OVERLAP_ARCHS``), and the multi entry's (``MULTI_*``).  The deterministic
-# KCP package's sets (FlashInfer #9225): this package runs the same forward programs (the zero-history registry's
+# KCP package's sets: this package runs the same forward programs (the zero-history registry's
 # ``fwd`` route records carry the deterministic records' build identity digits; the ``kcp_fwd`` and ``kcp_fwd_halo``
 # programs are copies of the deterministic ones), so each entry takes the form the deterministic package measured
 # faster than the one-launch forward on every forward, forward + backward and checkpointed step row of B200, GB300 and
@@ -906,7 +905,7 @@ def _bwd_grid(
     device_index: int,
     reserve: int = RESERVE_DEFAULT,
 ) -> tuple[int, int, int]:
-    """The main backward program's launch grid (issue #8365): :func:`launch_grid` of ``record`` on the device, less
+    """The main backward program's launch grid: :func:`launch_grid` of ``record`` on the device, less
     ``ctas_per_sm`` CTAs when that grid is a single wave (``grid_mult`` 1) whose last channel-tile rank holds at
     least ``ctas_per_sm`` CTAs (``grid % n_ch_tiles >= ctas_per_sm``), so the grid fits on one SM fewer; any other
     grid launches unchanged.  The trimmed grid keeps every channel tile's CTAs but one rank's worth at most.
@@ -2762,7 +2761,7 @@ def _kcp_given(
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Several convolutions of one layer with one halo exchange per direction (FlashInfer issue #7815): the q / k / v
+# Several convolutions of one layer with one halo exchange per direction: the q / k / v
 # convolutions of a layer share the context, so their history rows (forward) and head rows (backward) travel in ONE
 # ``all_to_all_single`` instead of one per tensor.  The send rows of the tensors are packed side by side
 # (``[n_rows, sum C_i]``, the context's splits unchanged), and after the wait each tensor's rows are copied out into

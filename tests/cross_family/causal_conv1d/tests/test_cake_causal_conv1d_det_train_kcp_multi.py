@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Single-GPU tests of ``cake_causal_conv1d_det_kcp_multi`` (FlashInfer issue #7815): the convolutions of several tensors of
+Single-GPU tests of ``cake_causal_conv1d_det_kcp_multi``: the convolutions of several tensors of
 one layer (q / k / v) with one halo exchange per direction.  One process, world size 1 (the rank holds every fragment
 of a partitioned problem, so history rows, head rows and the tail fold all run; one rank issues no collective).  The
 criterion is bitwise equality with one ``cake_causal_conv1d_det_kcp`` call per tensor: ``y``, ``hist``, ``dx`` and
@@ -47,7 +47,7 @@ MROWS = [(name, lens, cuts, (C, C, C)) for name, lens, cuts, C in ROWS] + [
     ("short-mixed", (1, 2, 3, 57), (3, 30, 30), (384, 128, 8)),
     ("one-tensor", (5000, 1003), (1, 2, 4997, 1003), (512,)),
 ]
-# The multi entry's production layer (FlashInfer issue #8365): one rank's 16384 tokens and three convolutions of
+# The multi entry's production layer: one rank's 16384 tokens and three convolutions of
 # C = 8192; kept out of ``MROWS`` (other suites import it).
 MROWS_8365 = [
     ("8365-c8192x3", (9000, 5000, 2384), (4095, 4097, 4099, 4093), (8192, 8192, 8192)),
@@ -454,7 +454,7 @@ def test_facade_multi_entry_is_lazy_and_keyword_only() -> None:
 
 @pytest.mark.parametrize("cooperative", [True, False])
 def test_multi_launch_form_bitwise_single_calls(cooperative) -> None:
-    """``cooperative`` (FlashInfer issue #8365) applies to every tensor of a multi call: outputs and gradients are
+    """``cooperative`` applies to every tensor of a multi call: outputs and gradients are
     bitwise the single calls with the same form, through the explicit backward and the autograd entry."""
     conv_kcp = _kcp()
     device = torch.device("cuda")

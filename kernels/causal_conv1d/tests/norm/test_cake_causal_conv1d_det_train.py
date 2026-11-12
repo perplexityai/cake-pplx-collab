@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ every route, and that a routed row's ``dx`` (forward: ``y``) equals the
 fallback program's bits.  The backward is two launches on one stream -- the selected
 program, then its ``reduce`` program with programmatic dependent launch -- and
 the suite holds the launch order, the registry's grid-rule kinds and
-FlashInfer issue #7038's recipe: a kernel resident on another stream does not
+a side-stream check: a kernel resident on another stream does not
 stall the backward (``busy <= 2 x alone``) and leaves ``dweight`` bitwise
 unchanged.  The forward takes its token chunks from int32 counters in a
 forward workspace that every launch leaves zero: the suite checks its size
@@ -61,10 +61,10 @@ stream) buffer of the calls that pass none.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer, so a build that vendors the package under another import path
+``cake_pplx``, so a build that vendors the package under another import path
 runs it unchanged after pointing that table entry at its package.  The
-``cake_pplx.cake_causal_conv1d_det_train`` facade and the ``flashinfer``
-top-level exposure are covered by ``test_cake_causal_conv1d_det_train_api.py``.
+``cake_pplx.cake_causal_conv1d_det_train`` facade is covered by
+``test_cake_causal_conv1d_det_train_api.py``.
 """
 
 from __future__ import annotations
@@ -1892,7 +1892,7 @@ def test_run_module_names_a_missing_argument() -> None:
 def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     record_property,
 ) -> None:
-    """FlashInfer issue #7038's recipe: one 1-thread kernel resident on another stream must not stall the
+    """One 1-thread kernel resident on another stream must not stall the
     backward.
 
     The cooperative form waited for it (0.161 ms -> 17.85 ms on GB200, x28-x129 measured); the two ordinary
@@ -3130,7 +3130,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
 
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
-    # The manifest names the package by its FlashInfer import path, also in a copy
+    # The manifest names the package by its ``cake_pplx`` import path, also in a copy
     # vendored under another name (``pkg.__name__`` is then the copy's).
     assert (
         manifest["package"]
@@ -3172,7 +3172,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
         assert record["role"] in loader.ROLES, name
         grid = record["grid_rule"]
         assert grid["kind"] in loader.GRID_KINDS, name
-        # No launch is cooperative (FlashInfer #7038): a main program sizes its grid by occupancy, a reduce
+        # No launch is cooperative: a main program sizes its grid by occupancy, a reduce
         # program by channels, and both are ordinary launches.
         assert grid["cooperative"] is False, name
         assert record["launch"]["cooperative"] is False, name

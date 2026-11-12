@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -85,7 +85,7 @@ Measures (on every rank; a row reports the slowest rank, the JSON keeps every ra
   ``RESIDENT_US`` spin become ready together, so the side kernels are resident when the phase's first kernel is
   enqueued behind that spin, with about D ms - ``RESIDENT_US`` left.  Per load: the loaded span, the ratio loaded /
   unloaded per round (both the slowest rank of the same round) and ``loaded_scaled_us`` = median ratio x unloaded
-  median.  FlashInfer #8365's side-stream criterion: the backward's ratio at most ``SIDE_STREAM_LIMIT`` with a 1x2 ms
+  median.  The side-stream criterion: the backward's ratio at most ``SIDE_STREAM_LIMIT`` with a 1x2 ms
   and with a 1x4 ms load (``side_criterion``);
 * ``wall_us`` / ``host_us``: the synchronized wall time of one call and its enqueue time (``--skip-wall`` drops them);
 * ``first`` / ``steady`` (``det_coop`` / ``det_split``): the first call of each phase after the package caches are
@@ -107,10 +107,10 @@ Rows (``--rows``):
 
 * ``customer``: ``C = 10240`` at 32768 tokens per rank (single entry) and ``3 x C = 8192`` at 16384 tokens per rank
   (multi entry), each in the ``zigzag``, ``zigzag_per_document`` and ``contiguous`` layouts (``contiguous`` only at
-  ``W = 1``).  Documents: at ``W = 1`` the FlashInfer #8365 packs (12000 / 9000 / 6000 / 3768 / 2000 tokens; 9000 /
+  ``W = 1``).  Documents: at ``W = 1`` the production packs (12000 / 9000 / 6000 / 3768 / 2000 tokens; 9000 /
   5000 / 2384); at ``W > 1`` the pack's first document, one long document of ``floor(W / 2)`` ranks' tokens plus a
   third of a rank's, then the pack repeated from its second document up to ``W x tokens per rank`` (the last one cut);
-* ``pr8365`` (``W = 1``): the FlashInfer #8365 single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
+* ``pr8365`` (``W = 1``): the production single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
   16384 tokens, single, and ``3 x C = 8192`` multi;
 * ``custom``: ``--channels``, ``--tokens-per-rank``, ``--docs``, ``--tensors`` and ``--layouts``.
 
@@ -154,7 +154,6 @@ from torch.utils.checkpoint import checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import flashinfer  # noqa: E402
 import cake_pplx.cake_causal_conv1d_det_train as det_conv  # noqa: E402
 import cake_pplx.cake_causal_conv1d_det_train_kcp as det_kcp_api  # noqa: E402
 import cake_causal_conv1d_baselines as baselines  # noqa: E402
@@ -206,7 +205,7 @@ SIDE_STREAM_LIMIT = 1.3
 SPLIT_TOLERANCE = 1.02
 # The deterministic KCP package's dweight bound against an FP64 oracle.
 DW_ATOL, DW_RTOL = 5e-2, 1e-4
-# (channels, tokens per rank, the FlashInfer #8365 single-GPU documents of that token count)
+# (channels, tokens per rank, the production single-GPU documents of that token count)
 CUSTOMER_SINGLE = (10240, 32768, (12000, 9000, 6000, 3768, 2000))
 CUSTOMER_MULTI = (8192, 16384, (9000, 5000, 2384))
 MULTI_TENSORS = 3
@@ -1282,7 +1281,8 @@ def bench_row(
     for name, coop in CAKE_ARMS.items():
         entries[name] = {
             "name": name,
-            "library": f"flashinfer {flashinfer.__version__}",
+            "library": "cake-pplx-causal-conv1d "
+            + (baselines._distribution("cake-pplx-causal-conv1d") or "unknown"),
             "entry": "cake_pplx.cake_causal_conv1d_det_train_kcp."
             + (
                 "cake_causal_conv1d_det_kcp"
@@ -1835,7 +1835,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "sm_count": torch.cuda.get_device_properties(device).multi_processor_count,
         "cuda": torch.version.cuda,
         "torch": torch.__version__,
-        "flashinfer": flashinfer.__version__,
+        "cake-pplx-causal-conv1d": baselines._distribution("cake-pplx-causal-conv1d"),
         "world": world,
         "hosts": sorted(set(_gather(os.uname().nodename))),
         "cooperative_default": det_kcp_backend.COOPERATIVE_DEFAULT,
