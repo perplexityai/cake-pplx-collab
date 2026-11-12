@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ one record per program (its ``library`` stem; the ``build.json`` entries are
 ``<library>_<arch>``), :func:`.cake_jit.grid` the launch grids and
 :func:`.cake_jit.scratch_layout` the backward scratch.  :mod:`.cake_build`
 serves a library from a prebuilt ``aot/`` file when a builder compiled it and
-otherwise through FlashInfer's JIT from the sources and flags of
-``build.json``; the prebuilt route imports nothing from ``flashinfer``.
+otherwise through the package's JIT build shim (``_cake_pplx_jit.py``)
+from the sources and flags of ``build.json``.
 
 Every launch is a plain stream-ordered launch on the current torch stream:
 nothing cooperative, no PDL, no co-residency requirement.  The backward
@@ -174,13 +174,13 @@ def is_prebuilt(name: str, arch: str) -> bool:
 @functools.cache
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``: the prebuilt ``aot/`` library when a builder
-    compiled it, else FlashInfer's JIT build of the same sources and flags (``cake_build.load_library``)."""
+    compiled it, else the JIT build of the same sources and flags (``cake_build.load_library``)."""
     return cake_build.load_library(library_name(name, arch))
 
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library of ``build.json`` without a prebuilt file (for ahead-of-time
-    warm-up through FlashInfer's ``build_jit_specs``)."""
+    warm-up builds)."""
     return cake_build.jit_specs(arch)
 
 

@@ -17,7 +17,7 @@ SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
 supported architectures; another device raises `RuntimeError`.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
-JIT-built by FlashInfer from the sources and flags `build.json` records
+JIT-built from the sources and flags `build.json` records
 otherwise.  The package reads no environment variable.
 
 ## Opt-in

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ kernel; a key range past 64 key blocks; the package's buffers filled with 0xFF b
 small-budget chunks the backward launches; a workspace dropped between the forward and the backward (same budget,
 same bits); the plan kernel's dispatch bound; a caller's ``dq`` off a 32-byte boundary (the bits of an allocated one).
 
-The suite names its package once, through the shared alias helper, and imports nothing else from flashinfer.
+The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
 
 from __future__ import annotations
@@ -291,13 +291,11 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     assert (PACKAGE_DIR / "csrc" / "cake_ffi_checks.h").is_file()
 
 
-def test_the_loader_imports_standalone_without_flashinfer() -> None:
-    """The vendorable form: ``cake_build.py`` loaded by path in a process where ``flashinfer`` cannot be imported
-    reads the manifest (the prebuilt route imports nothing from FlashInfer)."""
+def test_the_loader_imports_standalone_by_path() -> None:
+    """The vendorable form: ``cake_build.py`` loaded by path in a fresh process reads the manifest."""
     _manifest_or_skip()
     code = (
         "import importlib.util, sys\n"
-        "sys.modules['flashinfer'] = None\n"
         f"spec = importlib.util.spec_from_file_location('vendored_cake_build', {str(PACKAGE_DIR / 'cake_build.py')!r})\n"
         "b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)\n"
         "m = b.manifest(); assert m['schema'] == 'cake-build/1'\n"
@@ -316,8 +314,8 @@ def test_the_loader_jit_shim_and_header_are_the_same_bytes_in_both_mode_packages
     copies of the loader (``cake_build.py``), the JIT shim (``_cake_pplx_jit.py``) and the FFI check header."""
     _manifest_or_skip()
     # The other mode package's copy, read from disk (not imported): the nondet GQA backend of this family, the sibling
-    # directory under ``cake_pplx/_backends``.  (Upstream compared with the KDA backend's copy; in cake_pplx each
-    # family carries its own copy, and copies of different families may diverge.)
+    # directory under ``cake_pplx/_backends``.  (Each family carries its own copy, and copies of
+    # different families may diverge.)
     other = PACKAGE_DIR.parent / "cake_gqa_nondet_train"
     assert other.is_dir(), other
     for relative in ("cake_build.py", "_cake_pplx_jit.py", "csrc/cake_ffi_checks.h"):
@@ -342,8 +340,7 @@ def test_the_prebuilt_library_is_preferred() -> None:
             )
 
 
-# The variables the JIT shim (``_cake_pplx_jit.py``) reads: it stands in for ``flashinfer.jit``, which read its
-# toolchain and cache variables outside the package upstream.
+# The variables the JIT shim (``_cake_pplx_jit.py``) reads: the toolchain, cache and JIT switches.
 JIT_SHIM_ENVIRONMENT_VARIABLES = frozenset(
     {
         "CUDA_HOME",
@@ -352,7 +349,6 @@ JIT_SHIM_ENVIRONMENT_VARIABLES = frozenset(
         "CAKE_PPLX_NVCC",
         "CXX",
         "CAKE_PPLX_JIT_WORKERS",
-        "FLASHINFER_DISABLE_JIT",
         "CAKE_PPLX_DISABLE_JIT",
     }
 )
