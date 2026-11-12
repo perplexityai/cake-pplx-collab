@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ det_jit = cake_package("cake_moe_grouped_gemm_det_train", "cake_jit")
 HOST_PLAN_CONSTANTS = cake_jit.HOST_PLAN_CONSTANTS
 
 REPEATS = 10  # launches per output pre-state (zero bytes, then FILL_BYTE)
-RACE_REPEATS = 50  # the flashinfer-ai/flashinfer#6570 shape
+RACE_REPEATS = 50  # the #6570 race shape
 FILL_BYTE = 0x5A
 ATOL = RTOL = 1e-2  # bf16 outputs
 FP32_REL_L2 = 1e-4  # fp32 weight gradient

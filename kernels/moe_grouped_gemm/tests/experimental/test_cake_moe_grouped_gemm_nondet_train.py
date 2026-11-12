@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ import torch.utils.checkpoint
 from tests.cake.test_helpers.cake_package import cake_package
 
 # Backend suite: the package is named through ``cake_package`` only; nothing
-# else of flashinfer is imported here.  The facade and the numerical-mode
+# else of ``cake_pplx`` is imported here.  The facade and the numerical-mode
 # checks live in ``test_cake_moe_grouped_gemm_nondet_train_api.py``, the comparisons with
 # the deterministic package (its routes and bits) in
 # ``test_cake_moe_grouped_gemm_nondet_train_reproducibility.py``.
@@ -82,7 +82,7 @@ DTYPE_NAMES = {torch.bfloat16: "bfloat16", torch.float32: "float32"}
 SM_COUNTS = {"sm_100a": (148, 160), "sm_103a": (148, 160), "sm_107a": (212, 216)}
 ARCH_SM_COUNTS = [(arch, sms) for arch, counts in SM_COUNTS.items() for sms in counts]
 # ~1 s at 2 GHz: a kernel resident on another stream for the whole of the
-# concurrent-stream test (flashinfer-ai/flashinfer#7038, #7548).
+# concurrent-stream test.
 RESIDENT_SLEEP_CYCLES = 2_000_000_000
 
 # Group size lists: an empty group, a one-row group, sizes that are not tile
@@ -91,7 +91,7 @@ RAGGED_E4 = [300, 0, 1, 700]
 RAGGED_E6 = [1, 257, 511, 4099, 0, 33]
 TINY_E5 = [1, 2, 3, 0, 4]
 LONG_E3 = [6145, 0, 12289]
-# Groups shorter than one 64-row k-step (flashinfer-ai/flashinfer#6570).
+# Groups shorter than one 64-row k-step (the race repro shape).
 SMALL_E512 = [32] * 512
 SMALL_GROUP_LAUNCHES = 200
 # Short groups beside long ones: with the 512-wide k tile forced, the split tail
@@ -1466,7 +1466,7 @@ def test_wgrad_short_groups_never_include_the_next_group(
         _assert_tail_at_rest(device)
 
 
-# The flashinfer-ai/flashinfer#6570 repro shape: 256 groups of 32 rows at (N, K).
+# The race repro shape: 256 groups of 32 rows at (N, K).
 RACE6570_SIZES = [32] * 256
 RACE6570_SHAPE = (1024, 6144)
 
@@ -1476,8 +1476,7 @@ RACE6570_SHAPE = (1024, 6144)
 def test_short_groups_on_two_concurrent_streams(form, out_dtype, monkeypatch):
     """Two prepared weight gradients launched interleaved on two streams in flight
     together while a long-running kernel stays resident on a third stream and copies and
-    GEMMs run on a fourth (flashinfer-ai/flashinfer#7038, #7548: correctness must not
-    depend on other streams being idle): the mixed short / long groups with the 512-wide
+    GEMMs run on a fourth (correctness must not depend on other streams being idle): the mixed short / long groups with the 512-wide
     k tile forced into ``form`` and a split ordered tail, or (``"race6570"``) the #6570
     repro shape as planned.  Every result has the bits of an isolated launch on a quiet
     stream (within the budget of the fp64 reference), with each stream's split-tail

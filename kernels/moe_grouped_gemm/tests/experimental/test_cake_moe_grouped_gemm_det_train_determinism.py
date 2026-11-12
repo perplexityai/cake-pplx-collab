@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ cake_jit = cake_package(PACKAGE, "cake_jit")
 HOST_PLAN_CONSTANTS = cake_jit.HOST_PLAN_CONSTANTS
 
 REPEATS = 10  # launches per output pre-state (zero bytes, then FILL_BYTE)
-RACE_REPEATS = 100  # the flashinfer-ai/flashinfer#6570 shape
+RACE_REPEATS = 100  # the #6570 race shape
 FILL_BYTE = 0x5A
 SPOT_ROWS = 64
 SPOT_COLS = 256

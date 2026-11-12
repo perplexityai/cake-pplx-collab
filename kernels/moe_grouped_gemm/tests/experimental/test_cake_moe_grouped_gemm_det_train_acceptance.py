@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # Acceptance checks of the deterministic ragged BF16 MoE grouped GEMM at the
-# shapes of flashinfer-ai/flashinfer#5678, on top of the determinism file:
+# design shapes, on top of the determinism file:
 #
 # * ``test_five_repeats_under_copy_streams``: every output (``Y``, ``dX``, bf16 and
 #   fp32 ``dW``, fp32 ``main_grad`` accumulate on the fused route and on the composed

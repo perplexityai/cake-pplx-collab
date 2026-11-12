@@ -1,5 +1,5 @@
-// Host surface of the generated Cake launchers (``*_binding.cu``) for a package built without
-// FlashInfer's csrc: the TVM-FFI / DLPack headers the launchers use, the named tensor-argument
+// Host surface of the generated Cake launchers (``*_binding.cu``) of a standalone package:
+// the TVM-FFI / DLPack headers the launchers use, the named tensor-argument
 // checks and the CUDA runtime version the library was compiled against.
 #pragma once
 

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,8 +26,8 @@ import torch.utils.checkpoint
 from tests.cake.test_helpers.cake_package import cake_package
 
 # Backend suite: the package is named once, through ``cake_package``; nothing else
-# of flashinfer is imported here.  The tests of the stable flashinfer entry point
-# ``flashinfer.grouped_mm.grouped_mm_bf16(..., backend="cake")`` live in
+# of ``cake_pplx`` is imported here.  The tests of the stable entry points and of
+# the ``grouped_mm_bf16`` handoff live in
 # ``test_cake_moe_grouped_gemm_det_train_api.py``.
 pkg = cake_package("cake_moe_grouped_gemm_det_train")
 cb = cake_package("cake_moe_grouped_gemm_det_train", "cake_backend")
@@ -60,7 +60,7 @@ RAGGED_E6 = [1, 257, 511, 4099, 0, 33]
 TINY_E5 = [1, 2, 3, 0, 4]
 LONG_E3 = [6145, 0, 12289]
 # Groups shorter than one 64-row k-step: every output tile is a single k-step, and
-# a CTA switches group at almost every tile (the shape of flashinfer-ai/flashinfer#6570).
+# a CTA switches group at almost every tile (the race repro shape).
 SMALL_E512 = [32] * 512
 SMALL_GROUP_LAUNCHES = 200
 # Two ragged groups of more than every architecture's ``k512_min_rows_per_group``

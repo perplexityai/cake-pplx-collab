@@ -5,13 +5,12 @@ This package is the backend of the module
 MoE grouped GEMM; the deterministic mode is the module
 `cake_pplx.cake_moe_grouped_gemm_det_train` (backend
 `cake_pplx._backends.cake_moe_grouped_gemm_det_train`). The module's
-functions are stable FlashInfer APIs: the one-shot functions
+functions are stable APIs: the one-shot functions
 `cake_moe_grouped_gemm_nondet_train_forward`, `_dgrad` and `_wgrad`, the prepared
 launches `cake_moe_grouped_gemm_nondet_train_prepare_forward` / `_prepare_dgrad` /
 `_prepare_wgrad`, the autograd entry `cake_moe_grouped_gemm_nondet` and the support
 query `is_cake_moe_grouped_gemm_nondet_train_supported`. There is no automatic
-backend selection. Tracking: FlashInfer issue #8070
-(source requirements: #5678, #6570, #6553, #7047).
+backend selection.
 
 The three operations, their arguments, alignment rules and outputs are the
 deterministic package's (see its README): over `E` groups of rows described by
@@ -57,45 +56,11 @@ capture that check runs when the launch is captured, not at replay. The
 preparation never alerts. No tape, saved tensor or workspace crosses between
 this package and the deterministic one.
 
-The former names were removed with no alias (`ModuleNotFoundError`,
-`ImportError` or `AttributeError`). The table lists the calls that ran the
-non-deterministic package, in the v0.7.4rc1 prerelease and on `main` after it
-(v0.7.3 had no non-deterministic package). Every entry of the package
-`cake_pplx._backends.cake_moe_grouped_gemm` ran only with
-`deterministic=False`; any other value raised `ValueError`. The module
-`cake_pplx._backends.grouped_mm` selected the mode with its
-`deterministic` argument: in v0.7.4rc1 the default (`True`) ran the
-deterministic package, so a call without `deterministic=False` moves to
-`cake_pplx.cake_moe_grouped_gemm_det_train`, with every former deterministic
-name (see its package README); on `main` only `deterministic=False` ran.
-
-| removed | use instead |
-| --- | --- |
-| the package `cake_pplx._backends.cake_moe_grouped_gemm` with its submodules | `cake_pplx.cake_moe_grouped_gemm_nondet_train` (this package: `cake_pplx._backends.cake_moe_grouped_gemm_nondet_train`, same submodule names) |
-| the module `cake_pplx._backends.grouped_mm` | `cake_pplx.cake_moe_grouped_gemm_nondet_train` for its calls with `deterministic=False`; `cake_pplx.cake_moe_grouped_gemm_det_train` for its other calls (v0.7.4rc1) |
-| `grouped_gemm_fwd` / `_dgrad` / `_wgrad` with `deterministic=False`, from `cake_pplx._backends.grouped_mm` or the package above | `cake_moe_grouped_gemm_nondet_train_forward` / `_dgrad` / `_wgrad` |
-| `prepare_grouped_gemm_fwd` / `_dgrad` / `_wgrad` with `deterministic=False`, from the package above | `cake_moe_grouped_gemm_nondet_train_prepare_forward` / `_prepare_dgrad` / `_prepare_wgrad` |
-| `GroupedGemmLaunch`, from the package above | `CakeMoEGroupedGemmNondetLaunch` |
-| `cake_grouped_mm` with `deterministic=False`, from `cake_pplx._backends.grouped_mm` or the package above | `cake_moe_grouped_gemm_nondet` |
-| `CakeGroupedMm`, from the package above | `CakeMoEGroupedGemmNondetFunction` |
-| the `deterministic` argument of every entry | the module of the mode: `cake_pplx.cake_moe_grouped_gemm_det_train` or `cake_pplx.cake_moe_grouped_gemm_nondet_train`; passing the argument raises `TypeError` |
-
 Under `torch.use_deterministic_algorithms(True)` this package runs the same
 launches as without the mode and gives the same bits: no launch of this release
 alerts (above). It never falls back to the deterministic package: use
 `cake_pplx.cake_moe_grouped_gemm_det_train` where the deterministic package's
-bits are required. This differs from v0.7.4rc1, where a call of
-`cake_pplx._backends.grouped_mm` with `deterministic=False` ran the
-deterministic package with a one-time `UserWarning`, and the package
-`cake_pplx._backends.cake_moe_grouped_gemm` alerted at every
-weight-gradient call, its preparation included. On `main` after v0.7.4rc1 both
-alerted only right before an order-varying weight-gradient launch, as this
-package did before its split tail became ordered.
-
-A source checkout that had the old package directory keeps its untracked
-`__pycache__` (and ignored `aot/`) there, which Python then imports as an empty
-namespace package; remove them with
-`git clean -fdX cake_pplx/_backends/cake_moe_grouped_gemm`.
+bits are required.
 
 What differs from the deterministic module:
 
@@ -134,10 +99,10 @@ error budgets. bf16 operands, fp32 accumulation, one round-to-nearest
 rounding to bf16 (or the fp32 store), the layouts, the offsets contract (no
 host synchronisation, no caller padding), the exact zeros of empty groups in
 overwrite mode and the deterministic package's error budgets are unchanged.
-The descriptor-ring and short-group fixes of #6570 live in the shared kernel
-body and host plan. The kernels use no cooperative launch, and the autograd
+The descriptor-ring and short-group fixes for groups shorter than one k-step
+live in the shared kernel body and host plan. The kernels use no cooperative launch, and the autograd
 entry saves only the tensors that backward reads; the latency under resident
-kernels and the shared-memory carveout wait of #7038 and #7548 are not
+kernels and the shared-memory carveout wait are not
 addressed by this package. The slot sum of a split tail tile uses fp32 adds
 without flush to zero, as the deterministic tail reduce does. Whether the
 tensor-core fp32 accumulation keeps subnormal values is not yet measured
@@ -176,9 +141,9 @@ adds in `plan["accumulate"]`:
 
 The route is chosen by a static rule (nothing is compiled, loaded or
 test-built to decide it): an accumulate build is bound when its prebuilt
-library exists under `aot/`, or else when the version of FlashInfer's JIT
+library exists under `aot/`, or else when the version of the JIT shim's
 toolkit reaches the build's `build.json` `min_cuda`, with `nvcc` under the CUDA
-path and `FLASHINFER_DISABLE_JIT` unset (the loader's own rule). The fp32 accumulate builds use the PTX ISA 9.4
+path and `CAKE_PPLX_DISABLE_JIT` unset (the loader's own rule). The fp32 accumulate builds use the PTX ISA 9.4
 `red.add.noftz.f32` form, so their `min_cuda` is 13.4 on every architecture;
 an ahead-of-time build with an older toolkit ships no library for them, and
 with a JIT toolkit below 13.4 the call composes (`"min_cuda"`) instead of
@@ -315,8 +280,8 @@ build calls directly. Importing the module loads none of this package.
 the weight-gradient descriptor slots, resolves the route and binds the
 generated programs, and returns a `CakeMoEGroupedGemmNondetLaunch` whose `launch()` passes
 the operands' TMA descriptors by value and performs no host synchronisation.
-There is no stable-API handoff: `flashinfer.grouped_mm.grouped_mm_bf16(...,
-backend="cake")` stays on the deterministic module.
+There is no `grouped_mm_bf16` handoff: it stays in the deterministic package
+(`cake_backend.grouped_det_mm_bf16_cake`).
 
 `cake_moe_grouped_gemm_nondet(x, w, offs)` is a
 `torch.autograd.Function` wrapper (`CakeMoEGroupedGemmNondetFunction`) that saves `x`, `w` and
@@ -469,16 +434,16 @@ request.
 
 ## Standalone import
 
-The package imports only itself, `torch` and `tvm_ffi`; the only `flashinfer`
-import is the loader's JIT fallback in `cake_build.py`, inside
-`try/except ImportError`. A copy of the package under another top-level name
-loads without a FlashInfer installation.
+The package imports only itself, `torch` and `tvm_ffi`; the loader's JIT
+fallback in `cake_build.py` imports the package's JIT shim `_cake_pplx_jit.py`
+inside `try/except ImportError`. A copy of the package under another top-level
+name loads.
 
 ## Accuracy
 
 Every output repeats bit for bit for the same inputs, shapes, device SM count
-and configuration. The reference package is the deterministic package at
-FlashInfer commit `2e989556` (`flashinfer.experimental.cake_moe_grouped_det_gemm`).
+and configuration. The reference package is the deterministic package
+(`cake_pplx._backends.cake_moe_grouped_gemm_det_train`).
 rel-L2 is the relative L2 error `||out - ref|| / ||ref||`; worst / max |ref|
 is the largest element error divided by the largest reference magnitude.
 
@@ -487,8 +452,8 @@ is the largest element error divided by the largest reference magnitude.
 The tests and the accuracy measurement hold the outputs to these tolerances:
 
 - G1, error against FP64: for each output, rel-L2 against an FP64 reference
-  is at most 1.1 times the reference package's median error over 5 repeats
-  (#8946), and worst / max |ref| is at most 1.5 times the reference
+  is at most 1.1 times the reference package's median error over 5 repeats,
+  and worst / max |ref| is at most 1.5 times the reference
   package's median. The worst element of a split weight-gradient tile
   depends on which tiles take the split tail; the reference package's own
   worst / max |ref| varies by about 1.2x from seed to seed. The table below
@@ -568,7 +533,7 @@ python benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py --help
 `test_cake_moe_grouped_gemm_nondet_train.py` (the backend suite, through
 `tests.cake.test_helpers.cake_package("cake_moe_grouped_gemm_nondet_train")`) checks every
 op, output dtype and stage form against a per-group fp64 reference (worst case
-over repeats), empty groups, the #6570 shape relaunched and on concurrent
+over repeats), empty groups, the short-group race shape relaunched and on concurrent
 streams, CUDA graph replay with changed offsets, checkpointing, gradient
 accumulation, changed shapes with reused and garbage-filled scratch, and the
 tail tickets at rest. `test_cake_moe_grouped_gemm_nondet_train_api.py` covers the
@@ -590,8 +555,8 @@ output repeats bit for bit: repeated launches into outputs prefilled with
 `0x00` and `0x5A` bytes, digests from fresh processes, fused and composed
 accumulation over 1 and 4 launches, the autograd entry with and without
 activation checkpointing, CUDA graph replay, and two CUDA streams.
-`test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy with `flashinfer`
-blocked. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
+`test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy under another
+top-level name. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
 `_acc` stages against the shipped set and their twins, the plans, the routes
 and the checks on the CPU; the fused and composed results against the fp64
 reference and the bitwise oracles (also on every benchmark row as planned),
@@ -613,5 +578,5 @@ weight-gradient row records its plan (`tail_splits`, `ordered_tail`,
   32-bit element addressing.
 - The deterministic package's alignment rules; compute capability 10.0, 10.3
   or 10.7 only.
-- The optional fused SwiGLU and routing-scale epilogues of #5678 are not part
+- The optional fused SwiGLU and routing-scale epilogues are not part
   of this family.

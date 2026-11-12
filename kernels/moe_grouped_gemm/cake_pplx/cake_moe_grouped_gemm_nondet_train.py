@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 Cake ragged BF16 MoE grouped GEMM (SM100 / SM103 / SM107), non-deterministic
 training module.
 
-The functions of this module are stable FlashInfer APIs (``@cake_api``;
+The functions of this module are stable ``cake_pplx`` APIs (``@cake_api``;
 no experimental marking) and hand off to the backend package
 :mod:`cake_pplx._backends.cake_moe_grouped_gemm_nondet_train` with the
 same arguments: the weight gradient with the 512-wide k tile finishes its

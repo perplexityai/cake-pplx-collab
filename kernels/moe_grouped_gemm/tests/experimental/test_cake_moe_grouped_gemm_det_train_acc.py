@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -918,7 +918,7 @@ def test_acc_library_loadable_is_the_loader_rule(name, stage, arch, monkeypatch)
     """``acc_library_loadable`` is the loader's own rule, decided without building,
     loading or probing anything: a prebuilt library under ``aot/`` loads whatever the
     toolkit; otherwise the JIT toolkit must reach the ``build.json`` entry's
-    ``min_cuda``; without FlashInfer's JIT nothing builds."""
+    ``min_cuda``; without the JIT shim nothing builds."""
     library = _library(name, stage, arch)
     floor = _cuda_version(cake_jit.cake_build.libraries_by_name()[library]["min_cuda"])
     toolkit_of_process = cb._jit_cuda_version
@@ -944,20 +944,18 @@ def test_acc_library_loadable_is_the_loader_rule(name, stage, arch, monkeypatch)
         # The package's JIT shim is not importable (a prebuilt-only or vendored copy):
         # the real ``cake_build._jit_toolchain`` path, whose error names a manifest
         # library.
-        mp.delenv("FLASHINFER_DISABLE_JIT", raising=False)
         mp.delenv("CAKE_PPLX_DISABLE_JIT", raising=False)
         mp.setitem(sys.modules, f"{cb.__package__}._cake_pplx_jit", None)
         assert toolkit_of_process.__wrapped__() is None
 
 
 def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
-    """FlashInfer's JIT toolkit counts only where it can build: with ``FLASHINFER_DISABLE_JIT``
-    set, without ``bin/nvcc`` under FlashInfer's CUDA path (where its version query falls
-    back to PyTorch's CUDA version), or when that path cannot be resolved (an ``OSError``),
+    """The JIT shim's toolkit counts only where it can build: with ``CAKE_PPLX_DISABLE_JIT``
+    set, without ``bin/nvcc`` under the shim's CUDA path, or when that path cannot be
+    resolved (an ``OSError``),
     ``_jit_cuda_version`` is None and an accumulate build that is not prebuilt cannot load
     (the call composes, ``"min_cuda"``)."""
-    # the package's JIT shim (``_cake_pplx_jit``), which replaces FlashInfer's
-    # ``flashinfer.jit.cpp_ext`` toolchain queries
+    # the package's JIT shim (``_cake_pplx_jit``), which answers the toolchain queries
     cpp_ext = importlib.import_module(f"{cb.__package__}._cake_pplx_jit")
     toolkit = cb._jit_cuda_version.__wrapped__
     monkeypatch.setattr(
@@ -966,7 +964,6 @@ def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr(cpp_ext, "get_cuda_path", lambda: str(tmp_path))
     monkeypatch.setattr(cb, "_jit_cuda_version", toolkit)
     monkeypatch.setattr(cb, "prebuilt_path", lambda lib: _Path(False))
-    monkeypatch.delenv("FLASHINFER_DISABLE_JIT", raising=False)
     monkeypatch.delenv("CAKE_PPLX_DISABLE_JIT", raising=False)
     shipped = _shipped_bindings()
     assert toolkit() is None  # no bin/nvcc
@@ -976,7 +973,7 @@ def test_jit_toolkit_needs_nvcc_and_the_jit_enabled(tmp_path, monkeypatch):
     nvcc.write_text("")
     assert toolkit() == (99, 0)
     assert all(cb.acc_library_loadable(*binding) for binding in shipped)
-    for variable in ("FLASHINFER_DISABLE_JIT", "CAKE_PPLX_DISABLE_JIT"):
+    for variable in ("CAKE_PPLX_DISABLE_JIT",):
         monkeypatch.setenv(variable, "1")
         assert toolkit() is None
         assert not any(cb.acc_library_loadable(*binding) for binding in shipped)
@@ -2044,7 +2041,7 @@ def _device_route(device, plan, stage, out_dtype):
         if not cb.acc_library_loadable(route, build, arch):
             pytest.skip(
                 f"the {build} library of {route} cannot load here (not prebuilt, and "
-                "FlashInfer's JIT cannot build it at its build.json min_cuda): the call composes"
+                "the JIT shim cannot build it at its build.json min_cuda): the call composes"
             )
     return "fused"
 

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -96,8 +96,6 @@ EXTRA_FORMER_NAMES = {
     f"{PACKAGE}.cake_backend": ("grouped_mm_bf16_cake",),
 }
 # The modules that must have none of the former names.
-# (``flashinfer.grouped_mm`` is a FlashInfer module with no cake_pplx counterpart;
-# the ``cake_pplx`` namespace package stands for the ``flashinfer`` top level.)
 NAME_HOSTS = (
     "cake_pplx",
     FACADE,
@@ -110,8 +108,7 @@ FORMER_HELPER_KEYS = (
     "cake_moe_grouped_gemm",
 )
 # Hand-offs into the package outside the ``__all__`` lists: the backend function
-# that FlashInfer's stable ``grouped_mm_bf16(..., backend="cake")`` calls (the
-# stable FlashInfer entry itself is not part of cake_pplx).
+# with the call shape of ``grouped_mm_bf16(..., backend="cake")``.
 HANDOFFS = ((f"{PACKAGE}.cake_backend", "grouped_det_mm_bf16_cake"),)
 
 
