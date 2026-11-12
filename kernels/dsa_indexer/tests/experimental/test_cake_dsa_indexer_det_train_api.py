@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,8 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the public entry points of the deterministic Cake DSA indexer top-k
-(flashinfer-ai/flashinfer#5676, renamed by flashinfer-ai/flashinfer#8928):
+Tests of the public entry points of the deterministic Cake DSA indexer top-k:
 ``cake_pplx.cake_dsa_indexer_det_train.cake_dsa_indexer_det_train_topk`` and
 ``cake_dsa_indexer_det_train_topk_workspace_size`` against the backend package,
 and their stable-API contract (no experimental warning).  The backend contract
@@ -76,7 +75,7 @@ def _run(inputs: ref.IndexerInputs, **extra):
     [cake_dsa_indexer_det_train_topk, cake_dsa_indexer_det_train_topk_workspace_size],
 )
 def test_public_api_is_stable(fn):
-    """#8928: the facades are stable APIs (no experimental marker, no warning)."""
+    """The facades are stable APIs (no experimental marker, no warning)."""
     assert not getattr(fn, "is_experimental", False)
 
 
@@ -87,7 +86,7 @@ def test_public_entry_point_matches_backend_without_warning():
     )
     expected = _run(inputs)
     with warnings.catch_warnings():
-        # no warning at all (FlashInfer checked its ExperimentalWarning; cake_api is a no-op decorator)
+        # no warning at all (cake_api is a no-op decorator)
         warnings.simplefilter("error")
         got = cake_dsa_indexer_det_train_topk(
             inputs.q,

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ limitations under the License.
 # registered FP8 programs and skip otherwise.
 #
 # Like ``test_cake_dsa_indexer_det_train.py`` this suite names the package once, through
-# ``tests.cake.test_helpers.cake_package``, and imports nothing else from flashinfer.
+# ``tests.cake.test_helpers.cake_package``, and imports nothing else from cake_pplx.
 
 import copy
 import importlib.util
@@ -234,7 +234,7 @@ def test_fp8_record_replaces_only_its_fields_and_leaves_the_bf16_record():
     # the FP8 records' own rules: every split field pinned (no split-resident rule); sm_107a keeps no split-fit
     # rule (no FP8 split program is measured under one), and no FP8 call walks its key tiles in descending order
     # (the descending-walk programs are BF16 programs); the sm_107a FP8 record sets neither BF16 sampling rule (the
-    # #7549 rules are measured on the BF16 programs) and runs no longest-first copy (its static programs draw no
+    # sampling rules are measured on the BF16 programs) and runs no longest-first copy (its static programs draw no
     # tickets to order; the BF16 record runs the copies of its l6 ticket programs)
     split_fields = (
         "split_max",

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -90,7 +90,6 @@ import json
 import statistics
 import sys
 import time
-import warnings
 from pathlib import Path
 
 import torch
@@ -98,7 +97,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bench_cake_dsa_indexer_det_train as bcdi  # noqa: E402  (benchmarks/ is the script directory)
-from flashinfer.api_logging import ExperimentalWarning  # noqa: E402
 from cake_pplx._backends.cake_dsa_indexer_det_train import cake_backend  # noqa: E402
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref  # noqa: E402
 
@@ -1036,7 +1034,6 @@ def main():
         "--json", help="plan, totals, segments, CTA distribution, timing, units"
     )
     args = parser.parse_args()
-    warnings.simplefilter("ignore", ExperimentalWarning)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)

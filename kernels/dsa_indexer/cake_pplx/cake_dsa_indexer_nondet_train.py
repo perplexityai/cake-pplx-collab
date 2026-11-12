@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,10 +16,10 @@ limitations under the License.
 Non-deterministic Cake DSA indexer top-k for training (SM100 / SM103 / SM107).
 
 Every public name carries the mode word ``nondet``; no entry point takes a
-``deterministic=`` keyword (flashinfer-ai/flashinfer#8928).  The deterministic
+``deterministic=`` keyword.  The deterministic
 counterpart is ``cake_pplx.cake_dsa_indexer_det_train``: it selects the same
 set per row and returns it in ascending id order.  This package implements the
-set-equality semantics of flashinfer-ai/flashinfer#8946 (point 4): per row the
+set-equality semantics: per row the
 selected set repeats bit for bit, the slot order does not.
 
 Thin entry points: validation of the backend contract, the host dispatch and

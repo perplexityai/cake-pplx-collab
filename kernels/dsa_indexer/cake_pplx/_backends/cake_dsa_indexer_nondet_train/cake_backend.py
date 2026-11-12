@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,12 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake backend: fused DSA indexer scoring + non-deterministic exact top-k
-selection for training on SM100 / SM103 / SM107 (flashinfer-ai/flashinfer#5676
-under the set-equality semantics of flashinfer-ai/flashinfer#8946, point 4;
-target geometry: 32 indexer heads, head dimension 128, top-k 2048).
+selection for training on SM100 / SM103 / SM107 under set-equality semantics
+(target geometry: 32 indexer heads, head dimension 128, top-k 2048).
 
-Contract (the issue text is authoritative)
-------------------------------------------
+Contract
+--------
 * ``q [T, 32, 128]`` BF16 indexer queries after RoPE (contiguous); ``k [Tkv,
   128]`` BF16 packed keys after normalization and RoPE -- a row-strided view
   (the trainer's ``[:, :128]`` view of a packed ``[Tkv, 704]`` tensor) is
@@ -116,7 +115,6 @@ from .cake_jit import (
     PROGRAMS,
     STAGES,
     TICKET_TAIL_ARCHES,
-    TRACKING_ISSUE,
     load_program,
 )
 from .cake_policy import (
@@ -276,7 +274,7 @@ def _policy_for(arch: str) -> DispatchPolicy:
     if record is None:
         raise NotImplementedError(
             f"The generated DSA indexer top-k programs for {arch} are not registered in this checkout "
-            f"(registered: {sorted(POLICY)}; see {TRACKING_ISSUE})"
+            f"(registered: {sorted(POLICY)})"
         )
     return DispatchPolicy.from_record(record)
 
@@ -306,13 +304,13 @@ def program_for(arch: str, key: str) -> str:
     if programs is None:
         raise NotImplementedError(
             f"The generated DSA indexer top-k programs for {arch} are not registered in this checkout "
-            f"(registered: {sorted(PROGRAM_KEYS)}; see {TRACKING_ISSUE})"
+            f"(registered: {sorted(PROGRAM_KEYS)})"
         )
     name = programs.get(key)
     if name is None:
         raise NotImplementedError(
             f"The host dispatch selected program {key!r} on {arch}, which this checkout does not register "
-            f"(registered on {arch}: {sorted(programs)}; see {TRACKING_ISSUE})"
+            f"(registered on {arch}: {sorted(programs)})"
         )
     return name
 
@@ -358,7 +356,7 @@ _PACKAGE = __name__.rpartition(".")[0]
 
 
 def _caller_stacklevel() -> int:
-    """The ``stacklevel`` of the nearest frame outside this package and flashinfer, for a warning issued by the
+    """The ``stacklevel`` of the nearest frame outside this package and ``cake_pplx``, for a warning issued by the
     function that calls this one: the caller of the entry point, also through the facade and its decorators (an
     autograd backward reports the autograd frame that called it)."""
     frame = inspect.currentframe()

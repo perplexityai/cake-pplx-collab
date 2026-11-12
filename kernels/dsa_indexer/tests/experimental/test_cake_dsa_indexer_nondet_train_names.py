@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Naming rules of flashinfer-ai/flashinfer#8928 for the non-deterministic Cake DSA indexer.
+Naming rules for the non-deterministic Cake DSA indexer.
 
 The public module is ``cake_pplx.cake_dsa_indexer_nondet_train`` and its backend package
 ``cake_pplx._backends.cake_dsa_indexer_nondet_train``.  Every public name of the module (except ALL_CAPS
@@ -220,7 +220,7 @@ def test_the_manifest_names_the_package() -> None:
 
 
 def test_shared_mode_name_checks() -> None:
-    """The shared #8928 checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
+    """The shared naming checks (``tests/cake/test_helpers/cake_mode_names.py``) over the entry-point module: the mode word
     and its place in every public name, no ``deterministic`` keyword, and each object bound only under its own name in
     the entry-point module, the ``cake_pplx`` namespace, the backend package and its ``cake_backend``.  The module is new, so there
     are no former modules or names to check."""

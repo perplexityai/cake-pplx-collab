@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,12 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# Contract tests of the experimental Cake non-deterministic DSA indexer top-k backend
-# (flashinfer-ai/flashinfer#5676 under the set-equality semantics of flashinfer-ai/flashinfer#8946, point 4).  The
+# Contract tests of the experimental Cake non-deterministic DSA indexer top-k backend (set-equality semantics).  The
 # host-side tests (registry, dispatch policy, validation, binding, the deterministic-algorithms alert) run without a
 # GPU; the operator tests need a compute capability 10.0 / 10.3 / 10.7 device with registered generated programs and
-# skip otherwise.  Opt-in heavy variant: ``FLASHINFER_CAKE_DSA_INDEXER_FULL=1`` runs the recorded packed key geometry
-# and the issue's sink geometry through the FP64 reference (minutes on B200).
+# skip otherwise.  Opt-in heavy variant: ``CAKE_PPLX_DSA_INDEXER_FULL=1`` runs the recorded packed key geometry
+# and the recorded sink geometry through the FP64 reference (minutes on B200).
 #
 # The package returns the selected entries of a row in no specified slot order, with the row's padding in any of its
 # slots.  The operator tests compare results as sets: ``_canonical`` puts every row in the order of the shared
@@ -29,10 +28,10 @@ limitations under the License.
 # (id, score bits) pairs.  No test compares the raw slot order of two calls.
 #
 # This suite exercises the package alone: it names the package once, through ``tests.cake.test_helpers.cake_package``, and
-# imports nothing else from flashinfer, so a build that vendors the package under another import path runs it
-# unchanged after pointing that table entry at its package.  The flashinfer public entry points
+# imports nothing else from cake_pplx, so a build that vendors the package under another import path runs it
+# unchanged after pointing that table entry at its package.  The public entry points
 # (``cake_pplx.cake_dsa_indexer_nondet_train``) are covered by ``test_cake_dsa_indexer_nondet_train_api.py`` and
-# their #8928 naming rules by ``test_cake_dsa_indexer_nondet_train_names.py``; the parity with the deterministic package
+# their naming rules by ``test_cake_dsa_indexer_nondet_train_names.py``; the parity with the deterministic package
 # (registry, host plans, device rows) by ``test_cake_dsa_indexer_nondet_train_vs_det.py``.
 
 import contextlib
@@ -91,7 +90,7 @@ scan_key_fields = cake_policy.scan_key_fields
 select_program = cake_policy.select_program
 stage_slug = cake_policy.stage_slug
 
-FULL = os.environ.get("FLASHINFER_CAKE_DSA_INDEXER_FULL", "0") not in (
+FULL = os.environ.get("CAKE_PPLX_DSA_INDEXER_FULL", "0") not in (
     "",
     "0",
     "false",
@@ -1023,7 +1022,7 @@ def test_sample_fit_kinds_name_exactly_the_registered_sampled_fit_programs():
 
 
 def test_lsf_copy_runs_on_packed_calls_of_unequal_key_segments():
-    """Lever LSF (#7549): an architecture whose policy sets ``lsf_programs`` (a ticket architecture) ships
+    """Lever LSF: an architecture whose policy sets ``lsf_programs`` (a ticket architecture) ships
     longest-first segment order copies of its scan programs (key suffix ``:lsf``, each a program of its own): sm_100a
     and sm_103a of every scan program, sm_107a of its two l6 ticket programs (``_SM107_LSF_COPIES``); the host runs the
     copy on packed calls whose key segments are not all equal and the program without it on one-segment calls and on
@@ -1196,7 +1195,7 @@ def test_static_scan_kinds_are_registered_ticket_architecture_kinds():
     """Every architecture is a ticket architecture; a record's ``static_scan_kinds`` names the physical scan kinds whose
     programs keep the static enumeration there, each a kind the architecture registers, and a kind with an ``:lsf``
     copy is never static (the copy reorders ticket draws).  No record names one: every scan program draws its work
-    units, the sm_107a l6 and CTA-pair l6 programs from their ``TicketWord`` block (flashinfer-ai/flashinfer#7548)."""
+    units, the sm_107a l6 and CTA-pair l6 programs from their ``TicketWord`` block."""
     assert tuple(cake_jit.POLICY) == cake_jit.TICKET_TAIL_ARCHES
     assert {arch: policy_for(arch).static_scan_kinds for arch in cake_jit.POLICY} == {
         "sm_100a": [],
@@ -1218,7 +1217,7 @@ def test_static_scan_kinds_are_registered_ticket_architecture_kinds():
 
 
 def test_sm107a_sampling_rules_cover_the_7549_rank_geometries():
-    """#7549 on sm_107a: the packed calls of short query segments and few mean unit tiles (the 22-segment packed rank
+    """On sm_107a the packed calls of short query segments and few mean unit tiles (the 22-segment packed rank
     inputs) sample ``sample_class_rule[0]`` tiles at its shift (a call whose mean unit holds no more tiles keeps the
     tiny-unit tiles), and the long-unit l6 calls (the two-segment 262144-key
     document ranks) take ``sample_long_rule``'s shift at the long-unit tile count, for every ``top_k``.  A long-unit call
@@ -1299,9 +1298,9 @@ def test_policy_is_validated_once_per_architecture(monkeypatch):
         )
         assert validate.call_count == 0, arch
     for _ in range(2):
-        with pytest.raises(NotImplementedError, match="5676"):
+        with pytest.raises(NotImplementedError, match="not registered in this checkout"):
             policy_for("sm_90a")
-    with pytest.raises(NotImplementedError, match="5676"):
+    with pytest.raises(NotImplementedError, match="not registered in this checkout"):
         program_for("sm_90a", "scan:narrow:u1:s0:f0")
     with pytest.raises(NotImplementedError, match="finalize:t256"):
         program_for("sm_100a", "finalize:t256")
@@ -1942,7 +1941,7 @@ def test_dispatch_rows_are_exact_and_plan_matches_runner(seg_q, seg_k, top_k):
         assert plan.split and plan.n_split >= 2
 
 
-# flashinfer-ai/flashinfer#7549's ratio-4 pooled selection (top-512 over 4-token pools: every key segment holds
+# The ratio-4 pooled selection (top-512 over 4-token pools: every key segment holds
 # ``ceil(L / 4)`` pools and the offsets stay in query tokens) at a scale the reference judges in seconds: one 8192-token
 # document, packed documents, and rank 0 of a 16-way context-parallel zigzag split of an 8192-token document (its head
 # chunk ``[0, 256)`` and its tail chunk ``[7936, 8192)``, which passes its token offset; ``ratio > 1`` makes the default
@@ -2209,9 +2208,9 @@ def test_exact_cases_are_knob_invariant(name):
         assert _same_sets(base, other), f"{name}: knob {knobs} changed the sets"
 
 
-# -- the attention-sink + local-band distribution (flashinfer-ai/flashinfer#7042) ----------------------------------
+# -- the attention-sink + local-band distribution -----------------------------------------------------------------
 # Small context-parallel geometries whose long units overflow the candidate buffer and run the sampled first
-# threshold (the issue's regime: the nearest key tile of every unit -- the diagonal -- holds a hot band of top-k
+# threshold (the attention-sink regime: the nearest key tile of every unit -- the diagonal -- holds a hot band of top-k
 # keys), judged like the random rows against the FP64 / FP32 reference under both settings of the far-sample
 # switch and compared as sets with the sampled threshold switched off and with the forced re-stream.
 SINK_GEOMETRIES = {
@@ -2245,7 +2244,7 @@ def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample):
         verdict.max_fp32_error_over_bound <= 1.0
         and verdict.max_fp64_error_over_bound <= 1.0
     )
-    # the sink: most rows select key 0 (the issue reports 94-100 %; an iid row selects it with probability
+    # the sink: most rows select key 0 (94-100 % on the recorded statistics; an iid row selects it with probability
     # ~ top_k / visible)
     assert float((base[0] == 0).any(dim=1).float().mean()) > 0.5
     _assert_sets_repeat(lambda: _run(inputs, far_sample=far_sample), base)
@@ -2260,11 +2259,11 @@ def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample):
 
 
 def test_sink_issue_geometry_full():
-    """The issue's call: one 262144-token document, CP16 zigzag rank 0, top-k 2048, ``max_seqlen_k`` 262144.
-    ``FLASHINFER_CAKE_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the matmul-order reference (minutes)."""
+    """The recorded long-context call: one 262144-token document, CP16 zigzag rank 0, top-k 2048, ``max_seqlen_k`` 262144.
+    ``CAKE_PPLX_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the matmul-order reference (minutes)."""
     _require_program()
     if not FULL:
-        pytest.skip("set FLASHINFER_CAKE_DSA_INDEXER_FULL=1 for the 262k sink geometry")
+        pytest.skip("set CAKE_PPLX_DSA_INDEXER_FULL=1 for the 262k sink geometry")
     inputs = ref.make_sink_inputs(
         [8192, 8192],
         [8192, 262144],
@@ -2274,8 +2273,8 @@ def test_sink_issue_geometry_full():
         label="Z1",
     )
     plan = _plan(inputs, max_seqlen_k=262144)
-    # unsplit units, 32 sample tiles, 16384-entry candidate buffers checked every 32 tiles: the plan the issue
-    # prints (the unit kind is the architecture's)
+    # unsplit units, 32 sample tiles, 16384-entry candidate buffers checked every 32 tiles: the plan recorded
+    # for this call (the unit kind is the architecture's)
     assert plan.n_split == 1 and _longest_unit_samples(inputs, plan), plan
     assert plan.sample_tiles_max == 32 and plan.cand_cap == 16384, plan
     assert plan.check_period == 32, plan
@@ -3534,7 +3533,7 @@ def _ours(record, entry: str) -> list:
 
 
 def _points_at_this_file(warning) -> bool:
-    """The alert points at the test's own call, not at a frame inside the package or flashinfer."""
+    """The alert points at the test's own call, not at a frame inside the package or cake_pplx."""
     return Path(warning.filename).name == Path(__file__).name
 
 

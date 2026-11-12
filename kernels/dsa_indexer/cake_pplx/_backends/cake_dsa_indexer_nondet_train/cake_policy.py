@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -121,7 +121,7 @@ POLICY_FIELDS = (
     "sample_class_rule",  # [tiny-unit sample tiles, shift permille] for the wide-unit programs (shift only) and the tiny dispatch class (shift, and tiles where the mean unit holds more), or None; explicit knobs override it
     "sample_long_rule",  # [physical scan kinds, shift permille] of the long-unit calls of those kinds (more than sample_dispatch_mean_tiles_max mean unit tiles), or None; an explicit shift knob overrides it
     "sample_shift_rule",  # [min top_k, shift permille] replacing sample_shift_permille from that top_k on, or None (the default shift on every call); an explicit sample_shift_permille knob overrides both
-    "lsf_programs",  # the architecture ships longest-first segment order copies (scan key suffix :lsf) of its scan programs; the host runs the decided program's copy on packed calls whose key segments differ in length (#7549), the program itself where the registry has no copy of it
+    "lsf_programs",  # the architecture ships longest-first segment order copies (scan key suffix :lsf) of its scan programs; the host runs the decided program's copy on packed calls whose key segments differ in length, the program itself where the registry has no copy of it
     "static_scan_kinds",  # physical scan kinds whose programs keep the static unit enumeration on a ticket architecture: they never touch the ticket tail, so the host gives their runners none
     "far_sample",  # 1: the sampled first threshold of the ascending-tile-order programs ranks the far sample tiles only (the tile nearest the diagonal left out); 0: every sample tile
     "check_period_max",  # cap on the default selection-trigger check period (tiles)
@@ -186,7 +186,7 @@ def ticket_static_path(choice: "ProgramChoice") -> bool:
     return ticket_units_bound(choice) <= agents
 
 
-# sample_class_rule's tiny-class part applies to packed calls of short query segments only (#7549)
+# sample_class_rule's tiny-class part applies to packed calls of short query segments only
 CLASS_RULE_MIN_SEGMENTS = 2
 CLASS_RULE_MAX_QUERIES_PER_SEGMENT = 4096
 # lever LSF: the longest-first segment order copy of a scan program runs on calls of at least this many segments
@@ -218,7 +218,7 @@ def sample_class_for(
     T, S = int(num_queries), int(num_segments)
     if tiles <= 0:
         return tiles, shift
-    # the long-unit calls of the long rule's kinds shift further (#7549 on sm_107a)
+    # the long-unit calls of the long rule's kinds shift further (sm_107a)
     if (
         long_rule is not None
         and physical in long_rule[0]
@@ -231,7 +231,7 @@ def sample_class_for(
         return tiles, shift
     if class_rule is None:
         return tiles, shift
-    # the wide-unit programs shift only; the tiny dispatch class also samples more tiles (#7549)
+    # the wide-unit programs shift only; the tiny dispatch class also samples more tiles
     if "wide" in physical:
         if not shift_knob and S >= CLASS_RULE_MIN_SEGMENTS:
             shift = int(class_rule[1])
@@ -1348,7 +1348,7 @@ def select_program(
     )
     split = n_split > 1
     pair = (not split) and policy.pair_for(T, Tkv, S, r, grid, K, block_q)
-    # lever LSF (#7549): the longest-first segment order pays off only where the segments differ, so the copy that
+    # lever LSF: the longest-first segment order pays off only where the segments differ, so the copy that
     # carries it runs on packed calls whose key segments are not all equal (one segment, or num_keys == S x the
     # call's max_seqlen_k, runs the program without it; without max_seqlen_k the host cannot tell and runs the copy).
     # The copy never changes the plan: every rule below that asks ``scan_keys`` for a program looks up its key without

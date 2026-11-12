@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Tests of the public entry points of the non-deterministic Cake DSA indexer top-k
-(flashinfer-ai/flashinfer#5676 under the set-equality semantics of
-flashinfer-ai/flashinfer#8946, named by the rules of flashinfer-ai/flashinfer#8928):
+(set-equality semantics):
 ``cake_pplx.cake_dsa_indexer_nondet_train.cake_dsa_indexer_nondet_train_topk``
 and ``cake_dsa_indexer_nondet_train_topk_workspace_size`` against the backend
 package, and their stable-API contract (no experimental warning).  A row's slot
@@ -136,7 +135,7 @@ def _torch_deterministic(*, warn_only: bool):
     ],
 )
 def test_public_api_is_stable(fn):
-    """#8928: the facades are stable APIs (no experimental marker, no warning)."""
+    """The facades are stable APIs (no experimental marker, no warning)."""
     assert not getattr(fn, "is_experimental", False)
 
 
@@ -147,7 +146,7 @@ def test_public_entry_point_matches_backend_without_warning():
     )
     expected = _run(inputs)
     with warnings.catch_warnings():
-        # no warning at all (FlashInfer checked its ExperimentalWarning; cake_api is a no-op decorator)
+        # no warning at all (cake_api is a no-op decorator)
         warnings.simplefilter("error")
         got = _public(inputs)
         again = _public(

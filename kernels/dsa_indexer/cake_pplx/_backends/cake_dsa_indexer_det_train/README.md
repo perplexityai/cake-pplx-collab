@@ -3,20 +3,20 @@
 Experimental backend for the fused DSA (sparse attention) indexer of a
 training stack: scoring of every visible key plus the deterministic exact
 top-k selection with aligned scores, in one device-side pipeline (target
-geometry: 32 indexer heads, head dimension 128, top-k 2048).  Tracking issue:
-flashinfer-ai/flashinfer#5676.
+geometry: 32 indexer heads, head dimension 128, top-k 2048).
 
 The public entry points live in the module `cake_pplx.cake_dsa_indexer_det_train`;
 this backend package under `cake_pplx/_backends/` is their implementation
 and carries no compatibility guarantee of its own.  The non-deterministic
-counterpart is `cake_pplx.cake_dsa_indexer_nondet_train`
-(flashinfer-ai/flashinfer#8928), which leaves the slot order of each row
+counterpart is `cake_pplx.cake_dsa_indexer_nondet_train`,
+which leaves the slot order of each row
 unspecified.
 SM107 (Rubin) is the primary target of the request, SM100 (B200 / GB200) the
 comparison architecture, SM103 (B300 / GB300) the third target.  The feature
 does not participate in automatic backend selection, autotuning or
 trace-apply; its libraries are loaded prebuilt from `aot/` when the package
-ships them and JIT-built by FlashInfer from `build.json` otherwise (see
+ships them and JIT-built through the package's JIT shim from `build.json`
+otherwise (see
 "Layout of this package").
 
 ## Public entry points (`cake_pplx/cake_dsa_indexer_det_train.py`)
@@ -39,14 +39,9 @@ nbytes = cake_dsa_indexer_det_train_topk_workspace_size(T, Tkv, S, device=q.devi
 ```
 
 Every name carries the mode word `det`, and no entry point takes a
-`deterministic=` keyword (flashinfer-ai/flashinfer#8928).  The previous names
-(`flashinfer.dsa_indexer.dsa_indexer_det_topk(..., backend="cake")`,
-`flashinfer.dsa_indexer.dsa_indexer_det_topk_workspace_size`, `dsa_indexer_topk`,
-`dsa_indexer_topk_workspace_size`, the backend's `dsa_indexer_*` aliases) and
-the package paths `flashinfer.experimental.cake_dsa_indexer_det` and
-`flashinfer.experimental.cake_dsa_indexer` are removed, with no aliases;
-`flashinfer.dsa_indexer.dsa_indexer_det_topk` keeps only its
-`backend="sm120"` form.
+`deterministic=` keyword.  The previous names (`dsa_indexer_topk`,
+`dsa_indexer_topk_workspace_size`, the backend's `dsa_indexer_*` aliases) are
+removed, with no aliases.
 
 | argument | shape and type | meaning |
 |---|---|---|
@@ -299,7 +294,7 @@ mean key tiles per work unit, `(Tkv - T / (2 ratio)) / S / 128`.
 | sampled first threshold on buffer-fitting units | when the mean unit tiles are at most `sample_fit_max_mean_tiles`, the mean segment offset leaves fitting units and the program kind is one of `sample_fit_kinds` (the kinds whose sampled-fit program the architecture registers; the split programs, for example, run their plain form on every call) |
 | sampled rank shift | `sample_shift_rule[1]` permille where the record sets `sample_shift_rule` and `top_k >= sample_shift_rule[0]`, else `sample_shift_permille`; where the record sets `sample_long_rule` (sm_107a: `[["l6"], 500]`), a call of more than `sample_dispatch_mean_tiles_max` mean unit tiles on a kind it names takes `sample_long_rule[1]`; otherwise, where the record sets `sample_class_rule` (sm_100a, sm_103a: [8, 500]; sm_107a: [32, 500]), a wide-unit call of two or more segments takes `sample_class_rule[1]`, and a call of two or more segments of at most 4096 queries per segment on average and at most `sample_dispatch_tiny_tiles_max` mean unit tiles samples `sample_class_rule[0]` tiles at that shift (where `sample_class_rule[0]` exceeds `sample_tiles_tiny_units`, only a call of more than `sample_class_rule[0]` mean unit tiles: on shorter units the larger sample covers whole units); an explicit `sample_shift_permille=` / `sample_tiles_max=` knob overrides these.  A launch scalar only: it sets how conservative the sampled first threshold is (a threshold that proves too aggressive is streamed again exactly), never the program, the capacity or an output bit; unsampled calls (`sample_tiles_max=0`) do not read it |
 | candidate capacity | `candidate_multiplier` x `top_k` (`cand_mult_rule[1]` for long units), raised to `cand_cap_floor` slots (`cand_cap_floor_rule[1]` slots from `top_k >= cand_cap_floor_rule[0]` on, where the record sets the rule: on `sm_100a` the 16384-slot floor applies from `top_k = 1024` on and smaller `top_k` keep 8192; `sm_103a` keeps its 16384-slot floor on every `top_k`) and lowered to `cand_cap_ceiling` slots where the record sets one (the multiplier becomes `ceiling // top_k`, so the buffer stops growing with `top_k` once it holds the ceiling), rounded up to whole tiles; with the sampled first threshold off (`sample_tiles_max=0`) the `candidate_multiplier_unsampled` / `cand_mult_rule_unsampled` / `cand_cap_floor_unsampled` / `cand_cap_ceiling_unsampled` values apply instead; the default check period follows the capacity (`check_period_cap_divisor`, per-kind overrides) |
-| finalize program | threads = the smallest power of two of sort slots holding `top_k` (`finalize_threads_fit` x `finalize_items`) for small `top_k`, else `finalize_threads_small` up to `finalize_top_k_small`, else `finalize_threads`.  Where the rank rules admit the call -- `rank_finalize` and `top_k >= rank_top_k_min` -- the row sort is a prefix-popcount rank finalize program sized for the call's **pool**: `Tkv`, or the caller's `max_seqlen_k` where `rank_seg_window` is set (lever RW; a bound above `Tkv` or below `ceil(Tkv / S)` is rejected whether or not the switch is set).  A pool above `rank_slab_window_max` takes the two-level (bucket + word) program of the smallest `rank_two_level_window_variants` entry holding it, with no segment bound, where `rank_two_level` is set and the window is within `rank_two_level_rule` (lever FR2; key `finalize_rank:t<threads>:w<window>:two`, staged where `rank_two_level_staged_rule` admits the window); a pool within the slab bound takes the smallest `rank_window_variants` entry holding it and one bitmap word (32 bits) per thread when `pool <= rank_rule[0]` and the segment -- mean `Tkv / S`, or `max_seqlen_k` itself under lever RW -- is at most `rank_rule[1]`, skipping the `rank_window_variants_seg_only` entries when the pool is `Tkv` (`finalize_rank:t<threads>:w<window>`, stage role `finalize_rank`; the kernel reads the segment boundaries on the device; where `rank_staged` is set and `rank_staged_rule` admits the window, its SMEM-staged, coalesced-I/O form `...:staged` -- lever FRS, same role and arguments); every other call sorts with the CUB block radix sort program (`finalize:t<threads>`, `(Tkv - 1).bit_length()` key bits).  Both produce the same ids and bits  Two forms of the staged program carry their own key tags: `:i16` (`rank_t16` / `rank_t16_slots`: the 4096-slot staged form runs 256 launched threads x 16 slots) and `:bulk` (`rank_bulk_io` / `rank_bulk_align_bytes`: `cp.async.bulk` row I/O when `top_k x 4` and the output addresses are multiples of the granule; unaligned caller-owned outputs run the registered plain twin, same results).  Where the record's `rank_persist_max_k` is above zero (SM107 only), the staged bulk program of rows with `top_k <= rank_persist_max_k` and 8-item threads carries `:persist` (the `:i16` form keeps the one-row program): one persistent grid of `min(rows, rank_persist_ctas_per_sm x (SMs - rank_persist_spare_sms))` CTAs (SM107: 8 x (SMs - 1)) ranks the call's rows, each CTA landing its next row while it ranks the current one (`cake_policy.finalize_grid`); an SM107 SM holds 4 of these 256-thread CTAs at a time, so the grid is two whole waves of the other SMs when another stream holds a block on one SM, not one wave plus a short second one (#7548); same results as the one-row program. |
+| finalize program | threads = the smallest power of two of sort slots holding `top_k` (`finalize_threads_fit` x `finalize_items`) for small `top_k`, else `finalize_threads_small` up to `finalize_top_k_small`, else `finalize_threads`.  Where the rank rules admit the call -- `rank_finalize` and `top_k >= rank_top_k_min` -- the row sort is a prefix-popcount rank finalize program sized for the call's **pool**: `Tkv`, or the caller's `max_seqlen_k` where `rank_seg_window` is set (lever RW; a bound above `Tkv` or below `ceil(Tkv / S)` is rejected whether or not the switch is set).  A pool above `rank_slab_window_max` takes the two-level (bucket + word) program of the smallest `rank_two_level_window_variants` entry holding it, with no segment bound, where `rank_two_level` is set and the window is within `rank_two_level_rule` (lever FR2; key `finalize_rank:t<threads>:w<window>:two`, staged where `rank_two_level_staged_rule` admits the window); a pool within the slab bound takes the smallest `rank_window_variants` entry holding it and one bitmap word (32 bits) per thread when `pool <= rank_rule[0]` and the segment -- mean `Tkv / S`, or `max_seqlen_k` itself under lever RW -- is at most `rank_rule[1]`, skipping the `rank_window_variants_seg_only` entries when the pool is `Tkv` (`finalize_rank:t<threads>:w<window>`, stage role `finalize_rank`; the kernel reads the segment boundaries on the device; where `rank_staged` is set and `rank_staged_rule` admits the window, its SMEM-staged, coalesced-I/O form `...:staged` -- lever FRS, same role and arguments); every other call sorts with the CUB block radix sort program (`finalize:t<threads>`, `(Tkv - 1).bit_length()` key bits).  Both produce the same ids and bits  Two forms of the staged program carry their own key tags: `:i16` (`rank_t16` / `rank_t16_slots`: the 4096-slot staged form runs 256 launched threads x 16 slots) and `:bulk` (`rank_bulk_io` / `rank_bulk_align_bytes`: `cp.async.bulk` row I/O when `top_k x 4` and the output addresses are multiples of the granule; unaligned caller-owned outputs run the registered plain twin, same results).  Where the record's `rank_persist_max_k` is above zero (SM107 only), the staged bulk program of rows with `top_k <= rank_persist_max_k` and 8-item threads carries `:persist` (the `:i16` form keeps the one-row program): one persistent grid of `min(rows, rank_persist_ctas_per_sm x (SMs - rank_persist_spare_sms))` CTAs (SM107: 8 x (SMs - 1)) ranks the call's rows, each CTA landing its next row while it ranks the current one (`cake_policy.finalize_grid`); an SM107 SM holds 4 of these 256-thread CTAs at a time, so the grid is two whole waves of the other SMs when another stream holds a block on one SM, not one wave plus a short second one; same results as the one-row program. |
 
 The dispatched program must be registered for the device's architecture
 (`cake_jit.PROGRAM_KEYS[arch]`); the backend raises `NotImplementedError`
@@ -378,19 +373,20 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
   `load_program(program, arch)` through `cake_build.load_library`).  The
   launch geometry of a program (block, cluster, dynamic shared memory) is
   fixed in its binding.
-* `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
-  FlashInfer package and this package's build manifest (schema `cake-build/1`),
+* `cake_build.py` + `build.json` -- the loader shared by every Cake package
+  and this package's build manifest (schema `cake-build/1`),
   the only record of what the package compiles: one entry per program and
   architecture with its package-relative sources, nvcc flags, closure digest,
   per-source SHA-256 and `aot/<name>.so` path, plus the common nvcc / link
   flags and the `tvm-ffi` requirement.  `cake_build.load_library(name)`
   loads the prebuilt library when `aot/` holds it (checked against the
   builder's `aot/build_info.json` and the library's own `build_cuda_version()`)
-  and otherwise JIT-builds the entry through FlashInfer from the same sources
-  and flags; the prebuilt path never imports `flashinfer`.
+  and otherwise JIT-builds the entry through the package's JIT shim
+  (`_cake_pplx_jit.py`) from the same sources and flags; the prebuilt path
+  never imports the JIT shim.
 * `csrc/cake_ffi_checks.h` -- the tvm-ffi / DLPack include set, the named
   tensor-argument checks and `cake_ffi_build_cuda_version()` the generated
-  launchers use; the package compiles without FlashInfer's `csrc/`.
+  launchers use; the package compiles from its own `csrc/` alone.
 * `cake_policy.py` -- the dependency-free dispatch policy (program choice,
   capacity, check period, finalize program, workspace bound).
 * `cake_backend.py` -- validation, planning, argument binding, the prepared
@@ -415,7 +411,7 @@ Tests: `tests/experimental/test_cake_dsa_indexer_det_train.py` (the backend suit
 imports the package only through `tests/cake/test_helpers/cake_package.py`),
 `tests/experimental/test_cake_dsa_indexer_det_train_api.py` (the
 `cake_pplx.cake_dsa_indexer_det_train` entry points) and
-`tests/experimental/test_cake_dsa_indexer_det_train_names.py` (the #8928 naming
+`tests/experimental/test_cake_dsa_indexer_det_train_names.py` (the naming
 rules), with the independent
 FP64 / FP32 reference in `tests/experimental/test_helpers/cake_dsa_indexer_reference.py`
 (exact semantic cases incl. cutoff ties, all-equal scores, mixed signed zeros
@@ -436,11 +432,7 @@ ids up to near ties, bitwise program-dispatch invariance over every
 registered FP8 key, the prepared runner's `k_scale` binding, the per-form
 ticket decision and, where `deep_gemm` imports on `sm_100a` / `sm_103a`, a
 bitwise comparison of the logits with `deep_gemm.fp8_mqa_logits`.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
-(paired AB / BA / interleaved CUPTI spans of the complete operator against two
-torch + FlashInfer compositions; both baseline arms are reconstructions of the
-training stack's chunked scoring / coarse top-k / rescoring path written for
-this benchmark, not the stack's own kernels, so their absolute numbers are
-speed references only).  `--form fp8` times the FP8 form against the BF16
-form on the same data dequantized to BF16 and, where they import, DeepGEMM's
-`fp8_mqa_logits` followed by FlashInfer's exact deterministic top-k
-(`--rows fp8`: the FP8 shape set).
+(paired AB / BA / interleaved CUPTI spans of the complete operator across the
+package's arms: sampling on / off, forced dispatch and a second copy of the
+package).  `--form fp8` times the FP8 form against the BF16 form on the same
+data dequantized to BF16 (`--rows fp8`: the FP8 shape set).
