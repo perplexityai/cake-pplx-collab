@@ -13,11 +13,10 @@ limitations under the License.
 
 The public-entry decorator of one ``cake_pplx`` family.
 
-It replaces FlashInfer's ``flashinfer_api`` logging decorator and does nothing:
-``@cake_api`` and ``@cake_api(...)`` both return the function unchanged.  It
-also stands in for the FlashInfer helpers a facade imported: the custom-op
-registration wrappers (no-ops in FlashInfer too) and the API-trace
-dispatchers.  Each family carries its own copy; no family imports another's.
+It does nothing: ``@cake_api`` and ``@cake_api(...)`` both return the
+function unchanged.  The module also provides no-op custom-op registration
+wrappers and API-trace dispatchers for the facades.  Each family carries its
+own copy; no family imports another's.
 """
 
 from __future__ import annotations
@@ -34,17 +33,17 @@ def cake_api(function: Callable[..., Any] | None = None, **_options: Any) -> Any
 
 
 def register_custom_op(name: str, fn: Callable[..., Any] | None = None, /, **_options: Any) -> Any:
-    """FlashInfer's ``register_custom_op``, which registers nothing: returns the function unchanged."""
+    """Registers nothing: returns the function unchanged."""
     return lambda inner: inner
 
 
 def register_fake_op(name: str, fn: Callable[..., Any] | None = None) -> Any:
-    """FlashInfer's ``register_fake_op``, which registers nothing: returns the function unchanged."""
+    """Registers nothing: returns the function unchanged."""
     return lambda inner: inner
 
 
 def __getattr__(name: str) -> Any:
-    # FlashInfer's API-trace dispatchers (``<entry>_trace_dispatch``); ``cake_api`` ignores them.
+    # API-trace dispatchers (``<entry>_trace_dispatch``); ``cake_api`` ignores them.
     if name.endswith("_trace_dispatch"):
         return None
     raise AttributeError(name)

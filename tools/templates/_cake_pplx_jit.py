@@ -13,13 +13,11 @@ limitations under the License.
 
 JIT build shim of one ``cake_pplx`` backend package.
 
-It replaces the three FlashInfer JIT names the package used --
-``gen_jit_spec``, ``get_cuda_version`` and ``get_cuda_path`` -- with the same
-call shapes, so ``cake_build.py`` and the backend modules keep their logic.
-Every backend package carries its own copy (written by
-``tools/import_from_flashinfer.py``); no copy imports another.
+It provides the three JIT functions that ``cake_build.py`` and the backend
+modules call: ``gen_jit_spec``, ``get_cuda_version`` and ``get_cuda_path``.
+Every backend package carries its own copy; no copy imports another.
 
-Compilation follows FlashInfer's non-debug JIT defaults (``-std=c++17 -O3
+Compilation uses these non-debug defaults (``-std=c++17 -O3
 -DNDEBUG --compiler-options=-fPIC --expt-relaxed-constexpr
 -Xfatbin=-compress-all --compress-mode=size``, plus
 ``-static-global-template-stub=false`` from CUDA 12.8) and takes the target
@@ -180,7 +178,7 @@ class JitSpec:
 
     def build(self) -> Path:
         """Compile and link the library once; later calls return the cached file."""
-        if os.environ.get("FLASHINFER_DISABLE_JIT") or os.environ.get("CAKE_PPLX_DISABLE_JIT"):
+        if os.environ.get("CAKE_PPLX_DISABLE_JIT"):
             raise RuntimeError(f"{self.name}: JIT is disabled and no prebuilt library exists")
         compiles, link, directory = self._commands()
         library = directory / f"{self.name}.so"
@@ -234,7 +232,7 @@ def gen_jit_spec(
     use_fast_math: bool = True,
     **unsupported: Any,
 ) -> JitSpec:
-    """A :class:`JitSpec` with FlashInfer's ``gen_jit_spec`` call shape and default (fast math on)."""
+    """A :class:`JitSpec` from the ``gen_jit_spec`` keyword arguments (fast math on by default)."""
     if unsupported:
         raise TypeError(f"{name}: unsupported JIT options {sorted(unsupported)}")
     return JitSpec(

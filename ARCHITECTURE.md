@@ -2,13 +2,6 @@
 
 This repository holds the Cake training kernels for Perplexity. NVIDIA engineers maintain the kernels. Perplexity training engineers use them.
 
-The kernels came from FlashInfer:
-
-- [flashinfer-ai/flashinfer#8928](https://github.com/flashinfer-ai/flashinfer/issues/8928) defined their names.
-- [flashinfer-ai/flashinfer#9326](https://github.com/flashinfer-ai/flashinfer/pull/9326) is a draft PR. It removes the kernels from FlashInfer.
-
-The import source is FlashInfer `main` at `c5c39b0e87f027011c86881aa2935a83e1ce53e7`.
-
 ## Core requirement
 
 Each kernel family is decoupled from the other families. When you integrate, you can take each family from a different commit.
@@ -27,7 +20,7 @@ The rest of this document explains how the repository meets this requirement.
 | Facade | Public module `cake_pplx.<module>`. It wraps one backend package. |
 | Backend package | `cake_pplx._backends.<module>/`. Holds kernels, `build.json` and `csrc/`. |
 
-The names follow #8928:
+The names follow this pattern:
 
 - Public module: `cake_<op>_<det|nondet>_train[_kcp]`
 - Autograd entry: `cake_<op>_<mode>[_kcp]`
@@ -39,7 +32,7 @@ README.md
 ARCHITECTURE.md
 kernels/
   <family>/
-    pyproject.toml  VERSION  README.md  UPSTREAM.json
+    pyproject.toml  VERSION  README.md
     cake_pplx/
       cake_<op>_<mode>_train[_kcp].py          # public facades
       _backends/cake_<op>_<mode>_train[_kcp]/  # kernels, build.json, csrc/
@@ -48,11 +41,11 @@ tests/
   cross_family/
     <family>/       # tests that need another family, run on a pinned combination
       tests/  benchmarks/                      # same layout as kernels/<family>/
-tools/              # check_isolation.py, import_from_flashinfer.py, release helper
+tools/              # check_isolation.py, templates/ (JIT shim and API decorator)
 .github/workflows/
 ```
 
-Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, `UPSTREAM.json`, tests and benchmarks.
+Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
 
 The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`.
 
@@ -112,16 +105,6 @@ pip normalizes `_` and `-` in distribution names. Both spellings resolve to the 
 
 Do not add `cake_pplx/__init__.py` or `cake_pplx/_backends/__init__.py`. If you add one, one family takes ownership of the namespace and the other families break.
 
-## Migrating from FlashInfer
-
-The migration only changes the import prefix. The entry-point names stay the #8928 names.
-
-| FlashInfer | cake-pplx-collab |
-|---|---|
-| `flashinfer.<module>` | `cake_pplx.<module>` |
-| `flashinfer.experimental.cake.<module>` | `cake_pplx._backends.<module>` |
-| `from flashinfer.cake_kda_nondet_train import cake_kda_nondet` | `from cake_pplx.cake_kda_nondet_train import cake_kda_nondet` |
-
 ## Selecting a commit per family
 
 Install each family from its own commit with a pip VCS URL. Use full commit SHAs.
@@ -159,8 +142,8 @@ CI enforces these rules with `tools/check_isolation.py` on every PR.
    - `torch`, `tvm_ffi`, `numpy`, `pytest`
    - the Python standard library
 2. No shared runtime package exists. Each family has its own copy of the small common pieces:
-   - the JIT build shim (`_cake_pplx_jit.py` in each backend package; it replaces `flashinfer.jit`)
-   - the API decorator that replaces `flashinfer.api_logging.flashinfer_api` (a no-op)
+   - the JIT build shim (`_cake_pplx_jit.py` in each backend package)
+   - the API decorator (`_cake_pplx_api_<family>.py`, a no-op)
    - `cake_ffi_checks.h`
    - the test helpers
 
@@ -177,7 +160,7 @@ There is one cross-family runtime contract. The `causal_conv1d` KCP route consum
 
 - The contract is a documented duck-typed protocol.
 - Planned, not implemented yet: a version integer, `KCP_CONTEXT_PROTOCOL`, that `causal_conv1d` checks at run time, raising a clear error on a mismatch. Until then, pin `causal_conv1d` with a `kda`/`gdn` commit that was tested together.
-- Tests that need another family live in `tests/cross_family/<family>/`, not in `kernels/<family>/tests/`. The import tool moves them there.
+- Tests that need another family live in `tests/cross_family/<family>/`, not in `kernels/<family>/tests/`.
 - Run them in one environment that has the families they need, each at a chosen commit.
 
 If you change the context shape, update the consumer side in a separate PR and record the tested combination. Once `KCP_CONTEXT_PROTOCOL` exists, also increase it.
@@ -226,48 +209,17 @@ cd /tmp/kda-tests && python -m pytest -p no:cacheprovider tests
 
 Run the tests of `tests/cross_family/<family>/` the same way, in an environment that has every family they import. For example, `tests/cross_family/causal_conv1d/` needs `kda` and `gdn` too. Tests that need several GPUs start their own processes when one process sees all GPUs. Run them with the `SLURM_*` task variables unset.
 
-## Upstream sync
-
-Each family has an `UPSTREAM.json` file. It records:
-
-- the source FlashInfer commit
-- the source paths
-- the generator revision from `build.json`
-
-To import a family again, run:
-
-```bash
-python tools/import_from_flashinfer.py --family <family> --src <flashinfer checkout> --dest kernels
-```
-
-The tool makes only mechanical changes:
-
-1. It copies the family sources.
-2. It changes the import paths to `cake_pplx`.
-3. It installs the JIT shim and the API decorator.
-4. It changes the `package` field in each `build.json`.
-
-It also moves every test that imports another family to `tests/cross_family/<family>/`, and reports the remaining `flashinfer` references.
-
-A family update has two kinds of commits:
-
-1. One mechanical commit made by the tool. Review it by re-running the tool.
-2. Adaptation commits made by hand, for example tests that checked FlashInfer packaging. After a new import, re-apply them with `git cherry-pick` or by hand.
-
-Kernel updates from FlashInfer then land one family at a time.
-
 ## Release a family
 
 1. Change only files in `kernels/<family>/`.
 2. Increase the version in `kernels/<family>/VERSION`. Increase it only for changes in that directory.
 3. Merge the PR after the family CI passes.
-4. Tag the merge commit `<family>/vX.Y.Z`. You can use the release helper in `tools/`.
+4. Tag the merge commit `<family>/vX.Y.Z`.
 5. Consumers update the SHA or tag for that family. Other family pins do not change.
 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The first import was validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
-- **Environment variables.** The kernels keep their `FLASHINFER_*` knob names (for example `FLASHINFER_CAKE_DSA_*`). A rename to `CAKE_PPLX_*` is a later, per-family change.

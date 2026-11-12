@@ -126,7 +126,7 @@ ya.backward(g)                                           # wa.grad in w.dtype (B
 
 ## rmsnorm_silu_gate
 
-**Computes.** SiLU-gated RMSNorm over a last dimension of 128: `rstd = 1/sqrt(mean(x^2) + eps)` and `y = BF16(((x * rstd) * weight) * silu(z))`. This is `RMSNorm(x) * weight * SiLU(z)`, not `flashinfer.norm.fused_rmsnorm_silu`.
+**Computes.** SiLU-gated RMSNorm over a last dimension of 128: `rstd = 1/sqrt(mean(x^2) + eps)` and `y = BF16(((x * rstd) * weight) * silu(z))`. This is `RMSNorm(x) * weight * SiLU(z)`.
 
 The backward recomputes `rstd` and the gate from `x` and `z`. With `n = x*rstd`, `s = sigmoid(z)` and `a = dy*silu(z)`:
 
@@ -765,7 +765,7 @@ Y = cake_mhc_det_train_finish(X, B, handle)          # BF16 [T, 4, H]
 - Default workspaces are one buffer per device, hidden size and power-of-two T bucket, and they are shared across streams. Pass caller-owned workspaces when you use concurrent streams.
 - Nondet creates no default buffer while the stream is capturing a CUDA graph (`ValueError`). Warm up first with the same T and H.
 - A reentrant checkpoint region (`use_reentrant=True`) must contain both prepare and finish, or start after prepare. It must not end between them.
-- The former FlashInfer 0.7.3 names (`cake_pplx.cake_mhc_train`, `CakeMHCDetTrain{Prepare,Finish}Function`, `route_key`) have no alias.
+- The former names (`cake_pplx.cake_mhc_train`, `CakeMHCDetTrain{Prepare,Finish}Function`, `route_key`) have no alias.
 - The maximum token count is not stated in the facade docstrings.
 
 ---
@@ -837,7 +837,7 @@ cake_mhc_head_det(Xg).backward(dY)                  # autograd; Xg.grad == grad 
 - The entry-point docstrings list hidden sizes 4096/5120/7168 without mentioning that SM107 serves 4096 only. Check with `is_cake_mhc_head_*_supported(device, hidden)`.
 - Above `MAX_TOKENS`, the backend raises `ValueError`.
 - Capture the forward in a CUDA graph only after one eager call has loaded the program.
-- The former names (`cake_mhc_det_train_head*`, `CakeMHCDetTrainHeadFunction`, `is_cake_mhc_det_train_head_supported`, FlashInfer 0.7.3 `cake_mhc_train_head*`) have no alias.
+- The former names (`cake_mhc_det_train_head*`, `CakeMHCDetTrainHeadFunction`, `is_cake_mhc_det_train_head_supported`, `cake_mhc_train_head*`) have no alias.
 
 ---
 
@@ -960,7 +960,7 @@ The module exports only these two functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
-Repeatability is set equality (flashinfer#8946 point 4). Each row repeats its set of (id, score bits) pairs and its valid count bit for bit, but the slot order and the positions of the `-1`/`-inf` padding may vary. It selects the same set as det, with the same scores. Under deterministic algorithms it raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. BF16 only. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
+Repeatability is set equality. Each row repeats its set of (id, score bits) pairs and its valid count bit for bit, but the slot order and the positions of the `-1`/`-inf` padding may vary. It selects the same set as det, with the same scores. Under deterministic algorithms it raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. BF16 only. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -1058,8 +1058,8 @@ Every output (`out`, `lse`, `dq`, `dkv` / `dkv_acc` rows) repeats bit for bit fo
 Other public names:
 
 - `CakeDSASparseAttentionDetFunction`, `CakeDSASparseAttentionDetNopeFunction`, `CakeDSASparseAttentionDetNopeVarlenFunction`: loaded lazily.
-- `CHECK_DST_MAP_ENV` (`"FLASHINFER_CAKE_DSA_CHECK_DST_MAP"`).
-- `BINDING_CACHE_CAPACITY_ENV` (`"FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY"`).
+- `CHECK_DST_MAP_ENV` (`"CAKE_PPLX_DSA_CHECK_DST_MAP"`).
+- `BINDING_CACHE_CAPACITY_ENV` (`"CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY"`).
 
 ### `cake_pplx.cake_dsa_sparse_attention_nondet_train`
 
@@ -1067,7 +1067,7 @@ The forward and `dq` use a fixed order and are bitwise reproducible for one pass
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_dsa_sparse_attention_nondet` | Same as the det rope entry | `key_passes=None` applies the registered policy: `ceil(S*2304 B / 100 MiB)` passes when that exceeds 1 and T <= 4224 at top-k 2048. `1` forces one pass, and a larger value (<= S) forces that many. `dkv_direct=None` reads `FLASHINFER_CAKE_DSA_DKV_DIRECT`; `True`/`False` select direct vs accumulate-and-cast for `dkv_acc`. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dq` is bitwise deterministic. `dkv` is accumulated in FP32 with atomics, then cast to BF16 or added into `dkv_acc`. |
+| `cake_dsa_sparse_attention_nondet` | Same as the det rope entry | `key_passes=None` applies the registered policy: `ceil(S*2304 B / 100 MiB)` passes when that exceeds 1 and T <= 4224 at top-k 2048. `1` forces one pass, and a larger value (<= S) forces that many. `dkv_direct=None` reads `CAKE_PPLX_DSA_DKV_DIRECT`; `True`/`False` select direct vs accumulate-and-cast for `dkv_acc`. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dq` is bitwise deterministic. `dkv` is accumulated in FP32 with atomics, then cast to BF16 or added into `dkv_acc`. |
 | `cake_dsa_sparse_attention_nondet_varlen` | Same as det varlen | As det varlen | Packed rope form. |
 | `cake_dsa_sparse_attention_nondet_nope` | Same as det nope | `key_passes=None` uses one pass, and a value > 1 forces passes. For this program, the `dkv_direct` rule is 1 key per query token. | `dq` is BF16 and deterministic. `dkv` is FP32 via atomics, handed over through `dkv_acc` or cast by autograd. |
 | `cake_dsa_sparse_attention_nondet_nope_varlen` | Same as det nope_varlen | As det | Packed NoPE form. Without `check_cu_seqlens`, only structural checks run (dtype, rank, length, contiguity, device). |
@@ -1081,9 +1081,9 @@ Other public names:
 
 | Variable | Modules | Effect |
 |---|---|---|
-| `FLASHINFER_CAKE_DSA_CHECK_DST_MAP` | both | Used when `check_dst_map=None`. Unset, empty or `0` (the default) means no check. Any other value validates the `dkv_dst_map` values on every backward, at the cost of one device sync, and raises `ValueError` on a violation. An explicit `True`/`False` ignores the variable. The check is skipped during graph capture. |
-| `FLASHINFER_CAKE_DSA_TRAIN_BINDING_CACHE_CAPACITY` | both | A positive integer, read at module import; a bad value raises `ValueError` at import. Sets the capacity of the backend LRU binding cache (default 64). |
-| `FLASHINFER_CAKE_DSA_DKV_DIRECT` | nondet | Used when `dkv_direct=None`. `auto` (the default) applies the size rule (`min_keys_per_query` 4 for rope, 1 for NoPE). `1` forces the direct accumulate path, and `0` forces accumulate-and-cast. Other values raise `ValueError`. |
+| `CAKE_PPLX_DSA_CHECK_DST_MAP` | both | Used when `check_dst_map=None`. Unset, empty or `0` (the default) means no check. Any other value validates the `dkv_dst_map` values on every backward, at the cost of one device sync, and raises `ValueError` on a violation. An explicit `True`/`False` ignores the variable. The check is skipped during graph capture. |
+| `CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` | both | A positive integer, read at module import; a bad value raises `ValueError` at import. Sets the capacity of the backend LRU binding cache (default 64). |
+| `CAKE_PPLX_DSA_DKV_DIRECT` | nondet | Used when `dkv_direct=None`. `auto` (the default) applies the size rule (`min_keys_per_query` 4 for rope, 1 for NoPE). `1` forces the direct accumulate path, and `0` forces accumulate-and-cast. Other values raise `ValueError`. |
 
 `key_passes` splits the backward main stage into key-range passes. In det it is a scheduling choice with identical bits and no effect for NoPE. In nondet it forces or overrides the pass policy.
 
@@ -1374,7 +1374,7 @@ Other public names:
 
 - `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
 - `CakeGatedActMXFP8DetOutputs`: the 4-tuple type alias.
-- `cake_gated_act_mxfp8_det_train_register_custom_ops`: returns `SimpleNamespace(forward, backward)` wrapping the backend with positional `(gated_input, [grad_output,] rowwise, colwise)`. In this package the registration stand-ins are no-ops, so no `torch.ops.flashinfer` op is created.
+- `cake_gated_act_mxfp8_det_train_register_custom_ops`: returns `SimpleNamespace(forward, backward)` wrapping the backend with positional `(gated_input, [grad_output,] rowwise, colwise)`. In this package the registration stand-ins are no-ops, so no `torch.ops` custom op is created.
 - `is_cake_gated_act_mxfp8_det_train_supported(device)`.
 
 **Options and environment.** The only keywords are `rowwise` and `colwise`. The program is selected by `M*K` alone, and every program of a route writes the same bytes. The backend reads no environment variable for kernel behavior.
@@ -1404,7 +1404,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 
 - There is no autograd wrapper, so the caller must call the forward and backward explicitly.
 - `col_output` is column-major, meaning its storage is the transpose. The scale tensors are swizzled 128x4 and returned as `float8_e8m0fnu` views.
-- The former names (`flashinfer.gated_act_mxfp8`, `silu_and_mul_mxfp8_quantize[_backward]`) are removed and have no alias.
+- The former names (`silu_and_mul_mxfp8_quantize[_backward]`) are removed and have no alias.
 
 ---
 
@@ -1466,7 +1466,7 @@ There is no KCP module. Source: [`kernels/lm_head/cake_pplx/cake_lm_head_nondet_
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_lm_head_nondet_train_loss` | Same as the det loss | As det. `dx_finalize` here only selects the one-pass scatter of the compacted `dX` output. | Returns the FP32 loss, plus `logp` with `return_logp=True`. |
-| `cake_lm_head_nondet_train_logprob` | Same as the det logprob | As det. `None`, or a number whose FP32 value is 1.0, runs without temperature. A bool temperature raises `ValueError`. With `'keep_logits'`, a `hidden_count` left at `None` is passed down as `None` unless `FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT` is `'0'`. | Returns FP32 `logp [T]`. |
+| `cake_lm_head_nondet_train_logprob` | Same as the det logprob | As det. `None`, or a number whose FP32 value is 1.0, runs without temperature. A bool temperature raises `ValueError`. With `'keep_logits'`, a `hidden_count` left at `None` is passed down as `None` unless `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` is `'0'`. | Returns FP32 `logp [T]`. |
 | `cake_lm_head_nondet_train_preload` | `(device=None, *, temperature=False)` | As det | Per-thread state (side streams, events, count cells) belongs to the calling thread. |
 | `cake_lm_head_nondet_train_support_logprob` | Same as det | As det | No run-to-run promise for gradients. The backward alerts before a dense `dX` of more than one K slice. |
 | `cake_lm_head_nondet_train_support_kl` | Same as det | As det | Gradients behave as in `support_logprob`. |
@@ -1477,14 +1477,14 @@ The module exports exactly these five functions. The nondet backend also provide
 
 | Variable | Effect |
 |---|---|
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_COMPACT_ROWS` | `'0'` turns valid-row compaction off |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_FUSE_DW_CAST` | `'0'` turns off the fused last-chunk weight-gradient cast |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_DX_FINALIZE` | `'0'` turns off the fused `dX` finalize |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_DW_STREAM` | `0/false/off/no` gives `False`, `1/true/on/yes` gives `True`, and anything else gives `'auto'`. The side stream runs the `dW` GEMM; `'auto'` uses it for calls with 3 or more chunks. |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_HIDDEN_COUNT` | `'0'` turns off the hidden device-side valid-row count |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_GEMM_TUNING` | A JSON object of per-GEMM knobs. Invalid JSON or a non-object raises `ValueError`. |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE` | `'0'` disables both binding caches. Read at import and applied on the first call. |
-| `FLASHINFER_CAKE_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY` | A positive int capacity (default 64). A bad value raises `ValueError` at import. |
+| `CAKE_PPLX_LM_HEAD_LOSS_COMPACT_ROWS` | `'0'` turns valid-row compaction off |
+| `CAKE_PPLX_LM_HEAD_LOSS_FUSE_DW_CAST` | `'0'` turns off the fused last-chunk weight-gradient cast |
+| `CAKE_PPLX_LM_HEAD_LOSS_DX_FINALIZE` | `'0'` turns off the fused `dX` finalize |
+| `CAKE_PPLX_LM_HEAD_LOSS_DW_STREAM` | `0/false/off/no` gives `False`, `1/true/on/yes` gives `True`, and anything else gives `'auto'`. The side stream runs the `dW` GEMM; `'auto'` uses it for calls with 3 or more chunks. |
+| `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` | `'0'` turns off the hidden device-side valid-row count |
+| `CAKE_PPLX_LM_HEAD_LOSS_GEMM_TUNING` | A JSON object of per-GEMM knobs. Invalid JSON or a non-object raises `ValueError`. |
+| `CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE` | `'0'` disables both binding caches. Read at import and applied on the first call. |
+| `CAKE_PPLX_LM_HEAD_LOSS_BINDING_CACHE_CAPACITY` | A positive int capacity (default 64). A bad value raises `ValueError` at import. |
 
 `memory_mode` has no environment variable. `num_valid_rows` lets the caller supply the valid-row count and avoid a host wait. The knob parsing lives in the private module `cake_pplx._cake_lm_head_train_knobs`.
 
