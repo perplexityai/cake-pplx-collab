@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ CUDA Graph replay, the absence of rebuilds on a changed shape and the
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer, so a build that vendors the package under another import path
+``cake_pplx``, so a build that vendors the package under another import path
 runs it unchanged after pointing that table entry at its package.  The
 ``cake_pplx.cake_gated_act_mxfp8_det_train`` facade is covered by
 ``test_cake_gated_act_mxfp8_det_train_api.py``.

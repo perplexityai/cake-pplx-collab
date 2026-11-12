@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,15 +13,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Measure fused gated activation plus MXFP8 quantization against the decomposed
-FlashInfer path. Timings use CUPTI GPU activities with a cold L2 cache.
+Measure fused gated activation plus MXFP8 quantization. Timings use CUPTI GPU
+kernel activity (through ``torch.profiler``) with a cold L2 cache.
 """
 
 import argparse
 import json
 import statistics
-import warnings
-from importlib.metadata import version
 from pathlib import Path
 
 import torch
@@ -30,12 +28,6 @@ from cake_pplx.cake_gated_act_mxfp8_det_train import (
     cake_gated_act_mxfp8_det_train_backward,
     cake_gated_act_mxfp8_det_train_forward,
 )
-
-# FlashInfer is optional here: it provides the decomposed baseline
-# (``mxfp8_quantize``) and the CUPTI timer, never the kernel under test.
-import flashinfer
-from flashinfer import SfLayout
-from flashinfer.testing import bench_gpu_time
 
 
 SHAPES = (
@@ -56,49 +48,6 @@ MODES = (
 )
 
 
-@torch.compile(fullgraph=True, dynamic=False)
-def _forward_activation(gated_input: torch.Tensor, grad_output: torch.Tensor):
-    del grad_output
-    k = gated_input.shape[1] // 2
-    gate = gated_input[:, :k].float()
-    up = gated_input[:, k:].float()
-    return (torch.nn.functional.silu(gate) * up).bfloat16()
-
-
-@torch.compile(fullgraph=True, dynamic=False)
-def _backward_activation(gated_input: torch.Tensor, grad_output: torch.Tensor):
-    k = gated_input.shape[1] // 2
-    gate = gated_input[:, :k].float()
-    up = gated_input[:, k:].float()
-    grad = grad_output.float()
-    sigmoid_gate = torch.sigmoid(gate)
-    silu_gate = gate * sigmoid_gate
-    dact = silu_gate * (1.0 - sigmoid_gate) + sigmoid_gate
-    return torch.cat(
-        (((dact * grad) * up).bfloat16(), (silu_gate * grad).bfloat16()), dim=1
-    )
-
-
-def _decomposed(
-    direction: str,
-    gated_input: torch.Tensor,
-    grad_output: torch.Tensor,
-    rowwise: bool,
-    colwise: bool,
-):
-    logical = (
-        _forward_activation(gated_input, grad_output)
-        if direction == "forward"
-        else _backward_activation(gated_input, grad_output)
-    )
-    if rowwise:
-        flashinfer.mxfp8_quantize(logical, sf_swizzle_layout=SfLayout.layout_128x4)
-    if colwise:
-        flashinfer.mxfp8_quantize(
-            logical.T.contiguous(), sf_swizzle_layout=SfLayout.layout_128x4
-        )
-
-
 def _fused(
     direction: str,
     gated_input: torch.Tensor,
@@ -115,21 +64,61 @@ def _fused(
     )
 
 
-def _median_ms(fn) -> float:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        measurements = bench_gpu_time(
-            fn,
-            enable_cupti=True,
-            use_cuda_graph=False,
-            cold_l2_cache=True,
-            dry_run_iters=10,
-            repeat_iters=100,
+def _cupti_call_ms(fn, *, dry_run_iters: int = 10, repeat_iters: int = 100) -> list[float]:
+    """Per-call GPU time of ``fn`` in milliseconds, the L2 cache flushed before
+    every call: the summed duration of the GPU activities (kernels, copies,
+    fills) that CUPTI records through ``torch.profiler`` between two sentinel
+    kernels, an autograd backward included.
+
+    Every timed call runs between two launches of ATen's one-cycle spin kernel;
+    the first record after a sentinel is the L2 flush and is not counted.
+    Device records are attributed by position, not by the host operation that
+    launched them, so kernels launched through the driver API count too.
+    """
+    l2_bytes = torch.cuda.get_device_properties(torch.cuda.current_device()).L2_cache_size
+    flush = torch.empty(max(2 * l2_bytes, 1 << 20), dtype=torch.uint8, device="cuda")
+    for _ in range(dry_run_iters):
+        flush.fill_(1)
+        fn()
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as profile:
+        torch.cuda._sleep(1)
+        for _ in range(repeat_iters):
+            flush.fill_(1)
+            fn()
+            torch.cuda._sleep(1)
+        torch.cuda.synchronize()
+    records = sorted(
+        (
+            event
+            for event in profile.events()
+            if event.device_type == torch.autograd.DeviceType.CUDA
+        ),
+        key=lambda event: event.time_range.start,
+    )
+    call_us: list[float] = []
+    current = None
+    for event in records:
+        if "::spin_kernel(" in event.name:
+            if current is not None:
+                call_us.append(sum(e.time_range.end - e.time_range.start for e in current[1:]))
+            current = []
+        elif current is not None:
+            current.append(event)
+    if len(call_us) != repeat_iters:
+        raise RuntimeError(
+            f"the profiler returned {len(call_us)} complete calls of {repeat_iters}; "
+            "CUPTI lost device records"
         )
-    fallback = [item for item in caught if "Falling back" in str(item.message)]
-    if fallback:
-        raise RuntimeError(str(fallback[0].message))
-    return float(statistics.median(measurements))
+    if any(us <= 0 for us in call_us):
+        raise RuntimeError("CUPTI recorded no GPU activity for a timed call")
+    return [us / 1000.0 for us in call_us]
+
+
+def _median_ms(fn) -> float:
+    return float(
+        statistics.median(_cupti_call_ms(fn, dry_run_iters=10, repeat_iters=100))
+    )
 
 
 def _parse_shape(value: str) -> tuple[int, int]:
@@ -154,9 +143,6 @@ def main() -> None:
     capability = torch.cuda.get_device_capability()
     if capability not in ((10, 0), (10, 3)):
         raise RuntimeError("this benchmark requires SM100 or SM103")
-    cupti_version = version("cupti-python")
-    if int(cupti_version.split(".", 1)[0]) < 13:
-        raise RuntimeError(f"cupti-python 13 or newer is required, got {cupti_version}")
 
     shapes = tuple(args.shape) if args.shape else SHAPES
     rows = []
@@ -169,16 +155,11 @@ def main() -> None:
             (m, k), generator=generator, device="cuda", dtype=torch.bfloat16
         )
         for mode, direction, rowwise, colwise in MODES:
-            baseline = lambda: _decomposed(
-                direction, gated_input, grad_output, rowwise, colwise
-            )
             candidate = lambda: _fused(
                 direction, gated_input, grad_output, rowwise, colwise
             )
-            baseline()
             candidate()
             torch.cuda.synchronize()
-            baseline_ms = _median_ms(baseline)
             candidate_ms = _median_ms(candidate)
             rows.append(
                 {
@@ -189,18 +170,15 @@ def main() -> None:
                     "K": k,
                     "mode": mode,
                     "candidate_ms": candidate_ms,
-                    "baseline_ms": baseline_ms,
-                    "speedup": baseline_ms / candidate_ms,
                 }
             )
 
-    print("| M | K | Mode | Fused (ms) | Decomposed (ms) | Speedup |")
-    print("|---:|---:|:---|---:|---:|---:|")
+    print("| M | K | Mode | Fused (ms) |")
+    print("|---:|---:|:---|---:|")
     for row in rows:
         print(
             f"| {row['M']} | {row['K']} | {row['mode']} | "
-            f"{row['candidate_ms']:.6f} | {row['baseline_ms']:.6f} | "
-            f"{row['speedup']:.4f}x |"
+            f"{row['candidate_ms']:.6f} |"
         )
     if args.json:
         args.json.write_text(json.dumps(rows, indent=2) + "\n")
