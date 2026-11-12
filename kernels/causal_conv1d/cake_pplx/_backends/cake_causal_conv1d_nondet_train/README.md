@@ -4,9 +4,8 @@ This package is the backend of the non-deterministic (`nondet`) packed width-4
 depthwise causal convolution + SiLU training routes. It serves two routes: the single-rank route
 (`cake_pplx.cake_causal_conv1d_nondet_train`) and the context-parallel (KCP)
 route (`cake_pplx.cake_causal_conv1d_nondet_train_kcp`, module `kcp` of this
-package). The facades are stable FlashInfer APIs; this package, under
-`flashinfer.experimental.cake`, is their backend. Nothing in `flashinfer`
-imports it; a facade imports it on first use. The package reads no
+package). The facades are the stable APIs; this package is their backend.
+Nothing else imports it; a facade imports it on first use. The package reads no
 environment variable. The deterministic backend is
 `cake_pplx._backends.cake_causal_conv1d_det_train` (facades
 `cake_pplx.cake_causal_conv1d_det_train` and
@@ -25,7 +24,7 @@ rounding per output, and the SiLU derivative taken at the FP32 preactivation.
 The following parts are the deterministic KCP package's:
 
 - the context contract
-- the two-launch forward (FlashInfer PR #9225; see The forward)
+- the two-launch forward (see The forward)
 - the forward, history-row and head programs (this package's copies of the deterministic programs)
 - the halo exchanges
 - the recompute handle
@@ -151,8 +150,8 @@ deterministic route's head program. Then:
    Cluster Launch Control, they also take the lanes of CTAs that have not
    started. A kernel resident on another stream therefore leaves no work waiting
    for the SMs it holds. Its token arithmetic computes two adjacent channels
-   per packed FP32 (`f32x2`) instruction, as the deterministic KCP backward does
-   since FlashInfer PR #9142; `dx` and each run's FP32 `dweight` sum are bitwise
+   per packed FP32 (`f32x2`) instruction, as the deterministic KCP backward does;
+   `dx` and each run's FP32 `dweight` sum are bitwise
    those of the scalar (one channel per instruction) build. The FP32 `dweight` runs are added into four FP32
    accumulator copies in the order the runs end. The copies are summed once per
    channel tile.
@@ -210,7 +209,7 @@ id is not available, each captured call gets its own buffer.
 ### Rank agreement
 
 Every rank of a call must pass a context built from the same partition. Each rank must also call the same entry (single or multi) with the same channel counts.
-FlashInfer issue #8946 added a check of this agreement. The check runs on the first eager exchange of each (context, phase); the phase is forward or backward. It all-gathers one int64[8] fingerprint per rank over `ctx.group` and compares the fingerprints on the host. On a mismatch, every
+A check of this agreement runs on the first eager exchange of each (context, phase); the phase is forward or backward. It all-gathers one int64[8] fingerprint per rank over `ctx.group` and compares the fingerprints on the host. On a mismatch, every
 rank raises the same `ValueError` naming the ranks and fields that differ.
 This is the call's only collective beyond the halo exchange and its only host
 sync, once per context and phase.
@@ -266,7 +265,7 @@ There are no environment variables. Every setting is a keyword argument.
 ### Sharing the GPU with other streams
 
 The overlapped backward is the default and needs no setting. Its CTAs claim
-their tokens at run time. The repro from FlashInfer issues #7548 / #8365 timed the KCP
+their tokens at run time. A repro timed the KCP
 backward at world 4 with CUDA events, alone and next to a kernel on another
 stream. It used two per-rank shapes:
 
@@ -305,7 +304,6 @@ unloaded (C 1024, 62585 tokens), which is above the opt-in's 1.040 limit.
 
 ### Checkpoint recompute without the halo exchange
 
-FlashInfer issues #7815 / #7818 added this mode.
 With `recompute_handle=CakeCausalConv1dNondetKcpRecomputeHandle()`, the checkpoint
 recompute of a call issues no collective:
 

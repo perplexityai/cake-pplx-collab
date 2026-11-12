@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,11 +25,11 @@ with or without ``warn_only=True``::
 
     package                                        torch deterministic mode off   torch deterministic mode on
     the non-deterministic package                  non-deterministic              the forward runs; the backward raises
-      (flashinfer.cake_causal_conv1d_nondet_                                        RuntimeError before any exchange
+      (cake_pplx.cake_causal_conv1d_nondet_                                         RuntimeError before any exchange
       train_kcp, this module)                                                       (warn_only=True: a UserWarning, then
                                                                                     it runs); it never falls back
     the deterministic package                      deterministic                  deterministic; no warning
-      (flashinfer.cake_causal_conv1d_det_
+      (cake_pplx.cake_causal_conv1d_det_
       train_kcp)
 
 The backward reads torch's deterministic setting when it runs (the autograd backward included).  Every rank of
@@ -37,7 +37,7 @@ The backward reads torch's deterministic setting when it runs (the autograd back
 
 Contract: the context of the KDA step (``CakeKDADetKcpContext`` from
 ``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context``), FP32 taps and no bias, the halo exchanges (one
-``all_to_all_single`` per direction, with recompute handles for communication-free checkpoint recomputes, #7818),
+``all_to_all_single`` per direction, with recompute handles for communication-free checkpoint recomputes),
 the recompute-handle rules and the multi-tensor calls are the deterministic KCP package's.  The backward overlaps
 the halo exchange: its main program runs before the exchange is waited (no cooperative attribute, no grid barrier;
 its CTAs claim their tokens at run time, so a kernel resident on another stream slows it about in proportion to the
@@ -61,7 +61,7 @@ Name map (the deterministic package -> this module): ``cake_causal_conv1d_det_kc
     y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx)  # overlapped backward
     q, k, v = cake_causal_conv1d_nondet_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
-The backward beside a kernel of another stream (FlashInfer issue #8365): the overlapped backward needs no setting
+The backward beside a kernel of another stream: the overlapped backward needs no setting
 (its CTAs claim their tokens at run time); ``bwd_reserve_sms=K`` (SM100 / SM103; ``ValueError`` on SM107) runs the
 one-program backward after the halo exchange instead, ``K`` SMs short of its single wave::
 
@@ -124,7 +124,7 @@ def cake_causal_conv1d_nondet_kcp(
         package: ``cake_causal_conv1d_det_kcp(..., cooperative=True)``).
     bwd_reserve_sms : int, optional
         Keyword-only, default ``None`` (the package's ``RESERVE_DEFAULT``, 0).  The SMs the one-program backward
-        leaves to kernels of other streams (issue #8365): ``K >= 1`` runs that backward after the halo exchange
+        leaves to kernels of other streams: ``K >= 1`` runs that backward after the halo exchange
         instead of the overlapped one and launches its single-wave grid ``K x ctas_per_sm`` CTAs short, so a kernel of another stream that holds up to ``K`` SMs (for example a communication kernel) does
         not push the top CTAs into a second wave; the unloaded backward gives up the work of those ``K`` SMs.
         ``y``, ``dx`` and the exchanges are unchanged and ``dweight`` stays within the same budget.  With ``K = 0``

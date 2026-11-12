@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,8 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Multi-GPU rows of ``cake_causal_conv1d_det_kcp`` under ``torch.utils.checkpoint`` with and without a recompute handle
-(FlashInfer issues #7815 / #7818): ``W`` ranks over NCCL, each holding the fragments of one partition of a packed
+Multi-GPU rows of ``cake_causal_conv1d_det_kcp`` under ``torch.utils.checkpoint`` with and without a recompute handle:
+``W`` ranks over NCCL, each holding the fragments of one partition of a packed
 batch (contiguous, zigzag, per-document zigzag, ragged tables with a zero-token rank, one-token fragments and a
 fragment that reads its history from three predecessor ranks).  Per row and rank:
 
@@ -44,7 +44,7 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
   no device allocation (``tests/experimental/test_helpers/cake_host_sync.py``), bitwise the first call;
 - per-document zigzag rows: the longest document is a chain of ``2 W`` fragments over every rank.
 
-``ROWS`` are W = 2 / 4 / 8; ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (FlashInfer issue #7815: at
+``ROWS`` are W = 2 / 4 / 8; ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at
 W = 64 a document of 128 fragments, and documents of one- and two-token fragments whose history comes from up to three
 predecessor ranks).  Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
 ``torch.multiprocessing`` (``pytest``: skipped when fewer than ``W`` CUDA devices are visible) and one process per Slurm

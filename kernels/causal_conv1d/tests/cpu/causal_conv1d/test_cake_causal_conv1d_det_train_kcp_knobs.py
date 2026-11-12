@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -496,7 +496,7 @@ def test_host_trim_ffi_device_and_cpu_refusal() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Recompute handle (issues #7815 / #7818): the handle object, the phase helper and the entry rules (no kernel runs).
+# Recompute handle: the handle object, the phase helper and the entry rules (no kernel runs).
 
 
 @pytest.mark.cpu_only
@@ -638,7 +638,7 @@ def test_facade_reexports_the_handle_lazily() -> None:
 
 @pytest.mark.cpu_only
 def test_graph_key_holds_the_backward_launch_form() -> None:
-    """The backward's launch form (``cooperative``, FlashInfer issue #8365) is part of the graph validity key: the same
+    """The backward's launch form (``cooperative``) is part of the graph validity key: the same
     operands under the two forms are two keys, the same form one.  No kernel runs here."""
     ctx = types.SimpleNamespace(T_r=8, n_frag=1, world_size=1)
     x = torch.zeros(8, 16, dtype=torch.bfloat16)

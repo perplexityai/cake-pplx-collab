@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -407,11 +407,10 @@ def test_entry_points_mirror_the_package() -> None:
 
 @pytest.mark.cpu_only
 def test_entry_points_are_stable(recorded, kcp_recorded) -> None:
-    """Every entry point, helper and support query of the two modules is a stable API (``@cake_api``; FlashInfer
-    issue #8928): none is marked experimental (no ``is_experimental`` set ``True`` on the entry point or on the
-    function it wraps), and a call emits no ``ExperimentalWarning``.  FlashInfer's ``flashinfer_api`` emitted that
-    warning for an ``is_experimental`` entry point; ``cake_api`` is a no-op, so the check matches the category by
-    name (no ``ExperimentalWarning`` class of any module may be emitted)."""
+    """Every entry point, helper and support query of the two modules is a stable API (``@cake_api``): none is
+    marked experimental (no ``is_experimental`` set ``True`` on the entry point or on the function it wraps), and a
+    call emits no ``ExperimentalWarning``.  ``cake_api`` is a no-op, so the check matches the category by name
+    (no ``ExperimentalWarning`` class of any module may be emitted)."""
 
     x, w, cu, dy, b, ctx = (object() for _ in range(6))
     cpu = torch.device("cpu")
@@ -494,9 +493,9 @@ def test_no_entry_point_takes_a_mode_keyword() -> None:
 @pytest.mark.cpu_only
 def test_deterministic_names_are_unchanged_and_carry_det() -> None:
     """Every deterministic name is the deterministic object and carries ``det``; the names the deterministic package
-    had before the det rename, which the non-deterministic package had before FlashInfer issue #8928, are bound
+    had before the det rename, which the non-deterministic package had before its own rename, are bound
     nowhere, and the non-deterministic names live in these modules only.  The ``cake_pplx`` namespace package
-    re-exports no entry point (FlashInfer's top level did): neither the det nor the old names are bound on it."""
+    re-exports no entry point: neither the det nor the old names are bound on it."""
 
     for name in (
         "cake_causal_conv1d_det",

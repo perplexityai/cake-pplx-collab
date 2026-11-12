@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The opt-in SM reserve of the non-deterministic KCP backward (``bwd_reserve_sms``, FlashInfer issue #8365): one
+The opt-in SM reserve of the non-deterministic KCP backward (``bwd_reserve_sms``): one
 process, world size 1, the deterministic KCP suite's contexts and FP64 oracle.
 
 (a) The keyword of ``cake_pplx.cake_causal_conv1d_nondet_train_kcp``: ``None`` is never forwarded; a given value

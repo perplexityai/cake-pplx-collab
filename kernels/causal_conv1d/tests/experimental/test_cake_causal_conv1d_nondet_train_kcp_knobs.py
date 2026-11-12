@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -194,7 +194,7 @@ def test_bwd_route_knob_is_validated() -> None:
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 FORMS = ((False, False), (True, False), (False, True), (True, True))
 # The shipped ``_fwd_form(arch, multi=...)`` (single-rank main program, overlapped) of the single call and the multi
-# entry per architecture: the deterministic KCP package's (FlashInfer #9225)
+# entry per architecture: the deterministic KCP package's
 SHIPPED_FWD_FORMS = {
     "sm_100a": ((True, False), (True, False)),
     "sm_103a": ((True, False), (True, False)),
@@ -544,7 +544,7 @@ def test_host_trim_ffi_device_and_cpu_refusal(monkeypatch) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Recompute handle (issues #7815 / #7818): the handle object, the phase helper and the entry rules (no kernel runs).
+# Recompute handle: the handle object, the phase helper and the entry rules (no kernel runs).
 
 
 @pytest.mark.cpu_only

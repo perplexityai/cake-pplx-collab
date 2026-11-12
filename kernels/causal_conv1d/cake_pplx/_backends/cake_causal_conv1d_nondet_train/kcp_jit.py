@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,8 +28,8 @@ rule, selection rule and the kernel-parameter -> logical-argument map.  What to
 compile -- sources, digests, nvcc flags -- is recorded once in ``build.json``
 next to this file (its entries sit beside the zero-history entries);
 :mod:`.cake_build` serves the library ``<library>_<arch>`` from a prebuilt
-``aot/`` file when a builder compiled it and otherwise through FlashInfer's JIT
-from the same sources and flags, verifying every source digest first.
+``aot/`` file when a builder compiled it and otherwise through the package's JIT
+(``_cake_pplx_jit``) from the same sources and flags, verifying every source digest first.
 
 The routes of an architecture are the three KCP kinds of the det package
 (``cake_pplx.cake_causal_conv1d_det_train_kcp``): ``kcp_fwd``
@@ -1183,7 +1183,7 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of KCP record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
+    The prebuilt ``aot/`` library when a builder compiled it, else the package's
     JIT build of the same sources and flags (``cake_build.load_library``).
     """
 
@@ -1192,8 +1192,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library of the package's ``build.json`` without a prebuilt file
-    (the zero-history and the KCP entries alike; for ahead-of-time warm-up through FlashInfer's
-    ``build_jit_specs``)."""
+    (the zero-history and the KCP entries alike; for ahead-of-time warm-up: ``spec.build()`` of each)."""
 
     return cake_build.jit_specs(arch)
 

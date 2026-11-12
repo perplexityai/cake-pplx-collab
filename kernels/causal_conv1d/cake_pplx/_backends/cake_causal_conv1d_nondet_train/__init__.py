@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ Non-deterministic backend of the Cake packed width-4 depthwise causal
 convolution + SiLU training forward / backward (SM100 / SM103 / SM107), one
 self-contained package (host API bodies, the ``cake_jit`` registry, the pinned
 ``cake_build`` loader and the generated CUDA sources under ``csrc/``).  It
-imports nothing from other flashinfer packages.  The stable entry points and
+imports nothing from other packages of this repository.  The stable entry points and
 the user-facing documentation live in the non-deterministic package's
 facades :mod:`cake_pplx.cake_causal_conv1d_nondet_train` and
 :mod:`cake_pplx.cake_causal_conv1d_nondet_train_kcp` (the KCP entry points of
@@ -92,7 +92,7 @@ Host design (the knobs are keywords; no environment variable):
   wraps after that many CTAs), so ``dx`` keeps its bits and more CTAs add into
   the same accumulators.  The workspace does not grow with it (one accumulator
   set and one counter per channel tile, whatever the grid).
-- Backward grid beside a concurrent kernel (FlashInfer issue #8365): on the
+- Backward grid beside a concurrent kernel: on the
   ``bwd`` and ``bwd_fp32g`` routes at ``bwd_grid_mult`` 1, a launch of exactly
   ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
   ``ctas_per_sm`` CTAs launches ``ctas_per_sm`` fewer (:func:`_one_sm_trim`),
@@ -554,7 +554,7 @@ def _launch(
 
 
 # The backward routes whose single-wave grid gives up ``ctas_per_sm`` CTAs when its last channel-tile rank holds at
-# least that many (:func:`_one_sm_trim`, issue #8365); the other routes launch the grid of ``launch_grid``.
+# least that many (:func:`_one_sm_trim`); the other routes launch the grid of ``launch_grid``.
 _ONE_SM_TRIM_ROUTES: tuple[str, ...] = ("bwd", "bwd_fp32g")
 
 

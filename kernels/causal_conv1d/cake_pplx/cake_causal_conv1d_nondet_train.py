@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,12 +30,12 @@ with or without ``warn_only=True``::
 
     package                                        torch deterministic mode off   torch deterministic mode on
     the non-deterministic package                  non-deterministic              the forward runs; the backward
-      (flashinfer.cake_causal_conv1d_nondet_                                        raises RuntimeError before it
+      (cake_pplx.cake_causal_conv1d_nondet_                                         raises RuntimeError before it
       train[_kcp], this module)                                                     launches (warn_only=True: a
                                                                                     UserWarning, then it runs); it
                                                                                     never falls back
     the deterministic package                      deterministic                  deterministic; no warning
-      (flashinfer.cake_causal_conv1d_det_
+      (cake_pplx.cake_causal_conv1d_det_
       train[_kcp])
 
 The forward is fixed-order (the deterministic package's programs) and never
@@ -126,8 +126,8 @@ import torch
 
 from ._cake_pplx_api_causal_conv1d import cake_api
 
-# The package lives under flashinfer.experimental; this core module imports it on first use only (the containment
-# rules of flashinfer/experimental/README.md), so importing this module loads nothing from the experimental tree.
+# The backend package lives under cake_pplx._backends; this module imports it on first use only, so importing this
+# module loads nothing from the backend.
 # Its constants and its autograd Function resolve through the module ``__getattr__`` below.  The entry points are stable
 # APIs (``@cake_api``): real ``def``s whose signatures mirror the package's, forwarding each call to it.
 _FROM_BACKEND = (

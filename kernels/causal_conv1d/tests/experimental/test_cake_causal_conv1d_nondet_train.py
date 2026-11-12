@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ back all zero after every launch, over changed shapes and routes; NaN-poisoned o
 CUDA Graph capture / replay with and without a caller-owned workspace, one package buffer per capture and stream
 shared by the capture's backward calls; two streams with two workspaces at once;
 the backward is ONE ordinary launch (no reduce program) and keeps its speed beside a kernel resident on another
-stream (FlashInfer issues #7038 / #7548).  Autograd, non-reentrant activation checkpointing (2 x forward +
+stream.  Autograd, non-reentrant activation checkpointing (2 x forward +
 backward) and gradient accumulation; torch's deterministic mode.
 
 The opt-in ``bwd_grid_mult`` (every value of ``BWD_GRID_MULTS``) on every route, at single-tile, multi-sub-tile and
@@ -1071,7 +1071,7 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
 
 
 def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
-    """FlashInfer issue #8365 on a three-tile ``NARROW_TILES`` row: on the ``bwd`` and ``bwd_fp32g`` routes a
+    """A three-tile ``NARROW_TILES`` row: on the ``bwd`` and ``bwd_fp32g`` routes a
     single-wave launch of ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
     ``ctas_per_sm`` CTAs (``full % 3 >= ctas_per_sm``; B200: 296 % 3 = 2) launches ``ctas_per_sm`` fewer, as at a
     route-free plan of three tiles; a grid ``launch_grid`` already trimmed to whole ranks is kept.  The trimmed
@@ -1782,7 +1782,7 @@ def test_bwd_grid_mult_launches_that_many_times_the_untrimmed_grid(
 def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
     kind, monkeypatch
 ) -> None:
-    """FlashInfer issue #8365: on the ``bwd`` and ``bwd_fp32g`` routes a default-grid backward launches ``ctas_per_sm
+    """On the ``bwd`` and ``bwd_fp32g`` routes a default-grid backward launches ``ctas_per_sm
     x SM count`` CTAs less ``ctas_per_sm`` when the last channel-tile rank of that grid holds at least
     ``ctas_per_sm`` CTAs (so a kernel on another stream that keeps one SM's shared memory leaves the launch one
     wave), else the whole grid; the other backward routes launch ``launch_grid``'s grid.  The trimmed launch's
@@ -1906,7 +1906,7 @@ def test_fp32g_accumulators_follow_the_rendered_rule(kind, C, monkeypatch) -> No
 def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     record_property,
 ) -> None:
-    """FlashInfer issues #7038 / #7548: one 1-thread kernel resident on another stream must not stall the
+    """One 1-thread kernel resident on another stream must not stall the
     one-launch backward (``busy <= 2 x alone``, medians of 7 after 3 warm-ups, CUDA events on the current stream);
     ``dx`` is bitwise unchanged beside it and ``dweight`` stays within budget."""
 

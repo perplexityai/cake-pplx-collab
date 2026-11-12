@@ -4,12 +4,11 @@ Backend package of the deterministic (`det`) packed width-4 depthwise causal
 convolution + SiLU training routes: the single-rank route
 (`cake_pplx.cake_causal_conv1d_det_train`) and the context-parallel (KCP)
 route (`cake_pplx.cake_causal_conv1d_det_train_kcp`, module `kcp` of this
-package).  The facades are stable FlashInfer APIs; this package, under
-`flashinfer.experimental.cake`, is their backend.
+package).  The facades are the stable APIs; this package is their backend.
 
 ## Single-rank route
 
-The stable entry points live in `cake_pplx/cake_causal_conv1d_det_train.py`; that module imports this package on first use, and FlashInfer does not select it automatically (check `is_cake_causal_conv1d_det_train_supported(device)` and call it).
+The stable entry points live in `cake_pplx/cake_causal_conv1d_det_train.py`; that module imports this package on first use, and nothing selects it automatically (check `is_cake_causal_conv1d_det_train_supported(device)` and call it).
 
 ### Entry points (`cake_pplx/cake_causal_conv1d_det_train.py`)
 
@@ -62,7 +61,7 @@ There are no environment variables. Every setting is a keyword argument.
 
 ### Sharing the GPU with other streams
 
-The backward's main program is persistent, so a kernel that stays resident on another stream slows it down. The repro from FlashInfer issue #7548 timed the backward alone and next to a resident kernel on another stream, using CUDA events over 18 shapes each. With `bwd_grid_mult=1`, the median ratio of time next to the side kernel over time alone was 1.43-1.45 on GB300 (sm_103a, 152 SMs) and 1.42-1.48 on R200 (sm_107a, 212 SMs). That range covers three backward routes (default, bias, `"fp32"` SiLU') and two side kernels (one-thread and NCCL-like). A finer split costs some time when the backward runs alone but cuts the slowdown. The table below shows medians for the NCCL-like side kernel on the default route:
+The backward's main program is persistent, so a kernel that stays resident on another stream slows it down. A repro timed the backward alone and next to a resident kernel on another stream, using CUDA events over 18 shapes each. With `bwd_grid_mult=1`, the median ratio of time next to the side kernel over time alone was 1.43-1.45 on GB300 (sm_103a, 152 SMs) and 1.42-1.48 on R200 (sm_107a, 212 SMs). That range covers three backward routes (default, bias, `"fp32"` SiLU') and two side kernels (one-thread and NCCL-like). A finer split costs some time when the backward runs alone but cuts the slowdown. The table below shows medians for the NCCL-like side kernel on the default route:
 
 | `bwd_grid_mult` | GB300 next-to / alone | GB300 alone (us) | R200 next-to / alone | R200 alone (us) |
 | --- | --- | --- | --- | --- |

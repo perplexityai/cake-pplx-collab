@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -89,7 +89,7 @@ SINGLE_RANK = (
         "is_cake_causal_conv1d_det_train_supported",
     ),
 )
-# The single-rank names FlashInfer's top level exported; the ``cake_pplx`` namespace package binds none of them.
+# The former top-level single-rank names; the ``cake_pplx`` namespace package binds none of them.
 TOP_LEVEL = (
     ("CakeCausalConv1dFunction", "CakeCausalConv1dDetFunction"),
     ("cake_causal_conv1d", "cake_causal_conv1d_det"),
@@ -106,7 +106,7 @@ TOP_LEVEL = (
 )
 # (removed names, current name) of the KCP entry points and types: the KCP facade and the KCP backend module.  The
 # removed names are the ones before the det rename, then the det names before the KCP names took the module prefix
-# and the ``Kcp`` qualifier its place before the noun (FlashInfer #8928).
+# and the ``Kcp`` qualifier its place before the noun.
 KCP_FACADE_NAMES = (
     (("cake_causal_conv1d_kcp",), "cake_causal_conv1d_det_kcp"),
     (

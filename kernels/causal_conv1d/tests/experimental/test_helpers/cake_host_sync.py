@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright (c) 2026 by FlashInfer team
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION
 """Host-synchronization census of one call: does it copy from pageable memory or wait for queued device work?
 
 Four signals per window, each with a positive control in the same window:

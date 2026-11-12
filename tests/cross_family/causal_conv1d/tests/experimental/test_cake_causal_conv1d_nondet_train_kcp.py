@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,9 +24,9 @@ contexts and FP64 oracle, plus a C = 10240 row for (a) and (b).
     case is recorded); the package's accumulator workspace reads back all zero after every launch.
 (c) The autograd entry equals the direct calls (``y`` / ``dx`` bitwise), activation checkpointing with and without a
     recompute handle (2 x forward + backward; one exchange per direction, none in a recompute with a handle),
-    gradient accumulation, graph replay (bitwise ``y`` / ``hist`` / ``dx``), the legacy channel-tile plan, the side
-    kernel of FlashInfer issues #7038 / #7548 (the backward is an ordinary launch: no stall beside a resident kernel),
-    the grid that gives up one SM when the last channel-tile rank is partial (issue #8365) and torch's deterministic
+    gradient accumulation, graph replay (bitwise ``y`` / ``hist`` / ``dx``), the legacy channel-tile plan, a side
+    kernel (the backward is an ordinary launch: no stall beside a resident kernel),
+    the grid that gives up one SM when the last channel-tile rank is partial and torch's deterministic
     mode (the backward alerts, through the package's entries and through the non-deterministic KCP package
     ``cake_pplx.cake_causal_conv1d_nondet_train_kcp``, whose entries take no ``deterministic`` keyword).
 
@@ -293,7 +293,7 @@ def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):
 
 def _one_sm_rows(device: torch.device) -> list[tuple[int, tuple[int, int, int]]]:
     """``(C, expected main backward grid)`` of the first ``C`` (a multiple of 1024 up to 16384) whose single-wave grid
-    gives up one SM's CTAs on this device and of the first whose grid stays whole (issue #8365): ``ctas_per_sm x SM
+    gives up one SM's CTAs on this device and of the first whose grid stays whole: ``ctas_per_sm x SM
     count`` less ``ctas_per_sm`` when ``grid % n_ch_tiles >= ctas_per_sm``, from the record and the legacy split."""
 
     arch = conv_kcp._loader.device_arch(device.index)
@@ -313,7 +313,7 @@ def _one_sm_rows(device: torch.device) -> list[tuple[int, tuple[int, int, int]]]
 def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
     monkeypatch,
 ) -> None:
-    """FlashInfer issue #8365, the single backward program (the ``bwd_route`` test knob ``"single"``): it launches
+    """The single backward program (the ``bwd_route`` test knob ``"single"``): it launches
     ``ctas_per_sm x SM count`` CTAs, less ``ctas_per_sm`` when
     the last channel-tile rank of that grid holds at least ``ctas_per_sm`` CTAs (so a kernel on another stream that
     keeps one SM's shared memory leaves the launch one wave), else the whole grid, on both host paths; ``dx`` is
@@ -522,7 +522,7 @@ def test_graph_replay_is_bitwise_for_y_and_dx(monkeypatch, form) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Checkpointing and the recompute handle (#7815 / #7818).
+# Checkpointing and the recompute handle.
 
 
 def _ckpt_run(p, *, handle=None, reentrant=False, ckpt=True, counter=None, twice=False):
@@ -654,7 +654,7 @@ def test_recompute_handle_misuse_raises() -> None:
 def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     record_property,
 ) -> None:
-    """FlashInfer issues #7038 / #7548: the main KCP backward is an ordinary launch, so one 1-thread kernel resident
+    """The main KCP backward is an ordinary launch, so one 1-thread kernel resident
     on another stream does not stall it (``busy <= 2 x alone``, medians of 7 after 3 warm-ups); ``dx`` is bitwise
     unchanged beside it."""
 

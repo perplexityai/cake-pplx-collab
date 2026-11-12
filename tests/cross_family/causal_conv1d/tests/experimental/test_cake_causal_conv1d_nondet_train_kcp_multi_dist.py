@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -307,7 +307,7 @@ def _run_rank(rank: int, W: int, row, port: int, result_dir, local_id: int) -> d
     }
     flags["y_dx_within_one_bf16_ulp_of_fp64"] = worst_y <= 1.0 and worst_dx <= 1.0
     flags["dw_sum_within_budget_of_fp64"] = worst_dw <= 1.0
-    # The first nondet call of the context (the single calls) also runs the rank-agreement check of #8946: one
+    # The first nondet call of the context (the single calls) also runs the rank-agreement check: one
     # all_gather_into_tensor per phase; every later call issues only the halo exchanges.
     # The overlapped backward's tail rows: the main programs leave them to the tail-row programs on the side stream.
     y0, hist0 = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(xs[0], ws[0], ctx)

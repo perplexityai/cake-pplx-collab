@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The two-launch KCP forward of the non-deterministic package (``kcp`` module docstring, "Two-launch forward"; the
-deterministic package's forward, FlashInfer #9225, whose tests these mirror): a main program that reads no received
+deterministic package's forward, whose tests these mirror): a main program that reads no received
 history row -- the zero-history registry's single-rank ``fwd`` route program on the
 rank's fragments (knob ``fwd_main`` 1) or the ``kcp_fwd`` program with every ``hist_row_off`` entry ``-1`` -- and the
 ``kcp_fwd_halo`` history-row program, which writes the first rows of every fragment with a history row again from the

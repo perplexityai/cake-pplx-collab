@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Multi-GPU rows of ``cake_causal_conv1d_det_kcp_multi`` (FlashInfer issue #7815): the q / k / v convolutions of a layer
+Multi-GPU rows of ``cake_causal_conv1d_det_kcp_multi``: the q / k / v convolutions of a layer
 with one halo exchange per direction, against one ``cake_causal_conv1d_det_kcp`` call per tensor.  ``W`` ranks over NCCL,
 each holding the fragments of one partition of a packed batch (contiguous, zigzag, per-document zigzag, ragged tables
 with a zero-token rank, one-token fragments and a fragment that reads its history from three predecessor ranks).  Per

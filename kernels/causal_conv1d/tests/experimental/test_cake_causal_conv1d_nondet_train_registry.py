@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1046,7 +1046,7 @@ def test_row_plans_follow_a_replaced_narrow_table(
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The public names: the mode word in every name, no mode keyword (FlashInfer issue #8928).
+# The public names: the mode word in every name, no mode keyword.
 
 PUBLIC = (
     "cake_causal_conv1d_nondet_train_forward",
@@ -1224,8 +1224,7 @@ def test_package_wiring() -> None:
         pkg.__name__ == "cake_pplx._backends.cake_causal_conv1d_nondet_train"
     )
     # ``cake_pplx`` and ``cake_pplx._backends`` are PEP 420 namespace levels shared by every family: neither carries
-    # an ``__init__.py`` (FlashInfer's docstring-only ``flashinfer/experimental/cake/__init__.py`` has no
-    # counterpart here).
+    # an ``__init__.py``.
     assert not (REPO / "cake_pplx" / "__init__.py").exists()
     assert not (REPO / "cake_pplx" / "_backends" / "__init__.py").exists()
     try:
@@ -1282,7 +1281,7 @@ def test_build_manifest_lists_every_program() -> None:
 
 
 def _manifest_checker():
-    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module (it never imports flashinfer)."""
+    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module."""
 
     path = REPO / "scripts" / "check_cake_build_manifests.py"
     if not path.is_file():

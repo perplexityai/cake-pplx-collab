@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ most eight ranks).  Per row and rank:
   the form the rank ran (the overlapped form on a rank with tokens, the history-row program when the rank receives
   history rows) and ``y`` / ``hist`` are bitwise the one-launch forward's (``fwd_main`` 0, ``fwd_overlap`` 0: the
   previous forward) and the deterministic KCP forward's;
-- a 1-thread kernel resident on another stream does not stall the backward (FlashInfer issues #7038 / #7548: the
+- a 1-thread kernel resident on another stream does not stall the backward (the
   main backward is an ordinary launch; ``busy <= 2 x alone``).
 
 Launch forms as the deterministic suite: ``torch.multiprocessing`` (skipped with fewer than ``W`` visible devices)
@@ -216,7 +216,7 @@ def _run_rank(
     yd = det_kcp.cake_causal_conv1d_det_kcp(xd, wd, ctx)
     yd.backward(dy)
     det = {"y": yd.detach(), "dx": xd.grad, "dw": wd.grad}
-    # The first nondet call of the context runs the rank-agreement check of #8946 (one all_gather_into_tensor per
+    # The first nondet call of the context runs the rank-agreement check (one all_gather_into_tensor per
     # phase, before that phase's exchange); every later call issues only the halo exchanges.
     _, c_first = run("direct")
     flags["agreement_check_once_per_phase"] = c_first["calls"] == {
@@ -378,7 +378,7 @@ def _run_rank(
         del y, xl, wl
     info["retained_bytes"] = retained
     flags["retained"] = retained["plain"] == 0 and retained["handle"] == n_hist * C * 2
-    # A kernel resident on another stream of every rank (#7038 / #7548).
+    # A kernel resident on another stream of every rank.
     side = torch.cuda.Stream(device=device)
     start, end = (
         torch.cuda.Event(enable_timing=True),
@@ -421,7 +421,7 @@ def _run_rank(
     # These rows are tiny: one more wave of CTAs beside the SM that the side kernel
     # holds can exceed 2x alone (about 0.1 ms) without a stall.
     flags["side_kernel_no_stall"] = busy <= max(2.0 * alone, 0.5 * sleep)
-    # Rank agreement (#8946): on a fresh context of the same partition, rank 0 calls with C channels and every other
+    # Rank agreement: on a fresh context of the same partition, rank 0 calls with C channels and every other
     # rank with C + 8.  The first forward's check raises the same ValueError on every rank, before any exchange; a
     # matching call on that context then runs (the failed check recorded nothing).
     ctx2 = plan.cake_kda_det_train_kcp_build_context(

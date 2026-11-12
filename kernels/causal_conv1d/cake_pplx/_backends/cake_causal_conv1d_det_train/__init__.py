@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ Backend of :mod:`cake_pplx.cake_causal_conv1d_det_train`: the Cake packed width-
 depthwise causal convolution + SiLU training forward / backward (SM100 / SM103 /
 SM107) as one self-contained package (host API bodies, the ``cake_jit`` registry,
 the pinned ``cake_build`` loader and the generated CUDA sources under ``csrc/``).
-The stable, ``@flashinfer_api``-decorated entry points and the full user-facing
+The stable, ``@cake_api``-decorated entry points and the full user-facing
 documentation live in :mod:`cake_pplx.cake_causal_conv1d_det_train`; import that
 module.
 

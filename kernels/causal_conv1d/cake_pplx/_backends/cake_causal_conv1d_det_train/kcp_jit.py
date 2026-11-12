@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,8 +28,8 @@ rule, selection rule and the kernel-parameter -> logical-argument map.  What to
 compile -- sources, digests, nvcc flags -- is recorded once in ``build.json``
 next to this file (its entries sit beside the zero-history entries);
 :mod:`.cake_build` serves the library ``<library>_<arch>`` from a prebuilt
-``aot/`` file when a builder compiled it and otherwise through FlashInfer's JIT
-from the same sources and flags, verifying every source digest first.
+``aot/`` file when a builder compiled it and otherwise through the package's JIT
+(``_cake_pplx_jit``) from the same sources and flags, verifying every source digest first.
 
 The routes of an architecture are the six KCP kinds: ``kcp_fwd`` (one
 program: ``y`` and the fragments' history rows ``hist`` from ``x``, ``weight``,
@@ -45,8 +45,7 @@ selected by the same rule: each is an ordinary launch one SM short of
 co-resident -- ``grid_rule.reserve_sms`` -- writing per-CTA ``dweight`` partial
 rows, followed on the same stream by the record's ``reduce`` program, the
 zero-history package's fixed-order reduction; a launch that no grid-wide
-barrier holds back starts beside kernels of other streams, FlashInfer issue
-#8365), ``kcp_bwd_head`` (one program: the head-row derivatives
+barrier holds back starts beside kernels of other streams), ``kcp_bwd_head`` (one program: the head-row derivatives
 ``dpre_head`` every consumer fragment sends back; its grid is
 ``max(1, n_frag x ceil(C / (threads x vec)))``, computed by :mod:`.kcp` from
 the record's ``grid_rule.geometry`` and launched through the record's
@@ -498,7 +497,7 @@ MODULES: dict[str, dict[str, Any]] = {
         # ``f32x2`` channel pairs, bitwise the scalar build's ``dx`` and partial
         # rows), as are the other ``split`` records.
         # The ``split`` build of the cooperative fallback above (route
-        # ``kcp_bwd_split``, FlashInfer issue #8365): an ordinary launch with no
+        # ``kcp_bwd_split``): an ordinary launch with no
         # grid-wide barrier that ends at its partial row; the record's
         # ``reduce`` program sums the partial rows in the fixed order.  3 CTAs
         # per SM (168 registers at 128 threads, the launch bound); the grid is
@@ -530,7 +529,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_causal_conv1d_det_train_83900e631708e690fbb0_kcp",
         # The reduce program the host launches next on the same stream (``use_pdl``): the zero-history
-        # package's default fixed-order reduce over this program's partial rows (FlashInfer issue #8365).
+        # package's default fixed-order reduce over this program's partial rows.
         "reduce": "cake_causal_conv1d_det_train_86b5ecfbd90aca4b52e5",
         "logical": {
             "C": "C",
@@ -616,7 +615,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_causal_conv1d_det_train_2fc855aa2942ba7bb841_kcp",
         # The reduce program the host launches next on the same stream (``use_pdl``): the zero-history
-        # package's default fixed-order reduce over this program's partial rows (FlashInfer issue #8365).
+        # package's default fixed-order reduce over this program's partial rows.
         "reduce": "cake_causal_conv1d_det_train_86b5ecfbd90aca4b52e5",
         "logical": {
             "C": "C",
@@ -703,7 +702,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_causal_conv1d_det_train_7403791c52dfad8697ca_kcp",
         # The reduce program the host launches next on the same stream (``use_pdl``): the zero-history
-        # package's default fixed-order reduce over this program's partial rows (FlashInfer issue #8365).
+        # package's default fixed-order reduce over this program's partial rows.
         "reduce": "cake_causal_conv1d_det_train_86b5ecfbd90aca4b52e5",
         "logical": {
             "C": "C",
@@ -796,7 +795,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_causal_conv1d_det_train_8225ee9b6f8caea425da_kcp",
         # The reduce program the host launches next on the same stream (``use_pdl``): the zero-history
-        # package's default fixed-order reduce over this program's partial rows (FlashInfer issue #8365).
+        # package's default fixed-order reduce over this program's partial rows.
         "reduce": "cake_causal_conv1d_det_train_86b5ecfbd90aca4b52e5",
         "logical": {
             "C": "C",
@@ -1103,7 +1102,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
 # The KCP kinds (the zero-history kinds are ``cake_jit.KINDS``): the launch
 # roles the non-deterministic KCP registry mirrors.
 KINDS = ("kcp_fwd", "kcp_bwd", "kcp_bwd_head")
-# The route of the backward's ``split`` builds (FlashInfer issue #8365): the
+# The route of the backward's ``split`` builds: the
 # host (:mod:`.kcp`) runs the backward through ``kcp_bwd`` or
 # ``kcp_bwd_split`` per call (its ``cooperative`` argument).
 SPLIT_KIND = "kcp_bwd_split"
@@ -1313,7 +1312,7 @@ def library_name(name: str, arch: str) -> str:
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of KCP record ``name`` built for ``arch``.
 
-    The prebuilt ``aot/`` library when a builder compiled it, else FlashInfer's
+    The prebuilt ``aot/`` library when a builder compiled it, else the package's
     JIT build of the same sources and flags (``cake_build.load_library``).
     """
 
@@ -1322,8 +1321,7 @@ def load(name: str, arch: str) -> Any:
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library of the package's ``build.json`` without a prebuilt file
-    (the zero-history and the KCP entries alike; for ahead-of-time warm-up through FlashInfer's
-    ``build_jit_specs``)."""
+    (the zero-history and the KCP entries alike; for ahead-of-time warm-up: ``spec.build()`` of each)."""
 
     return cake_build.jit_specs(arch)
 

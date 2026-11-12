@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Context-parallel (KCP) halo forward / backward of the Cake packed width-4
-depthwise causal convolution + SiLU (FlashInfer issue #6919): the rank's
+depthwise causal convolution + SiLU: the rank's
 fragments of the packed documents are convolved with the three document tokens
 before each continuing fragment, received from the ranks that hold them by one
 ``all_to_all_single`` per direction, and the backward sends the first rows'
 derivative back to the predecessor fragments, which fold it into their last
 rows' ``dx`` before the one BF16 rounding.  ``cake_causal_conv1d_det_kcp(x_local,
-weight, ctx)`` is the autograd entry; the stable, ``@flashinfer_api``-decorated
+weight, ctx)`` is the autograd entry; the stable, ``@cake_api``-decorated
 facade is :mod:`cake_pplx.cake_causal_conv1d_det_train_kcp`.  This module imports
 only torch, torch.distributed, tvm_ffi and its own package, and reads no environment variable: every switch is a
 keyword argument of a call.
@@ -79,7 +79,7 @@ no bit changes; a replayed graph (``graph="replay"``) contains no host work.
 The private test hook ``_set_test_knobs({"host_trim": 0})`` selects the previous
 host path for the A/B record.
 
-Two launch forms of the main backward program (FlashInfer issue #8365), one per
+Two launch forms of the main backward program, one per
 call through the ``cooperative`` argument of the backward and autograd entries
 (``None`` = :data:`COOPERATIVE_DEFAULT`, ``False``: the ordinary launch).
 ``cooperative=False`` runs the ``kcp_bwd_split`` record: the token loop as an
@@ -146,8 +146,7 @@ once; kernels on more SMs still make some CTAs wait for a later wave.  The
 single-rank main program launches its record's full co-resident grid.  ``y``
 does not depend on the grid.
 
-Checkpoint recompute without the halo exchange (FlashInfer issues #7815 /
-#7818): with ``recompute_handle=`` (:class:`CakeCausalConv1dDetKcpRecomputeHandle`, or any object
+Checkpoint recompute without the halo exchange: with ``recompute_handle=`` (:class:`CakeCausalConv1dDetKcpRecomputeHandle`, or any object
 with an ``entries`` dict) the original forward exchanges as always and stores
 its history pool ``hist`` (the saved set's own tensor, key ``"conv"``) in the
 handle; torch's recompute of that forward inside the backward binds it and
@@ -159,7 +158,7 @@ rows).  The forward exchange is a collective: every rank of ``ctx.group`` passes
 a handle for the same call or none, created at the same checkpoint nesting
 level (no check is made; a mismatch hangs or corrupts data).
 
-Several convolutions of one layer (FlashInfer issue #7815): ``cake_causal_conv1d_det_kcp_multi(xs, weights, ctx)`` runs
+Several convolutions of one layer: ``cake_causal_conv1d_det_kcp_multi(xs, weights, ctx)`` runs
 the convolutions of ``n`` tensors that share the context (a layer's q, k and v) with one halo exchange per direction
 instead of ``n``: the tensors' send rows travel side by side in one ``all_to_all_single`` and are copied out into
 each tensor's own contiguous pool after the wait, and each tensor then runs the single call's kernels with the
@@ -209,7 +208,7 @@ KCP_FWD_HALO = "kcp_fwd_halo"
 FWD_MAIN_ROUTE = "fwd"
 # The main backward's launch form when a call passes ``cooperative=None``: ``False`` = the ``kcp_bwd_split`` record and
 # its reduce program, which starts beside kernels resident on other streams; ``True`` = the cooperative ``kcp_bwd``
-# record, which waits for them (FlashInfer issue #8365).
+# record, which waits for them.
 COOPERATIVE_DEFAULT = False
 # SMs of co-resident CTAs the forward (``kcp_fwd``) leaves free.  The forward record carries no ``reserve_sms`` (the
 # non-deterministic package's KCP forward runs the same record), so the rule is this host's (:func:`_launch_grid`): with
@@ -241,8 +240,8 @@ def _launch_grid(
 
     A record with ``reserve_sms = 1`` launches ``ctas_per_sm x (SM count - 1)`` CTAs: one small-carveout kernel of
     another stream resident on an SM keeps the whole SM from hosting a CTA of this program (its shared memory needs the
-    SM's large carveout), so a grid one SM short of the co-resident count still starts every CTA at once beside it
-    (FlashInfer issue #8365).  The grid is a pure function of the device and the record, so the partial rows and the
+    SM's large carveout), so a grid one SM short of the co-resident count still starts every CTA at once beside it.
+    The grid is a pure function of the device and the record, so the partial rows and the
     fixed-order ``dweight`` sum are the same on every call on one device type (bits differ from a full-grid launch).
     More such kernels than reserved SMs make the displaced CTAs start after the first ones finish: the backward then
     takes at most about twice its time, independent of how long the other kernels run.
@@ -770,8 +769,8 @@ def _launch_plan(
 def _reduce_plan(
     record: dict[str, Any], C: int, grid_x: int, device_index: int
 ) -> Optional[tuple[Any, str, tuple[tuple[str | None, int], ...]]]:
-    """The cached launch of the backward record's ``reduce`` program (a record of the zero-history registry, FlashInfer
-    issue #8365), or ``None`` for a record without one: ``ceil(C / channels_per_cta)`` CTAs summing the ``grid_x`` main
+    """The cached launch of the backward record's ``reduce`` program (a record of the zero-history registry), or
+    ``None`` for a record without one: ``ceil(C / channels_per_cta)`` CTAs summing the ``grid_x`` main
     CTAs' partial rows in the fixed order; its binding launches it programmatically dependent on the main program."""
     name = record.get("reduce")
     if name is None:
@@ -2181,7 +2180,7 @@ def cake_causal_conv1d_det_kcp(
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Several convolutions of one layer with one halo exchange per direction (FlashInfer issue #7815): the q / k / v
+# Several convolutions of one layer with one halo exchange per direction: the q / k / v
 # convolutions of a layer share the context, so their history rows (forward) and head rows (backward) travel in ONE
 # ``all_to_all_single`` instead of one per tensor.  The send rows of the tensors are packed side by side
 # (``[n_rows, sum C_i]``, the context's splits unchanged), and after the wait each tensor's rows are copied out into
