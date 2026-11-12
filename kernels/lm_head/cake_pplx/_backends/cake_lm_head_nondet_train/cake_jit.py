@@ -2598,7 +2598,7 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 1,
             ],
             "support_logits_gather_gemm": [
-                "f926c93e1045aea7d54d",
+                "8271cac097e47014444b",
                 "support_logits_gather_gemm",
                 "b320_c1",
                 "min(M/128, sms)",
