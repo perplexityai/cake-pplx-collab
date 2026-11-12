@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -229,7 +229,6 @@ KERNELS: dict[str, dict[str, str]] = {
 # GB200) registers the knob-free eight-warp program (the ``_w8`` template) for
 # five input-gradient rows.
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-TRACKING_ISSUE = "flashinfer-ai/flashinfer#5677"
 
 
 def arg_plan_key(plan) -> str:
@@ -269,8 +268,7 @@ def select_module(arch: str, template: str) -> str:
         registered = registered_templates(arch)
         raise NotImplementedError(
             f"The generated dense projection GEMM instance {template!r} for {arch} is "
-            f"not registered in this checkout (registered: {list(registered) or 'none'}; "
-            f"see {TRACKING_ISSUE})"
+            f"not registered in this checkout (registered: {list(registered) or 'none'})"
         )
     record = MODULES.get(name)
     if (
@@ -298,12 +296,12 @@ def library_name(name: str, arch: str) -> str:
 @functools.cache
 def load_cake_dense_projection_det_gemm_module(name: str, arch: str):
     """Load (once per program and architecture) the generated program ``name`` for ``arch``: the
-    prebuilt library under ``aot/`` when the package ships it, else FlashInfer's JIT build of its
+    prebuilt library under ``aot/`` when the package ships it, else the JIT build of its
     ``build.json`` entry."""
     return cake_build.load_library(library_name(name, arch))
 
 
 def specs_for_arch(arch: str):
-    """JIT specs of every ``build.json`` entry of ``arch`` without a prebuilt library (the
-    ``flashinfer.jit.build_jit_specs`` warm-up)."""
+    """JIT specs of every ``build.json`` entry of ``arch`` without a prebuilt library (for
+    ahead-of-time warm-up builds)."""
     return cake_build.jit_specs(arch)

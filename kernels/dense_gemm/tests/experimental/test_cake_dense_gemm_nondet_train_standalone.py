@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,20 +13,19 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Standalone-build tests of the non-deterministic Cake dense GEMM backend
-(flashinfer-ai/flashinfer#6553, #8928).
+Standalone-build tests of the non-deterministic Cake dense GEMM backend.
 
 The backend directory declares one dependency: the deterministic backend
 directory ``cake_dense_gemm_det_train``, shipped next to it (``build.json``:
 ``common.requires.packages``).  In a ``python -I``
-subprocess with ``flashinfer`` blocked, the directory loads as a top-level
+subprocess, the directory loads as a top-level
 package under its own name, and its ``cake_backend``, ``cake_jit`` and
-``cake_build`` import without any ``flashinfer`` module.  With the deterministic
+``cake_build`` import.  With the deterministic
 directory loaded as a top-level package beside it, the first use resolves that
 sibling; without it, importing still succeeds and the first use raises an
 ``ImportError`` that names the missing directory.  With both directories, the
-planners of both packages run under the blocker, and -- with the package's JIT
-shim (``_cake_pplx_jit``, which replaces FlashInfer's JIT) blocked too -- loading
+planners of both packages run, and -- with the package's JIT
+shim (``_cake_pplx_jit``) blocked -- loading
 a program that is not prebuilt raises the error that names the missing JIT
 shim.  CPU only:
 no GPU, no generated program and no JIT build.
@@ -59,8 +58,8 @@ def _dependency_paths() -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-# The child's preamble: ``flashinfer`` blocked, the two directories loadable as top-level packages.
-_BLOCKED = r"""
+# The child's preamble: the two directories loadable as top-level packages.
+_PREAMBLE = r"""
 import importlib
 import importlib.abc
 import importlib.util
@@ -74,17 +73,6 @@ for p in sys.argv[3:]:
         sys.path.append(p)
 
 
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
-
-
 def load_top_level(directory):
     name = os.path.basename(directory)
     spec = importlib.util.spec_from_file_location(
@@ -94,16 +82,10 @@ def load_top_level(directory):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
-
-
-def flashinfer_modules():
-    return sorted(
-        n for n, m in sys.modules.items() if (n == "flashinfer" or n.startswith("flashinfer.")) and m is not None
-    )
 """
 
 _STANDALONE = (
-    _BLOCKED
+    _PREAMBLE
     + r"""
 nd = load_top_level(ND_DIR)
 det = load_top_level(DET_DIR) if DET_DIR else None
@@ -113,7 +95,6 @@ facts = {
     "submodules": sorted(m.__name__ for m in (backend, jit, build)),
     "det_package": jit.DETERMINISTIC_PACKAGE,
     "det_loaded_before_use": sorted(n for n in sys.modules if n.startswith(jit.DETERMINISTIC_PACKAGE + ".")),
-    "flashinfer_after_import": flashinfer_modules(),
 }
 try:
     resolved = jit.deterministic_module("cake_backend")
@@ -128,18 +109,16 @@ else:
     facts["resolved_file"] = os.path.realpath(resolved.__file__)
     facts["resolved_is_loaded_sibling"] = resolved is sys.modules.get(f"{det.__name__}.cake_backend")
     facts["backend_resolves_same"] = backend.deterministic_backend() is resolved
-facts["flashinfer_after_use"] = flashinfer_modules()
 print(json.dumps(facts))
 """
 )
 
 
-# Under the blocker, with the deterministic directory beside it: the planners of both packages on CPU views (no
+# With the deterministic directory beside it: the planners of both packages on CPU views (no
 # device: the architecture and SM count given), then the load of each plan's program -- no library is prebuilt in the
-# checkout, and the fallback to the package's JIT shim (``_cake_pplx_jit``, FlashInfer's JIT before the move to
-# cake_pplx) is blocked as well.
+# checkout, and the fallback to the package's JIT shim (``_cake_pplx_jit``) is blocked.
 _PLANS = (
-    _BLOCKED
+    _PREAMBLE
     + r"""
 import torch
 
@@ -199,7 +178,6 @@ try:
     build.jit_specs(arch)
 except Exception as exc:
     facts["jit_specs_error"] = [type(exc).__name__, str(exc)]
-facts["flashinfer_after_use"] = flashinfer_modules()
 print(json.dumps(facts))
 """
 )
@@ -245,35 +223,31 @@ def test_the_backend_loads_as_a_top_level_package_and_resolves_its_top_level_sib
     )
     # the dependency is imported lazily: loading the package and its submodules imports none of its modules
     assert facts["det_loaded_before_use"] == []
-    assert facts["flashinfer_after_import"] == []
     # first use: the top-level sibling cake_dense_gemm_det_train, from the directory shipped next to it
     assert facts["det_package"] == DET_DIR.name == "cake_dense_gemm_det_train"
     assert facts["resolved"] == f"{DET_DIR.name}.cake_backend"
     assert facts["resolved_file"].startswith(os.path.realpath(DET_DIR) + os.sep)
     assert facts["resolved_is_loaded_sibling"] is True
     assert facts["backend_resolves_same"] is True
-    assert facts["flashinfer_after_use"] == []
 
 
 def test_without_the_deterministic_directory_import_succeeds_and_first_use_names_it():
     facts = _standalone("")
     assert facts["package"] == ND_DIR.name
-    assert facts["flashinfer_after_import"] == []
     assert "resolved" not in facts
     for key in ("error", "backend_error"):
         kind, message = facts[key]
         assert kind == "ImportError", facts[key]
         assert "cake_dense_gemm_det_train" in message
         assert "use_deterministic_backend" in message
-    assert facts["flashinfer_after_use"] == []
 
 
-def test_the_backend_plans_under_the_blocker_and_names_the_missing_jit():
-    """With ``flashinfer`` blocked the planners of both packages run on CPU views: this package's weight-gradient
+def test_the_backend_plans_standalone_and_names_the_missing_jit():
+    """In the standalone subprocess the planners of both packages run on CPU views: this package's weight-gradient
     plan at two splits (bitwise reproducible: one add of two values), the deterministic package's forward plan through
     the sibling, the router planner.  Loading a planned program whose library is not prebuilt under ``aot/`` takes the
-    fallback to the package's JIT shim, which the blocker refuses: a ``RuntimeError`` that names the library and the
-    missing JIT shim, raised from the ``ImportError`` -- in both packages -- and no ``flashinfer`` module is loaded."""
+    fallback to the package's JIT shim, which the JIT-shim blocker refuses: a ``RuntimeError`` that names the library and the
+    missing JIT shim, raised from the ``ImportError`` -- in both packages."""
     facts = _standalone(str(DET_DIR), _PLANS)
     kind, template, splits, reproducible = facts["wgrad_plan"]
     assert kind == "CakeDenseGemmNondetProjectionPlan"
@@ -298,4 +272,3 @@ def test_the_backend_plans_under_the_blocker_and_names_the_missing_jit():
     if "jit_specs_error" in facts:  # some library of the architecture is not prebuilt
         kind, message = facts["jit_specs_error"]
         assert kind == "RuntimeError" and "the cake_pplx JIT shim is not available" in message
-    assert facts["flashinfer_after_use"] == []

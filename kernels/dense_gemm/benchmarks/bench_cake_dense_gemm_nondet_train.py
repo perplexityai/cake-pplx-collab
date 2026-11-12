@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ limitations under the License.
 """Benchmark the non-deterministic Cake dense GEMMs (``cake_pplx.cake_dense_gemm_nondet_train``) against the
 deterministic ones (``cake_pplx.cake_dense_gemm_det_train``) and the non-Cake SOTA (SM100 / SM103 / SM107).
 
-Rows: every row of the deterministic family's benchmark table (flashinfer-ai/flashinfer#5677 and #7043): the
+Rows: every row of the deterministic family's benchmark table: the
 projection GEMMs, the batched MLA head projections and the FP32 router x {forward, input gradient, weight gradient}
 x their token counts and output dtypes (294 rows: 124 weight gradients, 12 router rows, 158 forward / input-gradient
 rows).  Arms per row:
@@ -55,8 +55,8 @@ same operands, relative Frobenius error <= 2e-6, finite, and for the forward the
 plain FP32 can be the fastest at small token counts and miss the budget at large ones).  ``sota_arm`` names the arm
 that won, and ``sota_budget`` holds each router candidate's error.
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and a cold L2 before every iteration (the
-GPU span of every kernel and memset of an iteration: the router's ``out.zero_()`` and BF16x3 split are inside), in two
+Timing: the local ``bench_gpu_time`` with CUPTI activity tracing (``cupti-python``) and a cold L2 before every
+iteration (the GPU span of every kernel and memset of an iteration: the router's ``out.zero_()`` and BF16x3 split are inside), in two
 modes -- ``eager`` (the launch called per iteration) and ``graph`` (the launch captured in a CUDA graph and
 replayed).  ``--groups`` paired groups per row (5; 9 with ``--groups 9``), the arm order rotated per group and
 reversed every other group; per arm and mode the median of the group medians and the 5th / 95th percentiles of all
@@ -99,6 +99,8 @@ Usage::
 """
 
 import argparse
+import bisect
+import collections
 import csv
 import ctypes
 import hashlib
@@ -124,14 +126,130 @@ from cake_pplx._backends.cake_dense_gemm_nondet_train import (  # noqa: E402
     cake_backend,
 )
 import cake_pplx.cake_dense_gemm_nondet_train as shim  # noqa: E402
-try:  # FlashInfer is optional: only its CUPTI timer is used, and only when timing
-    from flashinfer.testing import bench_gpu_time  # noqa: E402
-except ImportError:  # the tests load this script for its tables and helpers
 
-    def bench_gpu_time(*args, **kwargs):
-        raise RuntimeError(
-            "timing needs flashinfer.testing.bench_gpu_time: install flashinfer"
-        )
+
+# ---------------------------------------------------------------------------
+# GPU timer
+# ---------------------------------------------------------------------------
+
+
+def bench_gpu_time(
+    fn,
+    dry_run_iters=3,
+    repeat_iters=20,
+    enable_cupti=True,
+    cold_l2_cache=True,
+    use_cuda_graph=False,
+):
+    """Per-iteration GPU times (ms) of ``fn``: the span from the first start to the last end of the kernels,
+    memsets and copies the iteration launches, from CUPTI activity records (``cupti-python``) matched to the
+    iteration's own API calls by correlation id.  ``cold_l2_cache`` zeroes a buffer of twice the L2 size before
+    every iteration (outside the span); ``use_cuda_graph`` captures ``fn`` once in a CUDA graph and times its
+    replays.  ``dry_run_iters`` untimed iterations run first.  Without CUPTI (``enable_cupti=False`` or no
+    ``cupti-python``) it warns "Falling back to CUDA events" and times each iteration between two CUDA events."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    flush = None
+    if cold_l2_cache:
+        l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+        flush = torch.empty(max(2 * l2_bytes, 1), dtype=torch.int8, device=device)
+    run = fn
+    if use_cuda_graph:
+        side = torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            fn()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        run = graph.replay
+    for _ in range(dry_run_iters):
+        if flush is not None:
+            flush.zero_()
+        run()
+    torch.cuda.synchronize(device)
+    if enable_cupti:
+        try:
+            from cupti import cupti
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"CUPTI is unavailable ({type(exc).__name__}: {exc}). Falling back to CUDA events.",
+                stacklevel=2,
+            )
+        else:
+            return _cupti_times(cupti, run, flush, repeat_iters, device)
+    return _event_times(run, flush, repeat_iters, device)
+
+
+def _cupti_times(cupti, run, flush, iters, device):
+    """The CUPTI span (ms) of each of ``iters`` calls of ``run`` (see :func:`bench_gpu_time`)."""
+    launches = []
+    spans = collections.defaultdict(list)
+    gpu_kinds = (
+        cupti.ActivityKind.CONCURRENT_KERNEL,
+        cupti.ActivityKind.MEMSET,
+        cupti.ActivityKind.MEMCPY,
+    )
+    api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
+
+    def requested():
+        return 8 * 1024 * 1024, 0
+
+    def completed(activities):
+        for activity in activities:
+            if activity.kind in gpu_kinds:
+                spans[activity.correlation_id].append((activity.start, activity.end))
+            elif activity.kind in api_kinds:
+                launches.append((activity.start, activity.correlation_id))
+
+    kinds = api_kinds + gpu_kinds
+    for kind in kinds:
+        cupti.activity_enable(kind)
+    cupti.activity_register_callbacks(requested, completed)
+    stamps = []
+    try:
+        for _ in range(iters):
+            if flush is not None:
+                flush.zero_()
+            torch.cuda.synchronize(device)
+            begin = cupti.get_timestamp()
+            run()
+            end = cupti.get_timestamp()
+            stamps.append((begin, end))
+        torch.cuda.synchronize(device)
+        cupti.activity_flush_all(0)
+    finally:
+        for kind in kinds:
+            cupti.activity_disable(kind)
+        cupti.finalize()
+    launches.sort()
+    starts = [start for start, _ in launches]
+    times = []
+    for begin, end in stamps:
+        lo, hi = bisect.bisect_left(starts, begin), bisect.bisect_right(starts, end)
+        correlation = {corr for _, corr in launches[lo:hi]}
+        found = [span for corr in correlation for span in spans.get(corr, ())]
+        if not found:
+            raise RuntimeError("CUPTI recorded no GPU activity for a timed iteration")
+        times.append((max(e for _, e in found) - min(s for s, _ in found)) / 1e6)
+    return times
+
+
+def _event_times(run, flush, iters, device):
+    """The CUDA-event time (ms) of each of ``iters`` calls of ``run`` (the fallback of :func:`bench_gpu_time`)."""
+    pairs = []
+    for _ in range(iters):
+        if flush is not None:
+            flush.zero_()
+        start = torch.cuda.Event(enable_timing=True)
+        stop = torch.cuda.Event(enable_timing=True)
+        start.record()
+        run()
+        stop.record()
+        pairs.append((start, stop))
+    torch.cuda.synchronize(device)
+    return [start.elapsed_time(stop) for start, stop in pairs]
 
 
 # ---------------------------------------------------------------------------
@@ -2166,7 +2284,7 @@ def main():
         arch=det_backend.arch_for(device),
         versions=library_versions(libs),
         image=image_identity(args),
-        flashinfer_head=git_head(repo),
+        repo_head=git_head(repo),
         packages=dict(
             det=package_identity(det_backend), atomic=package_identity(cake_backend)
         ),
@@ -2179,7 +2297,7 @@ def main():
         accept_rule=f"all groups atomic < det and median ratio < {ACCEPT_RATIO}, every mode",
         bit_runs=args.bit_runs,
         timer=(
-            "flashinfer.testing.bench_gpu_time(enable_cupti=True, cold_l2_cache=True, use_cuda_graph=<graph>); "
+            "bench_gpu_time(enable_cupti=True, cold_l2_cache=True, use_cuda_graph=<graph>): CUPTI span; "
             "resident: CUDA events"
         ),
         argv=sys.argv,

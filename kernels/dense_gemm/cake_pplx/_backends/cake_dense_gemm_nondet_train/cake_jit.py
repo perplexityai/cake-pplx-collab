@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -123,8 +123,6 @@ KERNELS: dict[str, dict[str, str]] = {
 # The architectures this package registers programs for (``KERNELS`` keys and every record's ``arches`` are drawn
 # from it).
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-# The tracking issue of the dense projection GEMM family (both packages).
-TRACKING_ISSUE = "flashinfer-ai/flashinfer#5677"
 
 #: The program-name prefix of this package.
 PROGRAM_PREFIX = "cake_dense_projection_gemm_"
@@ -158,8 +156,8 @@ TEMPLATE_PREFIXES = (
 )
 
 #: The deterministic package, which this package needs next to it: its sibling, resolved on first use and never
-#: through an absolute ``flashinfer`` import -- ``<parent>.cake_dense_gemm_det_train`` when this package sits in a
-#: parent package (a FlashInfer tree), the top-level package ``cake_dense_gemm_det_train`` when this package is
+#: through an absolute import -- ``<parent>.cake_dense_gemm_det_train`` when this package sits in a
+#: parent package (``cake_pplx._backends``), the top-level package ``cake_dense_gemm_det_train`` when this package is
 #: vendored as a top-level package.  A copy under another name is bound with ``cake_backend.use_deterministic_backend``.
 DETERMINISTIC_PACKAGE = "cake_dense_gemm_det_train"
 _det_package: Optional[str] = None
@@ -232,8 +230,7 @@ def select_module(arch: str, template: str) -> str:
         registered = registered_templates(arch)
         raise NotImplementedError(
             f"The generated non-deterministic dense projection GEMM instance {template!r} for {arch} is "
-            f"not registered in this checkout (registered: {list(registered) or 'none'}; "
-            f"see {TRACKING_ISSUE})"
+            f"not registered in this checkout (registered: {list(registered) or 'none'})"
         )
     record = MODULES.get(name)
     if (
@@ -265,12 +262,12 @@ def _load_module(name: str, arch: str):
 
 def load_cake_dense_projection_gemm_module(name: str, arch: str):
     """Load (once per program and architecture) this package's generated program ``name`` for ``arch``: its
-    prebuilt library under ``aot/`` when it ships one, else FlashInfer's JIT build of its ``build.json`` entry (a
+    prebuilt library under ``aot/`` when it ships one, else the JIT build of its ``build.json`` entry (a
     program of the deterministic package is loaded by that package's ``load_cake_dense_projection_det_gemm_module``)."""
     return _load_module(name, arch)
 
 
 def specs_for_arch(arch: str):
-    """JIT specs of every ``build.json`` entry of ``arch`` without a prebuilt library (the
-    ``flashinfer.jit.build_jit_specs`` warm-up); none while the package registers no program."""
+    """JIT specs of every ``build.json`` entry of ``arch`` without a prebuilt library (for
+    ahead-of-time warm-up builds); none while the package registers no program."""
     return cake_build.jit_specs(arch) if MODULES else []

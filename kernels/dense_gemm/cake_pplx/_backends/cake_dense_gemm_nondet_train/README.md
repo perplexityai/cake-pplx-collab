@@ -3,10 +3,10 @@
 Backend of the public module `cake_pplx.cake_dense_gemm_nondet_train`: the GLM-5.2 training GEMMs -- the BF16 dense projection GEMM (K1:
 BF16 operands, FP32 accumulation, BF16 or FP32 output, strided views, ragged token counts, batched head projections)
 and the FP32 router-gate GEMM through split-BF16x3 tensor-core emulation (K2) -- with programs whose split-K
-reductions add the partials in the order they finish.  Family issue: flashinfer-ai/flashinfer#5677.
+reductions add the partials in the order they finish.
 
 The deterministic implementation is the module `cake_pplx.cake_dense_gemm_det_train` (backend
-`cake_pplx._backends.cake_dense_gemm_det_train`; flashinfer-ai/flashinfer#5677, #7043; see its README for the view
+`cake_pplx._backends.cake_dense_gemm_det_train`; see its README for the view
 contract, the host paths and the per-architecture programs).  This package keeps its operations, dtypes, accuracy
 budgets and host paths.  It relaxes one guarantee only: an output may come from a program whose bits change from run
 to run where that program is at least 3 % faster ([Acceptance rules](#acceptance-rules)).  With the shipped tables and
@@ -137,7 +137,7 @@ On some rows this module runs the deterministic package's fixed-order programs:
 | K2 weight gradient `out` | repeats bit for bit | the SIMT program, the K-order program (partials added in K order), a `"waves"` partition of at most two partials per element, or the deterministic program at the split count of the router tables (partials added in a fixed order) | 1.012 / 1.095 |
 | any output with a caller's `splits >= 3` (K1 in the arrival order, K2 weight gradient) | may vary in the last bits | the partials are added in the order they finish; PyTorch's deterministic-algorithms alert fires before such a launch | not measured (no shipped row) |
 
-*Table: whether each output repeats bit for bit across runs, why, and its error against FP64.  The table states the shipped tables with default arguments; a row moves to a program whose bits vary only under the speed rule of [Acceptance rules](#acceptance-rules), and its launch raises the alert above.  The error column is the largest error against FP64 over every benchmark row of the output (and the rows at 16384 tokens), the six input kinds of the accuracy rule and five runs, on a B200, a GB200, a GB300 and an R200 part, as a multiple of the median error of the reference implementation (FlashInfer commit `2e989556`) in the same run: relative L2 error, then the largest element error.  The accuracy rule allows 1.1.*
+*Table: whether each output repeats bit for bit across runs, why, and its error against FP64.  The table states the shipped tables with default arguments; a row moves to a program whose bits vary only under the speed rule of [Acceptance rules](#acceptance-rules), and its launch raises the alert above.  The error column is the largest error against FP64 over every benchmark row of the output (and the rows at 16384 tokens), the six input kinds of the accuracy rule and five runs, on a B200, a GB200, a GB300 and an R200 part, as a multiple of the median error of the reference implementation in the same run: relative L2 error, then the largest element error.  The accuracy rule allows 1.1.*
 
 ## Acceptance rules
 
@@ -145,8 +145,8 @@ Two rules decide whether an output of this module may come from a program whose 
 They apply to every program this package adds or keeps, on every supported architecture.
 
 - **Accuracy.** At every benchmarked shape (the rows of [Benchmark](#benchmark)), each output's error against an FP64
-  reference of the same operands stays within 1.1 times the median error of the reference implementation (FlashInfer
-  commit `2e989556`; flashinfer-ai/flashinfer#8946) at that shape.  This holds for random normal inputs and for
+  reference of the same operands stays within 1.1 times the median error of the reference implementation
+  at that shape.  This holds for random normal inputs and for
   adversarial inputs: long sums, cancellation, values concentrated in a few elements, and values near the largest
   magnitude of the dtype.  Partial sums stay in FP32 or wider, and each output element is rounded once.  The
   absolute budgets of the table above apply as well.  Outside the benchmarked shapes, two 212-SM `sm_107a` FP32
@@ -283,7 +283,7 @@ only at 16172 to 16384 tokens (`K1_SPLIT_RULES_BY_SM_TOKENS`), and the 212-SM ch
 token-range table also at its ranges.*
 
 **Accuracy and repeatability changes.**  Every shipped row repeats bit for bit.  Every shipped row meets the accuracy
-rule above (the six input kinds against the reference implementation, FlashInfer commit `2e989556`; measured at every
+rule above (the six input kinds against the reference implementation; measured at every
 benchmark row on a B200, a GB200, a GB300 and an R200 part, the error column of the run-to-run table), except two
 212-SM `sm_107a` FP32 weight-gradient ranges, which keep their former program although it missed the rule at some
 token counts: `5120 -> 512` at odd K-block counts from 40962 tokens and `4096 -> 512` at odd counts from 24577 to 32767
@@ -1158,7 +1158,7 @@ deterministic plan through it at 16172, 16231 and 16384 tokens (three splits; ev
 backward pass and the checkpointed step, x0.980-0.986 alone in CUDA graphs) and no slower at 16385 and 20480 (six
 splits; alone in eager launches x1.011 and x0.999, x0.996 and x0.999 net of the change of the deterministic package's
 own entry between the two runs, x0.957 and x0.964 in CUDA graphs): its window is 16385 to 20480.  The `"waves"` rows
-are the FI-main
+are the former
 `"waves"` plan (same kernel text, measured on this package's host path).  On GB200 the rows from 10240 tokens up ran at
 the GPU's software power cap: after 21 of their 24 runs `nvidia-smi` read `clocks_throttle_reasons` 0x4, at SM clocks of
 1297-1912 MHz (2062 MHz maximum); on the R200 parts it read 0x4 after some rows as well (sampled every 200 ms only
@@ -1353,9 +1353,9 @@ full path).
   stream), so the second and later calls with the same geometry skip planning.  Warm a call up once on the stream
   before capturing it into a CUDA graph (see the CUDA graphs row of the table above).
 - **Prebuilt libraries.**  Each program loads from `aot/<library>.so` when the package ships it, and otherwise
-  FlashInfer's JIT builds it from `build.json` on its first use (this needs `nvcc`).  To build the programs ahead
-  of time in a FlashInfer tree, pass `cake_jit.specs_for_arch(arch)` of this package and of the deterministic
-  package to `flashinfer.jit.build_jit_specs`.  A vendoring build compiles the `build.json` entries into `aot/`
+  the package's JIT shim (`_cake_pplx_jit.py`) builds it from `build.json` on its first use (this needs `nvcc`).
+  `cake_jit.specs_for_arch(arch)` of this package and of the deterministic package lists the JIT specs still to
+  build for ahead-of-time warm-up.  A vendoring build compiles the `build.json` entries into `aot/`
   and writes the sidecar `aot/build_info.json` (see `cake_build.py`);
   `scripts/check_cake_build_manifests.py --vendored-gate --package cake_dense_gemm_nondet_train --arch <arch> --keep
   --work-dir <dir>` is the reference builder and leaves the vendored copies with their `aot/` libraries in the work directory.
@@ -1424,18 +1424,18 @@ the deterministic package's names there.
 
 ## Standalone build (vendoring)
 
-This backend directory builds and runs outside FlashInfer (flashinfer-ai/flashinfer#6553) with one declared
+This backend directory builds and runs on its own with one declared
 dependency: the deterministic backend directory `cake_dense_gemm_det_train`
 (`cake_pplx/_backends/cake_dense_gemm_det_train`), whose fixed-order programs this package runs.  `build.json`
 declares it (`common.requires.packages`: `["cake_dense_gemm_det_train"]`, sibling directory names).  A vendoring build
 ships the two directories together, next to each other.
 
 - This package imports the deterministic package lazily, on the first call that needs it, as its sibling:
-  `<parent>.cake_dense_gemm_det_train` when this package sits in a parent package (a FlashInfer tree), the top-level
+  `<parent>.cake_dense_gemm_det_train` when this package sits in a parent package (`cake_pplx._backends`), the top-level
   package `cake_dense_gemm_det_train` when this package is vendored as a top-level package.  Importing this package
   never imports the deterministic one; without it, the first use raises `ImportError` that names it.
 - A tree that holds the deterministic package under another name binds it with
   `cake_backend.use_deterministic_backend(<its cake_backend module>)` before the first call that needs it.
-- The package imports nothing else outside its own directory.  It imports `flashinfer` only in `cake_build`'s guarded
-  fallback to FlashInfer's JIT when a library is not prebuilt.
+- The package imports nothing else outside its own directory.  `cake_build` imports the package's JIT shim
+  (`_cake_pplx_jit.py`) only when a library is not prebuilt.
 - The mode is the package name: no keyword argument and no environment variable selects it.

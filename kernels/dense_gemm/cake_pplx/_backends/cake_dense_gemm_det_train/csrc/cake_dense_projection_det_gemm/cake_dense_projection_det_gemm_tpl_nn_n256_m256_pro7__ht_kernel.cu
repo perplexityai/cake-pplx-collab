@@ -1144,7 +1144,7 @@ nn_n256_m256_pro7__ht(const __grid_constant__ CUtensorMap A, const __grid_consta
     }
 }
 
-// Explicit instantiations.  FlashInfer compiles this unit once per registered variant with
+// Explicit instantiations.  The JIT build compiles this unit once per registered variant with
 // -DCAKE_DPG_NN_N256_M256_PRO7__HT_SELECT=1 -D<variant macro>=1 so a module instantiates its own kernel only; without
 // CAKE_DPG_NN_N256_M256_PRO7__HT_SELECT (the SASS proof) every instantiation is compiled.
 #if !defined(CAKE_DPG_NN_N256_M256_PRO7__HT_SELECT) || defined(CAKE_DPG_DENSE_PROJ_DET_GEMM_NN_N256_M256_PRO7)

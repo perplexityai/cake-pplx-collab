@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ paired against ``torch.matmul`` on the same strided views:
 * the FP32 router rows (``X[T, 6144] @ W[256, 6144].T`` and its gradients) through the
   split-BF16x3 emulation, paired against cuBLAS SGEMM (TF32 disabled).
 
-Timing: ``flashinfer.testing.bench_gpu_time`` with CUPTI activity tracing and a cold L2
+Timing: the local ``bench_gpu_time`` with CUPTI activity tracing (``cupti-python``) and a cold L2
 between iterations (per-iteration GPU span); medians over ``--steps`` iterations, the
 Cake arm re-timed after the baseline so both figures come from the same clock regime.
 ``--accuracy`` adds the error against an FP64 reference of the same views.
@@ -44,11 +44,14 @@ Usage::
 """
 
 import argparse
+import bisect
+import collections
 import json
 import statistics
 import sys
 import time
 import traceback
+import warnings
 from pathlib import Path
 
 import torch
@@ -56,14 +59,130 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cake_pplx._backends.cake_dense_gemm_det_train import cake_backend  # noqa: E402
-try:  # FlashInfer is optional: only its CUPTI timer is used, and only when timing
-    from flashinfer.testing import bench_gpu_time  # noqa: E402
-except ImportError:  # the tests load this script for its tables and helpers
 
-    def bench_gpu_time(*args, **kwargs):
-        raise RuntimeError(
-            "timing needs flashinfer.testing.bench_gpu_time: install flashinfer"
-        )
+
+# ---------------------------------------------------------------------------
+# GPU timer
+# ---------------------------------------------------------------------------
+
+
+def bench_gpu_time(
+    fn,
+    dry_run_iters=3,
+    repeat_iters=20,
+    enable_cupti=True,
+    cold_l2_cache=True,
+    use_cuda_graph=False,
+):
+    """Per-iteration GPU times (ms) of ``fn``: the span from the first start to the last end of the kernels,
+    memsets and copies the iteration launches, from CUPTI activity records (``cupti-python``) matched to the
+    iteration's own API calls by correlation id.  ``cold_l2_cache`` zeroes a buffer of twice the L2 size before
+    every iteration (outside the span); ``use_cuda_graph`` captures ``fn`` once in a CUDA graph and times its
+    replays.  ``dry_run_iters`` untimed iterations run first.  Without CUPTI (``enable_cupti=False`` or no
+    ``cupti-python``) it warns "Falling back to CUDA events" and times each iteration between two CUDA events."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    flush = None
+    if cold_l2_cache:
+        l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+        flush = torch.empty(max(2 * l2_bytes, 1), dtype=torch.int8, device=device)
+    run = fn
+    if use_cuda_graph:
+        side = torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            fn()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        run = graph.replay
+    for _ in range(dry_run_iters):
+        if flush is not None:
+            flush.zero_()
+        run()
+    torch.cuda.synchronize(device)
+    if enable_cupti:
+        try:
+            from cupti import cupti
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"CUPTI is unavailable ({type(exc).__name__}: {exc}). Falling back to CUDA events.",
+                stacklevel=2,
+            )
+        else:
+            return _cupti_times(cupti, run, flush, repeat_iters, device)
+    return _event_times(run, flush, repeat_iters, device)
+
+
+def _cupti_times(cupti, run, flush, iters, device):
+    """The CUPTI span (ms) of each of ``iters`` calls of ``run`` (see :func:`bench_gpu_time`)."""
+    launches = []
+    spans = collections.defaultdict(list)
+    gpu_kinds = (
+        cupti.ActivityKind.CONCURRENT_KERNEL,
+        cupti.ActivityKind.MEMSET,
+        cupti.ActivityKind.MEMCPY,
+    )
+    api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
+
+    def requested():
+        return 8 * 1024 * 1024, 0
+
+    def completed(activities):
+        for activity in activities:
+            if activity.kind in gpu_kinds:
+                spans[activity.correlation_id].append((activity.start, activity.end))
+            elif activity.kind in api_kinds:
+                launches.append((activity.start, activity.correlation_id))
+
+    kinds = api_kinds + gpu_kinds
+    for kind in kinds:
+        cupti.activity_enable(kind)
+    cupti.activity_register_callbacks(requested, completed)
+    stamps = []
+    try:
+        for _ in range(iters):
+            if flush is not None:
+                flush.zero_()
+            torch.cuda.synchronize(device)
+            begin = cupti.get_timestamp()
+            run()
+            end = cupti.get_timestamp()
+            stamps.append((begin, end))
+        torch.cuda.synchronize(device)
+        cupti.activity_flush_all(0)
+    finally:
+        for kind in kinds:
+            cupti.activity_disable(kind)
+        cupti.finalize()
+    launches.sort()
+    starts = [start for start, _ in launches]
+    times = []
+    for begin, end in stamps:
+        lo, hi = bisect.bisect_left(starts, begin), bisect.bisect_right(starts, end)
+        correlation = {corr for _, corr in launches[lo:hi]}
+        found = [span for corr in correlation for span in spans.get(corr, ())]
+        if not found:
+            raise RuntimeError("CUPTI recorded no GPU activity for a timed iteration")
+        times.append((max(e for _, e in found) - min(s for s, _ in found)) / 1e6)
+    return times
+
+
+def _event_times(run, flush, iters, device):
+    """The CUDA-event time (ms) of each of ``iters`` calls of ``run`` (the fallback of :func:`bench_gpu_time`)."""
+    pairs = []
+    for _ in range(iters):
+        if flush is not None:
+            flush.zero_()
+        start = torch.cuda.Event(enable_timing=True)
+        stop = torch.cuda.Event(enable_timing=True)
+        start.record()
+        run()
+        stop.record()
+        pairs.append((start, stop))
+    torch.cuda.synchronize(device)
+    return [start.elapsed_time(stop) for start, stop in pairs]
 
 
 # GLM-5.2 projection rows: label -> (K = in features, N = out features).
