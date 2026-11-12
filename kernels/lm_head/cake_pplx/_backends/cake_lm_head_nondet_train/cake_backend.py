@@ -301,7 +301,8 @@ GRAD_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # ``mode`` scalar of ``row_finalize`` / ``loss_reduce``: which per-row quantities the stage forms.
 MODE_CE, MODE_POLICY, MODE_EXTERNAL, MODE_NONE = 0, 1, 2, 3
 WORKSPACE_ALIGN = 256
-# One registry record and its build.json libraries per architecture (SM107 runs SM103's programs, built for sm_107a;
+# One registry record and its build.json libraries per architecture (SM107 runs SM103's programs, built for sm_107a,
+# except the support logits gather GEMM, which has its own sm_107a program;
 # the per-architecture GEMM tile rule tables give sm_107a the sm_103a entries, except DX_LONG_CHUNK_STAGES and the
 # logits height of LOGITS_LONG_RASTER_GROUPS (the default height 32 on sm_107a); the zero-gradient row skip has R200-timed sm_107a entries: the 1946-row floor of ZERO_DLOGP_MIN_ROWS_BY_ARCH and the
 # two-slice counted dX of DX_COUNTED_MIN_SLICES_BY_ARCH).
