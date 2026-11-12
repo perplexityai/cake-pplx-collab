@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 
 Backend suite of the Cake four-stream mHC training package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096, 5120 and
-7168 on SM100 / SM103, 4096 on SM107; 4 streams; FlashInfer issue #8068).
+7168 on SM100 / SM103, 4096 on SM107; 4 streams).
 
 The package is standalone: its forward, statistics replay, residual mixing and
 backward prepare run its own copies of the deterministic programs, and
@@ -92,8 +92,8 @@ throughout, never a source of tolerances.  This module checks:
 * four ``accumulate=True`` passes; the autograd functions plain and under a
   non-reentrant checkpoint, against the deterministic gradients;
 * ``test_cake_mhc_det_train.py``'s checkpoint and lifetime cases with this
-  package's autograd functions (the saved-tensor and autograd-edge contract of
-  FlashInfer issues #7039 / #7547): the checkpoint replay of the statistics, a
+  package's autograd functions (the saved-tensor and autograd-edge contract):
+  the checkpoint replay of the statistics, a
   checkpoint around the connection or after the prepare keeping nothing alive,
   nothing alive once a backward has run, repeated backward passes with
   ``retain_graph``, reentrant checkpoints, a backward without the prepare node,
@@ -123,7 +123,7 @@ device) and ``test_cake_mhc_nondet_train_api.py`` (the
 The largest cases hold the FP64 reference in row blocks of 8192 tokens.  Like
 ``test_cake_mhc_det_train.py`` this suite exercises the backend packages alone
 (both named through ``tests.cake.test_helpers.cake_package``) and imports nothing
-else from flashinfer.
+else from ``cake_pplx``.
 """
 
 from __future__ import annotations
@@ -1938,7 +1938,7 @@ def test_autograd_matches_the_deterministic_gradients(
 
 # ----------------------------------------------------------------------------------------------------------------
 # The autograd connection of this package: test_cake_mhc_det_train.py's checkpoint and lifetime cases (the
-# saved-tensor and autograd-edge contract of FlashInfer issues #7039 / #7547: nothing of a connection stays alive
+# saved-tensor and autograd-edge contract: nothing of a connection stays alive
 # once its backward has run, nothing beyond the outputs under a checkpoint)
 
 

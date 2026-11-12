@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 by FlashInfer team.
+ * Copyright (c) 2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// Host surface of the generated Cake launchers (``*_binding.cu``) for a package built without
-// FlashInfer's csrc: the TVM-FFI / DLPack headers the launchers use, the named tensor-argument
+// Host surface of the generated Cake launchers (``*_binding.cu``) of a standalone package:
+// the TVM-FFI / DLPack headers the launchers use, the named tensor-argument
 // checks and the CUDA runtime version the library was compiled against.
 #pragma once
 

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Host-plan, packaging and mode-policy tests of the Cake four-stream mHC training
-package ``cake_pplx._backends.cake_mhc_nondet_train`` (FlashInfer
-issue #8068; no GPU needed, nothing is built or launched).
+package ``cake_pplx._backends.cake_mhc_nondet_train`` (no GPU needed,
+nothing is built or launched).
 
 The package is a standalone copy of the deterministic package
 (``cake_pplx._backends.cake_mhc_det_train``) under the ``cake_mhc_train_``
@@ -95,10 +95,9 @@ deterministic registry's records, routes and record scalars of this package's
   deterministic column slab's; the rule under the former calibrations and the
   kernel test's screen), its
   call-time lookup and a workspace envelope that never runs its screen;
-* the package is standalone: no source file imports ``flashinfer`` or another
-  ``cake_pplx`` module (the shared ``cake_build.py`` falls back to the
-  package's own JIT shim inside a function), and a copy under another name
-  imports and plans with ``flashinfer`` blocked;
+* the package is standalone: no source file imports another ``cake_pplx``
+  module (the shared ``cake_build.py`` falls back to the package's own JIT
+  shim inside a function), and a copy under another name imports and plans;
 * the mode policy without a device: the mode is part of the names (every
   exported name but the ALL_CAPS constants carries the ``nondet`` token), no
   public callable has a ``deterministic`` parameter (the autograd
@@ -114,7 +113,7 @@ deterministic registry's records, routes and record scalars of this package's
   this package's parameters, the package is imported only on first use, and
   nothing is imported from the deterministic package;
 * the wiring: the test-helper key, the namespace, the package data and
-  ``build.json`` (the build-manifest checker's row where FlashInfer's
+  ``build.json`` (the build-manifest checker's row where
   ``scripts/check_cake_build_manifests.py`` is beside this test).
 """
 
@@ -3310,9 +3309,9 @@ def _imports(path: Path) -> list[tuple[ast.AST, bool]]:
 
 
 @pytest.mark.cpu_only
-def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
-    """No source file of the package imports from a parent package (``from ..``), ``flashinfer`` or another
-    ``cake_pplx`` module; a relative import names a module of the package itself; nothing imports by string.  The
+def test_package_imports_nothing_from_other_packages() -> None:
+    """No source file of the package imports from a parent package (``from ..``) or another ``cake_pplx``
+    module; a relative import names a module of the package itself; nothing imports by string.  The
     shared loader ``cake_build.py`` and the JIT shim ``_cake_pplx_jit.py`` are byte-identical to the deterministic
     package's; the loader's JIT fallback imports the package's own shim inside a function when no prebuilt library
     exists."""
@@ -3352,7 +3351,7 @@ def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
             )
             for module in modules:
                 top = module.split(".")[0]
-                assert top not in ("flashinfer", "cake_pplx"), (
+                assert top != "cake_pplx", (
                     path.name,
                     node.lineno,
                     module,
@@ -3361,18 +3360,8 @@ def test_package_imports_nothing_from_other_flashinfer_packages() -> None:
 
 
 _VENDORED_CHILD = r"""
-import importlib, importlib.abc, json, sys
+import importlib, json, sys
 
-
-class Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError("flashinfer is blocked: " + name)
-        return None
-
-
-sys.meta_path.insert(0, Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, sys.argv[1])
 import torch
 
@@ -3392,20 +3381,15 @@ try:
     package.cake_mhc_nondet_train_backward_finish(*([None] * 9), deterministic=False)
 except TypeError as error:
     out["refusal"] = str(error)
-out["flashinfer"] = sorted(
-    name for name, module in sys.modules.items()
-    if module is not None and (name == "flashinfer" or name.startswith("flashinfer."))
-)
 print(json.dumps(out))
 """
 
 
 @pytest.mark.cpu_only
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path: Path) -> None:
+def test_vendored_copy_imports(tmp_path: Path) -> None:
     """The package directory copied under another top-level name (the vendored gate's first step, without its
     sources) imports, plans its routes (every hidden size of every board) and refuses a ``deterministic`` keyword
-    (the interpreter's ``TypeError``) in an interpreter where every ``flashinfer`` import raises; no flashinfer module
-    is loaded."""
+    (the interpreter's ``TypeError``)."""
     neutral = "vendored_cake_mhc_nondet_train"
     shutil.copytree(
         PACKAGE_DIR,
@@ -3422,7 +3406,6 @@ def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path: Path) -> None:
     tail = "\n".join((run.stdout + run.stderr).strip().splitlines()[-8:])
     assert run.returncode == 0, tail
     out = json.loads(run.stdout.strip().splitlines()[-1])
-    assert out["flashinfer"] == [], out["flashinfer"]
     assert out["supported_cpu"] is False
     boards = [
         (arch, sm, hidden)
@@ -3730,7 +3713,7 @@ def test_no_entry_alerts_under_deterministic_algorithms(monkeypatch) -> None:
 def test_package_wiring() -> None:
     """The test-helper key, the ``cake_pplx._backends`` namespace (PEP 420: no ``__init__.py``), the package data
     and the ignored ``aot/`` directory; no key or module is left at the former paths
-    (``cake_pplx._backends.cake_mhc_train_backend`` and its ``cake_mhc_train`` module, the 0.7.3
+    (``cake_pplx._backends.cake_mhc_train_backend`` and its ``cake_mhc_train`` module, the earlier
     ``cake_mhc_train_backend``)."""
     assert PACKAGES[KEY] == PACKAGE_NAME == pkg.__name__
     for former in FORMER_PACKAGES:
@@ -3795,7 +3778,7 @@ def test_build_manifest_lists_every_program() -> None:
 
 
 def _manifest_checker():
-    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module (it never imports flashinfer)."""
+    """``scripts/check_cake_build_manifests.py`` of this checkout, loaded as a module."""
     path = REPO / "scripts" / "check_cake_build_manifests.py"
     if not path.is_file():
         pytest.skip(

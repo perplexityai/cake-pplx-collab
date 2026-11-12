@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@ the model's deterministic head ``cake_pplx.cake_mhc_head_det_train.cake_mhc_head
 (family ``mhc_head``, the stream mean of the last layer): the gradients reach
 every leaf through the head and equal the deterministic training and head's.
 
-Moved from ``kernels/mhc/tests/experimental/test_cake_mhc_nondet_train_api.py``
-(FlashInfer ``c5c39b0e``), which keeps the single-family checks; the helpers
+Moved from ``kernels/mhc/tests/experimental/test_cake_mhc_nondet_train_api.py``,
+which keeps the single-family checks; the helpers
 below are that module's.  Needs ``cake-pplx-mhc`` and ``cake-pplx-mhc-head``
 installed in one environment.
 """

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,9 +15,8 @@ limitations under the License.
 
 Tests of ``cake_pplx.cake_mhc_nondet_train``, the stable top-level module of
 the Cake four-stream mHC training kernels' package
-``cake_pplx._backends.cake_mhc_nondet_train`` (SM100 / SM103 / SM107;
-FlashInfer issue #8068): its entry points emit no warning (FlashInfer's
-``ExperimentalWarning`` included; the ``cake_api`` decorator emits none).
+``cake_pplx._backends.cake_mhc_nondet_train`` (SM100 / SM103 / SM107):
+its entry points emit no warning (the ``cake_api`` decorator emits none).
 
 The mode is part of the names: every entry point runs the package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (imported on the first
@@ -159,7 +158,7 @@ _HANDLE_ERROR = (
     "handle goes to cake_pplx.cake_mhc_det_train.cake_mhc_det_train_finish)"
 )
 _BACKEND = "cake_pplx._backends.cake_mhc_nondet_train"
-# The former module paths of the non-deterministic mode (and of the 0.7.3 names): removed, with no alias.
+# The former module paths of the non-deterministic mode (and of the earlier names): removed, with no alias.
 _FORMER_MODULES = (
     "cake_pplx._backends.cake_mhc_train",
     "cake_pplx._backends.cake_mhc_train_backend",
@@ -469,7 +468,7 @@ print(json.dumps(out))
 @pytest.mark.cpu_only
 def test_former_module_paths_fail_at_import() -> None:
     """The former module paths of the non-deterministic mode (``cake_pplx._backends.cake_mhc_train`` and its
-    ``_backend``) and of the 0.7.3 names are gone, with no alias: importing each in a fresh interpreter raises
+    ``_backend``) and of the earlier names are gone, with no alias: importing each in a fresh interpreter raises
     ``ImportError`` (a namespace package without code, left by a stale ``__pycache__``, counts as gone)."""
     out = _run_child(_FORMER_CHILD, *_FORMER_MODULES)
     assert out == dict.fromkeys(_FORMER_MODULES), out

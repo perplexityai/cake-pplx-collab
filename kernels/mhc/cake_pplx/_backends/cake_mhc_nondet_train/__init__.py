@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ SM100 / SM103, and hidden 4096 on SM107; the backward's column-slab pass folds
 ``dfn``, ``dscale`` and ``dbase`` itself), one self-contained
 package (host API bodies, the ``cake_jit`` registry, the ``cake_build`` loader
 and the generated CUDA sources under ``csrc/``).  It imports nothing from other
-flashinfer packages and ships its own copy of every program it launches.  The
+``cake_pplx`` packages and ships its own copy of every program it launches.  The
 user-facing module and documentation are
 :mod:`cake_pplx.cake_mhc_nondet_train`, which forwards every entry point
 here.

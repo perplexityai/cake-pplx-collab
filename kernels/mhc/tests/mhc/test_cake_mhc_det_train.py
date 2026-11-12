@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -108,10 +108,9 @@ the FP32 comparator in one block (about 40 GB of device memory at T = 65536
 and H = 4096; the footprint grows in proportion to H).
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer, so a build that vendors the package under another import path
+``cake_pplx``, so a build that vendors the package under another import path
 runs it unchanged after pointing that table entry at its package.  The
-``cake_pplx.cake_mhc_det_train`` facade and the ``flashinfer`` top-level
-exposure are covered by ``test_cake_mhc_det_train_api.py``; the host rules by
+``cake_pplx.cake_mhc_det_train`` facade is covered by ``test_cake_mhc_det_train_api.py``; the host rules by
 ``test_cake_mhc_det_train_rules.py``.
 """
 
@@ -1302,8 +1301,8 @@ def _live_bytes(*, baseline: bool = False) -> int | None:
     """Bytes the live CUDA tensors asked the caching allocator for (its ``requested_bytes``), not the bytes of the
     blocks they occupy (``torch.cuda.memory_allocated``): a tensor placed in a reused free block up to 1 MiB larger
     than itself (the allocator does not split a large block for a remainder of at most 1 MiB) would otherwise count
-    that slack as memory kept alive, as the flashinfer-ci nightly did on torch 2.15 (186880 B on B200, 1047040 B on
-    R200) for the checkpointed output below.  ``None`` under another allocator backend (``cudaMallocAsync`` keeps
+    that slack as memory kept alive (on torch 2.15, 186880 B on B200 and 1047040 B on R200 for the checkpointed
+    output below).  ``None`` under another allocator backend (``cudaMallocAsync`` keeps
     no ``requested_bytes``), where the retention check is skipped and the gradient checks still run.  The baseline
     (``baseline=True``, before the call) first collects unreachable reference cycles, so tensors held only by earlier
     garbage (for example the frames of a failed test kept by pytest's exception record) neither count in it nor vanish

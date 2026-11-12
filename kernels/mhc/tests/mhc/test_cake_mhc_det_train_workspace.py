@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ token count.  On one buffer reused over realistic token-count sequences:
 * the default workspaces (``workspace=None``: one buffer per power-of-two
   token-count bucket) give bitwise the fresh-workspace outputs across the
   token counts of one bucket;
-* the sequence of FlashInfer issue #7763 (``backward_finish`` at 7832 tokens,
+* the reported sequence (``backward_finish`` at 7832 tokens,
   then at 7435 tokens, on the default workspace of a fresh process, and the
   reverse order) finds the ticket words of every call zero before and after
   the call and gives bitwise the fresh-workspace outputs.  Each sequence runs
@@ -77,7 +77,7 @@ SEQUENCES = {
 }
 GRAPHS = ((4096, 3000), (8192, 4500), (16263, 14928))
 DEFAULT_BUCKETS = ((4096, 3000, 2100, 4096), (8192, 6000, 4500, 8192))
-# The backward token-count sequences of FlashInfer issue #7763 (one 8192-token default bucket).
+# The reported backward token-count sequences (one 8192-token default bucket).
 REPORTED_SEQUENCES = ((7832, 7435), (7435, 7832))
 OUTPUTS = ("U", "stats", "Y", "dB", "gstats", "dX", "dfn", "dscale", "dbase")
 

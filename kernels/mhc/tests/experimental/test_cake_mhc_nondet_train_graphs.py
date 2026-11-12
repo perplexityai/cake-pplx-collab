@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ limitations under the License.
 CUDA-graph capture of the entry points of the Cake four-stream mHC training
 package ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096,
 5120 and 7168, 4 streams; SM100 / SM103 at the three hidden sizes, SM107 at
-4096; FlashInfer issue #8068), in the
+4096), in the
 form of ``test_cake_mhc_det_train_graphs.py``.  Every case runs at each hidden
 size ``H`` the device's architecture routes (``W`` is ``[H, H]``, the
 workspaces are sized with ``hidden=H``); a size it does not route is skipped.
