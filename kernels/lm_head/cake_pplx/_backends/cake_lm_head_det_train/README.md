@@ -825,11 +825,10 @@ previous mode; `zero_weight_loss_mode()` reads it):
   (`term = w * clipped`, `clipped = ratio < 2 ? ratio : 2`, so a NaN or
   infinite ratio clips to 2) and reduces the terms chunk by chunk over the
   valid rows in `loss_reduce`: one 256-thread CTA, thread `i` adds
-  `term[i], term[i + 256], ...` into an FP32 pair `(s, c)` that starts at
-  `+0` (compensated addition), then a warp butterfly and a cross-warp
-  butterfly of pair merges; the first chunk stores its pair in the FP32 pair
-  accumulator `(hi, lo)`, every later chunk merges its pair into it, and the
-  last chunk stores `0 - (hi + lo)`.  The split keeps every chunk's
+  `term[i], term[i + 256], ...` into an FP32 register that starts at `+0`,
+  then a warp butterfly and a cross-warp butterfly; the first chunk stores
+  the chunk sum in the FP32 accumulator, every later chunk adds its sum, and
+  the last chunk stores `0 - acc`.  The split keeps every chunk's
   terms without another buffer: chunk 0's stay in the chunk-local `term`
   buffer, chunk `c >= 1` writes its terms into the compact `loss_weights`
   rows of chunk `c - 1` (gathered before the loop and read by no launch
@@ -839,9 +838,9 @@ previous mode; `zero_weight_loss_mode()` reads it):
   that row for any ratio), and the shipped `loss_reduce` runs over the plain
   path's chunks of that array (`ceil(T_v / C)` launches, the same `rows_c`
   and first / last flags) on the call's stream.  Every thread adds the same
-  values in the same order, so the pair sums and the FP32 rounding are the
+  values in the same order, so the FP32 sums and the rounding are the
   plain path's.
-* `"regroup"`: the chunk loop's own `loss_reduce` over `G` (the same pair sum
+* `"regroup"`: the chunk loop's own `loss_reduce` over `G` (the same FP32 sum
   of the same nonzero terms over the split's chunk boundaries); the loss may
   differ from the plain path's in its last FP32 bits.  No term placement and
   no extra launch.
@@ -852,7 +851,7 @@ previous mode; `zero_weight_loss_mode()` reads it):
 | --- | --- |
 | `logp`, `lse` of every row (`Z` rows from the logp-only pass) | identical (the same per-row logits and row-statistics arithmetic) |
 | `loss`, mode `"exact"` | identical, non-finite values in `Z` rows included (their term is `+-0` either way) |
-| `loss`, mode `"regroup"` | the same pair sum over other chunk boundaries: may differ in the last FP32 bits |
+| `loss`, mode `"regroup"` | the same FP32 sum over other chunk boundaries: may differ in the last FP32 bits |
 | `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X`, logits or `infer_logp` is not finite) |
 | `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise within the accuracy budget |
 | `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): within the accuracy budget; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
