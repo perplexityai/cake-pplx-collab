@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -83,8 +83,8 @@ TAPE_LEVELS: Mapping[str, str] = MappingProxyType(
 # (architecture, SM count, H, HV).  ``"nosplit"``: the planner's tables (no one-wave split of the adjoint walk; a group
 # of three keeps its pre-scan R-form table) with the pre-scans' warm-up cut, which skips the steps whose decay has
 # fallen below the threshold: the split's price does not depend on the gates, the planner's time does.  An entry is
-# the form whose worst time relative to the best FROST arm, over the FI-bench and log-spaced gates, is the lower one:
-# sm_100a on GB200 (152 SMs) at H 1 / HV 3, measured at the pair rows (three sequences of about 11k tokens).  From
+# the form whose worst time relative to the best FROST arm, over the benchmark's and the log-spaced gates, is the lower
+# one: sm_100a on GB200 (152 SMs) at H 1 / HV 3, measured at the pair rows (three sequences of about 11k tokens).  From
 # H 2 / HV 6 on the split stays: its worst ratio is the lower one there, set by the long H 2 / HV 6 packs.
 ADJOINT_FORMS: Mapping[tuple[str, int, int, int], str] = MappingProxyType(
     {("sm_100a", 152, 1, 3): "nosplit"}
@@ -237,7 +237,7 @@ def pieces(seq_lens: Sequence[int], num_v_heads: int, sm_count: int) -> Pieces:
 # table (:func:`pieces`) on which a call's forward runs the split forward instead of the prep forward's split scan.
 # The split's fixed costs (the front, the middle pieces' summary, the stitch and a second wave) pay back on long pieces
 # only.  Measured on B200 (148 SMs) and GB300 (152; fwd+bwd and checkpoint, the larger ratio to the best FROST arm
-# over the FI-bench and log-spaced gates), the split lowers that ratio at the long rows (two to six sequences of 11k..131k tokens
+# over the benchmark's and the log-spaced gates), the split lowers that ratio at the long rows (two to six sequences of 11k..131k tokens
 # at HV 6: pieces of 132..158 chunks) and at the pair row of HV 24 (three sequences of about 11k tokens: 63 chunks) and
 # raises it at the pair rows of HV 12 and 6 (38 and 20 chunks; HV 3 has 11).  The class reads the host piece table
 # alone (the sequence lengths, HV and the SM count), never tensor contents.

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -105,7 +105,7 @@ SIDE_STREAM_ITERS = 7
 
 
 def _reference():
-    """The FP64 reference: the FlashInfer test helper once it ships, else the session harness on PYTHONPATH."""
+    """The FP64 reference: the in-tree test helper when present, else the session harness on PYTHONPATH."""
     try:
         from tests.experimental.test_helpers import (
             cake_gdn_det_train_kcp_reference as ref,
@@ -1896,7 +1896,7 @@ class _Slurm:
         print(
             f"[kcp_dist] init timeout {WORLD_TIMEOUT_S} s; "
             f"rank {self.rank}/{self.world} local {local} host {socket.gethostname()} device {self.device} "
-            f"{torch.cuda.get_device_name(self.device)} flashinfer={_mod().__file__} MASTER={os.environ.get('MASTER_ADDR')}:{os.environ.get('MASTER_PORT')}",
+            f"{torch.cuda.get_device_name(self.device)} package={_mod().__file__} MASTER={os.environ.get('MASTER_ADDR')}:{os.environ.get('MASTER_PORT')}",
             flush=True,
         )
 
@@ -2112,7 +2112,7 @@ def test_public_api_cannot_select_test_programs() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# C7: the convolution halo row.  The user calls FlashInfer's ``cake_causal_conv1d_det_kcp(x_local, weight, ctx)`` with
+# C7: the convolution halo row.  The user calls ``cake_causal_conv1d_det_kcp(x_local, weight, ctx)`` with
 # THIS package's context: the conv package reads the halo plan (``ctx.halo``, ``ctx.halo_tables``), the local
 # ``cu_seqlens`` and the process group by duck typing.  The row's partition: document 0 = [1, 2, 300] on ranks 0,
 # 1 and 3 (the three history rows of rank 3's first outputs come from TWO predecessor ranks), rank 2 holds no token

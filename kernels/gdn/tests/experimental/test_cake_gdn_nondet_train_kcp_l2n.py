@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 CPU tests of the in-kernel Q / K L2 norm of the non-deterministic KCP GDN package
-(``cake_pplx._backends.cake_gdn_nondet_train_kcp``; ``use_qk_l2norm_in_kernel``), mirrored from the deterministic package's tests (FlashInfer #7817 / #8063):
+(``cake_pplx._backends.cake_gdn_nondet_train_kcp``; ``use_qk_l2norm_in_kernel``), mirrored from the deterministic package's tests:
 
 * the pure-torch reference ``cake_l2n`` against an exact rational oracle (every FP32 step rounded from the exact
   value; subnormals, zero rows, overflow of the sum of squares, wide exponents), in the documented orders;
@@ -32,7 +32,7 @@ CPU tests of the in-kernel Q / K L2 norm of the non-deterministic KCP GDN packag
 The fake backend is not bitwise the device programs in #1 / #8's bodies (different accumulation orders): these tests
 prove the plumbing and the oracle, not GPU numerics (``test_cake_gdn_nondet_train_kcp_dist.py`` holds the GPU rows).
 The suite imports the package and the deterministic package through ``tests/cake/test_helpers/cake_package.py`` and nothing
-else from flashinfer; the facade's hand-off of the option is tested in ``test_cake_gdn_nondet_train_kcp_api.py``.
+else from cake_pplx; the facade's hand-off of the option is tested in ``test_cake_gdn_nondet_train_kcp_api.py``.
 """
 
 from __future__ import annotations

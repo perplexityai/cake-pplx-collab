@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,10 +19,8 @@ backward launch sequences with their collectives, the saved set
 :class:`CakeGDNNondetKcpSaved`, the autograd Function and the entry points
 ``cake_gdn_nondet_kcp`` / ``cake_gdn_nondet_train_kcp_forward`` / ``cake_gdn_nondet_train_kcp_backward``.
 
-Provenance: adapted from ``flashinfer/experimental/cake_kda_train/cake_kcp.py`` (now
-``cake_pplx/_backends/cake_kda_det_train_kcp/cake_kcp.py``)
-at FlashInfer ``13d7fcf4041635f5b7f573bb0dbab23570ae1034`` (the KDA KCP host
-module).  Verbatim parts: the compact pools and chains (``Indexed``,
+Mirrors the KDA KCP host module
+(``cake_pplx/_backends/cake_kda_det_train_kcp/cake_kcp.py``).  Same code: the compact pools and chains (``Indexed``,
 ``Chains``), the exchange tables (``_Tables``), the per-call state
 (``CakeGDNNondetKcpCall``), the ring exchange, the launch-sequence structure and the
 CUDA-graph replay.  Changed for GDN: two head counts (``H_qk`` Q/K heads,
@@ -1551,7 +1549,7 @@ class Backend:
 
     name = "abstract"
     dtypes: dict[str, torch.dtype] = dict(CONTRACT_DTYPES)
-    path = "fi-rendered"  # recorded with every result: fake (emulation), direct (bring-up), fi-rendered (the package)
+    path = "package-rendered"  # recorded with every result: fake (emulation), direct (bring-up), package-rendered (the package)
 
     def run(
         self, name: str, args: dict[str, Any]
@@ -1870,7 +1868,7 @@ class KernelBackend(Backend):
         launcher: Any | None = None,
         *,
         cols_per_cta: int = 8,
-        path: str = "fi-rendered",
+        path: str = "package-rendered",
     ) -> None:
         self._launcher = launcher
         if cols_per_cta not in (8, 16, 32) or D % cols_per_cta:

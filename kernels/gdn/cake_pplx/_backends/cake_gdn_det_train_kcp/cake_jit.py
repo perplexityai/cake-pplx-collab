@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -86,9 +86,8 @@ In-kernel Q / K L2 norm (option ``use_qk_l2norm_in_kernel``; three programs, rec
 leaves ``records_of_program`` empty and ``select_record`` refuses them (:func:`l2n_records_shipped` says which).
 :data:`L2N_RECORD_PLANS` is their host plan, which the records repeat.
 
-Provenance of the rules: ``flashinfer/experimental/cake_kda_train/cake_kcp_jit.py`` (records_of_program,
-select_record, launch_grid; sha256 c405e7dcd36c9cbe0ff01e3e3194fd760491504655bda28a646c2067a23b4c90) at
-FlashInfer 13d7fcf4041635f5b7f573bb0dbab23570ae1034, adapted to the GDN vocabulary; the loader glue moved to
+The rules (records_of_program, select_record, launch_grid) are those of the KDA KCP registry
+``cake_pplx/_backends/cake_kda_det_train_kcp/cake_kcp_jit.py``, in the GDN vocabulary; the loader glue lives in
 :mod:`.cake_backend`.
 """
 

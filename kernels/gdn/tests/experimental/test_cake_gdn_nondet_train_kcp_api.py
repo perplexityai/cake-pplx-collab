@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -19,7 +19,7 @@ entries, not marked experimental, a first call warns of nothing), the numerical 
 takes ``deterministic``, a stray keyword is a ``TypeError``; every launch being fixed-order, nothing alerts, reroutes
 or warns under ``torch.use_deterministic_algorithms``; no context, partition or options field holds the mode), the
 facade's hand-off of ``use_qk_l2norm_in_kernel`` to the package, the package hygiene rules (no environment variable,
-no KDA package import, standalone: no import of another FlashInfer package, its deterministic counterpart included,
+no KDA package import, standalone: no import of another cake_pplx package, its deterministic counterpart included,
 and no library name of that package) and the host tables built on the CPU for the correctness rows' partitions.  No
 kernel runs here: the compute entries run on the fake backend (the CPU emulation), directly or through
 ``KernelBackend`` with a stub launch glue (the architecture the kernel backend passes to the #7 walks).
@@ -781,7 +781,7 @@ def test_the_facade_is_a_stable_api() -> None:
         assert not entry.__doc__.lstrip().startswith(".. warning::"), name
     # the source: every entry is a top-level def with the one decorator ``@cake_api`` (the decorator returns the
     # function itself, so only the source shows it), the only name taken from ``_cake_pplx_api_gdn`` (the family's
-    # stand-in for FlashInfer's ``api_logging``); under it the entries of OPTION_KEYWORD_ENTRIES carry the facade's ``_forwards_keywords``, which
+    # API decorator module); under it the entries of OPTION_KEYWORD_ENTRIES carry the facade's ``_forwards_keywords``, which
     # declares the keywords they hand to the package (``test_option_keyword_entries_declare_every_option_field``)
     tree = ast.parse(_facade_source().read_text())
     decorators = {
@@ -2084,13 +2084,13 @@ def test_the_context_holds_no_mode() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# standalone (flashinfer #6553): the package imports itself, torch, torch.distributed, tvm_ffi and the standard
-# library only, and names no library of its deterministic twin.  The package's JIT shim ``_cake_pplx_jit.py`` (the
-# stand-in for ``flashinfer.jit``, which lived outside the package) is not part of this rule: see ``_package_sources``.
+# standalone: the package imports itself, torch, torch.distributed, tvm_ffi and the standard
+# library only, and names no library of its deterministic twin.  The package's JIT shim ``_cake_pplx_jit.py`` is
+# not part of this rule: see ``_package_sources``.
 
 
 def test_the_package_imports_no_other_package() -> None:
-    """No import of ``flashinfer`` at all and nothing outside the package (relative imports one level deep only), none
+    """Nothing outside the package (relative imports one level deep only), none
     of the twin; the pinned loader's JIT route (``cake_build.py``) imports the package's own shim ``._cake_pplx_jit``
     inside a function.  Every other absolute import is the standard library, ``torch``, ``torch.distributed`` or
     ``tvm_ffi``."""
@@ -2116,7 +2116,6 @@ def test_the_package_imports_no_other_package() -> None:
             for name in names:
                 assert "cake_gdn_det" not in name, (path.name, node.lineno, name)
                 head = name.split(".")[0]
-                assert head != "flashinfer", (path.name, node.lineno, name)
                 assert head in stdlib or name in (
                     "torch",
                     "torch.distributed",
@@ -2169,9 +2168,8 @@ def test_the_registry_names_no_library_of_the_deterministic_twin() -> None:
 
 
 def _package_sources(*, jit_shim: bool = False) -> list[pathlib.Path]:
-    # The JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit``, which lived outside the package: like it,
-    # it reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and runs nvcc, so the environment and
-    # import allow-list rules do not cover it; the KDA import rule does (``jit_shim=True``).
+    # The JIT shim ``_cake_pplx_jit.py`` reads the toolkit / cache environment (CUDA_HOME, CAKE_PPLX_CACHE_DIR) and
+    # runs nvcc, so the environment and import allow-list rules do not cover it; the KDA import rule does (``jit_shim=True``).
     root = pathlib.Path(_mod().__file__).resolve().parent
     files = sorted(
         p for p in root.glob("*.py") if jit_shim or p.name != "_cake_pplx_jit.py"

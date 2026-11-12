@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,9 +23,9 @@ are ``<library>_<arch>``), the architectures it is delivered for, the stage it
 serves and the argument plan of its ``run`` entry.  What to compile -- sources,
 digests, nvcc flags -- is recorded once in ``build.json`` next to this file;
 :mod:`.cake_build` serves a library from a prebuilt ``aot/`` file when a builder
-compiled it and otherwise through FlashInfer's JIT from the same sources and
-flags.  The prebuilt route imports nothing from ``flashinfer``: a process
-without ``flashinfer.jit`` loads every library from ``aot/``
+compiled it and otherwise through the package's JIT shim (``_cake_pplx_jit.py``)
+from the same sources and flags.  The prebuilt route never imports the JIT
+shim: a process without a CUDA toolkit loads every library from ``aot/``
 (``cake_build.load_library``).
 
 Launches go through :func:`launch_stage` (the chain's positional call: the
@@ -154,13 +154,13 @@ def is_prebuilt(name: str, arch: str) -> bool:
 @functools.cache
 def load(name: str, arch: str) -> Any:
     """The loaded tvm-ffi module of record ``name`` built for ``arch``: the prebuilt ``aot/`` library when a
-    builder compiled it, else FlashInfer's JIT build of the same sources and flags (``cake_build.load_library``)."""
+    builder compiled it, else the JIT build of the same sources and flags (``cake_build.load_library``)."""
     return cake_build.load_library(library_name(name, arch))
 
 
 def specs_for_arch(arch: str) -> list[Any]:
     """JIT specifications of every ``arch`` library of ``build.json`` without a prebuilt file (for ahead-of-time
-    warm-up through FlashInfer's ``build_jit_specs``)."""
+    warm-up)."""
     return cake_build.jit_specs(arch)
 
 

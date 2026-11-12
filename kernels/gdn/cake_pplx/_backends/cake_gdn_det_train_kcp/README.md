@@ -5,18 +5,17 @@ DeltaNet) layers with native grouped Q/K heads: forward, backward and
 checkpoint replay over a process group whose ranks each hold fragments of the
 documents of one packed batch, with precise (FP32 / TF32x3-class) cross-rank
 passing of the per-document recurrent state.  Tokens never move between ranks;
-only affine summaries of the state do.  Tracking issue:
-flashinfer-ai/flashinfer#7082.
+only affine summaries of the state do.
 
-The facade `cake_pplx.cake_gdn_det_train_kcp` is a stable FlashInfer API:
-its entry points are `@flashinfer_api` functions.  This package, under
-`flashinfer.experimental.cake`, is its backend.
+The facade `cake_pplx.cake_gdn_det_train_kcp` is a stable API: its entry
+points are `@cake_api` functions.  This package, under `cake_pplx._backends`,
+is its backend.
 SM100 (B200 / GB200) and SM103 (B300 / GB300) are the acceptance architectures
 of the kernels; SM107 (R200) is compiled from the same sources with an nvcc
 that emits `compute_107a`.  The feature does not participate in automatic
 backend selection, autotuning or trace-apply.  Its libraries are loaded
-prebuilt from `aot/` when the package ships them and JIT-built by FlashInfer
-from `build.json` otherwise (see "Layout of this package").  The package
+prebuilt from `aot/` when the package ships them and JIT-built by the
+package's JIT shim from `build.json` otherwise (see "Layout of this package").  The package
 imports nothing from the KDA training package and reads no environment
 variable.
 
@@ -27,7 +26,7 @@ variable.
 
 - This package (`cake_pplx._backends.cake_gdn_det_train_kcp`) and its
   facade `cake_pplx.cake_gdn_det_train_kcp` are the deterministic (`det`)
-  mode only.  Every public name carries the mode word (FlashInfer #8928):
+  mode only.  Every public name carries the mode word:
   `cake_gdn_det_kcp` (the autograd entry), `CakeGDNDetKcp<Noun>` (the types,
   the autograd class `CakeGDNDetKcpFunction`) and
   `cake_gdn_det_train_kcp_<verb>` (the other functions).  No entry takes a
@@ -82,16 +81,12 @@ environment variable selects anything.
 
 ### Names
 
-The package moved from `flashinfer.experimental.cake_gdn_det_train_kcp` and
-its names took the mode-word scheme of FlashInfer #8928.  The former names and
-the former path were removed with no alias (they fail at import), as were the
-earlier no-det names (`flashinfer.gdn_train`,
-`flashinfer.experimental.cake_gdn_train`, `chunk_gdn_kcp`, `KcpContext`,
-`kcp_partition`, ...).
+The names follow the mode-word scheme.  The former names were removed with no
+alias (they fail at import), as were the earlier no-det names (`gdn_train`,
+`cake_gdn_train`, `chunk_gdn_kcp`, `KcpContext`, `kcp_partition`, ...).
 
 | former name | name |
 |---|---|
-| `flashinfer.experimental.cake_gdn_det_train_kcp` | `cake_pplx._backends.cake_gdn_det_train_kcp` |
 | `chunk_gdn_det_kcp` | `cake_gdn_det_kcp` |
 | `ChunkGDNDetFunctionKcp` | `CakeGDNDetKcpFunction` |
 | `chunk_gdn_det_fwd_kcp` / `chunk_gdn_det_bwd_kcp` | `cake_gdn_det_train_kcp_forward` / `cake_gdn_det_train_kcp_backward` |
@@ -551,7 +546,7 @@ not the whole grid.
 |---|---|
 | `build.json` | the build manifest (schema `cake-build/1`): one entry per `<program>_<arch>` library with its sources, digests and nvcc flags; the only record of what the package compiles |
 | `build.test.json` | the test-only programs in the same form; never read by the shipped route |
-| `cake_build.py` | the manifest loader (byte-identical across the Cake packages): prebuilt `aot/` library first, FlashInfer JIT otherwise |
+| `cake_build.py` | the manifest loader (byte-identical across the Cake packages): prebuilt `aot/` library first, the JIT shim otherwise |
 | `cake_jit.py` | the registry: the records of every program (library stem, architectures, selection and grid rules, argument plan) |
 | `cake_backend.py` | device -> architecture map, library loading, the generic launch of one record |
 | `cake_kcp_plan.py`, `cake_tables.py`, `cake_bytes.py` | partition, context, ownership and halo plans, the CPU tables, the byte queries |

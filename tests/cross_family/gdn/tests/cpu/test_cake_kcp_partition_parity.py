@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright (c) 2026 by FlashInfer team
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION
 """The four KCP packages build the same partition and the same base context.
 
 The deterministic and the non-deterministic KDA and GDN KCP packages each keep

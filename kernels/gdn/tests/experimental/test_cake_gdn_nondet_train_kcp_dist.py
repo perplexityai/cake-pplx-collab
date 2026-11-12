@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -77,7 +77,7 @@ sub-group of its ``W`` lowest ranks; the other ranks skip the row).  Environment
 ``N_REPEAT`` above 3), ``KCP_TEST_PORT_DIR`` (the Slurm rendezvous port file), ``KCP_TEST_DEBUG_RETAINED``.
 Operands come from the seeded CPU generator (bitwise identical on every rank and host).  The suite imports this package
 and the deterministic package through ``tests/cake/test_helpers/cake_package.py`` and
-nothing else from flashinfer (the facade's tests live in ``test_cake_gdn_nondet_train_kcp_api.py``).
+nothing else from cake_pplx (the facade's tests live in ``test_cake_gdn_nondet_train_kcp_api.py``).
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ STAGES = ("int1", "int3", "int4")
 
 
 def _reference():
-    """The FP64 reference: the FlashInfer test helper (read only), else the session harness on PYTHONPATH."""
+    """The FP64 reference: the in-tree test helper (read only), else the session harness on PYTHONPATH."""
     try:
         from tests.experimental.test_helpers import (
             cake_gdn_det_train_kcp_reference as ref,
@@ -3048,7 +3048,7 @@ class _Slurm:
         print(
             f"[kcp_train_dist] init timeout {WORLD_TIMEOUT_S} s; "
             f"rank {self.rank}/{self.world} local {local} host {socket.gethostname()} device {self.device} "
-            f"{torch.cuda.get_device_name(self.device)} flashinfer={_mod().__file__} MASTER={os.environ.get('MASTER_ADDR')}:{os.environ.get('MASTER_PORT')}",
+            f"{torch.cuda.get_device_name(self.device)} package={_mod().__file__} MASTER={os.environ.get('MASTER_ADDR')}:{os.environ.get('MASTER_PORT')}",
             flush=True,
         )
 

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ packed row (q / k / v as head views of one row that requires grad).
 * PyTorch's deterministic algorithms (strict and ``warn_only``) change nothing on the packed row and under
   checkpointing either: no alert, no warning, the same bits.
 
-The suite names its package through the shared alias helper and imports nothing else from flashinfer.
+The suite names its package through the shared alias helper and imports nothing else from cake_pplx.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ ROUTES = ("host", "device", "equal", "packed")
 SEQ_LENS = (300, 77, 640)
 EQUAL = (2, 512)  # (batch, tokens per sequence)
 HEADS = (2, 6)  # the value-head group of three of the source issue (#7074)
-# The host-time bound of one steady-state forward call and one backward call (FlashInfer #7914: a module's
+# The host-time bound of one steady-state forward call and one backward call (the target: a module's
 # per-call host cost under fully_shard of about 1 ms), on the issue's longest pack.
 HOST_CALL_MAX_US = 1000.0
 HOST_LAYOUT = (131071, 87531, 43385)
@@ -378,7 +378,7 @@ def test_steady_state_calls_do_not_synchronize(
 @pytest.mark.parametrize("route", ROUTES)
 def test_checkpointed_forward_retains_no_bytes(route, initial, device) -> None:
     # non-reentrant checkpointing drops the saved tensors of the forward: on every route the checkpointed forward
-    # keeps nothing on the device beyond its output (and final state) (FlashInfer #7039), and its backward replays it
+    # keeps nothing on the device beyond its output (and final state), and its backward replays it
     problem = _Problem(route, device, seed=19, initial=initial)
     for _ in range(2):  # the libraries, the tables and the workspaces of this layout
         problem.step(problem.leaves(), checkpointed=True)

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ from tests.cake.test_helpers.cake_package import cake_package
 
 FACADE = "cake_pplx.cake_gdn_nondet_train"
 PACKAGE = "cake_pplx._backends.cake_gdn_nondet_train"
-# The module path before the rename (FlashInfer #8928): nothing imports from it any more.
+# The module path before the mode-word rename: nothing imports from it any more.
 OLD_MODULE = "cake_pplx._backends.cake_gdn_train"
 HEAD_DIM = 128
 

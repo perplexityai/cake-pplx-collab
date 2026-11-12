@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -78,7 +78,7 @@ gradient row the tail writes (CakeGDNDetPackedFunction), the bits of the head vi
 non-leaf row with another consumer, a row without a gradient, and a checkpoint (non-reentrant and reentrant) with the
 eager call's bits.
 
-The suite names its package once, through the shared alias helper, and imports nothing else from flashinfer: a build
+The suite names its package once, through the shared alias helper, and imports nothing else from cake_pplx: a build
 that vendors the package under another import path runs it unchanged after pointing the ``PACKAGES`` entry at its
 own package.
 """
@@ -387,7 +387,7 @@ FWD_SPLIT_STAGES = ["wy_a", "wy_tc2", "fwd_summary", "fwd_fused", "stitch", "fwd
 FWD_SPLIT_A_STAGES = ["wy_a", "fwd_summary_a", "fwd_ho_a", "stitch", "fwd_ho_a"]
 # The route switches the non-deterministic package's tests set (by name, where this package has them) to hold that
 # package's prep forward to this package's bits, with their off values: with all three off this package runs the prep
-# forward (the prep, the WY stage, fwd_ho) on every call, as FI main does.
+# forward (the prep, the WY stage, fwd_ho) on every call.
 PREP_FORWARD_OFF = (
     ("FWD_A_ARCHS", ()),
     ("FWD_SPLIT_ARCHS", ()),
@@ -633,7 +633,7 @@ def _tc2(heads) -> str:
     return cake_chain.dhu_tc2_stage(_current_arch(), *heads)
 
 
-# The package exports the mode-word names of FlashInfer #8928 only; the former names (with and without det) are
+# The package exports the mode-word names only; the former names (with and without det) are
 # removed (no alias), and the planner and table helpers stay public in ``cake_chain`` only.
 DET_NAMES = (
     "CakeGDNDetFunction",
@@ -3157,7 +3157,7 @@ def test_unaligned_qk_take_the_plain_prep(device, monkeypatch) -> None:
     _assert_bitwise(shifted, aligned, OUTPUT_NAMES)
 
 
-# The operands of the unaligned-operand test: row -> (operand, offset in elements past a 16-byte boundary).  FI main's
+# The operands of the unaligned-operand test: row -> (operand, offset in elements past a 16-byte boundary).  The base
 # rows (v, q / k 2 bytes, do) run on every route, the prep forward included; q / k 8 bytes (which the plain prep reads
 # in place), g, beta and the initial state run on the forwards on wy_a's A.
 UNALIGNED_ROWS = {
@@ -3193,8 +3193,8 @@ def test_unaligned_operands_take_an_aligned_copy(
     # rows of v / g / beta / do and of the initial state (the split forward's stitch), the 16-byte tensor-map rows of
     # wy_a's q / k and the plain prep's 8-byte q / k loads would fault there (misaligned address); the package copies
     # such an operand to an aligned buffer, so the run gives the bits of the aligned one (the final state and the
-    # initial state's gradient included).  "prep": the switches of PREP_FORWARD_OFF off (FI main's forward: the prep,
-    # the WY stage, fwd_ho) with FP32 beta, as FI main's test ran; the forwards on wy_a's A ("a" and both split forms)
+    # initial state's gradient included).  "prep": the switches of PREP_FORWARD_OFF off (the prep forward: the prep,
+    # the WY stage, fwd_ho) with FP32 beta; the forwards on wy_a's A ("a" and both split forms)
     # decide their route before any copy (an address never moves a call off it: q / k 8 bytes past the boundary, which
     # the plain prep reads in place, take an aligned copy and stay on the route)
     name, offset = {**UNALIGNED_ROWS, **UNALIGNED_A_ROWS}[row]
@@ -6117,8 +6117,8 @@ def test_fwd_routes_leave_the_other_calls_on_the_main_launches(
 ) -> None:
     # on a layout whose FP32-beta calls take a forward on wy_a's A, a call that misses one of its conditions (BF16
     # beta, q / k the caller normalized, the device-built table, a value-head group of four, a prep / scan_config /
-    # segment_chunks pin) launches exactly what the package launches with the switches of PREP_FORWARD_OFF off (FI
-    # main's forward: the prep, the WY stage, fwd_ho), with the same bits: a route check within this version
+    # segment_chunks pin) launches exactly what the package launches with the switches of PREP_FORWARD_OFF off (the
+    # prep forward: the prep, the WY stage, fwd_ho), with the same bits: a route check within this version
     heads, seq_lens = _fwd_route(route, device, monkeypatch)
     beta_dtype, l2norm, table_route, group_of_four, pins = MAIN_ROUTE_ROWS[row]
     if group_of_four:
@@ -6139,7 +6139,7 @@ def test_fwd_routes_leave_the_other_calls_on_the_main_launches(
 def test_the_route_switches_give_the_prep_forward(route, device, monkeypatch) -> None:
     # PREP_FORWARD_OFF as the non-deterministic package's tests apply it: after an unpinned call has cached the
     # layout's tables (the switches are in their key), the switches off make an FP32-beta call of the route's layout
-    # run the prep forward (FI main's forward), with the bits of the same call under a prep pin
+    # run the prep forward, with the bits of the same call under a prep pin
     heads, seq_lens = _fwd_route(route, device, monkeypatch)
     inputs = _inputs(seq_lens, heads, torch.float32, device, seed=463)
     stages = _record_launches(monkeypatch)

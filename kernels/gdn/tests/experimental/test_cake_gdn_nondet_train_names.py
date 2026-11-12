@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -10,7 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The mode names (FlashInfer #8928) of the two NON-DETERMINISTIC GDN facades, ``cake_pplx.cake_gdn_nondet_train``
+The mode names of the two NON-DETERMINISTIC GDN facades, ``cake_pplx.cake_gdn_nondet_train``
 (single rank) and ``cake_pplx.cake_gdn_nondet_train_kcp`` (context-parallel), through the shared check
 ``tests/cake/test_helpers/cake_mode_names.assert_cake_mode_module``, with no exemption: every public name carries the word
 ``nondet`` right after the op, no public callable binds ``deterministic=`` at its signature, the facade, the
@@ -67,7 +67,7 @@ KCP_FORWARDS = (
 )
 KCP_OLD_MODULES = (
     "cake_pplx.cake_gdn_train_kcp",
-    "cake_pplx._backends.cake_gdn_train_kcp",  # FlashInfer's flashinfer.experimental.cake_gdn_train_kcp
+    "cake_pplx._backends.cake_gdn_train_kcp",
 )
 KCP_OLD_NAMES = (
     "chunk_gdn_kcp",

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ The registry (``cake_jit``), the loader glue (``cake_backend``) and the manifest
 GDN KCP training package ``cake_pplx._backends.cake_gdn_nondet_train_kcp``: the package contract that needs no device --
 ``build.json`` (schema ``cake-build/1``, the shipped programs, never a test-only one, digests over the listed sources),
 ``build.test.json`` (the test-only programs), the program names against the identity rule (prefix ``cake_gdn_train``,
-never a library name of the deterministic twin), the records against the frozen kernel ABIs, the loader's independence
-from ``flashinfer.jit`` (the prebuilt route) and the package's independence from the KDA training package.  The pinned
+never a library name of the deterministic twin), the records against the frozen kernel ABIs, the loader's standalone
+import by file path and the package's independence from the KDA training package.  The pinned
 bytes of the loader and header against the KDA family's package are the cross-family check of
 ``tests/cross_family/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp_build.py``.  Nothing is built or launched.  The generated files (``cake_build.py``, ``build.json``, ``build.test.json``, ``csrc/*.cu``) come
 from the export render: every test that needs one of them skips while it is absent.
@@ -259,7 +259,7 @@ def _manifest_rendered() -> bool:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The package's independence: no KDA training import, no environment read, importable without flashinfer.jit
+# The package's independence: no KDA training import, no environment read, a loader importable on its own
 
 
 def _python_files() -> list[Path]:
@@ -283,8 +283,8 @@ def test_the_package_imports_nothing_from_the_kda_training_package() -> None:
 
 
 def test_the_package_reads_no_environment_variable() -> None:
-    # the JIT shim ``_cake_pplx_jit.py`` stands in for ``flashinfer.jit`` (outside the package upstream): like it, it
-    # reads the toolkit and cache locations (CUDA_HOME, CAKE_PPLX_CACHE_DIR), never a kernel control
+    # the JIT shim ``_cake_pplx_jit.py`` is the exception: it reads the toolkit and cache locations (CUDA_HOME,
+    # CAKE_PPLX_CACHE_DIR), never a kernel control
     offenders = []
     for path in _python_files():
         if path.name == "_cake_pplx_jit.py":
@@ -301,18 +301,15 @@ def test_the_package_reads_no_environment_variable() -> None:
     assert not offenders, offenders
 
 
-def test_the_loader_imports_standalone_without_flashinfer() -> None:
-    """The vendorable form: ``cake_build.py`` loaded by file path from the package directory, in a process where
-    ``flashinfer`` cannot be imported, reads the manifest (the prebuilt route imports nothing from FlashInfer)."""
+def test_the_loader_imports_standalone_by_file_path() -> None:
+    """The vendorable form: ``cake_build.py`` loaded by file path from the package directory reads the manifest."""
     _cake_build()
     if not (PACKAGE_DIR / "build.json").is_file():
         pytest.skip("build.json is not rendered into the package yet")
     code = (
-        "import importlib.util, sys\n"
-        "sys.modules['flashinfer'] = None\n"
+        "import importlib.util\n"
         f"spec = importlib.util.spec_from_file_location('vendored_cake_build', {str(PACKAGE_DIR / 'cake_build.py')!r})\n"
         "b = importlib.util.module_from_spec(spec); spec.loader.exec_module(b)\n"
-        "assert sys.modules['flashinfer'] is None\n"
         "m = b.manifest(); assert m['schema'] == 'cake-build/1'\n"
         "print('ok', m['package'])\n"
     )

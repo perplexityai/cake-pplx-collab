@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ counters must break ``dq`` / ``dk``, stale workspace slots must not).  The packe
 row that requires grad give the bits of the views route through one packed gradient row (a leaf or a non-leaf row,
 other consumers of the row, a row without a gradient, checkpoint replay).
 
-The suite names its packages through the shared alias helper and imports nothing else from flashinfer.  The tests of
+The suite names its packages through the shared alias helper and imports nothing else from cake_pplx.  The tests of
 the facade ``cake_pplx.cake_gdn_nondet_train`` and of the old module path live in
 ``test_cake_gdn_nondet_train_api.py``.
 """
@@ -2235,7 +2235,7 @@ DET_NAMES = (
     "cake_gdn_det_train_forward",
     "cake_gdn_det_train_backward",
 )
-# The names before the rename (FlashInfer #8928): none of them resolves any more.
+# The names before the mode-word rename: none of them resolves any more.
 OLD_NAMES = (
     "chunk_gated_delta_rule",
     "ChunkGatedDeltaRuleFunction",

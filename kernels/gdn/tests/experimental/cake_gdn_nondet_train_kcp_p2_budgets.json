@@ -12,7 +12,7 @@
   "declared_utc": "2026-10-23T17:11:14Z"
  },
  "measured_at": {
-  "fi_head": "11cbbc4d272aa936d20321defdcc5c8c79584b40",
+  "source_head": "11cbbc4d272aa936d20321defdcc5c8c79584b40",
   "nd_package_tree": "25cd8146e4ed90236b77948217887e69ca196997",
   "det_package_tree": "5d027a0af02b8870e2df65986d957932de3b9dab",
   "dist_test_blob": "89dada6e55436cd19cdb5104c702d762de918a06",

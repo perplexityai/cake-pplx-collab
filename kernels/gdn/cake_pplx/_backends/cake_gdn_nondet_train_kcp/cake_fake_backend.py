@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -72,8 +72,7 @@ own orchestration (:mod:`.cake_kcp`) runs the same programs on NCCL.
 Segment plans with ``P > 1`` are not emulated here (build the contexts with
 ``sm_count=1`` for ``P = 1``); the programs themselves take any segment list.
 
-The dictionary collective is adapted from ``tests/experimental/test_helpers/cake_kcp_fake_backend.py`` at FlashInfer
-13d7fcf4041635f5b7f573bb0dbab23570ae1034 (sha256 eb733b4e8e15556f023379332939454c4fa5b15a2d258168e3c9daa510a4b006).
+The dictionary collective follows the fake KCP backend of the KDA KCP tests.
 """
 
 from __future__ import annotations
