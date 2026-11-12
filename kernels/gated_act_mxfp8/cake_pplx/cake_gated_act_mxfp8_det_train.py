@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,14 +35,13 @@ Naming rules:
    ``det``; the module constants ``ARCHES`` and
    ``SUPPORTED_COMPUTE_CAPABILITIES`` are exempt.  The backend package is
    ``cake_pplx._backends.cake_gated_act_mxfp8_det_train``, imported
-   on first use (``import flashinfer`` does not load it).
+   on first use.
 2. No entry point takes a ``deterministic`` keyword.  No call alerts under
    ``torch.use_deterministic_algorithms(True)``.
-3. The former names are gone, with no alias or shim: ``flashinfer.gated_act_mxfp8``
+3. The former names are gone, with no alias or shim: ``cake_pplx.gated_act_mxfp8``
    fails at import, and ``silu_and_mul_mxfp8_quantize`` /
-   ``silu_and_mul_mxfp8_quantize_backward`` are attributes of neither
-   ``flashinfer`` nor this module.  The fused SwiGLU + MXFP8 section of
-   ``docs/api/quantization.rst`` maps each former name to its new name.
+   ``silu_and_mul_mxfp8_quantize_backward`` are not attributes of this
+   module.
 
 Usage::
 
@@ -100,11 +99,13 @@ def __getattr__(name: str) -> Any:
 
 @functools.cache
 def cake_gated_act_mxfp8_det_train_register_custom_ops():
-    """The two operations as registered custom ops (``torch.ops.flashinfer``),
-    each running the Cake backend."""
+    """The two operations as custom-op functions (op names ``cake_pplx::...``),
+    each running the Cake backend.  The registration wrappers are no-ops, so
+    nothing is added to ``torch.ops``; the result's ``forward`` and
+    ``backward`` attributes are the functions."""
 
     @register_custom_op(
-        "flashinfer::cake_gated_act_mxfp8_det_train_forward",
+        "cake_pplx::cake_gated_act_mxfp8_det_train_forward",
         mutates_args=(),
     )
     def _forward(
@@ -116,7 +117,7 @@ def cake_gated_act_mxfp8_det_train_register_custom_ops():
             gated_input, rowwise=rowwise, colwise=colwise
         )
 
-    @register_fake_op("flashinfer::cake_gated_act_mxfp8_det_train_forward")
+    @register_fake_op("cake_pplx::cake_gated_act_mxfp8_det_train_forward")
     def _fake_forward(
         gated_input: torch.Tensor,
         rowwise: bool,
@@ -130,7 +131,7 @@ def cake_gated_act_mxfp8_det_train_register_custom_ops():
         )
 
     @register_custom_op(
-        "flashinfer::cake_gated_act_mxfp8_det_train_backward",
+        "cake_pplx::cake_gated_act_mxfp8_det_train_backward",
         mutates_args=(),
     )
     def _backward(
@@ -143,7 +144,7 @@ def cake_gated_act_mxfp8_det_train_register_custom_ops():
             gated_input, grad_output, rowwise=rowwise, colwise=colwise
         )
 
-    @register_fake_op("flashinfer::cake_gated_act_mxfp8_det_train_backward")
+    @register_fake_op("cake_pplx::cake_gated_act_mxfp8_det_train_backward")
     def _fake_backward(
         gated_input: torch.Tensor,
         grad_output: torch.Tensor,

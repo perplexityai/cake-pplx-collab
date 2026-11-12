@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -86,7 +86,7 @@ CONSTANTS = {
 }
 NAMESPACES = {"facade": facade, "backend": backend}
 # The modules and packages the family had before the mode-in-name rule, under
-# the ``cake_pplx`` prefix (``flashinfer.<module>`` -> ``cake_pplx.<module>``).
+# the ``cake_pplx`` prefix.
 OLD_MODULES = ("cake_pplx.gated_act_mxfp8", "cake_pplx.cake_gated_act_mxfp8_backend")
 # The names the facade (and, for the two entry points, the top level) had.
 OLD_FACADE_NAMES = (

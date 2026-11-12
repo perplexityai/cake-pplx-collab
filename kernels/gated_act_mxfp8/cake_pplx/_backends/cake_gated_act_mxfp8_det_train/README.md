@@ -9,10 +9,10 @@ from `grad_output` `[M, K]`.  Each value is rounded to BF16 and quantized to E4M
 
 The facade `cake_pplx.cake_gated_act_mxfp8_det_train` is a stable API.  This backend package
 is experimental, and its internal names may change.  The facade imports the backend on first
-use; `import flashinfer` does not load it.  The supported architectures are SM100
+use.  The supported architectures are SM100
 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200).  Another device raises `RuntimeError`.
 The package loads its libraries prebuilt from `aot/` when a builder compiled them.  Otherwise
-FlashInfer JIT-builds them from the sources and flags that `build.json` records.  The package
+the package JIT-builds them from the sources and flags that `build.json` records.  The package
 reads no environment variable.
 
 ## Usage
@@ -35,10 +35,12 @@ if is_cake_gated_act_mxfp8_det_train_supported(gated_input.device):
     )
 ```
 
-`cake_gated_act_mxfp8_det_train_register_custom_ops()` registers the two entries as
-`torch.ops.flashinfer.cake_gated_act_mxfp8_det_train_forward` and
-`torch.ops.flashinfer.cake_gated_act_mxfp8_det_train_backward`, with fake ops for
-`torch.compile`.  Their signatures are `(gated_input, rowwise, colwise)` and
+`cake_gated_act_mxfp8_det_train_register_custom_ops()` returns the two entries as the
+`forward` and `backward` attributes of a namespace, under the op names
+`cake_pplx::cake_gated_act_mxfp8_det_train_forward` and
+`cake_pplx::cake_gated_act_mxfp8_det_train_backward`, with fake versions.  The
+registration wrappers in this package are no-ops, so nothing is added to `torch.ops`.
+Their signatures are `(gated_input, rowwise, colwise)` and
 `(gated_input, grad_output, rowwise, colwise)`.  The facade also exposes `ARCHES` and
 `SUPPORTED_COMPUTE_CAPABILITIES`.  The backend package exposes the forward, backward and
 support-check entries too.  It also exposes `cake_gated_act_mxfp8_det_train_check_inputs`,
