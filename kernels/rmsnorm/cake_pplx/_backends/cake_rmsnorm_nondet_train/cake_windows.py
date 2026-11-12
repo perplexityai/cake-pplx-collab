@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -2112,23 +2112,23 @@ scheduling).  On sm_103a from T 10239 to 65536 on ``bwd_h4096``, from T 24575 to
 on ``bwd_h6144`` and in every sm_107a window its build cuts the chunk table for more
 slots per SM than the grid has CTAs (8 and 6 per SM on sm_103a; 4 per SM on sm_107a, 8
 on ``bwd_h4096``): more, shorter chunks, the grid unchanged.  On GB300 it took 0.84x to
-0.99x the time of the programs FlashInfer e14ddfd9 runs there, at the sampled ``T`` of
+0.99x the time of the programs this package's previous version runs there, at the sampled ``T`` of
 those windows (0.938x to 0.969x at T 32768 and 65536 on ``bwd_h4096`` and
 ``bwd_h6144``), with a ``dw`` error (relative L2 or worst element, the larger over six
-input families) of at most 1.0x that of the deterministic package's program at
-FlashInfer 2e989556, except 1.2x at T 98304 on the residual routes, equal to the twosum
+input families) of at most 1.0x that of the deterministic package's program in
+its earlier version, except 1.2x at T 98304 on the residual routes, equal to the twosum
 single kernel's there.  From T 10239 to 32768 on ``bwd_h4096`` and from T 24575 to
 32768 on ``bwd_h6144`` it replaces the det pairs that ran there before: on GB300 its
 backward took 0.940x to 0.959x and 0.972x to 0.980x their time at the sampled ``T``,
 with a ``dw`` error of at most 0.979x and 0.907x that of the deterministic package's
-program at FlashInfer 2e989556 (on ``bwd_h4096`` the ``dw`` gate has not sampled T
+program in its earlier version (on ``bwd_h4096`` the ``dw`` gate has not sampled T
 10240 yet; it passes at T 8192 and 12288).  On R200 with 212 SMs it
 took 0.87x to 0.90x (``bwd_h6144``) and 0.78x to 0.82x (the residual routes) the time of
-the twosum single kernel FlashInfer e14ddfd9 runs there, 0.96x to 0.98x that of the
+the twosum single kernel this package's previous version runs there, 0.96x to 0.98x that of the
 deterministic package's det pair on ``bwd_h4096`` and 0.93x to 0.95x that of the det
 pair (up to T 49152) and the kblock single kernel on ``bwd_w32_h5120``, at the sampled
 ``T`` of those windows, with a ``dw`` error of at most 1.08x that of the deterministic
-package's program at FlashInfer 2e989556, except 1.13x at T 8192 on
+package's program in its earlier version, except 1.13x at T 8192 on
 ``bwd_residual_h6144``, equal to the twosum single kernel's there.
 A window marked ``(det pair)`` runs the deterministic package's main kernel and
 fixed-order dw reduce, rendered into this package; on ``bwd_h5120`` (both weight dtypes)
@@ -2157,26 +2157,26 @@ from T 13608 to 58880, ``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight 
 pair) and ``bwd_h6144`` from T 5632 to 42496 run the det pair the
 deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536 the kblock
 single kernel of its window above (FP32 sums of 8-row blocks kept as TwoSum pairs; the
-det pair that package ran there at FlashInfer 2e989556 reaches 0.883 of the ``dw``
+det pair that package ran there in its earlier version reaches 0.883 of the ``dw``
 budget at T 59392), for ``dw`` accuracy: like the twosum windows of sm_100a
 ``bwd_h4096`` and ``bwd_residual_h6144`` above, they replace single kernels whose FP32
 ``dw`` sums over windows of 16 steps put their worst ``dw`` error at 1.10x to 2.30x the
 deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200
 (BF16 weight).  On sm_100a ``bwd_h1536`` from T 36352 (the deterministic package's own
 edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run the det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernels FlashInfer
-e14ddfd9 runs there exceed 1.1x the ``dw`` error of the deterministic package's program
-at FlashInfer 2e989556 (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
+deterministic package runs there, for ``dw`` accuracy: the single kernels this
+package's previous version runs there exceed 1.1x the ``dw`` error of the deterministic package's program
+in its earlier version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
 1.012x to 1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time,
 against 1.094x to 1.109x for the twosum single kernel that ran on ``bwd_h1536`` before.
 On sm_100a ``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernel FlashInfer
-e14ddfd9 runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
+deterministic package runs there, for ``dw`` accuracy: the single kernel this
+package's previous version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
 T 45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
 sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs the FP32-weight det pairs the
-deterministic package ran there at FlashInfer 2e989556, with that package's split at
+deterministic package ran there in its earlier version, with that package's split at
 T 48640; from T 9216 for speed: on GB300 they took 0.961x to 0.989x the time of the
-kblock single kernel FlashInfer main runs there, at the 6 sampled ``T`` from 10240 to
+kblock single kernel this package's previous version runs there, at the 6 sampled ``T`` from 10240 to
 65536.  These det pair windows do not follow the deterministic
 package's switch to its compensated programs on devices with fewer SMs than its
 ``ACCURACY_MIN_SMS`` (148 on sm_100a).  On sm_107a ``bwd_h4096`` from T 24064 to 24576
@@ -2189,8 +2189,8 @@ median FP64 error over 5 repeats at T 14928 to 32768 on R200 with 212 SMs.  From
 to 19968 that det pair's ``dw`` error exceeds the FP32 eager reduction's at some sampled
 ``T``, within the ``dw`` budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536
 runs the FP32-weight twin of the compensated det pair of ``bwd_h4096`` from T 24064 as
-well, the program the deterministic package runs above T 24064 at FlashInfer 2e989556,
-for ``dw`` accuracy: the single kernels FlashInfer e14ddfd9 runs on both routes there
+well, the program the deterministic package runs above T 24064 in its earlier version,
+for ``dw`` accuracy: the single kernels this package's previous version runs on both routes there
 put their worst ``dw`` error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32
 weight) that package's median FP64 error over 5 repeats at T 40960 to 65536 on R200
 (3 seeds), and on R200 the det pair took 0.84x to 0.86x the time of that FP32-weight
@@ -2246,7 +2246,7 @@ from T 17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic
 package's column-task program of the route in its ticket form (the form whose ``dx``
 and ``dw`` the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of
 0.73x to 0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(FI bench, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
+(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
 sampled T up to those token counts had a backward call, a forward and backward call or
 a checkpointed step (two forward calls and a backward call) slower than with the
 programs it replaces beyond the run-to-run band in all its runs.  Above them the det
@@ -2373,23 +2373,23 @@ scheduling).  On sm_103a from T 10239 to 65536 on ``bwd_h4096``, from T 24575 to
 on ``bwd_h6144`` and in every sm_107a window its build cuts the chunk table for more
 slots per SM than the grid has CTAs (8 and 6 per SM on sm_103a; 4 per SM on sm_107a, 8
 on ``bwd_h4096``): more, shorter chunks, the grid unchanged.  On GB300 it took 0.84x to
-0.99x the time of the programs FlashInfer e14ddfd9 runs there, at the sampled ``T`` of
+0.99x the time of the programs this package's previous version runs there, at the sampled ``T`` of
 those windows (0.938x to 0.969x at T 32768 and 65536 on ``bwd_h4096`` and
 ``bwd_h6144``), with a ``dw`` error (relative L2 or worst element, the larger over six
-input families) of at most 1.0x that of the deterministic package's program at
-FlashInfer 2e989556, except 1.2x at T 98304 on the residual routes, equal to the twosum
+input families) of at most 1.0x that of the deterministic package's program in
+its earlier version, except 1.2x at T 98304 on the residual routes, equal to the twosum
 single kernel's there.  From T 10239 to 32768 on ``bwd_h4096`` and from T 24575 to
 32768 on ``bwd_h6144`` it replaces the det pairs that ran there before: on GB300 its
 backward took 0.940x to 0.959x and 0.972x to 0.980x their time at the sampled ``T``,
 with a ``dw`` error of at most 0.979x and 0.907x that of the deterministic package's
-program at FlashInfer 2e989556 (on ``bwd_h4096`` the ``dw`` gate has not sampled T
+program in its earlier version (on ``bwd_h4096`` the ``dw`` gate has not sampled T
 10240 yet; it passes at T 8192 and 12288).  On R200 with 212 SMs it
 took 0.87x to 0.90x (``bwd_h6144``) and 0.78x to 0.82x (the residual routes) the time of
-the twosum single kernel FlashInfer e14ddfd9 runs there, 0.96x to 0.98x that of the
+the twosum single kernel this package's previous version runs there, 0.96x to 0.98x that of the
 deterministic package's det pair on ``bwd_h4096`` and 0.93x to 0.95x that of the det
 pair (up to T 49152) and the kblock single kernel on ``bwd_w32_h5120``, at the sampled
 ``T`` of those windows, with a ``dw`` error of at most 1.08x that of the deterministic
-package's program at FlashInfer 2e989556, except 1.13x at T 8192 on
+package's program in its earlier version, except 1.13x at T 8192 on
 ``bwd_residual_h6144``, equal to the twosum single kernel's there.
 A window marked ``(det pair)`` runs the deterministic package's main kernel and
 fixed-order dw reduce, rendered into this package; on ``bwd_h5120`` (both weight dtypes)
@@ -2418,26 +2418,26 @@ from T 13608 to 58880, ``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight 
 pair) and ``bwd_h6144`` from T 5632 to 42496 run the det pair the
 deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536 the kblock
 single kernel of its window above (FP32 sums of 8-row blocks kept as TwoSum pairs; the
-det pair that package ran there at FlashInfer 2e989556 reaches 0.883 of the ``dw``
+det pair that package ran there in its earlier version reaches 0.883 of the ``dw``
 budget at T 59392), for ``dw`` accuracy: like the twosum windows of sm_100a
 ``bwd_h4096`` and ``bwd_residual_h6144`` above, they replace single kernels whose FP32
 ``dw`` sums over windows of 16 steps put their worst ``dw`` error at 1.10x to 2.30x the
 deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200
 (BF16 weight).  On sm_100a ``bwd_h1536`` from T 36352 (the deterministic package's own
 edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run the det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernels FlashInfer
-e14ddfd9 runs there exceed 1.1x the ``dw`` error of the deterministic package's program
-at FlashInfer 2e989556 (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
+deterministic package runs there, for ``dw`` accuracy: the single kernels this
+package's previous version runs there exceed 1.1x the ``dw`` error of the deterministic package's program
+in its earlier version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
 1.012x to 1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time,
 against 1.094x to 1.109x for the twosum single kernel that ran on ``bwd_h1536`` before.
 On sm_100a ``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernel FlashInfer
-e14ddfd9 runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
+deterministic package runs there, for ``dw`` accuracy: the single kernel this
+package's previous version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
 T 45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
 sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs the FP32-weight det pairs the
-deterministic package ran there at FlashInfer 2e989556, with that package's split at
+deterministic package ran there in its earlier version, with that package's split at
 T 48640; from T 9216 for speed: on GB300 they took 0.961x to 0.989x the time of the
-kblock single kernel FlashInfer main runs there, at the 6 sampled ``T`` from 10240 to
+kblock single kernel this package's previous version runs there, at the 6 sampled ``T`` from 10240 to
 65536.  These det pair windows do not follow the deterministic
 package's switch to its compensated programs on devices with fewer SMs than its
 ``ACCURACY_MIN_SMS`` (148 on sm_100a).  On sm_107a ``bwd_h4096`` from T 24064 to 24576
@@ -2450,8 +2450,8 @@ median FP64 error over 5 repeats at T 14928 to 32768 on R200 with 212 SMs.  From
 to 19968 that det pair's ``dw`` error exceeds the FP32 eager reduction's at some sampled
 ``T``, within the ``dw`` budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536
 runs the FP32-weight twin of the compensated det pair of ``bwd_h4096`` from T 24064 as
-well, the program the deterministic package runs above T 24064 at FlashInfer 2e989556,
-for ``dw`` accuracy: the single kernels FlashInfer e14ddfd9 runs on both routes there
+well, the program the deterministic package runs above T 24064 in its earlier version,
+for ``dw`` accuracy: the single kernels this package's previous version runs on both routes there
 put their worst ``dw`` error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32
 weight) that package's median FP64 error over 5 repeats at T 40960 to 65536 on R200
 (3 seeds), and on R200 the det pair took 0.84x to 0.86x the time of that FP32-weight
@@ -2507,7 +2507,7 @@ from T 17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic
 package's column-task program of the route in its ticket form (the form whose ``dx``
 and ``dw`` the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of
 0.73x to 0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(FI bench, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
+(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
 sampled T up to those token counts had a backward call, a forward and backward call or
 a checkpointed step (two forward calls and a backward call) slower than with the
 programs it replaces beyond the run-to-run band in all its runs.  Above them the det
@@ -2720,23 +2720,23 @@ scheduling).  On sm_103a from T 10239 to 65536 on ``bwd_h4096``, from T 24575 to
 on ``bwd_h6144`` and in every sm_107a window its build cuts the chunk table for more
 slots per SM than the grid has CTAs (8 and 6 per SM on sm_103a; 4 per SM on sm_107a, 8
 on ``bwd_h4096``): more, shorter chunks, the grid unchanged.  On GB300 it took 0.84x to
-0.99x the time of the programs FlashInfer e14ddfd9 runs there, at the sampled ``T`` of
+0.99x the time of the programs this package's previous version runs there, at the sampled ``T`` of
 those windows (0.938x to 0.969x at T 32768 and 65536 on ``bwd_h4096`` and
 ``bwd_h6144``), with a ``dw`` error (relative L2 or worst element, the larger over six
-input families) of at most 1.0x that of the deterministic package's program at
-FlashInfer 2e989556, except 1.2x at T 98304 on the residual routes, equal to the twosum
+input families) of at most 1.0x that of the deterministic package's program in
+its earlier version, except 1.2x at T 98304 on the residual routes, equal to the twosum
 single kernel's there.  From T 10239 to 32768 on ``bwd_h4096`` and from T 24575 to
 32768 on ``bwd_h6144`` it replaces the det pairs that ran there before: on GB300 its
 backward took 0.940x to 0.959x and 0.972x to 0.980x their time at the sampled ``T``,
 with a ``dw`` error of at most 0.979x and 0.907x that of the deterministic package's
-program at FlashInfer 2e989556 (on ``bwd_h4096`` the ``dw`` gate has not sampled T
+program in its earlier version (on ``bwd_h4096`` the ``dw`` gate has not sampled T
 10240 yet; it passes at T 8192 and 12288).  On R200 with 212 SMs it
 took 0.87x to 0.90x (``bwd_h6144``) and 0.78x to 0.82x (the residual routes) the time of
-the twosum single kernel FlashInfer e14ddfd9 runs there, 0.96x to 0.98x that of the
+the twosum single kernel this package's previous version runs there, 0.96x to 0.98x that of the
 deterministic package's det pair on ``bwd_h4096`` and 0.93x to 0.95x that of the det
 pair (up to T 49152) and the kblock single kernel on ``bwd_w32_h5120``, at the sampled
 ``T`` of those windows, with a ``dw`` error of at most 1.08x that of the deterministic
-package's program at FlashInfer 2e989556, except 1.13x at T 8192 on
+package's program in its earlier version, except 1.13x at T 8192 on
 ``bwd_residual_h6144``, equal to the twosum single kernel's there.
 A window marked ``(det pair)`` runs the deterministic package's main kernel and
 fixed-order dw reduce, rendered into this package; on ``bwd_h5120`` (both weight dtypes)
@@ -2765,26 +2765,26 @@ from T 13608 to 58880, ``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight 
 pair) and ``bwd_h6144`` from T 5632 to 42496 run the det pair the
 deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536 the kblock
 single kernel of its window above (FP32 sums of 8-row blocks kept as TwoSum pairs; the
-det pair that package ran there at FlashInfer 2e989556 reaches 0.883 of the ``dw``
+det pair that package ran there in its earlier version reaches 0.883 of the ``dw``
 budget at T 59392), for ``dw`` accuracy: like the twosum windows of sm_100a
 ``bwd_h4096`` and ``bwd_residual_h6144`` above, they replace single kernels whose FP32
 ``dw`` sums over windows of 16 steps put their worst ``dw`` error at 1.10x to 2.30x the
 deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200
 (BF16 weight).  On sm_100a ``bwd_h1536`` from T 36352 (the deterministic package's own
 edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run the det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernels FlashInfer
-e14ddfd9 runs there exceed 1.1x the ``dw`` error of the deterministic package's program
-at FlashInfer 2e989556 (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
+deterministic package runs there, for ``dw`` accuracy: the single kernels this
+package's previous version runs there exceed 1.1x the ``dw`` error of the deterministic package's program
+in its earlier version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took
 1.012x to 1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time,
 against 1.094x to 1.109x for the twosum single kernel that ran on ``bwd_h1536`` before.
 On sm_100a ``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the
-deterministic package runs there, for ``dw`` accuracy: the single kernel FlashInfer
-e14ddfd9 runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
+deterministic package runs there, for ``dw`` accuracy: the single kernel this
+package's previous version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at
 T 45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
 sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs the FP32-weight det pairs the
-deterministic package ran there at FlashInfer 2e989556, with that package's split at
+deterministic package ran there in its earlier version, with that package's split at
 T 48640; from T 9216 for speed: on GB300 they took 0.961x to 0.989x the time of the
-kblock single kernel FlashInfer main runs there, at the 6 sampled ``T`` from 10240 to
+kblock single kernel this package's previous version runs there, at the 6 sampled ``T`` from 10240 to
 65536.  These det pair windows do not follow the deterministic
 package's switch to its compensated programs on devices with fewer SMs than its
 ``ACCURACY_MIN_SMS`` (148 on sm_100a).  On sm_107a ``bwd_h4096`` from T 24064 to 24576
@@ -2797,8 +2797,8 @@ median FP64 error over 5 repeats at T 14928 to 32768 on R200 with 212 SMs.  From
 to 19968 that det pair's ``dw`` error exceeds the FP32 eager reduction's at some sampled
 ``T``, within the ``dw`` budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536
 runs the FP32-weight twin of the compensated det pair of ``bwd_h4096`` from T 24064 as
-well, the program the deterministic package runs above T 24064 at FlashInfer 2e989556,
-for ``dw`` accuracy: the single kernels FlashInfer e14ddfd9 runs on both routes there
+well, the program the deterministic package runs above T 24064 in its earlier version,
+for ``dw`` accuracy: the single kernels this package's previous version runs on both routes there
 put their worst ``dw`` error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32
 weight) that package's median FP64 error over 5 repeats at T 40960 to 65536 on R200
 (3 seeds), and on R200 the det pair took 0.84x to 0.86x the time of that FP32-weight
@@ -2854,7 +2854,7 @@ from T 17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic
 package's column-task program of the route in its ticket form (the form whose ``dx``
 and ``dw`` the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of
 0.73x to 0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(FI bench, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
+(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
 sampled T up to those token counts had a backward call, a forward and backward call or
 a checkpointed step (two forward calls and a backward call) slower than with the
 programs it replaces beyond the run-to-run band in all its runs.  Above them the det

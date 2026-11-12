@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ entry point takes a ``deterministic`` keyword (passing one raises Python's
 function's backward, when it runs, names ``cake_rmsnorm_det``), or, with
 ``warn_only=True``, warns once and runs this package's backward; the forward,
 the workspace helpers, the route helper and the support query do not consult
-the setting.  The stable, ``@flashinfer_api``-decorated entry points and the
+the setting.  The stable, ``@cake_api``-decorated entry points and the
 full user-facing documentation live in
 :mod:`cake_pplx.cake_rmsnorm_nondet_train`; import that module.
 

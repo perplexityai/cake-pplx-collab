@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,12 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the flashinfer public surface of the Cake fused BF16 RMSNorm
+Tests of the public surface of the Cake fused BF16 RMSNorm
 training kernels (SM100 / SM103 / SM107): the ``cake_pplx.cake_rmsnorm_det_train``
-facade and its re-export from the ``flashinfer`` top-level package.  The
-facade's three entry points are pass-throughs to
+facade.  The facade's three entry points are pass-throughs to
 ``cake_pplx._backends.cake_rmsnorm_det_train``; this module checks that identity
-(same objects at the top level, same bits as the backend) and leaves the
+(same objects on the facade, same bits as the backend) and leaves the
 numerical contract to ``test_cake_rmsnorm_det_train.py``, which imports only the
 backend package.
 """

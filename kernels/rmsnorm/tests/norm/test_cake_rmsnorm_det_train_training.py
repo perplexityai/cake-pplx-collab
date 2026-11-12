@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ deterministic ``dw`` reduction): what a training step does around the kernels.
   ``node_exclusive`` test): the forward and backward finish while the rank's
   all-reduce kernel is resident and waiting for its delayed peer, with bitwise
   the results of the run without NCCL.
-* The package imports under another name with ``flashinfer`` blocked.
+* The package imports under another name.
 
 The cases are the per-head ``[T, 24, 256]`` view of a ``[T, 24, 512]`` buffer
 (hidden 256), ``[T, 5120]`` rows (hidden 5120) and the fused residual add on
@@ -43,7 +43,7 @@ the reason.
 
 Like ``test_cake_rmsnorm_det_train.py`` this suite names its package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer, so the vendored-package gate runs it against a vendored copy.
+``cake_pplx``, so the vendored-package gate runs it against a vendored copy.
 """
 
 from __future__ import annotations
@@ -880,14 +880,8 @@ def test_forward_backward_beside_a_resident_nccl_all_reduce(tmp_path: Path) -> N
 
 _STANDALONE = textwrap.dedent(
     """
-    import importlib, importlib.abc, json, sys
+    import importlib, json, sys
     root, name, paths, subs = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), json.loads(sys.argv[4])
-    class Block(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path=None, target=None):
-            if fullname == "flashinfer" or fullname.startswith("flashinfer."):
-                raise ImportError("flashinfer is blocked: " + fullname)
-            return None
-    sys.meta_path.insert(0, Block())
     sys.path[:0] = [root] + paths
     package = importlib.import_module(name)
     for sub in subs:
@@ -896,7 +890,7 @@ _STANDALONE = textwrap.dedent(
     build = sys.modules[name + ".cake_build"]
     assert jit.MODULES and set(package.__all__) <= set(dir(package))
     library = next(iter(build.libraries_by_name()))
-    # The copy's own JIT shim imported above with flashinfer blocked; take it away to
+    # The copy's own JIT shim imported above; take it away to
     # reach the path of a library that has neither a prebuilt file nor a JIT.
     sys.modules[name + "._cake_pplx_jit"] = None
     try:
@@ -905,18 +899,15 @@ _STANDALONE = textwrap.dedent(
         assert "is not prebuilt" in str(exc) and "the cake_pplx JIT shim is not available" in str(exc), exc
     else:
         raise AssertionError("a library without a prebuilt file loaded without the JIT shim")
-    leaked = sorted(m for m in sys.modules if m == "flashinfer" or m.startswith("flashinfer."))
-    assert not leaked, leaked
     print("STANDALONE", name, "modules", len(jit.MODULES), "libraries", len(build.libraries_by_name()))
     """
 )
 
 
 def test_the_package_imports_standalone_under_another_name(tmp_path: Path) -> None:
-    """A copy of the package (without ``aot/``) under another name imports in a fresh interpreter with
-    ``flashinfer`` blocked: every submodule (its own JIT shim included) loads, nothing of flashinfer is
-    imported, and without the JIT shim a library with no prebuilt file raises the error naming the missing
-    prebuilt and the JIT shim instead of falling back silently."""
+    """A copy of the package (without ``aot/``) under another name imports in a fresh interpreter: every
+    submodule (its own JIT shim included) loads, and without the JIT shim a library with no prebuilt file
+    raises the error naming the missing prebuilt and the JIT shim instead of falling back silently."""
 
     source = Path(loader.__file__).parent
     name = "vendored_cake_rmsnorm_det_train_copy"
@@ -925,7 +916,7 @@ def test_the_package_imports_standalone_under_another_name(tmp_path: Path) -> No
         tmp_path / name,
         ignore=shutil.ignore_patterns("aot", "__pycache__"),
     )
-    # The interpreter's dependency paths (torch, tvm_ffi and their site directories); flashinfer is blocked by name.
+    # The interpreter's dependency paths (torch, tvm_ffi and their site directories).
     deps = [
         Path(torch.__file__).parent.parent,
         Path(sys.modules["tvm_ffi"].__file__).parent.parent,

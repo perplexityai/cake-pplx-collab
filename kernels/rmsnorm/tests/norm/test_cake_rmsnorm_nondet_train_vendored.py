@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ Vendored copies of the Cake RMSNorm training package with the
 non-deterministic weight gradient
 (``cake_pplx/_backends/cake_rmsnorm_nondet_train``) and its
 deterministic sibling (``cake_pplx/_backends/cake_rmsnorm_det_train``),
-imported with flashinfer blocked (issues #6553, #7047, #8066, #8928).
+imported under other names.
 
 This package never imports the deterministic package: a consumer vendors it
 alone.  No entry point takes a ``deterministic`` keyword (passing one raises
@@ -25,18 +25,17 @@ alone.  No entry point takes a ``deterministic`` keyword (passing one raises
 serves the backend suites that compare against the deterministic package.
 
 * Device-free (``cpu_only``): both forms are copied (without ``aot/`` and
-  ``__pycache__/``) and imported in a fresh ``python -I`` interpreter in which
-  every ``flashinfer`` import raises: the pair under one parent (the calls
-  reach this package's own checks and the vendored sibling is never
-  imported), the lone copy (it imports; the calls reach this package's own
-  checks; a ``deterministic`` keyword raises ``TypeError``), the lone
-  deterministic copy; no ``flashinfer`` module is loaded.
-* Device (opt-in, ``FLASHINFER_CAKE_VENDORED_SUITE=1``: it compiles both
+  ``__pycache__/``) and imported in a fresh ``python -I`` interpreter: the pair
+  under one parent (the calls reach this package's own checks and the vendored
+  sibling is never imported), the lone copy (it imports; the calls reach this
+  package's own checks; a ``deterministic`` keyword raises ``TypeError``), the
+  lone deterministic copy.
+* Device (opt-in, ``CAKE_PPLX_VENDORED_SUITE=1``: it compiles both
   manifests with plain ``nvcc``, minutes): ``scripts/check_cake_build_manifests.py
   --vendored-gate`` builds both copies for the visible GPUs' architecture and
-  checks that they load prebuilt with flashinfer blocked; the two copies are then
+  checks that they load prebuilt; the two copies are then
   put under one parent and the backend suites run against them in a ``python -I``
-  child with flashinfer blocked (the ``cake_package`` table pointed at the
+  child (the ``cake_package`` table pointed at the
   copies); the suites that do not need the deterministic package run against the
   lone copy (with no deterministic package importable at all).
 """
@@ -80,24 +79,6 @@ LONE_SUITES = (
 )
 SUITE_TIMEOUT_S = 5400
 
-# The blocker every child installs (the vendored gate's): any flashinfer import raises.
-BLOCKER = """\
-import importlib.abc
-import sys
-
-
-class _BlockFlashinfer(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError("flashinfer is blocked by the vendored test: " + name)
-        return None
-
-
-sys.meta_path.insert(0, _BlockFlashinfer())
-sys.modules["flashinfer"] = None
-"""
-
-
 def _dependency_paths() -> list[str]:
     """The interpreter's dependency directories (site-packages and the parents of
     torch and tvm_ffi): a ``-I`` child does not read ``PYTHONPATH``."""
@@ -123,7 +104,7 @@ def _child(
     code = (
         "import sys\n"
         f"for _p in reversed({paths!r}):\n"
-        "    sys.path.insert(0, _p)\n" + BLOCKER + script
+        "    sys.path.insert(0, _p)\n" + script
     )
     return subprocess.run(
         [sys.executable, "-I", "-c", code],
@@ -164,13 +145,6 @@ def raises(error, call, *words):
         assert not missing, f"{type(exc).__name__} without {missing}: {text[:300]}"
         return
     raise AssertionError(f"no {error.__name__}")
-
-
-def leaked():
-    return sorted(
-        k for k in sys.modules
-        if (k == "flashinfer" and sys.modules[k] is not None) or k.startswith("flashinfer.")
-    )
 
 
 x = torch.zeros(4, 512, dtype=torch.bfloat16)
@@ -214,8 +188,6 @@ check(
     "pair: the vendored sibling is never imported",
     lambda: None if "{PARENT}.{DET}" not in sys.modules else 1 / 0,
 )
-check("pair: no flashinfer module", lambda: None if not leaked() else 1 / 0)
-results["leaked"] = leaked()
 print("RESULTS " + json.dumps(results))
 """
 )
@@ -262,8 +234,6 @@ check(
     "lone det copy: imports and answers",
     lambda: None if not det.is_cake_rmsnorm_det_train_supported(torch.device("cpu")) else 1 / 0,
 )
-check("lone: no flashinfer module", lambda: None if not leaked() else 1 / 0)
-results["leaked"] = leaked()
 print("RESULTS " + json.dumps(results))
 """
 )
@@ -278,7 +248,7 @@ def _results(proc) -> dict:
 
 
 @pytest.mark.cpu_only
-def test_vendored_copies_import_with_flashinfer_blocked(tmp_path: Path) -> None:
+def test_vendored_copies_import(tmp_path: Path) -> None:
     paths = _dependency_paths()
     pair = tmp_path / "pair"
     _copy(SOURCE / NONDET, pair / PARENT / NONDET)
@@ -298,7 +268,7 @@ def test_vendored_copies_import_with_flashinfer_blocked(tmp_path: Path) -> None:
             cwd=tmp_path,
         )
         report.update(_results(proc))
-    failed = {k: v for k, v in report.items() if k != "leaked" and v != "ok"}
+    failed = {k: v for k, v in report.items() if v != "ok"}
     for name, verdict in sorted(report.items()):
         print(f"VENDORED import {name}: {verdict}")
     assert not failed, failed
@@ -314,14 +284,14 @@ def _nvidia_smi_gpus() -> int:
     return sum(line.startswith("GPU ") for line in proc.stdout.splitlines())
 
 
-# FlashInfer's vendored gate; cake-pplx-collab does not ship it.
+# The vendored gate script; cake-pplx-collab does not ship it.
 GATE_SCRIPT = REPO_ROOT / "scripts" / "check_cake_build_manifests.py"
 requires_opt_in = pytest.mark.skipif(
-    os.environ.get("FLASHINFER_CAKE_VENDORED_SUITE") != "1"
+    os.environ.get("CAKE_PPLX_VENDORED_SUITE") != "1"
     or _nvidia_smi_gpus() == 0
     or not GATE_SCRIPT.is_file(),
     reason=(
-        "set FLASHINFER_CAKE_VENDORED_SUITE=1 on a GPU node with nvcc to build both "
+        "set CAKE_PPLX_VENDORED_SUITE=1 on a GPU node with nvcc to build both "
         "manifests with plain nvcc and run the backend suites against the vendored "
         f"copies; needs the vendored gate {GATE_SCRIPT} (not shipped by cake-pplx-collab)"
     ),
@@ -330,8 +300,8 @@ requires_opt_in = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def vendored_build(tmp_path_factory):
-    """Both packages built by the vendored gate (compile, sidecar, load check with
-    flashinfer blocked), then arranged as the pair under one parent and the lone copy."""
+    """Both packages built by the vendored gate (compile, sidecar, load check), then
+    arranged as the pair under one parent and the lone copy."""
     work = tmp_path_factory.mktemp("cake_rmsnorm_vendored")
     gate = work / "gate"
     report = work / "gate.json"
@@ -397,13 +367,12 @@ sys.exit(int(pytest.main(PYTEST_ARGS)))
 
 
 def _run_suites(root: Path, packages: dict, suites, work: Path, label: str):
-    """The suites in a ``python -I`` child with flashinfer blocked and the
-    ``cake_package`` table pointed at the copies (``sitecustomize.py`` repeats both
-    for any interpreter a test spawns); ``(junit counts, failing ids)``."""
+    """The suites in a ``python -I`` child with the ``cake_package`` table pointed
+    at the copies (``sitecustomize.py`` repeats that for any interpreter a test
+    spawns); ``(junit counts, failing ids)``."""
     paths = [str(root), str(REPO_ROOT), *_dependency_paths()]
     (root / "sitecustomize.py").write_text(
-        BLOCKER
-        + "import importlib\n"
+        "import importlib\n"
         + f"importlib.import_module('tests.cake.test_helpers.cake_package').PACKAGES.update({packages!r})\n"
     )
     junit = work / f"{label}.xml"

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -135,7 +135,7 @@ from ._cake_pplx_api_rmsnorm import cake_api
 
 
 # The backend package is imported on first use and cached: importing this module does not
-# import ``flashinfer.experimental``, and a call does not repeat the import.
+# import the backend package, and a call does not repeat the import.
 @functools.cache
 def _backend():
     from ._backends import cake_rmsnorm_det_train as backend  # noqa: PLC0415 - the backend package, imported on first use

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,10 +29,10 @@ process and the autograd wrapper end to end.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
-flashinfer, so a build that vendors the package under another import path
+``cake_pplx``, so a build that vendors the package under another import path
 runs it unchanged after pointing that table entry at its package.  The
-``cake_pplx.cake_rmsnorm_det_train`` facade and the ``flashinfer`` top-level
-exposure are covered by ``test_cake_rmsnorm_det_train_api.py``.
+``cake_pplx.cake_rmsnorm_det_train`` facade is covered by
+``test_cake_rmsnorm_det_train_api.py``.
 """
 
 from __future__ import annotations
@@ -1637,7 +1637,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
 
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
-    # build.json names the package's FlashInfer import path; a vendored copy ships the file unchanged under its own name.
+    # build.json names the package's import path; a vendored copy ships the file unchanged under its own name.
     assert manifest["package"] == "cake_pplx._backends.cake_rmsnorm_det_train"
     libraries = cake_build.libraries_by_name()
     package = Path(cake_build.__file__).parent

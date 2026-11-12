@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright (c) 2026 by FlashInfer team
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION
 """CUDA launch records of one call under ``torch.profiler``, robust to a session that loses its device records.
 
 The Cake tests read launch structure (one kernel per call, no cast kernel, no device-to-host copy) from the CUDA
 activity records of ``torch.profiler.profile``.  Some torch / CUPTI builds hand back a session with no device
-records at all, or with its first records missing: in the flashinfer-ci nightlies of 2026-10-24..26 the GB200 and
+records at all, or with its first records missing: in the CI nightlies of 2026-10-24..26 the GB200 and
 GB300 jobs of the cu129 image (torch 2.13.0+cu129, CUPTI 12.9 on aarch64 nodes) lost the records of a profiled
 Cake call in one to four sessions per night, while the same tests passed in the other images' jobs on the same
 nodes and in every B200 job.  A missing record cannot be told from a kernel that was never launched, so every
