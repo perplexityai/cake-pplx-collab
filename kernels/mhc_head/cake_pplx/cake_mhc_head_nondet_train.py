@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ on the first call or attribute access (importing this module imports no
 backend).  Every name this module exports carries the mode word ``nondet``
 (``cake_mhc_head_nondet_train_*``, ``cake_mhc_head_nondet``,
 ``CakeMHCHeadNondetFunction``) except the constants ``ARCHES`` and
-``SUPPORTED_COMPUTE_CAPABILITIES``.  The top level of ``flashinfer``
+``SUPPORTED_COMPUTE_CAPABILITIES``.  The ``cake_pplx`` namespace
 re-exports none of them: import this module by its full name.  No entry point
 takes a ``deterministic`` keyword, and nothing falls back to the deterministic
 module.

@@ -1,5 +1,5 @@
 """
-Copyright (c) 2026 by FlashInfer team.
+Copyright (c) 2026, NVIDIA CORPORATION.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,13 @@ Standalone-import tests of the Cake mHC training head package.
 
 A copy of ``cake_pplx/_backends/cake_mhc_head_det_train`` must import
 and reach its host-side checks on its own: under another top-level name, in a
-``python -I`` subprocess with ``flashinfer`` blocked (the form of a vendoring
-gate, ``scripts/check_cake_build_manifests.py --vendored-gate``).  The package
+``python -I`` subprocess (the form of a vendoring gate,
+``scripts/check_cake_build_manifests.py --vendored-gate``).  The package
 imports only itself, ``torch`` and ``tvm_ffi``; the public entry points
 ``cake_pplx.cake_mhc_head_det_train.*`` add only the no-op ``cake_api``
-decorator, so a direct call of the package emits no warning, no module imports
-``flashinfer``, and the JIT fallback of ``cake_build.py`` imports the package's
-own JIT shim ``_cake_pplx_jit.py``.  The copy keeps ``csrc/``, so
+decorator, so a direct call of the package emits no warning, and the JIT
+fallback of ``cake_build.py`` imports the package's own JIT shim
+``_cake_pplx_jit.py``.  The copy keeps ``csrc/``, so
 the subprocess also checks what a vendoring builder compiles: every
 ``build.json`` library is the build of one registry record for one of the
 record's architectures, routed on that architecture (``ROUTES[arch][role][hidden]``
@@ -59,7 +59,7 @@ VENDORED_NAME = (
 
 
 # ---------------------------------------------------------------------------
-# A vendored copy, flashinfer blocked
+# A vendored copy in an isolated interpreter
 # ---------------------------------------------------------------------------
 
 
@@ -78,7 +78,6 @@ def _dependency_paths():
 _ISOLATED = """
 import hashlib
 import importlib
-import importlib.abc
 import os
 import sys
 import warnings
@@ -87,17 +86,6 @@ PKG_ROOT, PKG_NAME = sys.argv[1], sys.argv[2]
 for p in sys.argv[3:]:
     if p not in sys.path:
         sys.path.append(p)
-
-
-class _Block(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path=None, target=None):
-        if name == "flashinfer" or name.startswith("flashinfer."):
-            raise ImportError(f"flashinfer is blocked in this test: {name}")
-        return None
-
-
-sys.meta_path.insert(0, _Block())
-sys.modules["flashinfer"] = None
 sys.path.insert(0, PKG_ROOT)
 
 import torch
@@ -201,27 +189,18 @@ with warnings.catch_warnings(record=True) as rec:
             else:
                 raise AssertionError("the host-side check must reject the call")
 assert not rec, [f"{w.category.__name__}: {w.message}" for w in rec]
-
-leaked = sorted(
-    k
-    for k in sys.modules
-    if (k == "flashinfer" and sys.modules[k] is not None)
-    or k.startswith("flashinfer.")
-)
-assert not leaked, leaked
 print("OK")
 """
 
 
-def test_vendored_copy_imports_with_flashinfer_blocked(tmp_path):
+def test_vendored_copy_imports_standalone(tmp_path):
     """A copy of the package under another top-level name imports in a ``python -I``
-    subprocess with ``flashinfer`` blocked (meta-path finder plus
-    ``sys.modules["flashinfer"] = None``), resolves the package's public names and
+    subprocess, resolves the package's public names and
     the loader's ``__all__``, finds every ``build.json`` library (each the routed
     build of one registry record on one of its architectures, its sources in the
     copy at their digests), raises the host-side ``ValueError`` of each of ten
     rejected calls (five public calls on CPU operands, five loader calls) without
-    emitting a warning of any kind, and loads no ``flashinfer`` module."""
+    emitting a warning of any kind."""
     root = tmp_path / "site"
     shutil.copytree(
         PACKAGE_DIR,
@@ -254,17 +233,6 @@ def _exception_names(expr):
     return [expr.id] if isinstance(expr, ast.Name) else []
 
 
-def _imports_flashinfer(node):
-    if isinstance(node, ast.Import):
-        return any(
-            a.name == "flashinfer" or a.name.startswith("flashinfer.")
-            for a in node.names
-        )
-    if isinstance(node, ast.ImportFrom) and not node.level and node.module:
-        return node.module == "flashinfer" or node.module.startswith("flashinfer.")
-    return False
-
-
 def _imports_the_jit_shim(node):
     return (
         isinstance(node, ast.ImportFrom)
@@ -273,11 +241,10 @@ def _imports_the_jit_shim(node):
     )
 
 
-def test_package_names_flashinfer_only_in_the_jit_fallback():
-    """The package imports nothing outside itself: no relative import climbs above the package (``from .. import``),
-    no module imports ``flashinfer``, and the one import of the package's JIT shim (``from ._cake_pplx_jit import``,
-    which replaces FlashInfer's JIT) sits in the body of a ``try`` with an ``except ImportError`` handler -- the JIT
-    fallback in ``cake_build.py``."""
+def test_package_imports_the_jit_shim_only_in_the_jit_fallback():
+    """No relative import of the package climbs above the package (``from .. import``), and the one import of the
+    package's JIT shim (``from ._cake_pplx_jit import``) sits in the body of a ``try`` with an ``except ImportError``
+    handler -- the JIT fallback in ``cake_build.py``."""
     guards = {}
     for path in sorted(PACKAGE_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -294,9 +261,6 @@ def test_package_names_flashinfer_only_in_the_jit_fallback():
                 assert node.level < 2, (
                     f"{path.name}:{node.lineno}: import from outside the package"
                 )
-            assert not _imports_flashinfer(node), (
-                f"{path.name}:{node.lineno}: flashinfer import"
-            )
             if _imports_the_jit_shim(node):
                 assert node in guarded, (
                     f"{path.name}:{node.lineno}: JIT shim import outside a "
