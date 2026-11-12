@@ -466,7 +466,7 @@ row out of the gradient path:
 | | deterministic package | this package |
 | --- | --- | --- |
 | zero-weight row, finite inputs | full chunk path; its terms are exact zeros | skipped for the gradients; the same mathematics |
-| `loss` | FP64 sum over the valid rows | FP64 sum over `G` (the `Z` terms are 0; the grouping differs) |
+| `loss` | compensated FP32 pair sum over the valid rows | compensated FP32 pair sum over `G` (the `Z` terms are 0; the grouping differs) |
 | `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ within the accuracy budgets) |
 | `logp` of a zero-weight row | loss-path logits GEMM + `row_finalize` | logp-only pass (`return_logp=True`); 0 in the internal output otherwise |
 | non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `loss` / `dX` / `dW` (`0 * inf`) | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |

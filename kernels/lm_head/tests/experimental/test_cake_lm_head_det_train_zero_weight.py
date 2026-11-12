@@ -471,7 +471,7 @@ def test_exact_loss_reproduces_the_plain_reduction(n_v, frac, C):
     vrows = valid.nonzero().squeeze(1)
     plain_terms = term_full[vrows]
     problem = SimpleNamespace(chunk=C, mode=cake_backend.MODE_POLICY, loss_div=None)
-    acc = torch.empty(1, dtype=torch.float64)
+    acc = torch.empty(2, dtype=torch.float32)
     plain = torch.empty(1, dtype=torch.float32)
     chunks = cake_backend.plan_chunks(n_v, C)
     for i, (row0, rows_c) in enumerate(chunks):
@@ -506,7 +506,7 @@ def test_exact_loss_reproduces_the_plain_reduction(n_v, frac, C):
     )
     assert _same_bits(got, plain), (float(got), float(plain))
     if n_g:
-        # the regrouped sum of the same terms is the same value to FP64 rounding, not necessarily the same bits
+        # the regrouped sum of the same terms is the same value to the sum's rounding, not necessarily the same bits
         assert math.isclose(
             float(got), -float(tg.double().sum()), rel_tol=1e-6, abs_tol=1e-6
         )
@@ -1385,7 +1385,7 @@ def test_device_runs_repeat_and_both_count_paths(glm_weight, hidden_count):
 
 def test_device_regroup_mode(glm_weight):
     """The ``"regroup"`` mode: ``logp`` / ``dX`` / ``dW`` are the exact mode's bits (the loss mode changes the loss
-    only); the loss is the same FP64 sum over the split's chunks, within ``1e-6`` of the plain loss."""
+    only); the loss is the same pair sum over the split's chunks, within ``1e-6`` of the plain loss."""
     _require_program(entry="loss")
     base = _device_inputs(12289, W=glm_weight)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3)))

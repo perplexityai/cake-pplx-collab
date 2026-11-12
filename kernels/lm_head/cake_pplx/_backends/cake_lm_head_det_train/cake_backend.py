@@ -142,7 +142,7 @@ Contract
   at the rows' positions among the valid rows (a zero-weight row's slot holds its weight, the ``+0`` / ``-0`` term
   the plain path forms) and reduces them with the plain path's chunk boundaries and ``loss_reduce`` launches, so
   ``loss`` is bitwise the call without the split; ``"regroup"`` reduces the gradient rows' terms over the split's
-  own chunks (the same FP64 sum over different chunk boundaries).  ``logp`` / ``lse`` of every row are bitwise the
+  own chunks (the same compensated sum over different chunk boundaries).  ``logp`` / ``lse`` of every row are bitwise the
   plain path's; ``dX`` rows of ``G`` too whenever their chunk runs the same dX form and K-slice count; ``dW`` groups
   its K reduction over the split's chunk rows (within the accuracy budget; run to run bitwise).  A zero-weight row is
   treated like an ignored row for the gradients: a non-finite value in its ``X`` row, its logits or its
@@ -2610,8 +2610,8 @@ def set_zero_weight_min_rows(rows: int) -> int:
 #   to their rows' positions among the valid rows, a zero-weight row's slot holding its weight (``+0`` / ``-0``, the
 #   term ``w * min(ratio, 2)`` the plain path's ``row_finalize`` forms for any ``ratio``, NaN included), and the
 #   shipped ``loss_reduce`` runs over the plain path's chunks of the valid rows (same ``rows_c``, first / last flags,
-#   FP64 accumulator and FP32 rounding) -- :func:`_zero_weight_exact_loss`.
-# * ``"regroup"``: the chunk loop's own ``loss_reduce`` over the gradient rows (the same FP64 sum of the same terms over
+#   FP32 pair accumulator and FP32 rounding) -- :func:`_zero_weight_exact_loss`.
+# * ``"regroup"``: the chunk loop's own ``loss_reduce`` over the gradient rows (the same compensated sum of the same terms over
 #   the split's chunk boundaries, so the loss may differ from the plain path's in its last FP32 bits; no term
 #   placement, no extra launch).
 ZERO_WEIGHT_LOSS_MODES = ("exact", "regroup")
@@ -4352,7 +4352,7 @@ def workspace_layout(
         ("stats", rows * tiles * 2 * 4),
         ("d", rows * 4),
         ("term", rows * 4),
-        ("loss_acc", 8),  # FP64 accumulator of the fixed-order loss sum
+        ("loss_acc", 8),  # FP32 pair (hi, lo) accumulating the fixed-order loss sum
         ("grad_scale", 4),
     ]
     if dx_ws_slabs:
@@ -6151,17 +6151,17 @@ class ReferenceEngine:
     @staticmethod
     def loss_reduce(values: dict[str, Any]) -> None:
         rows_c = int(values["rows_c"])
-        total = (
-            values["term"][:rows_c].double().sum().reshape(1)
-        )  # FP64 accumulation of the FP32 terms
+        # FP64 accumulation of the FP32 terms, carried between chunks in the kernel's FP32 pair ``(hi, lo)``
+        total = values["term"][:rows_c].double().sum()
         acc = values["loss_acc"]
-        if int(values["first_chunk"]):
-            acc.copy_(total)
-        else:
-            acc.add_(total)
+        if not int(values["first_chunk"]):
+            total = total + (acc[0].double() + acc[1].double())
+        hi = total.float()
+        acc[0] = hi
+        acc[1] = (total - hi.double()).float()
         if int(values["last_chunk"]):
-            # ``0 - acc`` as the kernel forms it (``+0`` for a zero sum of either sign; a unary minus would give ``-0``)
-            neg = torch.zeros_like(acc).sub_(acc)
+            # ``0 - total`` as the kernel forms it (``+0`` for a zero sum of either sign; a unary minus would give ``-0``)
+            neg = torch.zeros_like(total).sub_(total)
             values["loss_out"].copy_(
                 neg / float(values["loss_div"])
                 if int(values["mode"]) == MODE_CE
@@ -6867,7 +6867,7 @@ def prepare_lm_head_det_loss(
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))
     t["term"] = carve("term", torch.float32, (rows,))
-    t["loss_acc"] = carve("loss_acc", torch.float64, (1,))
+    t["loss_acc"] = carve("loss_acc", torch.float32, (2,))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -7311,7 +7311,7 @@ def prepare_lm_head_det_loss_temperature(
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))
     t["term"] = carve("term", torch.float32, (rows,))
-    t["loss_acc"] = carve("loss_acc", torch.float64, (1,))
+    t["loss_acc"] = carve("loss_acc", torch.float32, (2,))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -7775,7 +7775,7 @@ class _Binding:
                 )
         t["d"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
-        t["loss_acc"] = torch.empty((1,), dtype=torch.float64, device=self.device)
+        t["loss_acc"] = torch.empty((2,), dtype=torch.float32, device=self.device)
         t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
             _device_constants(self.device_index)
@@ -9166,9 +9166,10 @@ def _zero_weight_exact_loss(
     """The FP32 ``[1]`` loss of a zero-weight split, bitwise the loss of the same call without the split.
 
     The plain path reduces the per-row terms ``term_t = w_t * min(ratio_t, 2)`` of the valid rows in its chunks of the
-    valid rows: ``loss_reduce`` per chunk (one CTA; thread ``i`` adds ``term[i], term[i + 256], ..`` into an FP64
-    register from ``+0``, a warp butterfly and a cross-warp butterfly, then the chunk sum goes into the FP64
-    accumulator -- stored by the first chunk, added by the others -- and the last chunk stores ``float(0 - acc)``).
+    valid rows: ``loss_reduce`` per chunk (one CTA; thread ``i`` adds ``term[i], term[i + 256], ..`` into an FP32
+    pair ``(s, c)`` from ``+0`` by compensated addition, a warp butterfly and a cross-warp butterfly of pair merges,
+    then the chunk's pair goes into the FP32 pair accumulator ``(hi, lo)`` -- stored by the first chunk, merged by the
+    others -- and the last chunk stores ``0 - (hi + lo)``).
     This forms that array: ``term_v [T_v]`` (``T_v = |G| + |Z|``, the valid rows in ascending order) holds each
     gradient row's term -- the chunk loop's own ``row_finalize`` value (``terms``: chunk 0's in ``term``, chunk
     ``c >= 1``'s at ``loss_weights[(c - 1) C + r]``, :func:`_term_rows`) -- at its position among the valid rows,
@@ -9205,7 +9206,7 @@ def _zero_weight_exact_loss(
     else:
         term_v.copy_(weights)
     del weights
-    acc = torch.empty((1,), dtype=torch.float64, device=device)
+    acc = torch.empty((2,), dtype=torch.float32, device=device)
     out = torch.empty((1,), dtype=torch.float32, device=device)
     chunks = plan_chunks(n_v, chunk)
     scalars = dict(

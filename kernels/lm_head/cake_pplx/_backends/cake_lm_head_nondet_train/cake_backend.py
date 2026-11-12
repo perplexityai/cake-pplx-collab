@@ -175,7 +175,7 @@ Contract
   arithmetic as the loss path's); their ``dX`` rows are exact zeros.  A zero-weight row is treated like an ignored
   row for the gradients: a non-finite value in its ``X`` row, its logits or its ``infer_logp`` does not reach
   ``loss`` / ``dX`` / ``dW`` (the deterministic package gives NaN there through ``0 * inf``).  Finite inputs: the
-  same mathematics; ``dW`` (and the FP64 loss sum) group their additions over different chunk rows, so their bits
+  same mathematics; ``dW`` (and the compensated loss sum) group their additions over different chunk rows, so their bits
   may differ from the deterministic package's within the accuracy budgets.  Not applied (the plain path runs):
   ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
   (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits
@@ -4985,7 +4985,7 @@ def workspace_layout(
         ("stats", rows * tiles * 2 * 4),
         ("d", rows * 4),
         ("term", rows * 4),
-        ("loss_acc", 8),  # FP64 accumulator of the fixed-order loss sum
+        ("loss_acc", 8),  # FP32 pair (hi, lo) accumulating the fixed-order loss sum
         ("grad_scale", 4),
     ]
     if compact:
@@ -6883,16 +6883,17 @@ class ReferenceEngine:
     @staticmethod
     def loss_reduce(values: dict[str, Any]) -> None:
         rows_c = int(values["rows_c"])
-        total = (
-            values["term"][:rows_c].double().sum().reshape(1)
-        )  # FP64 accumulation of the FP32 terms
+        # FP64 accumulation of the FP32 terms, carried between chunks in the kernel's FP32 pair ``(hi, lo)``
+        total = values["term"][:rows_c].double().sum()
         acc = values["loss_acc"]
-        if int(values["first_chunk"]):
-            acc.copy_(total)
-        else:
-            acc.add_(total)
+        if not int(values["first_chunk"]):
+            total = total + (acc[0].double() + acc[1].double())
+        hi = total.float()
+        acc[0] = hi
+        acc[1] = (total - hi.double()).float()
         if int(values["last_chunk"]):
-            neg = -acc
+            # ``0 - total`` as the kernel forms it (``+0`` for a zero sum of either sign; a unary minus would give ``-0``)
+            neg = torch.zeros_like(total).sub_(total)
             values["loss_out"].copy_(
                 neg / float(values["loss_div"])
                 if int(values["mode"]) == MODE_CE
@@ -7626,7 +7627,7 @@ def prepare_lm_head_loss(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float64, (1,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (2,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8081,7 +8082,7 @@ def prepare_lm_head_loss_temperature(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float64, (1,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (2,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8710,7 +8711,7 @@ class _Binding:
         if "term" in scratch:
             t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         if "loss_acc" in scratch:
-            t["loss_acc"] = torch.empty((1,), dtype=torch.float64, device=self.device)
+            t["loss_acc"] = torch.empty((2,), dtype=torch.float32, device=self.device)
         if "loss" in scratch:
             t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
