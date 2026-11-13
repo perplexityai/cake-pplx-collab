@@ -302,7 +302,8 @@ GRAD_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 MODE_CE, MODE_POLICY, MODE_EXTERNAL, MODE_NONE = 0, 1, 2, 3
 # The loss reduction's ``loss_acc``: FP32 [LOSS_ACC_WORDS], the binary counter of the chunks'
 # loss sums (words 0 .. 30) and the chunk count (word 31). The kernel reads and writes up to
-# word 31, so every buffer handed to it holds at least this many words (``_loss_acc``).
+# word 31, so every buffer the host makes for it is checked to hold at least this many words
+# (``_loss_acc``).
 LOSS_ACC_WORDS = 32
 
 
@@ -6244,7 +6245,7 @@ def stage_values(
             term=t["term"],
         )
     elif stage == "loss_reduce":
-        values.update(term=t["term"], loss_acc=_loss_acc(t["loss_acc"]), loss_out=t["loss"])
+        values.update(term=t["term"], loss_acc=t["loss_acc"], loss_out=t["loss"])
     elif stage == "row_grad":
         external = (
             p.entry == "logprob"
@@ -6401,7 +6402,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             term=t["term"],
         )
     elif stage == "loss_reduce":
-        values.update(term=t["term"], loss_acc=_loss_acc(t["loss_acc"]), loss_out=t["loss"])
+        values.update(term=t["term"], loss_acc=t["loss_acc"], loss_out=t["loss"])
     elif stage == "row_grad":
         values.update(
             z=logits,
@@ -7673,7 +7674,7 @@ def prepare_lm_head_loss(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,))
+    t["loss_acc"] = _loss_acc(_carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8128,7 +8129,7 @@ def prepare_lm_head_loss_temperature(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,))
+    t["loss_acc"] = _loss_acc(_carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8757,7 +8758,7 @@ class _Binding:
         if "term" in scratch:
             t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         if "loss_acc" in scratch:
-            t["loss_acc"] = torch.empty((LOSS_ACC_WORDS,), dtype=torch.float32, device=self.device)
+            t["loss_acc"] = _loss_acc(torch.empty((LOSS_ACC_WORDS,), dtype=torch.float32, device=self.device))
         if "loss" in scratch:
             t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
