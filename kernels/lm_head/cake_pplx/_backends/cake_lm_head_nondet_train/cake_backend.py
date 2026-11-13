@@ -300,6 +300,20 @@ BACKENDS = ("cake", "reference")
 GRAD_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # ``mode`` scalar of ``row_finalize`` / ``loss_reduce``: which per-row quantities the stage forms.
 MODE_CE, MODE_POLICY, MODE_EXTERNAL, MODE_NONE = 0, 1, 2, 3
+# The loss reduction's ``loss_acc``: FP32 [LOSS_ACC_WORDS], the binary counter of the chunks'
+# loss sums (words 0 .. 30) and the chunk count (word 31). The kernel reads and writes up to
+# word 31, so every buffer handed to it holds at least this many words (``_loss_acc``).
+LOSS_ACC_WORDS = 32
+
+
+def _loss_acc(acc: torch.Tensor) -> torch.Tensor:
+    """``acc``, once checked to be FP32 with at least ``LOSS_ACC_WORDS`` words."""
+    if acc.dtype != torch.float32 or acc.numel() < LOSS_ACC_WORDS:
+        raise ValueError(
+            f"loss_acc must be FP32 with at least {LOSS_ACC_WORDS} words, "
+            f"got {acc.dtype} [{acc.numel()}]"
+        )
+    return acc
 WORKSPACE_ALIGN = 256
 # One registry record and its build.json libraries per architecture (SM107 runs SM103's programs, built for sm_107a,
 # except the support logits gather GEMM, which has its own sm_107a program;
@@ -4986,7 +5000,7 @@ def workspace_layout(
         ("stats", rows * tiles * 2 * 4),
         ("d", rows * 4),
         ("term", rows * 4),
-        ("loss_acc", 128),  # FP32 [32]: the binary counter of the chunks' loss sums
+        ("loss_acc", 4 * LOSS_ACC_WORDS),  # FP32 [32]: the binary counter of the chunks' loss sums
         ("grad_scale", 4),
     ]
     if compact:
@@ -6230,7 +6244,7 @@ def stage_values(
             term=t["term"],
         )
     elif stage == "loss_reduce":
-        values.update(term=t["term"], loss_acc=t["loss_acc"], loss_out=t["loss"])
+        values.update(term=t["term"], loss_acc=_loss_acc(t["loss_acc"]), loss_out=t["loss"])
     elif stage == "row_grad":
         external = (
             p.entry == "logprob"
@@ -6387,7 +6401,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             term=t["term"],
         )
     elif stage == "loss_reduce":
-        values.update(term=t["term"], loss_acc=t["loss_acc"], loss_out=t["loss"])
+        values.update(term=t["term"], loss_acc=_loss_acc(t["loss_acc"]), loss_out=t["loss"])
     elif stage == "row_grad":
         values.update(
             z=logits,
@@ -7659,7 +7673,7 @@ def prepare_lm_head_loss(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8114,7 +8128,7 @@ def prepare_lm_head_loss_temperature(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -8743,7 +8757,7 @@ class _Binding:
         if "term" in scratch:
             t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         if "loss_acc" in scratch:
-            t["loss_acc"] = torch.empty((32,), dtype=torch.float32, device=self.device)
+            t["loss_acc"] = torch.empty((LOSS_ACC_WORDS,), dtype=torch.float32, device=self.device)
         if "loss" in scratch:
             t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
