@@ -1390,9 +1390,9 @@ REGROUP_INPUTS = 32
 
 def _regroup_case(W, seed):
     """One input of :func:`test_device_regroup_mode` (``T`` 12289, 30 % of the valid rows zero-weight in groups of
-    512, chunk 4096): the exact and the regroup mode's calls, and the distance of each mode's loss and of ``torch.sum``'s
-    from the FP64 sum of the valid rows' FP32 loss terms (the kernel's own terms, the zero-weight rows' ``+-0``; policy
-    loss ``0 - sum``); ``torch.sum`` runs in FP32 on the device over the same terms in row order."""
+    512, chunk 4096): the exact and the regroup mode's calls, the FP64 sum of the valid rows' FP32 loss terms (the
+    kernel's own terms, the zero-weight rows' ``+-0``; policy loss ``0 - sum``), ``torch.sum``'s loss in FP32 on the
+    device over the same terms in row order, and each loss's relative error ``|loss - FP64 loss| / |FP64 loss|``."""
     base = _device_inputs(12289, W=W, seed=seed)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3), seed=seed))
     seen = {}
@@ -1425,21 +1425,20 @@ def _regroup_case(W, seed):
     terms = rows[valid]
     oracle = 0.0 - math.fsum(terms.double().cpu().tolist())
     naive = float(torch.zeros((), device=terms.device).sub_(terms.sum()))
-    errors = {
-        "exact": abs(float(exact["loss"]) - oracle),
-        "regroup": abs(float(regroup["loss"]) - oracle),
-        "torch.sum": abs(naive - oracle),
-    }
-    return SimpleNamespace(inp=inp, exact=exact, regroup=regroup, oracle=oracle, errors=errors)
+    losses = {"exact": float(exact["loss"]), "regroup": float(regroup["loss"]), "torch.sum": naive}
+    errors = {name: abs(loss - oracle) / abs(oracle) for name, loss in losses.items()}
+    return SimpleNamespace(inp=inp, exact=exact, regroup=regroup, oracle=oracle, losses=losses, errors=errors)
 
 
 def test_device_regroup_mode(glm_weight):
     """The ``"regroup"`` mode on :data:`REGROUP_INPUTS` independent inputs: ``logp`` / ``dX`` / ``dW`` are the exact
     mode's bits on every input (the loss mode changes the loss only), and the first input's regroup call passes the
-    deterministic suite's gates.  Each mode's loss is held to ``torch.sum`` in FP32 (k = 1) over the inputs: the median
-    and the maximum of its distance from the FP64 sum (:func:`_regroup_case`) are at most ``torch.sum``'s median and
-    maximum.  A loss is one number, so its L2 and max norm are the same ``|loss - FP64 sum|`` and one comparison of
-    each statistic covers both norms."""
+    deterministic suite's gates.  Each mode's loss is held to ``torch.sum`` in FP32 (k = 1) over the inputs.  An
+    input's error is relative, ``|loss - FP64 loss| / |FP64 loss|`` (:func:`_regroup_case`): the norm of the error over
+    the norm of the expected value, as the naive check of a single input measures it, so the inputs' errors are on one
+    scale whatever their losses' sizes.  On every input where ``torch.sum``'s error is 0, each mode's error is 0; over
+    the inputs, each mode's median and maximum error are at most ``torch.sum``'s.  A loss is one number, so its L2 and
+    max norm are the same and one comparison of each statistic covers both norms."""
     _require_program(entry="loss")
     errors = {"exact": [], "regroup": [], "torch.sum": []}
     for i in range(REGROUP_INPUTS):
@@ -1448,17 +1447,20 @@ def test_device_regroup_mode(glm_weight):
             assert _same_bits(case.regroup[key], case.exact[key]), (i, key)
         if i == 0:
             _check_against_references(case.regroup, case.inp, ceiling=True)
+        if case.errors["torch.sum"] == 0:
+            for name in ("exact", "regroup"):
+                assert case.errors[name] == 0, (i, name, case.losses, case.oracle)
         for name, err in case.errors.items():
             errors[name].append(err)
     naive = errors["torch.sum"]
     report = ", ".join(
         f"{name} median {statistics.median(v):.4e} max {max(v):.4e}" for name, v in errors.items()
     )
-    print(f"\nregroup over {REGROUP_INPUTS} inputs: {report}")
+    print(f"\nregroup over {REGROUP_INPUTS} inputs, relative error: {report}")
     for name in ("exact", "regroup"):
         ours = errors[name]
         assert statistics.median(ours) <= statistics.median(naive) and max(ours) <= max(naive), (
-            f"{name} over {REGROUP_INPUTS} inputs: |loss - FP64 sum| median {statistics.median(ours):.4e} max "
+            f"{name} over {REGROUP_INPUTS} inputs: relative error median {statistics.median(ours):.4e} max "
             f"{max(ours):.4e} against torch.sum FP32's median {statistics.median(naive):.4e} max {max(naive):.4e}"
         )
 
