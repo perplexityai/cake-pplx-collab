@@ -471,7 +471,7 @@ def test_exact_loss_reproduces_the_plain_reduction(n_v, frac, C):
     vrows = valid.nonzero().squeeze(1)
     plain_terms = term_full[vrows]
     problem = SimpleNamespace(chunk=C, mode=cake_backend.MODE_POLICY, loss_div=None)
-    acc = torch.empty(1, dtype=torch.float32)
+    acc = torch.empty(32, dtype=torch.float32)
     plain = torch.empty(1, dtype=torch.float32)
     chunks = cake_backend.plan_chunks(n_v, C)
     for i, (row0, rows_c) in enumerate(chunks):
@@ -1383,22 +1383,49 @@ def test_device_runs_repeat_and_both_count_paths(glm_weight, hidden_count):
     assert split_syncs == plain_syncs
 
 
-def test_device_regroup_mode(glm_weight):
+def test_device_regroup_mode(glm_weight, monkeypatch):
     """The ``"regroup"`` mode: ``logp`` / ``dX`` / ``dW`` are the exact mode's bits (the loss mode changes the loss
-    only); the loss is the same FP32 sum over the split's chunks, within ``1e-6`` of the plain loss."""
+    only).  Each mode's loss is held to ``torch.sum``: its distance from the FP64 sum of the valid rows' FP32 loss
+    terms (the kernel's own terms, the zero-weight rows' ``+-0``; policy loss ``0 - sum``) is at most that of
+    ``torch.sum`` in FP32 on the device over the same terms in row order (k = 1)."""
     _require_program(entry="loss")
     base = _device_inputs(12289, W=glm_weight)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3)))
+    seen = {}
+    exact_loss = cake_backend._zero_weight_exact_loss
+
+    def keep_terms(problem, terms, row_index, zero_index, loss_weights, *, backend):
+        # the gradient rows' FP32 terms as the chunk loop left them (chunk 0's in ``term``, the later chunks' in the
+        # compact ``loss_weights`` rows), before the exact loss consumes them
+        n_g = 0 if row_index is None else int(row_index.numel())
+        head = min(int(problem.chunk), n_g)
+        seen.update(
+            terms=torch.cat((terms["term"][:head], terms["loss_weights"][: n_g - head])).clone(),
+            row_index=row_index.clone(),
+            zero_index=zero_index.clone(),
+        )
+        return exact_loss(problem, terms, row_index, zero_index, loss_weights, backend=backend)
+
+    monkeypatch.setattr(cake_backend, "_zero_weight_exact_loss", keep_terms)
     with _zero_weight_floor(0):
         exact = _loss_call(inp, 4096)
         with _loss_mode("regroup"):
             regroup = _loss_call(inp, 4096)
     for key in ("logp", "dX", "dW"):
         assert _same_bits(regroup[key], exact[key]), key
-    rel = abs(float(regroup["loss"]) - float(exact["loss"])) / max(
-        abs(float(exact["loss"])), 1e-30
-    )
-    assert rel <= 1e-6, rel
+    valid = inp.labels >= 0
+    rows = torch.zeros(valid.numel(), dtype=torch.float32, device=valid.device)
+    rows[seen["row_index"].long()] = seen["terms"]
+    rows[seen["zero_index"].long()] = inp.loss_weights[seen["zero_index"].long()]
+    terms = rows[valid]
+    oracle = 0.0 - math.fsum(terms.double().cpu().tolist())
+    naive = abs(float(torch.zeros((), device=terms.device).sub_(terms.sum())) - oracle)
+    for name, out in (("exact", exact), ("regroup", regroup)):
+        err = abs(float(out["loss"]) - oracle)
+        assert err <= naive, (
+            f"{name}: |loss - FP64 sum| = {err:.4e} ({err / abs(oracle):.4e} relative) exceeds torch.sum FP32's "
+            f"{naive:.4e} ({naive / abs(oracle):.4e} relative)"
+        )
     _check_against_references(regroup, inp, ceiling=True)
 
 

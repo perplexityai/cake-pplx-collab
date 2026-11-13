@@ -926,8 +926,8 @@ def test_workspace_layout_and_memory_rule():
         assert layout["stats"][1] == rows * (V // 256) * 8
         assert layout["d"][1] == rows * 4 and layout["term"][1] == rows * 4
         assert (
-            layout["loss_acc"][1] == 4 and layout["grad_scale"][1] == 4
-        )  # FP32 loss accumulator, FP32 scale
+            layout["loss_acc"][1] == 128 and layout["grad_scale"][1] == 4
+        )  # FP32 [32] counter of the chunks' loss sums, FP32 scale
         assert layout["total"] % WORKSPACE_ALIGN == 0 and layout["total"] >= sum(
             layout[k][1] for k in regions
         )

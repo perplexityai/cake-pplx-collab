@@ -2410,7 +2410,7 @@ def prepare_lm_head_loss(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (1,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -2872,7 +2872,7 @@ def prepare_lm_head_loss_temperature(
     t["stats"] = _carve(flat, layout, "stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = _carve(flat, layout, "d", torch.float32, (rows,))
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
-    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (1,))
+    t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -3253,7 +3253,7 @@ class _Binding:
             )
         t["d"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
-        t["loss_acc"] = torch.empty((1,), dtype=torch.float32, device=self.device)
+        t["loss_acc"] = torch.empty((32,), dtype=torch.float32, device=self.device)
         t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
             _device_constants(self.device_index)
