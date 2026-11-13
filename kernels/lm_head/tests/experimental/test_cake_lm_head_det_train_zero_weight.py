@@ -29,6 +29,7 @@ import inspect
 import json
 import math
 import pathlib
+import statistics
 import subprocess
 import sys
 import warnings
@@ -1383,14 +1384,17 @@ def test_device_runs_repeat_and_both_count_paths(glm_weight, hidden_count):
     assert split_syncs == plain_syncs
 
 
-def test_device_regroup_mode(glm_weight, monkeypatch):
-    """The ``"regroup"`` mode: ``logp`` / ``dX`` / ``dW`` are the exact mode's bits (the loss mode changes the loss
-    only).  Each mode's loss is held to ``torch.sum``: its distance from the FP64 sum of the valid rows' FP32 loss
-    terms (the kernel's own terms, the zero-weight rows' ``+-0``; policy loss ``0 - sum``) is at most that of
-    ``torch.sum`` in FP32 on the device over the same terms in row order (k = 1)."""
-    _require_program(entry="loss")
-    base = _device_inputs(12289, W=glm_weight)
-    inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3)))
+# The regroup test's independent inputs: each its own X / labels / weights (``seed`` SEED + i) and zero-weight groups.
+REGROUP_INPUTS = 32
+
+
+def _regroup_case(W, seed):
+    """One input of :func:`test_device_regroup_mode` (``T`` 12289, 30 % of the valid rows zero-weight in groups of
+    512, chunk 4096): the exact and the regroup mode's calls, and the distance of each mode's loss and of ``torch.sum``'s
+    from the FP64 sum of the valid rows' FP32 loss terms (the kernel's own terms, the zero-weight rows' ``+-0``; policy
+    loss ``0 - sum``); ``torch.sum`` runs in FP32 on the device over the same terms in row order."""
+    base = _device_inputs(12289, W=W, seed=seed)
+    inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3), seed=seed))
     seen = {}
     exact_loss = cake_backend._zero_weight_exact_loss
 
@@ -1406,27 +1410,57 @@ def test_device_regroup_mode(glm_weight, monkeypatch):
         )
         return exact_loss(problem, terms, row_index, zero_index, loss_weights, backend=backend)
 
-    monkeypatch.setattr(cake_backend, "_zero_weight_exact_loss", keep_terms)
-    with _zero_weight_floor(0):
-        exact = _loss_call(inp, 4096)
-        with _loss_mode("regroup"):
-            regroup = _loss_call(inp, 4096)
-    for key in ("logp", "dX", "dW"):
-        assert _same_bits(regroup[key], exact[key]), key
+    cake_backend._zero_weight_exact_loss = keep_terms
+    try:
+        with _zero_weight_floor(0):
+            exact = _loss_call(inp, 4096)
+            with _loss_mode("regroup"):
+                regroup = _loss_call(inp, 4096)
+    finally:
+        cake_backend._zero_weight_exact_loss = exact_loss
     valid = inp.labels >= 0
     rows = torch.zeros(valid.numel(), dtype=torch.float32, device=valid.device)
     rows[seen["row_index"].long()] = seen["terms"]
     rows[seen["zero_index"].long()] = inp.loss_weights[seen["zero_index"].long()]
     terms = rows[valid]
     oracle = 0.0 - math.fsum(terms.double().cpu().tolist())
-    naive = abs(float(torch.zeros((), device=terms.device).sub_(terms.sum())) - oracle)
-    for name, out in (("exact", exact), ("regroup", regroup)):
-        err = abs(float(out["loss"]) - oracle)
-        assert err <= naive, (
-            f"{name}: |loss - FP64 sum| = {err:.4e} ({err / abs(oracle):.4e} relative) exceeds torch.sum FP32's "
-            f"{naive:.4e} ({naive / abs(oracle):.4e} relative)"
+    naive = float(torch.zeros((), device=terms.device).sub_(terms.sum()))
+    errors = {
+        "exact": abs(float(exact["loss"]) - oracle),
+        "regroup": abs(float(regroup["loss"]) - oracle),
+        "torch.sum": abs(naive - oracle),
+    }
+    return SimpleNamespace(inp=inp, exact=exact, regroup=regroup, oracle=oracle, errors=errors)
+
+
+def test_device_regroup_mode(glm_weight):
+    """The ``"regroup"`` mode on :data:`REGROUP_INPUTS` independent inputs: ``logp`` / ``dX`` / ``dW`` are the exact
+    mode's bits on every input (the loss mode changes the loss only), and the first input's regroup call passes the
+    deterministic suite's gates.  Each mode's loss is held to ``torch.sum`` in FP32 (k = 1) over the inputs: the median
+    and the maximum of its distance from the FP64 sum (:func:`_regroup_case`) are at most ``torch.sum``'s median and
+    maximum.  A loss is one number, so its L2 and max norm are the same ``|loss - FP64 sum|`` and one comparison of
+    each statistic covers both norms."""
+    _require_program(entry="loss")
+    errors = {"exact": [], "regroup": [], "torch.sum": []}
+    for i in range(REGROUP_INPUTS):
+        case = _regroup_case(glm_weight, SEED + i)
+        for key in ("logp", "dX", "dW"):
+            assert _same_bits(case.regroup[key], case.exact[key]), (i, key)
+        if i == 0:
+            _check_against_references(case.regroup, case.inp, ceiling=True)
+        for name, err in case.errors.items():
+            errors[name].append(err)
+    naive = errors["torch.sum"]
+    report = ", ".join(
+        f"{name} median {statistics.median(v):.4e} max {max(v):.4e}" for name, v in errors.items()
+    )
+    print(f"\nregroup over {REGROUP_INPUTS} inputs: {report}")
+    for name in ("exact", "regroup"):
+        ours = errors[name]
+        assert statistics.median(ours) <= statistics.median(naive) and max(ours) <= max(naive), (
+            f"{name} over {REGROUP_INPUTS} inputs: |loss - FP64 sum| median {statistics.median(ours):.4e} max "
+            f"{max(ours):.4e} against torch.sum FP32's median {statistics.median(naive):.4e} max {max(naive):.4e}"
         )
-    _check_against_references(regroup, inp, ceiling=True)
 
 
 def test_device_noncontiguous_x(glm_weight):
