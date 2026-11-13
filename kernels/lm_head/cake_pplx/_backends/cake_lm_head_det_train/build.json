@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "33057ea4e63fc9c7df7f01ec9c5464c47a161044",
+    "cake_revision": "55a38de835bd2d4d2608874ac6b88f12f368ff36",
     "cuda": "13.4.92",
-    "rendered_at": "2026-11-11T19:31:02Z"
+    "rendered_at": "2026-11-12T18:52:24Z"
   },
   "libraries": [
     {
@@ -3707,7 +3707,7 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "bac12aac2afcead2eac09f284104b32eda7ee33d10eef46886dbed68aa7f092d",
+      "closure_sha256": "1aa716ccd02ddd38ffb746f6f07a39fcec92c8dfeae46c4a25fe2f83b140ed91",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.9",
@@ -3716,8 +3716,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_lm_head_det_loss_e03bef31303e0675324f_sm_100a.so",
       "sha256": {
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "1b5b80cea93dabedfb5f288582bcc2e2244ceb0bff481f3580a7f7da0aabff33",
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "fcd79fb3c4206b36a8e96d48e51a84098b75f3cc5308346950d4f838ecb532be"
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "2bffe9c52f08b7d0e48490a0aa324243f372ba5ad46446432d452362d27abf09",
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "3737232d85d189877d33d196e85180774e66a2223ab5b1a657f8c807f0e15e58"
       },
       "sources": [
         "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu",
@@ -3726,7 +3726,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "889f06cee0dc91bb66e53f4723dcfc7b3032eb08aa5e8b1de6a714c61744e7f1",
+      "closure_sha256": "bae8a54aad47d888228bb8774e1e5acfe1f1fadaa4345a9af650139942fc7991",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -3743,8 +3743,8 @@
       ],
       "path": "aot/cake_lm_head_det_loss_e03bef31303e0675324f_sm_103a.so",
       "sha256": {
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "1b5b80cea93dabedfb5f288582bcc2e2244ceb0bff481f3580a7f7da0aabff33",
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "fcd79fb3c4206b36a8e96d48e51a84098b75f3cc5308346950d4f838ecb532be"
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "2bffe9c52f08b7d0e48490a0aa324243f372ba5ad46446432d452362d27abf09",
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "3737232d85d189877d33d196e85180774e66a2223ab5b1a657f8c807f0e15e58"
       },
       "sources": [
         "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu",
@@ -3753,7 +3753,7 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "534f392bd44a884c95c1b4d271684739f28d33a8907b37b5a46722c86b98fcc8",
+      "closure_sha256": "1138898b5027fddc15aa1fa410497cdf25f6fb1224f4066a5fc097bacf208242",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
@@ -3762,8 +3762,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_lm_head_det_loss_e03bef31303e0675324f_sm_107a.so",
       "sha256": {
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "1b5b80cea93dabedfb5f288582bcc2e2244ceb0bff481f3580a7f7da0aabff33",
-        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "fcd79fb3c4206b36a8e96d48e51a84098b75f3cc5308346950d4f838ecb532be"
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_binding.cu": "2bffe9c52f08b7d0e48490a0aa324243f372ba5ad46446432d452362d27abf09",
+        "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "3737232d85d189877d33d196e85180774e66a2223ab5b1a657f8c807f0e15e58"
       },
       "sources": [
         "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu",
