@@ -571,8 +571,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                         mbarrier_wait(acc_empty_addr + (acc_mm) * 8, _phase_acc_empty);
                         mbarrier_wait(stage_full_z_addr + (mm_stage) * 8, _phase_stage_full_z);
                         asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_0 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x3FFF) + (mm_stage) * 5376);
                         int _mma_b_lo_0 = make_warp_uniform(((fnw0_addr_1_2) >> 4) & 0x3FFF);
+#else
+                        int _mma_a_lo_0 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+                        int _mma_b_lo_0 = make_warp_uniform(((fnw0_addr_1_2) >> 4) & 0x7FFF);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -597,8 +602,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_0), "r"(_mma_b_lo_0), "r"((tmem_accw + (acc_mm * 128))), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_1 = make_warp_uniform((((dz0_addr_t_2) >> 4) & 0x3FFF) + (mm_stage) * 5376);
                         int _mma_b_lo_1 = make_warp_uniform(((fnw0_addr_1_0) >> 4) & 0x3FFF);
+#else
+                        int _mma_a_lo_1 = make_warp_uniform((((dz0_addr_t_2) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+                        int _mma_b_lo_1 = make_warp_uniform(((fnw0_addr_1_0) >> 4) & 0x7FFF);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -623,8 +633,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_1), "r"(_mma_b_lo_1), "r"((tmem_accw + (acc_mm * 128))), "r"(1) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_2 = make_warp_uniform((((dz0_addr_t_1) >> 4) & 0x3FFF) + (mm_stage) * 5376);
                         int _mma_b_lo_2 = make_warp_uniform(((fnw0_addr_1_1) >> 4) & 0x3FFF);
+#else
+                        int _mma_a_lo_2 = make_warp_uniform((((dz0_addr_t_1) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+                        int _mma_b_lo_2 = make_warp_uniform(((fnw0_addr_1_1) >> 4) & 0x7FFF);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -649,7 +664,11 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_2), "r"(_mma_b_lo_2), "r"((tmem_accw + (acc_mm * 128))), "r"(1) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_3 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x3FFF) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_3 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -674,7 +693,11 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_3), "r"(_mma_b_lo_2), "r"((tmem_accw + (acc_mm * 128))), "r"(1) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_4 = make_warp_uniform((((dz0_addr_t_1) >> 4) & 0x3FFF) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_4 = make_warp_uniform((((dz0_addr_t_1) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -699,7 +722,11 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_4), "r"(_mma_b_lo_1), "r"((tmem_accw + (acc_mm * 128))), "r"(1) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_5 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x3FFF) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_5 = make_warp_uniform((((dz0_addr_t_0) >> 4) & 0x7FFF) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -730,8 +757,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                         int in_grp = tile_1 % 16;
                         int small_init = ((in_grp == 0) ? 1 : 0);
                         unsigned int sbuf = grp_mm % 2;
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_6 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_3 = make_warp_uniform(((((dzn0_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_6 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_3 = make_warp_uniform(((((dzn0_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -766,8 +798,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_6), "r"(_mma_b_lo_3), "r"((tmem_dfb0 + (acc_mm * 32))), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_7 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_4 = make_warp_uniform(((((dzn1_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_7 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_4 = make_warp_uniform(((((dzn1_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -802,8 +839,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_7), "r"(_mma_b_lo_4), "r"((tmem_dfs0 + (sbuf * 32))), "r"(((small_init) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_8 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_5 = make_warp_uniform(((((dzn2_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_8 = make_warp_uniform(((((xa0_addr_1_0) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_5 = make_warp_uniform(((((dzn2_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -838,8 +880,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_8), "r"(_mma_b_lo_5), "r"((tmem_dfs0 + (sbuf * 32))), "r"(1) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_9 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_6 = make_warp_uniform(((((dzn0_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_9 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_6 = make_warp_uniform(((((dzn0_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -874,8 +921,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_9), "r"(_mma_b_lo_6), "r"((tmem_dfb1 + (acc_mm * 32))), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_10 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_7 = make_warp_uniform(((((dzn1_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_10 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_7 = make_warp_uniform(((((dzn1_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -910,8 +962,13 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     "@leader tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_10), "r"(_mma_b_lo_7), "r"((tmem_dfs1 + (sbuf * 32))), "r"(((small_init) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         int _mma_a_lo_11 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x3FFF) | 0x2000000) + (mm_stage) * 5376);
                         int _mma_b_lo_8 = make_warp_uniform(((((dzn2_addr) >> 4) & 0x3FFF) | 0x1000000) + (mm_stage) * 5376);
+#else
+                        int _mma_a_lo_11 = make_warp_uniform(((((xa0_addr_1_1) >> 4) & 0x7FFF) | 0x2000000) + (mm_stage) * 5376);
+                        int _mma_b_lo_8 = make_warp_uniform(((((dzn2_addr) >> 4) & 0x7FFF) | 0x1000000) + (mm_stage) * 5376);
+#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred leader, p0, p1;\n\t"
@@ -2884,9 +2941,11 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                     }
                     acc_ep += 1;
                     if (acc_ep == 2) { acc_ep = 0; _phase_acc_full ^= 1; }
-#if __CUDA_ARCH__ == 1030
-#else
+#if __CUDA_ARCH__ == 1000
                     asm volatile("nanosleep.u32 %0;" :: "r"(100));
+#elif __CUDA_ARCH__ == 1030
+#else
+                    asm volatile("nanosleep.u32 %0;" :: "r"(50));
 #endif
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
@@ -2923,15 +2982,23 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
             asm volatile("barrier.sync 1, 256;" ::: "memory");
             int gstep = num_bids * 256;
             #pragma unroll 1
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
             for (int g0 = bid * 256 + etid; g0 < 122880; g0 += 3 * gstep) {
                 float2 fh[6];
                 float cv[12];
+#else
+            for (int g0 = bid * 256 + etid; g0 < 122880; g0 += 2 * gstep) {
+                float2 fh[4];
+                float cv[8];
+#endif
                 fh[0] = make_float2(0.0f, 0.0f);
                 fh[1] = make_float2(0.0f, 0.0f);
                 fh[2] = make_float2(0.0f, 0.0f);
                 fh[3] = make_float2(0.0f, 0.0f);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                 fh[4] = make_float2(0.0f, 0.0f);
                 fh[5] = make_float2(0.0f, 0.0f);
+#endif
                 if (accumulate != 0) {
                     if (g0 < 122880) {
                         {
@@ -2951,6 +3018,7 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                             cv[4 + 3] = _v4.w;
                         }
                     }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                     if (g0 + 2 * gstep < 122880) {
                         {
                             float4 _v4 = *reinterpret_cast<const float4*>(dfn + (unsigned long long)(g0 + 2 * gstep) * 4ull + 0);
@@ -2960,349 +3028,756 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                             cv[8 + 3] = _v4.w;
                         }
                     }
+#endif
                 }
                 #pragma unroll 1
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                 for (int pc_1 = 0; pc_1 < n_ne; pc_1 += 8) {
                     float xs[96];
+#else
+                for (int pc_1 = 0; pc_1 < n_ne; pc_1 += 16) {
+                    float xs[128];
+#endif
                     if (g0 < 122880) {
                         if (pc_1 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
+#else
+                            {
+                                unsigned _v4_4_0;
+                                unsigned _v4_4_1;
+                                unsigned _v4_4_2;
+                                unsigned _v4_4_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_4_0), "=r"(_v4_4_1), "=r"(_v4_4_2), "=r"(_v4_4_3) : "l"((const void*)(dfn_slot + ((unsigned long long)(pc_1 * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[0 + 0] = __uint_as_float(_v4_4_0);
+                                xs[0 + 1] = __uint_as_float(_v4_4_1);
+                                xs[0 + 2] = __uint_as_float(_v4_4_2);
+                                xs[0 + 3] = __uint_as_float(_v4_4_3);
+                            }
+                        }
+                        if (pc_1 + 1 < n_ne) {
+#endif
                             {
                                 unsigned _v4_5_0;
                                 unsigned _v4_5_1;
                                 unsigned _v4_5_2;
                                 unsigned _v4_5_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_5_0), "=r"(_v4_5_1), "=r"(_v4_5_2), "=r"(_v4_5_3) : "l"((const void*)(dfn_slot + ((unsigned long long)(pc_1 * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[0 + 0] = __uint_as_float(_v4_5_0);
                                 xs[0 + 1] = __uint_as_float(_v4_5_1);
                                 xs[0 + 2] = __uint_as_float(_v4_5_2);
                                 xs[0 + 3] = __uint_as_float(_v4_5_3);
+#else
+                                    : "=r"(_v4_5_0), "=r"(_v4_5_1), "=r"(_v4_5_2), "=r"(_v4_5_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 1) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[4 + 0] = __uint_as_float(_v4_5_0);
+                                xs[4 + 1] = __uint_as_float(_v4_5_1);
+                                xs[4 + 2] = __uint_as_float(_v4_5_2);
+                                xs[4 + 3] = __uint_as_float(_v4_5_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 1 < n_ne) {
+#else
+                        if (pc_1 + 2 < n_ne) {
+#endif
                             {
                                 unsigned _v4_6_0;
                                 unsigned _v4_6_1;
                                 unsigned _v4_6_2;
                                 unsigned _v4_6_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_6_0), "=r"(_v4_6_1), "=r"(_v4_6_2), "=r"(_v4_6_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 1) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[4 + 0] = __uint_as_float(_v4_6_0);
                                 xs[4 + 1] = __uint_as_float(_v4_6_1);
                                 xs[4 + 2] = __uint_as_float(_v4_6_2);
                                 xs[4 + 3] = __uint_as_float(_v4_6_3);
+#else
+                                    : "=r"(_v4_6_0), "=r"(_v4_6_1), "=r"(_v4_6_2), "=r"(_v4_6_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 2) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[8 + 0] = __uint_as_float(_v4_6_0);
+                                xs[8 + 1] = __uint_as_float(_v4_6_1);
+                                xs[8 + 2] = __uint_as_float(_v4_6_2);
+                                xs[8 + 3] = __uint_as_float(_v4_6_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 2 < n_ne) {
+#else
+                        if (pc_1 + 3 < n_ne) {
+#endif
                             {
                                 unsigned _v4_7_0;
                                 unsigned _v4_7_1;
                                 unsigned _v4_7_2;
                                 unsigned _v4_7_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_7_0), "=r"(_v4_7_1), "=r"(_v4_7_2), "=r"(_v4_7_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 2) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[8 + 0] = __uint_as_float(_v4_7_0);
                                 xs[8 + 1] = __uint_as_float(_v4_7_1);
                                 xs[8 + 2] = __uint_as_float(_v4_7_2);
                                 xs[8 + 3] = __uint_as_float(_v4_7_3);
+#else
+                                    : "=r"(_v4_7_0), "=r"(_v4_7_1), "=r"(_v4_7_2), "=r"(_v4_7_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 3) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[12 + 0] = __uint_as_float(_v4_7_0);
+                                xs[12 + 1] = __uint_as_float(_v4_7_1);
+                                xs[12 + 2] = __uint_as_float(_v4_7_2);
+                                xs[12 + 3] = __uint_as_float(_v4_7_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 3 < n_ne) {
+#else
+                        if (pc_1 + 4 < n_ne) {
+#endif
                             {
                                 unsigned _v4_8_0;
                                 unsigned _v4_8_1;
                                 unsigned _v4_8_2;
                                 unsigned _v4_8_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_8_0), "=r"(_v4_8_1), "=r"(_v4_8_2), "=r"(_v4_8_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 3) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[12 + 0] = __uint_as_float(_v4_8_0);
                                 xs[12 + 1] = __uint_as_float(_v4_8_1);
                                 xs[12 + 2] = __uint_as_float(_v4_8_2);
                                 xs[12 + 3] = __uint_as_float(_v4_8_3);
+#else
+                                    : "=r"(_v4_8_0), "=r"(_v4_8_1), "=r"(_v4_8_2), "=r"(_v4_8_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 4) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[16 + 0] = __uint_as_float(_v4_8_0);
+                                xs[16 + 1] = __uint_as_float(_v4_8_1);
+                                xs[16 + 2] = __uint_as_float(_v4_8_2);
+                                xs[16 + 3] = __uint_as_float(_v4_8_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 4 < n_ne) {
+#else
+                        if (pc_1 + 5 < n_ne) {
+#endif
                             {
                                 unsigned _v4_9_0;
                                 unsigned _v4_9_1;
                                 unsigned _v4_9_2;
                                 unsigned _v4_9_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_9_0), "=r"(_v4_9_1), "=r"(_v4_9_2), "=r"(_v4_9_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 4) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[16 + 0] = __uint_as_float(_v4_9_0);
                                 xs[16 + 1] = __uint_as_float(_v4_9_1);
                                 xs[16 + 2] = __uint_as_float(_v4_9_2);
                                 xs[16 + 3] = __uint_as_float(_v4_9_3);
+#else
+                                    : "=r"(_v4_9_0), "=r"(_v4_9_1), "=r"(_v4_9_2), "=r"(_v4_9_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 5) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[20 + 0] = __uint_as_float(_v4_9_0);
+                                xs[20 + 1] = __uint_as_float(_v4_9_1);
+                                xs[20 + 2] = __uint_as_float(_v4_9_2);
+                                xs[20 + 3] = __uint_as_float(_v4_9_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 5 < n_ne) {
+#else
+                        if (pc_1 + 6 < n_ne) {
+#endif
                             {
                                 unsigned _v4_10_0;
                                 unsigned _v4_10_1;
                                 unsigned _v4_10_2;
                                 unsigned _v4_10_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_10_0), "=r"(_v4_10_1), "=r"(_v4_10_2), "=r"(_v4_10_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 5) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[20 + 0] = __uint_as_float(_v4_10_0);
                                 xs[20 + 1] = __uint_as_float(_v4_10_1);
                                 xs[20 + 2] = __uint_as_float(_v4_10_2);
                                 xs[20 + 3] = __uint_as_float(_v4_10_3);
+#else
+                                    : "=r"(_v4_10_0), "=r"(_v4_10_1), "=r"(_v4_10_2), "=r"(_v4_10_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 6) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[24 + 0] = __uint_as_float(_v4_10_0);
+                                xs[24 + 1] = __uint_as_float(_v4_10_1);
+                                xs[24 + 2] = __uint_as_float(_v4_10_2);
+                                xs[24 + 3] = __uint_as_float(_v4_10_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 6 < n_ne) {
+#else
+                        if (pc_1 + 7 < n_ne) {
+#endif
                             {
                                 unsigned _v4_11_0;
                                 unsigned _v4_11_1;
                                 unsigned _v4_11_2;
                                 unsigned _v4_11_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_11_0), "=r"(_v4_11_1), "=r"(_v4_11_2), "=r"(_v4_11_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 6) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[24 + 0] = __uint_as_float(_v4_11_0);
                                 xs[24 + 1] = __uint_as_float(_v4_11_1);
                                 xs[24 + 2] = __uint_as_float(_v4_11_2);
                                 xs[24 + 3] = __uint_as_float(_v4_11_3);
+#else
+                                    : "=r"(_v4_11_0), "=r"(_v4_11_1), "=r"(_v4_11_2), "=r"(_v4_11_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 7) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[28 + 0] = __uint_as_float(_v4_11_0);
+                                xs[28 + 1] = __uint_as_float(_v4_11_1);
+                                xs[28 + 2] = __uint_as_float(_v4_11_2);
+                                xs[28 + 3] = __uint_as_float(_v4_11_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 7 < n_ne) {
+#else
+                        if (pc_1 + 8 < n_ne) {
+#endif
                             {
                                 unsigned _v4_12_0;
                                 unsigned _v4_12_1;
                                 unsigned _v4_12_2;
                                 unsigned _v4_12_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_12_0), "=r"(_v4_12_1), "=r"(_v4_12_2), "=r"(_v4_12_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 7) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
                                 xs[28 + 0] = __uint_as_float(_v4_12_0);
                                 xs[28 + 1] = __uint_as_float(_v4_12_1);
                                 xs[28 + 2] = __uint_as_float(_v4_12_2);
                                 xs[28 + 3] = __uint_as_float(_v4_12_3);
+#else
+                                    : "=r"(_v4_12_0), "=r"(_v4_12_1), "=r"(_v4_12_2), "=r"(_v4_12_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 8) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[32 + 0] = __uint_as_float(_v4_12_0);
+                                xs[32 + 1] = __uint_as_float(_v4_12_1);
+                                xs[32 + 2] = __uint_as_float(_v4_12_2);
+                                xs[32 + 3] = __uint_as_float(_v4_12_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                     }
                     if (g0 + gstep < 122880) {
                         if (pc_1 < n_ne) {
+#else
+                        if (pc_1 + 9 < n_ne) {
+#endif
                             {
                                 unsigned _v4_13_0;
                                 unsigned _v4_13_1;
                                 unsigned _v4_13_2;
                                 unsigned _v4_13_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_13_0), "=r"(_v4_13_1), "=r"(_v4_13_2), "=r"(_v4_13_3) : "l"((const void*)(dfn_slot + ((unsigned long long)(pc_1 * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[32 + 0] = __uint_as_float(_v4_13_0);
                                 xs[32 + 1] = __uint_as_float(_v4_13_1);
                                 xs[32 + 2] = __uint_as_float(_v4_13_2);
                                 xs[32 + 3] = __uint_as_float(_v4_13_3);
+#else
+                                    : "=r"(_v4_13_0), "=r"(_v4_13_1), "=r"(_v4_13_2), "=r"(_v4_13_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 9) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[36 + 0] = __uint_as_float(_v4_13_0);
+                                xs[36 + 1] = __uint_as_float(_v4_13_1);
+                                xs[36 + 2] = __uint_as_float(_v4_13_2);
+                                xs[36 + 3] = __uint_as_float(_v4_13_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 1 < n_ne) {
+#else
+                        if (pc_1 + 10 < n_ne) {
+#endif
                             {
                                 unsigned _v4_14_0;
                                 unsigned _v4_14_1;
                                 unsigned _v4_14_2;
                                 unsigned _v4_14_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_14_0), "=r"(_v4_14_1), "=r"(_v4_14_2), "=r"(_v4_14_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 1) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[36 + 0] = __uint_as_float(_v4_14_0);
                                 xs[36 + 1] = __uint_as_float(_v4_14_1);
                                 xs[36 + 2] = __uint_as_float(_v4_14_2);
                                 xs[36 + 3] = __uint_as_float(_v4_14_3);
+#else
+                                    : "=r"(_v4_14_0), "=r"(_v4_14_1), "=r"(_v4_14_2), "=r"(_v4_14_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 10) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[40 + 0] = __uint_as_float(_v4_14_0);
+                                xs[40 + 1] = __uint_as_float(_v4_14_1);
+                                xs[40 + 2] = __uint_as_float(_v4_14_2);
+                                xs[40 + 3] = __uint_as_float(_v4_14_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 2 < n_ne) {
+#else
+                        if (pc_1 + 11 < n_ne) {
+#endif
                             {
                                 unsigned _v4_15_0;
                                 unsigned _v4_15_1;
                                 unsigned _v4_15_2;
                                 unsigned _v4_15_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_15_0), "=r"(_v4_15_1), "=r"(_v4_15_2), "=r"(_v4_15_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 2) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[40 + 0] = __uint_as_float(_v4_15_0);
                                 xs[40 + 1] = __uint_as_float(_v4_15_1);
                                 xs[40 + 2] = __uint_as_float(_v4_15_2);
                                 xs[40 + 3] = __uint_as_float(_v4_15_3);
+#else
+                                    : "=r"(_v4_15_0), "=r"(_v4_15_1), "=r"(_v4_15_2), "=r"(_v4_15_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 11) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[44 + 0] = __uint_as_float(_v4_15_0);
+                                xs[44 + 1] = __uint_as_float(_v4_15_1);
+                                xs[44 + 2] = __uint_as_float(_v4_15_2);
+                                xs[44 + 3] = __uint_as_float(_v4_15_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 3 < n_ne) {
+#else
+                        if (pc_1 + 12 < n_ne) {
+#endif
                             {
                                 unsigned _v4_16_0;
                                 unsigned _v4_16_1;
                                 unsigned _v4_16_2;
                                 unsigned _v4_16_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_16_0), "=r"(_v4_16_1), "=r"(_v4_16_2), "=r"(_v4_16_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 3) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[44 + 0] = __uint_as_float(_v4_16_0);
                                 xs[44 + 1] = __uint_as_float(_v4_16_1);
                                 xs[44 + 2] = __uint_as_float(_v4_16_2);
                                 xs[44 + 3] = __uint_as_float(_v4_16_3);
+#else
+                                    : "=r"(_v4_16_0), "=r"(_v4_16_1), "=r"(_v4_16_2), "=r"(_v4_16_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 12) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[48 + 0] = __uint_as_float(_v4_16_0);
+                                xs[48 + 1] = __uint_as_float(_v4_16_1);
+                                xs[48 + 2] = __uint_as_float(_v4_16_2);
+                                xs[48 + 3] = __uint_as_float(_v4_16_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 4 < n_ne) {
+#else
+                        if (pc_1 + 13 < n_ne) {
+#endif
                             {
                                 unsigned _v4_17_0;
                                 unsigned _v4_17_1;
                                 unsigned _v4_17_2;
                                 unsigned _v4_17_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_17_0), "=r"(_v4_17_1), "=r"(_v4_17_2), "=r"(_v4_17_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 4) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[48 + 0] = __uint_as_float(_v4_17_0);
                                 xs[48 + 1] = __uint_as_float(_v4_17_1);
                                 xs[48 + 2] = __uint_as_float(_v4_17_2);
                                 xs[48 + 3] = __uint_as_float(_v4_17_3);
+#else
+                                    : "=r"(_v4_17_0), "=r"(_v4_17_1), "=r"(_v4_17_2), "=r"(_v4_17_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 13) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[52 + 0] = __uint_as_float(_v4_17_0);
+                                xs[52 + 1] = __uint_as_float(_v4_17_1);
+                                xs[52 + 2] = __uint_as_float(_v4_17_2);
+                                xs[52 + 3] = __uint_as_float(_v4_17_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 5 < n_ne) {
+#else
+                        if (pc_1 + 14 < n_ne) {
+#endif
                             {
                                 unsigned _v4_18_0;
                                 unsigned _v4_18_1;
                                 unsigned _v4_18_2;
                                 unsigned _v4_18_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_18_0), "=r"(_v4_18_1), "=r"(_v4_18_2), "=r"(_v4_18_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 5) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[52 + 0] = __uint_as_float(_v4_18_0);
                                 xs[52 + 1] = __uint_as_float(_v4_18_1);
                                 xs[52 + 2] = __uint_as_float(_v4_18_2);
                                 xs[52 + 3] = __uint_as_float(_v4_18_3);
+#else
+                                    : "=r"(_v4_18_0), "=r"(_v4_18_1), "=r"(_v4_18_2), "=r"(_v4_18_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 14) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[56 + 0] = __uint_as_float(_v4_18_0);
+                                xs[56 + 1] = __uint_as_float(_v4_18_1);
+                                xs[56 + 2] = __uint_as_float(_v4_18_2);
+                                xs[56 + 3] = __uint_as_float(_v4_18_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 6 < n_ne) {
+#else
+                        if (pc_1 + 15 < n_ne) {
+#endif
                             {
                                 unsigned _v4_19_0;
                                 unsigned _v4_19_1;
                                 unsigned _v4_19_2;
                                 unsigned _v4_19_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_19_0), "=r"(_v4_19_1), "=r"(_v4_19_2), "=r"(_v4_19_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 6) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[56 + 0] = __uint_as_float(_v4_19_0);
                                 xs[56 + 1] = __uint_as_float(_v4_19_1);
                                 xs[56 + 2] = __uint_as_float(_v4_19_2);
                                 xs[56 + 3] = __uint_as_float(_v4_19_3);
+#else
+                                    : "=r"(_v4_19_0), "=r"(_v4_19_1), "=r"(_v4_19_2), "=r"(_v4_19_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 15) * 24) * 20480ull + (unsigned long long)g0 * 4ull) + (0))) : "memory");
+                                xs[60 + 0] = __uint_as_float(_v4_19_0);
+                                xs[60 + 1] = __uint_as_float(_v4_19_1);
+                                xs[60 + 2] = __uint_as_float(_v4_19_2);
+                                xs[60 + 3] = __uint_as_float(_v4_19_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 7 < n_ne) {
+#else
+                    }
+                    if (g0 + gstep < 122880) {
+                        if (pc_1 < n_ne) {
+#endif
                             {
                                 unsigned _v4_20_0;
                                 unsigned _v4_20_1;
                                 unsigned _v4_20_2;
                                 unsigned _v4_20_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_20_0), "=r"(_v4_20_1), "=r"(_v4_20_2), "=r"(_v4_20_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 7) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
                                 xs[60 + 0] = __uint_as_float(_v4_20_0);
                                 xs[60 + 1] = __uint_as_float(_v4_20_1);
                                 xs[60 + 2] = __uint_as_float(_v4_20_2);
                                 xs[60 + 3] = __uint_as_float(_v4_20_3);
+#else
+                                    : "=r"(_v4_20_0), "=r"(_v4_20_1), "=r"(_v4_20_2), "=r"(_v4_20_3) : "l"((const void*)(dfn_slot + ((unsigned long long)(pc_1 * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[64 + 0] = __uint_as_float(_v4_20_0);
+                                xs[64 + 1] = __uint_as_float(_v4_20_1);
+                                xs[64 + 2] = __uint_as_float(_v4_20_2);
+                                xs[64 + 3] = __uint_as_float(_v4_20_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                     }
                     if (g0 + 2 * gstep < 122880) {
                         if (pc_1 < n_ne) {
+#else
+                        if (pc_1 + 1 < n_ne) {
+#endif
                             {
                                 unsigned _v4_21_0;
                                 unsigned _v4_21_1;
                                 unsigned _v4_21_2;
                                 unsigned _v4_21_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_21_0), "=r"(_v4_21_1), "=r"(_v4_21_2), "=r"(_v4_21_3) : "l"((const void*)(dfn_slot + ((unsigned long long)(pc_1 * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[64 + 0] = __uint_as_float(_v4_21_0);
                                 xs[64 + 1] = __uint_as_float(_v4_21_1);
                                 xs[64 + 2] = __uint_as_float(_v4_21_2);
                                 xs[64 + 3] = __uint_as_float(_v4_21_3);
+#else
+                                    : "=r"(_v4_21_0), "=r"(_v4_21_1), "=r"(_v4_21_2), "=r"(_v4_21_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 1) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[68 + 0] = __uint_as_float(_v4_21_0);
+                                xs[68 + 1] = __uint_as_float(_v4_21_1);
+                                xs[68 + 2] = __uint_as_float(_v4_21_2);
+                                xs[68 + 3] = __uint_as_float(_v4_21_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 1 < n_ne) {
+#else
+                        if (pc_1 + 2 < n_ne) {
+#endif
                             {
                                 unsigned _v4_22_0;
                                 unsigned _v4_22_1;
                                 unsigned _v4_22_2;
                                 unsigned _v4_22_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_22_0), "=r"(_v4_22_1), "=r"(_v4_22_2), "=r"(_v4_22_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 1) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[68 + 0] = __uint_as_float(_v4_22_0);
                                 xs[68 + 1] = __uint_as_float(_v4_22_1);
                                 xs[68 + 2] = __uint_as_float(_v4_22_2);
                                 xs[68 + 3] = __uint_as_float(_v4_22_3);
+#else
+                                    : "=r"(_v4_22_0), "=r"(_v4_22_1), "=r"(_v4_22_2), "=r"(_v4_22_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 2) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[72 + 0] = __uint_as_float(_v4_22_0);
+                                xs[72 + 1] = __uint_as_float(_v4_22_1);
+                                xs[72 + 2] = __uint_as_float(_v4_22_2);
+                                xs[72 + 3] = __uint_as_float(_v4_22_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 2 < n_ne) {
+#else
+                        if (pc_1 + 3 < n_ne) {
+#endif
                             {
                                 unsigned _v4_23_0;
                                 unsigned _v4_23_1;
                                 unsigned _v4_23_2;
                                 unsigned _v4_23_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_23_0), "=r"(_v4_23_1), "=r"(_v4_23_2), "=r"(_v4_23_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 2) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[72 + 0] = __uint_as_float(_v4_23_0);
                                 xs[72 + 1] = __uint_as_float(_v4_23_1);
                                 xs[72 + 2] = __uint_as_float(_v4_23_2);
                                 xs[72 + 3] = __uint_as_float(_v4_23_3);
+#else
+                                    : "=r"(_v4_23_0), "=r"(_v4_23_1), "=r"(_v4_23_2), "=r"(_v4_23_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 3) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[76 + 0] = __uint_as_float(_v4_23_0);
+                                xs[76 + 1] = __uint_as_float(_v4_23_1);
+                                xs[76 + 2] = __uint_as_float(_v4_23_2);
+                                xs[76 + 3] = __uint_as_float(_v4_23_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 3 < n_ne) {
+#else
+                        if (pc_1 + 4 < n_ne) {
+#endif
                             {
                                 unsigned _v4_24_0;
                                 unsigned _v4_24_1;
                                 unsigned _v4_24_2;
                                 unsigned _v4_24_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_24_0), "=r"(_v4_24_1), "=r"(_v4_24_2), "=r"(_v4_24_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 3) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[76 + 0] = __uint_as_float(_v4_24_0);
                                 xs[76 + 1] = __uint_as_float(_v4_24_1);
                                 xs[76 + 2] = __uint_as_float(_v4_24_2);
                                 xs[76 + 3] = __uint_as_float(_v4_24_3);
+#else
+                                    : "=r"(_v4_24_0), "=r"(_v4_24_1), "=r"(_v4_24_2), "=r"(_v4_24_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 4) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[80 + 0] = __uint_as_float(_v4_24_0);
+                                xs[80 + 1] = __uint_as_float(_v4_24_1);
+                                xs[80 + 2] = __uint_as_float(_v4_24_2);
+                                xs[80 + 3] = __uint_as_float(_v4_24_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 4 < n_ne) {
+#else
+                        if (pc_1 + 5 < n_ne) {
+#endif
                             {
                                 unsigned _v4_25_0;
                                 unsigned _v4_25_1;
                                 unsigned _v4_25_2;
                                 unsigned _v4_25_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_25_0), "=r"(_v4_25_1), "=r"(_v4_25_2), "=r"(_v4_25_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 4) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[80 + 0] = __uint_as_float(_v4_25_0);
                                 xs[80 + 1] = __uint_as_float(_v4_25_1);
                                 xs[80 + 2] = __uint_as_float(_v4_25_2);
                                 xs[80 + 3] = __uint_as_float(_v4_25_3);
+#else
+                                    : "=r"(_v4_25_0), "=r"(_v4_25_1), "=r"(_v4_25_2), "=r"(_v4_25_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 5) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[84 + 0] = __uint_as_float(_v4_25_0);
+                                xs[84 + 1] = __uint_as_float(_v4_25_1);
+                                xs[84 + 2] = __uint_as_float(_v4_25_2);
+                                xs[84 + 3] = __uint_as_float(_v4_25_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 5 < n_ne) {
+#else
+                        if (pc_1 + 6 < n_ne) {
+#endif
                             {
                                 unsigned _v4_26_0;
                                 unsigned _v4_26_1;
                                 unsigned _v4_26_2;
                                 unsigned _v4_26_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_26_0), "=r"(_v4_26_1), "=r"(_v4_26_2), "=r"(_v4_26_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 5) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[84 + 0] = __uint_as_float(_v4_26_0);
                                 xs[84 + 1] = __uint_as_float(_v4_26_1);
                                 xs[84 + 2] = __uint_as_float(_v4_26_2);
                                 xs[84 + 3] = __uint_as_float(_v4_26_3);
+#else
+                                    : "=r"(_v4_26_0), "=r"(_v4_26_1), "=r"(_v4_26_2), "=r"(_v4_26_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 6) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[88 + 0] = __uint_as_float(_v4_26_0);
+                                xs[88 + 1] = __uint_as_float(_v4_26_1);
+                                xs[88 + 2] = __uint_as_float(_v4_26_2);
+                                xs[88 + 3] = __uint_as_float(_v4_26_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 6 < n_ne) {
+#else
+                        if (pc_1 + 7 < n_ne) {
+#endif
                             {
                                 unsigned _v4_27_0;
                                 unsigned _v4_27_1;
                                 unsigned _v4_27_2;
                                 unsigned _v4_27_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_27_0), "=r"(_v4_27_1), "=r"(_v4_27_2), "=r"(_v4_27_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 6) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[88 + 0] = __uint_as_float(_v4_27_0);
                                 xs[88 + 1] = __uint_as_float(_v4_27_1);
                                 xs[88 + 2] = __uint_as_float(_v4_27_2);
                                 xs[88 + 3] = __uint_as_float(_v4_27_3);
+#else
+                                    : "=r"(_v4_27_0), "=r"(_v4_27_1), "=r"(_v4_27_2), "=r"(_v4_27_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 7) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[92 + 0] = __uint_as_float(_v4_27_0);
+                                xs[92 + 1] = __uint_as_float(_v4_27_1);
+                                xs[92 + 2] = __uint_as_float(_v4_27_2);
+                                xs[92 + 3] = __uint_as_float(_v4_27_3);
+#endif
                             }
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 7 < n_ne) {
+#else
+                        if (pc_1 + 8 < n_ne) {
+#endif
                             {
                                 unsigned _v4_28_0;
                                 unsigned _v4_28_1;
                                 unsigned _v4_28_2;
                                 unsigned _v4_28_3;
                                 asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     : "=r"(_v4_28_0), "=r"(_v4_28_1), "=r"(_v4_28_2), "=r"(_v4_28_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 7) * 24) * 20480ull + (unsigned long long)(g0 + 2 * gstep) * 4ull) + (0))) : "memory");
                                 xs[92 + 0] = __uint_as_float(_v4_28_0);
                                 xs[92 + 1] = __uint_as_float(_v4_28_1);
                                 xs[92 + 2] = __uint_as_float(_v4_28_2);
                                 xs[92 + 3] = __uint_as_float(_v4_28_3);
+#else
+                                    : "=r"(_v4_28_0), "=r"(_v4_28_1), "=r"(_v4_28_2), "=r"(_v4_28_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 8) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[96 + 0] = __uint_as_float(_v4_28_0);
+                                xs[96 + 1] = __uint_as_float(_v4_28_1);
+                                xs[96 + 2] = __uint_as_float(_v4_28_2);
+                                xs[96 + 3] = __uint_as_float(_v4_28_3);
+                            }
+                        }
+                        if (pc_1 + 9 < n_ne) {
+                            {
+                                unsigned _v4_29_0;
+                                unsigned _v4_29_1;
+                                unsigned _v4_29_2;
+                                unsigned _v4_29_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_29_0), "=r"(_v4_29_1), "=r"(_v4_29_2), "=r"(_v4_29_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 9) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[100 + 0] = __uint_as_float(_v4_29_0);
+                                xs[100 + 1] = __uint_as_float(_v4_29_1);
+                                xs[100 + 2] = __uint_as_float(_v4_29_2);
+                                xs[100 + 3] = __uint_as_float(_v4_29_3);
+                            }
+                        }
+                        if (pc_1 + 10 < n_ne) {
+                            {
+                                unsigned _v4_30_0;
+                                unsigned _v4_30_1;
+                                unsigned _v4_30_2;
+                                unsigned _v4_30_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_30_0), "=r"(_v4_30_1), "=r"(_v4_30_2), "=r"(_v4_30_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 10) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[104 + 0] = __uint_as_float(_v4_30_0);
+                                xs[104 + 1] = __uint_as_float(_v4_30_1);
+                                xs[104 + 2] = __uint_as_float(_v4_30_2);
+                                xs[104 + 3] = __uint_as_float(_v4_30_3);
+                            }
+                        }
+                        if (pc_1 + 11 < n_ne) {
+                            {
+                                unsigned _v4_31_0;
+                                unsigned _v4_31_1;
+                                unsigned _v4_31_2;
+                                unsigned _v4_31_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_31_0), "=r"(_v4_31_1), "=r"(_v4_31_2), "=r"(_v4_31_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 11) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[108 + 0] = __uint_as_float(_v4_31_0);
+                                xs[108 + 1] = __uint_as_float(_v4_31_1);
+                                xs[108 + 2] = __uint_as_float(_v4_31_2);
+                                xs[108 + 3] = __uint_as_float(_v4_31_3);
+                            }
+                        }
+                        if (pc_1 + 12 < n_ne) {
+                            {
+                                unsigned _v4_32_0;
+                                unsigned _v4_32_1;
+                                unsigned _v4_32_2;
+                                unsigned _v4_32_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_32_0), "=r"(_v4_32_1), "=r"(_v4_32_2), "=r"(_v4_32_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 12) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[112 + 0] = __uint_as_float(_v4_32_0);
+                                xs[112 + 1] = __uint_as_float(_v4_32_1);
+                                xs[112 + 2] = __uint_as_float(_v4_32_2);
+                                xs[112 + 3] = __uint_as_float(_v4_32_3);
+                            }
+                        }
+                        if (pc_1 + 13 < n_ne) {
+                            {
+                                unsigned _v4_33_0;
+                                unsigned _v4_33_1;
+                                unsigned _v4_33_2;
+                                unsigned _v4_33_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_33_0), "=r"(_v4_33_1), "=r"(_v4_33_2), "=r"(_v4_33_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 13) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[116 + 0] = __uint_as_float(_v4_33_0);
+                                xs[116 + 1] = __uint_as_float(_v4_33_1);
+                                xs[116 + 2] = __uint_as_float(_v4_33_2);
+                                xs[116 + 3] = __uint_as_float(_v4_33_3);
+                            }
+                        }
+                        if (pc_1 + 14 < n_ne) {
+                            {
+                                unsigned _v4_34_0;
+                                unsigned _v4_34_1;
+                                unsigned _v4_34_2;
+                                unsigned _v4_34_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_34_0), "=r"(_v4_34_1), "=r"(_v4_34_2), "=r"(_v4_34_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 14) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[120 + 0] = __uint_as_float(_v4_34_0);
+                                xs[120 + 1] = __uint_as_float(_v4_34_1);
+                                xs[120 + 2] = __uint_as_float(_v4_34_2);
+                                xs[120 + 3] = __uint_as_float(_v4_34_3);
+                            }
+                        }
+                        if (pc_1 + 15 < n_ne) {
+                            {
+                                unsigned _v4_35_0;
+                                unsigned _v4_35_1;
+                                unsigned _v4_35_2;
+                                unsigned _v4_35_3;
+                                asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                    : "=r"(_v4_35_0), "=r"(_v4_35_1), "=r"(_v4_35_2), "=r"(_v4_35_3) : "l"((const void*)(dfn_slot + ((unsigned long long)((pc_1 + 15) * 24) * 20480ull + (unsigned long long)(g0 + gstep) * 4ull) + (0))) : "memory");
+                                xs[124 + 0] = __uint_as_float(_v4_35_0);
+                                xs[124 + 1] = __uint_as_float(_v4_35_1);
+                                xs[124 + 2] = __uint_as_float(_v4_35_2);
+                                xs[124 + 3] = __uint_as_float(_v4_35_3);
+#endif
                             }
                         }
                     }
@@ -3339,73 +3814,196 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                             fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[28], xs[29]));
                             fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[30], xs[31]));
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
+#else
+                        if (pc_1 + 8 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[32], xs[33]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[34], xs[35]));
+                        }
+                        if (pc_1 + 9 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[36], xs[37]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[38], xs[39]));
+                        }
+                        if (pc_1 + 10 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[40], xs[41]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[42], xs[43]));
+                        }
+                        if (pc_1 + 11 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[44], xs[45]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[46], xs[47]));
+                        }
+                        if (pc_1 + 12 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[48], xs[49]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[50], xs[51]));
+                        }
+                        if (pc_1 + 13 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[52], xs[53]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[54], xs[55]));
+                        }
+                        if (pc_1 + 14 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[56], xs[57]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[58], xs[59]));
+                        }
+                        if (pc_1 + 15 < n_ne) {
+                            fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[60], xs[61]));
+                            fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[62], xs[63]));
+                        }
+#endif
                     }
                     if (g0 + gstep < 122880) {
                         if (pc_1 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[32], xs[33]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[34], xs[35]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[64], xs[65]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[66], xs[67]));
+#endif
                         }
                         if (pc_1 + 1 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[36], xs[37]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[38], xs[39]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[68], xs[69]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[70], xs[71]));
+#endif
                         }
                         if (pc_1 + 2 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[40], xs[41]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[42], xs[43]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[72], xs[73]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[74], xs[75]));
+#endif
                         }
                         if (pc_1 + 3 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[44], xs[45]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[46], xs[47]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[76], xs[77]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[78], xs[79]));
+#endif
                         }
                         if (pc_1 + 4 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[48], xs[49]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[50], xs[51]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[80], xs[81]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[82], xs[83]));
+#endif
                         }
                         if (pc_1 + 5 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[52], xs[53]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[54], xs[55]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[84], xs[85]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[86], xs[87]));
+#endif
                         }
                         if (pc_1 + 6 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[56], xs[57]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[58], xs[59]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[88], xs[89]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[90], xs[91]));
+#endif
                         }
                         if (pc_1 + 7 < n_ne) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[60], xs[61]));
                             fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[62], xs[63]));
+#else
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[92], xs[93]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[94], xs[95]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                     }
                     if (g0 + 2 * gstep < 122880) {
                         if (pc_1 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[64], xs[65]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[66], xs[67]));
+#else
+                        if (pc_1 + 8 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[96], xs[97]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[98], xs[99]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 1 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[68], xs[69]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[70], xs[71]));
+#else
+                        if (pc_1 + 9 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[100], xs[101]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[102], xs[103]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 2 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[72], xs[73]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[74], xs[75]));
+#else
+                        if (pc_1 + 10 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[104], xs[105]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[106], xs[107]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 3 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[76], xs[77]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[78], xs[79]));
+#else
+                        if (pc_1 + 11 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[108], xs[109]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[110], xs[111]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 4 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[80], xs[81]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[82], xs[83]));
+#else
+                        if (pc_1 + 12 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[112], xs[113]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[114], xs[115]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 5 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[84], xs[85]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[86], xs[87]));
+#else
+                        if (pc_1 + 13 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[116], xs[117]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[118], xs[119]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 6 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[88], xs[89]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[90], xs[91]));
+#else
+                        if (pc_1 + 14 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[120], xs[121]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[122], xs[123]));
+#endif
                         }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                         if (pc_1 + 7 < n_ne) {
                             fh[4] = add_f32x2_noftz(fh[4], make_float2(xs[92], xs[93]));
                             fh[5] = add_f32x2_noftz(fh[5], make_float2(xs[94], xs[95]));
+#else
+                        if (pc_1 + 15 < n_ne) {
+                            fh[2] = add_f32x2_noftz(fh[2], make_float2(xs[124], xs[125]));
+                            fh[3] = add_f32x2_noftz(fh[3], make_float2(xs[126], xs[127]));
+#endif
                         }
                     }
                 }
@@ -3443,6 +4041,7 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                         *reinterpret_cast<float4*>((dfn + (unsigned long long)(g0 + gstep) * 4ull) + 0) = _v4;
                     }
                 }
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                 if (g0 + 2 * gstep < 122880) {
                     if (accumulate != 0) {
                         fh[4] = add_f32x2_noftz(fh[4], make_float2(cv[8], cv[9]));
@@ -3460,6 +4059,7 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr__h5120(const __grid_constant__ CUtenso
                         *reinterpret_cast<float4*>((dfn + (unsigned long long)(g0 + 2 * gstep) * 4ull) + 0) = _v4;
                     }
                 }
+#endif
             }
             if (etid == 0) {
                 unsigned int departed;

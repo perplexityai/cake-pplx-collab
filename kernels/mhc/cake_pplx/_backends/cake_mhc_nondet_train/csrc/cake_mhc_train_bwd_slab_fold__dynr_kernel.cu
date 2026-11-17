@@ -2943,7 +2943,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr(const __grid_constant__ CUtensorMap X,
                     if (acc_ep == 2) { acc_ep = 0; _phase_acc_full ^= 1; }
 #if __CUDA_ARCH__ == 1070
                     asm volatile("nanosleep.u32 %0;" :: "r"(50));
-#else
 #endif
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
@@ -3055,7 +3054,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr(const __grid_constant__ CUtensorMap X,
                             }
                         }
                         if (pc_1 + 1 < n_ne) {
-#else
 #endif
                             {
                                 unsigned _v4_5_0;
@@ -3858,7 +3856,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr(const __grid_constant__ CUtensorMap X,
                             fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[60], xs[61]));
                             fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[62], xs[63]));
                         }
-#else
 #endif
                     }
                     if (g0 + gstep < 98304) {

@@ -2886,7 +2886,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr_os__h7168(const __grid_constant__ CUte
                     if (acc_ep == 2) { acc_ep = 0; _phase_acc_full ^= 1; }
 #if __CUDA_ARCH__ == 1030
                     asm volatile("nanosleep.u32 %0;" :: "r"(200));
-#else
 #endif
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");

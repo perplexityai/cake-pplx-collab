@@ -3055,7 +3055,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr_os(const __grid_constant__ CUtensorMap
                             }
                         }
                         if (pc_1 + 1 < n_ne) {
-#else
 #endif
                             {
                                 unsigned _v4_5_0;
@@ -3858,7 +3857,6 @@ kernel_cake_mhc_train_bwd_slab_fold__dynr_os(const __grid_constant__ CUtensorMap
                             fh[0] = add_f32x2_noftz(fh[0], make_float2(xs[60], xs[61]));
                             fh[1] = add_f32x2_noftz(fh[1], make_float2(xs[62], xs[63]));
                         }
-#else
 #endif
                     }
                     if (g0 + gstep < 98304) {
