@@ -45,10 +45,11 @@ entries), ``CakeDSASparseAttentionDetNopeFunction`` and
 ``CakeDSASparseAttentionDetNopeVarlenFunction``, resolve from the backend
 package on first access.  The signatures match the non-deterministic package's
 entries; ``key_passes`` and ``dkv_direct`` are accepted there and validated
-here.  The rope backward may split its main stage into key-range passes (as the
-non-deterministic package's policy does, or as ``key_passes`` asks); the NoPE
-backward runs its main stage once over all keys.  Every backward accumulates in
-one form, and its dK / dV do not depend on the pass count.
+here.  The backward of either program may split its main stage into key-range
+passes (as the non-deterministic package's policy does, or as ``key_passes``
+asks; the NoPE policy keeps one pass unless ``key_passes`` asks for more).
+Every backward accumulates in one form, and its dK / dV do not depend on the
+pass count.
 
 Usage::
 
@@ -455,8 +456,12 @@ def cake_dsa_sparse_attention_det_nope(
         Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows).
     key_passes : Optional[int]
-        As in :func:`cake_dsa_sparse_attention_det`: accepted for parity,
-        validated, without effect.
+        As in :func:`cake_dsa_sparse_attention_det`: the key-range passes of
+        the backward's main stage.  ``None`` lets the NoPE key-pass policy
+        choose (one pass); a count above 1 runs that many key-range passes (a
+        compaction and a main pass each, with their scratch in the backward's
+        workspace).  dK + dV is bit for bit that of one pass; dQ is summed
+        through an FP32 partial between passes.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -579,7 +584,11 @@ def cake_dsa_sparse_attention_det_nope_varlen(
     causal : bool
         With ``True`` a slot that selects a key after the query's own position
         is invalid too; ``False`` (default) takes the index row as is.
-    key_passes, dkv_direct
+    key_passes : Optional[int]
+        As in :func:`cake_dsa_sparse_attention_det_nope`: the key-range passes
+        of the backward's main stage (``None``: the NoPE key-pass policy, one
+        pass); dK + dV is bit for bit that of one pass.
+    dkv_direct : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`: accepted for parity,
         validated, without effect.
     check_dst_map : Optional[bool]

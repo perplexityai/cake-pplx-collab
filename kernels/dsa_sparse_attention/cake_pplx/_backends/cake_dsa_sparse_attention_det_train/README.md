@@ -39,9 +39,9 @@ entry falls back to another package.
 | `cake_dsa_sparse_attention_det_nope_varlen` | `CakeDSASparseAttentionDetNopeVarlenFunction` |
 
 The entries take the arguments of the non-deterministic entries.
-`key_passes` and `num_segments` select the key-range passes of the rope
-backward (see below); `dkv_direct` is accepted and validated as there and has
-no effect: the accumulation into `dkv_acc` has one form.  The facade reads
+`key_passes` and `num_segments` select the key-range passes of the backward
+(see below); `dkv_direct` is accepted and validated as there and has no
+effect: the accumulation into `dkv_acc` has one form.  The facade reads
 `CAKE_PPLX_DSA_CHECK_DST_MAP` and
 `CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` (as the non-deterministic
 facade does, for this package's own cache); the backend reads no environment
@@ -105,19 +105,21 @@ program prefixes the names with `nope_`); no stage is chosen by a tensor value:
 Repeated destination rows of `dkv_dst_map` add into the same integers, so they
 combine exactly before the one FP32 addition.
 
-Key-range passes (rope program).  When the key row is much larger than the
-L2, the backward splits every token's keys into `P` equal key ranges and runs,
-per range and in place of `bwd_main`, the non-deterministic package's
-compaction of the token's keys in the range (`bwd_compact`) and the pass build
-of the main kernel over the compacted keys (`bwd_main_pass`).  dQ goes through
-an FP32 partial (147,456 B per token) between passes.  The integer sums and
-the overflow counters do not depend on the split, so dK/dV keep the bits of one
-launch.  dQ is summed through the FP32 partial, so it can differ from the dQ
-of one launch in the last FP32 places.  `P`
+Key-range passes.  When the key row is much larger than the L2, the backward
+splits every token's keys into `P` equal key ranges and runs, per range and in
+place of `bwd_main` (NoPE: `nope_bwd_main`), the non-deterministic package's
+compaction of the token's keys in the range (`bwd_compact`; the NoPE stage
+`nope_bwd_compact` runs the same library) and the pass build of the main
+kernel over the compacted keys (`bwd_main_pass` / `nope_bwd_main_pass`).  dQ
+goes through an FP32 partial (147,456 B per token; NoPE 131,072 B) between
+passes.  The integer sums and the overflow counters do not depend on the split,
+so dK/dV keep the bits of one launch.  dQ is summed through the FP32 partial,
+so it can differ from the dQ of one launch in the last FP32 places.  `P`
 follows that package's policy (`cake_backend.plan_key_passes`); a row of more
-than one token chunk (4224 tokens at top-k 2048) takes one pass here, because
-every pass runs all tokens in one launch.  `key_passes` overrides `P`.  The
-redo stays one launch, and the NoPE program always runs one pass.
+than one token chunk (4224 tokens at top-k 2048 for rope) takes one pass here,
+because every pass runs all tokens in one launch.  The NoPE record's policy
+is that package's NoPE policy, which never plans a second pass.  `key_passes`
+overrides `P` in both programs.  The redo stays one launch.
 
 Non-finite values: a pair whose contribution is NaN or infinite has no integer
 image, so the counters flag its destination row, the redo flags it again, and

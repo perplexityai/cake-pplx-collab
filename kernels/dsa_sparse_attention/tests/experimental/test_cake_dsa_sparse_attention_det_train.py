@@ -133,6 +133,19 @@ def test_backward_stage_order_is_fixed():
     assert not set(cake_jit.KEY_PASS_STAGES) & set(
         cake_jit.registered_stages(cake_jit.NOPE_PROGRAM)
     )
+    # the NoPE program's key-range-pass stages (in place of nope_bwd_main): their ``nope_`` forms, whose compaction
+    # names the RoPE program's compaction library
+    assert cake_jit.KEY_PASS_STAGES_OF == {
+        cake_jit.PROGRAM: ("bwd_compact", "bwd_main_pass"),
+        cake_jit.NOPE_PROGRAM: ("nope_bwd_compact", "nope_bwd_main_pass"),
+    }
+    nope = cake_jit.registered_stages(cake_jit.NOPE_PROGRAM)
+    nope_passes = [s for s in nope if s in cake_jit.NOPE_KEY_PASS_STAGES]
+    assert nope_passes == list(cake_jit.NOPE_KEY_PASS_STAGES), nope_passes
+    rope_compact = cake_jit.record(cake_jit.PROGRAM)["bwd_compact"]
+    nope_compact = cake_jit.record(cake_jit.NOPE_PROGRAM)["nope_bwd_compact"]
+    assert nope_compact["library"] == rope_compact["library"]
+    assert nope_compact["launch"] == rope_compact["launch"]
     # the pack27 builds of the row bound and its grid (in place of bwd_bound / bwd_grid on the backwards of
     # 2 ** 26 <= T * topk < 2 ** 27 pair slots), after every other stage of each program
     assert cake_jit.PACK27_STAGES == {
@@ -278,6 +291,39 @@ def test_key_pass_policy_is_the_nondet_policy():
         cake_backend.plan_key_passes(record, stages, 64, 4096, 2048, num_segments=0)
 
 
+def test_nope_key_pass_policy_is_the_nondet_nope_policy():
+    """The NoPE record's ``key_pass_policy`` is the non-deterministic package's NoPE record's (131,072 B of FP32 dQ
+    partial per token, ``max_passes`` 1): the policy never plans a second pass, as there; ``key_passes`` forces the
+    passes, and a record without the NoPE pass stages serves one pass only."""
+    name = cake_jit.NOPE_PROGRAM
+    record = cake_jit.record(name)
+    det = cake_backend.KeyPassPolicy.from_record(record)
+    nondet_record = nondet_jit.record(nondet_jit.NOPE_PROGRAM)
+    nd = nondet_backend.KeyPassPolicy.from_record(nondet_record)
+    assert det is not None and nd is not None
+    for field in (*cake_backend.KEY_PASS_POLICY_FIELDS, "dq_partial_bytes_per_token"):
+        assert getattr(det, field) == getattr(nd, field), field
+    assert det.rules == nd.rules == ()
+    assert det.max_passes == 1
+    assert det.dq_partial_bytes_per_token == cake_backend.NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
+    assert cake_backend.NOPE_DQ_PARTIAL_BYTES_PER_TOKEN == NUM_HEADS * D_LATENT * 4
+    stages = cake_jit.registered_stages(name)
+    nd_stages = nondet_jit.registered_stages(nondet_jit.NOPE_PROGRAM)
+    for arch in ("sm_100a", "sm_103a", "sm_107a", None):
+        for T, S in ((1, 4096), (2123, 67923), (4096, 268757), (16384, 131072)):
+            kw = dict(arch=arch, program=name)
+            got = cake_backend.plan_key_passes(record, stages, T, S, 2048, **kw)
+            want = nondet_backend.plan_key_passes(
+                nondet_record, nd_stages, T, S, 2048, arch=arch, program=nondet_jit.NOPE_PROGRAM
+            )
+            assert got == want == 1, (arch, T, S, got, want)
+            assert cake_backend.plan_key_passes(record, stages, T, S, 2048, 3, **kw) == 3
+            no_stages = tuple(s for s in stages if s not in cake_jit.NOPE_KEY_PASS_STAGES)
+            assert cake_backend.plan_key_passes(record, no_stages, T, S, 2048, **kw) == 1
+    with pytest.raises(NotImplementedError):
+        cake_backend.plan_key_passes(record, cake_jit.NOPE_STAGES, 64, 4096, 2048, 2, program=name)
+
+
 @pytest.mark.parametrize("S, passes", [(4096, 2), (4097, 3), (268757, 2), (5, 5)])
 def test_key_pass_ranges_and_dq_modes(S, passes):
     ranges = cake_backend.key_pass_ranges(S, passes)
@@ -302,6 +348,15 @@ def test_workspace_layout_of_key_passes():
     assert two["total"] - one["total"] == extra
     per_call = cake_backend.workspace_layout(T, S, topk, key_passes=2, per_call=True)
     assert per_call["dq_partial"][1] == two["dq_partial"][1]
+    # NoPE: the dQ partial has no rope part (64 x 512 FP32 per token)
+    nope_one = cake_backend.workspace_layout_nope(T, S, topk)
+    nope_two = cake_backend.workspace_layout_nope(T, S, topk, key_passes=2)
+    assert "dq_partial" not in nope_one
+    assert nope_two["dq_partial"][1] == T * NUM_HEADS * D_LATENT * 4
+    assert nope_two["key_scratch"][1] == T * topk * 4
+    assert nope_two["pass_counts"][1] == T * 4
+    extra = sum(_align(nope_two[n][1]) for n in ("dq_partial", "key_scratch", "pass_counts"))
+    assert nope_two["total"] - nope_one["total"] == extra
 
 
 @pytest.mark.parametrize(
@@ -1474,6 +1529,120 @@ def test_key_passes_meet_the_naive_tier(passes, record_property):
     nv.judge_draws(record_property, case, seed=SEED + 33)
 
 
+@pytest.mark.parametrize("dkv", ["fresh", "acc"])
+@pytest.mark.parametrize("redo", [False, True], ids=["no_redo", "redo"])
+def test_nope_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
+    """NoPE: a backward of P key-range passes (``nope_bwd_compact`` + ``nope_bwd_main_pass`` per pass, in place of
+    ``nope_bwd_main``) gives the dK + dV, overflow-counter and global-word bits of one main launch -- with most rows
+    recomputed by the redo too (``GRID_SHIFT = 24``); the eager backward and the autograd entry with the same
+    ``key_passes`` give the runner's bits (the passes' accuracy: :func:`test_nope_key_passes_meet_the_naive_tier`).
+    The counters and pair counts are compared on the rows a pair touches (the grid stage zeroes only those)."""
+    name = cake_jit.NOPE_PROGRAM
+    _require_program(backward=True, program=name)
+    inp = make_inputs([384], [4096], seed=SEED + 35, topk=512)
+    args, tl, S = (inp.q_latent, inp.kv_latent, inp.idx_global), inp.topk_length, inp.total_k
+    T = inp.total_q
+    idx = inp.idx_global.long()
+    slot = torch.arange(idx.shape[1], device=idx.device)
+    lengths = idx.shape[1] if tl is None else tl.long()[:, None]
+    valid = (idx >= 0) & (idx < S) & (slot[None, :] < lengths)
+    touched = torch.zeros(S, dtype=torch.bool, device=idx.device)
+    touched[idx[valid]] = True
+    assert bool(touched.any())
+    # the eager and autograd backwards below plan into a cache of their own: the cache keys on shapes alone and may
+    # hold a plan of these shapes under the shipped grid; this test's plans are not kept for later tests
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cake_backend._BindingCache())
+    if redo:
+        monkeypatch.setattr(cake_backend, "GRID_SHIFT", 24)
+        monkeypatch.setattr(cake_backend, "MIN_BUMP", 25)
+
+    def run(passes):
+        acc = torch.zeros(S, D_LATENT, device="cuda") if dkv == "acc" else None
+        runner = cake_backend.prepare_dsa_nope_train(
+            *args, topk_length=tl, dout=inp.dout, dkv_acc=acc, key_passes=passes
+        )
+        assert runner.key_passes == passes
+        order = runner.backward_order
+        stages = [k[0] if isinstance(k, tuple) else k for k in order]
+        main = [k for k, s in zip(order, stages, strict=True) if "main" in s]
+        if passes == 1:
+            assert main == ["nope_bwd_main"]
+            assert "dq_partial" not in runner.layout
+        else:
+            pairs = [k for k in order if isinstance(k, tuple)]
+            assert pairs == [
+                (stage, i)
+                for i in range(passes)
+                for stage in ("nope_bwd_compact", "nope_bwd_main_pass")
+            ]
+            assert main == [("nope_bwd_main_pass", i) for i in range(passes)]
+            assert runner.layout["dq_partial"][1] == T * NUM_HEADS * D_LATENT * 4
+        runner.forward()
+        grads = [g.clone() for g in runner.backward() if g is not None]
+        if acc is not None:
+            grads.append(acc.clone())
+        t = runner.tensors
+        words = _globals(runner)
+        # signed views: boolean indexing of the unsigned dtypes is not implemented everywhere
+        cnt = t["cnt64"].view(torch.int64)[touched].clone()
+        state = [cnt, t["row_pairs"].view(torch.int32)[touched].clone()]
+        return grads, state, words
+
+    one, one_state, one_words = run(1)
+    if redo:
+        assert one_words[cake_backend.REDO_WORD] > S // 4
+    for passes in (2, 3):
+        grads, state, words = run(passes)
+        # dK + dV (the fresh dkv or the accumulated rows), the counters and the global words: the bits of one launch
+        for a, b in zip(grads[1:], one[1:], strict=True):
+            assert _same_bits(a, b)
+        for a, b in zip(state, one_state, strict=True):
+            assert torch.equal(a, b)
+        assert words[cake_backend.REDO_WORD] == one_words[cake_backend.REDO_WORD]
+        nonfinite = cake_backend.NONFINITE_WORD
+        assert words[nonfinite] == one_words[nonfinite] == 0
+        if dkv == "fresh":
+            out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+            eager = cake_backend.backward_nope(
+                *args, out, o_lo, lse, inp.dout, topk_length=tl, key_passes=passes
+            )
+            for a, b in zip(eager, grads, strict=True):
+                assert _same_bits(a, b)
+        else:
+            # the autograd entry: dq into the query leaf, dK + dV added into a fresh zeroed dkv_acc; its backward
+            # binding is the only one in the emptied cache
+            cake_backend.BINDING_CACHE.clear()
+            q = inp.q_latent.detach().clone().requires_grad_(True)
+            acc = torch.zeros(S, D_LATENT, device="cuda")
+            out = cake_backend.cake_dsa_sparse_attention_det_nope(
+                q, inp.kv_latent, inp.idx_global, topk_length=tl, key_passes=passes, dkv_acc=acc
+            )
+            out.backward(inp.dout)
+            assert _same_bits(q.grad, grads[0]) and _same_bits(acc, grads[1])
+            plans = [b.plan for b in cake_backend.BINDING_CACHE._entries.values()]
+            assert [p.key_passes for p in plans if p.program == name and p.backward] == [passes]
+
+
+@pytest.mark.parametrize("passes", [2, 3])
+def test_nope_key_passes_meet_the_naive_tier(passes, record_property):
+    """NoPE: a backward of P key-range passes: the forward's outputs and the gradients meet the naive tier over the
+    draws (its dK + dV bits are one launch's: :func:`test_nope_key_passes_give_the_bits_of_one_launch`)."""
+    _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
+
+    def case(s, j):
+        inp = make_inputs([384], [4096], seed=s, topk=512)
+        args, tl = (inp.q_latent, inp.kv_latent, inp.idx_global), inp.topk_length
+        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+        got = dict(out=out, lse=lse, o_lo=o_lo.clone())
+        dq, dkv = cake_backend.backward_nope(
+            *args, out, o_lo, lse, inp.dout, topk_length=tl, key_passes=passes
+        )
+        got.update(dq=dq, dkv=dkv)
+        return nv.judged(nv.nope_problem(inp, topk_length=tl), {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 35)
+
+
 # The poisoned-scratch cases: (program, dK/dV form, key-range passes).  "fresh": the runner's own dK/dV outputs
 # (BF16 for RoPE, the FP32 ``dkv`` that is its own accumulator for NoPE); "fp32": the natural-layout FP32 RoPE
 # outputs (``dkv_fp32=True``); "acc": added into a caller ``dkv_acc``; "acc_map": the same through a
@@ -1484,6 +1653,9 @@ POISON_CASES = [
     for passes in (1, 2)
 ] + [
     pytest.param("nope", form, 1, id=f"nope-{form}")
+    for form in ("fresh", "acc", "acc_map")
+] + [
+    pytest.param("nope", form, 2, id=f"nope-{form}-P2")
     for form in ("fresh", "acc", "acc_map")
 ]
 # Every tensor of a runner the backward may use as scratch or write: the outputs (the bound terms and key norms live
@@ -1530,7 +1702,7 @@ def test_backward_reads_no_stale_scratch(monkeypatch, program, form, passes, red
     _require_program(
         backward=True, program=cake_jit.NOPE_PROGRAM if nope else cake_jit.PROGRAM
     )
-    if passes > 1:
+    if passes > 1 and not nope:
         _require_key_passes()
     inp = make_inputs([384], [4096], seed=SEED + 34, topk=512)
     S, width = inp.total_k, D_LATENT if nope else D_QK
@@ -1551,7 +1723,7 @@ def test_backward_reads_no_stale_scratch(monkeypatch, program, form, passes, red
         if nope:
             runner = cake_backend.prepare_dsa_nope_train(
                 inp.q_latent, inp.kv_latent, inp.idx_global, topk_length=inp.topk_length,
-                dout=inp.dout, dkv_acc=acc, dkv_dst_map=dst_map,
+                dout=inp.dout, dkv_acc=acc, dkv_dst_map=dst_map, key_passes=passes,
             )  # fmt: skip
         else:
             runner = cake_backend.prepare_dsa_train(
@@ -1559,7 +1731,7 @@ def test_backward_reads_no_stale_scratch(monkeypatch, program, form, passes, red
                 dkv_acc=acc, dkv_dst_map=dst_map, key_passes=passes,
                 dkv_fp32=form == "fp32",
             )  # fmt: skip
-            assert runner.key_passes == passes
+        assert runner.key_passes == passes
         # the workspace length vector (filled at prepare time) is not in use: the caller passes the lengths
         assert runner.has_topk_length
         gen = torch.Generator(device="cuda").manual_seed(SEED + 1)
