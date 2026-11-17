@@ -22,9 +22,9 @@ size ``H`` the device's architecture routes (``W`` is ``[H, H]``, the
 workspaces are sized with ``hidden=H``); a size it does not route is skipped.
 
 One training iteration of a layer -- prepare, an external branch ``B = U @ W``
-(BF16, ``W`` fixed), finish, the loss and its backward -- is captured whole
-with ``torch.cuda.graph`` after a warm-up on a side stream (the JIT modules and
-the per-device default workspaces exist before the capture), in three forms:
+(BF16), finish, the loss and its backward -- is captured whole with
+``torch.cuda.graph`` after a warm-up on a side stream (the JIT modules and the
+per-device default workspaces exist before the capture), in three forms:
 
 * the package's direct entry points ``forward_prepare`` -> ``forward_finish``
   -> ``backward_prepare`` -> ``backward_finish`` (the branch backward
@@ -40,20 +40,23 @@ and the autograd / checkpointed layer through
 default workspaces and with caller-owned workspaces of the package (the
 backward workspace of this package's sizing; its bytes past the zero prefix --
 the ticket region and the column slab's arrival counts -- overwritten with 0xFF
-before every replay, its zero prefix zero after every replay).  Three replays,
-each after the static outputs and gradients were overwritten with 0xFF bytes,
-are compared with the eager iteration of this package (every output and
-gradient bitwise, ``dfn`` included) and the eager iteration of the
-deterministic package (``cake_pplx._backends.cake_mhc_det_train``) on
-the same inputs (every output and gradient but ``dfn`` bitwise; ``dfn`` within
-``F u (sum_t |dz'_t| |x_t|)`` per element, ``F`` =
-``test_cake_mhc_nondet_train.py``'s ``_dfn_factor``: ``2 P`` with ``P`` the
-chunk count of the column-slab pass, ``u = 2^-24``, ``dz'`` the FP64
-reference's).  The graphed callables get new input values on each of three
-calls, each compared the same way with eager calls on the same values.  A
-captured ``backward_finish`` on a caller workspace sized for a larger token
-count, replayed with new inputs copied in place between eager calls at the
-larger count, closes the module.
+before every replay, its zero prefix zero after every replay).
+
+Each captured iteration is replayed on 32 inputs, each copied into the
+captured inputs in place, after its static outputs and gradients were
+overwritten with 0xFF bytes; the graphed callables get the 32 inputs as new
+arguments.  Every output and gradient of a replay is judged against the naive
+BF16 tier (``tests/cake_naive.py``): its error against the float64 oracle of
+the layer iteration, in the L2 and the max norm, median and max over the 32
+inputs, is at most 1.005 times the tier's, and zero where the tier's is zero.
+The oracle evaluates the branch ``B = U @ W`` and its backward
+``dU = dB @ W^T`` in float64; the tier evaluates the whole iteration with
+PyTorch in BF16 (the branch on the tier's own ``U`` and ``dB``).  The package
+makes no bit promise, so a replay is not compared bit for bit with an eager
+call of this package or of the deterministic package.  A captured
+``backward_finish`` on a caller workspace sized for a larger token count,
+replayed after an eager call at the larger count on the same workspace (both
+judged against the naive tier of their inputs), closes the module.
 """
 
 from __future__ import annotations
@@ -64,34 +67,29 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from tests.cake.test_helpers.cake_mhc_naive import (
+    case_oracle,
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 
 KEY = "cake.cake_mhc_nondet_train"
 pkg = cake_package(KEY)
 loader = cake_package(KEY, "cake_jit")
-# The deterministic package: the same-input comparison point.
-det = cake_package("cake.cake_mhc_det_train")
-det_loader = cake_package("cake.cake_mhc_det_train", "cake_jit")
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 STREAMS, HIDDEN, MAPPING_ROWS = 4, 4096, 24
 HIDDEN_SIZES = (4096, 5120, 7168)
-RMS_EPS, HC_EPS, SINKHORN_ITERS = 1e-5, 1e-6, 20
-BLOCK_TOKENS = 8192
 SEED = 2032
-REPLAYS = 3
-FP32_UNIT_ROUNDOFF = 2.0**-24
-ABS_SLACK = 1.02
 # The backward workspace's zero prefix: the ticket region (256 bytes) and the column slab's arrival counts (512 bytes),
 # first for every token count and hidden size; every call finds it zero and leaves it zero.
 ZERO_PREFIX_BYTES = 768
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 _OUTPUTS = ("dX", "dfn", "dscale", "dbase")
-_EXACT = ("dX", "dscale", "dbase")
-_FN_KEYS = (
-    "dfn",
-    "grad_fn",
-)  # the outputs within the dfn bound of the deterministic package's
+# The inputs of one layer iteration: copied into a captured iteration's static tensors before each replay.
+_STATIC = ("X", "fn", "scale", "base", "W", "dY")
 
 
 def _device() -> torch.device:
@@ -121,11 +119,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
-    # Both packages' libraries of the local architecture (this package's, and the deterministic package's for the
-    # same-input comparisons); a prebuilt or cached library loads without compiling.
+    # The package's libraries of the local architecture; a prebuilt or cached library loads without compiling.
     if _supported():
-        arch = _arch()
-        for spec in [*det_loader.specs_for_arch(arch), *loader.specs_for_arch(arch)]:
+        for spec in loader.specs_for_arch(_arch()):
             spec.build_and_load()
     yield
 
@@ -143,10 +139,6 @@ def _arch() -> str:
     return loader.arch_for_capability(_capability())
 
 
-def _sm_count() -> int:
-    return loader.sm_count(_device().index)
-
-
 @pytest.fixture(params=HIDDEN_SIZES, ids=lambda h: f"H{h}")
 def hidden(request) -> int:
     """The hidden size of a case (every size of the package; skipped where the architecture has no route)."""
@@ -159,117 +151,31 @@ def hidden(request) -> int:
     return request.param
 
 
-def _parts(T: int, hidden: int = HIDDEN) -> int:
-    """``P``: the chunk count of the column-slab pass, the number of partials each ``dfn`` element folds."""
-    parts = loader.host_plan(T, _sm_count(), _arch(), hidden)["parts"]
-    assert 1 <= parts <= 32, (T, hidden, parts)
-    return parts
+# ----------------------------------------------------------------------------------------------------------------
+# The oracle and the naive tier of one layer iteration
 
 
-def _lpt_runs(T: int, hidden: int = HIDDEN) -> bool:
-    """Whether the column slab runs a two-size record of ``hidden`` (``lpt`` or its slab-fastest copy ``lpt_os``) at
-    ``T`` on this device (at hidden 5120 and 7168 only where the size's table calibrates the architecture)."""
-    program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
-    return program.startswith("lpt")
-
-
-def _slab_parts(T: int, hidden: int = HIDDEN) -> int:
-    """The chunk count the column slab launches: ``slab_plan``'s ``lpt_parts`` under ``lpt`` / ``lpt_os``, else
-    :func:`_parts`."""
-    if not _lpt_runs(T, hidden):
-        return _parts(T, hidden)
-    parts = loader.slab_plan(T, _sm_count(), _arch(), hidden)["lpt_parts"]
-    assert 1 <= parts <= 32, (T, hidden, parts)
-    return parts
-
-
-def _dfn_factor(T: int, hidden: int = HIDDEN) -> float:
-    """F of the dfn bound F u (|carried| + ABS_SLACK sum_t |dz'_t| |x_t|) at T (``test_cake_mhc_nondet_train.py``'s
-    ``_dfn_factor``, which derives it): 2 P where the column slab runs dynr or dynr_os (both sides fold the same
-    per-chunk partials), 2 max(P, P_k7) + 10 where it runs lpt or lpt_os (the partials are another partition's)."""
-    if not _lpt_runs(T, hidden):
-        return 2.0 * _parts(T, hidden)
-    return 2.0 * max(_slab_parts(T, hidden), _parts(T, hidden)) + 10.0
+def _layer_expected(i: dict, names) -> tuple[dict, dict]:
+    """The oracle's (float64) and the naive tier's (BF16) values of the outputs ``names`` of one layer iteration on
+    ``i``: the branch ``B = U @ W`` and its backward ``dU = dB @ W^T`` in the precision of the rest (the tier's
+    PyTorch BF16 matmuls on the tier's own ``U`` and ``dB``).  ``U`` and ``dB`` depend on neither ``B`` nor ``dU``, so
+    a first evaluation gives them and a second one, on that ``B`` and ``dU``, every output."""
+    names = tuple(names)
+    parts = []
+    for dtype in (F64, BF16):
+        W = i["W"].to(dtype)
+        zero = torch.zeros(i["B"].shape, dtype=dtype, device=_device())
+        first = case_oracle({**i, "B": zero, "dU": zero}, dtype=dtype)
+        B = first["U"].to(dtype) @ W
+        dU = first["dB"].to(dtype) @ W.t()
+        del first, zero
+        parts.append(case_oracle({**i, "B": B, "dU": dU}, dtype=dtype))
+    want, tier = parts
+    return {k: want[k] for k in names}, {k: tier[k].to(BF16) for k in names}
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The dfn bound (test_cake_mhc_nondet_train.py's)
-
-
-def _sinkhorn(logits: torch.Tensor, hc_eps: float, iters: int) -> torch.Tensor:
-    C = torch.softmax(logits, dim=-1) + hc_eps
-    C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    for _ in range(iters - 1):
-        C = C / (C.sum(dim=2, keepdim=True) + hc_eps)
-        C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    return C
-
-
-def _coefficients(z, scale, base, hc_eps: float = HC_EPS, iters: int = SINKHORN_ITERS):
-    T = z.shape[0]
-    pre = torch.sigmoid(z[:, 0:4] * scale[0] + base[0:4]) + hc_eps
-    post = 2 * torch.sigmoid(z[:, 4:8] * scale[1] + base[4:8])
-    C = _sinkhorn(
-        (z[:, 8:] * scale[2] + base[8:]).reshape(T, STREAMS, STREAMS), hc_eps, iters
-    )
-    return pre, post, C
-
-
-def _dzp(i: dict) -> torch.Tensor:
-    """The FP64 ``dz' = r dL/dz`` of the reference, ``[T, 24]``: ``dfn = dz'^T X_flat`` sums one product per token
-    (the backward of the coefficients alone, so no ``[T, 4H]`` autograd graph is held)."""
-    T, n = i["X"].shape[0], STREAMS * i["X"].shape[2]
-    fn, scale, base = (i[k].double() for k in ("fn", "scale", "base"))
-    blocks = [torch.zeros((0, MAPPING_ROWS), dtype=F64, device=_device())]
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        X = i["X"][lo:hi].double()
-        dY = i["dY"][lo:hi].double()
-        dU = i["dU"][lo:hi].double()
-        B = i["B"][lo:hi].double()
-        u = X.reshape(hi - lo, n)
-        r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + RMS_EPS)
-        with torch.enable_grad():
-            z = ((u * r) @ fn.T).requires_grad_(True)
-            pre, post, C = _coefficients(z, scale, base)
-            (dz,) = torch.autograd.grad(
-                [pre, post, C],
-                [z],
-                grad_outputs=[
-                    torch.einsum("tid,td->ti", X, dU),
-                    torch.einsum("tjd,td->tj", dY, B),
-                    torch.einsum("tid,tjd->tij", X, dY),
-                ],
-            )
-        blocks.append(dz * r)
-    return torch.cat(blocks, dim=0)
-
-
-def _dfn_bound(i: dict) -> torch.Tensor:
-    """Per-element bound of ``|dfn_a - dfn_b|`` for two folds of per-chunk partials:
-    ``F u * 1.02 sum_t |dz'_t| |x_t|`` with ``F`` = :func:`_dfn_factor` (``test_cake_mhc_nondet_train.py``'s
-    ``_dfn_bound``)."""
-    T, hidden = i["X"].shape[0], i["X"].shape[2]
-    dzp = _dzp(i).abs()
-    A = torch.zeros((MAPPING_ROWS, STREAMS * hidden), dtype=F64, device=_device())
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        A += dzp[lo:hi].T @ i["X"][lo:hi].reshape(hi - lo, -1).double().abs()
-    return _dfn_factor(T, hidden) * FP32_UNIT_ROUNDOFF * ABS_SLACK * A
-
-
-def _layer_bound(i: dict, W: torch.Tensor) -> torch.Tensor:
-    """The ``dfn`` bound of one layer iteration (branch ``B = U @ W``, loss gradient ``dY``): ``B`` and ``dU = dB @
-    W^T`` from the deterministic direct entry points."""
-    X, fn, scale, base = (i[k] for k in ("X", "fn", "scale", "base"))
-    U, stats = det.cake_mhc_det_train_forward_prepare(X, fn, scale, base)
-    B = U @ W
-    dB, _gstats = det.cake_mhc_det_train_backward_prepare(i["dY"], B, X, stats)
-    return _dfn_bound({**i, "B": B, "dU": dB @ W.t()})
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# Inputs, steps and comparisons
+# Inputs, steps, capture and replay
 
 
 def _inputs(T: int, seed: int, hidden: int = HIDDEN) -> dict:
@@ -300,39 +206,15 @@ def _workspaces(T: int, caller_owned: bool, hidden: int = HIDDEN):
     )
 
 
-def _entries(det_package: bool) -> dict:
-    """The entry points of one package: this package's, or the deterministic package's (the eager reference)."""
-    if det_package:
-        return {
-            "forward_prepare": det.cake_mhc_det_train_forward_prepare,
-            "forward_finish": det.cake_mhc_det_train_forward_finish,
-            "backward_prepare": det.cake_mhc_det_train_backward_prepare,
-            "backward_finish": det.cake_mhc_det_train_backward_finish,
-            "prepare": det.cake_mhc_det_train_prepare,
-            "finish": det.cake_mhc_det_train_finish,
-        }
-    names = (
-        "forward_prepare",
-        "forward_finish",
-        "backward_prepare",
-        "backward_finish",
-        "prepare",
-        "finish",
-    )
-    return {name: getattr(pkg, f"cake_mhc_nondet_train_{name}") for name in names}
-
-
 def _leaves(i: dict) -> list:
     return [
         i[k].detach().clone().requires_grad_(True) for k in ("X", "fn", "scale", "base")
     ]
 
 
-def _layer(i: dict, wsf, wsb, save_stats: bool, det_package: bool = False):
-    api = _entries(det_package)
-
+def _layer(W: torch.Tensor, wsf, wsb, save_stats: bool):
     def layer(X, fn, scale, base):
-        U, handle = api["prepare"](
+        U, handle = pkg.cake_mhc_nondet_train_prepare(
             X,
             fn,
             scale,
@@ -341,21 +223,23 @@ def _layer(i: dict, wsf, wsb, save_stats: bool, det_package: bool = False):
             workspace=wsf,
             backward_workspace=wsb,
         )
-        return api["finish"](X, U @ i["W"], handle)
+        return pkg.cake_mhc_nondet_train_finish(X, U @ W, handle)
 
     return layer
 
 
-def _direct_step(i: dict, wsf, wsb, det_package: bool = False):
-    X, fn, scale, base, W, dY = (i[k] for k in ("X", "fn", "scale", "base", "W", "dY"))
-    api = _entries(det_package)
+def _direct_step(i: dict, wsf, wsb):
+    """One iteration through the direct entry points -> (the step, its leaves (none), its static inputs)."""
+    X, fn, scale, base, W, dY = (i[k] for k in _STATIC)
 
     def step() -> dict:
-        U, stats = api["forward_prepare"](X, fn, scale, base, workspace=wsf)
+        U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
+            X, fn, scale, base, workspace=wsf
+        )
         B = U @ W
-        Y = api["forward_finish"](X, B, stats)
-        dB, gstats = api["backward_prepare"](dY, B, X, stats)
-        dX, dfn, dscale, dbase = api["backward_finish"](
+        Y = pkg.cake_mhc_nondet_train_forward_finish(X, B, stats)
+        dB, gstats = pkg.cake_mhc_nondet_train_backward_prepare(dY, B, X, stats)
+        dX, dfn, dscale, dbase = pkg.cake_mhc_nondet_train_backward_finish(
             X, dY, dB @ W.t(), B, fn, scale, base, stats, gstats, workspace=wsb,
         )  # fmt: skip
         return {
@@ -363,20 +247,20 @@ def _direct_step(i: dict, wsf, wsb, det_package: bool = False):
             "stats": stats,
             "Y": Y,
             "dB": dB,
-            "grad_stats": gstats,
+            "gstats": gstats,
             "dX": dX,
             "dfn": dfn,
             "dscale": dscale,
             "dbase": dbase,
         }
 
-    return step, ()
+    return step, (), {k: i[k] for k in _STATIC}
 
 
-def _autograd_step(
-    i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool, det_package: bool = False
-):
-    layer = _layer(i, wsf, wsb, save_stats, det_package)
+def _autograd_step(i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool):
+    """One iteration through the autograd entry points (inside a checkpoint with ``ckpt``) -> (the step, its leaves,
+    its static inputs: the leaves, ``W`` and the FP32 copy of ``dY`` the loss reads)."""
+    layer = _layer(i["W"], wsf, wsb, save_stats)
     leaves = _leaves(i)
     dY = i["dY"].float()
 
@@ -390,13 +274,16 @@ def _autograd_step(
         (Y.float() * dY).sum().backward()
         return {"Y": Y, **_grads(leaves)}
 
-    return step, leaves
+    statics = dict(zip(("X", "fn", "scale", "base"), leaves, strict=True))
+    statics.update({"W": i["W"], "dY": dY})
+    return step, leaves, statics
 
 
 def _grads(leaves) -> dict:
+    """The gradients of the leaves ``X``, ``fn``, ``scale``, ``base`` under the package's output names."""
     return {
-        f"grad_{n}": t.grad
-        for n, t in zip(("X", "fn", "scale", "base"), leaves, strict=True)
+        name: t.grad
+        for name, t in zip(("dX", "dfn", "dscale", "dbase"), leaves, strict=True)
     }
 
 
@@ -441,57 +328,10 @@ def _assert_zero_prefix(ws: torch.Tensor, what: str) -> None:
     )
 
 
-def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
-    return torch.equal(
-        a.detach().reshape(-1).view(torch.uint8),
-        b.detach().reshape(-1).view(torch.uint8),
-    )
-
-
-def _assert_dfn_within(
-    got: torch.Tensor, want: torch.Tensor, bound: torch.Tensor, label: str
-) -> None:
-    assert got.dtype == F32 and tuple(got.shape) == tuple(want.shape), label
-    assert tuple(got.shape) == tuple(bound.shape) and got.shape[0] == MAPPING_ROWS, (
-        label
-    )
-    assert torch.isfinite(got).all(), f"{label}: non-finite dfn"
-    diff = (got.double() - want.double()).abs()
-    over = int((diff > bound).sum())
-    ratio = float((diff / bound.clamp_min(torch.finfo(F64).tiny)).max())
-    assert over == 0, (
-        f"{label}: {over} dfn elements beyond 2 P u sum_t |dz'_t| |x_t| (largest ratio {ratio:.3e})"
-    )
-
-
-def _assert_matches(ref: dict, got: dict, bound: torch.Tensor, what: str) -> None:
-    """Every output and gradient but ``dfn`` bitwise ``ref``'s (the deterministic package's); ``dfn`` within the
-    bound."""
-    for k, v in ref.items():
-        if k in _FN_KEYS:
-            _assert_dfn_within(got[k], v, bound, f"{what}: {k}")
-        else:
-            assert _same_bits(v, got[k]), (
-                f"{what}: {k} differs from the eager iteration"
-            )
-
-
-def _assert_same_call(ref: dict, got: dict, what: str) -> None:
-    """Every output and gradient, ``dfn`` included, bitwise ``ref``'s (the same iteration of this package)."""
-    for k, v in ref.items():
-        assert _same_bits(v, got[k]), f"{what}: {k} differs from the eager iteration"
-
-
-def _eager(make) -> dict:
-    step, leaves = make()
-    _reset(leaves)
-    return _snapshot(step())
-
-
-def _capture_and_replay(make, ws=None, what: str = "") -> list:
-    """``REPLAYS`` replays of the captured iteration, each after its static outputs (and the bytes of ``ws`` past the
-    zero prefix) were overwritten with 0xFF; ``ws``'s zero prefix is zero after every replay."""
-    step, leaves = make()
+def _capture(make):
+    """``make()``'s iteration captured in a ``torch.cuda.CUDAGraph`` after three warm-up iterations on a side
+    stream -> (the graph, its static outputs, its static inputs)."""
+    step, leaves, statics = make()
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -504,17 +344,58 @@ def _capture_and_replay(make, ws=None, what: str = "") -> list:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         out = step()
-    replays = []
-    for r in range(REPLAYS):
-        _poison(out)
-        if ws is not None:
-            _poison_workspace(ws)
-        graph.replay()
-        torch.cuda.synchronize()
-        if ws is not None:
-            _assert_zero_prefix(ws, f"{what} replay {r}")
-        replays.append(_snapshot(out))
-    return replays
+    return graph, out, statics
+
+
+def _replay(graph, out: dict, ws, what: str) -> dict:
+    """One replay after the static outputs (and the bytes of ``ws`` past the zero prefix) were overwritten with
+    0xFF; ``ws``'s zero prefix is zero after it."""
+    _poison(out)
+    if ws is not None:
+        _poison_workspace(ws)
+    graph.replay()
+    torch.cuda.synchronize()
+    if ws is not None:
+        _assert_zero_prefix(ws, what)
+    return _snapshot(out)
+
+
+def _judge_captured(
+    make, T: int, hidden: int, ws, what: str, record_property, *, seed: int
+) -> None:
+    """``make()``'s iteration captured once, then replayed on 32 inputs copied into its static inputs: every output
+    and gradient of each replay judged against the naive tier of the layer iteration."""
+    graph, out, statics = _capture(make)
+
+    def case(j: int, s: int):
+        new = _inputs(T, seed=s, hidden=hidden)
+        with torch.no_grad():
+            for k, t in statics.items():
+                t.copy_(new[k])
+        got = package_outputs(_replay(graph, out, ws, f"{what} replay {j}"))
+        expected, naive = _layer_expected(new, got)
+        return [got], expected, naive
+
+    judge_draws(case, record_property, seed=seed)
+
+
+def _forward(i: dict) -> dict:
+    """This package's forward prepare and backward prepare of a case: the ``stats`` / ``grad_stats`` records
+    ``backward_finish`` takes."""
+    _U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
+        i["X"], i["fn"], i["scale"], i["base"]
+    )
+    _dB, gstats = pkg.cake_mhc_nondet_train_backward_prepare(
+        i["dY"], i["B"], i["X"], stats
+    )
+    return {"stats": stats, "gstats": gstats}
+
+
+def _nd_backward(i: dict, prep: dict, **kwargs) -> dict:
+    out = pkg.cake_mhc_nondet_train_backward_finish(
+        i["X"], i["dY"], i["dU"], i["B"], i["fn"], i["scale"], i["base"], prep["stats"], prep["gstats"], **kwargs,
+    )  # fmt: skip
+    return dict(zip(_OUTPUTS, out, strict=True))
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -523,17 +404,21 @@ def _capture_and_replay(make, ws=None, what: str = "") -> list:
 
 @pytest.mark.parametrize("T", (1, 129, 2049))
 @pytest.mark.parametrize("caller_owned", (False, True))
-def test_direct_entry_points_capture(T: int, caller_owned: bool, hidden: int) -> None:
+def test_direct_entry_points_capture(
+    T: int, caller_owned: bool, hidden: int, record_property
+) -> None:
     i = _inputs(T, seed=7046 + T, hidden=hidden)
     wsf, wsb = _workspaces(T, caller_owned, hidden)
-    bound = _layer_bound(i, i["W"])
-    eager = _eager(lambda: _direct_step(i, wsf, wsb))
-    eager_det = _eager(lambda: _direct_step(i, None, None, det_package=True))
     what = f"direct T={T} H={hidden} caller_owned={caller_owned}"
-    replays = _capture_and_replay(lambda: _direct_step(i, wsf, wsb), wsb, what)
-    for r, got in enumerate(replays):
-        _assert_same_call(eager, got, f"{what} replay {r} vs eager")
-        _assert_matches(eager_det, got, bound, f"{what} replay {r} vs deterministic")
+    _judge_captured(
+        lambda: _direct_step(i, wsf, wsb),
+        T,
+        hidden,
+        wsb,
+        what,
+        record_property,
+        seed=7046 + T,
+    )
 
 
 @pytest.mark.parametrize("T", (1, 129, 2049))
@@ -541,110 +426,73 @@ def test_direct_entry_points_capture(T: int, caller_owned: bool, hidden: int) ->
 @pytest.mark.parametrize("ckpt", (False, True))
 @pytest.mark.parametrize("caller_owned", (False, True))
 def test_autograd_iteration_capture(
-    T: int, save_stats: bool, ckpt: bool, caller_owned: bool, hidden: int
+    T: int,
+    save_stats: bool,
+    ckpt: bool,
+    caller_owned: bool,
+    hidden: int,
+    record_property,
 ) -> None:
     i = _inputs(T, seed=7146 + T, hidden=hidden)
     wsf, wsb = _workspaces(T, caller_owned, hidden)
-    bound = _layer_bound(i, i["W"])
-
-    def make(det_package: bool = False):
-        if det_package:
-            return _autograd_step(
-                i, None, None, save_stats=save_stats, ckpt=ckpt, det_package=True
-            )
-        return _autograd_step(i, wsf, wsb, save_stats=save_stats, ckpt=ckpt)
-
-    eager = _eager(make)
-    eager_det = _eager(lambda: make(det_package=True))
     what = f"autograd ckpt={ckpt} save_stats={save_stats} caller_owned={caller_owned} T={T} H={hidden}"
-    for r, got in enumerate(_capture_and_replay(make, wsb, what)):
-        _assert_same_call(eager, got, f"{what} replay {r} vs eager")
-        _assert_matches(eager_det, got, bound, f"{what} replay {r} vs deterministic")
+    _judge_captured(
+        lambda: _autograd_step(i, wsf, wsb, save_stats=save_stats, ckpt=ckpt),
+        T,
+        hidden,
+        wsb,
+        what,
+        record_property,
+        seed=7146 + T,
+    )
 
 
 @pytest.mark.parametrize("T", (129, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("ckpt", (False, True))
 def test_make_graphed_callables(
-    T: int, save_stats: bool, ckpt: bool, hidden: int
+    T: int, save_stats: bool, ckpt: bool, hidden: int, record_property
 ) -> None:
+    """The layer through ``torch.cuda.make_graphed_callables`` (``W`` fixed: the first input set's), called on 32 new
+    input sets of the same shapes (a call whose graphs did not replay would return the previous call's outputs):
+    ``Y`` and the gradients of each call judged against the naive tier of the layer iteration."""
     i = _inputs(T, seed=7246 + T, hidden=hidden)
+    layer = _layer(i["W"], None, None, save_stats)
 
-    def forward(det_package: bool):
-        layer = _layer(i, None, None, save_stats, det_package)
+    def fwd(X, fn, scale, base):
         if not ckpt:
-            return layer
+            return layer(X, fn, scale, base)
+        return checkpoint(
+            layer, X, fn, scale, base, use_reentrant=False, preserve_rng_state=False
+        )
 
-        def fwd(X, fn, scale, base):
-            return checkpoint(
-                layer, X, fn, scale, base, use_reentrant=False, preserve_rng_state=False
-            )
-
-        return fwd
-
-    def run(f, inp: dict) -> dict:
-        leaves = _leaves(inp)
-        Y = f(*leaves)
-        (Y.float() * inp["dY"].float()).sum().backward()
-        return _snapshot({"Y": Y, **_grads(leaves)})
-
-    fwd, fwd_det = forward(False), forward(True)
     graphed = torch.cuda.make_graphed_callables(
         fwd, tuple(_leaves(i)), num_warmup_iters=3
     )
-    for r in range(REPLAYS):
-        # New values of the same shapes on every call: a call whose graphs did
-        # not replay would return the previous call's outputs and fail.
-        ir = _inputs(T, seed=7246 + T + 1000 * (r + 1), hidden=hidden)
-        bound = _layer_bound(ir, i["W"])  # the layer's W is the first draw's
-        ref, ref_det = run(fwd, ir), run(fwd_det, ir)
-        got = run(graphed, ir)
-        what = f"make_graphed_callables ckpt={ckpt} save_stats={save_stats} T={T} H={hidden} call {r}"
-        _assert_same_call(ref, got, f"{what} vs eager")
-        _assert_matches(ref_det, got, bound, f"{what} vs deterministic")
 
+    def case(j: int, s: int):
+        new = {**_inputs(T, seed=s, hidden=hidden), "W": i["W"]}
+        leaves = _leaves(new)
+        Y = graphed(*leaves)
+        (Y.float() * new["dY"].float()).sum().backward()
+        got = _snapshot({"Y": Y, **_grads(leaves)})
+        expected, naive = _layer_expected(new, got)
+        return [got], expected, naive
 
-def _backward(entry, i: dict, prep: dict, **kwargs) -> dict:
-    out = entry(
-        i["X"], i["dY"], i["dU"], i["B"], i["fn"], i["scale"], i["base"], prep["stats"], prep["gstats"], **kwargs,
-    )  # fmt: skip
-    return dict(zip(_OUTPUTS, out, strict=True))
-
-
-def _forward(i: dict) -> dict:
-    _U, stats = det.cake_mhc_det_train_forward_prepare(
-        i["X"], i["fn"], i["scale"], i["base"]
-    )
-    _dB, gstats = det.cake_mhc_det_train_backward_prepare(
-        i["dY"], i["B"], i["X"], stats
-    )
-    return {"stats": stats, "gstats": gstats}
-
-
-def _nd_backward(i: dict, prep: dict, **kwargs) -> dict:
-    return _backward(pkg.cake_mhc_nondet_train_backward_finish, i, prep, **kwargs)
-
-
-def _det_backward(i: dict, prep: dict) -> dict:
-    """The deterministic backward of a case (its group-row forms inside ``BWD_ROW_BANDS``, as this package's)."""
-    return _backward(det.cake_mhc_det_train_backward_finish, i, prep)
-
-
-def _assert_exact_outputs(got: dict, want: dict, label: str) -> None:
-    for k in _EXACT:
-        assert _same_bits(got[k], want[k]), f"{k} {label}: bits differ"
+    judge_draws(case, record_property, seed=7246 + T)
 
 
 @pytest.mark.parametrize(
     ("T", "t_ws"), ((129, 129), (2049, 2049), (2049, 16263), (1, 4096))
 )
-def test_cuda_graph_capture_and_replay(T: int, t_ws: int, hidden: int) -> None:
+def test_cuda_graph_capture_and_replay(
+    T: int, t_ws: int, hidden: int, record_property
+) -> None:
     """This package's ``backward_finish`` with a caller workspace (sized for ``t_ws >= T``) and caller outputs,
-    captured in a ``torch.cuda.CUDAGraph`` after a warm-up on a side stream, then replayed with new inputs copied in
-    place (and, on a larger buffer, an eager call at ``t_ws`` on the same workspace before each replay): every replay
-    leaves the zero prefix zero, gives every output of this package's eager call on the same inputs bitwise (``dfn``
-    included) and matches the eager deterministic call (``dX``, ``dscale``, ``dbase`` bitwise; ``dfn`` within the
-    bound)."""
+    captured in a ``torch.cuda.CUDAGraph`` after a warm-up on a side stream, then replayed on 32 inputs copied in
+    place (and, on a larger buffer, after an eager call at ``t_ws`` on new inputs on the same workspace): every replay
+    and every eager call leaves the zero prefix zero, and their outputs are judged against the naive tier of their
+    inputs (the eager call's under the name prefix ``eager T=<t_ws>``)."""
     dev = _device()
     ws = pkg.cake_mhc_nondet_train_backward_workspace(t_ws, dev, hidden=hidden)
     static = _inputs(T, seed=SEED + 600, hidden=hidden)
@@ -668,47 +516,35 @@ def test_cuda_graph_capture_and_replay(T: int, t_ws: int, hidden: int) -> None:
     with torch.cuda.graph(graph):
         step()
     torch.cuda.synchronize()
-    big = None
-    if t_ws > T:
-        bi = _inputs(t_ws, seed=SEED + 601, hidden=hidden)
-        bprep = _forward(bi)
-        big = {
-            "i": bi,
-            "prep": bprep,
-            "want": _snapshot(_det_backward(bi, bprep)),
-            "bound": _dfn_bound(bi),
-        }
-    for r in range(REPLAYS):
-        new = _inputs(T, seed=SEED + 610 + r, hidden=hidden)
+
+    def case(j: int, s: int):
+        new = _inputs(T, seed=s, hidden=hidden)
         nprep = _forward(new)
-        want = _snapshot(_det_backward(new, nprep))
-        eager = _snapshot(_nd_backward(new, nprep))
-        bound = _dfn_bound(new)
         for k in ("X", "dY", "dU", "B", "fn", "scale", "base"):
             static[k].copy_(new[k])
         sprep["stats"].copy_(nprep["stats"])
         sprep["gstats"].copy_(nprep["gstats"])
-        what = f"replay {r} at T={T} H={hidden} on a workspace of T={t_ws}"
-        if big is not None:
+        what = f"replay {j} at T={T} H={hidden} on a workspace of T={t_ws}"
+        launch, expected, naive = {}, {}, {}
+        if t_ws > T:
+            big = _inputs(t_ws, seed=s + 1, hidden=hidden)
             _poison_workspace(ws)
-            got_big = _snapshot(_nd_backward(big["i"], big["prep"], workspace=ws))
+            got = _snapshot(_nd_backward(big, _forward(big), workspace=ws))
             _assert_zero_prefix(ws, f"eager T={t_ws} before {what}")
-            _assert_exact_outputs(got_big, big["want"], f"eager T={t_ws} before {what}")
-            _assert_dfn_within(
-                got_big["dfn"],
-                big["want"]["dfn"],
-                big["bound"],
-                f"dfn eager T={t_ws} before {what}",
-            )
+            e, t = expected_and_naive(big, _OUTPUTS)
+            prefix = f"eager T={t_ws} "
+            for d, part in zip((launch, expected, naive), (got, e, t), strict=True):
+                d.update({prefix + k: v for k, v in part.items()})
+            del big, got, e, t
         _poison_workspace(ws)
         for v in outs.values():
             v.fill_(float("nan"))
         graph.replay()
         _assert_zero_prefix(ws, what)
-        got = _snapshot(outs)
-        _assert_exact_outputs(got, want, what + " vs eager deterministic")
-        _assert_same_call(eager, got, what + " vs the eager call")
-        _assert_dfn_within(
-            got["dfn"], want["dfn"], bound, f"dfn {what} vs eager deterministic"
-        )
-    del graph
+        launch.update(_snapshot(outs))
+        e, t = expected_and_naive(new, _OUTPUTS)
+        expected.update(e)
+        naive.update(t)
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 610)

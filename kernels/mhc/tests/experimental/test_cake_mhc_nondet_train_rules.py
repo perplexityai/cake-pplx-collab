@@ -103,9 +103,8 @@ deterministic registry's records, routes and record scalars of this package's
   public callable has a ``deterministic`` parameter (the autograd
   ``Function.forward`` included) and a ``deterministic`` keyword is the
   interpreter's ``TypeError`` before any operand check; every entry point has
-  the deterministic package's counterpart of the same verb; every output of
-  the package repeats bit for bit on one device, so no call of the package
-  raises PyTorch's alert of a non-deterministic operation, and under
+  the deterministic package's counterpart of the same verb; no call of the
+  package raises PyTorch's alert of a non-deterministic operation, and under
   ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only``) every
   entry point refuses CPU operands with its operand error and no alert;
 * the top-level module ``cake_pplx.cake_mhc_nondet_train`` (read as source):
@@ -3659,8 +3658,7 @@ def _called_names(path: Path) -> list[tuple[int, str]]:
 
 @pytest.mark.cpu_only
 def test_no_call_raises_the_determinism_alert() -> None:
-    """Every output of the package repeats bit for bit on one device, so nothing alerts under PyTorch's deterministic
-    algorithms: no source file of the package (nor the top-level module, where it is beside this test) calls an
+    """Nothing alerts under PyTorch's deterministic algorithms: no source file of the package (nor the top-level module, where it is beside this test) calls an
     alert (a function or method whose name holds ``alert``, as PyTorch's ``_alert_not_deterministic`` and a package
     helper around it would) or reads the mode (``are_deterministic_algorithms_enabled``,
     ``is_deterministic_algorithms_warn_only_enabled``)."""
@@ -3684,7 +3682,7 @@ def test_no_call_raises_the_determinism_alert() -> None:
 def test_no_entry_alerts_under_deterministic_algorithms(monkeypatch) -> None:
     """Under PyTorch's deterministic algorithms (strict and ``warn_only=True``, warnings are errors) every entry
     point, ``backward_finish`` included, refuses the CPU operands here with its operand error, no alert, and
-    launches nothing (the GPU suite checks that every entry point runs and gives the bits it gives with the mode off);
+    launches nothing (the GPU suite checks that every entry point runs and judges its outputs with the mode on);
     ``cake_mhc_nondet_train_finish`` refuses the handle its prepare did not make with a ``TypeError`` that names the
     deterministic finish."""
     launched = []
