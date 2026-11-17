@@ -29,46 +29,46 @@ bit for bit: the same inputs on the same device give the same bits on every
 call, whatever the order in which CTAs run and the work beside the call on
 other streams, and whatever the grid.  A BF16 weight gradient repeats bit for
 bit too, whatever the grid but in the repeatable band (whose grid, and so
-whose bits, the rows and the SM count fix), except in the fused and the
-row-claims bands of ``cake_jit.BACKWARD_BANDS`` (the role
-``bwd_bf16_fused``, on every architecture, and the roles ``bwd_bf16_rc`` and
-``bwd_bf16_rc_mid``, on sm_100a and sm_103a only), where its last bits may
-vary from run to run.  A band runs a backward whose weight gradient may vary
-only where it makes the checkpointed training step (2 x forward + backward)
-at least 3 % faster than the repeatable backward.
+whose bits, the rows and the SM count fix), except in the fused band of
+``cake_jit.BACKWARD_BANDS`` (the role ``bwd_bf16_fused``, on every
+architecture), where its last bits may vary from run to run (as would those
+of the row-claims backwards ``bwd_bf16_rc`` and ``bwd_bf16_rc_mid``, sm_100a
+and sm_103a, which no band runs).  A band runs a backward whose weight
+gradient may vary only where the band-selection measurement found the
+checkpointed training step (2 x forward + backward) about 3 % or more faster
+than with the repeatable backward (near a band's edges the gain can be
+smaller).
 The forward computes ``rstd`` with ``rsqrt.approx`` and the SiLU gate with
 ``ex2.approx`` and ``rcp.approx`` (the deterministic forward's split gate:
 the reciprocal of a scaled ``1 + e``, a nonzero sigmoid down to where
 ``ex2.approx`` overflows, ``z`` about -88.72), rounding ``y`` to BF16 once;
 its bits are the deterministic package's only from the pipelined forwards
-where that package's gate does not flush, and its error against an FP64
-reference stays within the family's budget.  Each forward program's arithmetic is fixed,
+where that package's gate does not flush.  Each forward program's arithmetic is fixed,
 but the programs may associate a row's sum of squares differently (the row
 count and the SM count pick the program), so ``y`` repeats bit for bit for the
-same inputs on the same device.  The backward writes ``dx`` and ``dz``
-with one row arithmetic in every band but the fused and the repeatable ones
-(within one BF16 ulp of the FP64 value plus 1/64 ulp of the tensor's largest
-finite magnitude; the deterministic package's backward need not give these
-bits; in those two bands they are the deterministic package's bits) and
-computes the FP32 partial of
-each chunk of rows as the deterministic backward at ``2e989556``
-does; it adds the partials
+same inputs on the same device.  Each backward program repeats ``dx`` and
+``dz`` bit for bit for the same inputs on the same device; the programs'
+``.f32x2`` FMA chains for a row's sums differ by program and by
+architecture, so the last bits of ``dx`` and ``dz`` can differ between bands
+(the deterministic package's backward need not give these bits; in the
+repeatable band they are the deterministic package's bits).  The backward
+computes the FP32 partial of each chunk of rows (the chunks of the
+deterministic backward at ``2e989556``); it adds the partials
 exactly, as signed 64-bit integer windows of the FP32 values (an addition of
 integers does not depend on its order), and rounds the exact sum once into
-``dw`` (FP32, then BF16 for a BF16 ``dw``), so ``dw`` is that package's bits
-except where the exact sum lies within its FP64 sum's error of a rounding
-boundary.  An infinite or ``NaN`` partial makes its column's
-``dw`` infinite or ``NaN`` with the class the FP64 sum gives it (a ``NaN``'s
-sign and payload need not be its).  A call of few rows runs a small-row
+``dw`` in integer arithmetic (FP32, then BF16 for a BF16 ``dw``; no FP64).
+An infinite or ``NaN`` partial makes its column's
+``dw`` infinite or ``NaN`` with the class the exact sum of the partials gives
+it (a ``NaN``'s sign and payload need not be its).  A call of few rows runs a small-row
 backward instead (``cake_jit.BACKWARD_BANDS``, by architecture and
 weight-gradient dtype; ``compute_grad_weight=False`` takes the BF16 bands):
-one thread-block cluster of 16 CTAs, its ``dx`` and ``dz`` the same
-arithmetic, that sums the weight gradient on chip in a fixed order and rounds
-it once, the same bits on every call.  The exact tiny backward (4 teams of
-the 128-thread CTA of the deterministic backward at ``2e989556`` a CTA) adds
-that backward's chunk partials in its reduction order in FP64; the short backward
+one thread-block cluster of 16 CTAs that sums the weight gradient on chip in
+a fixed order and rounds it once, the same bits on every call.  The exact
+tiny backward (4 teams of the 128-thread CTA of the deterministic backward
+at ``2e989556`` a CTA) sums its FP32 weight-gradient terms in plain FP32
+words in an order of its own; the short backward
 of a BF16 weight gradient (256-thread CTAs) has each
-CTA finish 8 columns from every CTA's FP32 partials in rank order in FP64.
+CTA finish 8 columns from every CTA's FP32 partials in rank order in FP32.
 Past its small-row bands, in a band of rows per SM, a call with a BF16
 weight gradient runs the fused backward (``bwd_bf16_fused``, on every
 architecture: up to 1000 rows per SM on sm_100a and sm_103a, past 64 up to
@@ -76,32 +76,42 @@ architecture: up to 1000 rows per SM on sm_100a and sm_103a, past 64 up to
 deterministic package's fused backward's schedule and row arithmetic,
 256-thread CTAs of 16-row blocks, 16 lanes a row, at most 4 CTAs per SM,
 which claim the blocks from the workspace's claim counter in chunks, with
-that backward's approximate gate and ``rstd``, so ``dx`` and ``dz`` are that
-package's bits (within the bound above) at any grid.  Its weight gradient
-adds each thread's FP32 runs of at most 16 rows, folded into FP32 two-sum
-pairs, to FP64 accumulators with atomics, and the CTA that arrives last
-rounds the sum once, so the sum's order, and the BF16 rounding of its last
-bits, depend on scheduling; its error stays within the family's budget
-(``dw`` within ``|dw64| * 2^-7 + sum|terms| * 2^-20`` of the FP64 sum
-``dw64`` of its terms).  Past the fused band (on sm_107a also before it,
+that backward's approximate gate and ``rstd``, so ``dx`` and ``dz`` are the
+same bits at any grid (a row's sums run on FMA chains of its own, set per
+architecture, so their last bits may differ from that package's).  Its
+weight gradient adds each thread's FP32 runs of at
+most 16 rows into FP32 words and each CTA's FP32 column sums into 8 FP32
+replicas in the workspace with FP32 atomic adds, and the CTA that arrives
+last sums the replicas in FP32 and rounds the sum to BF16 (no FP64), so the
+sum's order, and the last bits of ``dw``, depend on scheduling.  Past the
+fused band (on sm_107a also before it,
 up to 64 rows per SM) a call with a BF16 weight gradient runs the
 repeatable backward (``bwd_bf16_rep``, on every architecture), this
 package's copy of the deterministic package's BF16
 backward: the fused backward's schedule and row arithmetic, the CTAs
 claiming the blocks in chunks whose rows are fixed by the row count and the
-grid, each chunk's weight-gradient terms added exactly into fixed-point
-digits in the workspace and the sum rounded once by the CTA that arrives
-last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
-the same for the rows and the SM count: ``dx`` and ``dz`` within the bound
-above, ``dw`` not the sum of the chunk partials of the deterministic backward
-at ``2e989556`` (within that package's budget).
+grid, each thread's FP32 runs of at most 16 rows of a chunk added into
+plain FP32 words, each CTA adding a column's FP32 word exactly into 64-bit
+fixed-point digits in the workspace and the sum rounded once by the CTA that
+arrives last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
+the same for the rows and the SM count.
 On sm_100a and sm_103a the row-claims backwards (``bwd_bf16_rc``,
 ``bwd_bf16_rc_mid``: 256-thread CTAs of 16-row blocks, the CTAs past one
 wave claiming blocks from the workspace's claim counter) give ``dx`` and
-``dz`` as above, each thread's FP32 run of rows added to FP64 accumulators
-with atomics (or, ``_rc_mid``, kept as FP32 two-sum pairs and added once as
-FP64), so the sum's order, and the BF16 rounding of its last bits, depend
-on scheduling; its error stays within the family's budget.
+``dz`` as above, each thread's FP32 runs of rows added into FP32 words and
+each CTA's FP32 column sums added into 4 FP32 replicas in the workspace with
+FP32 atomic adds, which the CTA that arrives last sums in FP32 (no FP64), so
+the sum's order, and the last bits of ``dw``, depend on scheduling.
+
+Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
+either weight gradient, accumulated or not) to the PyTorch BF16 naive
+implementation of the same operation (every op in BF16, the gradients from
+PyTorch autograd), each against a float64 reference computed from the BF16
+inputs: over 32 random inputs of a case, in the L2 and in the max norm of the
+error, the median and the largest error of the output are each at most
+1.005 times the naive implementation's, and 0 on every input where the
+naive implementation's is 0 (``tests/cake/test_helpers/cake_naive.py``).
+No output has an error budget of its own.
 
 Mode: the mode is part of the name (``nondet``).  No entry point takes a
 ``deterministic`` keyword (passing one is a ``TypeError``), and no call of this
@@ -131,8 +141,10 @@ Host design (the input layout rules are the deterministic package's):
   exact weight-gradient sum (``slots`` copies of 7 x 128, 4 or 5 by module;
   on sm_107a the static modules' last copy holds occupancy words instead),
   128 FP32 class words and the two 32-bit words of the arrival ticket and the
-  claim counter; for a row-claims or the fused backward two: its 4 x 128
-  FP64 accumulators and the same two words (4104 bytes); for the repeatable
+  claim counter; for a row-claims or the fused backward two: its FP32
+  replicas (one FP32 sum for each of 128 columns, 4 replicas for a
+  row-claims backward, 8 for the fused one) and the same two words (2056 and
+  4104 bytes); for the repeatable
   backward three: its 2304 64-bit fixed-point digits, a 32-bit flag word a
   column and the same two words (18952 bytes).  Every launch of the static,
   the claimed, the row-claims, the fused and the repeatable backwards takes a
@@ -162,8 +174,9 @@ Host design (the input layout rules are the deterministic package's):
   module), allocated on first use and kept in ``_STREAM_WORKSPACES`` for later
   calls: 29192 bytes each on sm_100a and sm_103a and 36360 on sm_107a, at
   most one per backward module that takes one (the static, the fused
-  ``_fused``, the row-claims ``_rc`` and ``_rc_mid`` and the claimed ``_mid``
-  backwards an architecture routes) for every stream that ran such a
+  ``_fused``, the repeatable ``_rep`` and ``_rep_long``, the row-claims
+  ``_rc`` and ``_rc_mid`` and the claimed ``_mid`` backwards an architecture
+  routes) for every stream that ran such a
   backward.  Such eager calls also keep a reserve of
   64 zero-filled workspaces per device (in one allocation, 29440 bytes each,
   about 1.8 MiB, on sm_100a and sm_103a and 36608 bytes each, about 2.2 MiB,
@@ -217,12 +230,17 @@ Host design (the input layout rules are the deterministic package's):
   past it; on sm_103a the mid forward up to 250, the extra-long forward up to
   700 and the plain forward past it; on sm_107a the mid forward up to 480 and
   the plain forward past it.  The forward programs
-  associate a row's sum of squares differently (the tiny and the short
-  forward: 8-term FMA chains of 16 lanes folded by XOR shuffles 1, 2, 4, 8;
-  the sm_107a pipelined forward: four 4-term chains of 8 lanes added in pairs,
-  then folded by 1, 2, 4; the others: 16-term chains of 8 lanes folded by 1,
-  2, 4), so ``y``'s bits can differ between bands while each program repeats
-  them.  The static and the claimed
+  associate a row's sum of squares differently, on FP32 FMA chains (the
+  lanes of ``.f32x2`` FMA chains where a program runs two or four): the tiny
+  and the short forward four 2-term chains of 16 lanes added in pairs, then
+  folded by XOR shuffles 1, 2, 4, 8; the mid forward, the extra-long forward
+  but on sm_100a and the sm_107a pipelined forward four 4-term chains of 8
+  lanes added in pairs, then folded by 1, 2, 4; the plain forward and the
+  pipelined forward on sm_100a and sm_103a two 8-term chains of 8 lanes (the
+  even and the odd elements) added, then folded by 1, 2, 4; the long forward,
+  and the extra-long forward on sm_100a, 16-term chains of 8 lanes folded by
+  1, 2, 4.  So ``y``'s bits can differ between bands while each program
+  repeats them.  The static and the claimed
   backward run 128-thread CTAs of 8-row blocks in the deterministic
   backward's chunks (``cake_jit.backward_chunks``) and launch
   ``cake_jit.backward_ctas`` ``G = min(chunks, ctas_per_sm * SMs)`` CTAs (8
@@ -318,7 +336,7 @@ _DETERMINISTIC_ENTRIES = {
 # The torch dtype of each workspace buffer (``cake_jit.WORKSPACE_BUFFERS``).
 _WORKSPACE_DTYPES = {
     "dw_win": torch.uint64,
-    "dw_sums": torch.float64,
+    "dw_sums": torch.float32,
     "dw_spec": torch.float32,
     "dw_done": torch.uint32,
     "acc": torch.uint64,
@@ -589,11 +607,11 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
 
     ``rstd`` from ``rsqrt.approx`` and the gate from ``ex2.approx`` and
     ``rcp.approx``, ``y`` rounded to BF16 once: the same bits on every call
-    (not the deterministic package's bits) for the same inputs on the same
-    device.  ``cake_jit.module_for_rows`` picks the program from the rows and
-    the SM count (``cake_jit.ROUTES``); each program's arithmetic is fixed, but
-    the programs may associate a row's sum of squares differently.  The
-    arguments are those of
+    (which need not be the deterministic package's) for the same inputs on
+    the same device.  ``cake_jit.module_for_rows`` picks the program from
+    the rows and the SM count (``cake_jit.ROUTES``); each program's
+    arithmetic is fixed, but the programs may associate a row's sum of
+    squares differently.  The arguments are those of
     :func:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train.cake_rmsnorm_silu_gate_nondet_train_forward`.
     """
 
@@ -618,7 +636,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward_workspace_bytes(
     (``T * H``) on ``device``: the largest workspace of the architecture's
     backward modules (the integer windows of the exact weight-gradient sum, the
     FP32 class words and the arrival ticket and claim counter; the row-claims
-    and the fused modules' FP64 accumulators and the repeatable module's
+    and the fused modules' FP32 replicas and the repeatable module's
     fixed-point digits and flag words fit within it), whatever ``rows``: 29192
     bytes
     (about 29 KiB) on sm_100a and sm_103a, 36360 (about 36 KiB) on sm_107a.
@@ -656,7 +674,7 @@ def cake_rmsnorm_silu_gate_nondet_train_reset_workspace(
     workspace: torch.Tensor,
 ) -> None:
     """Return a caller-owned backward workspace to its first-use state: zero
-    all of it (the integer windows, the class words, the FP64 accumulators,
+    all of it (the integer windows, the class words, the FP32 replicas,
     the fixed-point digits, the flag words, the arrival ticket and the claim
     counter).
 
@@ -681,7 +699,8 @@ def cake_rmsnorm_silu_gate_nondet_train_reset_workspace(
 
 
 # The workspaces of calls without a caller workspace (every launch of the
-# static, the claimed, the row-claims and the fused backwards needs one: it
+# static, the claimed, the row-claims, the fused and the repeatable backwards
+# needs one: it
 # takes the arrival ticket, and the claimed, the row-claims and the fused ones
 # claim their chunks or blocks; the small-row backwards need none): one per
 # (device, stream, backward module), zero-filled once and kept for the process
@@ -870,8 +889,8 @@ def _workspace_views(
     workspace: torch.Tensor, name: str, device: torch.device
 ) -> dict[str, torch.Tensor]:
     """The buffers of backward module ``name`` on a workspace
-    (``cake_jit.workspace_layout``): ``dw_win`` (uint64) or ``dw_sums`` (FP64,
-    a row-claims or a fused backward), ``dw_spec`` (FP32) and ``dw_done``
+    (``cake_jit.workspace_layout``): ``dw_win`` (uint64) or ``dw_sums`` (FP32
+    replicas, a row-claims or a fused backward), ``dw_spec`` (FP32) and ``dw_done``
     (uint32: ``[0]`` the arrival ticket, ``[1]`` the claim counter), or, for
     the repeatable backward, ``acc`` (uint64 fixed-point digits), ``flags``
     (uint32, a word a column) and ``done`` (uint32: the arrival ticket and the
@@ -1062,26 +1081,28 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     rows of the deterministic backward at ``2e989556`` (a static
     backward, CTA ``b`` running the chunks ``b``, ``b + grid``, ..., or, in
     the last band, the claimed backward, whose CTAs claim runs of chunks from
-    the workspace's claim counter): ``dx`` and ``dz`` are one row arithmetic
-    (within one BF16 ulp of FP64 plus 1/64 ulp of the tensor's largest finite
-    magnitude), each chunk's FP32 weight-gradient partial is that backward's,
-    and the partials are added
-    exactly as 64-bit integer windows in the workspace; the CTA that arrives
-    last rounds the exact sum once into ``dw`` (adding ``grad_weight``'s value
-    first when accumulating; FP32, then BF16 for a BF16 ``dw``) and zeroes the
-    workspace.  The BF16 bands past the small-row ones run the fused backward
+    the workspace's claim counter): the chunks' FP32 weight-gradient partials
+    are added exactly as 64-bit integer windows in the workspace; the CTA
+    that arrives last rounds the exact sum once into ``dw`` (adding
+    ``grad_weight``'s value first when accumulating; FP32, then BF16 for a
+    BF16 ``dw``) and zeroes the workspace.  The BF16 bands past the
+    small-row ones run the fused backward
     (``bwd_bf16_fused``) in a band of rows per SM (on sm_107a past 64 up to
     256; the repeatable backward runs below it there): ``dx`` and ``dz`` the
-    deterministic package's bits at any grid, its weight gradient FP32 runs
-    of rows added to FP64 accumulators with atomics, ``dw`` within the
-    family's budget but its last bits may vary from run to run, and so do the
-    row-claims backwards (``bwd_bf16_rc``, ``bwd_bf16_rc_mid``) where a band
-    of sm_100a or sm_103a runs one.  Past the fused band the repeatable
-    backward (``bwd_bf16_rep``), this package's copy of the deterministic
-    package's backward, adds each chunk's weight-gradient terms exactly into
-    fixed-point digits in the workspace: ``dx``, ``dz`` and ``dw`` the
+    same bits at any grid, its
+    weight gradient FP32 runs of rows added into FP32 words and the CTAs'
+    FP32 column sums added into FP32 replicas with FP32 atomic adds, so the
+    last bits of ``dw`` may vary from run to run (as would those of the
+    row-claims backwards ``bwd_bf16_rc`` and ``bwd_bf16_rc_mid``, which no
+    band runs).  Past the fused band the repeatable backward
+    (``bwd_bf16_rep``), this package's copy of the deterministic package's
+    backward, adds each thread's FP32 runs of rows into plain FP32 words and
+    each CTA's FP32 column words exactly into 64-bit fixed-point digits in the
+    workspace: ``dx``, ``dz`` and ``dw`` the
     deterministic package's bits, the same for the rows and the SM count.
-    Every other output repeats bit for bit.  Every
+    Every other output repeats bit for bit; the modules' ``.f32x2`` FMA
+    chains for a row's sums differ by module and by architecture, so the
+    last bits of ``dx`` and ``dz`` can differ between bands.  Every
     call with rows uses a workspace, also with ``compute_grad_weight=False``,
     but one of few rows (by architecture and weight-gradient dtype): there one
     cluster of 16 CTAs runs (summing a weight gradient on chip in a fixed
@@ -1092,7 +1113,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     buffer of the current device and stream; during CUDA Graph capture, a
     zero-filled buffer of the capture and capture stream).  Under
     ``torch.use_deterministic_algorithms(True)`` a call that computes the
-    weight gradient in a fused or a row-claims band raises PyTorch's alert
+    BF16 weight gradient in the fused band raises PyTorch's alert
     (``RuntimeError``; a ``UserWarning`` under ``warn_only=True``, then it
     runs) after the argument checks, immediately before the launch; no other
     call alerts.
@@ -1122,7 +1143,7 @@ class CakeRMSNormSiLUGateNondetFunction(torch.autograd.Function):
 
     ``forward(x, z, weight, eps)``: both directions run this package's
     kernels; every output repeats bit for bit but a BF16 weight gradient in
-    the fused and the row-claims bands (whose backward alerts under
+    the fused band (whose backward alerts under
     ``torch.use_deterministic_algorithms(True)``); a checkpoint replay reruns
     the forward (the same ``y``).
     """

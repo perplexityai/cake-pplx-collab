@@ -20,12 +20,12 @@ approximate FP32 intrinsics, and one backward kernel whose CTAs add the
 weight-gradient partials exactly as 64-bit integer windows, the last CTA
 rounding the sum once, or, for a BF16 weight gradient in its fused band, run
 the deterministic package's fused backward's schedule and row arithmetic and
-add FP32 runs of rows to FP64 accumulators with atomics, and past that band
-run its copy of the deterministic package's backward) against the
-deterministic package
+add FP32 runs of rows into FP32 words and the CTAs' FP32 column sums into
+FP32 replicas with FP32 atomic adds, and past that band run its copy of the
+deterministic package's backward) beside the deterministic package
 (``cake_pplx.cake_rmsnorm_silu_gate_det_train``: its one-kernel backward with
-the exact fixed-point weight-gradient sum), each called through its own public
-entry points.
+FP32 chunk words added exactly in fixed point), each called through its own
+public entry points.
 
 Every row times, for both modes, on identical generated inputs:
 
@@ -44,9 +44,9 @@ that its mid, long, extra-long or pipelined forward (its copy of the
 deterministic forward) by bands of rows per SM (``cake_jit.FORWARD_BANDS``).
 Its backward runs one cluster of 16 CTAs for few rows, else one kernel by bands
 of rows per SM (``cake_jit.BACKWARD_BANDS``).  A BF16 weight gradient (the one
-timed here) runs the short backward (one cluster, a fixed-order sum) up to 256
-rows and, on SM100 and SM107, the exact tiny backward (one cluster, the bits of
-the deterministic pair at 2e989556) up to 512 rows.  Past that, on
+timed here) runs the short backward (one cluster, a fixed-order FP32 sum) up
+to 256 rows and, on SM100 and SM107, the exact tiny backward (one cluster, a
+fixed-order FP32 sum of its own) up to 512 rows.  Past that, on
 SM100 and SM103, it runs the fused backward (256-thread CTAs of 16-row blocks,
 at most 4 per SM) up to 1000 rows per SM and the repeatable backward (its copy
 of the deterministic package's backward, the same grid; its ``dw`` repeats its
@@ -58,8 +58,9 @@ program, the same bits; ``cake_jit.LONG_BACKWARD_ROWS_PER_SM``).
 An FP32 weight gradient runs the exact tiny backward up to 512 rows, the
 static backward up to 256 rows per SM on SM100 and SM103 (64 on SM107) and the
 claimed backward past that.  At ``--heads 48`` the default token counts reach
-every forward kernel of packed rows and every BF16 backward kernel that a band
-of a 148-SM B200 runs (2048 tokens: the extra-long forward).
+every forward kernel of packed rows but the extra-long one (401 to 520 rows
+per SM, 1234 to 1603 tokens) and every BF16 backward kernel that a band of a
+148-SM B200 runs (2048 tokens: the pipelined forward).
 
 Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, 100
 calls after 10 warm-up calls); each stage reports
@@ -73,14 +74,15 @@ workspace (``temp``; the zero-filled ``torch.uint8`` workspaces that
 non-deterministic calls without a caller workspace keep, one per device,
 stream and kernel that takes one and a reserve per device, come from the calls before it) and
 the caller workspace of each mode (``workspace``: the non-deterministic one
-29192 bytes on SM100 and SM103 and 36360 on SM107, whatever the rows).  Output columns check the non-deterministic
-results against the deterministic ones: ``y`` bitwise (the non-deterministic
-forward's approximate intrinsics need not give the deterministic ``y`` bits),
-``dx``, ``dz`` and ``dw`` as the largest distance in BF16 units in the last
-place, and the number of distinct ``dw`` bit patterns over ``--repeats``
-backward calls (1 for the deterministic package; 1 for the non-deterministic
-package too, except in its fused band, where the BF16 ``dw``'s last bits may
-vary from run to run, so the count may exceed 1).
+29192 bytes on SM100 and SM103 and 36360 on SM107, whatever the rows).  Output
+columns report, for each mode on its own, the error of ``y``, ``dx``, ``dz``
+and the BF16 ``dw`` against a float64 reference computed from the BF16 inputs
+(the L2 norm and the largest magnitude of the difference), and the number of
+distinct ``dw`` bit patterns over ``--repeats`` backward calls (1 for the
+deterministic package; 1 for the non-deterministic package too, except in
+its fused band, where the BF16 ``dw``'s last bits may vary from run to run,
+so the count may exceed 1).  No column compares the outputs of the two
+modes.
 
 Example::
 
@@ -122,6 +124,7 @@ API = {
 }
 MODES = tuple(API)
 STAGES = ("fwd", "bwd", "ckpt")
+OUTPUTS = ("y", "dx", "dz", "dw")
 # The issue's token counts and a spread around them, then small and irregular ones.
 # The BF16 backward each reaches at 48 heads (``cake_jit.BACKWARD_BANDS``):
 # - 148-SM B200 (sm_100a): 1 and 5 tokens the short backward; 7 the exact tiny
@@ -238,11 +241,32 @@ def _peak_bytes(call: Callable[[], object]) -> int:
     return peak
 
 
-def _ordered(bf16: torch.Tensor) -> torch.Tensor:
-    """BF16 bit patterns as integers in the order of their values (+0 = -0)."""
+def _reference(dy, x, z, w, eps):
+    """``(y, dx, dz, dw)`` in float64 from the BF16 inputs, with no FP32
+    rounding: ``rstd = (mean(x^2) + eps)^-1/2``, ``s = sigmoid(z)``,
+    ``g = z s``, ``n = x rstd``; ``y = n w g``; ``dn = dy w g``;
+    ``dx = rstd dn - x rstd^3 sum(dn x) / 128``;
+    ``dz = dy n w s (1 + z (1 - s))``; ``dw`` the sum of ``dy g n`` over the
+    rows."""
 
-    bits = bf16.view(torch.int16).to(torch.int32)
-    return torch.where(bits < 0, -(bits & 0x7FFF), bits)
+    xd, zd, gd, wd = x.double(), z.double(), dy.double(), w.double()
+    rstd = torch.rsqrt(xd.square().mean(dim=-1, keepdim=True) + eps)
+    s = torch.sigmoid(zd)
+    g = zd * s
+    n = xd * rstd
+    dn = gd * wd * g
+    dx = rstd * dn - xd * rstd.pow(3) * (dn * xd).sum(dim=-1, keepdim=True) / D
+    dz = gd * n * wd * s * (1.0 + zd * (1.0 - s))
+    dw = (gd * g * n).reshape(-1, D).sum(dim=0)
+    return n * wd * g, dx, dz, dw
+
+
+def _errors(out: torch.Tensor, ref: torch.Tensor) -> list[float]:
+    """``[l2, max]``: the L2 norm and the largest magnitude of ``out - ref``
+    in float64."""
+
+    diff = out.double() - ref
+    return [diff.norm().item(), diff.abs().max().item()]
 
 
 def bench_row(T: int, H: int, eps: float, seed: int, repeats: int) -> dict:
@@ -323,13 +347,15 @@ def bench_row(T: int, H: int, eps: float, seed: int, repeats: int) -> dict:
         result["modes"][name] = entry
         del ws
         torch.cuda.empty_cache()
-    # The non-deterministic outputs against the deterministic ones.
-    reference, candidate = outputs["deterministic"], outputs["nondeterministic"]
-    result["y_bitwise_equal"] = bool(torch.equal(reference[0], candidate[0]))
-    for i, grad in enumerate(("dx", "dz", "dw"), 1):
-        result[f"{grad}_max_ulps_apart"] = int(
-            (_ordered(reference[i]) - _ordered(candidate[i])).abs().max().item()
-        )
+    # Each mode's outputs against the float64 reference, on their own.
+    reference = _reference(dy, x, z, w, eps)
+    for name in MODES:
+        result["modes"][name]["errors"] = {
+            out: _errors(got, ref)
+            for out, got, ref in zip(OUTPUTS, outputs[name], reference, strict=True)
+        }
+    del reference
+    torch.cuda.empty_cache()
     # deterministic GPU time over non-deterministic GPU time
     for stage in STAGES:
         result[f"{stage}_speedup"] = (
@@ -363,11 +389,14 @@ def _format(result: dict) -> list[str]:
             f"workspace {m['workspace_bytes'] / 2**10:9.1f} KiB  "
             f"dw patterns {m['dw_patterns']}/{m['repeats']}"
         )
-    lines.append(
-        f"{head} out  | y bitwise equal: {result['y_bitwise_equal']}  "
-        f"dx/dz/dw at most {result['dx_max_ulps_apart']}/"
-        f"{result['dz_max_ulps_apart']}/{result['dw_max_ulps_apart']} BF16 ulp apart"
-    )
+    for name in MODES:
+        errors = result["modes"][name]["errors"]
+        lines.append(
+            f"{head} err  | {name:16s} vs float64 (l2, max): "
+            + "  ".join(
+                f"{out} {errors[out][0]:.3e} {errors[out][1]:.3e}" for out in OUTPUTS
+            )
+        )
     return lines
 
 

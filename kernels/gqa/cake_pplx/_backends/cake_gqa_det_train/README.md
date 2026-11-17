@@ -181,10 +181,18 @@ pytest tests/experimental/test_cake_gqa_det_train.py \
 python benchmarks/bench_cake_gqa_det_train.py --layouts issue1,issue2,issue3 --budget-gib 8
 ```
 
+On `sm_107a`, `test_deterministic_mode_adds_no_kernel_to_the_backward` reads
+the kernel launches with the PyTorch profiler.  The CUPTI that torch cu130
+bundles (13.0) records no kernel on `sm_107a`: install `nvidia-cuda-cupti`
+13.5 or later and preload its `libcupti.so.13` (`LD_PRELOAD`) for this test.
+
 ## Limitations
 
 - Head dimension 256, BF16 inputs, causal only (bottom-right aligned), no
   dropout, no sliding window.
 - `H_q / H_kv` must be even.
 - `dout` of the low-level backward must be contiguous (autograd makes it so).
-- `sm_100a`, `sm_103a` and `sm_107a` only.
+- `sm_100a`, `sm_103a` and `sm_107a` only, minimum CUDA 12.8 / 12.9 / 13.5
+  (`build.json`): every `sm_107a` entry has `min_cuda` 13.5, and on an older
+  toolkit `cake_build.jit_spec` raises and `cake_build.jit_specs` leaves the
+  entry out.
