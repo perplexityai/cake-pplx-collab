@@ -3431,8 +3431,8 @@ def test_k1_promote_exempt_rows_keep_the_program_without_promotion(monkeypatch):
     program without promotion where the promotion rule names the promoted one: on 212 SMs at 8193 and 12288 tokens
     (the row's range there; 129 and 192 K blocks), on 216 SMs at 16172 and 16384 tokens (its verdict) and at 65536,
     as the planner's choice and with the same knobs given explicitly.  ``promote=True`` runs the promoted program
-    there; the row's FP32 output and the same explicit plan of another row (``4096 -> 1024`` BF16) are unchanged by
-    the table, and the rule itself (:func:`k1_promote_blocks`) still names the promoted program."""
+    there; the same explicit plan of another row (``4096 -> 1024`` BF16) is unchanged by the table, and the rule
+    itself (:func:`k1_promote_blocks`) still names the promoted program."""
     assert cake_backend.K1_PROMOTE_EXEMPT_ROWS == K1_PROMOTE_EXEMPT_ROWS
     arch = "sm_107a"
     _register_k1(monkeypatch, arch)

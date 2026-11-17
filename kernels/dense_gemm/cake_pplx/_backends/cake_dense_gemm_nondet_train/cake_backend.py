@@ -359,13 +359,13 @@ K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
 #: out, the transposed store, more than this many K blocks in the largest split), except on the rows of
 #: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
 K1_PROMOTE_BLOCKS = 128
-#: Rows whose plans the planner's promotion rule (:func:`k1_promote_blocks`) leaves without promotion, keys as in
-#: :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles (on 212 SMs from 512 to
-#: 12288 tokens, on 216 SMs and more at every token count of its verdict); the verdicts were measured without
-#: promotion.  Measured on a 212-SM VR200 part: without promotion its output met the naive BF16 tier at 10240,
-#: 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and the max norm, its median
-#: and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to 1.015 times its time at
-#: 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20 launches).  The row
+#: Rows whose plans :func:`plan_atomic_gemm` keeps without promotion where :func:`k1_promote_blocks` names the promoted
+#: program, keys as in :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles (on
+#: 212 SMs from 512 to 12288 tokens, on 216 SMs and more at every token count of its verdict); the verdicts were
+#: measured without promotion.  Measured on a 212-SM VR200 part: without promotion its output met the naive BF16 tier at
+#: 10240, 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and the max norm, its
+#: median and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to 1.015 times its time
+#: at 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20 launches).  The row
 #: keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
 K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
     {("sm_107a", 1, 5120, 1024, "bf16")}
@@ -398,8 +398,9 @@ K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
 #: there, and the BF16 output of a row with a split verdict runs the promoted split program, whose output met the naive
 #: BF16 tier against FP64 at every measured point, where the deterministic program's missed it at most of them
 #: (:data:`K1_SPLIT_RULE_EXCLUDED_TOKENS`).  The promoted program runs where a one-chain BF16 transposed-store split
-#: holds more than :data:`K1_PROMOTE_BLOCKS` K blocks (:func:`k1_promote_blocks`); it was not measured against those
-#: budgets.
+#: holds more than :data:`K1_PROMOTE_BLOCKS` K blocks (:func:`k1_promote_blocks`), except on the rows of
+#: :data:`K1_PROMOTE_EXEMPT_ROWS`, whose program without promotion met the naive BF16 tier; it was not measured against
+#: those budgets.
 # fmt: off
 K1_SPLIT_RULES:dict[tuple[str, int, int, int, str], Optional[tuple[int, int]]] = {
     # sm_100a: two splits of 64-wide tiles (one wave of the CTA pairs; two partials, bitwise reproducible).  d_out 128
