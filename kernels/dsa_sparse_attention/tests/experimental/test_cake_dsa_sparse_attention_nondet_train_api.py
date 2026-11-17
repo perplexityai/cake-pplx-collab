@@ -21,7 +21,8 @@ public entry-point module: the stable entry points of ``cake_pplx.cake_dsa_spars
 ``cake_dsa_sparse_attention_nondet_varlen`` and the NoPE pair: their stable-API marking, the arguments they forward,
 autograd, the varlen glue through them and their behaviour under ``torch.use_deterministic_algorithms``), the explicit
 step entries (``cake_dsa_sparse_attention_nondet_train_*_forward`` / ``_backward``: the autograd entries' shapes and
-dtypes, the naive tier, the alert of the backward) and the
+dtypes, the naive tier, the alert of the backward, the packed forward's global rows and lengths, a one-head NoPE
+``kv``) and the
 environment variables the wrapper resolves into the package's keyword switches --
 ``CAKE_PPLX_DSA_DKV_DIRECT`` (``dkv_direct``), ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (``check_dst_map``) and
 ``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` (``BINDING_CACHE.configure``).  The helpers shared with the
@@ -74,6 +75,7 @@ from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_refe
     compact_rows,
     derive_topk_length,
     globalize_gather_indices_loop,
+    last_valid_plus_one,
     make_inputs,
 )
 
@@ -2231,8 +2233,8 @@ def test_torch_deterministic_mode_zero_query_rows_launch_and_alert_nothing():
 
 # ---------------------------------------------------------------------------
 # Explicit step entries (GPU): the forward and the backward as two calls.  This package promises no output bits (its
-# dK / dV come from FP32 atomics): the step outputs keep the autograd entry's shapes and dtypes, and every output is
-# judged by the naive tier.
+# dK / dV come from FP32 atomics): the step outputs keep the autograd entry's shapes and dtypes (the fresh NoPE dK + dV
+# excepted: FP32 [S, 512], which autograd casts to the kv leaf's dtype), and every output is judged by the naive tier.
 # ---------------------------------------------------------------------------
 
 STEP_FORMS = ("rope", "nope", "nope_varlen")
@@ -2241,6 +2243,17 @@ STEP_GRADS = {
     "nope": ("dq", "dkv"),
     "nope_varlen": ("dq", "dkv"),
 }
+# (form, one_head): the NoPE forms also take ``kv`` in its one-head form ``[S, 1, 512]``.
+STEP_CASES = [
+    ("rope", False),
+    ("nope", False),
+    ("nope_varlen", False),
+    ("nope", True),
+    ("nope_varlen", True),
+]
+STEP_CASE_IDS = [
+    form + ("-kv_one_head" if one_head else "") for form, one_head in STEP_CASES
+]
 
 
 def _same_bits(a, b):
@@ -2279,25 +2292,36 @@ def _step_inputs(seed):
     return make_inputs([200, 120], [600, 360], seed=seed, topk=256)
 
 
-def _explicit_step(form, inp, acc=None, *, backward=True):
+def _step_kv(inp, one_head):
+    """``kv`` of a NoPE call: ``[S, 512]``, or its one-head form ``[S, 1, 512]``."""
+    return inp.kv_latent.unsqueeze(1) if one_head else inp.kv_latent
+
+
+def _explicit_step(form, inp, acc=None, *, backward=True, one_head=False):
     """One forward and (``backward``) one backward through the step entries of ``form`` (the varlen backward on the
-    rows and lengths its forward returns): the :class:`nv.Problem` the outputs answer and the outputs by the names
-    :func:`nv.judged` takes.  The backward leaves ``o_lo`` unchanged."""
+    rows and lengths its forward returns; ``one_head``: a NoPE ``kv`` of shape ``[S, 1, 512]``): the
+    :class:`nv.Problem` the outputs answer and the outputs by the names :func:`nv.judged` takes.  The backward leaves
+    ``o_lo`` unchanged."""
     forward, step_backward = _step_entries(form)
     kw = {} if acc is None else dict(dkv_acc=acc)
+    kv = _step_kv(inp, one_head)
     if form == "nope_varlen":
         out, lse, o_lo, rows, lengths = forward(
             inp.q_latent,
-            inp.kv_latent,
+            kv,
             inp.idx_local,
             inp.cu_seqlens_q,
             inp.cu_seqlens_k,
         )
-        problem = nv.nope_problem(inp, indices=rows, topk_length=lengths)
+        # The returned rows and lengths, exactly, against the test's own references: the inputs' rows are valid
+        # first, so the forward keeps every slot in place on either index route.
+        assert torch.equal(rows, inp.idx_global)
+        assert torch.equal(lengths, last_valid_plus_one(inp.idx_global, inp.total_k))
+        problem = nv.nope_problem(inp)
 
         def run():
             return step_backward(
-                inp.q_latent, inp.kv_latent, rows, out, o_lo, lse, inp.dout, inp.cu_seqlens_k,
+                inp.q_latent, kv, rows, out, o_lo, lse, inp.dout, inp.cu_seqlens_k,
                 topk_length=lengths, **kw,
             )  # fmt: skip
 
@@ -2306,7 +2330,7 @@ def _explicit_step(form, inp, acc=None, *, backward=True):
             args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
             problem = nv.rope_problem(inp)
         else:
-            args = (inp.q_latent, inp.kv_latent, inp.idx_global)
+            args = (inp.q_latent, kv, inp.idx_global)
             problem = nv.nope_problem(inp)
         out, lse, o_lo = forward(*args)
 
@@ -2329,11 +2353,11 @@ def _explicit_step(form, inp, acc=None, *, backward=True):
     return problem, got
 
 
-def _autograd_step(form, inp, acc=None):
+def _autograd_step(form, inp, acc=None, *, one_head=False):
     """The autograd entry of ``form`` on the same inputs: ``(out, lse, leaf gradients)``."""
     nope = form != "rope"
     sources = (
-        (inp.q_latent, inp.kv_latent)
+        (inp.q_latent, _step_kv(inp, one_head))
         if nope
         else (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
     )
@@ -2352,17 +2376,21 @@ def _autograd_step(form, inp, acc=None):
     return out.detach(), lse.detach(), [leaf.grad for leaf in leaves]
 
 
-@pytest.mark.parametrize("form", STEP_FORMS)
+@pytest.mark.parametrize("form, one_head", STEP_CASES, ids=STEP_CASE_IDS)
 @pytest.mark.parametrize("acc", [False, True], ids=["fresh", "acc"])
-def test_step_entries_return_the_autograd_shapes_and_dtypes(form, acc):
-    """The explicit forward and backward (fresh, or with a zeroed ``dkv_acc``) return the autograd entry's outputs with
-    its shapes and dtypes, and ``None`` for dK + dV exactly when they add them into ``dkv_acc``; the values are judged
-    by :func:`test_step_entries_meet_the_naive_tier`."""
+def test_step_entries_return_the_autograd_shapes_and_dtypes(form, one_head, acc):
+    """The explicit forward and backward (fresh, or with a zeroed ``dkv_acc``; the NoPE forms also with a one-head
+    ``kv [S, 1, 512]``) return the autograd entry's outputs with its shapes and dtypes, and ``None`` for dK + dV
+    exactly when they add them into ``dkv_acc``.  The fresh NoPE dK + dV is the exception: the step backward returns
+    it in FP32 ``[S, 512]``, and the autograd engine casts it to the dtype (and shape) of the ``kv`` leaf.  The values
+    are judged by :func:`test_step_entries_meet_the_naive_tier`."""
     _require_step(form)
     inp = _step_inputs(SEED + 50)
-    _, got = _explicit_step(form, inp, _step_acc(form, inp) if acc else None)
+    kv = _step_kv(inp, one_head)
+    step_acc = _step_acc(form, inp) if acc else None
+    _, got = _explicit_step(form, inp, step_acc, one_head=one_head)
     out, lse, leaf_grads = _autograd_step(
-        form, inp, _step_acc(form, inp) if acc else None
+        form, inp, _step_acc(form, inp) if acc else None, one_head=one_head
     )
     num_dq = 2 if form == "rope" else 1
     assert all((g is None) == acc for g in leaf_grads[num_dq:])
@@ -2374,22 +2402,27 @@ def test_step_entries_return_the_autograd_shapes_and_dtypes(form, acc):
     )
     assert sorted(got) == sorted([*auto, "o_lo"])
     for name, ref in auto.items():
-        assert (got[name].shape, got[name].dtype) == (ref.shape, ref.dtype), name
+        if name == "dkv":
+            want = ((inp.total_k, 512), torch.float32)
+            assert (got[name].shape, got[name].dtype) == want, name
+            assert (ref.shape, ref.dtype) == (kv.shape, kv.dtype), name
+        else:
+            assert (got[name].shape, got[name].dtype) == (ref.shape, ref.dtype), name
 
 
-@pytest.mark.parametrize("form", STEP_FORMS)
-def test_step_entries_meet_the_naive_tier(form, record_property):
+@pytest.mark.parametrize("form, one_head", STEP_CASES, ids=STEP_CASE_IDS)
+def test_step_entries_meet_the_naive_tier(form, one_head, record_property):
     """The explicit forward and backward (fresh dK + dV, and added into a zeroed ``dkv_acc``) and the autograd entry
-    on the same inputs meet the naive tier over the draws."""
+    on the same inputs meet the naive tier over the draws; the NoPE forms also with a one-head ``kv [S, 1, 512]``."""
     _require_step(form)
 
     def case(s, j):
         inp = _step_inputs(s)
-        problem, fresh = _explicit_step(form, inp)
+        problem, fresh = _explicit_step(form, inp, one_head=one_head)
         acc = _step_acc(form, inp)
-        _, added = _explicit_step(form, inp, acc)
+        _, added = _explicit_step(form, inp, acc, one_head=one_head)
         added["dkv_acc"] = nv.Acc(before=torch.zeros_like(acc), after=acc)
-        out, lse, leaf_grads = _autograd_step(form, inp)
+        out, lse, leaf_grads = _autograd_step(form, inp, one_head=one_head)
         names = STEP_GRADS[form]
         auto = dict(out=out, lse=lse, **dict(zip(names, leaf_grads, strict=True)))
         return nv.judged(problem, {"fresh": fresh, "acc": added, "autograd": auto})

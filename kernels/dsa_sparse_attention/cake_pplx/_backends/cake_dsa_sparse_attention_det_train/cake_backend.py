@@ -4535,13 +4535,14 @@ def forward_nope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """NoPE forward pass: ``(out, lse, o_lo)``.
 
-    ``q_latent`` BF16 ``[T, 64, 512]``, ``kv_latent`` BF16 ``[S, 512]`` (the shared latent, K = V), ``indices``
-    int32 ``[T, K_slots]`` global key rows (any ``K_slots >= 1``; ``-1`` / ``>= S`` invalid).  ``softmax_scale``
-    defaults to 1/16.  A fully masked row gives ``out = 0`` and ``lse = -inf``.  Allocates the outputs (or writes
-    the given ``out`` / ``lse`` / ``o_lo``, all three or none) and launches over the remembered plan of the input
-    geometry; a call without query rows returns empty outputs without launching.  ``topk_length`` /
-    ``derive_topk_length`` as in :func:`forward`.
+    ``q_latent`` BF16 ``[T, 64, 512]``, ``kv_latent`` BF16 ``[S, 512]`` or ``[S, 1, 512]`` (the shared latent,
+    K = V), ``indices`` int32 ``[T, K_slots]`` global key rows (any ``K_slots >= 1``; ``-1`` / ``>= S`` invalid).
+    ``softmax_scale`` defaults to 1/16.  A fully masked row gives ``out = 0`` and ``lse = -inf``.  Allocates the
+    outputs (or writes the given ``out`` / ``lse`` / ``o_lo``, all three or none) and launches over the remembered
+    plan of the input geometry; a call without query rows returns empty outputs without launching.
+    ``topk_length`` / ``derive_topk_length`` as in :func:`forward`.
     """
+    kv_latent = _kv_latent_rows(kv_latent)
     if derive_topk_length and topk_length is None:
         raise ValueError(
             "derive_topk_length=True needs a topk_length [T] int32 tensor for the forward to fill"
@@ -4620,6 +4621,7 @@ def backward_nope(
     otherwise unused).  A call without query rows returns an empty ``dq`` and a zero ``dkv`` (``None`` with
     ``dkv_acc``) without launching.
     """
+    kv_latent = _kv_latent_rows(kv_latent)
     if dkv_dst_map is not None and dkv_acc is None:
         raise ValueError("dkv_dst_map is only meaningful together with dkv_acc")
     _check_key_passes(key_passes, int(kv_latent.shape[0]))
