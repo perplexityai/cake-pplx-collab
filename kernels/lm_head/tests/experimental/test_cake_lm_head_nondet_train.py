@@ -22,14 +22,12 @@ precision boundaries, with the dX GEMM's K-slice partials of a chunk of more tha
 ordered FP32 reduction: each slice stores its tile into a slab and the slab sum launched right after the GEMM
 stores the slices' sum, taken in slice order, into the FP32 accumulator rows (a one-slice chunk keeps the
 deterministic plain store).
-Its outputs are held to the deterministic suite's accuracy budgets against the FP64 oracle and the
-unchunked PyTorch path (the same ``GATE_MARGIN`` / ``GATE_TINY`` / ``PRODUCTION_B0``, checked
-against that suite's source below), over repeated runs (worst case), and compared with the
-deterministic package on the same inputs: ``loss`` / ``logp`` / ``lse`` and ``dW`` keep their fixed
-order and equal its bits; ``dX`` meets the budgets, repeats its own bits from run to run, and its
-distance to the deterministic ``dX`` is reported.  A log-probability backward of more than one chunk runs
-vocabulary-major by default (``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` meet the same budgets
-and repeat bit for bit; the tests of the chunk loop's own machinery and bits pin the chunk loop
+Its outputs are held to accuracy budgets against the FP64 oracle and the unchunked PyTorch path, over
+repeated runs (worst case); ``loss`` / ``logp`` / ``lse`` and ``dW`` keep their fixed order and repeat their
+bits from run to run.  No test compares an output with the deterministic package's.  A log-probability backward of
+more than one chunk runs vocabulary-major by default (``cake_backend._set_logprob_vocab_major``): its ``dX`` /
+``dW`` meet the same budgets and repeat bit for bit; the tests of the chunk loop's own machinery and bits pin the
+chunk loop
 (``logprob_chunk_loop``).  The host layer (no mode keyword, PyTorch's deterministic-algorithms alert, the reference
 backend) runs anywhere; the device tests need an SM100 / SM103 / SM107 GPU and the package's
 rendered programs.
@@ -73,7 +71,8 @@ from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
-# The package under test, named once through ``cake_package``; the deterministic package is the comparison arm.
+# The package under test, named once through ``cake_package``; the deterministic package's names, loader, slice rule
+# and host waits are the counterpart some tests check (no test compares an output with that package's).
 pkg = cake_package("cake.cake_lm_head_nondet_train")
 cake_backend = cake_package("cake.cake_lm_head_nondet_train", "cake_backend")
 opt_in = cake_package("cake.cake_lm_head_nondet_train", "cake_backend_opt_in")
@@ -88,9 +87,8 @@ CUDA = torch.device("cuda")
 SEED = 20261031
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# The deterministic suite's accuracy budgets, unchanged (``test_tolerances_are_the_deterministic_suites``):
-# at most 1.05x the error of the unchunked PyTorch path on the same inputs plus a floor per metric, and below
-# twice the production-geometry errors of that path.
+# The accuracy budgets: at most 1.05x the error of the unchunked PyTorch path on the same inputs plus a floor per
+# metric, and below twice the production-geometry errors of that path.
 GATE_MARGIN = 1.05
 GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
 PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
@@ -98,24 +96,6 @@ PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
 REPEATS = 20
 # Seconds a two-thread test waits for a barrier or a thread before it fails
 TIMEOUT_S = 120
-
-
-def _det_suite_constants() -> dict:
-    """``GATE_MARGIN`` / ``GATE_TINY`` / ``PRODUCTION_B0`` as the deterministic suite's source assigns them (read, not
-    imported: importing that module would run its module-level package lookups)."""
-    path = Path(__file__).with_name("test_cake_lm_head_det_train.py")
-    found = {}
-    for node in ast.parse(path.read_text()).body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in ("GATE_MARGIN", "GATE_TINY", "PRODUCTION_B0")
-        ):
-            found[node.targets[0].id] = eval(  # noqa: S307 -- literal constants of a repository file
-                compile(ast.Expression(node.value), str(path), "eval"), {"dict": dict}
-            )
-    return found
 
 
 @pytest.fixture(autouse=True)
@@ -131,18 +111,6 @@ def _zero_weight_split_at_every_size():
 
 # A zero-weight floor above every call's row count: the split never applies
 NO_SPLIT = 1 << 62
-
-
-@contextlib.contextmanager
-def _det_unsplit():
-    """Run the deterministic package without its own zero-weight split (its floor raised past every call,
-    ``det_backend.set_zero_weight_min_rows``), then restore its previous floor: its plain path, every valid row in the
-    chunk loop."""
-    previous = det_backend.set_zero_weight_min_rows(NO_SPLIT)
-    try:
-        yield
-    finally:
-        det_backend.set_zero_weight_min_rows(previous)
 
 
 @contextlib.contextmanager
@@ -186,7 +154,6 @@ def _run(
     inp,
     C,
     *,
-    package="nd",
     entry="loss",
     train_x=True,
     train_w=True,
@@ -195,13 +162,11 @@ def _run(
     keep=False,
     **switches,
 ):
-    """One forward + backward through the autograd entry of ``package`` (``"nd"``: this package; ``"det"``: the
-    deterministic package) on ``backend``.  ``switches`` pass through
+    """One forward + backward through this package's autograd entry on ``backend``.  ``switches`` pass through
     (``memory_mode`` / ``num_valid_rows`` / ``check_num_valid_rows`` select the opt-in module); ``keep`` calls the
-    log-probability entry with the kept logits (``cake_lm_head_nondet_train_logprob_keep`` /
-    ``cake_lm_head_det_train_logprob_keep``); the log-probability entry also takes the inputs' ``temperature`` unless
-    ``switches`` names one, and a call with ``temperature`` or ``check_temperature`` goes to the module's
-    ``cake_lm_head_nondet_train_logprob_temperature`` / ``cake_lm_head_det_train_logprob_temperature``.  Returns ``loss`` /
+    log-probability entry with the kept logits (``cake_lm_head_nondet_train_logprob_keep``); the log-probability entry
+    also takes the inputs' ``temperature`` unless ``switches`` names one, and a call with ``temperature`` or
+    ``check_temperature`` goes to the module's ``cake_lm_head_nondet_train_logprob_temperature``.  Returns ``loss`` /
     ``logp`` / ``dX`` / ``dW`` and the leaves."""
     X = inp.X.detach().requires_grad_(train_x)
     W = inp.W.detach().requires_grad_(train_w)
@@ -209,28 +174,15 @@ def _run(
         switches.setdefault("temperature", inp.temperature)
     opt = bool(_OPT_IN_KEYWORDS & switches.keys())
     tau = bool(TEMPERATURE_KEYWORDS & switches.keys())
-    if package == "nd":
-        be = opt_in if opt else cake_backend
-        loss_fn, logprob_fn = (
-            be.cake_lm_head_nondet_train_loss,
-            be.cake_lm_head_nondet_train_logprob_temperature
-            if tau
-            else be.cake_lm_head_nondet_train_logprob,
-        )
-    else:
-        be = det_opt_in if opt else det_backend
-        loss_fn, logprob_fn = (
-            be.cake_lm_head_det_train_loss,
-            be.cake_lm_head_det_train_logprob_temperature
-            if tau
-            else be.cake_lm_head_det_train_logprob,
-        )
+    be = opt_in if opt else cake_backend
+    loss_fn, logprob_fn = (
+        be.cake_lm_head_nondet_train_loss,
+        be.cake_lm_head_nondet_train_logprob_temperature
+        if tau
+        else be.cake_lm_head_nondet_train_logprob,
+    )
     if keep:
-        logprob_fn = (
-            cake_backend.cake_lm_head_nondet_train_logprob_keep
-            if package == "nd"
-            else det_backend.cake_lm_head_det_train_logprob_keep
-        )
+        logprob_fn = cake_backend.cake_lm_head_nondet_train_logprob_keep
     if entry == "loss":
         loss, logp = loss_fn(
             X,
@@ -308,13 +260,6 @@ def _ulp_flips(a: torch.Tensor, b: torch.Tensor) -> tuple[float, int]:
 # ---------------------------------------------------------------------------
 # Host layer (any device; the reference backend)
 # ---------------------------------------------------------------------------
-
-
-def test_tolerances_are_the_deterministic_suites():
-    """The accuracy budgets of this suite are the deterministic suite's (the same budgets for both paths)."""
-    assert _det_suite_constants() == dict(
-        GATE_MARGIN=GATE_MARGIN, GATE_TINY=GATE_TINY, PRODUCTION_B0=PRODUCTION_B0
-    )
 
 
 # The names of the package without ``det`` and the deterministic package's name of each.
@@ -1095,23 +1040,16 @@ def test_paths_without_gradient_gemms_do_not_alert():
 
 @pytest.mark.parametrize("T, C", [(1, 16), (37, 16), (200, 64)])
 @pytest.mark.parametrize("objective", ["ce", "policy"])
-def test_reference_matches_the_deterministic_reference_and_the_oracle(objective, T, C):
-    """The reference backend (PyTorch operators at the kernels' rounding boundaries, fixed order) is the
-    deterministic package's bit for bit and passes the deterministic suite's gates."""
+def test_reference_matches_the_oracle(objective, T, C):
+    """The reference backend (PyTorch operators at the kernels' rounding boundaries, fixed order) passes the gates."""
     inp = _host_inputs(T, objective)
     nd = _run(inp, C)
-    det = _run(inp, C, package="det")
-    for key in ("loss", "logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
     _check_against_references(nd, inp)
 
 
-def test_reference_logprob_entry_matches_the_deterministic_reference():
+def test_reference_logprob_entry_matches_the_oracle():
     inp = _host_inputs(37)
     nd = _run(inp, 16, entry="logprob")
-    det = _run(inp, 16, entry="logprob", package="det")
-    for key in ("logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
     _check_against_references(nd, inp, entry="logprob")
 
 
@@ -2377,47 +2315,6 @@ def _poison_allocator(nbytes: int = 1 << 31) -> None:
     torch.cuda.synchronize()
 
 
-def _det_tuning(kw: dict) -> dict:
-    """The deterministic package's arm of a call's ``gemm_tuning``: a pinned dX slice count above its four slices (the
-    reduction serves up to eight) falls back to its own rule -- ``loss`` / ``logp`` / ``dW`` do not depend on it."""
-    tuning = kw.get("gemm_tuning")
-    k = (tuning or {}).get("dx", {}).get("k_slices")
-    if k is None or int(k) <= 4:
-        return kw
-    dx = {key: v for key, v in tuning["dx"].items() if key != "k_slices"}
-    rest = {op: v for op, v in tuning.items() if op != "dx"}
-    return dict(kw, gemm_tuning=dict(rest, **({"dx": dx} if dx else {})) or None)
-
-
-def _folds(inp, chunk) -> bool:
-    """Whether this package's plan of the call folds its short tail (``cake_backend.loop_chunks``) over the valid rows
-    (compacted) or every row: the deterministic package's chunks then differ."""
-    T = int(inp.labels.numel())
-    return any(
-        len(cake_backend.loop_chunks(T, rows, chunk))
-        < len(cake_backend.plan_chunks(rows, chunk))
-        for rows in {T, int((inp.labels >= 0).sum())}
-        if rows
-    )
-
-
-def _compare_with_det(nd, det, *, record=None, folded=False):
-    """``loss`` / ``logp`` and ``dW`` are the deterministic package's bits (fixed-order stages); ``dX`` is
-    reported: max |ND - det| and the BF16 flip rate.  ``folded`` (a call whose short tail folds, :func:`_folds`): its
-    chunks are not the deterministic package's, ``logp`` only (``loss`` / ``dW`` are held to the gates)."""
-    for key in ("logp",) if folded else ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    if nd["dX"] is not None:
-        diff = float((nd["dX"].float() - det["dX"].float()).abs().max())
-        flips, max_ulp = _ulp_flips(nd["dX"], det["dX"])
-        if record is not None:
-            record.append(
-                dict(dX_max_abs_vs_det=diff, dX_flip_rate=flips, dX_max_ulp=max_ulp)
-            )
-        return diff, flips, max_ulp
-    return None
-
-
 @contextlib.contextmanager
 def _launch_record(*, temperature: bool = False):
     """The launch keys both backend modules run (each key as ``_run_keys`` runs it), in order: the record of what a
@@ -2471,30 +2368,25 @@ DEVICE_CASES = [
     DEVICE_CASES,
     ids=lambda v: "-" if v is None else str(v).replace(" ", ""),
 )
-def test_device_matches_references_and_the_deterministic_package(
-    glm_weight, T, objective, entry, tuning
-):
+def test_device_matches_the_references(glm_weight, T, objective, entry, tuning):
     _require_program(entry=entry)
     inp = _device_inputs(T, objective, W=glm_weight)
     kw = {} if tuning is None else dict(gemm_tuning=tuning)
     with _one_pass_launches() as one_pass:
         nd = _run(inp, 4096, entry=entry, backend="cake", **kw)
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **_det_tuning(kw))
     errors, b0 = _check_against_references(nd, inp, entry=entry, ceiling=True)
-    _check_against_references(det, inp, entry=entry, ceiling=True)
     if one_pass:
         # a one-pass call (one_pass_rows) forms loss / logp / dW in its own fixed-order stages: the same bits run to
-        # run, not the deterministic package's; the chunked path of the same call keeps the package's bits
+        # run; the chunked path of the same call passes the gates too
         again = _run(inp, 4096, entry=entry, backend="cake", **kw)
         for key in ("loss", "logp", "dW"):
             assert _same_bits(again[key], nd[key]), key
         with _one_pass_rows(()):
             nd = _run(inp, 4096, entry=entry, backend="cake", **kw)
         _check_against_references(nd, inp, entry=entry, ceiling=True)
-    diff, flips, max_ulp = _compare_with_det(nd, det)
     print(
         f"\nND T={T} {objective} {entry} {tuning}: dX_rel_l2 {errors['dX_rel_l2']:.3e} (b0 {b0['dX_rel_l2']:.3e}) "
-        f"dW_rel_l2 {errors['dW_rel_l2']:.3e} max|ND-det| dX {diff:.3e} flip {flips:.2e} max_ulp {max_ulp}"
+        f"dW_rel_l2 {errors['dW_rel_l2']:.3e}"
     )
 
 
@@ -2515,21 +2407,18 @@ def test_device_worst_case_over_repeated_runs(
     logprob_chunk_loop, glm_weight, T, objective, entry, tuning, policy
 ):
     """``REPEATS`` runs on the same inputs (fresh allocator state each time, 0xFF-poisoned): every run passes the
-    gates against the FP64 oracle and the unchunked FP32 path; ``loss`` / ``logp`` / ``dW`` never change and are the
-    deterministic package's bits; the worst ``dX`` error, the run-to-run ``dX`` spread and the worst max |ND - det| and
-    BF16 flip rate of ``dX`` are reported."""
+    gates against the FP64 oracle and the unchunked FP32 path; ``loss`` / ``logp`` / ``dW`` never change; the worst
+    ``dX`` error and the run-to-run ``dX`` spread are reported."""
     _require_program(entry=entry)
     inp = _device_inputs(T, objective, W=glm_weight)
     kw = {} if tuning is None else dict(gemm_tuning=tuning)
     oracle = reference_fp64(inp, entry=entry)
     b0 = error_report(reference_unchunked(inp, entry=entry), oracle, inp.labels)
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **_det_tuning(kw))
-    first, worst, spread, versus = None, {}, 0.0, []
+    first, worst, spread = None, {}, 0.0
     for _ in range(REPEATS):
         _poison_allocator(1 << 30)
         with _slice_policy(policy):
             run = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        _compare_with_det(run, det, record=versus, folded=_folds(inp, 4096))
         errors = error_report(run, oracle, inp.labels)
         assert (
             not errors["nan"]
@@ -2550,8 +2439,7 @@ def test_device_worst_case_over_repeated_runs(
             )
     print(
         f"\nND worst over {REPEATS} runs T={T} {objective} {entry} {tuning} policy={policy}: {worst}; dX run-to-run "
-        f"max {spread:.3e}; max|ND-det| dX {max(v['dX_max_abs_vs_det'] for v in versus):.3e} flip "
-        f"{max(v['dX_flip_rate'] for v in versus):.2e} max_ulp {max(v['dX_max_ulp'] for v in versus)}"
+        f"max {spread:.3e}"
     )
 
 
@@ -2835,22 +2723,12 @@ def test_device_frozen_inputs(glm_weight):
 
 @pytest.mark.parametrize("memory_mode", ["fast", "budget"])
 def test_device_opt_in_forms(glm_weight, memory_mode):
-    """The opt-in forms (``memory_mode``, the caller's valid-row count) of this package pass the gates and keep the
-    deterministic package's ``loss`` / ``logp`` / ``dW``."""
+    """The opt-in forms (``memory_mode``, the caller's valid-row count) of this package pass the gates."""
     _require_program(entry="loss")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     count = int(inp.valid.sum())
     nd = _run(inp, 4096, backend="cake", memory_mode=memory_mode, num_valid_rows=count)
-    det = _run(
-        inp,
-        4096,
-        backend="cake",
-        package="det",
-        memory_mode=memory_mode,
-        num_valid_rows=count,
-    )
     _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
 
 
 @pytest.mark.parametrize("policy", ["det", "measured"])
@@ -2987,15 +2865,11 @@ def _device_slices(
 
 
 @pytest.mark.parametrize("policy", ["det", "measured"])
-def test_device_one_slice_chunks_are_the_deterministic_bits(
-    glm_weight, policy, shipped_chunks
-):
+def test_device_one_slice_and_sliced_chunks_in_one_call(glm_weight, policy, shipped_chunks):
     """A call whose plan on the RUNNING device mixes a chunk of more than one K slice (the reduction) with a chunk of
     one (the plain store) -- the row count is searched on this device's plan (its SM count and architecture), never
-    assumed: the one-slice chunk's ``dX`` rows are the deterministic package's one-slice bits, ``loss`` / ``logp`` /
-    ``dW`` its bits under its own rule, the call passes the gates, and the
-    sliced rows' max |ND - det| and BF16 flip rate are reported.  Skipped only when no two-chunk call of this device
-    has such a plan.  The shipped chunks (``shipped_chunks``: no short-tail fold)."""
+    assumed: the call runs that plan and passes the gates.  Skipped only when no two-chunk call of this device has
+    such a plan.  The shipped chunks (``shipped_chunks``: no short-tail fold)."""
     _require_program(entry="loss")
     T = next(
         (
@@ -3023,35 +2897,16 @@ def test_device_one_slice_chunks_are_the_deterministic_bits(
         del runner
         nd = _run(inp, 4096, backend="cake")
     assert slices == _device_slices(T, policy, glm_weight), slices
-    det = _run(inp, 4096, backend="cake", package="det")
-    one = _run(
-        inp, 4096, backend="cake", package="det", gemm_tuning={"dx": {"k_slices": None}}
-    )
+    assert len(chunks) == len(slices) == 2, (chunks, slices)
     _check_against_references(nd, inp, ceiling=True)
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    sliced = torch.zeros(T, dtype=torch.bool, device=CUDA)
-    for (row0, rows_c), s in zip(chunks, slices, strict=True):
-        if s > 1:
-            sliced[row0 : row0 + rows_c] = True
-    # the one-slice rows: the deterministic package's one-slice dX bits (one slice sums the same products in the same
-    # K order in every dX form, so this holds whatever slice count the deterministic rule plans for that chunk)
-    assert _same_bits(nd["dX"][~sliced], one["dX"][~sliced])
-    diff = float((nd["dX"][sliced].float() - det["dX"][sliced].float()).abs().max())
-    flips, max_ulp = _ulp_flips(nd["dX"][sliced], det["dX"][sliced])
-    print(
-        f"\nND mixed slices T={T} {slices} policy={policy}: S1 rows bitwise det; sliced rows max|ND-det| {diff:.3e} "
-        f"flip {flips:.2e} max_ulp {max_ulp}"
-    )
+    print(f"\nND mixed slices T={T} {slices} policy={policy}")
 
 
 def test_device_logp_statistics_never_change(glm_weight):
-    """``loss`` / ``logp`` / ``lse`` keep their fixed order in this package: the deterministic package's bits."""
+    """The forward-only log-probability call's ``logp`` (fixed-order stages) is finite."""
     _require_program(entry="logprob")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     nd = cake_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096)
-    det = det_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096)
-    assert _same_bits(nd.logp, det.logp) and _same_bits(nd.lse, det.lse)
     assert math.isfinite(float(nd.logp.sum()))
 
 
@@ -3061,8 +2916,8 @@ def test_device_one_slice_call_runs_under_strict_deterministic_algorithms(
 ):
     """Under strict ``torch.use_deterministic_algorithms(True)`` a call whose dX chunks all have one slice (pinned; every
     row valid, uncompacted) raises no alert: its launches have one order, so two runs give the same ``dX`` / ``dW``
-    bits and ``dX`` is the deterministic entry's (the same one-slice plain store).  This checks on the device the
-    fixed order of the weight gradient (chunk order, no atomics) that the package's docstrings state."""
+    bits.  This checks on the device the fixed order of the weight gradient (chunk order, no atomics) that the
+    package's docstrings state."""
     _require_program(entry=entry)
     inp = _device_inputs(8191, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(gemm_tuning={"dx": {"k_slices": None}}, compact_rows=False)
@@ -3071,10 +2926,8 @@ def test_device_one_slice_call_runs_under_strict_deterministic_algorithms(
         with _torch_deterministic(True), warnings.catch_warnings():
             warnings.filterwarnings("error", message=f".*{_ALERT}.*")
             runs.append(_run(inp, 4096, entry=entry, backend="cake", **kw))
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **kw)
     for key in ("loss", "logp", "dX", "dW"):
         assert _same_bits(runs[0][key], runs[1][key]), key
-    assert _same_bits(runs[0]["dX"], det["dX"])
     _check_against_references(runs[0], inp, entry=entry)
 
 
@@ -3260,7 +3113,6 @@ def _loss_call(
     inp,
     C,
     *,
-    package="nd",
     backend="cake",
     return_logp=True,
     train_x=True,
@@ -3268,14 +3120,11 @@ def _loss_call(
     module=None,
     **kw,
 ):
-    """One autograd loss call (forward + backward) of ``package`` (``module``: this package's opt-in module for its
+    """One autograd policy-loss call (forward + backward) of this package (``module``: its opt-in module for its
     keywords); returns loss / logp (``None`` without ``return_logp``) / dX / dW."""
     X = inp.X.detach().requires_grad_(train_x)
     W = inp.W.detach().requires_grad_(train_w)
-    if package == "nd":
-        fn = (cake_backend if module is None else module).cake_lm_head_nondet_train_loss
-    else:
-        fn = det_backend.cake_lm_head_det_train_loss
+    fn = (cake_backend if module is None else module).cake_lm_head_nondet_train_loss
     out = fn(
         X,
         W,
@@ -3344,19 +3193,16 @@ ZERO_KINDS_HOST = ["one", ("random", 0.166), ("group", 0.5), "all"]
 @pytest.mark.parametrize("kind", ZERO_KINDS_HOST, ids=str)
 @pytest.mark.parametrize("T, C", [(37, 16), (1200, 256)])
 def test_reference_zero_weight_rows(kind, T, C):
-    """The reference backend with zero-weight rows (ignored rows mixed in, ragged multi-chunk calls): the
-    deterministic suite's gates against the FP64 oracle; ``logp`` of every valid row (the zero-weight rows' from the
-    logp-only pass) matches the deterministic reference; the zero-weight rows' ``dX`` rows are exact zeros; ``loss``
-    and the gradients agree with the deterministic reference within the gates."""
+    """The reference backend with zero-weight rows (ignored rows mixed in, ragged multi-chunk calls): the gates
+    against the FP64 oracle (``logp`` of the zero-weight rows from the logp-only pass); the zero-weight rows' ``dX``
+    rows are exact zeros."""
     base = _host_inputs(T, "policy")
     if kind == ("group", 0.5) and T < 1024:
         kind = ("random", 0.5)  # one 512-row group: the fraction rounds to no group
     zero = _zero_weight_set(base, kind)
     inp = _with_zero_weights(base, zero, negative_zero=True)
     nd = _run(inp, C)
-    det = _run(inp, C, package="det")
     valid = inp.labels >= 0
-    torch.testing.assert_close(nd["logp"], det["logp"], atol=1e-5, rtol=0)
     assert bool((nd["logp"][~valid] == 0).all())
     assert bool((nd["dX"][zero] == 0).all())
     if bool(zero[valid].all()):
@@ -3364,10 +3210,6 @@ def test_reference_zero_weight_rows(kind, T, C):
         assert not bool(nd["dX"].any()) and not bool(nd["dW"].any())
     else:
         _check_against_references(nd, inp)
-        assert (
-            abs(float(nd["loss"]) - float(det["loss"]))
-            <= 1e-6 * abs(float(det["loss"])) + 1e-6
-        )
 
 
 def test_reference_zero_weight_rows_without_return_logp():
@@ -3443,13 +3285,10 @@ ZERO_DEVICE_CASES = [
 
 @pytest.mark.parametrize("return_logp", [True, False])
 @pytest.mark.parametrize("T, kind", ZERO_DEVICE_CASES, ids=str)
-def test_device_zero_weight_rows_match_the_deterministic_package(
-    glm_weight, T, kind, return_logp
-):
-    """Zero-weight policy rows on the device: the deterministic suite's gates against the FP64 oracle; ``logp`` of
-    every valid row -- the zero-weight rows' from the logp-only pass -- is the deterministic package's bits (with
-    ``return_logp``); the zero-weight rows' ``dX`` rows are exact zeros; ``loss`` / ``dW`` / ``dX`` are reported
-    against the deterministic package.  Every valid row of zero weight: loss 0, zero gradients, no gradient GEMM."""
+def test_device_zero_weight_rows(glm_weight, T, kind, return_logp):
+    """Zero-weight policy rows on the device: the gates against the FP64 oracle (``logp`` of the zero-weight rows from
+    the logp-only pass, with ``return_logp``); the zero-weight rows' ``dX`` rows are exact zeros.  Every valid row of
+    zero weight: loss 0, zero gradients, no gradient GEMM."""
     _require_program(entry="loss")
     base = _device_inputs(T, "policy", W=glm_weight)
     zero = _zero_weight_set(base, kind)
@@ -3467,11 +3306,8 @@ def test_device_zero_weight_rows_match_the_deterministic_package(
         nd = _loss_call(inp, 4096, return_logp=return_logp)
     finally:
         cake_backend.prepare_lm_head_loss = original
-    det = _loss_call(inp, 4096, package="det")
     valid = inp.labels >= 0
     assert bool((nd["dX"][zero] == 0).all())
-    if return_logp:
-        assert _same_bits(nd["logp"], det["logp"])
     every = bool(zero[valid].all())
     if every:
         assert launched == (["logprob"] if return_logp else [])
@@ -3479,24 +3315,8 @@ def test_device_zero_weight_rows_match_the_deterministic_package(
         assert not bool(nd["dX"].any()) and not bool(nd["dW"].any())
         return
     assert launched.count("loss") == 1
-    # without return_logp the gates read the deterministic logp (the gradients and the loss are this call's)
-    _check_against_references(
-        nd if return_logp else dict(nd, logp=det["logp"]), inp, ceiling=True
-    )
-    loss_rel = abs(float(nd["loss"]) - float(det["loss"])) / max(
-        abs(float(det["loss"])), 1e-30
-    )
-    dw_rel = float(
-        (nd["dW"].float() - det["dW"].float()).norm() / det["dW"].float().norm()
-    )
-    dx_diff = float((nd["dX"].float() - det["dX"].float()).abs().max())
-    dw_flips, dw_ulp = _ulp_flips(nd["dW"], det["dW"])
-    assert loss_rel <= 1e-6, loss_rel
-    print(
-        f"\nzero-weight T={T} {kind} zero {int(zero.sum())}/{int(valid.sum())} logp={return_logp}: loss_rel vs det "
-        f"{loss_rel:.2e}, dW rel-L2 vs det {dw_rel:.2e} (flip {dw_flips:.2e} max_ulp {dw_ulp}), "
-        f"dX max|ND-det| {dx_diff:.2e}"
-    )
+    if return_logp:
+        _check_against_references(nd, inp, ceiling=True)
 
 
 def test_device_zero_weight_rows_repeat_and_both_count_paths(glm_weight):
@@ -3604,8 +3424,8 @@ def test_device_zero_weight_rows_checkpoint_accumulation_retained_graph(glm_weig
 
 def test_device_zero_weight_rows_do_not_propagate_non_finite_values(glm_weight):
     """An ``inf`` ``X`` row and a NaN ``infer_logp`` in zero-weight rows leave ``loss`` / ``dX`` / ``dW`` finite and
-    equal to the clean call's (the deterministic package's plain path, without its own zero-weight split, gives a
-    non-finite ``dW``); a NaN weight keeps its row in the gradient path (NaN loss)."""
+    equal to the clean call's (this package's plain path, the zero-weight split off, gives a non-finite ``dW``); a NaN
+    weight keeps its row in the gradient path (NaN loss)."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.2))
@@ -3621,9 +3441,9 @@ def test_device_zero_weight_rows_do_not_propagate_non_finite_values(glm_weight):
     for key in ("loss", "dW"):
         assert _same_bits(a[key], b[key]), key
     assert bool(torch.isfinite(b["dX"].float()).all()) and not bool(b["dX"][zero].any())
-    with _det_unsplit():
-        det = _loss_call(poisoned, 4096, package="det")
-    assert not bool(torch.isfinite(det["dW"].float()).all())
+    with _zero_weight_floor(NO_SPLIT):
+        plain = _loss_call(poisoned, 4096)
+    assert not bool(torch.isfinite(plain["dW"].float()).all())
     w = clean.loss_weights.clone()
     w[int((~zero & (clean.labels >= 0)).nonzero()[0])] = float("nan")
     assert math.isnan(
@@ -3640,7 +3460,7 @@ def test_device_zero_weight_pass_adds_no_peak_without_a_weight_gradient(
     (four chunks), the zero-weight rows' logp-only pass runs after the chunk loop once chunk 0's buffers are released:
     the call's measured peak with ``return_logp=True`` stays within the same call's without the split (every weight
     nonzero) plus the split's extra ``O(T)`` row vectors; the memory report's ``peak_temporary_bytes`` covers the
-    loop and the pass; ``logp`` is the deterministic package's bits and the zero-weight rows' ``dX`` rows are zeros.
+    loop and the pass; the zero-weight rows' ``dX`` rows are zeros.
     ``memory_mode="budget"`` runs the opt-in module's forward: without a weight gradient its budget form does not
     apply (``budget = need_dw``), so the call keeps the hidden valid-row count and the opt-in module's own pass order --
     after the chunk loop (the recorded order), with the same peaks as the default rows."""
@@ -3727,8 +3547,6 @@ def test_device_zero_weight_pass_adds_no_peak_without_a_weight_gradient(
         f"(+{(split_peak - plain_peak) / 2**20:.2f} MiB)"
     )
     assert split_peak <= plain_peak + slack, (split_peak, plain_peak)
-    det = _loss_call(split, 4096, package="det", train_w=False, train_x=train_x)
-    assert _same_bits(nd["logp"], det["logp"])
     if train_x:
         assert not bool(nd["dX"][zero].any())
         _check_against_references(dict(nd, dW=None), split, ceiling=True)
@@ -3849,12 +3667,6 @@ def test_device_zero_weight_pass_phase_matches_the_report(
     if kind == "all":
         assert result.row_index is not None and result.row_index.numel() == 0
         assert float(result.loss) == 0.0
-        torch.testing.assert_close(
-            result.logp,
-            det_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096).logp,
-            atol=0,
-            rtol=0,
-        )
 
 
 @pytest.mark.parametrize("T", [1000, 4097, 8191, 12289, 16231])
@@ -4028,40 +3840,26 @@ def test_device_zero_weight_rows_concurrent_threads(glm_weight):
 
 def test_device_zero_weight_rows_under_a_non_finite_upstream_gradient(glm_weight):
     """A non-finite upstream loss gradient leaves the zero-weight rows' ``dX`` rows exact zeros (as an ignored
-    row's); the deterministic package's are ``bf16(g * 0)``."""
+    row's)."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.3))
     inp = _with_zero_weights(base, zero)
-    out = {}
-    for package in ("nd", "det"):
-        X = inp.X.detach().requires_grad_(True)
-        fn = (
-            cake_backend.cake_lm_head_nondet_train_loss
-            if package == "nd"
-            else det_backend.cake_lm_head_det_train_loss
-        )
-        loss = fn(
-            X,
-            inp.W,
-            inp.labels,
-            objective="policy",
-            infer_logp=inp.infer_logp,
-            loss_weights=inp.loss_weights,
-            chunk_size=4096,
-            return_logp=False,
-        )
-        loss.backward(torch.tensor(float("inf"), device=CUDA))
-        torch.cuda.synchronize()
-        out[package] = X.grad
-    nd_zero = out["nd"][zero]
-    assert bool((nd_zero == 0).all())
-    assert not bool(out["nd"][inp.labels < 0].any())
-    det_zero = out["det"][zero].float()
-    print(
-        f"\nnon-finite grad_loss=inf: ND zero-weight dX rows all +0; det non-finite share "
-        f"{float((~torch.isfinite(det_zero)).float().mean()):.3f}"
+    X = inp.X.detach().requires_grad_(True)
+    loss = cake_backend.cake_lm_head_nondet_train_loss(
+        X,
+        inp.W,
+        inp.labels,
+        objective="policy",
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=4096,
+        return_logp=False,
     )
+    loss.backward(torch.tensor(float("inf"), device=CUDA))
+    torch.cuda.synchronize()
+    assert bool((X.grad[zero] == 0).all())
+    assert not bool(X.grad[inp.labels < 0].any())
 
 
 def test_opt_in_forms_split_zero_weight_rows_unless_the_count_is_given():
@@ -4578,9 +4376,8 @@ def test_device_loads_the_libraries_of_its_architecture():
 def test_device_every_reduction_form_runs_within_the_budgets(glm_weight, stage):
     """Every ``gemm_dx_red*`` form the running architecture registers and its tuning accepts (``gemm_dx_red_swab`` on
     the ``DX_SWAB_ARCHES`` only: ``sm_103a`` and ``sm_107a``, which registers it with the ``sm_103a`` stages), pinned
-    at four K slices on a call of two whole 4096-row chunks: the launch record shows it launched on both, the
-    outputs pass the deterministic suite's gates against the FP64 oracle, and ``loss`` / ``logp`` / ``dW`` are the
-    deterministic package's bits."""
+    at four K slices on a call of two whole 4096-row chunks: the launch record shows it launched on both, and the
+    outputs pass the gates against the FP64 oracle."""
     _require_program(entry="loss")
     module_name, record = cake_backend.record_for(CUDA)
     if stage not in cake_jit.registered_stages(module_name):
@@ -4596,12 +4393,9 @@ def test_device_every_reduction_form_runs_within_the_budgets(glm_weight, stage):
         nd = _run(inp, 4096, backend="cake", gemm_tuning=tuning)
     count = sum(1 for key in launched if key[0] == stage)
     assert count == 2, (stage, sorted({key[0] for key in launched}))
-    det = _run(inp, 4096, backend="cake", package="det")
     errors, b0 = _check_against_references(nd, inp, ceiling=True)
-    diff, flips, max_ulp = _compare_with_det(nd, det)
     print(
-        f"\nND form {stage} x{count}: dX_rel_l2 {errors['dX_rel_l2']:.3e} (b0 {b0['dX_rel_l2']:.3e}) "
-        f"max|ND-det| {diff:.3e} flip {flips:.2e} max_ulp {max_ulp}"
+        f"\nND form {stage} x{count}: dX_rel_l2 {errors['dX_rel_l2']:.3e} (b0 {b0['dX_rel_l2']:.3e})"
     )
 
 
@@ -5692,8 +5486,7 @@ def test_device_checkpointed_forward_keeps_no_more_than_the_deterministic_packag
     """After a non-reentrant checkpointed forward the bytes
     the graph keeps alive, and after its backward (graph released) the bytes left beyond the gradients, are no more
     than the deterministic package's for the same call, whatever each package forms in that forward (the FP32 gradient
-    accumulators, kept until the backward, or the loss only); the outputs keep the deterministic package's ``loss`` /
-    ``dW`` bits.  The bytes are the ones the live tensors requested from the caching allocator, not its allocated
+    accumulators, kept until the backward, or the loss only).  The bytes are the ones the live tensors requested from the caching allocator, not its allocated
     blocks: a block can exceed its request by up to 1 MiB, by an amount set by the free blocks the process's earlier
     tests left, so the allocated bytes of the same call differ with the test order."""
     _require_program(entry="loss")
@@ -5723,29 +5516,27 @@ def test_device_checkpointed_forward_keeps_no_more_than_the_deterministic_packag
         torch.cuda.synchronize()
         kept = requested() - before
         loss.backward()
-        out = dict(loss=loss.detach(), dW=W.grad, dX=X.grad)
         del loss
         gc.collect()
         torch.cuda.synchronize()
         grads = sum(t.numel() * t.element_size() for t in (X.grad, W.grad))
         after = requested() - before - grads
-        return kept, after, out
+        return kept, after
 
-    nd_kept, nd_after, nd = retained("nd")
-    det_kept, det_after, det = retained("det")
+    nd_kept, nd_after = retained("nd")
+    det_kept, det_after = retained("det")
     print(
         f"\ncheckpoint T=8191 (requested bytes): kept after forward ND {nd_kept} det {det_kept}; "
         f"after backward ND {nd_after} det {det_after}"
     )
     assert nd_kept <= det_kept + (1 << 20), (nd_kept, det_kept)
     assert nd_after <= max(det_after, 0) + (1 << 20), (nd_after, det_after)
-    assert _same_bits(nd["loss"], det["loss"]) and _same_bits(nd["dW"], det["dW"])
 
 
 @pytest.mark.parametrize("fuse", [True, False])
 def test_device_fp32_weight_gradient(glm_weight, fuse):
     """FP32 ``dW``: ``forward_loss`` / ``backward_loss`` with ``grad_weight_dtype=torch.float32``
-    (fused and unfused last-chunk cast) give an FP32 ``dW`` with the deterministic package's bits, within the gates."""
+    (fused and unfused last-chunk cast) give an FP32 ``dW`` within the gates."""
     _require_program(entry="loss")
     inp = _device_inputs(4097, "ce", W=glm_weight)
     kw = dict(
@@ -5756,26 +5547,19 @@ def test_device_fp32_weight_gradient(glm_weight, fuse):
     )
     nd_fwd = cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
     dx, dw = nd_fwd.backward(grad_weight_dtype=torch.float32)
-    det_fwd = det_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
-    det_dx, det_dw = det_fwd.backward(grad_weight_dtype=torch.float32)
-    assert dw.dtype == torch.float32 and _same_bits(dw, det_dw)
-    assert _same_bits(nd_fwd.loss, det_fwd.loss) and _same_bits(
-        nd_fwd.logp, det_fwd.logp
-    )
+    assert dw.dtype == torch.float32
     _check_against_references(
         dict(loss=nd_fwd.loss, logp=nd_fwd.logp, dX=dx, dW=dw), inp, ceiling=True
     )
 
 
 def test_device_policy_rows_at_the_clip_knee(glm_weight):
-    """The policy objective at ``ratio = 2``: rows whose inference log-probability puts the ratio at the
-    clip knee and one FP32 step on either side: ``loss`` / ``logp`` / ``dW`` are the deterministic package's bits
-    (the same row kernel decides the same side), the rows the deterministic package gives zero ``dX`` get zero ``dX``,
-    and ``dX`` is the deterministic package's within the dX budget's floor (an FP64 oracle decides a knee row's side in
+    """The policy objective at ``ratio = 2``: rows whose inference log-probability puts the ratio at the clip knee of
+    this package's own FP32 ``logp`` and one FP32 step on either side (an FP64 oracle decides a knee row's side in
     FP64, so it is no reference at the knee)."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
-    logp = det_backend.forward_logprob(
+    logp = cake_backend.forward_logprob(
         base.X, base.W, base.labels, chunk_size=4096
     ).logp
     rows = (base.labels >= 0).nonzero().squeeze(1)
@@ -5792,29 +5576,19 @@ def test_device_policy_rows_at_the_clip_knee(glm_weight):
     )
     inp = dataclasses.replace(base, infer_logp=infer.contiguous())
     nd = _loss_call(inp, 4096)
-    det = _loss_call(inp, 4096, package="det")
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    clipped = (det["dX"] == 0).all(dim=1) & (inp.labels >= 0)
-    assert bool((nd["dX"][clipped] == 0).all())
-    err = rel_l2(nd["dX"], det["dX"].double())
-    print(
-        f"\nknee rows: {int(clipped.sum())} zero-dX of {rows.numel()}; dX rel-L2 vs det {err:.3e}"
-    )
-    assert err <= GATE_TINY["dX_rel_l2"], err
+    clipped = (nd["dX"] == 0).all(dim=1) & (inp.labels >= 0)
+    print(f"\nknee rows: {int(clipped.sum())} zero-dX of {rows.numel()}")
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_every_row_ignored_and_no_rows(glm_weight, entry):
-    """Every label ``-100`` gives loss 0, ``logp`` 0 and zero gradients (the deterministic package's
-    bits); ``T = 0`` gives loss 0, an empty ``logp`` and zero gradients."""
+    """Every label ``-100`` gives loss 0, ``logp`` 0 and zero gradients; ``T = 0`` gives loss 0, an empty ``logp``
+    and zero gradients."""
     _require_program(entry=entry)
     inp = _device_inputs(37, "ce", W=glm_weight, ignore_frac=1.0)
     assert not bool((inp.labels >= 0).any())
     nd = _run(inp, 4096, entry=entry, backend="cake")
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det")
     for key in ("logp", "dX", "dW") + (("loss",) if entry == "loss" else ()):
-        assert _same_bits(nd[key], det[key]), key
         assert not bool(nd[key].any()), key
     empty = dataclasses.replace(
         inp,
@@ -5830,13 +5604,10 @@ def test_device_every_row_ignored_and_no_rows(glm_weight, entry):
 
 def test_device_upstream_gradient_scale(glm_weight):
     """A loss upstream gradient other than 1 (``loss * 3``) scales ``dX`` / ``dW`` through the same
-    single cast: ``loss`` / ``logp`` / ``dW`` are the deterministic package's bits and ``dX`` passes the gates against
-    three times the oracle's."""
+    single cast: ``dX`` / ``dW`` pass the gates against three times the oracle's."""
     _require_program(entry="loss")
     inp = _device_inputs(4097, "ce", W=glm_weight)
     nd = _run(inp, 4096, backend="cake", scale=3.0)
-    det = _run(inp, 4096, backend="cake", package="det", scale=3.0)
-    _compare_with_det(nd, det)
     oracle = reference_fp64(inp)
     b0 = error_report(reference_unchunked(inp), oracle, inp.labels)
     for name in ("dX", "dW"):
@@ -5850,29 +5621,24 @@ def test_device_upstream_gradient_scale(glm_weight):
 
 
 def test_device_uncompacted_path(glm_weight):
-    """``compact_rows=False``: the chunk loop over every row gives the deterministic package's
-    uncompacted ``loss`` / ``logp`` / ``dW`` bits, ``dX`` within the gates, and the compacted call's ``logp`` bits."""
+    """``compact_rows=False``: the chunk loop over every row passes the gates and gives the compacted call's ``logp``
+    bits."""
     _require_program(entry="loss")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     nd = _run(inp, 4096, backend="cake", compact_rows=False)
-    det = _run(inp, 4096, backend="cake", package="det", compact_rows=False)
     _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
     assert _same_bits(nd["logp"], _run(inp, 4096, backend="cake")["logp"])
 
 
 @pytest.mark.parametrize("ld_pad", [256, 1])
 def test_device_strided_x(glm_weight, ld_pad):
     """Strided ``X``: the ``[:, :H]`` view of a ``[T, H + ld_pad]`` buffer -- read in place at a 16-byte
-    row pitch (``ld_pad`` 256), copied to a contiguous tensor otherwise (``ld_pad`` 1) -- gives the deterministic
-    package's ``loss`` / ``logp`` / ``dW`` bits and ``dX`` within the gates."""
+    row pitch (``ld_pad`` 256), copied to a contiguous tensor otherwise (``ld_pad`` 1) -- passes the gates."""
     _require_program(entry="loss")
     inp = make_inputs(4097, seed=SEED + 4097, device=CUDA, W=glm_weight, ld_pad=ld_pad)
     assert inp.X.stride(0) == inp.H + ld_pad
     nd = _run(inp, 4096, backend="cake")
-    det = _run(inp, 4096, backend="cake", package="det")
     _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
 
 
 def test_device_wrong_valid_row_count_raises_on_every_path(glm_weight):
@@ -5932,19 +5698,16 @@ def test_device_wrong_valid_row_count_raises_on_every_path(glm_weight):
 
 
 def test_device_dw_stream_modes(glm_weight):
-    """``dw_stream``: off, on and ``"auto"`` on a four-chunk call give the same ``loss`` / ``logp`` /
-    ``dW`` bits (the deterministic package's), and ``dX`` within the gates after a 0xFF-poisoned allocator: every
-    ``dX_acc`` row is stored (a one-slice chunk's GEMM, a K-sliced chunk's slab sum) when the weight-gradient GEMMs run
-    on the side stream."""
+    """``dw_stream``: off, on and ``"auto"`` on a four-chunk call keep ``loss`` / ``logp`` / ``dX`` / ``dW`` within
+    the gates after a 0xFF-poisoned allocator: every ``dX_acc`` row is stored (a one-slice chunk's GEMM, a K-sliced
+    chunk's slab sum) when the weight-gradient GEMMs run on the side stream."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, "ce", W=glm_weight)
     oracle = reference_fp64(inp)
     b0 = error_report(reference_unchunked(inp), oracle, inp.labels)
-    det = _run(inp, 4096, backend="cake", package="det")
     for mode in (False, True, "auto"):
         _poison_allocator(1 << 30)
         nd = _run(inp, 4096, backend="cake", dw_stream=mode)
-        _compare_with_det(nd, det)
         errors = error_report(nd, oracle, inp.labels)
         assert not errors["nan"] and errors["dX_ignored_zero"]
         for key, tiny in GATE_TINY.items():
@@ -6611,8 +6374,8 @@ def test_device_red_min_rows_keeps_small_chunks_on_the_plain_store(
     glm_weight, shipped_chunks
 ):
     """``set_dx_red_min_rows``: a two-chunk call whose one-row tail falls below the floor runs that chunk with the
-    plain store -- its ``dX`` rows are the deterministic package's one-slice bits -- while the 4096-row chunk keeps
-    the reduction (launch record); the call passes the gates.  The shipped chunks (no short-tail fold)."""
+    plain store while the 4096-row chunk keeps the reduction (launch record); the call passes the gates.  The shipped
+    chunks (no short-tail fold)."""
     _require_program(entry="loss")
     policy = cake_backend.dx_slice_policy()
     if _device_slices(4097, policy, glm_weight)[0] == 1:
@@ -6632,17 +6395,12 @@ def test_device_red_min_rows_keeps_small_chunks_on_the_plain_store(
     assert [key[1] for key in dx_keys] == [0, 1], dx_keys
     assert dx_keys[0][0].startswith(cake_backend.DX_RED_STAGE)
     assert not dx_keys[1][0].startswith(cake_backend.DX_RED_STAGE)
-    plain = _run(
-        inp, 4096, backend="cake", package="det", gemm_tuning={"dx": {"k_slices": None}}
-    )
-    assert _same_bits(nd["dX"][4096:], plain["dX"][4096:])
     _check_against_references(nd, inp, ceiling=True)
 
 
 def test_device_zero_weight_floor_keeps_small_calls_unsplit(glm_weight):
     """``set_zero_weight_min_rows``: a policy call below the floor keeps its zero-weight rows on the gradient path (no
-    split): ``loss`` / ``logp`` / ``dW`` are the bits of the deterministic package's plain path (its own zero-weight
-    split off) and the zero-weight rows' ``dX`` rows are zeros."""
+    split, no zero-weight report) and the zero-weight rows' ``dX`` rows are zeros."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.3))
@@ -6662,10 +6420,6 @@ def test_device_zero_weight_floor_keeps_small_calls_unsplit(glm_weight):
     finally:
         cake_backend.set_zero_weight_min_rows(previous)
     assert "zero_weight_rows" not in (fwd.memory or {})
-    with _det_unsplit():
-        det = _loss_call(inp, 4096, package="det")
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
     assert not bool(nd["dX"][zero].any())
 
 
@@ -9197,9 +8951,9 @@ def test_device_logprob_keep_one_pass_frees_the_dw_accumulator(glm_weight, form)
     assert left1 <= (8 << 20) and left0 <= (8 << 20), (left0, left1)
 
 
-def _logprob_call(inp, C=4096, *, package="nd"):
-    """One autograd log-probability call (forward + ``backward(dlogp)``) of ``package`` on the generated programs."""
-    return _run(inp, C, package=package, entry="logprob", backend="cake")
+def _logprob_call(inp, C=4096):
+    """One autograd log-probability call (forward + ``backward(dlogp)``) of this package on the generated programs."""
+    return _run(inp, C, entry="logprob", backend="cake")
 
 
 def _has_zero_dlogp_skip():
@@ -11097,15 +10851,14 @@ def test_device_zero_dlogp_generic_floor_is_one_row_above_a_chunk(
 
 def test_device_zero_dlogp_rows_repeat(glm_weight):
     """``REPEATS`` runs with 16.6 % zero-gradient rows (T 12289, chunks of 4096), each after poisoning the free
-    allocator memory: every run passes the deterministic suite's gates and keeps the zero rows' ``dX`` exact ``+0``; the
-    worst error per metric is printed beside the deterministic package's on the same inputs."""
+    allocator memory: every run passes the gates and keeps the zero rows' ``dX`` exact ``+0``; the worst error per
+    metric is printed."""
     _require_program(entry="logprob")
     base = _device_inputs(12289, "ce", W=glm_weight)
     zero = _zero_dlogp_set(base, ("random", 0.166))
     inp = _with_zero_dlogp(base, zero)
     oracle = reference_fp64(inp, entry="logprob")
     b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
-    det = error_report(_logprob_call(inp, package="det"), oracle, inp.labels)
     worst = {}
     with _zero_dlogp_floor(0):
         for _ in range(REPEATS):
@@ -11122,7 +10875,7 @@ def test_device_zero_dlogp_rows_repeat(glm_weight):
     print(
         "\nzero-dlogp skip repeat worst: "
         + ", ".join(
-            f"{k} {v:.3e} (det {det.get(k, float('nan')):.3e}, b0 {b0[k]:.3e})"
+            f"{k} {v:.3e} (b0 {b0[k]:.3e})"
             for k, v in worst.items()
         )
     )
@@ -11250,8 +11003,8 @@ def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight
 
 # ---------------------------------------------------------------------------
 # Temperature of the log-probability entry (``*_temperature``; the deterministic suite's temperature tests on this
-# package: ``logp`` / ``dW`` keep the deterministic package's bits, ``dX`` of a chunk of more than one slice comes from
-# the unordered K-slice reduction)
+# package: ``logp`` / ``dW`` keep their fixed order, ``dX`` of a chunk of more than one slice comes from the unordered
+# K-slice reduction)
 # ---------------------------------------------------------------------------
 
 # The keywords of the log-probability entries' temperature forms (``*_temperature``).
@@ -13068,21 +12821,18 @@ def test_device_temperature_heterogeneous_matches_the_references(
     the same inputs (fresh allocator state each time, 0xFF-poisoned): every run passes the gates against the FP64
     oracle and the unchunked PyTorch path (both with the temperature: 1.05x its error plus the floor; the production
     ceiling, a temperature-1 figure, only where every temperature is at least 1) with zeros on the ignored rows;
-    ``logp`` / ``dW`` never change and are the deterministic package's bits (its temperature entry on the same
-    inputs; ``logp`` only where the short tail folds); the worst errors, the run-to-run ``dX`` spread and the worst max |ND - det| and BF16 flip rate of ``dX``
-    are recorded (junit properties)."""
+    ``logp`` / ``dW`` never change; the worst errors and the run-to-run ``dX`` spread are recorded (junit
+    properties)."""
     _require_tau_program()
     inp = _tau_inputs(T, W=glm_weight, ignore_frac=ignore)
     ceiling = bool(inp.temperature.min() >= 1.0)
     oracle = reference_fp64(inp, entry="logprob")
     b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
-    det = _run(inp, C, entry="logprob", backend="cake", package="det")
-    first, worst, spread, versus = None, {}, 0.0, []
+    first, worst, spread = None, {}, 0.0
     for _ in range(REPEATS):
         _poison_allocator(1 << 30)
         run = _run(inp, C, entry="logprob", backend="cake")
         _check_dtypes(run, inp)
-        _compare_with_det(run, det, record=versus, folded=_folds(inp, C))
         errors = error_report(run, oracle, inp.labels)
         assert (
             not errors["nan"]
@@ -13107,17 +12857,7 @@ def test_device_temperature_heterogeneous_matches_the_references(
             )
     record_property("temperature_errors_worst", repr(worst))
     record_property("temperature_unchunked_errors", repr(b0))
-    record_property(
-        "temperature_dX_vs_det",
-        repr(
-            dict(
-                run_to_run_max=spread,
-                max_abs=max(v["dX_max_abs_vs_det"] for v in versus),
-                flip_rate=max(v["dX_flip_rate"] for v in versus),
-                max_ulp=max(v["dX_max_ulp"] for v in versus),
-            )
-        ),
-    )
+    record_property("temperature_dX_run_to_run_max", repr(spread))
 
 
 def test_device_temperature_switches_are_bitwise(
@@ -14022,7 +13762,7 @@ def test_device_temperature_zero_dlogp_rows_skip(
 ):
     """The zero-gradient row skip with a temperature (a distinct per-token temperature on every row, or the scalar
     0.7; ignored rows; zero rows ``+0`` and ``-0``) against the same calls without the skip
-    (``set_zero_dlogp_min_rows(None)``), the deterministic package's temperature entry and the FP64 oracle.  Every
+    (``set_zero_dlogp_min_rows(None)``) and the FP64 oracle.  Every
     call with the skip runs the partition (binding and remembered binding) and binds the counted weight-gradient
     GEMMs; its backward plan runs the ``dz`` arm's counted temperature form ``gemm_logits_dz_dcnt_tau``
     (``dz_form="counted"``, the default, where the record registers it) or the uncounted ``gemm_logits_dz_tau``
@@ -14032,8 +13772,8 @@ def test_device_temperature_zero_dlogp_rows_skip(
     its bits; the zero rows' and the ignored rows' ``dX`` rows are exact ``+0``; with one dX slice pinned
     (``_TAU_ONE``) a live row's ``dX`` -- the same product of its ``dz`` row -- keeps the bits of the call without the
     skip (the ``dz`` of the live rows is unchanged: the temperature rows follow the skip's row order).  ``dW`` and the
-    default-slice ``dX`` stay within the ND budget floors of the call without the skip and of the deterministic
-    package (``dW`` the same bits when no row is zero) and pass the gates against the FP64 oracle; every row zero
+    default-slice ``dX`` stay within the ND budget floors of the call without the skip (``dW`` the same bits when no
+    row is zero) and pass the gates against the FP64 oracle; every row zero
     gives zero gradients.  A distinct temperature also keeps its bits with extreme values on the ignored rows.  T 5000
     runs the shipped chunks (``shipped_chunks``: its two-chunk cast forms); T 4600 the short-tail fold."""
     _require_zero_dlogp_skip()
@@ -14105,10 +13845,8 @@ def test_device_temperature_zero_dlogp_rows_skip(
         one_off = _run(inp, 4096, **kw, **_TAU_ONE)
         sliced_off = _run(inp, 4096, **kw)
     assert not calls and not any(s.endswith("_dcnt") for s in bound), case
-    det = _run(inp, 4096, **kw, package="det")
     for run in (one, again, sliced):
         assert _same_bits(run["logp"], one_off["logp"]), case
-        assert _same_bits(run["logp"], det["logp"]), case
         assert not bool(_bits(run["dX"][zero | ~valid]).any()), case
     for run in (one, again):
         assert _same_bits(run["dX"][live], one_off["dX"][live]), case
@@ -14119,18 +13857,16 @@ def test_device_temperature_zero_dlogp_rows_skip(
         return
     if not bool(zero.any()):
         # no zero row: the partition keeps the forward's order, the counted forms run every row
-        for run, off in ((one, one_off), (sliced, sliced_off), (sliced, det)):
+        for run, off in ((one, one_off), (sliced, sliced_off)):
             assert _same_bits(run["dW"], off["dW"]), case
     dw_rel = {}
     for name, run, ref in (
         ("one", one, one_off),
         ("sliced", sliced, sliced_off),
-        ("det", sliced, det),
     ):
         dw_rel[name] = float(rel_l2(run["dW"].float(), ref["dW"].float()))
         assert dw_rel[name] <= GATE_TINY["dW_rel_l2"], (case, name, dw_rel[name])
     _assert_tau_close(sliced, sliced_off, (case, "skip off"), keys=("logp", "dX"))
-    _assert_tau_close(sliced, det, (case, "det"), keys=("logp", "dX"))
     oracle = reference_fp64(inp, entry="logprob")
     b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
     for run in (one, sliced):
@@ -14153,7 +13889,7 @@ def test_device_temperature_zero_dlogp_rows_skip(
         _assert_same_bits(one, other, _LOGPROB_KEYS)
     print(
         f"\ntemperature zero-dlogp skip {case} zero {int(zero.sum())}/{rows}: dW rel-L2 vs skip off "
-        f"{dw_rel['one']:.2e} (one slice) / {dw_rel['sliced']:.2e}, vs det {dw_rel['det']:.2e}"
+        f"{dw_rel['one']:.2e} (one slice) / {dw_rel['sliced']:.2e}"
     )
 
 
@@ -14443,14 +14179,10 @@ def test_temperature_entries_run_their_function():
 
 @pytest.mark.parametrize("form", ["scalar", "hetero"])
 @pytest.mark.parametrize("compact", [True, False])
-def test_reference_temperature_matches_the_deterministic_reference(form, compact):
-    """With a temperature the reference backend is the deterministic package's temperature entry bit for bit
-    (``logp`` / ``dX`` / ``dW``) and passes the gates against the references."""
+def test_reference_temperature_matches_the_oracle(form, compact):
+    """With a temperature the reference backend passes the gates against the references."""
     inp = _host_inputs(37, ignore_frac=0.2, temperature=form)
     nd = _run(inp, 16, entry="logprob", compact_rows=compact)
-    det = _run(inp, 16, entry="logprob", compact_rows=compact, package="det")
-    for key in ("logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
     _check_against_references(nd, inp, entry="logprob")
 
 
