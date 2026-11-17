@@ -74,10 +74,13 @@ directory of a main checkout, in the same process: the package is
 self-contained -- relative imports, ``Path(__file__)`` manifest, JIT names
 salted by its own closure digests -- so both versions run on the same input
 tensors), ``cake_aa`` / ``cake_far_aa`` / ``cake_main_aa`` (the same arm prepared a second time:
-the in-process A/A band).  Every pair of Cake arms of one form and one package is compared bitwise
-(ids and score bits) on every row and the verdicts are recorded (``same_bits``); other arms, other
-forms and the arms of the ``--main-package`` copy are not compared bitwise (the bits may change
-between package versions).
+the in-process A/A band).  ``same_bits`` compares bitwise (ids and score bits), on every row, every
+pair of Cake arms of one form within one package: the arms of this package among themselves and the
+``--main-package`` arms among themselves.  No arm of this package is compared bitwise with an arm of
+the ``--main-package`` copy (the bits may change between package versions), and no BF16 arm with an
+FP8 arm.  Separately, the ids of every arm, of any form or package, are compared with the anchor's
+(``cake``; ``cake_fp8`` in ``--form fp8``), and the number of rows with the anchor's ids is recorded
+as ``rows_identical_to_cake`` (information only: nothing is asserted on it).
 A SHA-256 of each arm's ids and score bits is recorded for cross-process comparisons.
 
 Timing: :func:`gpu_times`, CUPTI activity tracing through ``torch.profiler``
@@ -120,7 +123,8 @@ BF16 form on the same data dequantized to BF16: ``q`` exactly, ``bf16(k * k_scal
 ``softmax_scale = 1``).
 Timing boundary: a Cake arm's span is the complete operator (scan, merge,
 finalize into caller-owned outputs and workspace).  ``same_bits`` / ``all_cake_arms_identical``
-compare the Cake arms of one form and one package; the speed ratios are against ``cake_fp8``.
+compare the Cake arms of one form and one package; ``rows_identical_to_cake`` and the speed ratios
+are against ``cake_fp8``.
 
 Usage::
 
@@ -1178,8 +1182,9 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
                 "main" if arm.backend is not cake_backend else "candidate"
             )
         result["arms"][arm_name] = record
-    # bitwise identity of every pair of cake arms of one form and one package (ids and score bits): run-to-run
-    # and invariance; other arms, other forms and arms of another package version are not compared bitwise
+    # bitwise identity (ids and score bits) of every pair of cake arms of one form and one package (this package's
+    # arms among themselves, the --main-package arms among themselves): run-to-run and invariance; arms of another
+    # form or another package version are not compared bitwise
     result["same_bits"] = {
         f"{a}|{b}": ref.same_bits(outputs[a], outputs[b])
         for a, b in itertools.combinations(outputs, 2)
@@ -1188,6 +1193,8 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
     result["all_cake_arms_identical"] = (
         all(result["same_bits"].values()) if result["same_bits"] else None
     )
+    # every other arm, of any form or package, against the anchor: the number of rows with the anchor's ids
+    # (information only, nothing is asserted on it) and the time ratio
     if anchor in outputs:
         for arm_name, out in outputs.items():
             if arm_name != anchor:
