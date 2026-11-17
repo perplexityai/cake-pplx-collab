@@ -434,8 +434,8 @@ selection's ids and counts on integer e4m3 inputs and the scores judged
 against the naive tier (integer and amax-quantized Gaussian e4m3 inputs),
 bitwise program-dispatch invariance over every
 registered FP8 key, the prepared runner's `k_scale` binding, the per-form
-ticket decision and, where `deep_gemm` imports, the ids against the top-k of
-DeepGEMM's FP8 MQA logits on integer e4m3 inputs.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
+ticket decision and, on `sm_100a` / `sm_103a` where `deep_gemm` imports, the
+ids against the top-k of DeepGEMM's FP8 MQA logits on integer e4m3 inputs.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
 (paired AB / BA / interleaved CUPTI spans of the complete operator across the
 package's arms: sampling on / off, forced dispatch and a second copy of the
 package).  `--form fp8` times the FP8 form against the BF16 form on the same

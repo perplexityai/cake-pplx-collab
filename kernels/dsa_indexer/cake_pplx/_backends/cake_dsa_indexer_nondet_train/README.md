@@ -545,8 +545,8 @@ on integer e4m3 inputs and the scores judged against the naive tier (integer
 and amax-quantized Gaussian e4m3 inputs), the same sets from every registered
 FP8 program forced on one call, the prepared runner's `k_scale` binding, the
 per-form ticket decision on a poisoned workspace, the workspace bound, CUDA
-graphs and, where `deep_gemm` imports, the sets against the top-k of
-DeepGEMM's FP8 MQA logits.
+graphs and, on `sm_100a` / `sm_103a` where `deep_gemm` imports, the sets
+against the top-k of DeepGEMM's FP8 MQA logits.
 
 The comparison file checks that the registry keys, policy records and host
 plans of BF16 and FP8 calls are the deterministic package's, on the host, and
