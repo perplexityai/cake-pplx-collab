@@ -22,7 +22,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_lm_head_det_loss_8eccf1c4d61d3cd4f354(__nv_bfloat16* __restrict__ z, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ d, int row0, int d_off, int V);
+extern "C" __global__ void kernel_cake_lm_head_det_loss_8eccf1c4d61d3cd4f354(__nv_bfloat16* __restrict__ z, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ d, float* __restrict__ rlab, int row0, int d_off, int V);
 
 namespace cake_binding_kernel_cake_lm_head_det_loss_8eccf1c4d61d3cd4f354 {
 
@@ -37,7 +37,7 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
-void Run(TensorView a_z, TensorView a_labels, TensorView a_lse, TensorView a_d, int64_t a_row0, int64_t a_d_off, int64_t a_V, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_z, TensorView a_labels, TensorView a_lse, TensorView a_d, TensorView a_rlab, int64_t a_row0, int64_t a_d_off, int64_t a_V, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_z.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_z, "z");
@@ -48,6 +48,8 @@ void Run(TensorView a_z, TensorView a_labels, TensorView a_lse, TensorView a_d, 
   check_dtype(a_lse, DLDataType{kDLFloat, 32, 1}, "lse");
   check_cuda_tensor(a_d, "d");
   check_dtype(a_d, DLDataType{kDLFloat, 32, 1}, "d");
+  check_cuda_tensor(a_rlab, "rlab");
+  check_dtype(a_rlab, DLDataType{kDLFloat, 32, 1}, "rlab");
   TVM_FFI_CHECK(a_row0 >= -2147483648LL && a_row0 <= 2147483647LL, ValueError)
       << KERNEL_NAME << ": 'row0' = " << a_row0
       << " is outside the i32 range [-2147483648, 2147483647]";
@@ -64,6 +66,8 @@ void Run(TensorView a_z, TensorView a_labels, TensorView a_lse, TensorView a_d, 
   check_same_device(a_lse, a_z, "lse", "z");
   check_contiguous(a_d, "d");
   check_same_device(a_d, a_z, "d", "z");
+  check_contiguous(a_rlab, "rlab");
+  check_same_device(a_rlab, a_z, "rlab", "z");
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
@@ -73,14 +77,15 @@ void Run(TensorView a_z, TensorView a_labels, TensorView a_lse, TensorView a_d, 
   void* v_labels = DataPtr(a_labels);
   void* v_lse = DataPtr(a_lse);
   void* v_d = DataPtr(a_d);
+  void* v_rlab = DataPtr(a_rlab);
   int32_t v_row0 = static_cast<int32_t>(a_row0);
   int32_t v_d_off = static_cast<int32_t>(a_d_off);
   int32_t v_V = static_cast<int32_t>(a_V);
-  void* kernel_args[] = {&v_z, &v_labels, &v_lse, &v_d, &v_row0, &v_d_off, &v_V};
+  void* kernel_args[] = {&v_z, &v_labels, &v_lse, &v_d, &v_rlab, &v_row0, &v_d_off, &v_V};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(128, 1, 1);
-  config.dynamicSmemBytes = 0;
+  config.dynamicSmemBytes = 512;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_lm_head_det_loss_8eccf1c4d61d3cd4f354), kernel_args),
             "cudaLaunchKernelExC");

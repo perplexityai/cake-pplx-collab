@@ -168,10 +168,17 @@ __device__ __forceinline__ void tmem_ld_x16(float* dst, int tmem_addr) {
 }
 
 
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(224) __cluster_dims__(2,1,1) void
-kernel_cake_lm_head_det_loss_aa0003a3f2f72697433f(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off)
+kernel_cake_lm_head_det_loss_aa0003a3f2f72697433f(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ rlab)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -607,11 +614,32 @@ kernel_cake_lm_head_det_loss_aa0003a3f2f72697433f(const __grid_constant__ CUtens
                                 dzp_s[j] = _exp_0;
                                 dzv_s[j] = ((dz_skip != 0) ? 0.0f : dz_d * (-dzp_s[j]));
                             }
+                            float dzf_s = 0.0f;
+                            float dzf_r = 0.0f;
                             if (dz_skip == 0) {
                                 if ((unsigned int)(dz_col - fcol) < 16) {
                                     #pragma unroll
                                     for (int jl = 0; jl < 16; jl++) {
-                                        dzv_s[jl] = ((fcol + jl == dz_col) ? dz_d * (1.0f - dzp_s[jl]) : dzv_s[jl]);
+                                        if (fcol + jl == dz_col) {
+                                            float _sub_1;
+                                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_1) : "f"(1.0f), "f"(dzp_s[jl]));
+                                            dzv_s[jl] = mul_f32_rn_noftz(dz_d, _sub_1);
+                                            dzf_s = dzv_s[jl];
+                                        }
+                                    }
+                                    float lr_hi = (float)(__nv_bfloat16)dzf_s;
+                                    float _abs_2;
+                                    asm("abs.f32 %0, %1;" : "=f"(_abs_2) : "f"(lr_hi));
+                                    float _sub_3;
+                                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_3) : "f"(dzf_s), "f"(lr_hi));
+                                    float lr_r = ((_abs_2 <= 3.4028235e+38f) ? _sub_3 : 0.0f);
+                                    dzf_r = lr_r;
+                                }
+                            }
+                            if (global_row < M) {
+                                if (dz_skip == 0) {
+                                    if ((unsigned int)(dz_col - fcol) < 16) {
+                                        rlab[rin_t] = dzf_r;
                                     }
                                 }
                             }

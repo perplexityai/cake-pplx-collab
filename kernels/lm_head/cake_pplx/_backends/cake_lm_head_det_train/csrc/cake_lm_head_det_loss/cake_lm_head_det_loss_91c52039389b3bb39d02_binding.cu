@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_lm_head_det_loss_91c52039389b3bb39d02(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ temperature);
+extern "C" __global__ void kernel_cake_lm_head_det_loss_91c52039389b3bb39d02(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ rlab, float* __restrict__ temperature);
 
 namespace cake_binding_kernel_cake_lm_head_det_loss_91c52039389b3bb39d02 {
 
@@ -157,7 +157,7 @@ CUtensorMap EncodeTma_B(const TensorView& t) {
   return map;
 }
 
-void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT, int64_t a_M, int64_t a_m_tiles, int64_t a_k_iters, int64_t a_first_chunk, TensorView a_WS, int64_t a_ws_slab, int64_t a_ldc, int64_t a_k_slices, int64_t a_k_slice_iters, int64_t a_group_m, int64_t a_group_n, TensorView a_labels, TensorView a_lse, TensorView a_dlogp, int64_t a_row0, int64_t a_d_off, TensorView a_temperature, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT, int64_t a_M, int64_t a_m_tiles, int64_t a_k_iters, int64_t a_first_chunk, TensorView a_WS, int64_t a_ws_slab, int64_t a_ldc, int64_t a_k_slices, int64_t a_k_slice_iters, int64_t a_group_m, int64_t a_group_n, TensorView a_labels, TensorView a_lse, TensorView a_dlogp, int64_t a_row0, int64_t a_d_off, TensorView a_rlab, TensorView a_temperature, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_A.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_A, "A");
@@ -212,6 +212,8 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT,
   TVM_FFI_CHECK(a_d_off >= -2147483648LL && a_d_off <= 2147483647LL, ValueError)
       << KERNEL_NAME << ": 'd_off' = " << a_d_off
       << " is outside the i32 range [-2147483648, 2147483647]";
+  check_cuda_tensor(a_rlab, "rlab");
+  check_dtype(a_rlab, DLDataType{kDLFloat, 32, 1}, "rlab");
   check_cuda_tensor(a_temperature, "temperature");
   check_dtype(a_temperature, DLDataType{kDLFloat, 32, 1}, "temperature");
   check_same_device(a_B, a_A, "B", "A");
@@ -227,6 +229,8 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT,
   check_same_device(a_lse, a_A, "lse", "A");
   check_contiguous(a_dlogp, "dlogp");
   check_same_device(a_dlogp, a_A, "dlogp", "A");
+  check_contiguous(a_rlab, "rlab");
+  check_same_device(a_rlab, a_A, "rlab", "A");
   check_contiguous(a_temperature, "temperature");
   check_same_device(a_temperature, a_A, "temperature", "A");
   TVM_FFI_CHECK((CMod(a_ldc, 256LL) == 0LL), ValueError)
@@ -271,8 +275,9 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT,
   void* v_dlogp = DataPtr(a_dlogp);
   int32_t v_row0 = static_cast<int32_t>(a_row0);
   int32_t v_d_off = static_cast<int32_t>(a_d_off);
+  void* v_rlab = DataPtr(a_rlab);
   void* v_temperature = DataPtr(a_temperature);
-  void* kernel_args[] = {&v_A, &v_B, &v_C, &v_STATS_OUT, &v_M, &v_m_tiles, &v_k_iters, &v_first_chunk, &v_WS, &v_ws_slab, &v_ldc, &v_k_slices, &v_k_slice_iters, &v_group_m, &v_group_n, &v_labels, &v_lse, &v_dlogp, &v_row0, &v_d_off, &v_temperature};
+  void* kernel_args[] = {&v_A, &v_B, &v_C, &v_STATS_OUT, &v_M, &v_m_tiles, &v_k_iters, &v_first_chunk, &v_WS, &v_ws_slab, &v_ldc, &v_k_slices, &v_k_slice_iters, &v_group_m, &v_group_n, &v_labels, &v_lse, &v_dlogp, &v_row0, &v_d_off, &v_rlab, &v_temperature};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(224, 1, 1);
