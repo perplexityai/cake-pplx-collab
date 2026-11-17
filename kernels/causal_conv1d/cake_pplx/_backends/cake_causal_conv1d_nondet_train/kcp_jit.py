@@ -71,7 +71,11 @@ rows, so ``dx`` is the det program's bits on every row.  The main program's ``wo
 words are the tiles' warp words ``tile_tk`` (``DYN_TILE_WORDS`` per tile of
 :data:`DYN_TILE` channels), the claim words ``claims`` (``L``, one per lane)
 and the departure word ``departs`` (one), all zero before and after every
-launch (:func:`dyn_workspace_layout`).
+launch (:func:`dyn_workspace_layout`).  The opt-in route ``kcp_bwd_dyn_pair``
+(:data:`DYN_PAIR_KIND`, ``dweight_sum="fp32_pair"``) holds the main program's
+FP32 hi/lo pair build: the same work plan, workspace and ``dx``, the copies of
+a tile's ``dweight`` summed as an FP32 (hi, lo) pair and rounded once; the
+host runs it in place of the ``kcp_bwd_dyn`` program, never by default.
 
 One more route carries the two-launch forward's history-row program
 (:data:`FWD_HALO_KIND`, ``kcp_fwd_halo``: this package's copy of the det
@@ -640,6 +644,103 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``kcp_bwd_dyn_pair`` (opt-in, ``dweight_sum="fp32_pair"``): the overlapped backward's main program
+    # built with ``dw_df32=True``: the ``DW_COPIES`` FP32 copies of a tile's ``dweight`` are summed as an FP32
+    # (hi, lo) pair (TwoSum, FP32 operations only) and rounded once when the tile is stored; ``dx``, the work
+    # plan, the workspace and the launch are the ``kcp_bwd_dyn`` program's.  The exporter fills the derived
+    # leaves (shared memory included).
+    "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw"],
+            ["buffer", "dw_acc"],
+            ["buffer", "tile_tk"],
+            ["buffer", "hist"],
+            ["buffer", "hist_row_off"],
+            ["buffer", "dpre_tail"],
+            ["buffer", "tail_row_off"],
+            ["buffer", "skip_row_off"],
+            ["buffer", "claims"],
+            ["buffer", "departs"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "M"],
+            ["parameter", "NL"],
+            ["parameter", "P"],
+            ["parameter", "L"],
+            ["parameter", "n_ctas"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 384,
+                "vec": 8,
+            },
+            "kind": "co_resident",
+        },
+        "kernel": "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 197760,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
+        "logical": {
+            "C": "C",
+            "L": "L",
+            "M": "M",
+            "NL": "NL",
+            "P": "P",
+            "S": "S",
+            "claims": "claims",
+            "cu": "cu",
+            "departs": "departs",
+            "dpre_tail": "dpre_tail",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "hist": "hist",
+            "hist_row_off": "hist_row_off",
+            "n_ctas": "n_ctas",
+            "num_docs": "num_docs",
+            "skip_row_off": "skip_row_off",
+            "tail_row_off": "tail_row_off",
+            "tile_tk": "tile_tk",
+            "w": "w",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "kcp_bwd_dyn_pair",
+        "workspace_rule": {
+            "acc": "float32",
+            "kind": "accumulators",
+            "slots": 4,
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
     # Route ``kcp_bwd_halo``: the tail-row program of the overlapped backward (its own kernel module key).
     "cake_causal_conv1d_train_ae0c093e1e0ac46aec3f_kcp": {
         "arches": [
@@ -777,6 +878,9 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "kcp_bwd_dyn": [
             "cake_causal_conv1d_train_4fb1b7f750457bfedfdb_kcp",
         ],
+        "kcp_bwd_dyn_pair": [
+            "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
+        ],
         "kcp_bwd_halo": [
             "cake_causal_conv1d_train_ae0c093e1e0ac46aec3f_kcp",
         ],
@@ -797,6 +901,9 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "kcp_bwd_dyn": [
             "cake_causal_conv1d_train_4fb1b7f750457bfedfdb_kcp",
+        ],
+        "kcp_bwd_dyn_pair": [
+            "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
         ],
         "kcp_bwd_halo": [
             "cake_causal_conv1d_train_ae0c093e1e0ac46aec3f_kcp",
@@ -819,6 +926,9 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "kcp_bwd_dyn": [
             "cake_causal_conv1d_train_4fb1b7f750457bfedfdb_kcp",
         ],
+        "kcp_bwd_dyn_pair": [
+            "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
+        ],
         "kcp_bwd_halo": [
             "cake_causal_conv1d_train_ae0c093e1e0ac46aec3f_kcp",
         ],
@@ -840,12 +950,15 @@ KINDS = ("kcp_fwd", "kcp_bwd", "kcp_bwd_head")
 # The overlapped backward's routes: its main program and its tail-row program.
 DYN_KIND = "kcp_bwd_dyn"
 HALO_KIND = "kcp_bwd_halo"
+# The opt-in route of the main program's FP32 hi/lo pair build (``dweight_sum="fp32_pair"``): the overlapped
+# backward runs it in place of ``kcp_bwd_dyn``'s program; no default selects it.
+DYN_PAIR_KIND = "kcp_bwd_dyn_pair"
 # The route of the two-launch forward's history-row program: after a main
 # program that read no history row, it writes the first rows of every fragment
 # with a history row again (module docstring).
 FWD_HALO_KIND = "kcp_fwd_halo"
 # Every route of ``ROUTES[arch]``.
-ROUTE_KINDS = (*KINDS, DYN_KIND, HALO_KIND, FWD_HALO_KIND)
+ROUTE_KINDS = (*KINDS, DYN_KIND, DYN_PAIR_KIND, HALO_KIND, FWD_HALO_KIND)
 # The history / halo rows every fragment carries (the convolution width minus one).
 HALO = WIDTH - 1
 # Logical argument names the KCP host flow binds: the zero-history vocabulary
@@ -1244,6 +1357,7 @@ __all__ = [
     "ARCH_BY_CAPABILITY",
     "CHANNEL_MULTIPLE",
     "DYN_KIND",
+    "DYN_PAIR_KIND",
     "DYN_MAX_CHANNELS",
     "DYN_MAX_LANES",
     "DYN_TILE",

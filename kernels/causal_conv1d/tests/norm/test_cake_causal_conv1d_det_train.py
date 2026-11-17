@@ -672,7 +672,15 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     geometry = {"threads": 128, "vec": 8}
     assert loader.NARROW_TILE_ROUTES == {
         "fwd": ("fwd", "fwd_dt", "fwd_bias"),
-        "bwd": ("bwd", "bwd_dt", "bwd_bias", "bwd_fp32g", "bwd_bias_fp32g"),
+        "bwd": (
+            "bwd",
+            "bwd_dt",
+            "bwd_bias",
+            "bwd_fp32g",
+            "bwd_bias_fp32g",
+            "bwd_fp32g_pair",
+            "bwd_bias_fp32g_pair",
+        ),
     }
     assert loader.NARROW_TILE_WIDTHS == {"fwd": FWD_NARROW_WIDTHS, "bwd": {}}
     assert loader.NARROW_WIDTH_FLOORS == {"fwd": FWD_NARROW_FLOORS, "bwd": {}}
@@ -1225,7 +1233,25 @@ def test_route_tables() -> None:
             loader.backward_route(bias=bias, fp32_grad=fp32, bf16_taps_or_dweight=dt)
             == kind
         )
-    assert set(loader.KINDS) == {"fwd", "fwd_dt", "fwd_bias", *ROUTE_SETTINGS}
+        if fp32:
+            assert (
+                loader.backward_route(
+                    bias=bias, fp32_grad=True, bf16_taps_or_dweight=dt, pair=True
+                )
+                == f"{kind}_pair"
+            )
+    # The opt-in pair routes (dweight_sum="fp32_pair") and the routes they pair.
+    assert loader.PAIR_ROUTES == {
+        "bwd_fp32g_pair": "bwd_fp32g",
+        "bwd_bias_fp32g_pair": "bwd_bias_fp32g",
+    }
+    assert set(loader.KINDS) == {
+        "fwd",
+        "fwd_dt",
+        "fwd_bias",
+        *ROUTE_SETTINGS,
+        *loader.PAIR_ROUTES,
+    }
     assert set(loader.REQUIRED_KINDS) == {"fwd", "bwd"}
     for kind in loader.KINDS:
         assert loader.route_role(kind) == ("fwd" if kind.startswith("fwd") else "bwd")

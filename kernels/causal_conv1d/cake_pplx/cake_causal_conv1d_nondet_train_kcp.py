@@ -66,6 +66,10 @@ The backward beside a kernel of another stream: the overlapped backward needs no
 one-program backward after the halo exchange instead, ``K`` SMs short of its single wave::
 
     y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx, bwd_reserve_sms=1)
+
+Opt-in: the overlapped backward's ``dweight`` copies summed as FP32 (hi, lo) pairs (no ``bwd_reserve_sms``)::
+
+    y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx, dweight_sum="fp32_pair")
 """
 
 from __future__ import annotations
@@ -93,6 +97,7 @@ def cake_causal_conv1d_nondet_kcp(
     recompute_handle: Optional[Any] = None,
     cooperative: Optional[bool] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> torch.Tensor:
     """Autograd-enabled context-parallel packed width-4 depthwise causal convolution + SiLU of this rank's fragments,
     non-deterministic backward.
@@ -137,6 +142,14 @@ def cake_causal_conv1d_nondet_kcp(
         shipped grid unloaded (``C`` = 1024, 62585 tokens), above this opt-in's 1.040 limit.  The deterministic
         KCP package's form beside a kernel of another stream is ``cooperative=False``.  Each rank may choose its
         own value (no collective depends on it).
+    dweight_sum : str, optional
+        Keyword-only, default ``None`` (= ``"fp32"``: one FP32 word per accumulator copy of the rank's
+        ``dweight``).  ``"fp32_pair"`` (opt-in): the overlapped backward sums the accumulator copies of a tile's
+        ``dweight`` as an FP32 (hi, lo) pair and rounds once (FP32 operations only); ``y``, ``dx``, the workspace
+        and the exchanges are unchanged, and the cross-CTA order still varies run to run.  Validated by the package
+        when given: a non-``str`` raises ``TypeError``; another ``str``, ``"fp32_pair"`` with
+        ``bwd_reserve_sms >= 1``, and (in the backward) ``"fp32_pair"`` beyond the overlapped backward's channel
+        limit raise ``ValueError``; it never runs another program.  Each rank may choose its own value.
 
     Returns
     -------
@@ -154,7 +167,7 @@ def cake_causal_conv1d_nondet_kcp(
         weight,
         ctx,
         recompute_handle=recompute_handle,
-        **_given(cooperative=cooperative, bwd_reserve_sms=bwd_reserve_sms),
+        **_given(cooperative=cooperative, bwd_reserve_sms=bwd_reserve_sms, dweight_sum=dweight_sum),
     )
 
 
@@ -167,6 +180,7 @@ def cake_causal_conv1d_nondet_kcp_multi(
     recompute_handle: Optional[Any] = None,
     cooperative: Optional[bool] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> tuple[torch.Tensor, ...]:
     """Autograd-enabled context-parallel convolutions of several tensors of one layer (for example its q, k and v)
     with one halo exchange per direction, non-deterministic backward.
@@ -192,6 +206,8 @@ def cake_causal_conv1d_nondet_kcp_multi(
         As in :func:`cake_causal_conv1d_nondet_kcp`.
     bwd_reserve_sms : int, optional
         As in :func:`cake_causal_conv1d_nondet_kcp`, one value for every tensor of the call.
+    dweight_sum : str, optional
+        As in :func:`cake_causal_conv1d_nondet_kcp`, one value for every tensor of the call.
 
     Returns
     -------
@@ -208,7 +224,7 @@ def cake_causal_conv1d_nondet_kcp_multi(
         weights,
         ctx,
         recompute_handle=recompute_handle,
-        **_given(cooperative=cooperative, bwd_reserve_sms=bwd_reserve_sms),
+        **_given(cooperative=cooperative, bwd_reserve_sms=bwd_reserve_sms, dweight_sum=dweight_sum),
     )
 
 

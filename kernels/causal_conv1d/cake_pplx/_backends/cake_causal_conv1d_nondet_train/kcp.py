@@ -166,6 +166,16 @@ bitwise, ``dweight`` summed the same way); the host cache and graph keys hold
 ``K >= 1`` raises ``ValueError`` (:data:`RESERVE_UNSUPPORTED`): there the reserved
 grid costs up to 1.055x the shipped grid unloaded (C 1024, 62585 tokens).
 
+Opt-in FP32 hi/lo pair ``dweight`` (keyword ``dweight_sum``, default ``None`` =
+``"fp32"``): ``dweight_sum="fp32_pair"`` runs the overlapped main program's pair
+build (route ``kcp_bwd_dyn_pair``: the accumulator copies of a tile's
+``dweight`` summed as an FP32 (hi, lo) pair, one final rounding; FP32
+operations only) in place of the ``kcp_bwd_dyn`` program, with the same work
+plan, workspace, exchanges and ``dx``; the host cache and graph keys hold it.
+Only the overlapped backward has the build, so ``"fp32_pair"`` with
+``bwd_reserve_sms >= 1`` or more than ``DYN_MAX_CHANNELS`` channels raises
+``ValueError`` (never another program).
+
 Checkpoint recompute without the halo exchange: with ``recompute_handle=``
 (:class:`CakeCausalConv1dNondetKcpRecomputeHandle`, or any object with an
 ``entries`` dict) the original forward exchanges as always and stores
@@ -237,6 +247,8 @@ KCP_FWD = "kcp_fwd"
 KCP_BWD = "kcp_bwd"
 KCP_BWD_HEAD = "kcp_bwd_head"
 KCP_BWD_DYN = "kcp_bwd_dyn"
+# The opt-in FP32 hi/lo pair build of the overlapped main program (``dweight_sum="fp32_pair"``, :func:`_dweight_sum`).
+KCP_BWD_DYN_PAIR = "kcp_bwd_dyn_pair"
 KCP_BWD_HALO = "kcp_bwd_halo"
 KCP_FWD_HALO = "kcp_fwd_halo"
 # The zero-history registry's forward route of FP32 taps and no bias (the KCP contract): the single-rank main program
@@ -970,13 +982,14 @@ def _dyn_host(
     tail_rows: int,
     device: torch.device,
     device_index: int,
+    pair: bool = False,
 ) -> dict[str, Any]:
     """The overlapped backward's host state of a call: the main program's launch plan over :func:`dyn_plan`'s
     ``n_ctas`` CTAs, its work-plan scalars, accumulator layout and tile-word count, the all ``-1`` table it runs with as
     ``tail_row_off`` (and as ``skip_row_off`` when it writes every row), and the tail-row program's launch plan over
     :func:`head_grid` (``None`` when the rank receives no tail row: the main program then writes every row as the
-    single program does)."""
-    (main,) = route_modules(arch, KCP_BWD_DYN)
+    single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace)."""
+    (main,) = route_modules(arch, KCP_BWD_DYN_PAIR if pair else KCP_BWD_DYN)
     p = dyn_plan(S, C, _loader.sm_count(device_index))
     halo = None
     if tail_rows > 0:
@@ -1149,6 +1162,40 @@ def _reserve_fits(reserve: int, x: Any, entry: str) -> None:
             raise ValueError(
                 f"{entry}: bwd_reserve_sms={reserve} must be smaller than the device's {sms} SMs"
             )
+
+
+# The ``dweight`` sum forms of the KCP backward (``dweight_sum``): ``None`` / ``"fp32"`` (the default, one FP32 word
+# per accumulator copy) or ``"fp32_pair"`` (the main program's FP32 hi/lo pair build, route ``kcp_bwd_dyn_pair``).
+DWEIGHT_SUMS = ("fp32", "fp32_pair")
+
+
+def _dweight_sum(value: Any, reserve: int, entry: str) -> bool:
+    """``dweight_sum`` of a call: whether it asks for the pair build (``"fp32_pair"``); ``None`` and ``"fp32"`` are
+    the default.  ``TypeError`` for a value that is neither ``None`` nor a ``str``, ``ValueError`` for another
+    ``str``, and for ``"fp32_pair"`` with ``bwd_reserve_sms >= 1`` (the pair build is the overlapped backward's main
+    program, which a reserve replaces by the one-program backward)."""
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{entry}: dweight_sum must be None or a str, got {type(value).__name__}")
+    if value is not None and value not in DWEIGHT_SUMS:
+        raise ValueError(f"{entry}: dweight_sum must be None or one of {DWEIGHT_SUMS}, got {value!r}")
+    pair = value == "fp32_pair"
+    if pair and reserve:
+        raise ValueError(
+            f'{entry}: dweight_sum="fp32_pair" runs on the overlapped backward (route {KCP_BWD_DYN_PAIR!r}) only, '
+            f"which bwd_reserve_sms={reserve} replaces; pass bwd_reserve_sms=None"
+        )
+    return pair
+
+
+def _pair_fits(pair: bool, C: int, S: int, reserve: int, entry: str) -> None:
+    """Refuse ``dweight_sum="fp32_pair"`` for a call the overlapped backward does not run (``ValueError``: more than
+    ``DYN_MAX_CHANNELS`` channels, a reserve, or the test knob's one-program route); never another program."""
+    if pair and S > 0 and not _overlapped(C, S, reserve):
+        raise ValueError(
+            f'{entry}: dweight_sum="fp32_pair" runs on the overlapped backward (route {KCP_BWD_DYN_PAIR!r}) only, '
+            f"which this call (C={C}) does not run: at most {_loader.DYN_MAX_CHANNELS} channels, no "
+            "bwd_reserve_sms"
+        )
 
 
 def _set_test_knobs(knobs: Optional[dict]) -> dict:
@@ -1875,6 +1922,7 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     dweight: Optional[torch.Tensor] = None,
     graph: Optional[str] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""The KCP backward: ``dx`` of the rank's fragments (the halo contributions of the successor fragments folded in
     before the one BF16 rounding; the det KCP backward's bits) and the rank's FP32 ``dweight`` partial (summed across
@@ -1890,10 +1938,15 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     ``[C, 4]``, contiguous; ``dweight`` must be 16-byte aligned (one 16-byte store per channel; ``ValueError``
     otherwise).  ``bwd_reserve_sms`` (``None`` = ``RESERVE_DEFAULT``):
     the main backward's grid gives up that many SMs (:func:`_bwd_grid`); the graph key holds it.  ``ValueError`` for
-    ``K >= 1`` on sm_107a (:data:`RESERVE_UNSUPPORTED`) or at the device's SM count or above.
+    ``K >= 1`` on sm_107a (:data:`RESERVE_UNSUPPORTED`) or at the device's SM count or above.  ``dweight_sum``
+    (``None`` = ``"fp32"``): ``"fp32_pair"`` runs the overlapped main program's FP32 hi/lo pair build (route
+    ``kcp_bwd_dyn_pair``: the accumulator copies of a tile's ``dweight`` summed as an FP32 (hi, lo) pair, rounded
+    once; same ``dx``, workspace and exchanges); the graph key holds it.  ``ValueError`` for another value, and for
+    ``"fp32_pair"`` on a call the overlapped backward does not run (``bwd_reserve_sms >= 1``, more than
+    ``DYN_MAX_CHANNELS`` channels): never another program.
     """
 
-    if bwd_reserve_sms is not None:
+    if bwd_reserve_sms is not None or dweight_sum is not None:
         return _backward_kcp_given(
             x_local,
             weight,
@@ -1904,6 +1957,7 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
             dweight=dweight,
             graph=graph,
             bwd_reserve_sms=bwd_reserve_sms,
+            dweight_sum=dweight_sum,
         )
     _alert_nondeterministic("cake_causal_conv1d_nondet_train_kcp_backward")
     mode = _graph_mode(graph)
@@ -1932,29 +1986,33 @@ def _backward_kcp_given(
     dweight: Optional[torch.Tensor],
     graph: Optional[str],
     bwd_reserve_sms: Any,
+    dweight_sum: Any = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """:func:`cake_causal_conv1d_nondet_train_kcp_backward` with ``bwd_reserve_sms`` given: validated before anything
-    runs, then the backward on the grid of that reserve (0: the shipped grid)."""
-    reserve = _reserve(bwd_reserve_sms, "cake_causal_conv1d_nondet_train_kcp_backward")
-    _reserve_fits(reserve, x_local, "cake_causal_conv1d_nondet_train_kcp_backward")
-    _alert_nondeterministic("cake_causal_conv1d_nondet_train_kcp_backward")
+    """:func:`cake_causal_conv1d_nondet_train_kcp_backward` with ``bwd_reserve_sms`` or ``dweight_sum`` given:
+    validated before anything runs, then the backward on the grid of that reserve (0: the shipped grid) with the
+    main program of that sum form."""
+    entry_name = "cake_causal_conv1d_nondet_train_kcp_backward"
+    reserve = _reserve(bwd_reserve_sms, entry_name)
+    _reserve_fits(reserve, x_local, entry_name)
+    pair = _dweight_sum(dweight_sum, reserve, entry_name)
+    _alert_nondeterministic(entry_name)
     mode = _graph_mode(graph)
     if mode == "off":
         return _kcp_backward(
-            x_local, weight, ctx, dy, hist, dx=dx, dweight=dweight, reserve=reserve
+            x_local, weight, ctx, dy, hist, dx=dx, dweight=dweight, reserve=reserve, pair=pair
         )
     entry = _graph_entry(
         "bwd",
         ctx,
         (x_local, weight, dy, hist, dx, dweight),
         mode,
-        extra=(("reserve", reserve),) if reserve else (),
+        extra=(*((("reserve", reserve),) if reserve else ()), *((("dweight_sum", "fp32_pair"),) if pair else ())),
     )
     dx_out, dw_out = _graph_run(
         "bwd",
         entry,
         lambda: _kcp_backward(
-            x_local, weight, ctx, dy, hist, dx=dx, dweight=dweight, reserve=reserve
+            x_local, weight, ctx, dy, hist, dx=dx, dweight=dweight, reserve=reserve, pair=pair
         ),
         mode,
     )
@@ -1973,9 +2031,10 @@ def _kcp_backward(
     dx: Optional[torch.Tensor] = None,
     dweight: Optional[torch.Tensor] = None,
     reserve: int = RESERVE_DEFAULT,
+    pair: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The backward's host flow (eagerly or inside a capture): see
-    :func:`cake_causal_conv1d_nondet_train_kcp_backward`."""
+    :func:`cake_causal_conv1d_nondet_train_kcp_backward`; ``pair``: the ``dweight_sum="fp32_pair"`` main program."""
 
     x = _require_tensor(x_local, "x_local")
     device = x.device
@@ -1992,9 +2051,11 @@ def _kcp_backward(
             dweight=dweight,
             device=device,
             reserve=reserve,
+            pair=pair,
         )
     arch = _device_arch(device)
     S, C, x_flat = _tokens(x, "x_local", device=device)
+    _pair_fits(pair, C, S, reserve, "cake_causal_conv1d_nondet_train_kcp_backward")
     w = _weight(weight, C, device=device)
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
     cu, n_frag = _context(ctx, device=device, T_r=S)
@@ -2084,6 +2145,7 @@ def _kcp_backward(
             tail_rows=int(halo.n_tail_rows),
             device=device,
             device_index=device_index,
+            pair=pair,
         )
         dx2 = dx_out.view(S, C)
         common = {
@@ -2168,14 +2230,17 @@ def _bwd_host(
     dweight: Optional[torch.Tensor],
     device: torch.device,
     reserve: int = RESERVE_DEFAULT,
+    pair: bool = False,
 ) -> tuple[Any, ...]:
     """The trimmed backward's operand checks, outputs and host-cache entry: ``(S, C, x_flat, w, dy_flat, hist_t,
     dx_out, dw_out, entry)``.  The entry is cached per ``(ctx, S, C, device, cu_seqlens_local_cpu, reserve)`` (and
+    ``pair``, the ``dweight_sum="fp32_pair"`` main program, when set; and
     the ``bwd_route`` test knob when not the default): the tables, the head grid, and either the overlapped
     backward's state (``entry["dyn"]``, :func:`_dyn_host`) or the backward records, plan scalars, the accumulator
     layout, the loaded modules with their argument plans (grids for ``reserve``)."""
 
     S, C, x_flat = _tokens(x, "x_local", device=device)
+    _pair_fits(pair, C, S, reserve, "cake_causal_conv1d_nondet_train_kcp_backward")
     w = _weight(weight, C, device=device)
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
     hist_t = _require_tensor(hist, "hist")
@@ -2201,6 +2266,8 @@ def _bwd_host(
     key: tuple = ("bwd", S, C, str(device), tuple(ctx.cu_seqlens_local_cpu))
     if reserve:
         key += (reserve,)
+    if pair:
+        key += ("fp32_pair",)
     if _TEST_KNOBS["bwd_route"] != BWD_ROUTE_DEFAULT:
         key += (_TEST_KNOBS["bwd_route"],)
     e = _host_cache_entry(ctx, key)
@@ -2269,6 +2336,7 @@ def _bwd_host(
                 tail_rows=e["tail_rows"],
                 device=device,
                 device_index=device_index,
+                pair=pair,
             )
         elif S != 0:
             names = selected_modules(arch, KCP_BWD, C=C, S=S)
@@ -2483,6 +2551,7 @@ def _kcp_backward_trim(
     dweight: Optional[torch.Tensor],
     device: torch.device,
     reserve: int = RESERVE_DEFAULT,
+    pair: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Trimmed host path: :func:`_kcp_backward` with the context-derived host work cached (:func:`_bwd_host`); the
     operand checks, allocations, exchange, wait and launches are the untrimmed call's, except that an overlapped call
@@ -2498,6 +2567,7 @@ def _kcp_backward_trim(
         dweight=dweight,
         device=device,
         reserve=reserve,
+        pair=pair,
     )
     side = _side_stream(ctx, device, S > 0 and e["dyn"] is not None)
     pool = recv = None
@@ -2617,13 +2687,14 @@ class CakeCausalConv1dNondetKcpFunction(torch.autograd.Function):
 
 
 class _CakeCausalConv1dReserveFunctionKcp(CakeCausalConv1dNondetKcpFunction):
-    """:class:`CakeCausalConv1dNondetKcpFunction` with the opt-in SM reserve of the main backward:
-    ``apply(x_local, weight, ctx, graph, handle, reserve)``, ``reserve`` the caller's validated
-    ``bwd_reserve_sms >= 1`` (one more input, one more ``None`` gradient)."""
+    """:class:`CakeCausalConv1dNondetKcpFunction` with the backward's opt-ins: ``apply(x_local, weight, ctx, graph,
+    handle, reserve, dweight_sum)``, ``reserve`` the caller's validated ``bwd_reserve_sms`` and ``dweight_sum`` its
+    validated sum form (``None`` or ``"fp32_pair"``; two more inputs, two more ``None`` gradients)."""
 
     @staticmethod
-    def forward(fn_ctx, x_local, weight, ctx, graph, handle, reserve):
+    def forward(fn_ctx, x_local, weight, ctx, graph, handle, reserve, dweight_sum):
         fn_ctx.reserve = reserve
+        fn_ctx.dweight_sum = dweight_sum
         return CakeCausalConv1dNondetKcpFunction.forward(
             fn_ctx, x_local, weight, ctx, graph, handle
         )
@@ -2642,8 +2713,9 @@ class _CakeCausalConv1dReserveFunctionKcp(CakeCausalConv1dNondetKcpFunction):
             hist,
             graph=fn_ctx.graph,
             bwd_reserve_sms=fn_ctx.reserve,
+            dweight_sum=fn_ctx.dweight_sum,
         )
-        return dx, dweight, None, None, None, None
+        return dx, dweight, None, None, None, None, None
 
 
 def cake_causal_conv1d_nondet_kcp(
@@ -2655,6 +2727,7 @@ def cake_causal_conv1d_nondet_kcp(
     recompute_handle: Optional[Any] = None,
     cooperative: Optional[bool] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> torch.Tensor:
     """Autograd-enabled KCP packed width-4 depthwise causal convolution + SiLU of the rank's fragments, with the
     non-deterministic main backward program.  Under ``torch.use_deterministic_algorithms(True)`` (read when the
@@ -2704,6 +2777,14 @@ def cake_causal_conv1d_nondet_kcp(
         non-``int``; ``ValueError`` below zero, at the device's SM count or above, or ``K >= 1`` on sm_107a
         (:data:`RESERVE_UNSUPPORTED`: the reserved grid is outside the opt-in's unloaded-cost limit there).  The
         ranks of a group may differ.
+    dweight_sum : str, optional
+        ``None`` (default) or ``"fp32"``: one FP32 word per accumulator copy of the rank's ``dweight``.
+        ``"fp32_pair"`` (opt-in): the overlapped backward's main program sums the accumulator copies of a tile's
+        ``dweight`` as an FP32 (hi, lo) pair and rounds once (route ``kcp_bwd_dyn_pair``, FP32 operations only);
+        ``y``, ``dx``, the workspace and the exchanges are unchanged, and the cross-CTA order still varies run to
+        run.  Checked here, used by the backward.  ``TypeError`` for a non-``str``; ``ValueError`` for another
+        ``str``, with ``bwd_reserve_sms >= 1``, and in the backward of a call the overlapped backward does not run
+        (more than ``DYN_MAX_CHANNELS`` channels); never another program.
 
     Returns
     -------
@@ -2714,7 +2795,7 @@ def cake_causal_conv1d_nondet_kcp(
         ``dweight`` partial (unordered cross-CTA sum).
     """
 
-    if cooperative is not None or bwd_reserve_sms is not None:
+    if cooperative is not None or bwd_reserve_sms is not None or dweight_sum is not None:
         return _kcp_given(
             x_local,
             weight,
@@ -2723,6 +2804,7 @@ def cake_causal_conv1d_nondet_kcp(
             recompute_handle=recompute_handle,
             cooperative=cooperative,
             bwd_reserve_sms=bwd_reserve_sms,
+            dweight_sum=dweight_sum,
         )
     _graph_mode(graph)  # validate on the caller's frame
     if recompute_handle is not None:
@@ -2742,18 +2824,21 @@ def _kcp_given(
     recompute_handle: Optional[Any],
     cooperative: Any,
     bwd_reserve_sms: Any,
+    dweight_sum: Any = None,
 ) -> torch.Tensor:
-    """:func:`cake_causal_conv1d_nondet_kcp` with ``cooperative`` or ``bwd_reserve_sms`` given: both validated before
-    anything runs; a reserve of 1 or more runs :class:`_CakeCausalConv1dReserveFunctionKcp`."""
+    """:func:`cake_causal_conv1d_nondet_kcp` with ``cooperative``, ``bwd_reserve_sms`` or ``dweight_sum`` given: all
+    validated before anything runs; a reserve of 1 or more or the pair sum runs
+    :class:`_CakeCausalConv1dReserveFunctionKcp`."""
     _ordinary_launch(cooperative, "cake_causal_conv1d_nondet_kcp")
     reserve = _reserve(bwd_reserve_sms, "cake_causal_conv1d_nondet_kcp")
     _reserve_fits(reserve, x_local, "cake_causal_conv1d_nondet_kcp")
+    pair = _dweight_sum(dweight_sum, reserve, "cake_causal_conv1d_nondet_kcp")
     _graph_mode(graph)  # validate on the caller's frame
     if recompute_handle is not None:
         _handle_refusals(graph, recompute_handle)
-    if reserve:
+    if reserve or pair:
         return _CakeCausalConv1dReserveFunctionKcp.apply(
-            x_local, weight, ctx, graph, recompute_handle, reserve
+            x_local, weight, ctx, graph, recompute_handle, reserve, "fp32_pair" if pair else None
         )
     return CakeCausalConv1dNondetKcpFunction.apply(
         x_local, weight, ctx, graph, recompute_handle
@@ -2998,6 +3083,7 @@ def cake_causal_conv1d_nondet_train_kcp_multi_backward(
     dweights: Optional[Any] = None,
     graph: Optional[str] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     r"""The KCP backward of several convolutions of one layer with one halo exchange: ``(dxs, dweights)``,
     ``cake_causal_conv1d_nondet_train_kcp_backward(xs[i], weights[i], ctx, dys[i], hists[i])`` per tensor (``dxs``
@@ -3011,11 +3097,11 @@ def cake_causal_conv1d_nondet_train_kcp_multi_backward(
     this function once per layer, in the same order.  ``graph`` as in
     :func:`cake_causal_conv1d_nondet_train_kcp_backward`.  Under torch's deterministic mode the call alerts like the
     single backward.  ``dxs`` / ``dweights`` entries follow the single backward's output rules (``dweight`` 16-byte
-    aligned).  ``bwd_reserve_sms`` as in :func:`cake_causal_conv1d_nondet_train_kcp_backward`, for every tensor's main
-    backward.
+    aligned).  ``bwd_reserve_sms`` and ``dweight_sum`` as in :func:`cake_causal_conv1d_nondet_train_kcp_backward`, for
+    every tensor's main backward.
     """
 
-    if bwd_reserve_sms is not None:
+    if bwd_reserve_sms is not None or dweight_sum is not None:
         return _multi_backward_kcp_given(
             xs,
             weights,
@@ -3026,6 +3112,7 @@ def cake_causal_conv1d_nondet_train_kcp_multi_backward(
             dweights=dweights,
             graph=graph,
             bwd_reserve_sms=bwd_reserve_sms,
+            dweight_sum=dweight_sum,
         )
     _alert_nondeterministic("cake_causal_conv1d_nondet_train_kcp_multi_backward")
     xs, weights, _ = _multi_operands(xs, weights, None)
@@ -3071,9 +3158,11 @@ def _multi_backward_kcp_given(
     dweights: Any,
     graph: Optional[str],
     bwd_reserve_sms: Any,
+    dweight_sum: Any = None,
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-    """:func:`cake_causal_conv1d_nondet_train_kcp_multi_backward` with ``bwd_reserve_sms`` given: validated before
-    anything runs, then every tensor's main backward on the grid of that reserve (0: the shipped grid)."""
+    """:func:`cake_causal_conv1d_nondet_train_kcp_multi_backward` with ``bwd_reserve_sms`` or ``dweight_sum`` given:
+    validated before anything runs, then every tensor's main backward on the grid of that reserve (0: the shipped
+    grid) with the main program of that sum form."""
     reserve = _reserve(
         bwd_reserve_sms, "cake_causal_conv1d_nondet_train_kcp_multi_backward"
     )
@@ -3082,6 +3171,7 @@ def _multi_backward_kcp_given(
         xs[0] if isinstance(xs, (list, tuple)) and xs else None,
         "cake_causal_conv1d_nondet_train_kcp_multi_backward",
     )
+    pair = _dweight_sum(dweight_sum, reserve, "cake_causal_conv1d_nondet_train_kcp_multi_backward")
     _alert_nondeterministic("cake_causal_conv1d_nondet_train_kcp_multi_backward")
     xs, weights, _ = _multi_operands(xs, weights, None)
     n = len(xs)
@@ -3095,20 +3185,20 @@ def _multi_backward_kcp_given(
     mode = _graph_mode(graph)
     if mode == "off":
         return _kcp_backward_multi(
-            xs, weights, ctx, dys, hists, dxs, dweights, reserve=reserve
+            xs, weights, ctx, dys, hists, dxs, dweights, reserve=reserve, pair=pair
         )
     entry = _graph_entry(
         "bwd_multi",
         ctx,
         (*xs, *weights, *dys, *hists, *dxs, *dweights),
         mode,
-        extra=(("reserve", reserve),) if reserve else (),
+        extra=(*((("reserve", reserve),) if reserve else ()), *((("dweight_sum", "fp32_pair"),) if pair else ())),
     )
     dx_out, dw_out = _graph_run(
         "bwd_multi",
         entry,
         lambda: _kcp_backward_multi(
-            xs, weights, ctx, dys, hists, dxs, dweights, reserve=reserve
+            xs, weights, ctx, dys, hists, dxs, dweights, reserve=reserve, pair=pair
         ),
         mode,
     )
@@ -3132,6 +3222,7 @@ def _kcp_backward_multi(
     dxs: list[Optional[torch.Tensor]],
     dweights: list[Optional[torch.Tensor]],
     reserve: int = RESERVE_DEFAULT,
+    pair: bool = False,
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     """The multi backward's host flow (eagerly or inside a capture): see
     :func:`cake_causal_conv1d_nondet_train_kcp_multi_backward`."""
@@ -3139,7 +3230,7 @@ def _kcp_backward_multi(
     device = _require_tensor(xs[0], "xs[0]").device
     _wait_ready(ctx)
     calls = [
-        _bwd_host(x, w, ctx, dy, h, dx=dx, dweight=dw, device=device, reserve=reserve)
+        _bwd_host(x, w, ctx, dy, h, dx=dx, dweight=dw, device=device, reserve=reserve, pair=pair)
         for x, w, dy, h, dx, dw in zip(
             xs, weights, dys, hists, dxs, dweights, strict=True
         )
@@ -3377,13 +3468,14 @@ class CakeCausalConv1dNondetKcpMultiFunction(torch.autograd.Function):
 
 
 class _CakeCausalConv1dReserveMultiFunctionKcp(CakeCausalConv1dNondetKcpMultiFunction):
-    """:class:`CakeCausalConv1dNondetKcpMultiFunction` with the opt-in SM reserve of every main backward:
-    ``apply(reserve, ctx, graph, handle, n, *xs, *weights)``, ``reserve`` the caller's validated
-    ``bwd_reserve_sms >= 1`` (one more input, one more ``None`` gradient)."""
+    """:class:`CakeCausalConv1dNondetKcpMultiFunction` with the backward's opt-ins for every main backward:
+    ``apply(reserve, dweight_sum, ctx, graph, handle, n, *xs, *weights)``, ``reserve`` the caller's validated
+    ``bwd_reserve_sms`` and ``dweight_sum`` its validated sum form (two more inputs, two more ``None`` gradients)."""
 
     @staticmethod
-    def forward(fn_ctx, reserve, ctx, graph, handle, n, *tensors):
+    def forward(fn_ctx, reserve, dweight_sum, ctx, graph, handle, n, *tensors):
         fn_ctx.reserve = reserve
+        fn_ctx.dweight_sum = dweight_sum
         return CakeCausalConv1dNondetKcpMultiFunction.forward(
             fn_ctx, ctx, graph, handle, n, *tensors
         )
@@ -3405,8 +3497,9 @@ class _CakeCausalConv1dReserveMultiFunctionKcp(CakeCausalConv1dNondetKcpMultiFun
             hists,
             graph=fn_ctx.graph,
             bwd_reserve_sms=fn_ctx.reserve,
+            dweight_sum=fn_ctx.dweight_sum,
         )
-        return (None, None, None, None, None, *dxs, *dweights)
+        return (None, None, None, None, None, None, *dxs, *dweights)
 
 
 def cake_causal_conv1d_nondet_kcp_multi(
@@ -3418,6 +3511,7 @@ def cake_causal_conv1d_nondet_kcp_multi(
     recompute_handle: Optional[Any] = None,
     cooperative: Optional[bool] = None,
     bwd_reserve_sms: Optional[int] = None,
+    dweight_sum: Optional[str] = None,
 ) -> tuple[torch.Tensor, ...]:
     """Autograd-enabled KCP convolutions of several tensors of one layer (for example its q, k and v) with one halo
     exchange per direction.
@@ -3452,6 +3546,8 @@ def cake_causal_conv1d_nondet_kcp_multi(
         As in :func:`cake_causal_conv1d_nondet_kcp` (``None`` or ``False``).
     bwd_reserve_sms : int, optional
         As in :func:`cake_causal_conv1d_nondet_kcp`, for every tensor's main backward.
+    dweight_sum : str, optional
+        As in :func:`cake_causal_conv1d_nondet_kcp`, for every tensor's main backward.
 
     Returns
     -------
@@ -3459,7 +3555,7 @@ def cake_causal_conv1d_nondet_kcp_multi(
         The ``n`` BF16 outputs, each of its input's shape.
     """
 
-    if cooperative is not None or bwd_reserve_sms is not None:
+    if cooperative is not None or bwd_reserve_sms is not None or dweight_sum is not None:
         return _multi_kcp_given(
             xs,
             weights,
@@ -3468,6 +3564,7 @@ def cake_causal_conv1d_nondet_kcp_multi(
             recompute_handle=recompute_handle,
             cooperative=cooperative,
             bwd_reserve_sms=bwd_reserve_sms,
+            dweight_sum=dweight_sum,
         )
     _graph_mode(graph)
     xs, weights, _ = _multi_operands(xs, weights, None)
@@ -3487,19 +3584,22 @@ def _multi_kcp_given(
     recompute_handle: Optional[Any],
     cooperative: Any,
     bwd_reserve_sms: Any,
+    dweight_sum: Any = None,
 ) -> tuple[torch.Tensor, ...]:
-    """:func:`cake_causal_conv1d_nondet_kcp_multi` with ``cooperative`` or ``bwd_reserve_sms`` given: both validated
-    before anything runs; a reserve of 1 or more runs :class:`_CakeCausalConv1dReserveMultiFunctionKcp`."""
+    """:func:`cake_causal_conv1d_nondet_kcp_multi` with ``cooperative``, ``bwd_reserve_sms`` or ``dweight_sum`` given:
+    all validated before anything runs; a reserve of 1 or more or the pair sum runs
+    :class:`_CakeCausalConv1dReserveMultiFunctionKcp`."""
     _ordinary_launch(cooperative, "cake_causal_conv1d_nondet_kcp_multi")
     reserve = _reserve(bwd_reserve_sms, "cake_causal_conv1d_nondet_kcp_multi")
+    pair = _dweight_sum(dweight_sum, reserve, "cake_causal_conv1d_nondet_kcp_multi")
     _graph_mode(graph)
     xs, weights, _ = _multi_operands(xs, weights, None)
     _reserve_fits(reserve, xs[0], "cake_causal_conv1d_nondet_kcp_multi")
     if recompute_handle is not None:
         _handle_refusals(graph, recompute_handle)
-    if reserve:
+    if reserve or pair:
         return _CakeCausalConv1dReserveMultiFunctionKcp.apply(
-            reserve, ctx, graph, recompute_handle, len(xs), *xs, *weights
+            reserve, "fp32_pair" if pair else None, ctx, graph, recompute_handle, len(xs), *xs, *weights
         )
     return CakeCausalConv1dNondetKcpMultiFunction.apply(
         ctx, graph, recompute_handle, len(xs), *xs, *weights
@@ -3507,6 +3607,7 @@ def _multi_kcp_given(
 
 
 __all__ = [
+    "DWEIGHT_SUMS",
     "GRAPH_MODES",
     "GRAPH_DEFAULT",
     "GRAPH_STATS",
