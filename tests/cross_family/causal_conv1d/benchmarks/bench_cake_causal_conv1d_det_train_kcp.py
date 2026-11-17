@@ -55,16 +55,17 @@ per tensor):
 Precision class.  The Cake contract: BF16 activations in and out, FP32 taps, FP32 accumulation, one BF16 rounding,
 SiLU' at the FP32 preactivation.  Each arm records its activation, tap and gradient dtypes, the preactivation its
 SiLU' takes, its accumulation and ``same_precision`` (FP32 taps and FP32 accumulation; SiLU' at the BF16-rounded
-preactivation still qualifies, so ``fla_cp_triton`` is a candidate).  The best baseline is the fastest same-precision
-arm whose error check passes.
+preactivation is a note, so ``fla_cp_triton`` is a candidate).  The best baseline is the fastest same-precision arm
+that passes the accuracy gate.
 
-Determinism and error (one untimed block per arm, before the timing): ``DETERMINISM_RUNS`` forward + backward passes
-on the same inputs; class ``det`` when ``y``, ``dx`` and the rank's ``dweight`` are bitwise equal over the runs on
-every rank, else ``nondet`` with the tensors that varied.  The first run is compared with an FP64 evaluation of the
-same math (the BF16 inputs and FP32 taps, document-local) on the arm's own rows: max-abs and relative L2 of ``y`` and
-``dx`` (padding rows excluded), of ``dweight`` summed over the ranks, and of the rank's ``dweight`` partial against
-the FP64 sum over the arm's rows (``budget_ratio``: the largest ``|dw - ref| / (5e-2 + 1e-4 |ref|)``).  The check
-passes when the three relative L2 errors are below ``NUMERICS_REL_L2``.
+Determinism (one untimed block per arm, before the timing): ``DETERMINISM_RUNS`` forward + backward passes on the
+same inputs; class ``det`` when ``y``, ``dx`` and the rank's ``dweight`` are bitwise equal over the runs on every
+rank, else ``nondet`` with the tensors that varied.
+
+Accuracy gate (``--draws``; ``cake_causal_conv1d_baselines.kcp_gate``): every arm, the Cake launch forms included,
+is judged as the training tests judge a kernel, by its error against a float64 oracle of the whole pack beside the
+error of PyTorch BF16 over 32 random inputs (``y`` / ``dx`` on the arm's rows, the errors reduced over the ranks;
+``dweight`` as the sum of the ranks' partials), never against another arm.
 
 Phases (autograd, the leaves' gradients reset before every backward): ``fwd``; ``bwd`` (the backward of a recorded
 forward, ``retain_graph=True``); ``fwdbwd`` (one forward and its backward); ``ckpt``
@@ -100,8 +101,8 @@ eligible baseline; ``best_det_baseline``: the fastest whose measured class is ``
 ``split_vs_coop`` (``det_split / det_coop``, ``within_2pct``, and the A/A band ``det_split_aa / det_split``) and
 ``side_criterion``.  ``COLUMN`` (``ahead``) is the comparison column of the text summary.  Exit status 1 when a Cake
 check fails: class ``det`` for every Cake arm, ``y`` and ``dx`` bitwise equal between the two launch forms, the
-``ckpt`` and ``ckpt_handle`` gradients bitwise the direct backward's (each form), the error check and every rank's
-``dweight`` partial within ``5e-2 + 1e-4 |ref|``.
+``ckpt`` and ``ckpt_handle`` gradients bitwise the direct backward's (each form), and the accuracy gate of each
+launch form.
 
 Rows (``--rows``):
 
@@ -110,7 +111,7 @@ Rows (``--rows``):
   ``W = 1``).  Documents: at ``W = 1`` the production packs (12000 / 9000 / 6000 / 3768 / 2000 tokens; 9000 /
   5000 / 2384); at ``W > 1`` the pack's first document, one long document of ``floor(W / 2)`` ranks' tokens plus a
   third of a rank's, then the pack repeated from its second document up to ``W x tokens per rank`` (the last one cut);
-* ``pr8365`` (``W = 1``): the production single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
+* ``single_gpu`` (``W = 1``): the production single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
   16384 tokens, single, and ``3 x C = 8192`` multi;
 * ``custom``: ``--channels``, ``--tokens-per-rank``, ``--docs``, ``--tensors`` and ``--layouts``.
 
@@ -125,7 +126,7 @@ Launch: ``torchrun --nproc_per_node W``; one Slurm task per GPU (``SLURM_PROCID`
 
 Example::
 
-    python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --rows pr8365 --json kcp_w1.json
+    python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --rows single_gpu --json kcp_w1.json
     torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --json kcp_w4.json
     MASTER_ADDR=node0 MASTER_PORT=29500 srun -N 2 --ntasks-per-node 4 \\
         python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --json kcp_w8.json
@@ -196,15 +197,11 @@ CALL_OF = {
 }
 COLUMN = "ahead"
 DETERMINISM_RUNS = 5
-# Rows per chunk of the FP64 evaluation (about six [rows, C] FP64 temporaries live at once).
-REF_CHUNK = 2048
 # The one-thread spin between the side kernels' release and the phase's first kernel.
 RESIDENT_US = 50.0
 SIDE_LOADS = "none,1x2ms,1x4ms,8x2ms"
 SIDE_STREAM_LIMIT = 1.3
 SPLIT_TOLERANCE = 1.02
-# The deterministic KCP package's dweight bound against an FP64 oracle.
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
 # (channels, tokens per rank, the production single-GPU documents of that token count)
 CUSTOMER_SINGLE = (10240, 32768, (12000, 9000, 6000, 3768, 2000))
 CUSTOMER_MULTI = (8192, 16384, (9000, 5000, 2384))
@@ -277,14 +274,14 @@ def preset_rows(args: argparse.Namespace, world: int) -> list[Row]:
                 for layout in layouts
             ]
         return rows
-    if args.rows == "pr8365":
+    if args.rows == "single_gpu":
         if world != 1:
-            raise SystemExit("--rows pr8365 is the single-GPU preset (W = 1)")
+            raise SystemExit("--rows single_gpu is the single-GPU preset (W = 1)")
         (c1, t1, p1), (c2, t2, p2) = CUSTOMER_SINGLE, CUSTOMER_MULTI
         return [
-            Row("pr8365", c1, 1, t1, p1, "contiguous"),
-            Row("pr8365", c2, 1, t2, p2, "contiguous"),
-            Row("pr8365", c2, MULTI_TENSORS, t2, p2, "contiguous"),
+            Row("single_gpu", c1, 1, t1, p1, "contiguous"),
+            Row("single_gpu", c2, 1, t2, p2, "contiguous"),
+            Row("single_gpu", c2, MULTI_TENSORS, t2, p2, "contiguous"),
         ]
     pack = tuple(args.docs) if args.docs else (args.tokens_per_rank,)
     return [
@@ -569,53 +566,6 @@ def _snapshot(
     return [y.detach().clone() for y in ys], [g.detach().clone() for g in grads]
 
 
-def _fp64_rows(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    dy: torch.Tensor,
-    cu_t: torch.Tensor,
-    r: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """FP64 ``(y, dx)`` of the global rows ``r`` and their ``dweight`` partial, document-local, from the whole pack
-    ``x`` / ``dy`` and the taps ``w``: ``y[g] = silu(pre[g])``, ``pre[g] = sum_k w[k] x[g - 3 + k]``,
-    ``dx[g] = sum_e w[3 - e] dpre[g + e]``, ``dw[k] = sum_g dpre[g] x[g - 3 + k]`` (terms outside the document zero)."""
-
-    total = x.shape[0]
-    doc = torch.bucketize(r, cu_t[1:], right=True)
-    start, end = cu_t[doc], cu_t[doc + 1]
-    w64 = w.double()
-
-    def take(t: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-        return t.index_select(0, index.clamp(0, total - 1)).double()
-
-    dx = torch.zeros(r.numel(), x.shape[1], dtype=torch.float64, device=x.device)
-    y = dpre0 = dx
-    for e in range(WIDTH):
-        g = r + e
-        valid = g < end
-        pre = torch.zeros_like(dx)
-        for k in range(WIDTH):
-            src = g - (HALO - k)
-            pre += take(x, src) * w64[:, k] * (valid & (src >= start)).unsqueeze(1)
-        sig = torch.sigmoid(pre)
-        dpre = take(dy, g) * (sig * (1 + pre * (1 - sig))) * valid.unsqueeze(1)
-        dx = dx + dpre * w64[:, HALO - e]
-        if e == 0:
-            y, dpre0 = pre * sig, dpre
-    dw = torch.stack(
-        [
-            (
-                dpre0
-                * take(x, r - (HALO - k))
-                * ((r - (HALO - k)) >= start).unsqueeze(1)
-            ).sum(0)
-            for k in range(WIDTH)
-        ],
-        dim=1,
-    )
-    return y, dx, dw
-
-
 def local_checks(
     calls: dict[str, Callable],
     rows: torch.Tensor,
@@ -623,10 +573,9 @@ def local_checks(
     device: torch.device,
     keep_first: bool = False,
 ) -> dict:
-    """This rank's half of the determinism and error checks of an arm (combined over the ranks by
-    :func:`combine_checks`): the tensors that varied over ``DETERMINISM_RUNS`` runs, the FP64 error sums of ``y`` /
-    ``dx`` on the arm's rows, and the arm's and the FP64 ``dweight`` partials.  ``keep_first``: the first run's
-    ``ys`` and gradients are returned under ``"first"`` (not sent to the other ranks)."""
+    """This rank's half of the determinism check of an arm (combined over the ranks by :func:`combine_checks`): the
+    tensors that varied over ``DETERMINISM_RUNS`` runs on the same inputs, and the output dtypes.  ``keep_first``:
+    the first run's ``ys`` and gradients are returned under ``"first"`` (not sent to the other ranks)."""
 
     first = _snapshot(calls, device)
     n = len(first[0])
@@ -642,29 +591,6 @@ def local_checks(
                 if not torch.equal(_bits(a), _bits(b)):
                     varied.add(label if n == 1 else f"{label}[{i}]")
         del ys, grads
-    rows_d = rows.to(device)
-    valid = torch.nonzero(rows_d < p.total).squeeze(1)
-    sums = torch.zeros(4, dtype=torch.float64, device=device)
-    maxima = torch.zeros(2, dtype=torch.float64, device=device)
-    dws, dw_refs = [], []
-    for i in range(n):
-        ref_partial = torch.zeros(
-            p.ws[i].shape[0], WIDTH, dtype=torch.float64, device=device
-        )
-        for begin in range(0, valid.numel(), REF_CHUNK):
-            pos = valid[begin : begin + REF_CHUNK]
-            y_ref, dx_ref, dw_part = _fp64_rows(
-                p.xs_g[i], p.ws[i], p.dys_g[i], p.cu_t, rows_d.index_select(0, pos)
-            )
-            ref_partial += dw_part
-            for slot, out, ref in ((0, first[0][i], y_ref), (1, first[1][i], dx_ref)):
-                diff = out.index_select(0, pos).double() - ref
-                sums[2 * slot] += diff.square().sum()
-                sums[2 * slot + 1] += ref.square().sum()
-                maxima[slot] = torch.maximum(maxima[slot], diff.abs().max())
-            del y_ref, dx_ref, dw_part
-        dws.append(first[1][n + i].double().cpu())
-        dw_refs.append(ref_partial.cpu())
     out = {
         "varied": sorted(varied),
         "dtypes": {
@@ -673,26 +599,14 @@ def local_checks(
             "dx": baselines.dtype_name(first[1][0].dtype),
             "dweight": baselines.dtype_name(first[1][n].dtype),
         },
-        "sums": sums.tolist(),
-        "maxima": maxima.tolist(),
-        "dw": dws,
-        "dw_ref": dw_refs,
     }
     if keep_first:
         out["first"] = first
     return out
 
 
-def _rel_l2(diff: torch.Tensor, ref: torch.Tensor) -> float:
-    norm = float(ref.square().sum())
-    err = float(diff.square().sum())
-    return (err / norm) ** 0.5 if norm > 0 else (0.0 if err == 0 else float("inf"))
-
-
-def combine_checks(ranks: list[dict], partial: bool = True) -> tuple[dict, dict, dict]:
-    """``(determinism, error, dtypes)`` of an arm from every rank's :func:`local_checks`.  ``partial=False``: the
-    rank's ``dweight`` is not the sum over its own rows (the all-to-all arms: its channel slice over the whole pack),
-    so only the summed ``dweight`` is compared."""
+def combine_checks(ranks: list[dict]) -> tuple[dict, dict]:
+    """``(determinism, dtypes)`` of an arm from every rank's :func:`local_checks`."""
 
     varied = sorted({label for r in ranks for label in r["varied"]})
     determinism = {
@@ -701,56 +615,12 @@ def combine_checks(ranks: list[dict], partial: bool = True) -> tuple[dict, dict,
         "varied": varied,
         "varied_per_rank": [r["varied"] for r in ranks],
     }
-    sums = [sum(r["sums"][j] for r in ranks) for j in range(4)]
+    return determinism, ranks[0]["dtypes"]
 
-    def rel(err: float, norm: float) -> float:
-        return (err / norm) ** 0.5 if norm > 0 else (0.0 if err == 0 else float("inf"))
 
-    error: dict = {
-        "y": {
-            "max_abs": max(r["maxima"][0] for r in ranks),
-            "rel_l2": rel(sums[0], sums[1]),
-        },
-        "dx": {
-            "max_abs": max(r["maxima"][1] for r in ranks),
-            "rel_l2": rel(sums[2], sums[3]),
-        },
-    }
-    dw_max, dw_rel = 0.0, 0.0
-    part_max, part_rel, part_ratio = 0.0, 0.0, 0.0
-    for i in range(len(ranks[0]["dw"])):
-        arm_sum = sum(r["dw"][i] for r in ranks)
-        ref_sum = sum(r["dw_ref"][i] for r in ranks)
-        diff = arm_sum - ref_sum
-        dw_max = max(dw_max, float(diff.abs().max()))
-        dw_rel = max(dw_rel, _rel_l2(diff, ref_sum))
-        for r in ranks if partial else ():
-            d = r["dw"][i] - r["dw_ref"][i]
-            ref = r["dw_ref"][i]
-            part_max = max(part_max, float(d.abs().max()))
-            part_rel = max(part_rel, _rel_l2(d, ref))
-            part_ratio = max(
-                part_ratio, float((d.abs() / (DW_ATOL + DW_RTOL * ref.abs())).max())
-            )
-    error["dweight"] = {"max_abs": dw_max, "rel_l2": dw_rel, "summed_over_ranks": True}
-    error["dweight_partial"] = (
-        {
-            "max_abs": part_max,
-            "rel_l2": part_rel,
-            "budget_ratio": part_ratio,
-            "budget": f"{DW_ATOL:g} + {DW_RTOL:g} |ref|",
-        }
-        if partial
-        else {
-            "not_applicable": "a rank's dweight is its channel slice over the whole pack"
-        }
-    )
-    error["budget_rel_l2"] = baselines.NUMERICS_REL_L2
-    error["ok"] = all(
-        error[key]["rel_l2"] < baselines.NUMERICS_REL_L2
-        for key in ("y", "dx", "dweight")
-    )
-    return determinism, error, ranks[0]["dtypes"]
+def _all_reduce_op(t: torch.Tensor, op: str) -> torch.Tensor:
+    dist.all_reduce(t, op=dist.ReduceOp.SUM if op == "sum" else dist.ReduceOp.MAX)
+    return t
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1314,8 +1184,8 @@ def bench_row(
         first = local.pop("first", None)
         if first is not None:
             firsts[name] = first
-        determinism, error, dtypes = combine_checks(_gather(local))
-        entries[name].update(determinism=determinism, error=error, dtypes=dtypes)
+        determinism, dtypes = combine_checks(_gather(local))
+        entries[name].update(determinism=determinism, dtypes=dtypes)
     (ys_c, g_c), (ys_s, g_s) = firsts["det_coop"], firsts["det_split"]
     n = row.tensors
     same = {
@@ -1354,15 +1224,7 @@ def bench_row(
         # informational: the two forms sum different partial rows, so their dweight bits may differ
         "coop_split_dweight_bitwise": coop_vs_split["dweight_bitwise"],
         "ckpt_and_ckpt_handle_bitwise_direct": coop_vs_split["ckpt_bitwise"],
-        "error_ok": all(entries[a]["error"]["ok"] for a in CAKE_ARMS),
-        "dweight_partial_within_budget": all(
-            entries[a]["error"]["dweight_partial"]["budget_ratio"] <= 1.0
-            for a in CAKE_ARMS
-        ),
     }
-    checks["ok"] = all(
-        value for key, value in checks.items() if key != "coop_split_dweight_bitwise"
-    )
     result["checks"] = checks
     # The baselines: built, warmed up and checked on every rank; one runs only when every rank can run it.
     for name in args.sota_arms:
@@ -1389,22 +1251,36 @@ def bench_row(
                     else "; ".join(f"rank {i}: {r}" for i, r in failures.items())
                 )
             else:
-                determinism, error, dtypes = combine_checks(
-                    ranks, partial=not name.startswith("megatron_a2a")
-                )
-                entry.update(determinism=determinism, error=error, dtypes=dtypes)
+                determinism, dtypes = combine_checks(ranks)
+                entry.update(determinism=determinism, dtypes=dtypes)
                 entry["tokens_local"] = _gather(int(rows.numel()))
         if reason is not None:
             entry["unsupported"] = reason
             entry["eligible"] = False
             entries[name] = entry
             continue
-        entry["eligible"] = bool(
-            entry["precision"]["same_precision"] and entry["error"]["ok"]
-        )
         entries[name] = entry
-        timed[name] = {"calls": calls, "env": env, "phases": BASELINE_PHASES}
+        timed[name] = {"calls": calls, "env": env, "phases": BASELINE_PHASES, "rows": rows}
     p.release_pack()
+    # The accuracy gate: the two launch forms and every baseline on the same draws (leaves refilled in place).
+    gated = [n for n in timed if n != "det_split_aa"]
+    verdicts = (
+        baselines.kcp_gate(
+            {n: (timed[n]["calls"], timed[n].get("rows", p.rows), timed[n]["env"]) for n in gated},
+            cu=p.cu, channels=row.channels, tensors=row.tensors, device=device, all_reduce=_all_reduce_op,
+            draws=args.draws,
+        )
+        if args.draws
+        else {}
+    )  # fmt: skip
+    for n in gated:
+        entries[n]["gate"] = verdicts.get(n, {"passed": False, "error": "gate not run (--draws 0)"})
+        if n not in CAKE_ARMS:
+            entries[n]["eligible"] = bool(entries[n]["precision"]["same_precision"] and entries[n]["gate"]["passed"])
+    # The A/A arm is det_split again on its own leaves: the same program, judged once.
+    entries["det_split_aa"]["gate"] = {**entries["det_split"]["gate"], "note": "the verdict of det_split"}
+    checks["accuracy_gate"] = all(entries[a]["gate"].get("passed") for a in CAKE_ARMS)
+    checks["ok"] = all(value for key, value in checks.items() if key != "coop_split_dweight_bitwise")
     # Initialization and memory of the two launch forms.
     for name in ("det_coop", "det_split"):
         entries[name]["memory"] = _memory(timed[name]["calls"], device)
@@ -1581,7 +1457,7 @@ def _summarize(result: dict, entries: dict[str, dict]) -> None:
             reason
             for reason, bad in (
                 ("not same precision", not e["precision"]["same_precision"]),
-                ("error check failed", not e.get("error", {}).get("ok", False)),
+                ("accuracy gate not passed", not e.get("gate", {}).get("passed", False)),
             )
             if bad
         )
@@ -1651,10 +1527,13 @@ def _describe(entry: dict) -> str:
         return f"{entry['name']}: unsupported ({entry['unsupported']})"
     prec = entry["precision"]
     det = entry["determinism"]
-    err = entry["error"]
+    gate = entry.get("gate", {})
     varied = f" (varied: {', '.join(det['varied'])})" if det["varied"] else ""
-    partial = err["dweight_partial"]
-    budget = f"{partial['budget_ratio']:.3f}" if "budget_ratio" in partial else "n/a"
+    worst = " ".join(
+        f"{out} {v['norms']['l2']['ours_over_bf16'][1]:.3f}"
+        for out, v in gate.get("outputs", {}).items()
+        if v["norms"]["l2"]["ours_over_bf16"]
+    )
     tail = (
         ""
         if entry["name"] in CAKE_ARMS
@@ -1663,9 +1542,7 @@ def _describe(entry: dict) -> str:
     return (
         f"{entry['name']}: {entry.get('library')}; taps {prec['taps']}, SiLU' at {prec['preactivation']}, "
         f"acc {prec['accumulation']}, same_precision {prec['same_precision']}; {det['class']}{varied}; "
-        f"max-abs/rel-L2 y {err['y']['max_abs']:.2e}/{err['y']['rel_l2']:.1e} dx {err['dx']['max_abs']:.2e}/"
-        f"{err['dx']['rel_l2']:.1e} dw(sum) {err['dweight']['max_abs']:.2e}/{err['dweight']['rel_l2']:.1e} "
-        f"dw-partial budget {budget}" + tail
+        f"accuracy gate {'pass' if gate.get('passed') else 'FAIL'} (largest l2 / bf16: {worst})" + tail
     )
 
 
@@ -1756,7 +1633,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--rows", choices=("customer", "pr8365", "custom"), default="customer"
+        "--rows", choices=("customer", "single_gpu", "custom"), default="customer"
+    )
+    parser.add_argument(
+        "--draws",
+        type=int,
+        default=32,
+        help="accuracy gate draws per row (at least 32; 0: no gate, nothing eligible, exit status 1)",
     )
     parser.add_argument(
         "--layouts",
@@ -1811,6 +1694,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--json", default=None, help="rank 0 writes all rows to this JSON file"
     )
     args = parser.parse_args(argv)
+    if 0 < args.draws < 32:
+        parser.error("--draws: the gate judges at least 32 draws (or 0)")
     unknown = [layout for layout in args.layouts if layout not in LAYOUTS]
     if unknown:
         parser.error(f"unknown layouts {unknown}; known {list(LAYOUTS)}")
