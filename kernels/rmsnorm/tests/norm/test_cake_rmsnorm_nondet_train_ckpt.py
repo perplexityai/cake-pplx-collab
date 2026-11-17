@@ -176,10 +176,12 @@ def _randn(shape, generator, scale: float = 1.0) -> torch.Tensor:
 
 
 def _weight(hidden: int, generator, w: str) -> torch.Tensor:
+    """``1 + 0.1 randn`` drawn in BF16; an FP32 weight holds that BF16 draw (the
+    naive tier reads it exactly, ``ref.naive_weight``)."""
     weight = 1.0 + 0.1 * torch.randn(
         hidden, dtype=torch.float32, device=_device(), generator=generator
     )
-    return weight.to(W_DTYPES[w])
+    return weight.to(torch.bfloat16).to(W_DTYPES[w])
 
 
 def _view(view: str, tokens: int, generator) -> torch.Tensor:

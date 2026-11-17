@@ -585,7 +585,12 @@ def _call(hidden, residual, w_dtype, tokens, ws, generator, check, draw):
     eps = EPS.get(hidden, 1e-6)
     x = _randn(tokens, hidden, generator=generator)
     g = _randn(tokens, hidden, generator=generator)
-    w = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(w_dtype)
+    # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+    w = (
+        (1.0 + 0.1 * _randn(hidden, generator=generator).float())
+        .to(torch.bfloat16)
+        .to(w_dtype)
+    )
     u = _randn(tokens, hidden, generator=generator) if residual else None
     gh = _randn(tokens, hidden, generator=generator) if residual else None
     outputs = cake_rmsnorm_nondet_train_forward(x, w, eps, residual=u)
@@ -863,8 +868,11 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
         generator = _generator(SEED + 3 * hidden, draw)
         x = _randn(tokens, hidden, generator=generator)
         g = _randn(tokens, hidden, generator=generator)
-        w = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(
-            torch.float32 if w_token == "f32" else torch.bfloat16
+        # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+        w = (
+            (1.0 + 0.1 * _randn(hidden, generator=generator).float())
+            .to(torch.bfloat16)
+            .to(torch.float32 if w_token == "f32" else torch.bfloat16)
         )
         torch.use_deterministic_algorithms(False)
         y0, rstd0 = cake_rmsnorm_nondet_train_forward(x, w, eps)

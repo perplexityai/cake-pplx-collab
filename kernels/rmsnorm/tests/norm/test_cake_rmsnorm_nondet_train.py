@@ -304,10 +304,12 @@ def _rows(
 
 
 def _weight(hidden: int, generator: torch.Generator, dtype=torch.bfloat16):
+    """``1 + 0.1 randn`` drawn in BF16; an FP32 weight holds that BF16 draw (the
+    naive tier reads it exactly, ``ref.naive_weight``)."""
     w = 1.0 + 0.1 * torch.randn(
         hidden, dtype=torch.float32, device=_device(), generator=generator
     )
-    return w.to(dtype)
+    return w.to(torch.bfloat16).to(dtype)
 
 
 def _h_new_is_the_rounded_sum(h_new, x, u, label: str) -> None:

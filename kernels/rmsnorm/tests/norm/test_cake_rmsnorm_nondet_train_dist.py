@@ -236,7 +236,12 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         u = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
         g = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
         g_h = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
-        weight = (1 + 0.1 * torch.randn(hidden, **kw)).to(ref.W_DTYPES[w])
+        # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+        weight = (
+            (1 + 0.1 * torch.randn(hidden, **kw))
+            .to(torch.bfloat16)
+            .to(ref.W_DTYPES[w])
+        )
         return x, u, g, g_h, weight
 
     def run(forward, backward, ws, eps, x, u, g, g_h, weight):

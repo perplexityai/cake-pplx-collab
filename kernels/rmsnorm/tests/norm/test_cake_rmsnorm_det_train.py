@@ -1193,24 +1193,19 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("residual", (False, True))
 @pytest.mark.parametrize("rows", (7, 16231))
-def test_fp32_weight_is_applied_at_fp32(
+def test_fp32_weight_meets_the_naive_tier(
     hidden: int, residual: bool, rows: int, record_property
 ) -> None:
-    """An effective weight ``1 + delta`` that BF16 cannot represent is applied as given: y, rstd, dx and dw meet
-    the naive BF16 tier against the FP64 oracle of the FP32 weight, and y and dx differ from the BF16 path given
-    ``bf16(w32)``."""
+    """The FP32-weight routes: y, rstd (h_new), dx and dw meet the naive BF16 tier against the FP64 oracle of the
+    FP32 weight.  The weight holds a BF16 draw, as the kernel tests draw it, so the naive tier reads the same weight
+    as the oracle (``ref.naive_weight``)."""
 
     _skip_unless_fp32_routes(hidden, residual)
     eps = EPS[hidden]
-    label = f"hidden={hidden} residual={residual} rows={rows} fp32 w"
-    check = ref.Draws(label)
+    check = ref.Draws(f"hidden={hidden} residual={residual} rows={rows} fp32 w")
     for draw in range(check.draws):
         generator = _generator(hidden, rows, residual, 89, draw=draw)
-        w32 = 1.0 + 1e-3 * torch.randn(
-            hidden, dtype=torch.float32, device=_device(), generator=generator
-        )
-        assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
-        seed = generator.get_state()
+        w32 = _weight(hidden, generator).float()
         outputs, dx, dw, inputs = _fp32_case(hidden, rows, residual, w32, generator)
         forward = {"y": outputs[0], "rstd": outputs[1]}
         if residual:
@@ -1226,18 +1221,35 @@ def test_fp32_weight_is_applied_at_fp32(
             eps,
             g_h=inputs["g_h"],
         )
-        generator.set_state(seed)
-        outputs16, dx16, _dw16, _ = _fp32_case(
-            hidden, rows, residual, w32.to(torch.bfloat16), generator
-        )
-        assert torch.equal(outputs16[1], outputs[1]), (
-            f"{label}: rstd does not depend on w"
-        )
-        assert not torch.equal(outputs16[0], outputs[0]), (
-            f"{label}: y ignores the FP32 weight"
-        )
-        assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
     check.check(record_property)
+
+
+@pytest.mark.parametrize("hidden", HIDDEN_SIZES)
+@pytest.mark.parametrize("residual", (False, True))
+@pytest.mark.parametrize("rows", (7, 16231))
+def test_fp32_weight_is_applied_at_fp32(hidden: int, residual: bool, rows: int) -> None:
+    """An effective weight ``1 + delta`` that BF16 cannot represent is applied as given: rstd is the BF16 path's
+    given ``bf16(w32)``, and y and dx differ from it (exact checks; the accuracy of the FP32-weight routes is
+    ``test_fp32_weight_meets_the_naive_tier``'s)."""
+
+    _skip_unless_fp32_routes(hidden, residual)
+    label = f"hidden={hidden} residual={residual} rows={rows} fp32 w"
+    generator = _generator(hidden, rows, residual, 89)
+    w32 = 1.0 + 1e-3 * torch.randn(
+        hidden, dtype=torch.float32, device=_device(), generator=generator
+    )
+    assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
+    seed = generator.get_state()
+    outputs, dx, _dw, _ = _fp32_case(hidden, rows, residual, w32, generator)
+    generator.set_state(seed)
+    outputs16, dx16, _dw16, _ = _fp32_case(
+        hidden, rows, residual, w32.to(torch.bfloat16), generator
+    )
+    assert torch.equal(outputs16[1], outputs[1]), f"{label}: rstd does not depend on w"
+    assert not torch.equal(outputs16[0], outputs[0]), (
+        f"{label}: y ignores the FP32 weight"
+    )
+    assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
@@ -1672,12 +1684,10 @@ def _check_large_row_dw(
         generator = _generator(hidden, rows, fp32_weight, seed, 97, draw=draw)
         x = _rows(rows, hidden, generator=generator)
         g = _rows(rows, hidden, generator=generator)
+        # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+        w = _weight(hidden, generator)
         if fp32_weight:
-            w = 1.0 + 0.1 * torch.randn(
-                hidden, dtype=torch.float32, device=_device(), generator=generator
-            )
-        else:
-            w = _weight(hidden, generator)
+            w = w.float()
         _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
         _dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
         del _y, _dx

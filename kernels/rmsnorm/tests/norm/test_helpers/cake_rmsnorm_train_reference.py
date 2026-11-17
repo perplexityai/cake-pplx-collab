@@ -19,8 +19,10 @@ and ``dw`` at the FP32 ``rstd`` the backward takes.  The naive tier
 PyTorch code on the same inputs: ``y`` is ``torch.nn.functional.rms_norm`` (an
 FP32 weight is read as stored), ``rstd`` its formula in BF16 ops, ``h_new`` the
 BF16 sum, ``dx`` the backward formula with every op in BF16 (the FP32 ``rstd``
-and an FP32 weight rounded to BF16 once) and ``dw`` the weight gradient of
-``rms_norm``'s BF16 autograd.
+rounded to BF16 once) and ``dw`` the weight gradient of ``rms_norm``'s BF16
+autograd.  An FP32 weight judged here holds a BF16 draw, as the kernel tests
+draw it, so its BF16 cast is exact: the naive tier and the FP64 oracle see the
+same weight (:func:`naive_weight` refuses any other FP32 weight).
 
 Nothing here imports a package: the registry readers take the package's
 ``cake_jit`` module, so a suite run against a vendored copy uses them unchanged.
@@ -77,17 +79,32 @@ def oracle_forward(
     return out
 
 
+def naive_weight(w: torch.Tensor) -> torch.Tensor:
+    """The weight as the naive BF16 tier reads it: a BF16 weight as it is; an
+    FP32 weight cast to BF16, which must be exact (the weight holds a BF16
+    draw), so the naive tier and the FP64 oracle see the same weight."""
+    if w.dtype == torch.bfloat16:
+        return w
+    wb = w.to(torch.bfloat16)
+    assert torch.equal(wb.to(w.dtype), w), (
+        "a weight judged against the naive BF16 tier holds BF16 values "
+        f"(this {w.dtype} weight does not)"
+    )
+    return wb
+
+
 def naive_forward(
     x: torch.Tensor, w: torch.Tensor, eps: float, residual: torch.Tensor | None = None
 ) -> dict[str, torch.Tensor]:
     """The naive PyTorch BF16 forward: with a residual ``h_new`` the BF16 sum
     ``x + u`` and the statistics of it; ``y`` ``torch.nn.functional.rms_norm`` of
-    the rows with the weight as stored (an FP32 weight stays FP32, so the product
-    runs in FP32 by type promotion) cast to BF16; ``rstd`` the op's formula
-    ``rsqrt(mean(x^2) + eps)`` in BF16 ops (the public op returns no reciprocal
-    RMS)."""
+    the rows with the weight as stored (an FP32 weight, which holds BF16 values
+    (:func:`naive_weight`), stays FP32, so the product runs in FP32 by type
+    promotion) cast to BF16; ``rstd`` the op's formula ``rsqrt(mean(x^2) +
+    eps)`` in BF16 ops (the public op returns no reciprocal RMS)."""
+    naive_weight(w)  # holds BF16 values; the forward reads it as stored
     h = x if residual is None else x + residual
-    weight = w.to(torch.bfloat16) if w.dtype.itemsize <= 2 else w
+    weight = w if w.dtype == torch.float32 else w.to(torch.bfloat16)
     out = {
         "y": torch.nn.functional.rms_norm(h, (h.shape[-1],), weight, eps).to(
             torch.bfloat16
@@ -170,16 +187,17 @@ def naive_backward(
 ) -> dict[str, torch.Tensor]:
     """The naive PyTorch BF16 backward as BF16 tensors.  ``dx`` is
     :func:`oracle_backward`'s formula with every op's inputs and outputs in BF16
-    (the FP32 ``rstd`` and an FP32 weight rounded to BF16 once), in the same
-    blocks.  ``dw`` is the weight gradient of ``torch.nn.functional.rms_norm``
-    over the rows of ``x`` in BF16 (``x``, the weight and ``g`` as BF16, the
-    forward and the autograd backward in BF16, ``eps``): it computes its own
-    ``rstd`` from ``x``; ``g_h`` adds to ``dx`` only."""
+    (the FP32 ``rstd`` rounded to BF16 once; an FP32 weight, which holds BF16
+    values, cast exactly: :func:`naive_weight`), in the same blocks.  ``dw`` is
+    the weight gradient of ``torch.nn.functional.rms_norm`` over the rows of
+    ``x`` in BF16 (``x``, the weight and ``g`` as BF16, the forward and the
+    autograd backward in BF16, ``eps``): it computes its own ``rstd`` from
+    ``x``; ``g_h`` adds to ``dx`` only."""
     hidden = x.shape[-1]
     g2, x2 = _rows2d(g), _rows2d(x)
     gh2 = _rows2d(g_h) if g_h is not None else None
     r_all = rstd.reshape(-1).to(torch.bfloat16)
-    wb = w.to(torch.bfloat16)
+    wb = naive_weight(w)
     rows = x2.shape[0]
     dx = torch.empty(rows, hidden, dtype=torch.bfloat16, device=x.device)
     for start in range(0, rows, BLOCK_ROWS):

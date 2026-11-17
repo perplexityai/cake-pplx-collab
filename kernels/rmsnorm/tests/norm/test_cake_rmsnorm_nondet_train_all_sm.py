@@ -231,7 +231,12 @@ def _inputs(rows: int, hidden: int, residual: bool, w: str, draw: int = 0):
     kwargs = dict(dtype=torch.float32, device=_device(), generator=generator)
     x = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16)
     u = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16) if residual else None
-    weight = (1 + 0.1 * torch.randn(hidden, **kwargs)).to(ref.W_DTYPES[w])
+    # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+    weight = (
+        (1 + 0.1 * torch.randn(hidden, **kwargs))
+        .to(torch.bfloat16)
+        .to(ref.W_DTYPES[w])
+    )
     g = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16)
     g_h = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16) if residual else None
     outputs = forward(x, weight, ref.EPS[hidden], residual=u)
