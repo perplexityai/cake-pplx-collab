@@ -17,38 +17,38 @@ Tests for the Cake fused BF16 RMSNorm training kernels with the
 non-deterministic weight gradient (``cake_pplx.cake_rmsnorm_nondet_train``;
 SM100 / SM103 / SM107).
 
-Every kernel output is compared with an FP64 reference of the same math: BF16
-``y`` / ``dx`` at ``atol = rtol = 1e-2`` after normalizing both sides to unit
-scale (so 1e-3 and 1e3 magnitude inputs are judged like N(0, 1) inputs), FP32
-``rstd`` at relative L2 <= 1e-5 and FP32 ``dw`` at relative L2 <= 1e-4 with
-every element within ``atol = rtol = 1e-4`` of the reference -- the
-deterministic package's budget.
+Every floating kernel output -- ``y``, ``rstd``, ``h_new``, ``dx``, ``dw`` -- is
+judged against the naive PyTorch BF16 implementation, with no tolerance: its
+error against an FP64 oracle of the same math, over 32 independent random
+inputs of each case, in the L2 and the max norm, median and largest, is at most
+1.005 times the naive's, and 0 wherever the naive's is 0
+(``tests/norm/test_helpers/cake_rmsnorm_train_reference.py``,
+``tests/cake/test_helpers/cake_naive.py``).  ``h_new`` is also the correctly
+rounded BF16 sum.  The tests never compare this package with the deterministic
+one.
 
 A backward window runs one of two forms (the registry's records for the call's
-token count): the single kernel, which adds the CTAs' ``dw`` sums in FP64 in a
-scheduling-dependent order, or the deterministic package's pair rendered into
-this package.  Every case derives its form from its own window (the records of
-its architecture, width, residual flag, weight dtype and token count, read from
+token count): the single kernel, which adds the CTAs' FP32 ``dw`` sums in a
+scheduling-dependent order (``claim_sum_f32``) or keeps one FP32 partial row
+per CTA (``claim_part_f32``), or a deterministic pair rendered into this
+package.  Every case derives its form from its own window (the records of its
+architecture, width, residual flag, weight dtype and token count, read from
 ``ROUTES`` and the select rules) and checks that the call launched exactly
-those records.  A single-kernel case also holds its ``dw`` error to the eager
-FP32 reduction ``(g * x * rstd).sum(0)`` of the same inputs (not worse, up to
-one FP32 ulp of the result); a pair case is the deterministic package's ``dw``,
-which is judged on the median over the matrix like that package's suite.
+those records.
 
 The matrix covers token counts from 0 to 65536 (the deterministic contract's
 rows, the observed training counts and every program window edge +-1 of the
 registry), both eps values where the contract names both, 1e-3 / 1e3 scales,
-zero inputs and an extreme row, row-strided inputs, the residual-add fusion
-and the FP32-weight routes (also combined), the ``[..., H]`` per-head views,
-repeated launches (worst case over 20, ``dx`` bitwise stable) compared with the
-deterministic package where it serves the call, a workspace reused across token
-counts, windows and weight dtypes with its documented rest state checked after
-every call that reuses one, two streams, CUDA Graph capture and replay, the
-autograd wrapper (gradient
-accumulation, saved tensors, non-reentrant checkpointing, the
+zero inputs and a row of large values, row-strided inputs, the residual-add
+fusion and the FP32-weight routes (also combined), the ``[..., H]`` per-head
+views, repeated launches (``dx`` bitwise stable, every launch's ``dw`` judged), a
+workspace reused across token counts, windows and weight dtypes with its
+documented rest state checked after every call that reuses one, two streams,
+CUDA Graph capture and replay, the autograd wrapper (gradient accumulation,
+saved tensors, non-reentrant checkpointing, the
 ``torch.use_deterministic_algorithms`` check made when the backward runs) and
-argument validation.  The build manifest's
-per-architecture CUDA floors and flags are checked without a device.
+argument validation.  The build manifest's per-architecture CUDA floors and
+flags are checked without a device.
 
 This suite exercises the backend packages alone, through
 ``tests.cake.test_helpers.cake_package``; the facade is
@@ -58,11 +58,8 @@ This suite exercises the backend packages alone, through
 from __future__ import annotations
 
 import dataclasses
-import functools
 import re
-import statistics
 import warnings
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -70,13 +67,11 @@ import torch
 import torch.utils.checkpoint
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
 pkg = cake_package("cake_rmsnorm_nondet_train")
 loader = cake_package("cake_rmsnorm_nondet_train", "cake_jit")
 cake_build = cake_package("cake_rmsnorm_nondet_train", "cake_build")
-det = cake_package("cake_rmsnorm_det_train")
-det_loader = cake_package("cake_rmsnorm_det_train", "cake_jit")
-det_build = cake_package("cake_rmsnorm_det_train", "cake_build")
 forward = pkg.cake_rmsnorm_nondet_train_forward
 backward = pkg.cake_rmsnorm_nondet_train_backward
 workspace_for = pkg.cake_rmsnorm_nondet_train_backward_workspace
@@ -109,19 +104,10 @@ OBSERVED_ROWS = (14928, 15288, 15566, 15590, 16114, 16132, 16164, 16263)
 SCALES = (1e-3, 1e3)
 W_DTYPES = {"bf16": torch.bfloat16, "f32": torch.float32}
 REPEATS = 20
-RSTD_REL_L2 = 1e-5
-DW_REL_L2 = 1e-4
-DW_ATOL = 1e-4
-DW_RTOL = 1e-4
-# A single-kernel dw may exceed the eager FP32 reduction's error by at most the
-# rounding of its own FP32 result (one FP32 ulp, relative).
-DW_EAGER_FLOOR = 2.0**-23
-ATOL = 1e-2
-RTOL = 1e-2
 SEED = 8066
 # The CUDA toolkit floor of every exported architecture (``build.json``
 # ``min_cuda``) and the exact code it is compiled for.
-MIN_CUDA = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
+MIN_CUDA = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.5"}
 GENCODE = {
     "sm_100a": "-gencode=arch=compute_100a,code=sm_100a",
     "sm_103a": "-gencode=arch=compute_103a,code=sm_103a",
@@ -162,10 +148,9 @@ def device_or_skip(request):
 @pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
     if _supported():
-        for package in (loader, det_loader):
-            arch = package.arch_for_capability(_capability())
-            for spec in package.specs_for_arch(arch):
-                spec.build_and_load()
+        arch = loader.arch_for_capability(_capability())
+        for spec in loader.specs_for_arch(arch):
+            spec.build_and_load()
     yield
 
 
@@ -249,17 +234,10 @@ def _window_records(
 
 
 def _form(names: list[str]) -> str:
-    """``single`` (one ``claim_sum_f64`` kernel, or one ``claim_part_f32``
-    pair-row single kernel) or ``pair`` (a deterministic pair: ``chunk_partials``
+    """``single`` (one ``claim_sum_f32`` kernel, or one ``claim_part_f32``
+    part-row single kernel) or ``pair`` (a deterministic pair: ``chunk_partials``
     main kernel, then its dw reduce) of one backward window's records."""
-    records = [loader.MODULES[name] for name in names]
-    owners = [r["workspace_rule"]["kind"] for r in records if r["workspace_rule"]]
-    reduces = [r for r in records if r["role"] == "bwd_reduce"]
-    if len(records) == 1 and owners in (["claim_sum_f64"], ["claim_part_f32"]):
-        return "single"
-    if len(records) == 2 and owners == ["chunk_partials"] and len(reduces) == 1:
-        return "pair"
-    raise AssertionError(f"a backward window launches {names}: neither form")
+    return ref.form(loader, names)
 
 
 def _run_backward(*args, **kwargs):
@@ -272,7 +250,7 @@ def _run_backward(*args, **kwargs):
 def _workspace_at_rest(ws: torch.Tensor) -> bool:
     """The documented rest state after every call of any layout: every byte
     before the pair partial rows (``PAIR_ROWS_OFFSET``: the pair counters, the
-    single kernel's counters and FP64 sums) is zero, so the buffer serves the
+    single kernel's counters and FP32 sums) is zero, so the buffer serves the
     next call of any layout; the pair partial rows are scratch."""
     torch.cuda.synchronize()
     return not bool(ws[: min(loader.PAIR_ROWS_OFFSET, ws.numel())].any())
@@ -287,11 +265,18 @@ def _bytes(rows: int, hidden: int, residual: bool = False) -> int:
 # --------------------------------------------------------------------------- inputs and references
 
 
-def _generator(*keys) -> torch.Generator:
+def _seed(*keys) -> int:
     seed = SEED
     for key in keys:
         seed = (seed * 1_000_003 + int(key)) % (2**31 - 1)
-    return torch.Generator(device=_device()).manual_seed(seed)
+    return seed
+
+
+def _generator(*keys, draw: int = 0) -> torch.Generator:
+    """The generator of draw ``draw`` of the case keyed ``keys`` (draw 0 is the case's own input)."""
+    return torch.Generator(device=_device()).manual_seed(
+        ref.draw_seed(_seed(*keys), draw)
+    )
 
 
 def _rows(
@@ -325,89 +310,11 @@ def _weight(hidden: int, generator: torch.Generator, dtype=torch.bfloat16):
     return w.to(dtype)
 
 
-def _reference_forward(x, w, eps, residual=None):
-    """FP64 forward over the last axis; the residual boundary rounds to BF16 like the kernel."""
-    normalized = (
-        (x.double() + residual.double()).to(torch.bfloat16)
-        if residual is not None
-        else x
+def _h_new_is_the_rounded_sum(h_new, x, u, label: str) -> None:
+    """``h_new`` is ``x + u`` rounded once to BF16 (the float64 sum of two BF16 values is exact)."""
+    assert torch.equal(h_new, (x.double() + u.double()).to(torch.bfloat16)), (
+        f"h_new {label} is not the BF16-rounded sum"
     )
-    rstd = torch.rsqrt(normalized.double().pow(2).mean(-1) + eps)
-    y = (normalized.double() * rstd.unsqueeze(-1)) * w.double()
-    return y, rstd, normalized
-
-
-def _reference_backward(g, x, w, rstd, g_h=None):
-    """FP64 backward at the kernel's FP32 ``rstd``: ``dx`` per row, ``dw`` over every leading axis."""
-    xf, wf, gf = x.double(), w.double(), g.double()
-    r = rstd.double().unsqueeze(-1)
-    a = gf * wf
-    c = (a * xf).sum(-1, keepdim=True) / x.shape[-1]
-    dx = r * a - xf * r.pow(3) * c
-    if g_h is not None:
-        dx = dx + g_h.double()
-    dw = (gf * xf * r).reshape(-1, x.shape[-1]).sum(0)
-    return dx, dw
-
-
-def _rel_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
-    a, b = actual.double().flatten(), reference.double().flatten()
-    den = b.norm().item()
-    return (a - b).norm().item() / den if den > 0 else (a - b).norm().item()
-
-
-def _assert_bf16_close(actual, reference, label: str) -> None:
-    assert actual.dtype == torch.bfloat16, label
-    a, b = actual.double(), reference.double()
-    assert torch.isfinite(a).all(), f"{label} has non-finite values"
-    if a.numel() == 0:
-        return
-    scale = b.pow(2).mean().sqrt().item()
-    scale = scale if scale > 0.0 else 1.0
-    torch.testing.assert_close(a / scale, b / scale, atol=ATOL, rtol=RTOL, msg=label)
-
-
-# (label, form, kernel dw rel-L2, eager-FP32-path dw rel-L2) of every dw case checked in this process; the median
-# readings per form are the last test of this module.
-_DW_ERRORS: list[tuple[str, str, float, float]] = []
-
-
-def _assert_dw(dw, dw_ref, g, x, rstd, label: str, form: str) -> tuple[float, float]:
-    """dw against the FP64 reference at the deterministic budget -- rel-L2 <=
-    1e-4 and every element within ``atol = rtol = 1e-4`` -- and, for a
-    single-kernel window, not worse than the eager FP32 reduction of the same
-    inputs (up to ``DW_EAGER_FLOOR``).  Returns ``(rel-L2, worst element error
-    / its tolerance)``."""
-    assert dw.dtype == torch.float32 and dw.is_contiguous(), label
-    assert torch.isfinite(dw).all(), f"{label} has non-finite values"
-    error = _rel_l2(dw, dw_ref)
-    assert error <= DW_REL_L2, f"{label}: dw rel-L2 {error:.3e} > {DW_REL_L2:.0e}"
-    diff = (dw.double() - dw_ref).abs()
-    tolerance = DW_ATOL + DW_RTOL * dw_ref.abs()
-    bad = diff > tolerance
-    hidden = x.shape[-1]
-    eager_fp32 = (
-        (g.float() * x.float() * rstd.float().unsqueeze(-1)).reshape(-1, hidden).sum(0)
-    )
-    eager = _rel_l2(eager_fp32, dw_ref)
-    if bool(bad.any()):
-        at = int((diff / tolerance).argmax())
-        eager_ratio = (eager_fp32.double() - dw_ref).abs() / tolerance
-        raise AssertionError(
-            f"{label} ({form}): {int(bad.sum())} dw elements outside atol=rtol=1e-4 "
-            f"(worst column {at}: {float(dw[at]):.9g} vs {float(dw_ref[at]):.9g}, "
-            f"error/tolerance {float(diff[at] / tolerance[at]):.3f}); eager FP32 on the same "
-            f"inputs: {int((eager_ratio > 1).sum())} elements outside, worst error/tolerance "
-            f"{float(eager_ratio.max()):.3f}, column {at} {float(eager_ratio[at]):.3f}; "
-            f"rel-L2 {error:.3e} vs eager {eager:.3e}"
-        )
-    if form == "single":
-        assert error <= max(eager, DW_EAGER_FLOOR), (
-            f"{label}: single-kernel dw rel-L2 {error:.3e} > eager FP32 {eager:.3e} "
-            f"(ratio {error / eager if eager else float('inf'):.3f})"
-        )
-    _DW_ERRORS.append((label, form, error, eager))
-    return error, float((diff / tolerance).max())
 
 
 @dataclasses.dataclass
@@ -420,9 +327,9 @@ class Case:
     eps: float
     rstd: torch.Tensor
     normalized: torch.Tensor
+    y: torch.Tensor
     dx: torch.Tensor
     dw: torch.Tensor
-    dw_ref: Optional[torch.Tensor]
     records: list[str]
     form: Optional[str]
 
@@ -438,7 +345,9 @@ def _case_inputs(
     zeros: bool = False,
     spike: bool = False,
     key: int = 0,
+    draw: int = 0,
 ):
+    """``(x, u, g, g_h, w)`` of draw ``draw`` of the case (draw 0 is the case's own input)."""
     pad_key = hidden if pad == "2H" else int(pad)
     generator = _generator(
         hidden,
@@ -450,6 +359,7 @@ def _case_inputs(
         zeros,
         spike,
         key,
+        draw=draw,
     )
     x = _rows(rows, hidden, pad=pad, scale=scale, zeros=zeros, generator=generator)
     if spike and rows > 0:
@@ -467,10 +377,71 @@ def _case_inputs(
     return x, u, g, g_h, w
 
 
+def _launch(
+    hidden: int, rows: int, eps: float, inputs, *, residual, w_token: str, label: str
+) -> Case:
+    """Forward and backward of one draw's ``inputs``: the shapes, ``h_new`` and the launched records checked."""
+    x, u, g, g_h, w = inputs
+    start = len(_LAUNCHED)
+    outputs = forward(x, w, eps, residual=u)
+    fwd_launched = _LAUNCHED[start:]
+    y, rstd = outputs[0], outputs[1]
+    assert tuple(y.shape) == (rows, hidden) and y.is_contiguous()
+    assert rstd.dtype == torch.float32 and tuple(rstd.shape) == (rows,)
+    normalized = outputs[2] if residual else x
+    if residual:
+        _h_new_is_the_rounded_sum(normalized, x, u, label)
+    (dx, dw), records = _run_backward(g, normalized, w, rstd, g_residual=g_h)
+    assert tuple(dx.shape) == (rows, hidden) and dx.is_contiguous()
+    assert dw.dtype == torch.float32 and dw.is_contiguous(), label
+    if rows == 0:
+        assert fwd_launched == [] and records == []
+        assert torch.equal(dw, torch.zeros_like(dw))
+        return Case(x, u, g, g_h, w, eps, rstd, normalized, y, dx, dw, [], None)
+    assert fwd_launched == _window_records(hidden, "fwd", residual, w_token, rows), (
+        f"forward {label} launched {fwd_launched}"
+    )
+    expected = _window_records(hidden, "bwd", residual, w_token, rows)
+    assert records == expected, (
+        f"backward {label} launched {records}, window {expected}"
+    )
+    return Case(
+        x, u, g, g_h, w, eps, rstd, normalized, y, dx, dw, records, _form(expected)
+    )
+
+
+def _judge(check: ref.Draws, draw: int, case: Case, *, outputs=None) -> None:
+    """Judge ``case``'s outputs (``outputs``: names of ``y``, ``rstd``, ``h_new``,
+    ``dx``, ``dw``; default all) as draw ``draw`` of ``check``."""
+    names = set(outputs or ("y", "rstd", "h_new", "dx", "dw"))
+    forward_outputs = {"y": case.y, "rstd": case.rstd}
+    if case.u is not None:
+        forward_outputs["h_new"] = case.normalized
+    forward_outputs = {k: v for k, v in forward_outputs.items() if k in names}
+    if forward_outputs:
+        check.forward(draw, forward_outputs, case.x, case.w, case.eps, residual=case.u)
+    backward_outputs = {
+        k: v for k, v in (("dx", case.dx), ("dw", case.dw)) if k in names
+    }
+    if backward_outputs:
+        check.backward(
+            draw,
+            backward_outputs,
+            case.g,
+            case.normalized,
+            case.w,
+            case.rstd,
+            case.eps,
+            g_h=case.g_h,
+        )
+
+
 def _check(
     hidden: int,
     rows: int,
     *,
+    record,
+    tag: str = "",
     residual=False,
     w_dtype=torch.bfloat16,
     pad=0,
@@ -480,56 +451,41 @@ def _check(
     spike: bool = False,
     key: int = 0,
 ) -> Case:
-    """Forward and backward of one case against FP64; the backward launches
-    exactly its window's records, whose form decides the eager gate."""
+    """Forward and backward of one case over its draws: every launch runs exactly
+    its window's records, and every output meets the naive BF16 tier
+    (``ref.Draws``; verdicts recorded with ``record``, ``tag`` naming the outputs
+    of one case among several of a test).  Returns the case's own draw (draw 0)."""
     eps = EPS[hidden] if eps is None else eps
-    x, u, g, g_h, w = _case_inputs(
-        hidden,
-        rows,
-        residual=residual,
-        w_dtype=w_dtype,
-        pad=pad,
-        scale=scale,
-        zeros=zeros,
-        spike=spike,
-        key=key,
-    )
     w_token = _w_token(w_dtype)
-    start = len(_LAUNCHED)
-    outputs = forward(x, w, eps, residual=u)
-    fwd_launched = _LAUNCHED[start:]
-    y, rstd = outputs[0], outputs[1]
-    y_ref, rstd_ref, normalized_ref = _reference_forward(x, w, eps, residual=u)
     label = (
         f"hidden={hidden} rows={rows} residual={residual} w={w_token} pad={pad} "
         f"eps={eps} scale={scale} zeros={zeros} spike={spike}"
     )
-    assert tuple(y.shape) == (rows, hidden) and y.is_contiguous()
-    assert rstd.dtype == torch.float32 and tuple(rstd.shape) == (rows,)
-    _assert_bf16_close(y, y_ref, f"y {label}")
-    assert torch.isfinite(rstd).all(), f"rstd {label}"
-    assert _rel_l2(rstd, rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-    normalized = outputs[2] if residual else x
-    if residual:
-        assert torch.equal(normalized, normalized_ref), f"h_new {label}"
-    (dx, dw), records = _run_backward(g, normalized, w, rstd, g_residual=g_h)
-    dx_ref, dw_ref = _reference_backward(g, normalized, w, rstd, g_h=g_h)
-    assert tuple(dx.shape) == (rows, hidden) and dx.is_contiguous()
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    if rows == 0:
-        assert fwd_launched == [] and records == []
-        assert torch.equal(dw, torch.zeros_like(dw))
-        return Case(x, u, g, g_h, w, eps, rstd, normalized, dx, dw, None, [], None)
-    assert fwd_launched == _window_records(hidden, "fwd", residual, w_token, rows), (
-        f"forward {label} launched {fwd_launched}"
-    )
-    expected = _window_records(hidden, "bwd", residual, w_token, rows)
-    assert records == expected, (
-        f"backward {label} launched {records}, window {expected}"
-    )
-    form = _form(expected)
-    _assert_dw(dw, dw_ref, g, normalized, rstd, f"dw {label}", form)
-    return Case(x, u, g, g_h, w, eps, rstd, normalized, dx, dw, dw_ref, records, form)
+    check = ref.Draws(label, prefix=tag)
+    first = None
+    for draw in range(check.draws):
+        inputs = _case_inputs(
+            hidden,
+            rows,
+            residual=residual,
+            w_dtype=w_dtype,
+            pad=pad,
+            scale=scale,
+            zeros=zeros,
+            spike=spike,
+            key=key,
+            draw=draw,
+        )
+        case = _launch(
+            hidden, rows, eps, inputs, residual=residual, w_token=w_token, label=label
+        )
+        if rows == 0:
+            return case
+        _judge(check, draw, case)
+        if first is None:
+            first = case
+    check.check(record)
+    return first
 
 
 # --------------------------------------------------------------------------- accuracy matrix
@@ -538,9 +494,11 @@ def _check(
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("rows", ROWS + LARGE_ROWS)
-def test_forward_backward_match_fp64(hidden: int, rows: int, w: str) -> None:
+def test_forward_backward_match_fp64(
+    hidden: int, rows: int, w: str, record_property
+) -> None:
     _skip_unless_route(hidden, w_dtype=w)
-    _check(hidden, rows, w_dtype=W_DTYPES[w])
+    _check(hidden, rows, record=record_property, w_dtype=W_DTYPES[w])
 
 
 def _contract_cases():
@@ -555,12 +513,14 @@ def _contract_cases():
 
 
 @pytest.mark.parametrize(("hidden", "rows", "eps", "w"), list(_contract_cases()))
-def test_contract_and_observed_rows(hidden: int, rows: int, eps: float, w: str) -> None:
+def test_contract_and_observed_rows(
+    hidden: int, rows: int, eps: float, w: str, record_property
+) -> None:
     """The H=1536 / H=4096 contract rows and the observed training token counts
     at both contract eps values (both weight dtypes); the observed counts at
     every other width."""
     _skip_unless_route(hidden, w_dtype=w)
-    _check(hidden, rows, w_dtype=W_DTYPES[w], eps=eps)
+    _check(hidden, rows, record=record_property, w_dtype=W_DTYPES[w], eps=eps)
 
 
 @pytest.mark.parametrize(
@@ -570,9 +530,13 @@ def test_contract_and_observed_rows(hidden: int, rows: int, eps: float, w: str) 
 @pytest.mark.parametrize("rows", (7, 16231))
 @pytest.mark.parametrize("scale", (1.0, *SCALES))
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
-def test_eps_variants(hidden: int, eps: float, rows: int, scale: float, w: str) -> None:
+def test_eps_variants(
+    hidden: int, eps: float, rows: int, scale: float, w: str, record_property
+) -> None:
     _skip_unless_route(hidden, w_dtype=w)
-    _check(hidden, rows, eps=eps, scale=scale, w_dtype=W_DTYPES[w])
+    _check(
+        hidden, rows, record=record_property, eps=eps, scale=scale, w_dtype=W_DTYPES[w]
+    )
 
 
 def _route_params():
@@ -596,15 +560,25 @@ def _edge_rows(hidden: int, residual: bool, w: str) -> list[int]:
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_route_params()))
-def test_program_window_edges(hidden: int, residual: bool, w: str) -> None:
-    """Every window edge +-1 of the route matches FP64, every call launches its
-    window's records, and every forward and backward program of the route runs
-    for one of those counts."""
+def test_program_window_edges(
+    hidden: int, residual: bool, w: str, record_property
+) -> None:
+    """Every window edge +-1 of the route meets the naive BF16 tier, every call
+    launches its window's records, and every forward and backward program of the
+    route runs for one of those counts."""
     _skip_unless_route(hidden, residual, w)
     launched = set()
     forms = []
     for rows in _edge_rows(hidden, residual, w):
-        case = _check(hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=5)
+        case = _check(
+            hidden,
+            rows,
+            record=record_property,
+            tag=f"T={rows} ",
+            residual=residual,
+            w_dtype=W_DTYPES[w],
+            key=5,
+        )
         launched.update(case.records)
         launched.update(_window_records(hidden, "fwd", residual, w, rows))
         forms.append(f"{rows}:{case.form}")
@@ -618,17 +592,21 @@ def test_program_window_edges(hidden: int, residual: bool, w: str) -> None:
 @pytest.mark.parametrize("pad", (64, "2H"))
 @pytest.mark.parametrize("rows", (7, 257, 16385))
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
-def test_row_strided_inputs(hidden: int, pad, rows: int, w: str) -> None:
+def test_row_strided_inputs(
+    hidden: int, pad, rows: int, w: str, record_property
+) -> None:
     _skip_unless_route(hidden, w_dtype=w)
-    _check(hidden, rows, pad=pad, w_dtype=W_DTYPES[w])
+    _check(hidden, rows, record=record_property, pad=pad, w_dtype=W_DTYPES[w])
 
 
 @pytest.mark.parametrize("rows", (1, 7, 129, 257, 4096, 16231, 16385, 65536))
 @pytest.mark.parametrize("pad", (0, 64))
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
-def test_residual_fusion(rows: int, pad, w: str) -> None:
+def test_residual_fusion(rows: int, pad, w: str, record_property) -> None:
     _skip_unless_route(6144, residual=True, w_dtype=w)
-    _check(6144, rows, residual=True, pad=pad, w_dtype=W_DTYPES[w])
+    _check(
+        6144, rows, record=record_property, residual=True, pad=pad, w_dtype=W_DTYPES[w]
+    )
 
 
 def _scale_params():
@@ -642,23 +620,53 @@ def _scale_params():
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_scale_params()))
 @pytest.mark.parametrize("scale", SCALES)
 @pytest.mark.parametrize("rows", (7, 16231))
-def test_input_scales(hidden: int, residual: bool, w: str, scale: float, rows: int):
+def test_input_scales(
+    hidden: int, residual: bool, w: str, scale: float, rows: int, record_property
+):
     _skip_unless_route(hidden, residual, w)
-    _check(hidden, rows, residual=residual, w_dtype=W_DTYPES[w], scale=scale)
+    _check(
+        hidden,
+        rows,
+        record=record_property,
+        residual=residual,
+        w_dtype=W_DTYPES[w],
+        scale=scale,
+    )
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_scale_params()))
 @pytest.mark.parametrize("rows", (1, 129, 16231))
-def test_zero_input_has_no_nan(hidden: int, residual: bool, w: str, rows: int):
+def test_zero_input_has_no_nan(
+    hidden: int, residual: bool, w: str, rows: int, record_property
+):
+    """``x = 0`` (and ``u = 0``) with random ``g`` and ``w``: ``y``, ``h_new`` and ``dw`` are exactly 0 and ``rstd``
+    is ``eps^(-1/2)``; every output finite and judged over the draws (``g`` and ``w`` change with the seed)."""
     _skip_unless_route(hidden, residual, w)
-    _check(hidden, rows, residual=residual, w_dtype=W_DTYPES[w], zeros=True)
+    _check(
+        hidden,
+        rows,
+        record=record_property,
+        residual=residual,
+        w_dtype=W_DTYPES[w],
+        zeros=True,
+    )
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_scale_params()))
 @pytest.mark.parametrize("rows", (257, 16385))
-def test_extreme_row(hidden: int, residual: bool, w: str, rows: int) -> None:
+def test_extreme_row(
+    hidden: int, residual: bool, w: str, rows: int, record_property
+) -> None:
+    """One row scaled by 1e3 with one element 1e4 (normal BF16 values) among unit-scale rows."""
     _skip_unless_route(hidden, residual, w)
-    _check(hidden, rows, residual=residual, w_dtype=W_DTYPES[w], spike=True)
+    _check(
+        hidden,
+        rows,
+        record=record_property,
+        residual=residual,
+        w_dtype=W_DTYPES[w],
+        spike=True,
+    )
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
@@ -675,112 +683,7 @@ def test_zero_rows_launch_nothing(hidden: int, w: str) -> None:
     assert dw is dw_buffer and torch.equal(dw, torch.zeros_like(dw))
 
 
-# --------------------------------------------------------------------------- repeats and the det package
-
-
-def _det_records(hidden: int, residual: bool, w: str, rows: int) -> Optional[list[str]]:
-    """The deterministic package's backward records for the call, or ``None`` when
-    it has no route for it (it ships BF16 weights only)."""
-    arch = det_loader.arch_for_capability(_capability())
-    if w != "bf16" or arch is None:
-        return None
-    if det_loader.route_key(hidden, "bwd", residual) not in det_loader.ROUTES.get(
-        arch, {}
-    ):
-        return None
-    return list(det_loader.selected_modules(arch, hidden, "bwd", residual, rows=rows))
-
-
-@functools.cache
-def _kernel_text(build, library: str, prefix: str) -> str:
-    """A library's kernel source with its package prefix replaced by a marker."""
-    path = Path(build.__file__).parent / "csrc" / f"{library}_kernel.cu"
-    return path.read_text().replace(prefix, "@prefix@")
-
-
-def _program_id(name: str) -> str:
-    """The program part of a module name (the digits after the package prefix,
-    without the ``__<above>_<at_most>`` window suffix of a record that splits a
-    det window): a det pair window of this package renders the det program of
-    that name."""
-    return name.split("__", 1)[0].rsplit("_", 1)[1]
-
-
-# Single-kernel libraries whose ``dx`` reproduces a det program's ``dx`` bits
-# (``dx`` has no cross-row reduction; 0 differing elements on B200 at the token
-# counts named): library -> the det module whose bits it
-# claims.  The claim holds where the det package selects that module; elsewhere
-# the single is compared only.
-DX_BITWISE_WITH = {
-    # sm_100a H2048 column (64, 336]; det module at T 257
-    "cake_rmsnorm_train_64e6aa82bb2c6d4ea978": "cake_rmsnorm_det_train_caf6978ed0a17fbf65b9",
-    # sm_100a H2048 help row (7168, 11264] and (45056, 58880]; det module inside
-    # (45056, 58880]
-    "cake_rmsnorm_train_0fa4f255caf709d09f66": "cake_rmsnorm_det_train_ceeef043ac64f37fc529",
-    # sm_100a H4096 column (64, 1152]; det module at T 257
-    "cake_rmsnorm_train_4822793ea0c954c11af6": "cake_rmsnorm_det_train_59270fb249dcba1ff679",
-    # sm_100a H6144 column (64, 1152]; det module at T 257 (the help row differs)
-    "cake_rmsnorm_train_44508df7dab2ab688f85": "cake_rmsnorm_det_train_5c804aed7ad14b99e1d0",
-    # sm_100a H6144 residual column (64, 1408]; the det residual program (every T)
-    "cake_rmsnorm_train_864e84f3d874f850c091": "cake_rmsnorm_det_train_0dcdc563be377247044e",
-}
-
-
-def test_dx_bitwise_claims_name_shipped_programs() -> None:
-    """Every :data:`DX_BITWISE_WITH` entry names a single-kernel library this
-    package ships and a det module the det package ships (a renamed program
-    fails here instead of silently dropping its claim)."""
-    for library, det_name in DX_BITWISE_WITH.items():
-        records = [r for r in loader.MODULES.values() if r["library"] == library]
-        assert records, f"{library} is not a library of this package"
-        assert all(
-            (r["workspace_rule"] or {}).get("kind") == "claim_sum_f64" for r in records
-        ), f"{library} is not a single-kernel library"
-        assert det_name in det_loader.MODULES, f"{det_name} is not a det module"
-
-
-def _dx_bitwise_claimed(
-    records: list[str], det_records: list[str]
-) -> tuple[bool, bool]:
-    """``(claimed, same_source)`` for the window's main program against the det
-    package's selected main program.  Claimed: the window runs the det program
-    of that name (same program id: same tile and row mapping, and ``dx`` has no
-    cross-row reduction), or a single kernel whose record names that det program
-    (:data:`DX_BITWISE_WITH`).  ``same_source``: the two kernel sources are equal once
-    the package prefixes are replaced (reported only: the det package and this
-    package may render the same program from different source revisions)."""
-    main = next(n for n in records if loader.MODULES[n]["role"] != "bwd_reduce")
-    det_main = next(
-        n for n in det_records if det_loader.MODULES[n]["role"] != "bwd_reduce"
-    )
-    same_source = _kernel_text(
-        cake_build, loader.MODULES[main]["library"], "cake_rmsnorm_train_"
-    ) == _kernel_text(
-        det_build, det_loader.MODULES[det_main]["library"], "cake_rmsnorm_det_train_"
-    )
-    claim = DX_BITWISE_WITH.get(loader.MODULES[main]["library"])
-    if claim is not None:
-        return _program_id(claim) == _program_id(det_main), same_source
-    return _program_id(main) == _program_id(det_main), same_source
-
-
-# (label, claimed, differing dx elements) of every dx comparison against the det package in this process.
-_DX_CLAIMS: list[tuple[str, bool, int]] = []
-
-
-def _dx_vs_det(dx: torch.Tensor, dx_det: torch.Tensor) -> tuple[int, float, float]:
-    """``(differing elements, max |dx - dx_det|, worst |dx - dx_det| / (|dx_det| + rms(dx_det)))``."""
-    differing = int((dx.view(torch.int16) != dx_det.view(torch.int16)).sum().item())
-    a, b = dx.double(), dx_det.double()
-    if b.numel() == 0:
-        return differing, 0.0, 0.0
-    scale = b.pow(2).mean().sqrt().item()
-    scale = scale if scale > 0.0 else 1.0
-    return (
-        differing,
-        (a - b).abs().max().item(),
-        ((a - b).abs() / (b.abs() + scale)).max().item(),
-    )
+# --------------------------------------------------------------------------- repeats
 
 
 def _repeat_params():
@@ -794,272 +697,120 @@ def _repeat_params():
 
 
 @pytest.mark.parametrize(("hidden", "rows", "residual", "w"), list(_repeat_params()))
-def test_repeated_launches_against_fp64_and_det(
-    hidden: int, rows: int, residual: bool, w: str
+def test_repeated_launches(
+    hidden: int, rows: int, residual: bool, w: str, record_property
 ) -> None:
-    """20 launches on one reused workspace: ``dx`` bitwise identical every time,
-    ``dw`` within the budget every time (worst case reported), the workspace at
-    rest after every call; where the det package serves the call, ``dx``
-    bitwise equal to its ``dx`` when the window claims it (else within one BF16
-    ulp of max(|dx|, rms(dx)), differing count reported) and ``dw`` within the
-    budget of its ``dw`` (max |non-det - det| reported)."""
+    """20 more launches of the backward on the case's own input, on one reused
+    workspace: the window's records every time, ``dx`` bitwise identical every
+    time, the workspace at rest after every call (``dw``'s spread reported).
+    The forward, ``dx`` and ``dw`` meet the naive BF16 tier over the case's
+    draws, the own input's ``dw`` taken at its largest error over the launches."""
     _skip_unless_route(hidden, residual, w)
-    case = _check(hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=11)
-    det_records = _det_records(hidden, residual, w, rows)
-    dx_det = dw_det = None
-    if det_records is not None:
-        dx_det, dw_det = det.cake_rmsnorm_det_train_backward(
-            case.g, case.normalized, case.w, case.rstd, g_residual=case.g_h
-        )
-    ws = workspace_for(rows, hidden, _device(), residual=residual)
-    worst, worst_tol, spread, dw_vs_det = 0.0, 0.0, 0.0, 0.0
+    eps = EPS[hidden]
     label = f"repeat h={hidden} T={rows} res={residual} w={w}"
-    for _ in range(REPEATS):
-        (dx, dw), records = _run_backward(
-            case.g,
-            case.normalized,
-            case.w,
-            case.rstd,
-            g_residual=case.g_h,
-            workspace=ws,
+    check = ref.Draws(label)
+    ws = workspace_for(rows, hidden, _device(), residual=residual)
+    spread, form = 0.0, None
+    for draw in range(check.draws):
+        inputs = _case_inputs(
+            hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=11, draw=draw
         )
-        assert records == case.records, f"{label}: launched {records}"
-        assert torch.equal(dx, case.dx), f"{label}: dx changed between launches"
-        error, tol = _assert_dw(
-            dw, case.dw_ref, case.g, case.normalized, case.rstd, label, case.form
+        case = _launch(
+            hidden, rows, eps, inputs, residual=residual, w_token=w, label=label
         )
-        worst, worst_tol = max(worst, error), max(worst_tol, tol)
-        spread = max(spread, (dw - case.dw).abs().max().item())
-        assert _workspace_at_rest(ws), f"{label}: workspace not at rest"
-        if dw_det is not None:
-            dw_vs_det = max(dw_vs_det, (dw - dw_det).abs().max().item())
-            assert _rel_l2(dw, dw_det) <= DW_REL_L2, f"{label}: dw vs det"
-    det_note = "det=none"
-    if dx_det is not None:
-        claimed, same_source = _dx_bitwise_claimed(case.records, det_records)
-        differing, max_dx, worst_rel = _dx_vs_det(case.dx, dx_det)
-        _DX_CLAIMS.append((label, claimed, differing))
-        det_note = (
-            f"dx_bitwise_claimed={claimed} same_source={same_source} "
-            f"dx_differing={differing} max_dx_vs_det={max_dx:.3e} "
-            f"max_dw_vs_det={dw_vs_det:.3e}"
+        form = case.form
+        if draw:
+            _judge(check, draw, case)
+            continue
+        _judge(check, 0, case, outputs=("y", "rstd", "h_new"))
+        oracle = ref.oracle_backward(
+            case.g, case.normalized, case.w, case.rstd, case.g_h
         )
-        if claimed:
-            assert differing == 0, f"{label}: {differing} dx elements differ from det"
-        assert worst_rel <= 2.0**-7, (
-            f"{label}: dx differs from the det dx by {worst_rel:.3e} of "
-            "max(|dx|, rms(dx)), above one BF16 ulp"
+        naive = ref.naive_backward(
+            case.g, case.normalized, case.w, case.rstd, eps, case.g_h
         )
+        check.add(0, {"dx": case.dx, "dw": case.dw}, oracle, naive)
+        for _ in range(REPEATS):
+            (dx, dw), records = _run_backward(
+                case.g,
+                case.normalized,
+                case.w,
+                case.rstd,
+                g_residual=case.g_h,
+                workspace=ws,
+            )
+            assert records == case.records, f"{label}: launched {records}"
+            assert torch.equal(dx, case.dx), f"{label}: dx changed between launches"
+            check.add(0, {"dw": dw}, oracle, naive)
+            spread = max(spread, (dw - case.dw).abs().max().item())
+            assert _workspace_at_rest(ws), f"{label}: workspace not at rest"
+    check.check(record_property)
     print(
-        f"DW_WORST h={hidden} T={rows} res={residual} w={w} form={case.form} "
-        f"repeats={REPEATS} rel_l2={worst:.3e} worst_tol_ratio={worst_tol:.3f} "
-        f"max_abs_spread={spread:.3e} {det_note}"
-    )
-
-
-# H5120: the backward runs the plain det pair up to H5120_PLAIN_EDGE, the
-# deterministic package's compensated det pair (compensated per-chunk dw sums)
-# from there up to H5120_ACCURACY_EDGE, and the FP64-accumulating single kernel
-# (on sm_103a its kblock form up to T 393216 (BF16 weight) or T 196608 (FP32
-# weight) and a TwoSum single kernel above that, on sm_107a its kblock form)
-# above it; a single kernel also runs
-# from T 1 up to T 22 with FP32 weight on sm_100a and with both weight dtypes on
-# sm_103a, up to T 18 (BF16 weight) and 13 (FP32 weight) on sm_107a, and with BF16
-# weight up to T 896 on sm_100a.  The plain
-# edge is the deterministic package's own switch to its compensated pair.  The
-# accuracy edge is T 65536, the top of the qualified range, on
-# sm_100a, T 61952 on sm_103a and T 49152 on sm_107a, for both weight dtypes:
-# on GB300 the compensated pair's worst dw element reaches 0.888 of its budget
-# at T 62464 (FP32 weight; the two weight dtypes' compensated pairs compute
-# the same dw for equal inputs), and on the 216-SM R200 board 0.867 at T 53248
-# (BF16 weight, 200 inputs of each of three families) and 0.905 at T 57344
-# (FP32 weight), above ACCURACY_MARGIN.  The margin is taken against the FP64
-# reference at the kernel's FP32 rstd; against the FP64 reference at the FP64
-# rstd (which differs from it by the forward's FP32 rstd rounding, the same
-# for the deterministic package) the forms this test runs stay within the
-# budget, while the compensated pair above the sm_107a edge reaches 1.012 of
-# it at T 53248 on the 216-SM board.  Worst dw element over its budget at the
-# kernel's rstd, 60 or more inputs of each of three input families, BF16 and
-# FP32 weight: B200 plain pair <= 0.236 up to T 6144, compensated pair
-# <= 0.781 up to T 65536, single <= 0.643 at T 65537; GB300 plain pair
-# <= 0.245 up to T 5120, compensated pair <= 0.739 up to T 61952, kblock
-# single <= 0.688 at the sampled T from 61953 to 131072; R200 plain pair
-# <= 0.499 (216 SMs) and <= 0.545 (212 SMs) up to T 19968, compensated pair up
-# to T 49152 <= 0.825 (both weights) on 212 SMs, <= 0.759 (BF16 weight) and
-# <= 0.787 (FP32 weight) on 216 SMs (<= 0.818 at T 49152 over 200 inputs of
-# each of three families, both weights), single <= 0.703 (BF16 weight) and
-# <= 0.633 (FP32 weight) at the sampled T from 49152 to 65537 (212 SMs;
-# <= 0.608 and <= 0.646 from 49152 to 65537 on 216 SMs); its sm_107a kblock form
-# above T 49152 <= 0.807 (BF16 weight) and <= 0.719 (FP32 weight) at the sampled
-# T from 49153 to 131072 (212 SMs).  On sm_107a the FP32-weight route runs the
-# deterministic package's det pairs below the accuracy edge (its compensated
-# pair over 8-step blocks above the plain edge), the BF16-weight route the
-# earlier compensated pair over 16-step blocks.  On sm_107a the FP32-weight
-# compensated pair ends at T 32767: above it the pair-row single kernel (kblock
-# form, FP32 sums of 8-row blocks kept as TwoSum pairs) runs, for speed, so its
-# accuracy edge there is T 32767.
-H5120_PLAIN_EDGE = {"sm_100a": 6144, "sm_103a": 5120, "sm_107a": 19968}
-# FP32 weight: the plain det pair's top where a single kernel runs between it and
-# the compensated pair for dw accuracy (None: no plain det pair runs below the
-# compensated pair); an architecture not listed runs the plain det pair up to
-# the plain edge with both weight dtypes
-H5120_PLAIN_TOP_F32 = {"sm_100a": None}
-H5120_ACCURACY_EDGE = {
-    "sm_100a": {"bf16": 56256, "f32": 56256},
-    "sm_103a": {"bf16": 61952, "f32": 61952},
-    "sm_107a": {"bf16": 49152, "f32": 32767},
-}
-ACCURACY_MARGIN = 0.85
-ACCURACY_SEEDS = 20
-
-
-def _h5120_inputs(family: str, rows: int, w_dtype, k: int):
-    """``(x, g, w)`` of input ``k``: ``test`` = this module's generator, ``plain``
-    = one device generator seeded ``SEED + 7919 k`` drawing x, g ~ N(0, 1) and
-    w = 1 + 0.1 N(0, 1) in that order."""
-    if family == "test":
-        x, _u, g, _g_h, w = _case_inputs(5120, rows, w_dtype=w_dtype, key=k)
-        return x, g, w
-    generator = torch.Generator(device=_device()).manual_seed(SEED + 7919 * k)
-
-    def normal(*shape):
-        return torch.randn(
-            *shape, dtype=torch.float32, device=_device(), generator=generator
-        )
-
-    x = normal(rows, 5120).to(torch.bfloat16)
-    g = normal(rows, 5120).to(torch.bfloat16)
-    return x, g, (1.0 + 0.1 * normal(5120)).to(w_dtype)
-
-
-@pytest.mark.parametrize("family", ("test", "plain"))
-@pytest.mark.parametrize("w", tuple(W_DTYPES))
-@pytest.mark.parametrize("side", ("plain", "compensated", "edge", "above"))
-def test_h5120_dw_accuracy_edge(side: str, w: str, family: str) -> None:
-    """At the H5120 windows -- the plain det pair's top (``H5120_PLAIN_EDGE``),
-    the compensated det pair's first and last token counts, one above the
-    accuracy edge (the single kernel) -- over ``ACCURACY_SEEDS`` inputs of each
-    family: against the FP64 reference at the kernel's FP32 ``rstd``, a det
-    pair's worst dw element stays within ``ACCURACY_MARGIN`` of its budget and
-    the single kernel's within the budget; against the FP64 reference at the
-    FP64 ``rstd`` every form's stays within the budget."""
-    _skip_unless_route(5120, w_dtype=w)
-    plain_edge, edge = H5120_PLAIN_EDGE[_arch()], H5120_ACCURACY_EDGE[_arch()][w]
-    plain_top = (
-        H5120_PLAIN_TOP_F32.get(_arch(), plain_edge) if w == "f32" else plain_edge
-    )
-    if side == "plain" and plain_top is None:
-        pytest.skip(f"no plain det pair runs below the compensated pair ({w} weight)")
-    rows = {
-        "plain": plain_top,
-        "compensated": plain_edge + 1,
-        "edge": edge,
-        "above": edge + 1,
-    }[side]
-    expected = _window_records(5120, "bwd", False, w, rows)
-    form = _form(expected)
-    assert form == ("single" if side == "above" else "pair"), (
-        f"T={rows} runs {form}: the accuracy edge of this architecture is {edge}"
-    )
-    # the plain and the compensated det pair are different programs; the
-    # compensated pair runs from one above the plain edge to the accuracy edge
-    compensated = _window_records(5120, "bwd", False, w, plain_edge + 1)
-    if plain_top is not None:
-        plain = _window_records(5120, "bwd", False, w, plain_top)
-        library = loader.MODULES[plain[0]]["library"]
-        assert library != loader.MODULES[compensated[0]]["library"], (
-            f"T={plain_top} and T={plain_edge + 1} run the same program {library}"
-        )
-    assert compensated == _window_records(5120, "bwd", False, w, edge)
-    eps = EPS[5120]
-    worst, worst_fp64_rstd = 0.0, 0.0
-
-    def over_budget(dw, ref):
-        return float(
-            ((dw.double() - ref).abs() / (DW_ATOL + DW_RTOL * ref.abs())).max()
-        )
-
-    for k in range(ACCURACY_SEEDS):
-        x, g, weight = _h5120_inputs(family, rows, W_DTYPES[w], k)
-        rstd = forward(x, weight, eps)[1]
-        (_dx, dw), records = _run_backward(g, x, weight, rstd)
-        assert records == expected, f"T={rows} launched {records}"
-        xd = x.double()
-        rstd_fp64 = torch.rsqrt(xd.pow(2).mean(-1, keepdim=True) + eps)
-        worst = max(worst, over_budget(dw, _reference_backward(g, x, weight, rstd)[1]))
-        worst_fp64_rstd = max(
-            worst_fp64_rstd, over_budget(dw, (g.double() * xd * rstd_fp64).sum(0))
-        )
-    bound = ACCURACY_MARGIN if form == "pair" else 1.0
-    print(
-        f"H5120_EDGE arch={_arch()} edge={edge} T={rows} w={w} family={family} "
-        f"form={form} seeds={ACCURACY_SEEDS} worst_error_over_budget={worst:.3f} "
-        f"fp64_rstd={worst_fp64_rstd:.3f}"
-    )
-    assert worst <= bound, (
-        f"H5120 T={rows} w={w} {family} inputs ({form}): worst dw element "
-        f"{worst:.3f} of its budget > {bound}"
-    )
-    assert worst_fp64_rstd <= 1.0, (
-        f"H5120 T={rows} w={w} {family} inputs ({form}): worst dw element "
-        f"{worst_fp64_rstd:.3f} of its budget against the FP64-rstd reference > 1"
+        f"DW_REPEATS h={hidden} T={rows} res={residual} w={w} form={form} "
+        f"repeats={REPEATS} max_abs_spread={spread:.3e}"
     )
 
 
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 @pytest.mark.parametrize("view", ("query", "key"))
-def test_per_head_256_views(view: str, w: str) -> None:
+def test_per_head_256_views(view: str, w: str, record_property) -> None:
     """The per-head shapes: a [T, 24, 256] query view of a [T, 24, 512] buffer
     (strides (12288, 512, 1)) and a contiguous [T, 4, 256] key view share one
-    w[256]; dw sums over tokens and heads, rstd is [T, heads].  20 launches:
-    ``dx`` bitwise stable and equal to the 2-D call on the collapsed rows, ``dw``
-    within the budget every time (worst case reported)."""
+    w[256]; dw sums over tokens and heads, rstd is [T, heads].  20 launches on
+    the case's own input: ``dx`` bitwise stable and equal to the 2-D call on the
+    collapsed rows, the workspace at rest; ``y``, ``rstd``, ``dx`` and every
+    launch's ``dw`` meet the naive BF16 tier over the draws."""
     _skip_unless_route(256, w_dtype=w)
     rows = 1000
     heads = 24 if view == "query" else 4
-    generator = _generator(256, rows, heads, w == "f32")
-    if view == "query":
-        buffer = torch.randn(rows, 24, 512, device=_device(), generator=generator).to(
-            torch.bfloat16
-        )
-        x = buffer[:, :, :256]
-        assert x.stride() == (12288, 512, 1)
-    else:
-        x = torch.randn(rows, 4, 256, device=_device(), generator=generator).to(
-            torch.bfloat16
-        )
-    w_tensor = _weight(256, generator, W_DTYPES[w])
-    g = torch.randn(x.shape, device=_device(), generator=generator).to(torch.bfloat16)
-    y, rstd = forward(x, w_tensor, EPS[256])
-    assert y.shape == x.shape and y.is_contiguous() and rstd.shape == x.shape[:-1]
-    y_ref, rstd_ref, _n = _reference_forward(x, w_tensor, EPS[256])
-    _assert_bf16_close(y, y_ref, f"y {view}")
-    assert _rel_l2(rstd, rstd_ref) <= RSTD_REL_L2
-    dx_ref, dw_ref = _reference_backward(g, x, w_tensor, rstd)
+    eps = EPS[256]
     expected = _window_records(256, "bwd", False, w, rows * heads)
     form = _form(expected)
     ws = workspace_for(rows * heads, 256, _device())
-    dx0, worst, spread = None, 0.0, 0.0
-    dw0 = None
-    for _ in range(REPEATS):
-        (dx, dw), records = _run_backward(g, x, w_tensor, rstd, workspace=ws)
-        assert records == expected, records
-        assert dx.shape == x.shape and dx.is_contiguous() and dw.shape == (256,)
-        if dx0 is None:
-            dx0, dw0 = dx, dw
-            _assert_bf16_close(dx, dx_ref, f"dx {view}")
-        assert torch.equal(dx, dx0)
-        error, _tol = _assert_dw(dw, dw_ref, g, x, rstd, f"dw {view} w={w}", form)
-        worst = max(worst, error)
-        spread = max(spread, (dw - dw0).abs().max().item())
-        assert _workspace_at_rest(ws)
-    dx2, _dw2 = backward(
-        g.reshape(-1, 256), x.reshape(-1, 256), w_tensor, rstd.reshape(-1)
-    )
-    assert torch.equal(dx0.reshape(-1, 256), dx2)
+    check = ref.Draws(f"per-head view={view} w={w}")
+    spread = 0.0
+    for draw in range(check.draws):
+        generator = _generator(256, rows, heads, w == "f32", draw=draw)
+        if view == "query":
+            buffer = torch.randn(
+                rows, 24, 512, device=_device(), generator=generator
+            ).to(torch.bfloat16)
+            x = buffer[:, :, :256]
+            assert x.stride() == (12288, 512, 1)
+        else:
+            x = torch.randn(rows, 4, 256, device=_device(), generator=generator).to(
+                torch.bfloat16
+            )
+        w_tensor = _weight(256, generator, W_DTYPES[w])
+        g = torch.randn(x.shape, device=_device(), generator=generator).to(
+            torch.bfloat16
+        )
+        y, rstd = forward(x, w_tensor, eps)
+        assert y.shape == x.shape and y.is_contiguous() and rstd.shape == x.shape[:-1]
+        check.forward(draw, {"y": y, "rstd": rstd}, x, w_tensor, eps)
+        oracle = ref.oracle_backward(g, x, w_tensor, rstd)
+        naive = ref.naive_backward(g, x, w_tensor, rstd, eps)
+        dx0 = dw0 = None
+        for _ in range(REPEATS if draw == 0 else 1):
+            (dx, dw), records = _run_backward(g, x, w_tensor, rstd, workspace=ws)
+            assert records == expected, records
+            assert dx.shape == x.shape and dx.is_contiguous() and dw.shape == (256,)
+            if dx0 is None:
+                dx0, dw0 = dx, dw
+                check.add(draw, {"dx": dx}, oracle, naive)
+            assert torch.equal(dx, dx0)
+            check.add(draw, {"dw": dw}, oracle, naive)
+            spread = max(spread, (dw - dw0).abs().max().item())
+            assert _workspace_at_rest(ws)
+        if draw == 0:
+            dx2, _dw2 = backward(
+                g.reshape(-1, 256), x.reshape(-1, 256), w_tensor, rstd.reshape(-1)
+            )
+            assert torch.equal(dx0.reshape(-1, 256), dx2)
+    check.check(record_property)
     print(
-        f"DW_WORST per-head view={view} w={w} rows={rows * heads} form={form} "
-        f"repeats={REPEATS} rel_l2={worst:.3e} max_abs_spread={spread:.3e} det=none"
+        f"DW_REPEATS per-head view={view} w={w} rows={rows * heads} form={form} "
+        f"repeats={REPEATS} max_abs_spread={spread:.3e}"
     )
 
 
@@ -1068,25 +819,37 @@ def test_per_head_256_views(view: str, w: str) -> None:
 
 @pytest.mark.parametrize("hidden", (512, 4096))
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
-def test_garbage_filled_dw_is_overwritten(hidden: int, w: str) -> None:
+def test_garbage_filled_dw_is_overwritten(hidden: int, w: str, record_property) -> None:
+    """A caller's ``dw`` filled with NaN, 1e30 or -7 is overwritten: finite, and
+    every fill's ``dw`` meets the naive BF16 tier over the draws."""
     _skip_unless_route(hidden, w_dtype=w)
-    case = _check(hidden, 1000, w_dtype=W_DTYPES[w])
-    for fill in (float("nan"), 1e30, -7.0):
-        dw = torch.full((hidden,), fill, device=_device())
-        _dx2, dw_out = backward(case.g, case.x, case.w, case.rstd, dw=dw)
-        assert dw_out is dw and torch.isfinite(dw).all()
-        _assert_dw(
-            dw, case.dw_ref, case.g, case.x, case.rstd, f"dw fill={fill}", case.form
+    eps = EPS[hidden]
+    fills = (float("nan"), 1e30, -7.0)
+    check = ref.Draws(f"garbage dw h={hidden} w={w}")
+    for draw in range(check.draws):
+        x, _u, g, _g_h, weight = _case_inputs(
+            hidden, 1000, w_dtype=W_DTYPES[w], draw=draw
         )
+        _y, rstd = forward(x, weight, eps)
+        names = [f"dw fill={fill}" for fill in fills]
+        oracle = dict.fromkeys(names, ref.oracle_dw(g, x, rstd))
+        naive = dict.fromkeys(names, ref.naive_dw(g, x, eps))
+        for fill, name in zip(fills, names, strict=True):
+            dw = torch.full((hidden,), fill, device=_device())
+            _dx2, dw_out = backward(g, x, weight, rstd, dw=dw)
+            assert dw_out is dw and torch.isfinite(dw).all()
+            check.add(draw, {name: dw}, oracle, naive)
+    check.check(record_property)
 
 
-def _reuse_call(ws, hidden, residual, w, rows, key):
-    """One forward and backward on the caller's workspace ``ws``, its pair
-    partial rows poisoned (NaN) first: the call rewrites every row it reads."""
+def _reuse_call(ws, hidden, residual, w, rows, key, draw, check: ref.Draws):
+    """One forward and backward of draw ``draw`` on the caller's workspace
+    ``ws``, its pair partial rows poisoned (NaN) first: the call rewrites every
+    row it reads; ``dx`` and ``dw`` judged in ``check``."""
     eps = EPS[hidden]
     ws[loader.PAIR_ROWS_OFFSET :].fill_(0xFF)
     x, u, g, g_h, weight = _case_inputs(
-        hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=key
+        hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=key, draw=draw
     )
     outputs = forward(x, weight, eps, residual=u)
     normalized = outputs[2] if residual else x
@@ -1097,27 +860,44 @@ def _reuse_call(ws, hidden, residual, w, rows, key):
     expected = _window_records(hidden, "bwd", residual, w, rows)
     label = f"h={hidden} res={residual} w={w} T={rows}"
     assert records == expected, f"{label}: launched {records}"
-    dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    _assert_dw(dw, dw_ref, g, normalized, rstd, f"dw {label}", _form(expected))
+    check.backward(
+        draw, {"dx": dx, "dw": dw}, g, normalized, weight, rstd, eps, g_h=g_h
+    )
     return label, _form(expected)
 
 
 @pytest.mark.parametrize("hidden", (512, 2048, 6144))
-def test_workspace_reused_across_token_counts_and_weight_dtypes(hidden: int) -> None:
+def test_workspace_reused_across_token_counts_and_weight_dtypes(
+    hidden: int, record_property
+) -> None:
     """One buffer serves a width's calls of every token count up to its rows,
     every window and both weight dtypes with no host write but NaN poison in its
-    pair partial rows before each call; at rest after every call.  (Reuse across
+    pair partial rows before each call; at rest after every call; every call's
+    ``dx`` and ``dw`` meet the naive BF16 tier over the draws.  (Reuse across
     widths, residual flags and stale bytes: ``test_cake_rmsnorm_nondet_train_api.py``.)"""
     _skip_unless_route(hidden)
     ws = torch.zeros(_bytes(65536, hidden), dtype=torch.uint8, device=_device())
     w_dtypes = ["bf16"] + (["f32"] if _routes(hidden, "bwd", False, "f32") else [])
+    sequence = [
+        (rows, w_dtypes[index % len(w_dtypes)])
+        for index, rows in enumerate((7, 65536, 1, 257, 16385, 4096, 2))
+    ]
+    checks = {
+        (rows, w): ref.Draws(
+            f"reuse h={hidden} T={rows} w={w}", prefix=f"T={rows} {w} "
+        )
+        for rows, w in sequence
+    }
     forms = []
-    for index, rows in enumerate((7, 65536, 1, 257, 16385, 4096, 2)):
-        w = w_dtypes[index % len(w_dtypes)]
-        _label, form = _reuse_call(ws, hidden, False, w, rows, key=29)
-        assert _workspace_at_rest(ws), f"workspace state after h={hidden} T={rows}"
-        forms.append(f"{rows}:{w}:{form}")
+    for draw in range(ref.DRAWS):
+        for rows, w in sequence:
+            _label, form = _reuse_call(
+                ws, hidden, False, w, rows, 29, draw, checks[(rows, w)]
+            )
+            assert _workspace_at_rest(ws), f"workspace state after h={hidden} T={rows}"
+            if draw == 0:
+                forms.append(f"{rows}:{w}:{form}")
+    ref.check_all(record_property, checks.values())
     print(f"REUSE h={hidden} " + " ".join(forms))
 
 
@@ -1128,39 +908,51 @@ def test_workspace_reused_across_token_counts_and_weight_dtypes(hidden: int) -> 
         pytest.param(6144, True, "f32", id="res-h6144-f32"),
     ],
 )
-def test_two_streams_with_their_own_workspaces(hidden: int, residual: bool, w: str):
+def test_two_streams_with_their_own_workspaces(
+    hidden: int, residual: bool, w: str, record_property
+):
+    """Two streams, each with its own workspace, run five rounds of backward
+    calls of two token counts; every call's ``dx`` and ``dw`` meet the naive
+    BF16 tier over the draws, and both workspaces are at rest."""
     _skip_unless_route(hidden, residual, w)
-    cases = []
-    for rows in (16385, 65536):
-        x, u, g, g_h, weight = _case_inputs(
-            hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=37
-        )
-        outputs = forward(x, weight, EPS[hidden], residual=u)
-        normalized, rstd = (outputs[2] if residual else x), outputs[1]
-        dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-        form = _form(_window_records(hidden, "bwd", residual, w, rows))
-        cases.append((g, g_h, normalized, weight, rstd, dx_ref, dw_ref, form))
-    streams = [torch.cuda.Stream() for _ in cases]
+    eps = EPS[hidden]
+    counts = (16385, 65536)
+    checks = {
+        rows: ref.Draws(f"streams h={hidden} T={rows} w={w}", prefix=f"T={rows} ")
+        for rows in counts
+    }
+    streams = [torch.cuda.Stream() for _ in counts]
     workspaces = [
-        workspace_for(65536, hidden, _device(), residual=residual) for _ in cases
+        workspace_for(65536, hidden, _device(), residual=residual) for _ in counts
     ]
-    torch.cuda.synchronize()
-    results = []
-    for _round in range(5):
-        for stream, ws, case in zip(streams, workspaces, cases, strict=True):
-            g, g_h, normalized, weight, rstd = case[:5]
-            with torch.cuda.stream(stream):
-                results.append(
-                    backward(g, normalized, weight, rstd, g_residual=g_h, workspace=ws)
-                )
-    torch.cuda.synchronize()
-    for index, (dx, dw) in enumerate(results):
-        g, _g_h, normalized, _weight, rstd, dx_ref, dw_ref, form = cases[
-            index % len(cases)
-        ]
-        _assert_bf16_close(dx, dx_ref, f"stream dx {index}")
-        _assert_dw(dw, dw_ref, g, normalized, rstd, f"stream dw {index}", form)
-    assert all(_workspace_at_rest(ws) for ws in workspaces)
+    for draw in range(ref.DRAWS):
+        cases = []
+        for rows in counts:
+            x, u, g, g_h, weight = _case_inputs(
+                hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=37, draw=draw
+            )
+            outputs = forward(x, weight, eps, residual=u)
+            normalized, rstd = (outputs[2] if residual else x), outputs[1]
+            oracle = ref.oracle_backward(g, normalized, weight, rstd, g_h)
+            naive = ref.naive_backward(g, normalized, weight, rstd, eps, g_h)
+            cases.append((rows, g, g_h, normalized, weight, rstd, oracle, naive))
+        torch.cuda.synchronize()
+        results = []
+        for _round in range(5):
+            for stream, ws, case in zip(streams, workspaces, cases, strict=True):
+                _count, g, g_h, normalized, weight, rstd = case[:6]
+                with torch.cuda.stream(stream):
+                    results.append(
+                        backward(
+                            g, normalized, weight, rstd, g_residual=g_h, workspace=ws
+                        )
+                    )
+        torch.cuda.synchronize()
+        for index, (dx, dw) in enumerate(results):
+            rows, *_inputs, oracle, naive = cases[index % len(cases)]
+            checks[rows].add(draw, {"dx": dx, "dw": dw}, oracle, naive)
+        assert all(_workspace_at_rest(ws) for ws in workspaces)
+    ref.check_all(record_property, checks.values())
 
 
 def _graph_params():
@@ -1181,7 +973,14 @@ def _graph_params():
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w", "rows"), list(_graph_params()))
-def test_cuda_graph_capture_and_replay(hidden: int, residual: bool, w: str, rows: int):
+def test_cuda_graph_capture_and_replay(
+    hidden: int, residual: bool, w: str, rows: int, record_property
+):
+    """One captured forward + backward: three replays on the case's own input,
+    then one on each further draw copied into the static inputs.  Every replay
+    gives the eager call's ``y``, ``rstd``, ``h_new`` and ``dx`` bit for bit on
+    the same input, its ``dw`` (and the outputs) meet the naive BF16 tier over the
+    draws, and the workspace is at rest."""
     _skip_unless_route(hidden, residual, w)
     x, u, g, g_h, weight = _case_inputs(
         hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=41
@@ -1210,18 +1009,45 @@ def test_cuda_graph_capture_and_replay(hidden: int, residual: bool, w: str, rows
             dx=out_dx,
             dw=out_dw,
         )
-    dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    form = _form(_window_records(hidden, "bwd", residual, w, rows))
-    for replay in range(3):
-        out_dw.fill_(float("nan"))
-        graph.replay()
-        torch.cuda.synchronize()
-        assert torch.equal(out_y, outputs[0]) and torch.equal(out_rstd, rstd)
-        if residual:
-            assert torch.equal(out_h, normalized)
-        assert torch.equal(out_dx, dx)
-        _assert_dw(out_dw, dw_ref, g, normalized, rstd, f"graph replay {replay}", form)
-        assert _workspace_at_rest(ws)
+    check = ref.Draws(f"graph h={hidden} res={residual} w={w} T={rows}")
+    for draw in range(check.draws):
+        if draw:
+            fresh = _case_inputs(
+                hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=41, draw=draw
+            )
+            for static, value in zip((x, u, g, g_h, weight), fresh, strict=True):
+                if static is not None:
+                    static.copy_(value)
+            outputs = forward(x, weight, eps, residual=u)
+            normalized, rstd = (outputs[2] if residual else x), outputs[1]
+            dx, _dw = backward(
+                g, normalized, weight, rstd, g_residual=g_h, workspace=ws
+            )
+            assert _workspace_at_rest(ws)
+        for _replay in range(3 if draw == 0 else 1):
+            out_dw.fill_(float("nan"))
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(out_y, outputs[0]) and torch.equal(out_rstd, rstd)
+            if residual:
+                assert torch.equal(out_h, normalized)
+            assert torch.equal(out_dx, dx)
+            forward_outputs = {"y": out_y, "rstd": out_rstd}
+            if residual:
+                forward_outputs["h_new"] = out_h
+            check.forward(draw, forward_outputs, x, weight, eps, residual=u)
+            check.backward(
+                draw,
+                {"dx": out_dx, "dw": out_dw},
+                g,
+                normalized,
+                weight,
+                rstd,
+                eps,
+                g_h=g_h,
+            )
+            assert _workspace_at_rest(ws)
+    check.check(record_property)
 
 
 # --------------------------------------------------------------------------- autograd
@@ -1235,14 +1061,13 @@ def _autograd_params():
         yield pytest.param(6144, True, w, id=f"res-h6144-{w}")
 
 
-def _assert_autograd_dw(grad_w, weight, dw_ref, g, normalized, rstd, label, form):
-    """The autograd weight gradient is the kernel's FP32 ``dw`` (the last
-    backward buffer this package wrote) at the det budget, cast to the weight's
-    dtype bit for bit."""
+def _autograd_dw(grad_w, weight, label) -> torch.Tensor:
+    """The kernel's FP32 ``dw`` of the last backward this package ran (the last
+    backward buffer it wrote); the autograd weight gradient is it cast to the
+    weight's dtype bit for bit."""
     assert _DW_BUFFERS, f"{label}: no backward module of this package ran"
     dw32 = _DW_BUFFERS[-1].clone()
     assert grad_w.dtype == weight.dtype, label
-    _assert_dw(dw32, dw_ref, g, normalized, rstd, label, form)
     assert torch.equal(grad_w, dw32.to(weight.dtype)), (
         f"{label}: the autograd dw is not the kernel's dw in {weight.dtype}"
     )
@@ -1250,86 +1075,98 @@ def _assert_autograd_dw(grad_w, weight, dw_ref, g, normalized, rstd, label, form
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
-def test_autograd_matches_fp64(hidden: int, residual: bool, w: str) -> None:
+def test_autograd_matches_fp64(
+    hidden: int, residual: bool, w: str, record_property
+) -> None:
+    """The autograd wrapper's ``y`` (and ``h_new``), input gradient and the
+    kernel's FP32 ``dw`` (the weight gradient is it in the weight's dtype) meet
+    the naive BF16 tier over the draws, the backward judged at the FP32 ``rstd``
+    the forward saved (the functional forward's, same program, same bits)."""
     _skip_unless_route(hidden, residual, w)
     rows = 1000
-    x, u, g, g_h, weight = _case_inputs(
-        hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=43
-    )
-    xa = x.clone().requires_grad_(True)
-    wa = weight.clone().requires_grad_(True)
-    ua = u.clone().requires_grad_(True) if residual else None
-    outputs = rmsnorm(xa, wa, EPS[hidden], residual=ua)
-    if residual:
-        y, h_new = outputs
-        torch.autograd.backward((y, h_new), (g, g_h))
-    else:
-        y = outputs
-        y.backward(g)
-    y_ref, _rstd_ref, _normalized_ref = _reference_forward(
-        x, weight, EPS[hidden], residual=u
-    )
-    _assert_bf16_close(y.detach(), y_ref, "autograd y")
-    # the backward reference at the FP32 rstd the forward saved (same program, same bits)
-    outputs_fwd = forward(x, weight, EPS[hidden], residual=u)
-    normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
-    dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    _assert_bf16_close(xa.grad, dx_ref, "autograd dx")
-    if residual:
-        assert torch.equal(ua.grad, xa.grad)
-    form = _form(_window_records(hidden, "bwd", residual, w, rows))
-    _assert_autograd_dw(
-        wa.grad, weight, dw_ref, g, normalized, rstd, "autograd dw", form
-    )
+    eps = EPS[hidden]
+    check = ref.Draws(f"autograd h={hidden} res={residual} w={w}")
+    for draw in range(check.draws):
+        x, u, g, g_h, weight = _case_inputs(
+            hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=43, draw=draw
+        )
+        xa = x.clone().requires_grad_(True)
+        wa = weight.clone().requires_grad_(True)
+        ua = u.clone().requires_grad_(True) if residual else None
+        outputs = rmsnorm(xa, wa, eps, residual=ua)
+        if residual:
+            y, h_new = outputs
+            torch.autograd.backward((y, h_new), (g, g_h))
+            assert torch.equal(ua.grad, xa.grad)
+            forward_outputs = {"y": y.detach(), "h_new": h_new.detach()}
+        else:
+            y = outputs
+            y.backward(g)
+            forward_outputs = {"y": y.detach()}
+        dw32 = _autograd_dw(wa.grad, weight, "autograd dw")
+        outputs_fwd = forward(x, weight, eps, residual=u)
+        normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
+        check.forward(draw, forward_outputs, x, weight, eps, residual=u)
+        check.backward(
+            draw, {"dx": xa.grad, "dw": dw32}, g, normalized, weight, rstd, eps, g_h=g_h
+        )
+    check.check(record_property)
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
-def test_autograd_accumulates_into_existing_grads(hidden: int, residual: bool, w: str):
+def test_autograd_accumulates_into_existing_grads(
+    hidden: int, residual: bool, w: str, record_property
+):
     """Gradients add into existing ``.grad`` tensors (two backwards through one
     retained graph, on top of preset gradients) exactly as autograd adds them;
-    every kernel ``dw`` is at the det budget; the graph's saved tensors are
-    released after the last backward, so a third one raises."""
+    both kernel ``dw`` meet the naive BF16 tier over the draws; the graph's
+    saved tensors are released after the last backward, so a third one raises."""
     _skip_unless_route(hidden, residual, w)
     rows = 4096
     eps = EPS[hidden]
-    x, u, g, g_h, weight = _case_inputs(
-        hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=47
-    )
-    generator = _generator(hidden, rows, 53)
-    gx0 = _rows(rows, hidden, generator=generator)
-    gw0 = _weight(hidden, generator, W_DTYPES[w]) - 1.0
-    xa = x.clone().requires_grad_(True)
-    wa = weight.clone().requires_grad_(True)
-    ua = u.clone().requires_grad_(True) if residual else None
-    xa.grad, wa.grad = gx0.clone(), gw0.clone()
-    if residual:
-        ua.grad = gx0.clone()
-    outputs = rmsnorm(xa, wa, eps, residual=ua)
-    tensors = outputs if residual else (outputs,)
-    grads = (g, g_h) if residual else (g,)
-    outputs_fwd = forward(x, weight, eps, residual=u)
-    normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
-    dx_k, _dw = backward(g, normalized, weight, rstd, g_residual=g_h)
-    dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    form = _form(_window_records(hidden, "bwd", residual, w, rows))
-    torch.autograd.backward(tensors, grads, retain_graph=True)
-    dw1 = _DW_BUFFERS[-1].clone()
-    _assert_dw(dw1, dw_ref, g, normalized, rstd, "accumulate dw 1", form)
-    expected_x = gx0 + dx_k
-    expected_w = gw0 + dw1.to(weight.dtype)
-    assert torch.equal(xa.grad, expected_x)
-    assert torch.equal(wa.grad, expected_w)
-    if residual:
-        assert torch.equal(ua.grad, expected_x)
-    torch.autograd.backward(tensors, grads)
-    dw2 = _DW_BUFFERS[-1].clone()
-    _assert_dw(dw2, dw_ref, g, normalized, rstd, "accumulate dw 2", form)
-    assert torch.equal(xa.grad, expected_x + dx_k)
-    assert torch.equal(wa.grad, expected_w + dw2.to(weight.dtype))
-    if residual:
-        assert torch.equal(ua.grad, expected_x + dx_k)
-    with pytest.raises(RuntimeError, match="backward through the graph a second time"):
+    check = ref.Draws(f"accumulate h={hidden} res={residual} w={w}")
+    for draw in range(check.draws):
+        x, u, g, g_h, weight = _case_inputs(
+            hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=47, draw=draw
+        )
+        generator = _generator(hidden, rows, 53, draw=draw)
+        gx0 = _rows(rows, hidden, generator=generator)
+        gw0 = _weight(hidden, generator, W_DTYPES[w]) - 1.0
+        xa = x.clone().requires_grad_(True)
+        wa = weight.clone().requires_grad_(True)
+        ua = u.clone().requires_grad_(True) if residual else None
+        xa.grad, wa.grad = gx0.clone(), gw0.clone()
+        if residual:
+            ua.grad = gx0.clone()
+        outputs = rmsnorm(xa, wa, eps, residual=ua)
+        tensors = outputs if residual else (outputs,)
+        grads = (g, g_h) if residual else (g,)
+        outputs_fwd = forward(x, weight, eps, residual=u)
+        normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
+        dx_k, _dw = backward(g, normalized, weight, rstd, g_residual=g_h)
+        oracle = {"dw": ref.oracle_dw(g, normalized, rstd)}
+        naive = {"dw": ref.naive_dw(g, normalized, eps)}
+        torch.autograd.backward(tensors, grads, retain_graph=True)
+        dw1 = _DW_BUFFERS[-1].clone()
+        check.add(draw, {"dw": dw1}, oracle, naive)
+        expected_x = gx0 + dx_k
+        expected_w = gw0 + dw1.to(weight.dtype)
+        assert torch.equal(xa.grad, expected_x)
+        assert torch.equal(wa.grad, expected_w)
+        if residual:
+            assert torch.equal(ua.grad, expected_x)
         torch.autograd.backward(tensors, grads)
+        dw2 = _DW_BUFFERS[-1].clone()
+        check.add(draw, {"dw": dw2}, oracle, naive)
+        assert torch.equal(xa.grad, expected_x + dx_k)
+        assert torch.equal(wa.grad, expected_w + dw2.to(weight.dtype))
+        if residual:
+            assert torch.equal(ua.grad, expected_x + dx_k)
+        with pytest.raises(
+            RuntimeError, match="backward through the graph a second time"
+        ):
+            torch.autograd.backward(tensors, grads)
+    check.check(record_property)
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
@@ -1393,26 +1230,23 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
 
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
-def test_checkpoint_replays_the_same_forward(hidden: int, residual: bool, w: str):
+def test_checkpoint_replays_the_same_forward(
+    hidden: int, residual: bool, w: str, record_property
+):
     """Non-reentrant activation checkpointing: the replayed forward gives the
-    same ``y`` and ``dx`` bits as the plain autograd call; ``dw`` of both is at
-    the det budget; two checkpointed micro-batches accumulate into one ``.grad``."""
+    same ``y`` and ``dx`` bits as the plain autograd call; ``dx`` and the kernel
+    ``dw`` of both (and of a second checkpointed micro-batch, which accumulates
+    into the same ``.grad``) meet the naive BF16 tier over the draws."""
     _skip_unless_route(hidden, residual, w)
     rows = 1000
     eps = EPS[hidden]
-    x, u, g, g_h, weight = _case_inputs(
-        hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=61
-    )
-    outputs_fwd = forward(x, weight, eps, residual=u)
-    normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
-    dx_ref, dw_ref = _reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    form = _form(_window_records(hidden, "bwd", residual, w, rows))
+    check = ref.Draws(f"checkpoint h={hidden} res={residual} w={w}")
 
     def step(xt, wt, ut):
         out = rmsnorm(xt, wt, eps, residual=ut)
         return out if residual else (out,)
 
-    def run(checkpointed: bool, wt):
+    def run(checkpointed: bool, wt, x, u, g, g_h):
         xt = x.clone().requires_grad_(True)
         ut = u.clone().requires_grad_(True) if residual else None
         if checkpointed:
@@ -1424,55 +1258,56 @@ def test_checkpoint_replays_the_same_forward(hidden: int, residual: bool, w: str
         torch.autograd.backward(outs, (g, g_h) if residual else (g,))
         return outs[0].detach(), xt.grad
 
-    wa = weight.clone().requires_grad_(True)
-    y_ckpt, dx_ckpt = run(True, wa)
-    dw_ckpt = _assert_autograd_dw(
-        wa.grad, weight, dw_ref, g, normalized, rstd, "checkpoint dw", form
-    )
-    wb = weight.clone().requires_grad_(True)
-    y_plain, dx_plain = run(False, wb)
-    _assert_autograd_dw(wb.grad, weight, dw_ref, g, normalized, rstd, "plain dw", form)
-    assert torch.equal(y_ckpt, y_plain) and torch.equal(dx_ckpt, dx_plain)
-    _assert_bf16_close(dx_ckpt, dx_ref, "checkpoint dx")
-    first = wa.grad.clone()
-    run(True, wa)  # a second micro-batch accumulates
-    dw_second = _DW_BUFFERS[-1].clone()
-    _assert_dw(dw_second, dw_ref, g, normalized, rstd, "checkpoint dw 2", form)
-    assert torch.equal(wa.grad, first + dw_second.to(weight.dtype))
-    assert torch.equal(first, dw_ckpt.to(weight.dtype))
+    for draw in range(check.draws):
+        x, u, g, g_h, weight = _case_inputs(
+            hidden, rows, residual=residual, w_dtype=W_DTYPES[w], key=61, draw=draw
+        )
+        outputs_fwd = forward(x, weight, eps, residual=u)
+        normalized, rstd = (outputs_fwd[2] if residual else x), outputs_fwd[1]
+        oracle = ref.oracle_backward(g, normalized, weight, rstd, g_h)
+        naive = ref.naive_backward(g, normalized, weight, rstd, eps, g_h)
+        wa = weight.clone().requires_grad_(True)
+        y_ckpt, dx_ckpt = run(True, wa, x, u, g, g_h)
+        dw_ckpt = _autograd_dw(wa.grad, weight, "checkpoint dw")
+        wb = weight.clone().requires_grad_(True)
+        y_plain, dx_plain = run(False, wb, x, u, g, g_h)
+        dw_plain = _autograd_dw(wb.grad, weight, "plain dw")
+        assert torch.equal(y_ckpt, y_plain) and torch.equal(dx_ckpt, dx_plain)
+        check.add(draw, {"dx": dx_ckpt, "dw": dw_ckpt}, oracle, naive)
+        check.add(draw, {"dw": dw_plain}, oracle, naive)
+        first = wa.grad.clone()
+        run(True, wa, x, u, g, g_h)  # a second micro-batch accumulates
+        dw_second = _DW_BUFFERS[-1].clone()
+        check.add(draw, {"dw": dw_second}, oracle, naive)
+        assert torch.equal(wa.grad, first + dw_second.to(weight.dtype))
+        assert torch.equal(first, dw_ckpt.to(weight.dtype))
+    check.check(record_property)
 
 
-def _backward_launches(fn) -> list[str]:
+def _backward_launches(fn, *args) -> list[str]:
     start = len(_LAUNCHED)
-    fn()
+    fn(*args)
     return [n for n in _LAUNCHED[start:] if loader.MODULES[n]["role"].startswith("bwd")]
 
 
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 def test_autograd_backward_checks_deterministic_algorithms_when_it_runs(
-    w: str,
+    w: str, record_property
 ) -> None:
     """The autograd forward does not consult ``torch.use_deterministic_algorithms``;
     the backward does when it runs.  Strict determinism: the forward runs this
     package's forward with no alert, the backward raises ``RuntimeError`` naming
     the det entry point and launches nothing.  ``warn_only`` at backward time:
     one warning, then this package's backward -- ``dx`` bitwise equal to this
-    package's ``dx`` with determinism off, ``dw`` the kernel's at the det
-    budget.  Determinism on only at forward time: the backward runs with no
-    alert."""
+    package's ``dx`` with determinism off, the kernel's ``dw`` meeting the naive
+    BF16 tier.  Determinism on only at forward time: the backward runs with no
+    alert, ``dx`` and ``dw`` meeting the naive BF16 tier (over the draws)."""
     hidden, rows = 512, 257
     _skip_unless_route(hidden, w_dtype=w)
     eps = EPS[hidden]
-    x, _u, g, _g_h, weight = _case_inputs(hidden, rows, w_dtype=W_DTYPES[w], key=67)
     expected = _window_records(hidden, "bwd", False, w, rows)
-    rstd = forward(x, weight, eps)[1]
-    dx_off, _dw_off = backward(g, x, weight, rstd)
-    dx_ref, dw_ref = _reference_backward(g, x, weight, rstd)
-
-    def graph():
-        xa = x.clone().requires_grad_(True)
-        wa = weight.clone().requires_grad_(True)
-        return xa, wa, rmsnorm(xa, wa, eps)
+    warn_only = ref.Draws(f"warn_only w={w}", prefix="warn_only ")
+    strict = ref.Draws(f"strict-at-forward w={w}", prefix="strict-at-forward ")
 
     def package_warnings(caught) -> list[str]:
         return [
@@ -1481,54 +1316,74 @@ def test_autograd_backward_checks_deterministic_algorithms_when_it_runs(
             if "cake_pplx.cake_rmsnorm_nondet_train." in str(item.message)
         ]
 
-    # strict determinism: the forward runs, the backward refuses
-    torch.use_deterministic_algorithms(True)
-    start = len(_LAUNCHED)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _xa, _wa, y = graph()
-    assert package_warnings(caught) == [], "the forward alerted"
-    assert _LAUNCHED[start:] == _window_records(hidden, "fwd", False, w, rows)
-    start = len(_LAUNCHED)
-    with pytest.raises(
-        RuntimeError, match=r"cake_rmsnorm_det_train\.cake_rmsnorm_det\b"
-    ):
-        y.backward(g)
-    assert _LAUNCHED[start:] == [], "a refused backward launched a module"
-    torch.use_deterministic_algorithms(False)
+    def graph(x, weight):
+        xa = x.clone().requires_grad_(True)
+        wa = weight.clone().requires_grad_(True)
+        return xa, wa, rmsnorm(xa, wa, eps)
 
-    # warn_only at backward time: one warning, this package's backward
-    xa, wa, y = graph()
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        launched = _backward_launches(lambda: y.backward(g))
-    torch.use_deterministic_algorithms(False)
-    messages = package_warnings(caught)
-    assert len(messages) == 1, messages
-    assert re.search(
-        r"cake_pplx\.cake_rmsnorm_det_train\.cake_rmsnorm_det\b", messages[0]
-    ), messages[0]
-    assert launched == expected, launched
-    assert torch.equal(xa.grad, dx_off)
-    _assert_autograd_dw(
-        wa.grad, weight, dw_ref, g, x, rstd, "warn_only dw", _form(expected)
-    )
+    for draw in range(ref.DRAWS):
+        x, _u, g, _g_h, weight = _case_inputs(
+            hidden, rows, w_dtype=W_DTYPES[w], key=67, draw=draw
+        )
+        rstd = forward(x, weight, eps)[1]
+        dx_off, _dw_off = backward(g, x, weight, rstd)
+        oracle = ref.oracle_backward(g, x, weight, rstd)
+        naive = ref.naive_backward(g, x, weight, rstd, eps)
 
-    # determinism on only at forward time: the backward runs with no alert
-    torch.use_deterministic_algorithms(True)
-    xa, wa, y = graph()
-    torch.use_deterministic_algorithms(False)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        launched = _backward_launches(lambda: y.backward(g))
-    assert package_warnings(caught) == []
-    assert launched == expected, launched
-    assert torch.equal(xa.grad, dx_off)
-    _assert_bf16_close(xa.grad, dx_ref, "strict-at-forward dx")
-    _assert_autograd_dw(
-        wa.grad, weight, dw_ref, g, x, rstd, "strict-at-forward dw", _form(expected)
-    )
+        # strict determinism: the forward runs, the backward refuses
+        torch.use_deterministic_algorithms(True)
+        start = len(_LAUNCHED)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _xa, _wa, y = graph(x, weight)
+        assert package_warnings(caught) == [], "the forward alerted"
+        assert _LAUNCHED[start:] == _window_records(hidden, "fwd", False, w, rows)
+        start = len(_LAUNCHED)
+        with pytest.raises(
+            RuntimeError, match=r"cake_rmsnorm_det_train\.cake_rmsnorm_det\b"
+        ):
+            y.backward(g)
+        assert _LAUNCHED[start:] == [], "a refused backward launched a module"
+        torch.use_deterministic_algorithms(False)
+
+        # warn_only at backward time: one warning, this package's backward
+        xa, wa, y = graph(x, weight)
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            launched = _backward_launches(y.backward, g)
+        torch.use_deterministic_algorithms(False)
+        messages = package_warnings(caught)
+        assert len(messages) == 1, messages
+        assert re.search(
+            r"cake_pplx\.cake_rmsnorm_det_train\.cake_rmsnorm_det\b", messages[0]
+        ), messages[0]
+        assert launched == expected, launched
+        assert torch.equal(xa.grad, dx_off)
+        warn_only.add(
+            draw, {"dw": _autograd_dw(wa.grad, weight, "warn_only dw")}, oracle, naive
+        )
+
+        # determinism on only at forward time: the backward runs with no alert
+        torch.use_deterministic_algorithms(True)
+        xa, wa, y = graph(x, weight)
+        torch.use_deterministic_algorithms(False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            launched = _backward_launches(y.backward, g)
+        assert package_warnings(caught) == []
+        assert launched == expected, launched
+        assert torch.equal(xa.grad, dx_off)
+        strict.add(
+            draw,
+            {
+                "dx": xa.grad,
+                "dw": _autograd_dw(wa.grad, weight, "strict-at-forward dw"),
+            },
+            oracle,
+            naive,
+        )
+    ref.check_all(record_property, (warn_only, strict))
 
 
 # --------------------------------------------------------------------------- argument validation
@@ -1629,7 +1484,7 @@ def test_argument_validation(hidden: int) -> None:
 def test_every_library_carries_its_architecture_floor_and_flags() -> None:
     """Every ``build.json`` library is built for exactly its architecture's code
     (``-gencode=arch=compute_XXXa,code=sm_XXXa``), carries that architecture's
-    CUDA floor (sm_100a 12.8, sm_103a 12.9, sm_107a 13.4) and the exact-math
+    CUDA floor (sm_100a 12.8, sm_103a 12.9, sm_107a 13.5) and the exact-math
     flags; the package floor is the lowest of them; every architecture ships
     every route (the feature x architecture matrix)."""
     manifest = cake_build.manifest()
@@ -1684,45 +1539,3 @@ def test_registry_records_run_on_the_exported_architectures() -> None:
                 record = loader.MODULES[name]
                 assert arch in record["arches"], (arch, route, name)
                 assert loader.library_name(name, arch) in cake_build.libraries_by_name()
-
-
-# --------------------------------------------------------------------------- aggregate (runs last)
-
-
-def test_dw_not_worse_than_eager_fp32_over_the_matrix() -> None:
-    """Median readings of every dw case this process checked, per backward form:
-    a single-kernel window's dw error is not worse than the eager FP32 reduction
-    (also gated per case), and the det pair windows keep the det package's
-    median gate.  Skipped when the module's dw cases did not run in this process
-    (``-k`` selection)."""
-    if len(_DW_ERRORS) < 8:
-        pytest.skip("needs the dw cases of this module in the same process")
-    counts = {form: 0 for form in ("single", "pair")}
-    for form in counts:
-        cases = [item for item in _DW_ERRORS if item[1] == form]
-        counts[form] = len(cases)
-        if not cases:
-            continue
-        ratios = [
-            (k / e) if e > 0 else (0.0 if k == 0 else float("inf"))
-            for _label, _form_name, k, e in cases
-        ]
-        median = statistics.median(ratios)
-        worst = max(cases, key=lambda item: item[2])
-        worst_ratio = max(ratios)
-        print(
-            f"DW_VS_EAGER form={form} cases={len(cases)} median_ratio={median:.3f} "
-            f"worst_ratio={worst_ratio:.3f} worst_rel_l2={worst[2]:.3e} at {worst[0]}"
-        )
-        assert median <= 1.0, (
-            f"{form}: median dw error ratio kernel/eager-FP32 {median:.3f} > 1 over "
-            f"{len(cases)} cases (worst kernel rel-L2 {worst[2]:.3e} at {worst[0]})"
-        )
-    print(f"FORMS single={counts['single']} pair={counts['pair']}")
-    claimed = [item for item in _DX_CLAIMS if item[1]]
-    print(
-        f"DX_CLAIMS compared={len(_DX_CLAIMS)} claimed={len(claimed)} "
-        f"unclaimed_differing={sum(1 for item in _DX_CLAIMS if not item[1] and item[2])}"
-    )
-    # A det comparison that never claims bitwise dx would make that gate vacuous.
-    assert not _DX_CLAIMS or claimed, "no window claims the det dx bits"

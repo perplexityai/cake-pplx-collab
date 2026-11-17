@@ -43,7 +43,7 @@ REDUCE_ROLE = "bwd_reduce"
 # The workspace kinds: a main program with its dw reduce companion keeps FP32 partial rows; a column-task program
 # (role ``bwd_col``) runs alone, its first ``H / col`` tickets summing whole columns of dw, and keeps no sums.
 PAIR_WORKSPACE = "chunk_partials"
-COL_WORKSPACE = "claim_sum_f64"
+COL_WORKSPACE = "claim_sum_f32"
 # The column widths of the dw reduce slabs, one CTA each: 4 for the column-split H = 256 reduce (one column of a
 # four-column slab per lane).
 SHIPPED_SLABS = (4, 16, 32, 64)
@@ -370,20 +370,15 @@ def test_rows_cover_every_backward_window_edge() -> None:
 
 # The H = 256 backward route: per sm_100a / sm_103a window the faster of the four-CTA pipeline (``pd4``) and the
 # five-CTA ring at issue distance three without the L2 hint (``a3``), both at ``tail_div=4``, in two sessions per
-# architecture (BF16 and FP32 weight alike).  Above the ring's dw accuracy edge (80896 rows on sm_100a, 99840 on
-# sm_103a) the ring with compensated dw sums runs instead: its lean form ``dcln`` (two rows per iteration with the same
-# arithmetic in the same order), on sm_103a to 720896 rows and the ring itself (``dc``) above; above 1572864 rows its
-# form with hi / lo partial rows (``dchl``).  On sm_103a the lean compensated ring also runs the smallest row counts
-# (to 1680 rows), where the plain windows' dw drifts with the SM count; on sm_100a the column-task program ``fcwl``
-# runs them (to 87 rows; one CTA sums each column of dw over every row, so dw does not depend on the SM count);
-# sm_107a runs the lean ring at every row count to 1572864.
+# architecture (BF16 and FP32 weight alike).  The ring also serves every row count above 40960 (its windows split at
+# 80896 rows on sm_100a, at 99840 and 720896 rows on sm_103a, and at 1572864 rows, where the dw reduce geometry
+# changes).  On sm_103a the ring also runs the smallest row counts (to 1680 rows, then to 2048 rows with another
+# reduce); on sm_100a the column-task program ``fcwl`` runs them (to 87 rows; one CTA sums each column of dw over
+# every row, so dw does not depend on the SM count); sm_107a runs the ring at every row count (split at 1572864).
 H256_BWD_PROGRAMS = {
     "pd4": "rmsnorm_train_bwd_h256_t128x4_pd4_k_s32_split_pts_cl_td4",
     "a3": "rmsnorm_train_bwd_h256_t128x5_cpa8a3nhkc8_k_s32_split_pts_cl_td4_cs",
-    "dc": "rmsnorm_train_bwd_h256_t128x5_cpa8a3nhftdf_k_s32_split_pts_cl_td4_cs",
-    "dcln": "rmsnorm_train_bwd_h256_t128x5_cpa8a3nhftdfln_k_s32_split_pts_cl_td4_cs",
-    "dchl": "rmsnorm_train_bwd_h256_t128x5_cpa8a3nhftdfhl_k_s32_split_pts_cl_td4_cs",
-    "fcwl": "rmsnorm_train_bwd_atomic_h256_i8r8d1b2_c8_fx_wl_ts_l2evict_last",
+    "fcwl": "rmsnorm_train_bwd_atomic_h256_i8r8d1b2_c8_fx_wl_l2evict_last",
 }
 H256_BWD_RING = (
     (2048, 5120, "pd4"),
@@ -396,21 +391,21 @@ H256_BWD_SPLIT = {
         (87, 2048, "a3"),
         *H256_BWD_RING,
         (40960, 80896, "a3"),
-        (80896, 1572864, "dcln"),
-        (1572864, None, "dchl"),
+        (80896, 1572864, "a3"),
+        (1572864, None, "a3"),
     ),
     "sm_103a": (
-        (0, 1680, "dcln"),
+        (0, 1680, "a3"),
         (1680, 2048, "a3"),
         *H256_BWD_RING,
         (40960, 99840, "a3"),
-        (99840, 720896, "dcln"),
-        (720896, 1572864, "dc"),
-        (1572864, None, "dchl"),
+        (99840, 720896, "a3"),
+        (720896, 1572864, "a3"),
+        (1572864, None, "a3"),
     ),
     "sm_107a": (
-        (0, 1572864, "dcln"),
-        (1572864, None, "dchl"),
+        (0, 1572864, "a3"),
+        (1572864, None, "a3"),
     ),
 }
 
@@ -497,9 +492,9 @@ RECUT_FP32_ROUTES: dict[
 
 
 # The FP32-weight routes whose window runs the FP32-weight twin of another program than the BF16 route's there, under
-# a record of the same host plan (the window, grid rule and workspace of the BF16 record): SM103 H = 1536 above
-# 40448 rows, where the register-compensated program is faster with the FP32 weight and not with the BF16 weight.
-SWAPPED_FP32_ROUTES = {("sm_103a", 1536, "bwd", False)}
+# a record of the same host plan (the window, grid rule and workspace of the BF16 record): none (every backward
+# program sums dw in plain FP32; no route swaps in another program for the FP32 weight).
+SWAPPED_FP32_ROUTES: set[tuple[str, int, str, bool]] = set()
 
 
 def _window(record) -> tuple[int | None, int | None]:
@@ -663,38 +658,9 @@ def test_fp32_weight_routes_mirror_their_bf16_routes(arch: str) -> None:
 # The SM counts of devices per architecture at or above the guard's: the measured boards (B200 148, GB300 152,
 # R200 212 and 216) and a device of the same architecture with more SMs (GB200 152, a 160-SM GB300).
 BOARD_SMS = {"sm_100a": (148, 152), "sm_103a": (152, 160), "sm_107a": (212, 216)}
-# The accuracy edges: the plain programs of H = 1536 / 2048 / 4096 / 5120 / 6144 and of the residual H = 6144 ->
-# their block-compensated forms, the H = 256 ring -> the compensated-dot ring (0 on sm_107a: its H = 256 route runs
-# compensated programs only).
-ACCURACY_EDGES = {
-    "sm_100a": {
-        "h1536": 36352,
-        "h2048": 58880,
-        "h256": 80896,
-        "h4096": 44032,
-        "h5120": 6144,
-        "h6144": 42496,
-        "residual_h6144": 42496,
-    },
-    "sm_103a": {
-        "h1536": 40448,
-        "h2048": 55296,
-        "h256": 99840,
-        "h4096": 48640,
-        "h5120": 5120,
-        "h6144": 48640,
-        "residual_h6144": 48640,
-    },
-    "sm_107a": {
-        "h1536": 45056,
-        "h2048": 50688,
-        "h256": 0,
-        "h4096": 24064,
-        "h5120": 19968,
-        "h6144": 19456,
-        "residual_h6144": 19456,
-    },
-}
+# The accuracy edges: none.  Every backward program sums dw in plain FP32 (no compensated program), so the guard
+# has no route to move above an edge on a device with fewer SMs than it was measured on.
+ACCURACY_EDGES: dict[str, dict[str, int]] = {}
 
 
 def _backward_routes(arch: str) -> list[str]:
@@ -715,10 +681,10 @@ def _launched_library(arch: str, route: str, rows: int) -> str:
 
 def test_accuracy_guard_names_the_measured_sm_counts_and_edges() -> None:
     """The guard's tables: the smallest measured SM count per architecture and, for the BF16 and FP32-weight
-    backward routes with a compensated program (every one but H = 512), the edge where the route's compensated
-    programs start."""
+    backward routes with a compensated program (none: ``ACCURACY_EDGES`` above), the edge where the route's
+    compensated programs start."""
     assert windows.ACCURACY_MIN_SMS == {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
-    assert set(windows.ACCURACY_EDGES) == set(loader.ROUTES)
+    assert set(windows.ACCURACY_EDGES) == set(ACCURACY_EDGES)
     for arch, edges in ACCURACY_EDGES.items():
         assert windows.ACCURACY_EDGES[arch] == {
             f"bwd{w32}_{width}": edge
@@ -737,12 +703,13 @@ def test_accuracy_guard_runs_the_compensated_programs_below_the_measured_sm_coun
     arch: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """On a device with fewer SMs than ``ACCURACY_MIN_SMS`` (the SM count patched) every call of a guarded route
-    launches a program of the windows above its edge; the other routes select by the call's rows."""
+    launches a program of the windows above its edge; the other routes (every route while ``ACCURACY_EDGES`` is
+    empty) select by the call's rows."""
     for sms in (windows.ACCURACY_MIN_SMS[arch] - 1, 16):
         monkeypatch.setattr(loader, "sm_count", lambda _index, sms=sms: sms)
         for route in _backward_routes(arch):
             hidden, _kind, residual, w_dtype = _route_parts(route)
-            edge = windows.ACCURACY_EDGES[arch].get(route)
+            edge = windows.ACCURACY_EDGES.get(arch, {}).get(route)
             route_windows = windows.PROGRAM_WINDOWS[arch][route]
             compensated = {
                 lib
@@ -1116,7 +1083,8 @@ def test_workspace_holds_the_compensated_programs_below_the_measured_sm_count(
     hidden: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With the SM count below ``ACCURACY_MIN_SMS`` the workspace for ``rows`` tokens holds the layout of the
-    compensated program the guard launches at that row count."""
+    program the guard launches at that row count (a compensated program above a route's accuracy edge; the row
+    count's own window while ``cake_windows.ACCURACY_EDGES`` is empty)."""
     if not pkg.is_cake_rmsnorm_det_train_supported(_device(), hidden):
         pytest.skip(f"hidden={hidden} has no exported route on this device")
     device = _device()

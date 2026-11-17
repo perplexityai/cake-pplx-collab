@@ -46,8 +46,12 @@ that the twin's program twins); the deterministic package's own call
 beside the same side kernel is measured and printed for reference.  Every other
 call that waits fails: a single kernel, an unlisted window, or a window whose
 program is not the deterministic package's.  Outputs are checked across every call:
-``dx`` / ``y`` / ``rstd`` bitwise, ``dw`` within ``DW_REL_L2`` of the first call
-alone (bitwise for a deterministic pair), the workspace at rest.
+``dx`` / ``y`` / ``rstd`` bitwise (``dw`` too for a deterministic pair), the
+workspace at rest; every backward call's ``dx`` and ``dw`` meet the naive
+PyTorch BF16 tier (no tolerance: their errors against an FP64 oracle beside the
+naive's, ``tests/norm/test_helpers/cake_rmsnorm_train_reference.py``) on the
+case's own input, the largest error over the calls, and one further call on
+each of 31 more random inputs, untimed.
 """
 
 from __future__ import annotations
@@ -91,7 +95,6 @@ RUNS = 7
 ATTEMPTS = 3
 MAX_RATIO = 1.5
 MAX_EXTRA_MS = 0.020
-DW_REL_L2 = 1e-6
 SEED = 7548
 # all-SM side kernel (#7548 item 2)
 ALL_SM_SPIN_MS = 50.0
@@ -215,10 +218,15 @@ def _listed_whole_sm(kind: str, key: str, rows: int) -> Optional[int]:
 # --------------------------------------------------------------------------- inputs and calls
 
 
-def _inputs(rows: int, hidden: int, residual: bool, w: str):
+def _inputs(rows: int, hidden: int, residual: bool, w: str, draw: int = 0):
+    """``(x, u, weight, g, g_h, normalized, rstd)`` of draw ``draw`` of the case
+    (draw 0 is the case's own input): the forward runs on it."""
     generator = torch.Generator(device=_device()).manual_seed(
-        (SEED * 1_000_003 + rows * 7 + hidden + int(residual) * 3 + (w == "f32"))
-        % (2**31 - 1)
+        ref.draw_seed(
+            (SEED * 1_000_003 + rows * 7 + hidden + int(residual) * 3 + (w == "f32"))
+            % (2**31 - 1),
+            draw,
+        )
     )
     kwargs = dict(dtype=torch.float32, device=_device(), generator=generator)
     x = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16)
@@ -232,10 +240,12 @@ def _inputs(rows: int, hidden: int, residual: bool, w: str):
 
 
 def _backward_call(hidden, residual, w, rows):
-    """``(call, det_call or None, form, workspace)`` of one backward case: the
-    non-det call on its own workspace and, where the det package serves the
-    shape, its call (BF16 weight: an FP32-weight twin's owner)."""
-    _x, _u, weight, g, g_h, normalized, rstd = _inputs(rows, hidden, residual, w)
+    """``(call, det_call or None, form, workspace, accuracy)`` of one backward
+    case: the non-det call on its own workspace and, where the det package
+    serves the shape, its call (BF16 weight: an FP32-weight twin's owner);
+    ``accuracy`` judges the calls' outputs (:class:`_Accuracy`)."""
+    inputs = _inputs(rows, hidden, residual, w)
+    _x, _u, weight, g, g_h, normalized, rstd = inputs
     ws = workspace_for(rows, hidden, _device(), residual=residual)
 
     def call():
@@ -258,7 +268,44 @@ def _backward_call(hidden, residual, w, rows):
             return tuple(t.clone() for t in out)
 
     records = ref.window_records(loader, _arch(), hidden, "bwd", residual, w, rows)
-    return call, det_call, ref.form(loader, records), ws
+    accuracy = _Accuracy(hidden, residual, w, rows, inputs)
+    return call, det_call, ref.form(loader, records), ws, accuracy
+
+
+class _Accuracy(ref.BackwardCalls):
+    """The naive BF16 tier's judge of one backward case (``ref.BackwardCalls``):
+    every call on the case's own input is draw 0; :meth:`check` adds one untimed
+    call on each further draw."""
+
+    def __init__(self, hidden, residual, w, rows, inputs) -> None:
+        _x, _u, weight, g, g_h, normalized, rstd = inputs
+        super().__init__(
+            f"{'res-' if residual else ''}h{hidden}-{w} T={rows}",
+            g,
+            normalized,
+            weight,
+            rstd,
+            ref.EPS[hidden],
+            g_h,
+        )
+        self.case = (hidden, residual, w, rows)
+
+    def add(self, out) -> None:
+        super().add(out[0], out[1])
+
+    def check(self, record_property) -> None:
+        hidden, residual, w, rows = self.case
+
+        def draw_inputs(draw):
+            _x, _u, weight, g, g_h, normalized, rstd = _inputs(
+                rows, hidden, residual, w, draw
+            )
+            return g, normalized, weight, rstd, g_h
+
+        def launch(g, x, weight, rstd, g_h):
+            return backward(g, x, weight, rstd, g_residual=g_h)
+
+        super().check(record_property, draw_inputs, launch)
 
 
 def _forward_call(hidden, residual, w, rows):
@@ -281,9 +328,11 @@ def _forward_call(hidden, residual, w, rows):
     return call, det_call
 
 
-def _check_outputs(results, kind: str, form: Optional[str], label: str) -> None:
+def _check_outputs(
+    results, kind: str, form: Optional[str], label: str, accuracy=None
+) -> None:
     """Every call's outputs against the first: forward and ``dx`` bitwise, ``dw``
-    bitwise for a det pair and within ``DW_REL_L2`` for the single kernel."""
+    bitwise for a det pair; every backward call's outputs judged by ``accuracy``."""
     first = results[0]
     for out in results[1:]:
         if kind == "fwd":
@@ -296,10 +345,9 @@ def _check_outputs(results, kind: str, form: Optional[str], label: str) -> None:
             assert torch.equal(out[1], first[1]), (
                 f"{label}: det-pair dw differs across calls"
             )
-        else:
-            assert ref.rel_l2(out[1], first[1]) <= DW_REL_L2, (
-                f"{label}: dw moved across calls"
-            )
+    if accuracy is not None:
+        for out in results:
+            accuracy.add(out)
 
 
 # --------------------------------------------------------------------------- one-thread side kernel
@@ -335,10 +383,12 @@ def _route_id(route) -> str:
 
 @pytest.mark.parametrize("rows", TOKENS)
 @pytest.mark.parametrize("route", list(_backward_routes()), ids=_route_id)
-def test_backward_keeps_its_speed_beside_a_resident_one_thread_kernel(route, rows: int):
+def test_backward_keeps_its_speed_beside_a_resident_one_thread_kernel(
+    route, rows: int, record_property
+):
     hidden, residual, w = route
     _skip_unless_route(hidden, residual, w, "bwd")
-    call, _det_call, form, ws = _backward_call(hidden, residual, w, rows)
+    call, _det_call, form, ws, accuracy = _backward_call(hidden, residual, w, rows)
     side = torch.cuda.Stream()
     for _ in range(WARMUP):
         _timed(call, side=None)
@@ -351,7 +401,7 @@ def test_backward_keeps_its_speed_beside_a_resident_one_thread_kernel(route, row
             busy.append(_timed(call, side=side))
         alone_ms = statistics.median(t for t, _ in alone)
         busy_ms = statistics.median(t for t, _ in busy)
-        _check_outputs([o for _, o in alone + busy], "bwd", form, label)
+        _check_outputs([o for _, o in alone + busy], "bwd", form, label, accuracy)
         assert ref.workspace_at_rest(loader, ws), f"{label}: workspace not at rest"
         print(
             f"STALL1 {_arch()} {_route_id(route)} T={rows} form={form} attempt={attempt} "
@@ -368,6 +418,7 @@ def test_backward_keeps_its_speed_beside_a_resident_one_thread_kernel(route, row
             f"repetitions ({cells}): ratio above {MAX_RATIO} and more than "
             f"{MAX_EXTRA_MS} ms above the call alone"
         )
+    accuracy.check(record_property)
 
 
 # --------------------------------------------------------------------------- all-SM side kernel
@@ -641,16 +692,18 @@ def _report_waiting(verdict: str, label: str, note: str) -> None:
 @pytest.mark.parametrize("rows", ALL_SM_TOKENS)
 @pytest.mark.parametrize("route", list(_backward_routes()), ids=_route_id)
 def test_backward_beside_an_all_sm_kernel_with_the_max_shared_carveout(
-    route, rows: int
+    route, rows: int, record_property
 ):
     hidden, residual, w = route
     _skip_unless_route(hidden, residual, w, "bwd")
-    call, det_call, form, ws = _backward_call(hidden, residual, w, rows)
+    call, det_call, form, ws, accuracy = _backward_call(hidden, residual, w, rows)
     alone_ms, busy_ms, outputs = _all_sm(call)
     key = loader.route_key(hidden, "bwd", residual, w)
     label = f"{key} T={rows}"
-    _check_outputs(outputs, "bwd", form, label)
+    _check_outputs(outputs, "bwd", form, label, accuracy)
+    del outputs
     assert ref.workspace_at_rest(loader, ws), f"{label}: workspace not at rest"
+    accuracy.check(record_property)
     extra = busy_ms - alone_ms
     verdict, note = _judge("bwd", hidden, residual, w, rows, form, extra, det_call)
     print(

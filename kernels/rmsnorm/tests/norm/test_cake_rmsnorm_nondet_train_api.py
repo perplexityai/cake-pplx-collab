@@ -23,9 +23,13 @@ backward alert: ``RuntimeError``; with ``warn_only``, one warning naming the
 det entry point, then this package's kernels), the standalone import of the
 backend, the workspace contract (one buffer serves any sequence of layouts and
 is at rest after every call), the one-kernel launch of a single-kernel window
-and the N-D autograd gradients.  The names of both packages and the old names
-that fail at import are ``test_cake_rmsnorm_det_train_names.py``'s; the
-numerical contract of the kernels is ``test_cake_rmsnorm_nondet_train.py``'s.
+and the N-D autograd gradients.  Every output a test here computes meets the
+naive PyTorch BF16 tier over the draws (no tolerance: its error against an FP64
+oracle beside the naive's, ``tests/norm/test_helpers/
+cake_rmsnorm_train_reference.py``); the tests never compare this package with
+the deterministic one.  The names of both packages and the old names that fail
+at import are ``test_cake_rmsnorm_det_train_names.py``'s; the numerical
+contract of the kernels is ``test_cake_rmsnorm_nondet_train.py``'s.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ from cake_pplx.cake_rmsnorm_nondet_train import (
 )
 from cake_pplx._backends.cake_rmsnorm_nondet_train import cake_jit as loader
 from tests.cake.test_helpers.cake_jit_warmup import build_jit_specs
+from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WIDTHS = ((6144, 1e-5), (4096, 1e-5), (2048, 1e-6), (1536, 1e-6), (512, 1e-6))
@@ -349,13 +354,17 @@ def test_backend_never_needs_the_det_package(
 @requires_device
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 def test_every_call_runs_this_package(
-    hidden: int, warmup_jit, no_determinism, monkeypatch: pytest.MonkeyPatch
+    hidden: int,
+    warmup_jit,
+    no_determinism,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
 ) -> None:
     """Every call launches this package's modules, the same ones on a repeat
     with the same ``y``, ``rstd`` and ``dx`` bits (``dx`` is bitwise
-    reproducible) and ``dw`` within the budget of the FP64 reference; the
-    autograd wrapper returns that ``y`` and ``dx`` and the kernel's ``dw`` in
-    the weight's dtype."""
+    reproducible); the autograd wrapper returns that ``y`` and ``dx`` and the
+    kernel's ``dw`` in the weight's dtype.  On every draw, both calls' outputs
+    and the autograd ``dw`` meet the naive PyTorch BF16 tier."""
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
     launched: list[str] = []
@@ -366,45 +375,60 @@ def test_every_call_runs_this_package(
         return run_module(name, values, rows=rows, device_index=device_index)
 
     monkeypatch.setattr(loader, "run_module", spy)
-    generator = torch.Generator(device=_device()).manual_seed(SEED + hidden)
-    x = _randn(129, hidden, generator=generator)
-    g = _randn(129, hidden, generator=generator)
-    w = _randn(hidden, generator=generator)
-    y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
-    dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
-    first = list(launched)
-    launched.clear()
-    y_nd, rstd_nd = cake_rmsnorm_nondet_train_forward(x, w, eps)
-    dx_nd, dw_nd = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
-    assert first == launched and all(name in loader.MODULES for name in first)
-    assert torch.equal(y, y_nd) and torch.equal(rstd, rstd_nd)
-    assert torch.equal(dx, dx_nd)
-    reference = _dw_reference(g, x, rstd)
-    assert _rel(dw, reference) <= 1e-4 and _rel(dw_nd, reference) <= 1e-4
-    xa = x.clone().requires_grad_(True)
-    wa = w.clone().requires_grad_(True)
-    launched.clear()
-    ya = cake_rmsnorm_nondet(xa, wa, eps)
-    assert torch.equal(ya, y)
-    ya.backward(g)
-    assert launched == first, launched
-    assert torch.equal(xa.grad, dx)
-    assert wa.grad.dtype == w.dtype
-    # the kernel's FP32 dw rounded to BF16 (at most 2^-9 relative per element)
-    assert _rel(wa.grad, reference) <= 2.0**-8, _rel(wa.grad, reference)
+    check = ref.Draws(f"hidden={hidden}")
+    for draw in range(check.draws):
+        generator = torch.Generator(device=_device()).manual_seed(
+            ref.draw_seed(SEED + hidden, draw)
+        )
+        x = _randn(129, hidden, generator=generator)
+        g = _randn(129, hidden, generator=generator)
+        w = _randn(hidden, generator=generator)
+        launched.clear()
+        y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+        dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
+        first = list(launched)
+        launched.clear()
+        y_nd, rstd_nd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+        dx_nd, dw_nd = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
+        assert first == launched and all(name in loader.MODULES for name in first)
+        assert torch.equal(y, y_nd) and torch.equal(rstd, rstd_nd)
+        assert torch.equal(dx, dx_nd)
+        xa = x.clone().requires_grad_(True)
+        wa = w.clone().requires_grad_(True)
+        launched.clear()
+        ya = cake_rmsnorm_nondet(xa, wa, eps)
+        assert torch.equal(ya, y)
+        ya.backward(g)
+        assert launched == first, launched
+        assert torch.equal(xa.grad, dx)
+        assert wa.grad.dtype == w.dtype
+        oracle = ref.oracle_forward(x, w, eps)
+        oracle.update(ref.oracle_backward(g, x, w, rstd))
+        naive = ref.naive_forward(x, w, eps)
+        naive.update(ref.naive_backward(g, x, w, rstd, eps))
+        for outputs in ((y, rstd, dx, dw), (y_nd, rstd_nd, dx_nd, dw_nd)):
+            check.add(
+                draw, dict(zip(("y", "rstd", "dx", "dw"), outputs, strict=True)), oracle, naive
+            )
+        # the kernel's FP32 dw in the weight's dtype
+        oracle["autograd dw"], naive["autograd dw"] = oracle["dw"], naive["dw"]
+        check.add(draw, {"autograd dw": wa.grad}, oracle, naive)
+    check.check(record_property)
 
 
 @requires_device
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 def test_nondet_calls_select_this_package(
-    hidden: int, warmup_jit, no_determinism, monkeypatch: pytest.MonkeyPatch
+    hidden: int,
+    warmup_jit,
+    no_determinism,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
 ) -> None:
     """The nondet calls launch this package's modules (and no det module) --
     exactly the records the registry's windows select for the call: one
     forward, then one single backward kernel or a det pair's main kernel and
-    dw reduce; the forward bits equal the det forward's where the two packages
-    select the same program, and ``dx`` equals the det ``dx`` up to the BF16
-    rounding of the same formula."""
+    dw reduce; on every draw the outputs meet the naive PyTorch BF16 tier."""
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
     launched: list[str] = []
@@ -415,64 +439,63 @@ def test_nondet_calls_select_this_package(
         return run_module(name, values, rows=rows, device_index=device_index)
 
     monkeypatch.setattr(loader, "run_module", spy)
-    generator = torch.Generator(device=_device()).manual_seed(SEED + 7 * hidden)
-    x = _randn(257, hidden, generator=generator)
-    g = _randn(257, hidden, generator=generator)
-    w = _randn(hidden, generator=generator)
-    y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
-    dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
-    assert launched and all(name in loader.MODULES for name in launched)
     arch = loader.device_arch(_device().index or 0)
     expected = [
         *loader.selected_modules(arch, hidden, "fwd", False, rows=257),
         *loader.selected_modules(arch, hidden, "bwd", False, rows=257),
     ]
-    assert launched == expected, launched
-    owners = [
-        loader.MODULES[name]["workspace_rule"]["kind"]
-        for name in launched
-        if loader.MODULES[name]["workspace_rule"] is not None
-    ]
-    assert len(owners) == 1 and len(launched) == (
-        2 if owners[0] in ("claim_sum_f64", "claim_part_f32") else 3
-    ), launched
-    y_det, rstd_det = det.cake_rmsnorm_det_train_forward(x, w, eps)
-    torch.testing.assert_close(y.float(), y_det.float(), atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(rstd, rstd_det, atol=0, rtol=1e-6)
-    dx_det, dw_det = det.cake_rmsnorm_det_train_backward(g, x, w, rstd)
-    torch.testing.assert_close(dx.float(), dx_det.float(), atol=1e-2, rtol=1e-2)
-    rel = (dw.double() - dw_det.double()).norm() / dw_det.double().norm().clamp_min(
-        1e-30
-    )
-    assert float(rel) <= 1e-4, float(rel)
+    check = ref.Draws(f"hidden={hidden} rows=257")
+    for draw in range(check.draws):
+        generator = torch.Generator(device=_device()).manual_seed(
+            ref.draw_seed(SEED + 7 * hidden, draw)
+        )
+        x = _randn(257, hidden, generator=generator)
+        g = _randn(257, hidden, generator=generator)
+        w = _randn(hidden, generator=generator)
+        launched.clear()
+        y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+        dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd)
+        assert launched and all(name in loader.MODULES for name in launched)
+        assert launched == expected, launched
+        owners = [
+            loader.MODULES[name]["workspace_rule"]["kind"]
+            for name in launched
+            if loader.MODULES[name]["workspace_rule"] is not None
+        ]
+        assert len(owners) == 1 and len(launched) == (
+            2 if owners[0] in ("claim_sum_f32", "claim_part_f32") else 3
+        ), launched
+        check.forward(draw, {"y": y, "rstd": rstd}, x, w, eps)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+    check.check(record_property)
 
 
 def _at_rest(ws: torch.Tensor) -> bool:
     """The workspace's documented rest state after every call: every counter and
-    FP64 sum zero -- every byte before the det pair's partial rows
+    FP32 sum zero -- every byte before the det pair's partial rows
     (``cake_jit.PAIR_ROWS_OFFSET``), which are scratch."""
     torch.cuda.synchronize()
     return not bool(ws[: loader.PAIR_ROWS_OFFSET].any())
 
 
-def _dw_reference(g, x, rstd) -> torch.Tensor:
-    return (g.double() * x.double() * rstd.double().unsqueeze(-1)).sum(0)
-
-
-def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
-    return float((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30))
+def _generator(base: int, draw: int) -> torch.Generator:
+    """The generator of draw ``draw`` of a case whose own seed is ``base``."""
+    return torch.Generator(device=_device()).manual_seed(ref.draw_seed(base, draw))
 
 
 @requires_device
 def test_nondeterministic_workspace_serves_every_call_up_to_its_rows(
-    no_determinism,
+    no_determinism, record_property
 ) -> None:
     """The non-deterministic workspace of ``rows`` serves every backward call of
     its width of at most ``rows`` tokens without a host write and is at rest
-    after each call; a width whose windows all run the single kernel needs the
-    counters and its sums whatever ``rows``."""
+    after each call (every draw's calls on the one workspace; each call's ``dx``
+    and ``dw`` meet the naive PyTorch BF16 tier over the draws); a width whose
+    windows all run the single kernel needs the counters and its sums whatever
+    ``rows``."""
 
     arch = loader.device_arch(_device().index or 0)
+    judges: list[ref.Draws] = []
     for hidden in (512, 2048, 6144):
         if hidden not in loader.supported_hidden_sizes(arch):
             continue
@@ -482,7 +505,7 @@ def test_nondeterministic_workspace_serves_every_call_up_to_its_rows(
             for name in loader.route_modules(arch, hidden, "bwd", False, w_dtype)
             if loader.MODULES[name]["workspace_rule"] is not None
         ]
-        if all(r["workspace_rule"]["kind"] == "claim_sum_f64" for r in records):
+        if all(r["workspace_rule"]["kind"] == "claim_sum_f32" for r in records):
             sums = max(r["workspace_rule"]["sum_bytes"] for r in records)
             for rows in (0, 1, 12345, 65536):
                 assert (
@@ -491,22 +514,33 @@ def test_nondeterministic_workspace_serves_every_call_up_to_its_rows(
                     )
                     == loader.SUMS_OFFSET + -(-sums // 256) * 256
                 )
-        generator = torch.Generator(device=_device()).manual_seed(SEED + hidden)
         for rows in (257, 4096):
             ws = cake_rmsnorm_nondet_train_backward_workspace(rows, hidden, _device())
             assert ws.dtype == torch.uint8 and not bool(ws.any())
             assert ws.numel() == cake_rmsnorm_nondet_train_backward_workspace_bytes(
                 rows, hidden, _device()
             )
-            for tokens in (1, rows // 2, rows):
-                x = _randn(tokens, hidden, generator=generator)
-                g = _randn(tokens, hidden, generator=generator)
-                w = _randn(hidden, generator=generator)
-                _y, rstd = cake_rmsnorm_nondet_train_forward(x, w, EPS[hidden])
-                dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd, workspace=ws)
-                rel = _rel(dw, _dw_reference(g, x, rstd))
-                assert rel <= 1e-4, (hidden, rows, tokens, rel)
-                assert _at_rest(ws), (hidden, rows, tokens)
+            checks = {
+                tokens: ref.Draws(
+                    f"hidden={hidden} rows={rows}", prefix=f"tokens={tokens} "
+                )
+                for tokens in (1, rows // 2, rows)
+            }
+            for draw in range(ref.DRAWS):
+                generator = _generator(SEED + hidden + 7 * rows, draw)
+                for tokens, check in checks.items():
+                    x = _randn(tokens, hidden, generator=generator)
+                    g = _randn(tokens, hidden, generator=generator)
+                    w = _randn(hidden, generator=generator)
+                    eps = EPS[hidden]
+                    _y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+                    dx, dw = cake_rmsnorm_nondet_train_backward(
+                        g, x, w, rstd, workspace=ws
+                    )
+                    assert _at_rest(ws), (hidden, rows, tokens, draw)
+                    check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+            judges += checks.values()
+    ref.check_all(record_property, judges)
 
 
 def _sequence(arch: str) -> list[tuple[int, bool, torch.dtype, int]]:
@@ -533,7 +567,21 @@ def _sequence(arch: str) -> list[tuple[int, bool, torch.dtype, int]]:
     return out
 
 
-def _call(hidden, residual, w_dtype, tokens, ws, generator):
+def _sequence_judges(label: str, calls) -> list[ref.Draws]:
+    """One judge per call of a sequence (``_sequence``)."""
+    return [
+        ref.Draws(
+            label,
+            prefix=f"{index}: hidden={hidden} residual={residual} "
+            f"w={str(w_dtype).removeprefix('torch.')} tokens={tokens} ",
+        )
+        for index, (hidden, residual, w_dtype, tokens) in enumerate(calls)
+    ]
+
+
+def _call(hidden, residual, w_dtype, tokens, ws, generator, check, draw):
+    """One forward and backward on ``ws``; the backward's ``dx`` and ``dw`` are
+    draw ``draw`` of ``check``."""
     eps = EPS.get(hidden, 1e-6)
     x = _randn(tokens, hidden, generator=generator)
     g = _randn(tokens, hidden, generator=generator)
@@ -546,16 +594,18 @@ def _call(hidden, residual, w_dtype, tokens, ws, generator):
     dx, dw = cake_rmsnorm_nondet_train_backward(
         g, normalized, w, rstd, g_residual=gh, workspace=ws
     )
-    return _rel(dw, _dw_reference(g, normalized, rstd))
+    check.backward(draw, {"dx": dx, "dw": dw}, g, normalized, w, rstd, eps, gh)
 
 
 @requires_device
-def test_one_workspace_serves_a_sequence_of_layouts(no_determinism) -> None:
+def test_one_workspace_serves_a_sequence_of_layouts(
+    no_determinism, record_property
+) -> None:
     """R3 C1.4a/c: ONE zeroed workspace, sized for the largest call, serves a
     sequence that changes the hidden size, residual flag, weight dtype and
-    token count (so the kernel instance, its sums and its windows), twice over:
-    ``dw`` matches the FP64 reference after every call and the workspace is at
-    rest after every call."""
+    token count (so the kernel instance, its sums and its windows), once per
+    draw: every call's ``dx`` and ``dw`` meet the naive PyTorch BF16 tier over
+    the draws and the workspace is at rest after every call."""
     arch = loader.device_arch(_device().index or 0)
     calls = _sequence(arch)
     assert len({(h, r, d) for h, r, d, _t in calls}) >= 3, calls
@@ -566,19 +616,23 @@ def test_one_workspace_serves_a_sequence_of_layouts(no_determinism) -> None:
         for hidden, residual, _d, tokens in calls
     )
     ws = torch.zeros(nbytes, dtype=torch.uint8, device=_device())
-    generator = torch.Generator(device=_device()).manual_seed(SEED + 41)
-    for _round in range(2):
-        for hidden, residual, w_dtype, tokens in calls:
-            rel = _call(hidden, residual, w_dtype, tokens, ws, generator)
-            assert rel <= 1e-4, (hidden, residual, w_dtype, tokens, rel)
-            assert _at_rest(ws), (hidden, residual, w_dtype, tokens)
+    checks = _sequence_judges("one workspace", calls)
+    for draw in range(ref.DRAWS):
+        generator = _generator(SEED + 41, draw)
+        for check, (hidden, residual, w_dtype, tokens) in zip(checks, calls, strict=True):
+            _call(hidden, residual, w_dtype, tokens, ws, generator, check, draw)
+            assert _at_rest(ws), (hidden, residual, w_dtype, tokens, draw)
+    ref.check_all(record_property, checks)
 
 
 @requires_device
-def test_a_stale_workspace_is_correct_after_the_fresh_form(no_determinism) -> None:
+def test_a_stale_workspace_is_correct_after_the_fresh_form(
+    no_determinism, record_property
+) -> None:
     """R3 C1.4b: a workspace holding stale bytes of another layout (nonzero
     counters and sums) is correct after its documented fresh form -- zeroed
-    once (``torch.zeros`` / ``ws.zero_()``) -- and stays at rest."""
+    once (``torch.zeros`` / ``ws.zero_()``) -- and stays at rest: every call's
+    ``dx`` and ``dw`` meet the naive PyTorch BF16 tier over the draws."""
     arch = loader.device_arch(_device().index or 0)
     calls = _sequence(arch)
     nbytes = max(
@@ -588,22 +642,24 @@ def test_a_stale_workspace_is_correct_after_the_fresh_form(no_determinism) -> No
         for hidden, residual, _d, tokens in calls
     )
     ws = torch.empty(nbytes, dtype=torch.uint8, device=_device())
-    generator = torch.Generator(device=_device()).manual_seed(SEED + 43)
-    for hidden, residual, w_dtype, tokens in calls:
-        ws.copy_(
-            torch.randint(
-                1,
-                256,
-                (nbytes,),
-                dtype=torch.uint8,
-                device=_device(),
-                generator=generator,
+    checks = _sequence_judges("stale workspace", calls)
+    for draw in range(ref.DRAWS):
+        generator = _generator(SEED + 43, draw)
+        for check, (hidden, residual, w_dtype, tokens) in zip(checks, calls, strict=True):
+            ws.copy_(
+                torch.randint(
+                    1,
+                    256,
+                    (nbytes,),
+                    dtype=torch.uint8,
+                    device=_device(),
+                    generator=generator,
+                )
             )
-        )
-        ws.zero_()  # the documented fresh form
-        rel = _call(hidden, residual, w_dtype, tokens, ws, generator)
-        assert rel <= 1e-4, (hidden, residual, w_dtype, tokens, rel)
-        assert _at_rest(ws), (hidden, residual, w_dtype, tokens)
+            ws.zero_()  # the documented fresh form
+            _call(hidden, residual, w_dtype, tokens, ws, generator, check, draw)
+            assert _at_rest(ws), (hidden, residual, w_dtype, tokens, draw)
+    ref.check_all(record_property, checks)
 
 
 def _single_window(arch: str) -> tuple[int, bool, str, int] | None:
@@ -615,7 +671,7 @@ def _single_window(arch: str) -> tuple[int, bool, str, int] | None:
         for name in names:
             record = loader.MODULES[name]
             rule = record["workspace_rule"]
-            if rule is None or rule["kind"] != "claim_sum_f64":
+            if rule is None or rule["kind"] != "claim_sum_f32":
                 continue
             window = record["select_rule"]
             above = 0 if window is None else int(window["above"])
@@ -695,39 +751,49 @@ def test_a_single_kernel_window_launches_exactly_one_kernel(no_determinism) -> N
 @requires_device
 @pytest.mark.parametrize("heads", [24, 4])
 @pytest.mark.parametrize("consumer", ["sum", "transposed"])
-def test_nd_autograd_gradients(heads: int, consumer: str, no_determinism) -> None:
+def test_nd_autograd_gradients(
+    heads: int, consumer: str, no_determinism, record_property
+) -> None:
     """R3 C4 host-5: ``[T, heads, 256]`` through autograd with a ``.sum()``
     consumer (an expanded all-zero-stride gradient) and a transposed consumer
     (a non-collapsible gradient layout): the backward copies such gradients
-    once and returns ``dx`` / ``dw`` matching the FP64 reference."""
+    once and returns ``dx`` / ``dw`` that, with ``y``, meet the naive PyTorch
+    BF16 tier over the draws (the FP64 oracle of the whole step at its FP64
+    ``rstd``, the naive step at its own ``rstd``; the gradient ``y`` receives
+    is the consumer's in BF16)."""
     arch = loader.device_arch(_device().index or 0)
     hidden = 256
     if hidden not in loader.supported_hidden_sizes(arch):
         pytest.skip(f"hidden={hidden} has no exported route on {arch}")
     eps = 1e-6
-    generator = torch.Generator(device=_device()).manual_seed(SEED + heads)
     tokens = 300
-    x = _randn(tokens, heads, hidden, generator=generator).requires_grad_(True)
-    w = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(torch.bfloat16)
-    w.requires_grad_(True)
-    scale = _randn(heads, tokens, hidden, generator=generator).float()
-    y = cake_rmsnorm_nondet(x, w, eps)
-    if consumer == "sum":
-        loss = y.float().sum()
-        grad_y = torch.ones(
-            tokens, heads, hidden, dtype=torch.float64, device=_device()
+    check = ref.Draws(f"heads={heads} consumer={consumer}")
+    for draw in range(check.draws):
+        generator = _generator(SEED + heads, draw)
+        x0 = _randn(tokens, heads, hidden, generator=generator)
+        w0 = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(
+            torch.bfloat16
         )
-    else:
-        loss = (y.transpose(0, 1).float() * scale).sum()
-        grad_y = scale.double().transpose(0, 1)
-    loss.backward()
-    xd = x.detach().double().requires_grad_(True)
-    wd = w.detach().double().requires_grad_(True)
-    rstd = (xd.pow(2).mean(-1, keepdim=True) + eps).rsqrt()
-    ((xd * rstd * wd) * grad_y).sum().backward()
-    assert x.grad.shape == x.shape and w.grad.shape == w.shape
-    assert _rel(x.grad, xd.grad) <= 1e-2, _rel(x.grad, xd.grad)
-    assert _rel(w.grad, wd.grad) <= 1e-2, _rel(w.grad, wd.grad)
+        scale = _randn(heads, tokens, hidden, generator=generator).float()
+        x = x0.clone().requires_grad_(True)
+        w = w0.clone().requires_grad_(True)
+        y = cake_rmsnorm_nondet(x, w, eps)
+        if consumer == "sum":
+            loss = y.float().sum()
+            grad_y = torch.ones(
+                tokens, heads, hidden, dtype=torch.bfloat16, device=_device()
+            )
+        else:
+            loss = (y.transpose(0, 1).float() * scale).sum()
+            grad_y = scale.to(torch.bfloat16).transpose(0, 1)
+        loss.backward()
+        assert x.grad.shape == x.shape and w.grad.shape == w.shape
+        oracle = ref.oracle_forward(x0, w0, eps)
+        oracle.update(ref.oracle_backward(grad_y, x0, w0, oracle["rstd"]))
+        naive = ref.naive_forward(x0, w0, eps)
+        naive.update(ref.naive_backward(grad_y, x0, w0, naive["rstd"], eps))
+        check.add(draw, {"y": y.detach(), "dx": x.grad, "dw": w.grad}, oracle, naive)
+    check.check(record_property)
 
 
 @requires_device
@@ -739,6 +805,7 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
     warmup_jit,
     restore_determinism,
     monkeypatch: pytest.MonkeyPatch,
+    record_property,
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True, warn_only=True)`` the
     forward and the autograd forward run this package's modules without a
@@ -746,8 +813,9 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
     naming the det entry point and run this package's modules -- on widths the
     det package lacks too (256, 5120), with FP32 weights and a caller's
     workspace: ``y``, ``rstd`` and ``dx`` are the bits of the same calls with
-    the setting off (``dx`` is bitwise reproducible), ``dw`` is within the
-    budget of the FP64 reference and the workspace is at rest after the call."""
+    the setting off (``dx`` is bitwise reproducible), the workspace is at rest
+    after the call and, on every draw, the outputs meet the naive PyTorch BF16
+    tier."""
     arch = loader.device_arch(_device().index or 0)
     if hidden not in loader.supported_hidden_sizes(arch):
         pytest.skip(f"hidden={hidden} has no route on {arch}")
@@ -758,15 +826,6 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
         pytest.skip(f"hidden={hidden} ships no {w_token} weight route on {arch}")
     eps = EPS.get(hidden, 1e-6)
     tokens = 257
-    generator = torch.Generator(device=_device()).manual_seed(SEED + 3 * hidden)
-    x = _randn(tokens, hidden, generator=generator)
-    g = _randn(tokens, hidden, generator=generator)
-    w = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(
-        torch.float32 if w_token == "f32" else torch.bfloat16
-    )
-    torch.use_deterministic_algorithms(False)
-    y0, rstd0 = cake_rmsnorm_nondet_train_forward(x, w, eps)
-    dx0, _dw0 = cake_rmsnorm_nondet_train_backward(g, x, w, rstd0)
     ws = cake_rmsnorm_nondet_train_backward_workspace(tokens, hidden, _device())
     launched: list[str] = []
     run_module = loader.run_module
@@ -777,11 +836,11 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
 
     monkeypatch.setattr(loader, "run_module", spy)
 
-    def warned(call, det_name: Optional[str]):
-        """``call()``, asserting one warning naming ``det_name``, or none."""
+    def warned(det_name: Optional[str], call, *args, **kwargs):
+        """``call(*args, **kwargs)``, asserting one warning naming ``det_name``, or none."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            result = call()
+            result = call(*args, **kwargs)
         messages = _package_warnings(caught)
         if det_name is None:
             assert messages == [], messages
@@ -792,12 +851,6 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
             ), messages[0]
         return result
 
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    y, rstd = warned(lambda: cake_rmsnorm_nondet_train_forward(x, w, eps), None)
-    dx, dw = warned(
-        lambda: cake_rmsnorm_nondet_train_backward(g, x, w, rstd, workspace=ws),
-        "cake_rmsnorm_det_train_backward",
-    )
     expected = [
         name
         for kind in ("fwd", "bwd")
@@ -805,16 +858,40 @@ def test_warn_only_warns_at_the_backward_and_runs_this_package(
             arch, hidden, kind, False, rows=tokens, w_dtype=w_token
         )
     ]
-    assert launched == expected, launched
-    assert torch.equal(y, y0) and torch.equal(rstd, rstd0)
-    assert torch.equal(dx, dx0)
-    rel = _rel(dw, _dw_reference(g, x, rstd))
-    assert rel <= 1e-4, rel
-    assert _at_rest(ws)
-    xa = x.clone().requires_grad_(True)
-    wa = w.clone().requires_grad_(True)
-    launched.clear()
-    ya = warned(lambda: cake_rmsnorm_nondet(xa, wa, eps), None)
-    warned(lambda: ya.backward(g), "cake_rmsnorm_det")
-    assert launched == expected, launched
-    assert torch.equal(ya, y0) and torch.equal(xa.grad, dx0)
+    check = ref.Draws(f"warn_only hidden={hidden} w={w_token}")
+    for draw in range(check.draws):
+        generator = _generator(SEED + 3 * hidden, draw)
+        x = _randn(tokens, hidden, generator=generator)
+        g = _randn(tokens, hidden, generator=generator)
+        w = (1.0 + 0.1 * _randn(hidden, generator=generator).float()).to(
+            torch.float32 if w_token == "f32" else torch.bfloat16
+        )
+        torch.use_deterministic_algorithms(False)
+        y0, rstd0 = cake_rmsnorm_nondet_train_forward(x, w, eps)
+        dx0, _dw0 = cake_rmsnorm_nondet_train_backward(g, x, w, rstd0)
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        launched.clear()
+        y, rstd = warned(None, cake_rmsnorm_nondet_train_forward, x, w, eps)
+        dx, dw = warned(
+            "cake_rmsnorm_det_train_backward",
+            cake_rmsnorm_nondet_train_backward,
+            g,
+            x,
+            w,
+            rstd,
+            workspace=ws,
+        )
+        assert launched == expected, launched
+        assert torch.equal(y, y0) and torch.equal(rstd, rstd0)
+        assert torch.equal(dx, dx0)
+        assert _at_rest(ws)
+        check.forward(draw, {"y": y, "rstd": rstd}, x, w, eps)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+        xa = x.clone().requires_grad_(True)
+        wa = w.clone().requires_grad_(True)
+        launched.clear()
+        ya = warned(None, cake_rmsnorm_nondet, xa, wa, eps)
+        warned("cake_rmsnorm_det", ya.backward, g)
+        assert launched == expected, launched
+        assert torch.equal(ya, y0) and torch.equal(xa.grad, dx0)
+    check.check(record_property)
