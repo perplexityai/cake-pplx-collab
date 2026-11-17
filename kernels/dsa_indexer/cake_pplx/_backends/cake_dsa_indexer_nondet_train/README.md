@@ -18,7 +18,9 @@ The entry points of `cake_pplx.cake_dsa_indexer_nondet_train` are stable
 APIs.  This backend package under `cake_pplx/_backends/` is
 experimental and has no compatibility guarantee of its own.  SM107 (Rubin) is
 the primary target of the request.  SM100 (B200 / GB200) is the comparison
-architecture and SM103 (B300 / GB300) is the third target.  The feature does
+architecture and SM103 (B300 / GB300) is the third target.  The `sm_107a`
+libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
+entries).  The feature does
 not take part in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when the package ships them.
 Otherwise the package's JIT shim builds them from `build.json` (see "Layout of
@@ -479,5 +481,6 @@ plans of BF16 calls are the deterministic package's, on the host and at the
 device's grid.  It does not compare the outputs of the two packages.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
-package against the deterministic package on the same rows.  It compares their
-sets, not slot-by-slot bits, and fails on any set mismatch.
+package against the deterministic package on the same rows.  It checks each
+package's output on its own (the structure checks, `min(top_k, visible)` valid
+slots per row) and does not compare the outputs of the two packages.

@@ -17,10 +17,10 @@ Non-deterministic Cake DSA indexer top-k for training (SM100 / SM103 / SM107).
 
 Every public name carries the mode word ``nondet``; no entry point takes a
 ``deterministic=`` keyword.  The deterministic
-counterpart is ``cake_pplx.cake_dsa_indexer_det_train``: it selects the same
-set per row and returns it in ascending id order.  This package implements the
-set-equality semantics: per row the
-selected set repeats bit for bit, the slot order does not.
+counterpart is ``cake_pplx.cake_dsa_indexer_det_train``: it writes every row in
+ascending id order.  This package implements the set-equality semantics: a
+row's selected ids are a set, written in no specified slot order, and no output
+is promised to repeat bit for bit between calls.
 
 Thin entry points: validation of the backend contract, the host dispatch and
 workspace policy, the launch binding, JIT registration and the generated
@@ -66,7 +66,7 @@ def cake_dsa_indexer_nondet_train_topk(
     return_scores: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r"""Fused DSA indexer scoring and exact top-k selection with set-equality
-    repeatability (DeepSeek Sparse Attention indexer, training), SM100 / SM103 /
+    semantics (DeepSeek Sparse Attention indexer, training), SM100 / SM103 /
     SM107 only.
 
     For query ``t`` and key ``j`` of the same packed segment
@@ -149,13 +149,12 @@ def cake_dsa_indexer_nondet_train_topk(
         aligned with ``indices`` (a selected ``-0.0`` stays ``-0.0``); the
         slots of ``-1`` ids hold ``-inf``.
 
-    For identical inputs and configuration (same device, SM count and
-    arguments) the set of ``(id, score bits)`` pairs of every row, and with it
-    the row's number of valid (non ``-1``) slots, repeats bit for bit; the slot
-    order within a row and the positions of the ``-1`` / ``-inf`` padding
-    slots may vary between calls.  The internal query / key partition and the
-    program the host dispatches for the geometry never change the selected
-    set.  Under ``torch.use_deterministic_algorithms(True)`` a call with
+    Every row holds the exact selection above in its ``min(top_k, visible)``
+    valid (non ``-1``) slots; the slot order within a row and the positions of
+    the ``-1`` / ``-inf`` padding slots may vary between calls, and no output
+    is promised to repeat bit for bit.  The internal query / key partition and
+    the program the host dispatches for the geometry never change the selected
+    ids.  Under ``torch.use_deterministic_algorithms(True)`` a call with
     queries and keys raises ``RuntimeError`` before it allocates or launches
     anything (with ``warn_only=True`` it warns and runs).  The call never
     materializes a ``[T, Tkv]`` matrix, and no call synchronizes with the

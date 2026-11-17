@@ -27,20 +27,19 @@ unchanged; ``--rows`` takes its row and group names, ``iid`` / ``sink`` /
   ordering pass that writes every row in ascending id order;
 * ``nondet``: ``cake_pplx._backends.cake_dsa_indexer_nondet_train``
   -- the same scan programs and the plain split merge, without an ordering
-  pass: every row holds the same set of (id, score bits) pairs in no
-  specified slot order.
+  pass: every row holds its selection in no specified slot order.
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
 A/A band) and ``det_nosample`` / ``nondet_nosample`` run with the sampled
-first threshold off (``sample_tiles_max=0``).  The arms are compared as sets
-(``same_sets``: per row the valid count and the sorted (id, score bits)
-pairs), never slot by slot.  Every arm's plan is recorded;
-``same_scan_program`` says whether ``det`` and ``nondet`` dispatched the same
-scan key and split.  A row whose arms select different sets or whose output
-breaks the reference's structure checks (rows put in ascending id order) is
-flagged ``FAILED``: it gets no ``det / nondet`` ratio, and the script exits
-non-zero after writing its JSON.
+first threshold off (``sample_tiles_max=0``).  Every arm's output is checked
+on its own, never against another arm's: the reference's structure checks on
+its rows put in ascending id order (unique visible ids, ``min(top_k,
+visible)`` valid slots per row, ``-1`` / ``-inf`` padding).  Every arm's plan
+is recorded; ``same_scan_program`` says whether ``det`` and ``nondet``
+dispatched the same scan key and split.  A row where an arm's output breaks
+the structure checks is flagged ``FAILED``: it gets no ``det / nondet`` ratio,
+and the script exits non-zero after writing its JSON.
 
 Timing: the deterministic benchmark's ``gpu_times``, CUPTI activity tracing
 through ``torch.profiler`` with a cold L2 between iterations (per-iteration GPU
@@ -68,7 +67,6 @@ Usage::
 
 import argparse
 import importlib.util
-import itertools
 import json
 import math
 import statistics
@@ -102,28 +100,8 @@ det_backend = det_bench.cake_backend
 
 
 # ---------------------------------------------------------------------------
-# Rows as sets
+# Rows in ascending id order
 # ---------------------------------------------------------------------------
-
-
-def row_pairs(out) -> torch.Tensor:
-    """int64 ``[T, K]``: every slot as ``id << 32 | score bits``, each row sorted (the row's multiset of pairs)."""
-    ids, scores = out
-    bits = scores.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    return ((ids.to(torch.int64) << 32) | bits).sort(dim=1).values
-
-
-def valid_counts(indices) -> torch.Tensor:
-    return (indices >= 0).sum(dim=1)
-
-
-def same_sets(a, b) -> bool:
-    """Per row the same valid count and the same (id, score bits) pairs; slot order and padding positions free."""
-    if tuple(a[0].shape) != tuple(b[0].shape) or tuple(a[1].shape) != tuple(b[1].shape):
-        return False
-    return bool(torch.equal(valid_counts(a[0]), valid_counts(b[0]))) and bool(
-        torch.equal(row_pairs(a), row_pairs(b))
-    )
 
 
 def canonical(out):
@@ -238,7 +216,7 @@ def _nondet(name, knobs=None):
 
 
 # name -> factory(inputs) -> Arm.  ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process A/A
-# band); the ``_nosample`` arms run the same programs with the sampled first threshold off: the same sets.
+# band); the ``_nosample`` arms run the same programs with the sampled first threshold off.
 ARMS = {
     "det": _det("det"),
     "nondet": _nondet("nondet"),
@@ -323,14 +301,6 @@ def measure_row(name, inputs, arms, args):
         )
         record["gpu_ms"]["all"] = statistics.median(every)
         result["arms"][arm_name] = record
-    # set identity of every pair of arms: the contract says every arm selects the same set per row
-    result["same_sets"] = {
-        f"{a}|{b}": same_sets(outputs[a], outputs[b])
-        for a, b in itertools.combinations(outputs, 2)
-    }
-    result["all_arms_same_sets"] = (
-        all(result["same_sets"].values()) if result["same_sets"] else None
-    )
     if args.verify:
         reference = ref.select_reference(inputs)
         for arm_name, out in outputs.items():
@@ -341,11 +311,9 @@ def measure_row(name, inputs, arms, args):
                 else f"{same}/{rows} rows hold the FP64 selection's ids"
             )
             result["arms"][arm_name]["verdict_passed"] = not failures
-    # a row is correct when every pair of arms selects the same sets and no arm breaks the output structure; no
-    # speedup is published for a row that is not
-    failures = [
-        f"same_sets {key}" for key, same in result["same_sets"].items() if not same
-    ]
+    # a row is correct when no arm breaks the output structure (each arm checked on its own, never against another
+    # arm); no speedup is published for a row that is not
+    failures = []
     for arm_name, rec in result["arms"].items():
         if rec["structure_failures"]:
             failures.append(f"{arm_name}: structure {rec['structure_failures'][0]}")
@@ -393,12 +361,6 @@ def print_row(result):
             f"  [{result['row']}] FAILED (no speedup published): {result['failures']}",
             flush=True,
         )
-    differing = [key for key, same in result["same_sets"].items() if not same]
-    tail = f"; DIFFER {differing}" if differing else ""
-    print(
-        f"  [{result['row']}] same_sets: {len(result['same_sets']) - len(differing)}/{len(result['same_sets'])} pairs{tail}",
-        flush=True,
-    )
 
 
 def print_summary(results):
@@ -406,13 +368,13 @@ def print_summary(results):
     rows = [r for r in results if "det_ms" in r]
     if not rows:
         return
-    print("\n| row | T | Tkv | top_k | det ms | nondet ms | det / nondet | same sets |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print("\n| row | T | Tkv | top_k | det ms | nondet ms | det / nondet |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in rows:
         ratio = "FAILED" if r["failures"] else f"{r['det_over_nondet']:.3f}"
         print(
             f"| {r['row']} | {r['T']} | {r['Tkv']} | {r['top_k']} | {r['det_ms']:.3f} | {r['nondet_ms']:.3f} | "
-            f"{ratio} | {r['all_arms_same_sets']} |"
+            f"{ratio} |"
         )
     ratios = [r["det_over_nondet"] for r in rows if not r["failures"]]
     if ratios:

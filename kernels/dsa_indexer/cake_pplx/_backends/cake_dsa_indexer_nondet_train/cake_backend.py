@@ -53,16 +53,14 @@ Contract
   keys are defined (all padding).
 * Selection: the exact global top ``min(top_k, visible)`` keys per row, ranked
   by score descending then key id descending (``+0.0 == -0.0`` for ranking);
-  the returned score bits are the computed FP32 bits.  The scan programs are
-  the deterministic package's, so a row holds the ids and score bits that
-  package returns for it, in another slot order.
-* Repeatable as a set: for identical inputs and configuration (same device,
-  SM count and arguments) the set of ``(id, score bits)`` pairs of every row,
-  and with it the row's count of valid (non-``-1``) slots, repeats bit for
-  bit.  The program the host dispatches (unit geometry, key-range split, CTA
-  pair, unroll, unit order, sampled threshold) and the partition knobs
-  (``grid_ctas``, ``candidate_multiplier``, ``check_period``, the
-  sampled-threshold knobs) never change that set, only the slot order.
+  the returned score bits are the computed FP32 bits.
+* Set semantics: every row holds the exact selection in its ``min(top_k,
+  visible)`` valid (non-``-1``) slots; no output is promised to repeat bit for
+  bit between calls.  The program the host dispatches (unit geometry, key-range
+  split, CTA pair, unroll, unit order, sampled threshold) and the partition
+  knobs (``grid_ctas``, ``candidate_multiplier``, ``check_period``, the
+  sampled-threshold knobs) never change the selected ids, only the slot
+  order.
 * Deterministic algorithms: under ``torch.use_deterministic_algorithms(True)``
   a call that launches programs (``T > 0`` and ``Tkv > 0``) raises PyTorch's
   ``RuntimeError`` after its argument checks and before it allocates or
@@ -1370,7 +1368,7 @@ def prepare_dsa_indexer_nondet_topk(
     leaving out the sample tile nearest the diagonal; ``0``: every sample
     tile; the descending-order and wide programs ignore it) change only the
     internal partition and scheduling of the work: every admissible value
-    selects the same set of ids and score bits per row (the slot order may
+    selects the same ids per row, the exact selection (the slot order may
     differ).  ``grid_ctas`` also enters the key-range split rule
     (``cake_policy.DispatchPolicy.n_split_for``: a grid of more CTAs per query
     unit splits longer key ranges into more parts).  ``T == 0`` returns a

@@ -12,7 +12,9 @@ counterpart is `cake_pplx.cake_dsa_indexer_nondet_train`,
 which leaves the slot order of each row
 unspecified.
 SM107 (Rubin) is the primary target of the request, SM100 (B200 / GB200) the
-comparison architecture, SM103 (B300 / GB300) the third target.  The feature
+comparison architecture, SM103 (B300 / GB300) the third target.  The `sm_107a`
+libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
+entries).  The feature
 does not participate in automatic backend selection, autotuning or
 trace-apply; its libraries are loaded prebuilt from `aot/` when the package
 ships them and JIT-built through the package's JIT shim from `build.json`
