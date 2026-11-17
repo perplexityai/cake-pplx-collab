@@ -492,9 +492,15 @@ RECUT_FP32_ROUTES: dict[
 
 
 # The FP32-weight routes whose window runs the FP32-weight twin of another program than the BF16 route's there, under
-# a record of the same host plan (the window, grid rule and workspace of the BF16 record): none (every backward
-# program sums dw in plain FP32; no route swaps in another program for the FP32 weight).
-SWAPPED_FP32_ROUTES: set[tuple[str, int, str, bool]] = set()
+# a record of the same host plan (the window, grid rule and workspace of the BF16 record): SM100 H = 5120 over
+# (6144, 50688] and SM103 H = 4096 over (48640, 51200], where the FP32-weight route runs the twin of another program,
+# and SM100 H = 6144 with a residual over (42496, inf), where the BF16 route runs another program and the FP32-weight
+# route keeps the twin of the program of its earlier window.
+SWAPPED_FP32_ROUTES: set[tuple[str, int, str, bool]] = {
+    ("sm_100a", 5120, "bwd", False),
+    ("sm_103a", 4096, "bwd", False),
+    ("sm_100a", 6144, "bwd", True),
+}
 
 
 def _window(record) -> tuple[int | None, int | None]:
