@@ -821,25 +821,28 @@ row out of the gradient path:
 previous mode; `zero_weight_loss_mode()` reads it):
 
 * `"exact"`: the loss is bitwise the loss of the same call without the split.
-  The plain path forms one term per valid row in `row_finalize`
-  (`term = w * clipped`, `clipped = ratio < 2 ? ratio : 2`, so a NaN or
-  infinite ratio clips to 2) and reduces the terms chunk by chunk over the
-  valid rows in `loss_reduce`: one 256-thread CTA, thread `i` adds
-  `term[i], term[i + 256], ...` into an FP32 register that starts at `+0`,
-  then a warp butterfly and a cross-warp butterfly; the first chunk stores
-  the chunk sum in the FP32 accumulator, every later chunk adds its sum, and
-  the last chunk stores `0 - acc`.  The split keeps every chunk's
-  terms without another buffer: chunk 0's stay in the chunk-local `term`
-  buffer, chunk `c >= 1` writes its terms into the compact `loss_weights`
-  rows of chunk `c - 1` (gathered before the loop and read by no launch
-  after that chunk's `row_finalize`).  After the loop the terms go to their
-  rows' positions among the valid rows (`k + |{z < g_k}|`), each zero-weight
-  row's slot takes its weight (`+0` / `-0`: the term the plain path forms for
-  that row for any ratio), and the shipped `loss_reduce` runs over the plain
-  path's chunks of that array (`ceil(T_v / C)` launches, the same `rows_c`
-  and first / last flags) on the call's stream.  Every thread adds the same
-  values in the same order, so the FP32 sums and the rounding are the
-  plain path's.
+  The plain path forms one term per valid row in `row_finalize` (`term = w *
+  clipped`, `clipped = ratio < 2 ? ratio : 2`, so a NaN or infinite ratio
+  clips to 2) and reduces the terms chunk by chunk over the valid rows in
+  `loss_reduce`: one 256-thread CTA; in each block of 4096 rows thread `i`
+  sums its 16 terms `b + i + 256 j` (`+0` past the chunk's rows) by a pairwise
+  tree and adds its blocks' sums in block order, then a warp butterfly and a
+  cross-warp butterfly form the chunk sum.  The chunk sums are added as a
+  pairwise tree too: `loss_acc` (FP32, `LOSS_ACC_WORDS` = 32 words) is a
+  binary counter whose word `j` (0 to 30) holds the sum of `2^j` consecutive
+  chunks and whose word 31 counts the chunks, and the last chunk adds the
+  stored sums to its own in ascending order and stores `0 - total`.  Every add
+  is an FP32 add rounded to nearest.  The split keeps every chunk's terms
+  without another buffer: chunk 0's stay in the chunk-local `term` buffer,
+  chunk `c >= 1` writes its terms into the compact `loss_weights` rows of
+  chunk `c - 1` (gathered before the loop and read by no launch after that
+  chunk's `row_finalize`).  After the loop the terms go to their rows'
+  positions among the valid rows (`k + |{z < g_k}|`), each zero-weight row's
+  slot takes its weight (`+0` / `-0`: the term the plain path forms for that
+  row for any ratio), and the shipped `loss_reduce` runs over the plain path's
+  chunks of that array (`ceil(T_v / C)` launches, the same `rows_c` and first
+  / last flags) on the call's stream.  Every thread adds the same values in the
+  same order, so the FP32 sums and the rounding are the plain path's.
 * `"regroup"`: the chunk loop's own `loss_reduce` over `G` (the same FP32 sum
   of the same nonzero terms over the split's chunk boundaries); the loss may
   differ from the plain path's in its last FP32 bits.  No term placement and
