@@ -304,22 +304,17 @@ kernel_cake_rmsnorm_silu_gate_train_33ef19a28735b3e470b3(__nv_bfloat16* __restri
             }
         }
         float total = 0.0f;
-        total = __fmaf_rn(xs[0], xs[0], total);
-        total = __fmaf_rn(xs[1], xs[1], total);
-        total = __fmaf_rn(xs[2], xs[2], total);
-        total = __fmaf_rn(xs[3], xs[3], total);
-        total = __fmaf_rn(xs[4], xs[4], total);
-        total = __fmaf_rn(xs[5], xs[5], total);
-        total = __fmaf_rn(xs[6], xs[6], total);
-        total = __fmaf_rn(xs[7], xs[7], total);
-        total = __fmaf_rn(xs[8], xs[8], total);
-        total = __fmaf_rn(xs[9], xs[9], total);
-        total = __fmaf_rn(xs[10], xs[10], total);
-        total = __fmaf_rn(xs[11], xs[11], total);
-        total = __fmaf_rn(xs[12], xs[12], total);
-        total = __fmaf_rn(xs[13], xs[13], total);
-        total = __fmaf_rn(xs[14], xs[14], total);
-        total = __fmaf_rn(xs[15], xs[15], total);
+        float2 dx2_lo = make_float2(0.0f, 0.0f);
+        float2 dx2_hi = make_float2(0.0f, 0.0f);
+        dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[0], xs[1]), make_float2(xs[0], xs[1]), dx2_lo);
+        dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[2], xs[3]), make_float2(xs[2], xs[3]), dx2_hi);
+        dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[4], xs[5]), make_float2(xs[4], xs[5]), dx2_lo);
+        dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[6], xs[7]), make_float2(xs[6], xs[7]), dx2_hi);
+        dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[8], xs[9]), make_float2(xs[8], xs[9]), dx2_lo);
+        dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[10], xs[11]), make_float2(xs[10], xs[11]), dx2_hi);
+        dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[12], xs[13]), make_float2(xs[12], xs[13]), dx2_lo);
+        dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[14], xs[15]), make_float2(xs[14], xs[15]), dx2_hi);
+        total = dx2_lo.x + dx2_lo.y + (dx2_hi.x + dx2_hi.y);
         float _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, total, 1);
         total = total + _shfl_xor_sync_9;
         float _shfl_xor_sync_10 = __shfl_xor_sync(0xFFFFFFFF, total, 2);
