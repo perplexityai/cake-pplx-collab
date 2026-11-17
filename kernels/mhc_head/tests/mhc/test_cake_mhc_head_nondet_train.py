@@ -18,7 +18,7 @@ Tests of the non-deterministic Cake mHC training head
 of BF16 ``X`` ``[T, 4, H]`` and its gradient, through the forward / backward
 entry points, the accumulating backward, the autograd node, activation
 checkpointing and CUDA graph capture, at every hidden size the device's
-architecture serves (4096, 5120 and 7168 on SM100 / SM103, 4096 on SM107).
+architecture serves (4096, 5120 and 7168 on SM100 / SM103 / SM107).
 
 Every output is judged with ``tests/cake_naive.py`` against the naive BF16 tier
 over 32 inputs: its error against the float64 oracle (the exact mean and
