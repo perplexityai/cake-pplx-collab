@@ -250,8 +250,10 @@ def _positional(name: str, stage: str) -> bool:
     the ``KeyError`` of :func:`record`."""
     if record(name)["stage"] != stage or parameters(name) != _POSITIONAL[stage]:
         return False
+    # Distinct sizes, each one row past a multiple of BLOCK: a swapped axis, another tile size or a rounded-up tile
+    # count gives another grid than the stage launchers' (S // BLOCK, H, B).
     rows = 11 if stage == "bwd_main" else 7
-    return tuple(cake_jit.grid(stage, 3, 5, 7 * BLOCK, 11 * BLOCK)) == (rows, 5, 3)
+    return tuple(cake_jit.grid(stage, 3, 5, 7 * BLOCK + 1, 11 * BLOCK + 1)) == (rows, 5, 3)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -312,6 +314,7 @@ def launch_bwd_main(
     Skv = k.shape[1]
     scale = float(softmax_scale)
     if _positional(name, "bwd_main"):
+        # The parameters of _POSITIONAL["bwd_main"] in order, then the grid (Skv // BLOCK, H, B).
         _entry(name, device_arch(q.device.index))(
             dq_accum,
             lse_log2,
@@ -446,7 +449,8 @@ def _check(
     causal: bool,
 ) -> tuple[dict[str, int], float]:
     """The sizes ``B``, ``H``, ``Sq``, ``Skv``, ``D`` of a valid call and its ``softmax_scale``; ``ValueError``
-    otherwise.  The device check comes before anything that touches CUDA."""
+    otherwise.  The device check comes before anything that touches CUDA.  :func:`_accepted` repeats these checks
+    for the hot path: a change here needs the same change there."""
     operands = (("q", q), ("k", k), ("v", v), ("out", out), ("lse", lse), ("dout", dout))
     for name, t in operands:
         if not isinstance(t, torch.Tensor):
@@ -518,7 +522,8 @@ def _accepted(
 ) -> Optional[tuple[int, int, int, int, int, float]]:
     """``(B, H, Sq, Skv, D, softmax_scale)`` of a call that passes every check of :func:`_check`, found with the
     cheapest tests in one pass; ``None`` when any of them fails (or an operand is a ``torch.Tensor`` subclass), and then
-    :func:`_check` runs and raises its error."""
+    :func:`_check` runs and raises its error.  The backward also runs :func:`_check` when this function raises, so an
+    invalid call gets the error of :func:`_check` in every case."""
     tensor = torch.Tensor
     if not (
         type(q) is tensor
@@ -610,7 +615,10 @@ def cake_fmha_nondet_train_backward(
     alert.  The kernels run on the current stream of the operands' device; nothing synchronizes.
     """
     causal = bool(causal)
-    accepted = _accepted(q, k, v, out, lse, dout, softmax_scale, causal)
+    try:
+        accepted = _accepted(q, k, v, out, lse, dout, softmax_scale, causal)
+    except Exception:  # an operand the one-pass check cannot read (a nested tensor's shape): _check gives the error
+        accepted = None
     if accepted is None:
         dims, scale = _check(q, k, v, out, lse, dout, softmax_scale, causal)
         B, H, Sq, Skv, D = dims["B"], dims["H"], dims["Sq"], dims["Skv"], dims["D"]
