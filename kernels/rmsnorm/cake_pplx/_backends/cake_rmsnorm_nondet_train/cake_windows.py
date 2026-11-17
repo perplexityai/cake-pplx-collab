@@ -2127,7 +2127,9 @@ the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
 48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
-runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
+131072) and the single kernel of its top window, which sum in plain FP32 words.  On
+sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
 from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
@@ -2306,7 +2308,9 @@ the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
 48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
-runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
+131072) and the single kernel of its top window, which sum in plain FP32 words.  On
+sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
 from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
@@ -2571,7 +2575,9 @@ the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
 48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
-runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
+131072) and the single kernel of its top window, which sum in plain FP32 words.  On
+sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
 from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
