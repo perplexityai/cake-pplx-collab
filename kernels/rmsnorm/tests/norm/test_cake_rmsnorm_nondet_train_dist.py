@@ -34,6 +34,10 @@ Two kinds of resident collective:
 * ``traffic``: both ranks keep ``TRAFFIC_ITERS`` back-to-back collectives of
   ``TRAFFIC_MIB`` MiB in flight (NVLink traffic and its HBM reads and writes)
   while both run the call; the call ends while the traffic is still in flight.
+  The side stream starts the traffic only once all of it is enqueued (it waits
+  on an event behind a ``TRAFFIC_GATE_MS`` spin on the compute stream): a host
+  that enqueues the collectives more slowly than the GPU runs them would
+  otherwise drain the traffic before the call starts.
   The ratio is reported (memory-bandwidth sharing slows the call, not a stall).
 
 In both, a call that waited for the collective would take its lifetime (about
@@ -84,6 +88,7 @@ SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WARMUP = 3
 RUNS = 5
 PRE_SLEEP_CYCLES = 1_000_000
+TRAFFIC_GATE_MS = 20.0
 PEER_DELAY_MS = 50.0
 WAIT_BUFFER_MIB = 4
 TRAFFIC_ITERS = 64
@@ -170,8 +175,12 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         else:
             dist.reduce_scatter_tensor(outp, inp)
 
-    def timed(call, comm=None):
+    def timed(call, comm=None, gate_cycles=0):
         """``(call ms, ms from the call's start to the side stream's completion or None, outputs)``.
+
+        With ``gate_cycles`` the side stream starts ``comm`` only after a spin of
+        that many cycles on the compute stream, enqueued before ``comm``: the
+        collectives start once the host has enqueued all of them and the call.
 
         The timed span holds the call alone.  The copies of its outputs that the
         checks keep are taken after ``end``: a case keeps a copy of every call's
@@ -184,7 +193,14 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         end = torch.cuda.Event(enable_timing=True)
         done = None
         if comm is not None:
+            gate = None
+            if gate_cycles:
+                torch.cuda._sleep(gate_cycles)
+                gate = torch.cuda.Event()
+                gate.record()
             with torch.cuda.stream(side):
+                if gate is not None:
+                    side.wait_event(gate)
                 comm()
                 done = torch.cuda.Event(enable_timing=True)
                 done.record(side)
@@ -211,6 +227,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
     probe_b.record()
     torch.cuda.synchronize()
     delay_cycles = int(10_000_000 * PEER_DELAY_MS / probe_a.elapsed_time(probe_b))
+    gate_cycles = int(10_000_000 * TRAFFIC_GATE_MS / probe_a.elapsed_time(probe_b))
 
     for collective in COLLECTIVES:  # NCCL connections before any timing
         for mib in (WAIT_BUFFER_MIB, TRAFFIC_MIB):
@@ -336,7 +353,9 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                         for _ in range(TRAFFIC_ITERS):
                             issue(collective, *big)
 
-                    ms, comm, result = timed(call, comm=traffic)
+                    ms, comm, result = timed(
+                        call, comm=traffic, gate_cycles=gate_cycles
+                    )
                     busy.append(ms)
                     comm_ms.append(comm)
                     outs.append(result)
