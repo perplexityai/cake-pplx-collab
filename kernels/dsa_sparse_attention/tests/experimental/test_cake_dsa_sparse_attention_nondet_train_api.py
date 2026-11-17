@@ -19,7 +19,9 @@ Public-API tests of the CAKE DSA sparse-attention training package
 The backend suite ``test_cake_dsa_sparse_attention_nondet_train.py`` imports only the package.  This file covers what needs the
 public entry-point module: the stable entry points of ``cake_pplx.cake_dsa_sparse_attention_nondet_train`` (``cake_dsa_sparse_attention_nondet``,
 ``cake_dsa_sparse_attention_nondet_varlen`` and the NoPE pair: their stable-API marking, the arguments they forward,
-autograd, the varlen glue through them and their behaviour under ``torch.use_deterministic_algorithms``) and the
+autograd, the varlen glue through them and their behaviour under ``torch.use_deterministic_algorithms``), the explicit
+step entries (``cake_dsa_sparse_attention_nondet_train_*_forward`` / ``_backward``: the autograd entries' shapes and
+dtypes, the naive tier, the alert of the backward) and the
 environment variables the wrapper resolves into the package's keyword switches --
 ``CAKE_PPLX_DSA_DKV_DIRECT`` (``dkv_direct``), ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (``check_dst_map``) and
 ``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` (``BINDING_CACHE.configure``).  The helpers shared with the
@@ -2225,3 +2227,195 @@ def test_torch_deterministic_mode_zero_query_rows_launch_and_alert_nothing():
         out = cake_dsa_sparse_attention_nondet(*leaves, idx)
         grads = torch.autograd.grad(out, leaves, dout)
     assert torch.all(grads[2] == 0) and torch.all(grads[3] == 0)
+
+
+# ---------------------------------------------------------------------------
+# Explicit step entries (GPU): the forward and the backward as two calls.  This package promises no output bits (its
+# dK / dV come from FP32 atomics): the step outputs keep the autograd entry's shapes and dtypes, and every output is
+# judged by the naive tier.
+# ---------------------------------------------------------------------------
+
+STEP_FORMS = ("rope", "nope", "nope_varlen")
+STEP_GRADS = {
+    "rope": ("dq_latent", "dq_rope", "dkv_latent", "dk_rope"),
+    "nope": ("dq", "dkv"),
+    "nope_varlen": ("dq", "dkv"),
+}
+
+
+def _same_bits(a, b):
+    view = {2: torch.int16, 4: torch.int32, 8: torch.int64}
+    return (
+        a.shape == b.shape
+        and a.dtype == b.dtype
+        and torch.equal(
+            a.detach().contiguous().view(view[a.element_size()]),
+            b.detach().contiguous().view(view[b.element_size()]),
+        )
+    )
+
+
+def _require_step(form):
+    if form == "rope":
+        _require_program(backward=True)
+    else:
+        _require_nope_program(backward=True)
+
+
+def _step_entries(form):
+    stem = "cake_dsa_sparse_attention_nondet_train" + (
+        "" if form == "rope" else f"_{form}"
+    )
+    return getattr(public_api, f"{stem}_forward"), getattr(
+        public_api, f"{stem}_backward"
+    )
+
+
+def _step_acc(form, inp):
+    return torch.zeros(inp.total_k, 576 if form == "rope" else 512, device="cuda")
+
+
+def _step_inputs(seed):
+    return make_inputs([200, 120], [600, 360], seed=seed, topk=256)
+
+
+def _explicit_step(form, inp, acc=None, *, backward=True):
+    """One forward and (``backward``) one backward through the step entries of ``form`` (the varlen backward on the
+    rows and lengths its forward returns): the :class:`nv.Problem` the outputs answer and the outputs by the names
+    :func:`nv.judged` takes.  The backward leaves ``o_lo`` unchanged."""
+    forward, step_backward = _step_entries(form)
+    kw = {} if acc is None else dict(dkv_acc=acc)
+    if form == "nope_varlen":
+        out, lse, o_lo, rows, lengths = forward(
+            inp.q_latent,
+            inp.kv_latent,
+            inp.idx_local,
+            inp.cu_seqlens_q,
+            inp.cu_seqlens_k,
+        )
+        problem = nv.nope_problem(inp, indices=rows, topk_length=lengths)
+
+        def run():
+            return step_backward(
+                inp.q_latent, inp.kv_latent, rows, out, o_lo, lse, inp.dout, inp.cu_seqlens_k,
+                topk_length=lengths, **kw,
+            )  # fmt: skip
+
+    else:
+        if form == "rope":
+            args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+            problem = nv.rope_problem(inp)
+        else:
+            args = (inp.q_latent, inp.kv_latent, inp.idx_global)
+            problem = nv.nope_problem(inp)
+        out, lse, o_lo = forward(*args)
+
+        def run():
+            return step_backward(*args, out, o_lo, lse, inp.dout, **kw)
+
+    got = dict(out=out, lse=lse, o_lo=o_lo)
+    if not backward:
+        return problem, got, run
+    o_lo_before = o_lo.clone()
+    grads = run()
+    torch.cuda.synchronize()
+    assert _same_bits(o_lo, o_lo_before)
+    for name, grad in zip(STEP_GRADS[form], grads, strict=True):
+        assert (grad is None) == (
+            acc is not None and name in ("dkv_latent", "dk_rope", "dkv")
+        ), name
+        if grad is not None:
+            got[name] = grad
+    return problem, got
+
+
+def _autograd_step(form, inp, acc=None):
+    """The autograd entry of ``form`` on the same inputs: ``(out, lse, leaf gradients)``."""
+    nope = form != "rope"
+    sources = (
+        (inp.q_latent, inp.kv_latent)
+        if nope
+        else (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+    )
+    leaves = [t.detach().clone().requires_grad_(True) for t in sources]
+    kw = dict(return_lse=True) if acc is None else dict(return_lse=True, dkv_acc=acc)
+    if form == "rope":
+        out, lse = cake_dsa_sparse_attention_nondet(*leaves, inp.idx_global, **kw)
+    elif form == "nope":
+        out, lse = cake_dsa_sparse_attention_nondet_nope(*leaves, inp.idx_global, **kw)
+    else:
+        out, lse = cake_dsa_sparse_attention_nondet_nope_varlen(
+            *leaves, inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, **kw
+        )
+    out.backward(inp.dout)
+    torch.cuda.synchronize()
+    return out.detach(), lse.detach(), [leaf.grad for leaf in leaves]
+
+
+@pytest.mark.parametrize("form", STEP_FORMS)
+@pytest.mark.parametrize("acc", [False, True], ids=["fresh", "acc"])
+def test_step_entries_return_the_autograd_shapes_and_dtypes(form, acc):
+    """The explicit forward and backward (fresh, or with a zeroed ``dkv_acc``) return the autograd entry's outputs with
+    its shapes and dtypes, and ``None`` for dK + dV exactly when they add them into ``dkv_acc``; the values are judged
+    by :func:`test_step_entries_meet_the_naive_tier`."""
+    _require_step(form)
+    inp = _step_inputs(SEED + 50)
+    _, got = _explicit_step(form, inp, _step_acc(form, inp) if acc else None)
+    out, lse, leaf_grads = _autograd_step(
+        form, inp, _step_acc(form, inp) if acc else None
+    )
+    num_dq = 2 if form == "rope" else 1
+    assert all((g is None) == acc for g in leaf_grads[num_dq:])
+    auto = dict(out=out, lse=lse)
+    auto.update(
+        (name, g)
+        for name, g in zip(STEP_GRADS[form], leaf_grads, strict=True)
+        if g is not None
+    )
+    assert sorted(got) == sorted([*auto, "o_lo"])
+    for name, ref in auto.items():
+        assert (got[name].shape, got[name].dtype) == (ref.shape, ref.dtype), name
+
+
+@pytest.mark.parametrize("form", STEP_FORMS)
+def test_step_entries_meet_the_naive_tier(form, record_property):
+    """The explicit forward and backward (fresh dK + dV, and added into a zeroed ``dkv_acc``) and the autograd entry
+    on the same inputs meet the naive tier over the draws."""
+    _require_step(form)
+
+    def case(s, j):
+        inp = _step_inputs(s)
+        problem, fresh = _explicit_step(form, inp)
+        acc = _step_acc(form, inp)
+        _, added = _explicit_step(form, inp, acc)
+        added["dkv_acc"] = nv.Acc(before=torch.zeros_like(acc), after=acc)
+        out, lse, leaf_grads = _autograd_step(form, inp)
+        names = STEP_GRADS[form]
+        auto = dict(out=out, lse=lse, **dict(zip(names, leaf_grads, strict=True)))
+        return nv.judged(problem, {"fresh": fresh, "acc": added, "autograd": auto})
+
+    nv.judge_draws(record_property, case, seed=SEED + 51 + STEP_FORMS.index(form))
+
+
+@pytest.mark.parametrize("form", STEP_FORMS)
+def test_torch_deterministic_mode_step_forward_runs_and_step_backward_raises(form):
+    """Under ``torch.use_deterministic_algorithms(True)`` the step forward runs and the step backward raises
+    PyTorch's ``RuntimeError`` (the alert of the bound rope or NoPE backward); with ``warn_only=True`` it warns once
+    and runs."""
+    _require_step(form)
+    inp = _step_inputs(SEED + 54)
+    name = (
+        cake_backend.ROPE_BACKWARD_ENTRY
+        if form == "rope"
+        else cake_backend.NOPE_BACKWARD_ENTRY
+    )
+    with _torch_deterministic(warn_only=False):
+        _, _, run = _explicit_step(form, inp, backward=False)
+        with pytest.raises(RuntimeError, match=f"{name} {ALERT}"):
+            run()
+    with _torch_deterministic(warn_only=True):
+        _, _, run = _explicit_step(form, inp, backward=False)
+        with _alerts_once(name):
+            grads = run()
+    torch.cuda.synchronize()
+    assert all(g is not None for g in grads)

@@ -49,6 +49,12 @@ ENTRIES = (
     "cake_dsa_sparse_attention_det_nope",
     "cake_dsa_sparse_attention_det_nope_varlen",
 )
+# The explicit (non-autograd) step entries; the backend functions they call keep their own names.
+STEP_ENTRIES = tuple(
+    f"cake_dsa_sparse_attention_det_train_{form}{step}"
+    for form in ("", "nope_", "nope_varlen_")
+    for step in ("forward", "backward")
+)
 AUTOGRAD_FUNCTIONS = (
     "CakeDSASparseAttentionDetFunction",
     "CakeDSASparseAttentionDetNopeFunction",
@@ -65,7 +71,9 @@ def test_public_names_carry_the_mode_word() -> None:
     ``nondet``."""
 
     module = importlib.import_module(FACADE)
-    assert set(ENTRIES) | set(AUTOGRAD_FUNCTIONS) <= set(module.__all__)
+    assert set(ENTRIES) | set(STEP_ENTRIES) | set(AUTOGRAD_FUNCTIONS) <= set(
+        module.__all__
+    )
     for name in module.__all__:
         getattr(module, name)
         if CONSTANT.match(name):
@@ -75,12 +83,12 @@ def test_public_names_carry_the_mode_word() -> None:
 
 
 def test_entries_take_the_keywords_of_the_nondeterministic_entries() -> None:
-    """Each entry has the parameters of its non-deterministic counterpart, in the same order with the same defaults
-    (``key_passes`` and ``dkv_direct`` included), and no ``deterministic`` keyword."""
+    """Each entry and each step entry has the parameters of its non-deterministic counterpart, in the same order with
+    the same defaults (``key_passes`` and ``dkv_direct`` included), and no ``deterministic`` keyword."""
 
     det = importlib.import_module(FACADE)
     nondet = importlib.import_module(NONDET_FACADE)
-    for name in ENTRIES:
+    for name in ENTRIES + STEP_ENTRIES:
         mine = inspect.signature(getattr(det, name)).parameters
         theirs = inspect.signature(
             getattr(nondet, name.replace("_det", "_nondet", 1))

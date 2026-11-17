@@ -43,6 +43,19 @@ Entry points (each an autograd call: forward now, backward through autograd)::
     cake_dsa_sparse_attention_nondet_nope          flat, latent scores only (NoPE)
     cake_dsa_sparse_attention_nondet_nope_varlen   packed documents, NoPE
 
+Explicit steps (no autograd; the forward returns what the backward reads), for
+the flat rope form, the flat NoPE form and the packed NoPE form::
+
+    cake_dsa_sparse_attention_nondet_train_forward
+    cake_dsa_sparse_attention_nondet_train_backward
+    cake_dsa_sparse_attention_nondet_train_nope_forward
+    cake_dsa_sparse_attention_nondet_train_nope_backward
+    cake_dsa_sparse_attention_nondet_train_nope_varlen_forward
+    cake_dsa_sparse_attention_nondet_train_nope_varlen_backward
+
+The packed forward also returns the global rows and row lengths that its
+backward reads.
+
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
 ``CakeDSASparseAttentionNondetNopeVarlenFunction``, resolve from the backend
@@ -86,6 +99,12 @@ __all__ = [
     "cake_dsa_sparse_attention_nondet_nope",
     "cake_dsa_sparse_attention_nondet_nope_varlen",
     "cake_dsa_sparse_attention_nondet_varlen",
+    "cake_dsa_sparse_attention_nondet_train_backward",
+    "cake_dsa_sparse_attention_nondet_train_forward",
+    "cake_dsa_sparse_attention_nondet_train_nope_backward",
+    "cake_dsa_sparse_attention_nondet_train_nope_forward",
+    "cake_dsa_sparse_attention_nondet_train_nope_varlen_backward",
+    "cake_dsa_sparse_attention_nondet_train_nope_varlen_forward",
 ]
 
 # The backend's autograd Functions, re-exported on first access (module ``__getattr__``).
@@ -729,6 +748,289 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
         check_cu_seqlens=check_cu_seqlens,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Explicit (non-autograd) steps: the forward and the backward as two calls.
+# ---------------------------------------------------------------------------
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_forward(
+    q_latent: torch.Tensor,
+    q_rope: torch.Tensor,
+    kv_latent: torch.Tensor,
+    k_rope: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    topk_length: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    backend: str = "cake",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Training forward of the rope form without autograd: ``(out, lse,
+    o_lo)``.
+
+    The inputs are those of :func:`cake_dsa_sparse_attention_nondet`. ``out``
+    is BF16 ``[T, 64, 512]`` (zero for a fully masked row), ``lse`` FP32 ``[T,
+    64]`` and ``o_lo`` BF16 ``[T, 64, 512]``, the rounding residual of ``out``
+    (``out + o_lo`` is the output before its BF16 rounding). Pass the three
+    unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
+    ``out``, ``lse`` and ``o_lo`` come from one fixed-order forward kernel. A
+    call without query rows returns empty outputs without launching.
+    """
+    return _backend(backend).forward(
+        q_latent,
+        q_rope,
+        kv_latent,
+        k_rope,
+        indices,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+    )
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_backward(
+    q_latent: torch.Tensor,
+    q_rope: torch.Tensor,
+    kv_latent: torch.Tensor,
+    k_rope: torch.Tensor,
+    indices: torch.Tensor,
+    out: torch.Tensor,
+    o_lo: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    *,
+    topk_length: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    key_passes: Optional[int] = None,
+    backend: str = "cake",
+    dkv_acc: Optional[torch.Tensor] = None,
+    dkv_dst_map: Optional[torch.Tensor] = None,
+    dkv_direct: Optional[bool] = None,
+    check_dst_map: Optional[bool] = None,
+    dkv_fp32: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Training backward of the rope form without autograd: ``(dq_latent,
+    dq_rope, dkv_latent, dk_rope)``.
+
+    ``out``, ``o_lo`` and ``lse`` are the outputs of
+    :func:`cake_dsa_sparse_attention_nondet_train_forward` on the same inputs
+    and ``topk_length`` / ``softmax_scale``; ``dout`` is the BF16 ``[T, 64,
+    512]`` gradient of ``out``. The call leaves ``o_lo`` unchanged.
+    ``dq_latent`` / ``dq_rope`` are BF16. ``dkv_latent`` / ``dk_rope`` are BF16
+    in the layout of ``kv_latent`` / ``k_rope``, or FP32 with
+    ``dkv_fp32=True``. With a tensor ``dkv_acc`` (FP32 ``[S_dst, >= 576]``) the
+    call adds ``dK + dV`` into it instead (latent columns ``0:512``, rope
+    ``512:576`` of row ``dkv_dst_map[s]``; the caller owns the zeroing) and
+    returns ``None`` for both. ``key_passes`` and ``check_dst_map`` as in
+    :func:`cake_dsa_sparse_attention_nondet`; ``dkv_direct``: ``None``
+    (default) reads ``CAKE_PPLX_DSA_DKV_DIRECT``; ``True`` / ``False`` decide
+    explicitly. ``dK`` / ``dV`` are added with FP32 atomics; no output is
+    promised to repeat bit for bit. Under
+    ``torch.use_deterministic_algorithms(True)`` it raises PyTorch's
+    ``RuntimeError`` before its first backward kernel (with ``warn_only=True``
+    a ``UserWarning``, then it runs).
+    """
+    if dkv_direct is None:
+        dkv_direct = _dkv_direct_from_environment()
+    if check_dst_map is None:
+        check_dst_map = _check_dst_map_from_environment()
+    return _backend(backend).backward(
+        q_latent,
+        q_rope,
+        kv_latent,
+        k_rope,
+        indices,
+        out,
+        o_lo,
+        lse,
+        dout,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+        dkv_fp32=dkv_fp32,
+        key_passes=key_passes,
+        dkv_acc=dkv_acc,
+        dkv_dst_map=dkv_dst_map,
+        dkv_direct=dkv_direct,
+        check_dst_map=check_dst_map,
+    )
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_nope_forward(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    topk_length: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    backend: str = "cake",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Training forward of the NoPE form without autograd: ``(out, lse,
+    o_lo)``.
+
+    The inputs are those of :func:`cake_dsa_sparse_attention_nondet_nope`, and
+    the outputs those of
+    :func:`cake_dsa_sparse_attention_nondet_train_forward`. Pass them unchanged
+    to :func:`cake_dsa_sparse_attention_nondet_train_nope_backward`. ``out``,
+    ``lse`` and ``o_lo`` come from one fixed-order forward kernel.
+    """
+    return _backend(backend).forward_nope(
+        q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
+    )
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_nope_backward(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    out: torch.Tensor,
+    o_lo: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    *,
+    topk_length: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    key_passes: Optional[int] = None,
+    backend: str = "cake",
+    dkv_acc: Optional[torch.Tensor] = None,
+    dkv_dst_map: Optional[torch.Tensor] = None,
+    dkv_direct: Optional[bool] = None,
+    check_dst_map: Optional[bool] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Training backward of the NoPE form without autograd: ``(dq, dkv)``.
+
+    ``out``, ``o_lo`` and ``lse`` are the outputs of
+    :func:`cake_dsa_sparse_attention_nondet_train_nope_forward` on the same
+    inputs. ``dq`` is BF16 ``[T, 64, 512]``; ``dkv = dK + dV`` is FP32 ``[S,
+    512]``. With a tensor ``dkv_acc`` (FP32 ``[S_dst, >= 512]``) the call adds
+    ``dkv`` into columns ``0:512`` of row ``dkv_dst_map[s]`` instead (the
+    caller owns the zeroing) and returns ``(dq, None)``. The call leaves
+    ``o_lo`` unchanged. ``key_passes`` and ``check_dst_map`` as in
+    :func:`cake_dsa_sparse_attention_nondet_nope`; ``dkv_direct``: ``None``
+    (default) reads ``CAKE_PPLX_DSA_DKV_DIRECT``; ``True`` / ``False`` decide
+    explicitly. ``dK`` / ``dV`` are added with FP32 atomics; no output is
+    promised to repeat bit for bit. Under
+    ``torch.use_deterministic_algorithms(True)`` it raises PyTorch's
+    ``RuntimeError`` before its first backward kernel (with ``warn_only=True``
+    a ``UserWarning``, then it runs).
+    """
+    if dkv_direct is None:
+        dkv_direct = _dkv_direct_from_environment()
+    if check_dst_map is None:
+        check_dst_map = _check_dst_map_from_environment()
+    return _backend(backend).backward_nope(
+        q,
+        kv,
+        indices,
+        out,
+        o_lo,
+        lse,
+        dout,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+        key_passes=key_passes,
+        dkv_acc=dkv_acc,
+        dkv_dst_map=dkv_dst_map,
+        dkv_direct=dkv_direct,
+        check_dst_map=check_dst_map,
+    )
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    gather_kv_indices: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    *,
+    causal: bool = False,
+    topk_length: Optional[torch.Tensor] = None,
+    softmax_scale: Optional[float] = None,
+    backend: str = "cake",
+    check_cu_seqlens: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Training forward of the packed NoPE form without autograd: ``(out, lse,
+    o_lo, indices, topk_length)``.
+
+    The inputs and their checks are those of
+    :func:`cake_dsa_sparse_attention_nondet_nope_varlen`. ``out``, ``lse`` and
+    ``o_lo`` as in :func:`cake_dsa_sparse_attention_nondet_train_forward`;
+    ``indices`` (int32 ``[T, K_slots]``, global key rows) and ``topk_length``
+    (int32 ``[T]``) are the rows and row lengths the forward read. Pass all
+    five unchanged to
+    :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_backward`.
+    ``out``, ``lse`` and ``o_lo`` come from one fixed-order forward kernel.
+    """
+    return _backend(backend).forward_nope_varlen(
+        q,
+        kv,
+        gather_kv_indices,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        causal=causal,
+        softmax_scale=softmax_scale,
+        topk_length=topk_length,
+        check_cu_seqlens=check_cu_seqlens,
+    )
+
+
+@cake_api
+def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    out: torch.Tensor,
+    o_lo: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    *,
+    topk_length: torch.Tensor,
+    softmax_scale: Optional[float] = None,
+    key_passes: Optional[int] = None,
+    backend: str = "cake",
+    dkv_acc: Optional[torch.Tensor] = None,
+    dkv_dst_map: Optional[torch.Tensor] = None,
+    dkv_direct: Optional[bool] = None,
+    check_dst_map: Optional[bool] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Training backward of the packed NoPE form without autograd: ``(dq,
+    dkv)``.
+
+    ``out``, ``o_lo``, ``lse``, ``indices`` and ``topk_length`` are the outputs
+    of :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_forward`;
+    ``cu_seqlens_k`` is the forward's. The outputs and the other arguments as
+    in :func:`cake_dsa_sparse_attention_nondet_train_nope_backward`.
+    ``dK`` / ``dV`` are added with FP32 atomics; no output is promised to
+    repeat bit for bit. Under ``torch.use_deterministic_algorithms(True)``
+    it raises PyTorch's ``RuntimeError`` before its first backward kernel
+    (with ``warn_only=True`` a ``UserWarning``, then it runs).
+    """
+    if dkv_direct is None:
+        dkv_direct = _dkv_direct_from_environment()
+    if check_dst_map is None:
+        check_dst_map = _check_dst_map_from_environment()
+    return _backend(backend).backward_nope(
+        q,
+        kv,
+        indices,
+        out,
+        o_lo,
+        lse,
+        dout,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+        key_passes=key_passes,
+        dkv_acc=dkv_acc,
+        dkv_dst_map=dkv_dst_map,
+        num_segments=int(cu_seqlens_k.numel()) - 1,
+        dkv_direct=dkv_direct,
+        check_dst_map=check_dst_map,
     )
 
 
