@@ -312,8 +312,10 @@ def _mxfp8_case(
             up_saved=naive.dequantized((up_q[:r], up_sc[: r // 128])),
             hidden_saved=naive.dequantized((h_t[:, :r], h_sc_t[:, : r // 128]), transposed=True),
         )
-        x_codes = x_t[:, :r].contiguous().view(torch.uint8)
-        x_scales = x_sc_t[:, : r // 128].contiguous().view(torch.uint8)
+        # Copies: the backward reuses the context ring for the later macrobatches, and a slice that spans the whole ring
+        # is a view of it.
+        x_codes = x_t[:, :r].clone().view(torch.uint8)
+        x_scales = x_sc_t[:, : r // 128].clone().view(torch.uint8)
         result = backward(
             dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
             scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],

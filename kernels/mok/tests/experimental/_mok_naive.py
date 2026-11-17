@@ -17,8 +17,9 @@ The float64 oracle and the naive PyTorch BF16 implementation of the MoK layer: e
 checks use lives in this module.
 
 The layer.  One expert is the SwiGLU MLP ``E(x) = (silu(clamp(x Wg^T, max=L)) * clamp(x Wu^T, -L, L)) Wd^T`` (no clamp
-without a limit ``L``).  A token's output is ``y = S(x) + sum_k s_k E_{e_k}(x)``: the shared expert ``S`` plus its
-``topk`` routed experts, each weighted by its FP32 score.  The kernels return, per route, the routed expert's
+without a limit ``L``); the clamp's gradient passes at the limit itself (``gate <= L``, ``-L <= up <= L``).  A token's
+output is ``y = S(x) + sum_k s_k E_{e_k}(x)``: the shared expert ``S`` plus its ``topk`` routed experts, each weighted
+by its FP32 score.  The kernels return, per route, the routed expert's
 unweighted output (``y_route``), the gradient of ``x`` through that route (``dx_route``) and the score gradient
 (``d_scores``); per weight, the weight gradient (BF16, or added into the caller's FP32 accumulator).
 
@@ -96,10 +97,31 @@ def dequantized(pair, transposed: bool = False) -> torch.Tensor:
     return values.transpose(-1, -2) if transposed else values
 
 
+class _Clamp(torch.autograd.Function):
+    """``value.clamp(low, high)`` whose gradient passes at the limits themselves (``low <= value <= high``): the
+    clamped SwiGLU's definition.  torch's autograd of ``clamp`` gives 0 at the limits, which BF16 and E4M3 gate and up
+    values hit exactly."""
+
+    @staticmethod
+    def forward(ctx, value, low, high):
+        ctx.save_for_backward(value)
+        ctx.limits = (low, high)
+        return value.clamp(low, high)
+
+    @staticmethod
+    def backward(ctx, grad):
+        (value,) = ctx.saved_tensors
+        low, high = ctx.limits
+        keep = value <= high
+        if low is not None:
+            keep = keep & (value >= low)
+        return torch.where(keep, grad, torch.zeros_like(grad)), None, None
+
+
 def _clamped(gate, up, limit):
     if limit is None:
         return gate, up
-    return gate.clamp(max=limit), up.clamp(-limit, limit)
+    return _Clamp.apply(gate, None, limit), _Clamp.apply(up, -limit, limit)
 
 
 def mlp(x, weights, dy, limit, dtype):
