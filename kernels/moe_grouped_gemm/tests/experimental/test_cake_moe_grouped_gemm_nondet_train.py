@@ -119,6 +119,9 @@ CHANGED_SHAPES = ((7168, 1024), (4864, 1536))
 K256_WAVE_SIZES = [2048] * 8
 K256_WAVE_SHAPE = (4096, 4096)  # (N, K)
 ROW_PAD = 256  # extra columns of the wider tensors row-padded operands are cut from
+# extra columns of a row pitch no build takes: (cols + 4) BF16 elements, not a multiple of 16
+# bytes for the multiples of 64 columns the weight gradient takes
+PITCH_OFF_16 = 4
 # Two ragged groups of at least every architecture's ``dgrad_evict_first_min_rows``
 # rows on average: with ``K >= dgrad_evict_first_min_k`` the data gradient takes the
 # evict-first twin of its wide tile on the architectures of ``dgrad_evict_first_archs``
@@ -1967,6 +1970,39 @@ def test_wgrad_accepts_row_padded_operands(out_dtype, record_property):
         d.op("dW", out, "wgrad", g1, x1, sizes)
 
     judge_draws(record_property, draw, seed=31)
+
+
+@pytest.mark.parametrize("operand", ["g", "x"])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+def test_wgrad_refuses_row_pitches_off_16_bytes(operand, out_dtype):
+    """The weight gradient of a ``g`` or an ``x`` whose row stride is not a multiple of
+    16 bytes (the leading columns of a tensor ``PITCH_OFF_16`` columns wider), on the
+    shape of ``test_wgrad_accepts_row_padded_operands``: its launch raises
+    ``ValueError`` before any kernel runs (the binding's TMA descriptor of the operand
+    refuses the pitch; on sm_107a the ``main`` build also reads the rows at that pitch,
+    ``lda`` / ``ldb``), and ``out``, NaN-filled, keeps its bytes."""
+    device = _require_program("wgrad", out_dtype)
+    stage = _k256_wave_stage(device, out_dtype)
+    sizes = K256_WAVE_SIZES
+    n, k = K256_WAVE_SHAPE
+    x, _w, g, offs = _inputs(sizes, n, k, device, seed=31)
+    operands = {"g": g, "x": x}
+    dense = operands[operand]
+    cols = dense.size(1)
+    wide = torch.zeros(dense.size(0), cols + PITCH_OFF_16, dtype=dense.dtype, device=device)
+    wide[:, :cols] = dense
+    operands[operand] = wide[:, :cols]
+    pitch = operands[operand].stride(0) * operands[operand].element_size()
+    assert pitch % 16, pitch
+    out = torch.full((len(sizes), n, k), float("nan"), dtype=out_dtype, device=device)
+    launch = prepare_wgrad(operands["g"], operands["x"], offs, out=out)
+    assert launch.stages[0] == stage, launch.stages
+    torch.cuda.synchronize()
+    before = out.clone()
+    with pytest.raises(ValueError, match="multiples of 16 bytes"):
+        launch.launch()
+    torch.cuda.synchronize()
+    _assert_same_bits(out, before, f"out after the refused {operand} pitch {pitch}")
 
 
 def test_autograd_backward_takes_row_strided_operands(record_property):

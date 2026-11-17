@@ -1197,6 +1197,39 @@ def test_wgrad_wave_sync_takes_row_padded_operands(out_dtype):
     assert torch.equal(out, ref)
 
 
+@pytest.mark.parametrize("operand", ["g", "x"])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+def test_wgrad_refuses_row_pitches_off_16_bytes(operand, out_dtype):
+    """The weight gradient of a ``g`` or an ``x`` whose row stride is not a multiple of
+    16 bytes (the leading columns of a tensor 4 columns wider), on the shape of
+    ``test_wgrad_wave_sync_takes_row_padded_operands``: its launch raises ``ValueError``
+    before any kernel runs (the binding's TMA descriptor of the operand refuses the
+    pitch; on sm_107a the ``main`` build also reads the rows at that pitch, ``lda`` /
+    ``ldb``), and ``out``, NaN-filled, keeps its bytes."""
+    device = _require_program("wgrad", out_dtype)
+    sizes, n, k = [2048] * 8, 4096, 4096
+    x, _w, g, offs = _inputs(sizes, n, k, device, seed=11)
+    operands = {"g": g, "x": x}
+    dense = operands[operand]
+    cols = dense.size(1)
+    wide = torch.zeros(dense.size(0), cols + 4, dtype=dense.dtype, device=device)
+    wide[:, :cols] = dense
+    operands[operand] = wide[:, :cols]
+    pitch = operands[operand].stride(0) * operands[operand].element_size()
+    assert pitch % 16, pitch
+    out = torch.full((len(sizes), n, k), float("nan"), dtype=out_dtype, device=device)
+    launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+        operands["g"], operands["x"], offs, out=out
+    )
+    assert launch.plan["tile_k"] == 256, launch.plan
+    torch.cuda.synchronize()
+    before = out.view(torch.uint8).clone()
+    with pytest.raises(ValueError, match="multiples of 16 bytes"):
+        launch.launch()
+    torch.cuda.synchronize()
+    assert torch.equal(out.view(torch.uint8), before), f"{operand} pitch {pitch}"
+
+
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
 def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch, record_property):
     """On an architecture of ``wide_fwd_archs`` / ``wide_dgrad_archs`` an output
