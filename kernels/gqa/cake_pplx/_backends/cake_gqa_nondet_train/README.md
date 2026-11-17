@@ -35,7 +35,7 @@ out = cake_gqa_nondet(
 out.backward(dout)                               # BF16 dq, dk, dv
 
 # FP32 dK / dV added into caller-owned FP32 destinations [N_dst, H_kv, 256]
-# through an int32 row map [T_k] (repeated rows accumulate in window order); the callable runs
+# through an int32 row map [T_k] (repeated rows accumulate); the callable runs
 # in backward, so nothing is held between the forward and the backward:
 out = cake_gqa_nondet(q, k, v, cu_seqlens_q, cu_seqlens_k,
                       dkv_acc=lambda: (dk_dst, dv_dst, row_map))
@@ -93,9 +93,8 @@ the main kernel and the dQ GEMM; each extra key-block chunk re-reads the FP32
 dQ accumulator once and rewrites it for the Q tiles it does not finish (a Q
 tile's last chunk writes its BF16 dQ instead).  The chunks come from host values only
 (shapes, the segment count, `max_seqlen_k`, the budget); the tile numbering
-inside a chunk is computed on the device from `cu_seqlens` (`bwd_plan`).  The budget moves
-the rounding of dQ (its last bits, not its accuracy); `out`, `lse`, dK and dV
-do not depend on it.
+inside a chunk is computed on the device from `cu_seqlens` (`bwd_plan`).  The budget can
+move the rounding of the outputs, not their accuracy.
 
 A caller that holds the boundaries on the host can pass them as
 `cu_seqlens_q_host` / `cu_seqlens_k_host` (lists or 1-D CPU tensors, both or
@@ -112,44 +111,43 @@ size.  The kernels still read the device boundaries.  Before the main kernel a
 device-side assert checks that every device segment's keys lie within the key
 blocks and that every range holds at most its stride of tiles in the device
 numbering.  Host boundaries within both bounds give the device boundaries'
-gradients (only the chunks, and with them the dQ rounding, may differ); past
-them the assert fires instead of leaving key blocks out or writing past a
-chunk.  PyTorch reports a device-side assert at the next synchronization, and
-the process's CUDA context is unusable after it.  The dQ bits depend on
-whether the host boundaries are given (and on their values).
+gradients to the same accuracy (the chunks, and with them the rounding, may
+differ); past them the assert fires instead of leaving key blocks out or
+writing past a chunk.  PyTorch reports a device-side assert at the next
+synchronization, and the process's CUDA context is unusable after it.
 
-## Repeatability per output
+## Accuracy per output
 
-Every sum of the forward and the backward has one fixed order; nothing adds
-with atomics.  For one input, run to run:
+The package does not promise that an output repeats bit for bit, from run to
+run or across workspace budgets, host boundaries, streams or kernels running
+beside it.  Its tests judge every output against an FP64 reference instead:
+over 32 random inputs per case, the error of each output, in the L2 and the
+max norm, median and largest, is at most that of the same math in PyTorch
+BF16 (within a factor 1.005), and exactly 0 where that error is 0.
 
-| output | run to run | error vs FP64, rel-L2 / max abs err over max abs ref (`sm_100a`, `sm_103a`, `sm_107a`) |
-|---|---|---|
-| `out` (BF16) | repeats bit for bit | 2.35e-03 / 4.09e-03, 2.34e-03 / 3.91e-03, 2.34e-03 / 4.89e-03 |
-| `lse` (FP32) | repeats bit for bit | 7.86e-08 / 3.17e-07, 7.85e-08 / 3.16e-07, 7.85e-08 / 3.03e-07 |
-| `dq` (BF16) | repeats bit for bit | 2.46e-03 / 5.32e-03, 2.46e-03 / 5.55e-03, 2.46e-03 / 6.37e-03 |
-| `dk` / `dv`, BF16 | repeats bit for bit | 2.45e-03 / 4.39e-03, 2.44e-03 / 4.22e-03, 2.45e-03 / 4.41e-03 |
-| `dk` / `dv`, FP32 window | repeats bit for bit | 1.80e-03 / 3.09e-03, 1.79e-03 / 2.99e-03, 1.81e-03 / 3.04e-03 |
-| row-map adds into `dk_acc` / `dv_acc` | repeats bit for bit: destination row `r` becomes `((dst + w_j1) + w_j2) + ...` over its window rows `j1 < j2 < ...` | 1.80e-03 / 3.09e-03, 1.79e-03 / 2.93e-03, 1.81e-03 / 3.04e-03 |
+| output | error vs FP64, rel-L2 / max abs err over max abs ref (`sm_100a`, `sm_103a`, `sm_107a`) |
+|---|---|
+| `out` (BF16) | 2.35e-03 / 4.09e-03, 2.34e-03 / 3.91e-03, 2.34e-03 / 4.89e-03 |
+| `lse` (FP32) | 7.86e-08 / 3.17e-07, 7.85e-08 / 3.16e-07, 7.85e-08 / 3.03e-07 |
+| `dq` (BF16) | 2.46e-03 / 5.32e-03, 2.46e-03 / 5.55e-03, 2.46e-03 / 6.37e-03 |
+| `dk` / `dv`, BF16 | 2.45e-03 / 4.39e-03, 2.44e-03 / 4.22e-03, 2.45e-03 / 4.41e-03 |
+| `dk` / `dv`, FP32 window | 1.80e-03 / 3.09e-03, 1.79e-03 / 2.99e-03, 1.81e-03 / 3.04e-03 |
+| row-map adds into `dk_acc` / `dv_acc` | 1.80e-03 / 3.09e-03, 1.79e-03 / 2.93e-03, 1.81e-03 / 3.04e-03 |
 
 The errors are the worst of 5 runs over nine packed causal layouts (15K to
 37K query and 25K to 433K key tokens, 4 to 16 segments) with random BF16
 inputs, 24 query and 4 KV heads, against an FP64 reference from the same
 inputs: `sm_100a` on a GB200, `sm_103a` on a B300, `sm_107a` on an R200.  The
 `dk` / `dv` rows give the larger of the two; `dq` has the same error in every
-form.
-
-On one architecture the bits depend only on the shapes (`T_q`, `T_k`, `H_q`,
-`H_kv`, the segment lengths), `max_seqlen_k`, the workspace budget and, for dQ,
-the host boundaries (given or not): not on the stream, the workspace's earlier
-calls or kernels running beside it.
+form.  In the row-map form, destination row `r` becomes `dst` plus the FP32
+window rows `j` with `row_map[j] = r`.
 
 ## Determinism
 
 This is the `nondet` package of the family; its names carry the mode word and
-no entry takes a `deterministic=` keyword.  Its outputs nonetheless repeat
-bit for bit (above): under `torch.use_deterministic_algorithms(True)`, strict
-or with `warn_only=True`, nothing alerts or warns and the bits do not change.
+no entry takes a `deterministic=` keyword, and it does not promise that its
+outputs repeat bit for bit.  Under `torch.use_deterministic_algorithms(True)`,
+strict or with `warn_only=True`, nothing alerts or warns.
 
 ## Checkpointing and memory
 
@@ -158,8 +156,7 @@ Autograd saves `(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)` through
 lists, the `dkv_acc` callable and
 a weak reference to the workspace.  Under
 `torch.utils.checkpoint(..., use_reentrant=False)` a forward retains nothing,
-and the replay gives the gradients of the run without checkpointing bit for
-bit.
+and the backward replays it.
 
 A workspace keeps the forward's tile counter and the backward scratch, FP32
 `[H_q / 2, rows_pad, 256]` plus two `[H_q / 2, rows_pad]` with
