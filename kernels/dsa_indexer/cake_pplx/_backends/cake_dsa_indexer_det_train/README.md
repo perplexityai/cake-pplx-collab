@@ -391,8 +391,9 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
   units: one kernel per program or per group of programs that differ only in
   their constants (a scan lever-twin group, the rank-finalize programs of one
   window form, the CUB finalize programs) and one binding per launcher text
-  (the 76 scan programs share 9 bindings, the 25 rank-finalize programs 9, the
-  5 CUB finalize programs 1; the merge program has its own).  A shared kernel
+  (scan programs with the same launcher text share a binding, and so do the
+  rank-finalize programs and the CUB finalize programs; `build.json` lists each
+  library with its kernel and binding units).  A shared kernel
   source names its kernel `CAKE_PROGRAM_KERNEL` and reads its constants (the
   window, block size, tile unroll and snake order) from `CAKE_INDEXER_<KNOB>`; a
   shared binding names the kernel, its host-shim namespace, block size and
