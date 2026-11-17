@@ -120,8 +120,8 @@ ms for a few hundred MB on the GB200, GB300 and R200 systems measured).  When
 the allocation would exceed the device memory or the process's limit, the
 allocator first releases its cached blocks with ``cudaFree``, which waits for
 all work on the device, a collective resident on another stream included: the
-call then starts only after that work ends (measured on GB300 and R200 beside
-all-gathers of 37 to 47 ms).  A call given contiguous aligned ``out``,
+call then starts only after that work ends (measured on GB200, GB300 and R200
+beside all-gathers of 37 to 47 ms).  A call given contiguous aligned ``out``,
 ``rstd`` and ``residual_out`` (forward) or ``dx``, ``dw`` and ``workspace``
 (backward), with inputs it reads in place, allocates nothing and does not wait
 this way.  :func:`cake_rmsnorm_det` allocates its outputs and its backward
