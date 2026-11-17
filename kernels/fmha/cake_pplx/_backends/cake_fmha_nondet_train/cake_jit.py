@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Registry of the Cake dense multi-head attention backward kernels, head
-dimension 64 or 128, non-causal or causal (SM100 / SM103).  The loader and
-the launch plan are :mod:`.cake_backend`.
+dimension 64 or 128, non-causal or causal (SM100 / SM103 / SM107).  The
+loader and the launch plan are :mod:`.cake_backend`.
 
 Every record of ``MODULES`` is one mechanically exported program: a CUDA
 device translation unit plus a tvm-ffi binding, compiled once per
@@ -46,8 +46,8 @@ from __future__ import annotations
 
 from typing import Any
 
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 HEAD_DIMS = (64, 128)
 # Rows of a query block and of a key block; the sequence lengths are multiples of it.
 BLOCK = 128
@@ -60,7 +60,7 @@ STAGES = ("bwd_pre", "bwd_main", "bwd_post")
 
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_pre": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "O"], ["buffer", "dO"], ["buffer", "LSE"], ["buffer", "LSE_log2"], ["buffer", "dPsum"], ["buffer", "dQ_accum"], ["parameter", "seqlen_q"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_f0b639ee014a01d20db0",
@@ -75,7 +75,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_pre",
     },
     "bwd_pre_hd64": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "O"], ["buffer", "dO"], ["buffer", "LSE"], ["buffer", "LSE_log2"], ["buffer", "dPsum"], ["buffer", "dQ_accum"], ["parameter", "seqlen_q"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_25802c9246ef8b10ba9f",
@@ -90,7 +90,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_pre",
     },
     "bwd_main": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_32aa42a31904b8901ae7",
@@ -105,7 +105,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_main",
     },
     "bwd_main_causal": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_d63e403fa023c1cfba55",
@@ -120,7 +120,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_main",
     },
     "bwd_main_hd64": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_18086b28fd0ceef0c320",
@@ -135,7 +135,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_main",
     },
     "bwd_main_hd64_causal": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_1f0c2f01d6f6b42a6b60",
@@ -150,7 +150,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_main",
     },
     "bwd_post": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["parameter", "seqlen_q"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_465f6043909255815e00",
@@ -165,7 +165,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd_post",
     },
     "bwd_post_hd64": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["parameter", "seqlen_q"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_7057c4c605e7b2cc2436",
