@@ -29,6 +29,12 @@ from . import cake_build
 # ``build.json`` entries (``<library>_<arch>``, see ``cake_build``), the FFI
 # entry and the launch geometry the binding bakes in (block, cluster,
 # cooperative launch, dynamic shared memory, programmatic dependent launch).
+# A stage entry may narrow the record's architectures with its own ``arches``:
+# its library ships for those only.  On ``sm_107a`` each forward runs its
+# scanner-warp build, the stage ``SCAN_STAGES`` names (``arches``
+# ``["sm_107a"]``), in place of the forward (whose ``arches`` are the other
+# two): ``library_name`` resolves the forward there to the scanner stage's
+# library.
 # The forward stages are the forward kernels of the non-deterministic package
 # (fixed order: bitwise reproducible), compiled under program names of this
 # package.  The backward stages run in the record's order, every one of them on
@@ -60,6 +66,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "bwd_grid_pack27",
             "bwd_redo_prep_fold",
             "bwd_fold_list",
+            "fwd_scan",
         ],
         # The key-range-pass policy: the non-deterministic package's record values (``cake_backend.KeyPassPolicy``).
         "key_pass_policy": {
@@ -95,6 +102,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "fwd": {
             "library": "cake_dsa_h64_det_train_c949a885132a772bdb53",
             "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
             "launch": {
                 "block": [384, 1, 1],
                 "cluster": [1, 1, 1],
@@ -257,6 +265,18 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": False,
             },
         },
+        "fwd_scan": {
+            "library": "cake_dsa_h64_det_train_491a3b1d55552281da1a",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [416, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
     },
     # The native zero-RoPE (NoPE) training program: shared latent K = V of 512
     # dimensions, no rope operands, one combined dK + dV gradient per key row.
@@ -282,6 +302,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_fold_list",
             "nope_bwd_bound_pipe",
             "nope_bwd_bound_pack27_pipe",
+            "nope_fwd_scan",
         ],
         "index_prep": {
             "library": "cake_dsa_h64_det_nope_train_db791110b21a91be1388",
@@ -297,6 +318,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "nope_fwd": {
             "library": "cake_dsa_h64_det_nope_train_46cdc056c891876ed545",
             "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
             "launch": {
                 "block": [320, 1, 1],
                 "cluster": [1, 1, 1],
@@ -461,6 +483,18 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": False,
             },
         },
+        "nope_fwd_scan": {
+            "library": "cake_dsa_h64_det_nope_train_d13be3d78a70edab8c99",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [352, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
     },
 }
 
@@ -535,9 +569,14 @@ _NOPE_ALTERNATES = (
     + tuple(NOPE_ACCUMULATE_STAGES.values())
     + tuple(NOPE_PIPE_STAGES.values())
 )
+# The scanner-warp builds of the two forwards: on the architectures of their
+# stage entries' ``arches`` (``sm_107a``) the host runs them in place of the
+# forward stage; the device's architecture alone chooses.  Same arguments,
+# grid and outputs as the forward they replace.
+SCAN_STAGES = {"fwd": "fwd_scan", "nope_fwd": "nope_fwd_scan"}
 STAGES_OF = {
-    PROGRAM: STAGES + KEY_PASS_STAGES + _ROPE_ALTERNATES,
-    NOPE_PROGRAM: NOPE_STAGES + _NOPE_ALTERNATES,
+    PROGRAM: STAGES + KEY_PASS_STAGES + _ROPE_ALTERNATES + (SCAN_STAGES["fwd"],),
+    NOPE_PROGRAM: NOPE_STAGES + _NOPE_ALTERNATES + (SCAN_STAGES["nope_fwd"],),
 }
 BACKWARD_STAGES_OF = {PROGRAM: BACKWARD_STAGES, NOPE_PROGRAM: NOPE_BACKWARD_STAGES}
 
@@ -579,8 +618,22 @@ def stage_arches(stage: str, program: str = PROGRAM) -> tuple[str, ...]:
     return tuple(rec[stage].get("arches", rec["arches"]))
 
 
+def stage_for(stage: str, arch: str, program: str = PROGRAM) -> str:
+    """The stage that runs ``stage`` of ``program`` on ``arch``: its scanner-warp build
+    (``SCAN_STAGES``) where that ships for ``arch``, else ``stage`` itself."""
+    scan = SCAN_STAGES.get(stage)
+    if (
+        scan is not None
+        and scan in record(program)
+        and arch in stage_arches(scan, program)
+    ):
+        return scan
+    return stage
+
+
 def library_name(stage: str, arch: str, program: str = PROGRAM) -> str:
-    """The ``build.json`` entry of ``stage`` of ``program`` on ``arch``: ``<library>_<arch>``."""
+    """The ``build.json`` entry that runs ``stage`` of ``program`` on ``arch``: ``<library>_<arch>``
+    of the stage, or of its scanner-warp build where that ships for ``arch`` (``stage_for``)."""
     rec = record(program)
     if arch not in rec["arches"]:
         raise RuntimeError(
@@ -592,6 +645,7 @@ def library_name(stage: str, arch: str, program: str = PROGRAM) -> str:
             f"stage {stage!r} of the generated DSA training program {program!r} is not "
             f"registered in this checkout (registered: {registered_stages(program)})"
         )
+    stage = stage_for(stage, arch, program)
     if arch not in stage_arches(stage, program):
         raise RuntimeError(
             f"stage {stage!r} of the DSA training program {program!r} ships for "
