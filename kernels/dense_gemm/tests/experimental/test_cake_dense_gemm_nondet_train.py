@@ -46,7 +46,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
-from tests.cake.test_helpers.naive_gemm import judge_gemm, nan_fill  # noqa: F401
+from tests.cake.test_helpers.naive_gemm import judge_gemm, nan_fill
 
 # Backend suite: the packages are named through ``cake_package``; nothing else of cake_pplx is imported here.
 package = cake_package("cake_dense_gemm_nondet_train")
@@ -58,11 +58,6 @@ det_jit = cake_package("cake_dense_gemm_det_train", "cake_jit")
 # ``cake_pplx._backends`` this names the sibling the package resolves by itself).
 cake_backend.use_deterministic_backend(det_backend)
 
-# Accuracy gates (the deterministic package's budgets, which this module keeps).
-BF16_ATOL = BF16_RTOL = 1e-2
-F32_REL_FRO_MAX = 5e-5
-F32_MAX_ABS_OVER_REF_ABSMAX = 1e-3
-ROUTER_REL_FRO_MAX = 2e-6
 RERUNS = 20
 SEED = 20261031
 
@@ -10005,10 +10000,6 @@ def _bf16(shape, device, generator, scale=1.0):
     )
 
 
-def _rel_fro(out: torch.Tensor, ref: torch.Tensor) -> float:
-    return float((out.double() - ref).norm() / ref.norm())
-
-
 def _profile_kernel_names(fn):
     from torch.profiler import ProfilerActivity, profile
 
@@ -10052,6 +10043,12 @@ def _assert_ran(fn, module_name: str) -> None:
     assert not any(_det_kernel(name) for name in names), names
 
 
+def _assert_ran_det(fn) -> None:
+    """``fn`` launches a K1 / K2 GEMM program of the deterministic package (the profiler's kernel names)."""
+    names = _profile_kernel_names(fn)
+    assert any(_det_kernel(name) for name in names), names
+
+
 # ---------------------------------------------------------------------------
 # GPU: this package's K1 program.  The tests force the split count (an explicit ``splits`` / ``block_n``, or a
 # verdict in ``K1_SPLIT_RULES`` with the SM-count floor lifted), so they exercise the split-K program on every device
@@ -10076,22 +10073,6 @@ def _k1_wgrad_inputs(row, T, out_dtype, device, seed):
     G, X = _bf16((T, N), device, g), _bf16((T, K), device, g)
     out = torch.full((N, K), float("nan"), device=device, dtype=out_dtype)
     return G, X, out
-
-
-def _k1_check(out, ref, what=""):
-    """The K1 accuracy rule: the deterministic package's budgets against FP64, absolute (BF16 output: every element
-    within ``1e-2 + 1e-2 * |ref|``; FP32 output: relative Frobenius error at most 5e-5 and largest absolute error at
-    most 1e-3 of the largest reference magnitude).  The deterministic program's error on the same inputs is data, not
-    part of the rule."""
-    assert bool(torch.isfinite(out).all()), what
-    if out.dtype == torch.bfloat16:
-        bad = (out.double() - ref).abs() > BF16_ATOL + BF16_RTOL * ref.abs()
-        assert int(bad.sum()) == 0, (what, int(bad.sum()))
-    else:
-        assert _rel_fro(out, ref) <= F32_REL_FRO_MAX, (what, _rel_fro(out, ref))
-        assert float(
-            (out.double() - ref).abs().max()
-        ) <= F32_MAX_ABS_OVER_REF_ABSMAX * float(ref.abs().max()), what
 
 
 def _k1_prepare(G, X, out, arch, splits, block_n=None):
@@ -10791,12 +10772,6 @@ def test_gpu_det_then_atomic_share_a_stream_not_a_workspace(k1_rule, record_prop
     assert _arena_tickets_zero()
 
 
-def _n1_assert_ran_det(fn) -> None:
-    """``fn`` launches a K1 / K2 GEMM program of the deterministic package (the profiler's kernel names)."""
-    names = _profile_kernel_names(fn)
-    assert any(_det_kernel(name) for name in names), names
-
-
 def test_gpu_k1_deterministic_program_through_the_binding(record_property):
     """K1 calls of this package that run the deterministic program -- the forward, the input gradient (BF16
     and FP32 out), the weight gradient of rows without a verdict (both orientations, BF16 and FP32 out, another
@@ -10936,13 +10911,13 @@ def test_gpu_k1_deterministic_program_through_the_binding(record_property):
             poison=lambda v: list(v.out.values()),
         )
         for key, (name, _, _, op) in calls.items():
-            _n1_assert_ran_det(
+            _assert_ran_det(
                 functools.partial(ops[op][2], *last.operands[name], last.out[key])
             )
         for key, (A, B, shape) in last.views.items():
             if det_backend._swap_ab_launch(A, B, last.out[key], False) is not None:
                 swapped.add((T, shape))
-            _n1_assert_ran_det(
+            _assert_ran_det(
                 functools.partial(
                     cake_backend.cake_dense_gemm_nondet_train_projection,
                     A,
@@ -11356,19 +11331,6 @@ def _router_gate(op, splits, spec, router_rule, T, hidden, seed, record_property
         poison=lambda _: (out,),
     )
     return plan
-
-
-def _top8_rows_differ(out, ref, tie_ulps=16):
-    """``(differing, ties)``: the rows whose top-8 index set differs from FP64's, outside the near ties -- rows whose
-    FP64 8th and 9th values lie within ``tie_ulps`` FP32 ulps of the 8th, where any order of the FP32 sum may pick
-    either -- and the count of those near ties."""
-    top = torch.topk(ref, 9, dim=1).values
-    gap = top[:, 7] - top[:, 8]
-    tie = gap <= tie_ulps * torch.finfo(torch.float32).eps * top[:, 7].abs()
-    ref_top = torch.topk(ref, 8, dim=1).indices.sort(dim=1).values
-    got_top = torch.topk(out.double(), 8, dim=1).indices.sort(dim=1).values
-    differ = (got_top != ref_top).any(dim=1) & ~tie
-    return int(differ.sum()), int(tie.sum())
 
 
 @pytest.mark.parametrize(
@@ -13731,7 +13693,9 @@ def test_gpu_cached_router_launch_and_the_prepared_launch_meet_the_tier(
     """The convenience path's bound launch (arguments ordered once, the stack converted once per arena growth) and the
     prepared launch of the same arguments, on every plan of this package: on every draw (written in place into the
     prepared launch's operands) both outputs, NaN-filled first, are judged against the naive BF16 tier; after the
-    arena of the stream grows (a larger row) the launch is bound again and judged again."""
+    arena of the stream grows (a larger row) the launch is bound again and judged again.  The convenience call's
+    cached launch (``_K2_ATOMIC_CACHE``) has the prepared launch's plan and program, and the call runs that program
+    (by kernel name)."""
     device, arch = _atomic_device_or_skip()
     cases = []
     for T, splits in ((64, None), (128, None), (192, None), (1024, 3), (300, 2)):
@@ -13745,12 +13709,15 @@ def test_gpu_cached_router_launch_and_the_prepared_launch_meet_the_tier(
             A, B, pout, splits=splits
         )
 
+        def convenience():
+            return cake_backend.cake_dense_gemm_nondet_train_router(
+                A, B, out, splits=splits
+            )
+
         def launch(_):
             nan_fill((pout, out))
             want = prepared.launch()
-            got = cake_backend.cake_dense_gemm_nondet_train_router(
-                A, B, out, splits=splits
-            )
+            got = convenience()
             torch.cuda.synchronize()
             return {f"{what} prepared": want, f"{what} convenience": got}
 
@@ -13765,6 +13732,20 @@ def test_gpu_cached_router_launch_and_the_prepared_launch_meet_the_tier(
             launch=launch,
             product=product,
         )
+        # the convenience call's cached launch: the prepared launch's plan and program
+        index = out.get_device()
+        key = det_backend.convenience_key(
+            index,
+            torch.cuda.current_stream(device).cuda_stream,
+            ("k2", (splits, int(det_backend.pdl_enabled(None, index)))),
+            A,
+            B,
+            out,
+        )
+        entry = cake_backend._K2_ATOMIC_CACHE.get(key)
+        assert entry is not None and entry.plan == prepared.plan, what
+        assert entry.module_name == prepared.module_name, what
+        _assert_ran(convenience, prepared.module_name)
 
     ran = 0
     for grown in (False, True):
@@ -13953,12 +13934,6 @@ def _router_entry_of(op, P, Q, out, splits, stream):
     return cake_backend._K2_ENTRY_CACHE.get(key)
 
 
-def _router_entry_bits(entry) -> bool:
-    """Whether a cached router entry's launch repeats bit for bit: the deterministic program, or a reproducible plan
-    of this package's."""
-    return not entry.atomic or entry.launch.plan.reproducible
-
-
 @pytest.mark.parametrize("hidden, T", [(5120, 64), (4096, 256), (6144, 1000)])
 def test_gpu_router_entry_points_give_their_paths_results(
     monkeypatch, hidden, T, record_property
@@ -13967,7 +13942,9 @@ def test_gpu_router_entry_points_give_their_paths_results(
     without a split count, the input gradient, the weight gradient with and without one; dense and padded outputs;
     another stream -- binds the launch its own path takes; on every draw (written in place into the call's operands)
     the cached call's output and the output of the same call without the cache, each NaN-filled first, are judged
-    against the naive BF16 tier (three calls of each on the first draw); the padding keeps its values."""
+    against the naive BF16 tier (three calls of each on the first draw); the padding keeps its values.  An entry that
+    does not take this package's program binds the deterministic program's launch (``_K2_SPLITK_CACHE``), and its
+    cached call runs that package's program (by kernel name)."""
     device, arch = _atomic_device_or_skip()
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     X, W, G = _router_inputs(T, device, SEED + 100 + T, K=hidden)
@@ -14028,7 +14005,18 @@ def test_gpu_router_entry_points_give_their_paths_results(
             product=product,
             launches=3,
         )
-        return _router_entry_of(op, P, Q, out, splits, stream)
+        entry = _router_entry_of(op, P, Q, out, splits, stream)
+        if not entry.atomic:
+            det_launches = cake_backend._K2_SPLITK_CACHE.values()
+            assert any(entry.launch is e for e in det_launches), what
+
+            def cached():
+                stream.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(stream):
+                    assert calls[op](P, Q, out, **kw) is out, what
+
+            _assert_ran_det(cached)
+        return entry
 
     for case in cases:
         entry = judge(*case)
@@ -14598,8 +14586,9 @@ def test_gpu_captured_convenience_call_keeps_its_workspace(case, mode, record_pr
 
 
 # ---------------------------------------------------------------------------
-# GPU: views, layouts and the router's FP32 contract on this package's entry points.  The tests assert the outputs,
-# their layouts and the FP64 budgets; a test names a program only where it is about the weight gradient's program.
+# GPU: views, layouts and the router's FP32 contract on this package's entry points.  The tests judge the outputs
+# against the naive BF16 tier and assert their layouts; a test names a program only where it is about the weight
+# gradient's program.
 # ---------------------------------------------------------------------------
 
 
@@ -14980,7 +14969,8 @@ def test_gpu_router_meets_the_tier_under_the_tf32_settings(
     setting and planned under it, and the prepared launches -- returns its ``out`` and meets the naive BF16 tier
     against FP64 over the draws, as every call under the default precision does.  Each draw runs the calls under the
     default precision (the convenience caches cleared first), then with TF32 on from those keys, then with TF32 on
-    from keys planned again under it."""
+    from keys planned again under it.  On the last draw's inputs every call runs the programs it runs under the
+    default precision in both TF32 states (the profiler's kernel names of a call after the one that binds its key)."""
     device, _ = _atomic_device_or_skip()
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     calls = {
@@ -15021,19 +15011,38 @@ def test_gpu_router_meets_the_tier_under_the_tf32_settings(
             results[name(state, op, splits, "prepared")] = pout
         return results
 
+    def tf32(on: bool) -> None:
+        torch.backends.cuda.matmul.allow_tf32 = on
+        torch.backends.cudnn.allow_tf32 = on
+        torch.set_float32_matmul_precision("high" if on else "highest")
+
     def launch(v):
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        torch.set_float32_matmul_precision("highest")
+        tf32(False)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
         results = run(v, states[0])
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
+        tf32(True)
         results.update(run(v, states[1]))
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
         results.update(run(v, states[2]))
         return results
+
+    def programs(v) -> dict:
+        """(op, splits, path) -> the sorted kernel names of every call's second launch (the first binds its key)."""
+        kernels = {}
+        for op, splits in cases:
+            P, Q = v.tensors[op]
+            kw = {} if op == "dgrad" else {"splits": splits}
+            out = torch.empty(shapes[op], device=device)
+            prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(
+                *v.gemms[op], out, **({} if splits is None else {"splits": splits})
+            )
+            for path, fn in (
+                ("entry", functools.partial(calls[op], P, Q, out, **kw)),
+                ("prepared", prepared.launch),
+            ):
+                fn()
+                kernels[op, splits, path] = sorted(_profile_kernel_names(fn))
+        return kernels
 
     def product(v, dtype):
         gemm = {op: A.to(dtype) @ B.to(dtype) for op, (A, B) in v.gemms.items()}
@@ -15044,13 +15053,23 @@ def test_gpu_router_meets_the_tier_under_the_tf32_settings(
             for path in paths
         }
 
-    judge_gemm(
+    last = judge_gemm(
         record_property,
         seed=SEED + 180 + hidden + T,
         draw=draw,
         launch=launch,
         product=product,
     )
+    tf32(False)
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    default = programs(last)
+    tf32(True)
+    planned_before = programs(last)
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    planned_under = programs(last)
+    for state, got in zip(states[1:], (planned_before, planned_under), strict=True):
+        changed = {k: (default[k], got[k]) for k in default if got[k] != default[k]}
+        assert not changed, (state, changed)
 
 
 # ---------------------------------------------------------------------------
