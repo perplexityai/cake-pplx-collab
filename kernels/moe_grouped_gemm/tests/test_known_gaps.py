@@ -4,10 +4,10 @@
 is launched.
 
 * The table names collected tests only, of known GPU models (the suites are collected in
-  a subprocess that sees no GPU).
-* The xfail covers a test's known miss only (``known_gaps.covers``): the failures are
-  those ``judge_draws`` raises on CPU tensors whose errors against their oracle are set by
-  construction, and plain failures.
+  a subprocess that sees no GPU), and caps each output of a gap.
+* The xfail covers a test's known miss only, at most its cap (``known_gaps.covers``): the
+  failures are those ``judge_draws`` raises on CPU tensors whose errors against their
+  oracle are set by construction, and plain failures.
 * No test checks anything after its judgment (a static check of the suites' source), so
   a miss of the naive tier never skips a check of its test.
 """
@@ -15,6 +15,7 @@ is launched.
 from __future__ import annotations
 
 import ast
+import math
 import os
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from tests.cake.test_helpers.cake_moe_judge import (
     judge_draws,
     raise_misses,
 )
+from tests.cake.test_helpers.cake_naive import NEAR_TIE
 
 pytestmark = pytest.mark.cpu_only
 
@@ -74,6 +76,21 @@ def test_every_known_gap_model_is_a_device_model():
     assert set(known_gaps.KNOWN_GAPS) <= set(known_gaps.DEVICE_MODELS.values())
 
 
+def test_every_known_gap_caps_each_of_its_outputs():
+    """Every gap names an output and a reason, and each output has a cap: a ratio of four
+    decimals, at least NEAR_TIE (a miss of the tier has a larger ratio, so a lower cap
+    could cover nothing)."""
+    bad = []
+    for model, gaps in known_gaps.KNOWN_GAPS.items():
+        for key, gap in gaps.items():
+            if not gap.caps or not gap.reason:
+                bad.append((model, key, dict(gap.caps), gap.reason))
+            for output, cap in gap.caps.items():
+                if not (type(cap) is float and cap >= NEAR_TIE and round(cap, 4) == cap):
+                    bad.append((model, key, output, cap))
+    assert not bad, bad
+
+
 # ---------------------------------------------------------------------------
 # What a known gap's xfail covers: synthetic judgments on CPU
 # ---------------------------------------------------------------------------
@@ -105,6 +122,19 @@ def _bumped(naive: torch.Tensor, *rows: int) -> torch.Tensor:
     else:
         out += _ULP
     return out.to(torch.bfloat16)
+
+
+#: The max-norm miss ratio of each synthetic output (:func:`_output`) that misses the
+#: tier: three quarters of an ulp off at one element (``max_only``, ``nan``) or at every
+#: element (``l2``) where the tier is a quarter ulp off, on every draw; and one ulp off at
+#: one element of draw 0 (``zero``), where the tier's largest error is a quarter ulp.
+_RATIO = {"max_only": 3.0, "nan": 3.0, "l2": 3.0, "zero": 4.0}
+
+
+def _at_cap(*names: str) -> dict[str, float]:
+    """The caps of a gap of the outputs ``names``: each synthetic output's own ratio (a
+    miss at its cap); NEAR_TIE for an output with no synthetic miss."""
+    return {name: _RATIO.get(name, NEAR_TIE) for name in names}
 
 
 def _output(name: str, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -152,30 +182,55 @@ def test_a_listed_miss_in_the_max_norm_only_keeps_the_xfail():
     (miss,) = error.missed
     assert miss.output == "max_only" and miss.met == {"l2": True, "max": False}
     assert not miss.zero
-    assert known_gaps.covers(error, frozenset({"max_only"}))
-    assert known_gaps.covers(error, frozenset({"max_only", "dX"}))
+    assert known_gaps.covers(error, _at_cap("max_only"))
+    assert known_gaps.covers(error, _at_cap("max_only", "dX"))
+
+
+def test_a_listed_miss_at_its_cap_keeps_the_xfail():
+    error = _failure(["meets", "max_only"])
+    (miss,) = error.missed
+    assert miss.ratios["max"] == (3.0, 3.0)
+    assert known_gaps.uncovered(error, {"max_only": 3.0}) == []
+    assert known_gaps.covers(error, {"max_only": 3.0})
+
+
+def test_a_listed_miss_above_its_cap_fails():
+    error = _failure(["meets", "max_only"])
+    for cap in (2.9999, math.nextafter(3.0, 0.0)):
+        assert not known_gaps.covers(error, {"max_only": cap})
+        assert known_gaps.uncovered(error, {"max_only": cap}) == [
+            f"max_only: max-norm miss ratio 3 is above its cap {cap!r}"
+        ]
+    # the larger of the median and the largest ratio is held to the cap
+    zero = _failure(["zero"])
+    (miss,) = zero.missed
+    assert miss.ratios["max"] == (1.0, 4.0)
+    assert known_gaps.uncovered(zero, {"zero": 3.9999}) == [
+        "zero: error not 0 on draws [0], where the tier's is 0",
+        "zero: max-norm miss ratio 4 is above its cap 3.9999",
+    ]
 
 
 def test_a_miss_with_a_broken_contract_fails():
     error = _failure(["max_only", "nan"])
     assert type(error) is AssertionError
     assert "not finite" in str(error) and MISS in str(error)
-    assert not known_gaps.covers(error, frozenset({"max_only", "nan"}))
+    assert not known_gaps.covers(error, _at_cap("max_only", "nan"))
 
 
 def test_a_miss_of_an_unlisted_output_fails():
     error = _failure(["max_only"])
-    assert not known_gaps.covers(error, frozenset({"dX"}))
-    assert not known_gaps.covers(error, frozenset())
+    assert not known_gaps.covers(error, _at_cap("dX"))
+    assert not known_gaps.covers(error, _at_cap())
 
 
 def test_a_miss_in_the_l2_norm_fails():
     error = _failure(["l2"])
     assert type(error) is NaiveTierMiss
     assert [miss.met["l2"] for miss in error.missed] == [False]
-    assert not known_gaps.covers(error, frozenset({"l2"}))
+    assert not known_gaps.covers(error, _at_cap("l2"))
     both = _failure(["max_only", "l2"])
-    assert not known_gaps.covers(both, frozenset({"max_only", "l2"}))
+    assert not known_gaps.covers(both, _at_cap("max_only", "l2"))
 
 
 def test_a_miss_by_the_zero_rule_fails():
@@ -183,21 +238,21 @@ def test_a_miss_by_the_zero_rule_fails():
     assert type(error) is NaiveTierMiss
     (miss,) = error.missed
     assert miss.zero == (0,) and miss.met["l2"]
-    assert not known_gaps.covers(error, frozenset({"zero"}))
+    assert not known_gaps.covers(error, _at_cap("zero"))
 
 
 def test_a_plain_failure_with_the_miss_text_fails():
     text = f"dW: {MISS} over 32 inputs"
-    assert not known_gaps.covers(AssertionError(text), frozenset({"dW"}))
-    assert not known_gaps.covers(RuntimeError(text), frozenset({"dW"}))
-    assert not known_gaps.covers(None, frozenset({"dW"}))
-    assert not known_gaps.covers(NaiveTierMiss(text, []), frozenset({"dW"}))
+    assert not known_gaps.covers(AssertionError(text), _at_cap("dW"))
+    assert not known_gaps.covers(RuntimeError(text), _at_cap("dW"))
+    assert not known_gaps.covers(None, _at_cap("dW"))
+    assert not known_gaps.covers(NaiveTierMiss(text, []), _at_cap("dW"))
 
 
 def test_then_runs_before_a_miss_is_raised():
     ran = []
     error = _failure(["max_only"], then=lambda: ran.append(True))
-    assert ran == [True] and known_gaps.covers(error, frozenset({"max_only"}))
+    assert ran == [True] and known_gaps.covers(error, _at_cap("max_only"))
 
 
 def test_a_failure_of_then_fails_the_test():
@@ -207,7 +262,7 @@ def test_a_failure_of_then_fails_the_test():
     error = _failure(["max_only"], then=then)
     assert type(error) is AssertionError
     assert "bits differ" in str(error) and MISS in str(error)
-    assert not known_gaps.covers(error, frozenset({"max_only"}))
+    assert not known_gaps.covers(error, _at_cap("max_only"))
     alone = _failure(["meets"], then=then)
     assert type(alone) is AssertionError and "bits differ" in str(alone)
 
@@ -218,7 +273,7 @@ def test_a_failure_of_then_fails_the_test():
         error = _failure(names, then=broken)
         assert type(error) is AssertionError and type(error.__cause__) is RuntimeError
         assert "then: RuntimeError: launch failed" in str(error)
-        assert not known_gaps.covers(error, frozenset(names))
+        assert not known_gaps.covers(error, _at_cap(*names))
 
 
 def test_a_skip_in_then_leaves_the_miss():
@@ -226,7 +281,7 @@ def test_a_skip_in_then_leaves_the_miss():
         pytest.skip("no such build here (synthetic)")
 
     error = _failure(["max_only"], then=then)
-    assert known_gaps.covers(error, frozenset({"max_only"}))
+    assert known_gaps.covers(error, _at_cap("max_only"))
     with pytest.raises(pytest.skip.Exception):
         _judge(["meets"], then=then)
 
@@ -238,7 +293,7 @@ def test_collected_misses_are_raised_last():
     assert [type(miss) for miss in misses] == [NaiveTierMiss]
     with pytest.raises(NaiveTierMiss) as info:
         raise_misses(misses)
-    assert known_gaps.covers(info.value, frozenset({"max_only"}))
+    assert known_gaps.covers(info.value, _at_cap("max_only"))
     raise_misses([])
     plain = _failure(["nan"], misses=[])
     assert type(plain) is AssertionError

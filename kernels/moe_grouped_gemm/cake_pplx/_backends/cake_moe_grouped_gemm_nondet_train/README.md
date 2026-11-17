@@ -471,9 +471,11 @@ accumulate (`accumulate=True` into a bf16 `out`) rounds as the naive tier does
 (`dW` to BF16, then `out0 + dW` to BF16), and its misses are the same near
 ties: `dW` rounds to the other BF16 neighbour, and the second rounding carries
 that into `out`.
-`tests/known_gaps.py` lists them per GPU model, and the suites mark each one
-xfail (not strict) on that model only; any other failure of such a test still
-fails.
+`tests/known_gaps.py` lists them per GPU model, each output with a cap: the
+largest ratio of its max-norm error to the tier's (median or largest over the
+inputs) that the validation runs measured on that model, rounded up to four
+decimals. The suites mark each one xfail (not strict) on that model only; a
+miss above its cap, and any other failure of such a test, still fails.
 
 ## Tests and benchmark
 
