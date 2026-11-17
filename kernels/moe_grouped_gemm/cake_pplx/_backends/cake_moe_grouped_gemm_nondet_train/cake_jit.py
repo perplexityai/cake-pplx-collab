@@ -50,10 +50,7 @@ from . import cake_build
 # The forward, data-gradient and 256-wide k tile weight-gradient routes bind
 # this package's copies of the deterministic package's programs
 # (``cake_pplx._backends.cake_moe_grouped_gemm_det_train``: the same builds of the
-# same kernels, so the same output bits; the 256-wide k tile's ``main_wave``
-# program is the same kernel rendered from a newer source, with two more buffer
-# arguments its sm_100a / sm_103a builds never read and no sm_107a build) with
-# the same stages: ``main``,
+# same kernels, so the same output bits) with the same stages: ``main``,
 # ``main_wide``, ``main_wide_ef`` and ``main_wide_ts33`` of ``fwd`` / ``dgrad``,
 # and ``main``, ``main_wave`` and the ordered fp32 ``tail_reduce`` of the
 # 256-wide k tile.  The ``main_wide_ef`` programs are the deterministic
