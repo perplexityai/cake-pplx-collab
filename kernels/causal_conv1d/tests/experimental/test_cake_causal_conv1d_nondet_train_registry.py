@@ -17,8 +17,9 @@ The single-rank registry (``cake_jit``) of the non-deterministic causal convolut
 deterministic package's: the forward records are the deterministic forward programs (only their names differ),
 every backward route keeps the deterministic route's programs and selection (but where a channel-band program takes
 the lowest channel counts of its twin, the program of the route it shares a body with), each backward program is ONE
-ordinary launch (no reduce program) that owns an ``accumulators`` workspace (FP32, or FP64 on the ``_fp32g``
-routes; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per channel tile), and the workspace byte
+ordinary launch (no reduce program) that owns an ``accumulators`` workspace (one FP32 word per sum and accumulator
+copy on every route, :data:`ACC_SLOTS` copies; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per
+channel tile), and the workspace byte
 layout and size depend on ``C`` and the route only.  The public names (each carries the mode word ``nondet``; no
 entry point takes a mode keyword), and the package's wiring (test-helper key, package data, no ``__init__.py`` at
 the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
@@ -284,17 +285,13 @@ def test_backward_records_are_one_launch_with_accumulators() -> None:
         assert cake_jit.select_rule(record) == det_rule, label
         rule = dict(record["workspace_rule"])
         assert "slots" in rule, label  # required: the package never defaults it
-        slots = rule.pop("slots")
         assert rule == {
-            "acc": "float64" if kind.endswith("fp32g") else "float32",
+            "acc": "float32",
+            "slots": ACC_SLOTS[kind],
             "kind": "accumulators",
             "taps": 5 if bias else 4,
             "work": "uint32",
         }, label
-        # Accumulator copies, as the render names them: the fp32g programs may keep several, the FP32 routes one.
-        assert isinstance(slots, int) and slots >= 1, label
-        if not kind.endswith("fp32g"):
-            assert slots == 1, label
 
 
 @pytest.mark.cpu_only
@@ -376,6 +373,11 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     assert det_only_hits == det_only_routed, arch
 
 
+# The copies of the FP32 accumulator each backward route keeps (one FP32 word per sum and copy): the fp32g routes
+# spread a channel tile's CTAs over 16 copies, the others add into one.
+ACC_SLOTS = {"bwd": 1, "bwd_dt": 1, "bwd_bias": 1, "bwd_fp32g": 16, "bwd_bias_fp32g": 16}
+
+
 def _align16(n: int) -> int:
     return -(-n // 16) * 16
 
@@ -424,7 +426,7 @@ def test_accumulator_layout() -> None:
 @pytest.mark.parametrize("C", (512, 8192))
 def test_accumulators_are_sized_from_the_rule(kind, C) -> None:
     """The accumulator size comes from the rendered rule, never a fixed ``C x taps``: an fp32g program whose rule
-    names ``slots`` FP64 copies gets ``slots x taps x C`` words; a rule without ``slots``, or with a malformed one,
+    names ``slots`` FP32 copies gets ``slots x taps x C`` words; a rule without ``slots``, or with a malformed one,
     is refused."""
 
     import copy
@@ -435,7 +437,7 @@ def test_accumulators_are_sized_from_the_rule(kind, C) -> None:
         name = cake_jit.route_modules(arch, kind)[0]
         record = cake_jit.MODULES[name]
         rule = record["workspace_rule"]
-        assert rule["acc"] == "float64"
+        assert rule["acc"] == "float32" and rule["slots"] == ACC_SLOTS[kind]
         _, _, n_ch_tiles = cake_jit.channel_split(
             C, geometry=record["grid_rule"]["geometry"], role="bwd"
         )
@@ -446,7 +448,7 @@ def test_accumulators_are_sized_from_the_rule(kind, C) -> None:
             variant["workspace_rule"]["slots"] = slots
             layout = cake_jit.accumulator_layout(variant, C, n_ch_tiles)
             assert layout["acc_elems"] == slots * rule["taps"] * C, (arch, slots)
-            assert layout["acc_bytes"] == 8 * slots * rule["taps"] * C
+            assert layout["acc_bytes"] == 4 * slots * rule["taps"] * C
             assert layout["work_offset"] == _align16(layout["acc_bytes"])
             assert layout["total_bytes"] >= layout["work_offset"] + 4 * n_ch_tiles
         for slots in (0, -1, 1.5, True, "4", None):
@@ -490,12 +492,13 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
     """The public backward workspace is the largest layout over every backward program of the architecture, each
     at the largest tile count it may launch with (its split, or its route's ``TILE_OVERRIDES`` or ``NARROW_TILES``
     row), so one zeroed buffer serves whichever program, plan and route a call selects; the capacity owner is an
-    FP64 bias program (8 bytes x slots x 5 taps per channel, 40 with one copy).  A narrow row's three tickets fit
-    the 16-byte alignment of the single tile's, so its size is the split's."""
+    fp32g bias program (4 bytes x 16 copies x 5 taps per channel, 320).  A narrow row's three tickets fit the
+    16-byte alignment of the single tile's, so its size is the split's."""
 
     owner = cake_jit.workspace_record(arch)
     assert (
-        owner["workspace_rule"]["acc"] == "float64"
+        owner["workspace_rule"]["acc"] == "float32"
+        and owner["workspace_rule"]["slots"] == ACC_SLOTS["bwd_bias_fp32g"]
         and owner["workspace_rule"]["taps"] == 5
     )
     owners = cake_jit.workspace_owners(arch)
@@ -515,7 +518,7 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
         ]
         assert nbytes == max(layout["total_bytes"] for layout in layouts), (arch, C)
         if C not in overridden:
-            per_channel = 8 * cake_jit.accumulator_words_per_channel(owner)
+            per_channel = 4 * cake_jit.accumulator_words_per_channel(owner)
             assert nbytes == _align16(_align16(per_channel * C) + 4 * cake_jit.channel_split(
                 C, geometry=owner["grid_rule"]["geometry"], role="bwd")[2])  # fmt: skip
 
@@ -1244,7 +1247,7 @@ def test_build_manifest_lists_every_program() -> None:
     IEEE division / square root and no fast math; no record is a placeholder any more."""
 
     if not cake_jit.is_rendered():
-        pytest.skip("build.json is not rendered yet (TODO-EXPORT)")
+        pytest.skip("build.json is not rendered yet")
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
     assert manifest["package"] == pkg.__name__
@@ -1315,5 +1318,5 @@ def test_manifest_checker_lists_the_package() -> None:
     assert entry.refs is checker.refs_with_kcp
     assert checker.suite_key(REPO, entry) == KEY
     if not cake_jit.is_rendered():
-        pytest.skip("build.json is not rendered yet (TODO-EXPORT)")
+        pytest.skip("build.json is not rendered yet")
     assert checker.run_in_tree(REPO, [entry]) == []
