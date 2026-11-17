@@ -35,8 +35,9 @@ shows as an XPASS, which fails).  It is not strict in the non-deterministic suit
 the package's policy: their contract allows launches whose order varies, so a fix is
 reported and does not fail.  Every launch of this release runs in a fixed order and
 repeats bit for bit.  ``tests/test_known_gaps.py`` checks that every key names a
-collected test and caps each of its outputs, the xfail rule on synthetic failures, and
-that no test checks anything after its judgment.
+collected test and caps each of its outputs, the xfail rule on synthetic failures (also
+through the conftest's fixture and hook, in a pytest run of synthetic suites), and that
+no test checks anything after its judgment.
 """
 
 from __future__ import annotations

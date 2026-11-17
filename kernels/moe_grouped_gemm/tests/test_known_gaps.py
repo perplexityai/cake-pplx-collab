@@ -8,6 +8,8 @@ is launched.
 * The xfail covers a test's known miss only, at most its cap (``known_gaps.covers``): the
   failures are those ``judge_draws`` raises on CPU tensors whose errors against their
   oracle are set by construction, and plain failures.
+* The conftest's fixture and hook apply that rule: a pytest run of synthetic suites in a
+  subprocess, whose device is named as a GPU model of the table (no GPU is used).
 * No test checks anything after its judgment (a static check of the suites' source), so
   a miss of the naive tier never skips a check of its test.
 """
@@ -17,6 +19,7 @@ from __future__ import annotations
 import ast
 import math
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -299,6 +302,119 @@ def test_collected_misses_are_raised_last():
     assert type(plain) is AssertionError
     with pytest.raises(TypeError):
         _judge(["meets"], then=lambda: None, misses=[])
+
+
+# ---------------------------------------------------------------------------
+# The conftest's fixture and hook: a pytest run of synthetic suites
+# ---------------------------------------------------------------------------
+
+#: The synthetic suites: a deterministic one (strict xfail) and a non-deterministic one.
+_SUITES = (
+    "test_cake_moe_grouped_gemm_det_train_synthetic",
+    "test_cake_moe_grouped_gemm_nondet_train_synthetic",
+)
+#: The synthetic gaps of each suite's tests (``test_unlisted`` has none).
+_GAPS = {
+    "test_miss": {"max_only": 3.0},
+    "test_above_cap": {"max_only": 2.9999},
+    "test_plain_failure": {"max_only": 3.0},
+    "test_pass": {"max_only": 3.0},
+}
+#: Each synthetic test's outcome in the deterministic and the non-deterministic suite.
+_OUTCOMES = {
+    "test_miss": ("XFAIL", "XFAIL"),
+    "test_above_cap": ("FAILED", "FAILED"),
+    "test_plain_failure": ("FAILED", "FAILED"),
+    "test_pass": ("FAILED", "XPASS"),
+    "test_unlisted": ("FAILED", "FAILED"),
+}
+_SYNTHETIC_SUITE = """
+from tests.test_known_gaps import _judge
+
+
+def test_miss():
+    _judge(["meets", "max_only"])
+
+
+def test_above_cap():
+    _judge(["meets", "max_only"])
+
+
+def test_plain_failure():
+    raise AssertionError("bits differ (synthetic)")
+
+
+def test_pass():
+    pass
+
+
+def test_unlisted():
+    _judge(["meets", "max_only"])
+"""
+_SYNTHETIC_CONFTEST = """
+from pathlib import Path
+
+import torch
+
+from tests import known_gaps
+from tests.conftest import _known_gap, pytest_runtest_makereport  # noqa: F401
+
+# the fixture reads the device's name only: a B200, with no GPU
+torch.cuda.is_available = lambda: True
+torch.cuda.current_device = lambda: 0
+torch.cuda.get_device_name = lambda device=None: "NVIDIA B200"
+known_gaps.ROOT = Path(__file__).resolve().parent
+known_gaps.KNOWN_GAPS = {
+    "B200": {
+        f"{suite}.py::{name}": known_gaps.Gap(caps, "synthetic gap")
+        for suite in SUITES
+        for name, caps in GAPS.items()
+    }
+}
+known_gaps.LISTED = frozenset(known_gaps.KNOWN_GAPS["B200"])
+"""
+
+
+def test_the_conftest_fixture_and_hook_apply_the_rule(tmp_path):
+    """The conftest's fixture and hook (``tests/conftest.py``) in a pytest run of a
+    deterministic and a non-deterministic synthetic suite, on a device named as a B200 (no
+    GPU is used): a listed miss at its cap is an XFAIL; a listed miss above its cap, a
+    plain failure of a listed test and an unlisted test's miss fail; a listed test that
+    passes fails in the deterministic suite (a strict XPASS) and is an XPASS in the
+    non-deterministic one.  The failure reports say why the xfail does not cover them."""
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    (tmp_path / "conftest.py").write_text(
+        f"SUITES = {_SUITES!r}\nGAPS = {_GAPS!r}\n{_SYNTHETIC_CONFTEST}"
+    )
+    for suite in _SUITES:
+        (tmp_path / f"{suite}.py").write_text(_SYNTHETIC_SUITE)
+    path = [str(known_gaps.ROOT), os.environ.get("PYTHONPATH", "")]
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-rA"]
+        + [f"{suite}.py" for suite in _SUITES],
+        cwd=tmp_path,
+        env=dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONPATH=os.pathsep.join(filter(None, path))),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    got = {}
+    for line in done.stdout.splitlines():
+        if found := re.match(r"(PASSED|FAILED|ERROR|XFAIL|XPASS) (\S+)\.py::(\w+)", line):
+            got[found[2], found[3]] = found[1]
+    want = {
+        (suite, name): outcomes[i]
+        for name, outcomes in _OUTCOMES.items()
+        for i, suite in enumerate(_SUITES)
+    }
+    log = done.stdout[-8000:] + done.stderr[-2000:]
+    assert done.returncode == 1 and got == want, log
+    for reason, count in (
+        ("max_only: max-norm miss ratio 3 is above its cap 2.9999", 2),
+        ("the failure is not a miss of the naive tier alone (a NaiveTierMiss)", 2),
+        ("XPASS(strict)", 1),
+    ):
+        assert done.stdout.count(reason) >= count, (reason, log)
 
 
 # ---------------------------------------------------------------------------
