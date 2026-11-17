@@ -66,10 +66,8 @@ from it).  The single-kernel form, in the windows that ship it: persistent
 CTAs claim row chunks, write ``dx`` and add their per-column ``dw`` sums into
 FP32 sums in the workspace (one word per column) in the order they finish;
 the CTA that finishes last stores ``dw``, the FP32 sum of the replicas.
-``dx`` is bitwise reproducible and within one BF16 ulp of
-``max(|dx|, rms(dx))`` of the deterministic backward's ``dx`` (not always
-bitwise equal to it); ``dw`` is not guaranteed bitwise reproducible (the
-order of the FP32 additions depends on scheduling).  In the windows those
+``dx`` is bitwise reproducible; ``dw`` is not guaranteed bitwise
+reproducible (the order of the FP32 additions depends on scheduling).  In the windows those
 notes name, a part-row single kernel writes its CTAs' FP32 ``dw`` sums as one
 FP32 row per CTA into scratch in the workspace and folds the rows in helper
 CTAs once every row is in, with no column sums and no atomic add of a sum
@@ -281,12 +279,10 @@ def cake_rmsnorm_nondet_train_backward(
     token count" notes list for that window: in the windows that ship it, one
     kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP32
     sums in the workspace (one word per column), which the CTA that finishes
-    last adds into ``dw`` (``dx`` is bitwise reproducible and within one BF16
-    ulp of ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not
-    always bitwise equal to it; the order of the FP32 additions depends on
-    scheduling, so ``dw`` is not guaranteed bitwise reproducible); in the
-    others, the deterministic package's backward pair rendered into this
-    package.
+    last adds into ``dw`` (``dx`` is bitwise reproducible; the order of the
+    FP32 additions depends on scheduling, so ``dw`` is not guaranteed bitwise
+    reproducible); in the others, the deterministic package's backward pair
+    rendered into this package.
 
     While ``torch.use_deterministic_algorithms(True)`` is in effect every call
     raises ``RuntimeError`` naming

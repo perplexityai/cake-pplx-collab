@@ -22,7 +22,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
-| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is reproducible and within one BF16 ulp of det. | Backward always alerts |
+| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is bitwise reproducible. | Backward always alerts |
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. `y` and `dx` are bitwise det. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
@@ -73,7 +73,7 @@ Other public names:
 
 The forward runs the det forward programs and is bitwise reproducible.
 
-In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP32 sums, one word per column, in scheduling order (the part-row kernel instead writes one FP32 row per CTA, which helper CTAs fold), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible and within one BF16 ulp of `max(|dx|, rms(dx))` of the det `dx`. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
+In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP32 sums, one word per column, in scheduling order (the part-row kernel instead writes one FP32 row per CTA, which helper CTAs fold), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
