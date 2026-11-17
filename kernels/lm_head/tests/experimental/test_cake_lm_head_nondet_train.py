@@ -2765,54 +2765,100 @@ def test_device_gradient_accumulation(glm_weight):
     contract_lm_head(dict(dW=seen_w[1]), b)
 
 
-def test_device_retained_graph(glm_weight):
+def test_device_retained_graph(glm_weight, record_property):
     """A retained graph runs the backward again from the saved accumulators: both backward passes hold their
-    contract."""
+    contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence, and the loss and both backward passes
+    are judged against the naive tier (``name@first``: the loss and the pass that retains the graph;
+    ``name@retained``: the second pass, from the retained graph)."""
     _require_program(entry="loss")
+
+    def passes(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        loss = cake_backend.cake_lm_head_nondet_train_loss(
+            X,
+            W,
+            problem.labels,
+            objective="policy",
+            infer_logp=problem.infer_logp,
+            loss_weights=problem.loss_weights,
+            chunk_size=4096,
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dx, dw = torch.autograd.grad(loss, (X, W), retain_graph=retain)
+            results[label] = dict(dX=dx, dW=dw)
+        results["first"]["loss"] = loss.detach()
+        return results
+
     inp = _device_inputs(4097, "policy", W=glm_weight)
-    X = inp.X.detach().requires_grad_(True)
-    W = inp.W.detach().requires_grad_(True)
-    loss = cake_backend.cake_lm_head_nondet_train_loss(
-        X,
-        W,
-        inp.labels,
-        objective="policy",
-        infer_logp=inp.infer_logp,
-        loss_weights=inp.loss_weights,
-        chunk_size=4096,
+    for result in passes(inp).values():
+        contract_lm_head(result, inp)
+    del inp
+
+    def launch(j, s):
+        draw = _draw_inputs(4097, s, _judge_weight(s), "policy")
+        return [(draw, passes(draw))]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 4097,
+        names={"first": ("loss", "dX", "dW"), "retained": ("dX", "dW")},
     )
-    for retain in (True, False):
-        dx, dw = torch.autograd.grad(loss, (X, W), retain_graph=retain)
-        contract_lm_head(dict(dX=dx, dW=dw), inp)
 
 
-def test_device_concurrent_streams(glm_weight):
+def test_device_concurrent_streams(glm_weight, record_property):
     """Calls on two streams at once (different row counts, one weight), after a serial call of each: every call holds
-    its contract."""
+    its contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence (one weight), and every call is judged
+    against the naive tier (``name@serial_T<rows>``: the serial call; ``name@stream_T<rows>``: the call on its
+    stream)."""
     _require_program(entry="loss")
-    inputs = [_device_inputs(T, "ce", W=glm_weight) for T in (4097, 8191)]
-    for inp in inputs:
-        contract_lm_head(_run(inp, 4096, backend="cake"), inp)
-    streams = [torch.cuda.Stream() for _ in inputs]
-    results = [None, None]
-    torch.cuda.synchronize()
-    for i, (inp, stream) in enumerate(zip(inputs, streams, strict=True)):
-        with torch.cuda.stream(stream):
-            X = inp.X.detach().requires_grad_(True)
-            W = inp.W.detach().requires_grad_(True)
-            loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
-                X,
-                W,
-                inp.labels,
-                loss_div=inp.loss_div,
-                chunk_size=4096,
-                return_logp=True,
-            )
-            loss.backward()
-            results[i] = dict(loss=loss.detach(), logp=logp, dX=X.grad, dW=W.grad)
-    torch.cuda.synchronize()
-    for inp, got in zip(inputs, results, strict=True):
-        contract_lm_head(got, inp)
+    sizes = (4097, 8191)
+
+    def sequence(inputs):
+        results = {T: {f"serial_T{T}": _run(inputs[T], 4096, backend="cake")} for T in sizes}
+        streams = {T: torch.cuda.Stream() for T in sizes}
+        torch.cuda.synchronize()
+        for T in sizes:
+            inp = inputs[T]
+            with torch.cuda.stream(streams[T]):
+                X = inp.X.detach().requires_grad_(True)
+                W = inp.W.detach().requires_grad_(True)
+                loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+                    X,
+                    W,
+                    inp.labels,
+                    loss_div=inp.loss_div,
+                    chunk_size=4096,
+                    return_logp=True,
+                )
+                loss.backward()
+                results[T][f"stream_T{T}"] = dict(
+                    loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad
+                )
+        torch.cuda.synchronize()
+        return results
+
+    inputs = {T: _device_inputs(T, "ce", W=glm_weight) for T in sizes}
+    for T, results in sequence(inputs).items():
+        for got in results.values():
+            contract_lm_head(got, inputs[T])
+    del inputs
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {T: _draw_inputs(T, s, W) for T in sizes}
+        results = sequence(draws)
+        return [(draws[T], results[T]) for T in sizes]
+
+    _judge_problems(
+        record_property,
+        launch,
+        tuple(f"{form}_T{T}" for T in sizes for form in ("serial", "stream")),
+        seed=SEED + sum(sizes),
+    )
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
@@ -4201,65 +4247,89 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
             assert fwd.memory.get("hidden_count"), fwd.memory
 
 
-def test_device_zero_weight_rows_concurrent_threads(glm_weight):
+def test_device_zero_weight_rows_concurrent_threads(glm_weight, record_property):
     """Zero-weight splits on the hidden valid-row count path (four chunks, the dW side stream) from two threads
     at once, each on its own stream, several calls each, after a serial call of each: every call gives zero ``dX``
     rows on the zero-weight rows (each thread reads its own counts and forks its own side stream) and holds its
-    contract."""
+    contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence (one weight, the zero-weight rows from the
+    draw's own generator), and every call is judged against the naive tier (``name@first_serial`` /
+    ``name@second_serial``: the serial calls; ``name@first_<k>`` / ``name@second_<k>``: the ``k``-th call of each
+    thread)."""
     _require_program(entry="loss")
-    inputs, zeros = [], []
-    for T, kind in ((12289, ("random", 0.166)), (16231, ("group", 0.5))):
-        base = _device_inputs(T, "policy", W=glm_weight)
-        zero = _zero_weight_set(base, kind)
-        inputs.append(_with_zero_weights(base, zero))
-        zeros.append(zero)
-    for inp in inputs:
-        contract_lm_head(_loss_call(inp, 4096), inp)
-    runs: list[list] = [[], []]
-    errors: list[BaseException] = []
-    barrier = threading.Barrier(2)
+    cases = {"first": (12289, ("random", 0.166)), "second": (16231, ("group", 0.5))}
+    calls = 4
 
-    def worker(i):
-        try:
-            stream = torch.cuda.Stream()
-            inp = inputs[i]
-            with torch.cuda.stream(stream):
-                barrier.wait()
-                for _ in range(4):
-                    X = inp.X.detach().requires_grad_(True)
-                    W = inp.W.detach().requires_grad_(True)
-                    loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
-                        X,
-                        W,
-                        inp.labels,
-                        objective="policy",
-                        infer_logp=inp.infer_logp,
-                        loss_weights=inp.loss_weights,
-                        chunk_size=4096,
-                        return_logp=True,
-                    )
-                    loss.backward()
-                    runs[i].append(
-                        dict(
+    def sequence(inputs):
+        results = {name: {f"{name}_serial": _loss_call(inp, 4096)} for name, inp in inputs.items()}
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def worker(name):
+            try:
+                stream = torch.cuda.Stream()
+                inp = inputs[name]
+                with torch.cuda.stream(stream):
+                    barrier.wait(TIMEOUT_S)
+                    for k in range(1, calls + 1):
+                        X = inp.X.detach().requires_grad_(True)
+                        W = inp.W.detach().requires_grad_(True)
+                        loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+                            X,
+                            W,
+                            inp.labels,
+                            objective="policy",
+                            infer_logp=inp.infer_logp,
+                            loss_weights=inp.loss_weights,
+                            chunk_size=4096,
+                            return_logp=True,
+                        )
+                        loss.backward()
+                        results[name][f"{name}_{k}"] = dict(
                             loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad
                         )
-                    )
-            stream.synchronize()
-        except BaseException as exc:  # noqa: BLE001 -- re-raised by the main thread
-            errors.append(exc)
+                stream.synchronize()
+            except BaseException as exc:  # noqa: BLE001 -- re-raised by the main thread
+                errors.append(exc)
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    torch.cuda.synchronize()
-    assert not errors, errors
-    for inp, zero, got in zip(inputs, zeros, runs, strict=True):
-        assert len(got) == 4
-        for run in got:
-            assert not bool(run["dX"][zero].any())
-            contract_lm_head(run, inp)
+        threads = [threading.Thread(target=worker, args=(name,)) for name in inputs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(TIMEOUT_S)
+        assert not any(thread.is_alive() for thread in threads), "a thread did not finish"
+        torch.cuda.synchronize()
+        assert not errors, errors
+        assert all(len(found) == calls + 1 for found in results.values()), results.keys()
+        return results
+
+    inputs = {}
+    for name, (T, kind) in cases.items():
+        base = _device_inputs(T, "policy", W=glm_weight)
+        inputs[name] = _with_zero_weights(base, _zero_weight_set(base, kind))
+    contract = _zero_rows_contract()
+    for name, results in sequence(inputs).items():
+        for run in results.values():
+            contract(run, inputs[name])
+    del inputs
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {
+            name: _draw_zero_weights(_draw_inputs(T, s, W, "policy"), kind)
+            for name, (T, kind) in cases.items()
+        }
+        results = sequence(draws)
+        return [(draws[name], results[name]) for name in cases]
+
+    _judge_problems(
+        record_property,
+        launch,
+        tuple(
+            f"{name}_{call}" for name in cases for call in ("serial", *range(1, calls + 1))
+        ),
+        seed=SEED + 12289,
+        contract=contract,
+    )
 
 
 def test_device_zero_weight_rows_under_a_non_finite_upstream_gradient(glm_weight):
@@ -6387,12 +6457,37 @@ def test_device_dw_stream_modes(glm_weight, record_property):
     _judge_device(record_property, 12289, launch, forms=tuple(modes))
 
 
-def test_device_fresh_thread_and_preload(glm_weight):
+def test_device_fresh_thread_and_preload(glm_weight, record_property):
     """A call from a thread that never called the package before (after a call on the main thread) forms that thread's
     state (side streams, count cells) and holds its contract; ``cake_lm_head_nondet_train_preload`` forms the calling
-    thread's state ahead of its first call."""
+    thread's state ahead of its first call.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs a call on the main thread
+    and then one from a new thread, and both are judged against the naive tier (``name@main`` /
+    ``name@fresh_thread``)."""
     _require_program(entry="loss")
     import cake_pplx.cake_lm_head_nondet_train as public
+
+    def from_a_new_thread(problem):
+        found: dict = {}
+
+        def fresh():
+            try:
+                found["state_before"] = getattr(cake_backend._THREAD_STATE, "dw_streams", None)
+                found["result"] = _run(problem, 4096, backend="cake")
+            except BaseException as exc:  # noqa: BLE001 -- re-raised on the main thread
+                found["error"] = exc
+
+        thread = threading.Thread(target=fresh)
+        thread.start()
+        thread.join()
+        if "error" in found:
+            raise found["error"]
+        assert found["state_before"] is None
+        return found["result"]
+
+    def launch(j, s):
+        draw = _draw_inputs(12289, s, _judge_weight(s))
+        main = _run(draw, 4096, backend="cake")
+        return [(draw, dict(main=main, fresh_thread=from_a_new_thread(draw)))]
 
     inp = _device_inputs(12289, "ce", W=glm_weight)
     contract_lm_head(_run(inp, 4096, backend="cake"), inp)
@@ -6427,6 +6522,8 @@ def test_device_fresh_thread_and_preload(glm_weight):
     assert out["state_before"] is None
     contract_lm_head(out["result"], inp)
     assert out["preloaded"] == (True, True)
+    del inp, out
+    _judge_problems(record_property, launch, ("main", "fresh_thread"), seed=SEED + 12289)
 
 
 def _forget_device_constants():
@@ -8931,7 +9028,7 @@ def test_device_logprob_keep_meets_the_naive_tier(
     )
 
 
-def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
+def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep, record_property):
     """Where the kept logits live and what they cost (the chunked kept form, :data:`CHUNKED_KEEP`; one dX slice pinned:
     the kept gradients are compared with the default call's by their bits): a
     kept-entry call no backward can follow (``torch.no_grad``, ``torch.inference_mode``, frozen inputs) is the default
@@ -8941,7 +9038,9 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
     from the forward to the backward grow by the kept bindings' ``memory["saved_logits_bytes"]`` (chunk 0 lives in the
     chunk buffer the default forward frees), the step peak by no more than that, and nothing stays allocated after the
     backward; a kept views tuple of the wrong plan is a ``ValueError``; the prepared runner of a kept plan does not
-    launch it."""
+    launch it.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the retained graph's two backward passes, and both are
+    judged against the naive tier (``name@first``: the kept call's ``logp`` and the pass that spends the kept logits;
+    ``name@retained``: the second pass, which recomputes)."""
     _require_program(entry="logprob")
     C, T = 4096, 8700
     inp = make_inputs(T, seed=SEED + 97, device=CUDA, W=glm_weight, ignore_frac=0.05)
@@ -9150,6 +9249,38 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
     assert runner.plan.logprob_keep
     with pytest.raises(NotImplementedError, match="eager entry points"):
         runner.forward()
+    del runner, inp, ref
+
+    def retained_passes(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        lp = cake_backend.cake_lm_head_nondet_train_logprob_keep(
+            X, W, problem.labels, chunk_size=C, gemm_tuning=ONE_SLICE
+        )
+        node = lp.grad_fn
+        assert node.kept is True
+        lp.backward(problem.dlogp, retain_graph=True)
+        assert node.kept is False  # spent
+        first = dict(logp=lp.detach(), dX=X.grad, dW=W.grad)
+        X.grad = W.grad = None
+        lp.backward(problem.dlogp)
+        return dict(first=first, retained=dict(dX=X.grad, dW=W.grad))
+
+    def launch(j, s):
+        draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05)
+        with _cache(True) as cache:
+            cache.clear()
+            results = retained_passes(draw)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 97 + T,
+        entry="logprob",
+        names={"first": ("logp", "dX", "dW"), "retained": ("dX", "dW")},
+    )
 
 
 def test_device_logprob_keep_hidden_count_memory_report(glm_weight):
@@ -13948,8 +14079,10 @@ def test_device_temperature_upstream_gradients(glm_weight, record_property):
     """Arbitrary per-row upstream gradients with a heterogeneous temperature on the generated program: zeros give
     zero gradients (values; the default slices), the negated upstream the negated gradients (one dX slice pinned,
     ``_TAU_ONE``) and both backward passes of a retained graph hold their contract; at ``JUDGE_H`` / ``JUDGE_V``
-    random (nonzero on ignored rows too, drawn from the draw's seed) and large upstreams meet the naive tier (the
-    default dX slices; ``name@random`` / ``name@large``)."""
+    random (nonzero on ignored rows too, drawn from the draw's seed) and large upstreams are judged against the naive
+    tier (the default dX slices; ``name@random`` / ``name@large``), and so are both backward passes of a retained
+    graph on the draw's own upstream (one dX slice pinned; ``name@first``: ``logp`` and the pass that retains the
+    graph, ``name@retained``: the second pass)."""
     _require_tau_program()
     T = 4097
     inp = _tau_inputs(T, W=glm_weight)
@@ -13962,21 +14095,29 @@ def test_device_temperature_upstream_gradients(glm_weight, record_property):
     negated = _run(dataclasses.replace(inp, dlogp=-inp.dlogp), 4096, **kw, **_TAU_ONE)
     assert torch.equal(negated["dX"], -base["dX"])
     assert torch.equal(negated["dW"], -base["dW"])
-    X = inp.X.detach().requires_grad_(True)
-    W = inp.W.detach().requires_grad_(True)
-    logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
-        X,
-        W,
-        inp.labels,
-        chunk_size=4096,
-        backend="cake",
-        temperature=inp.temperature,
-        **_TAU_ONE,
-    )
-    for retain in (True, False):
-        dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp, retain_graph=retain)
-        contract_lm_head(dict(dX=dX, dW=dW), inp, entry="logprob")
-    base = zeros = negated = dX = dW = logp = X = W = None
+
+    def retained(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
+            X,
+            W,
+            problem.labels,
+            chunk_size=4096,
+            backend="cake",
+            temperature=problem.temperature,
+            **_TAU_ONE,
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dX, dW = torch.autograd.grad(logp, (X, W), problem.dlogp, retain_graph=retain)
+            results[label] = dict(dX=dX, dW=dW)
+        results["first"]["logp"] = logp.detach()
+        return results
+
+    for result in retained(inp).values():
+        contract_lm_head(result, inp, entry="logprob")
+    base = zeros = negated = None
 
     def launch(j, s):
         draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05, temperature="hetero")
@@ -13988,9 +14129,22 @@ def test_device_temperature_upstream_gradients(glm_weight, record_property):
         ):
             g_inp = dataclasses.replace(draw, dlogp=g.contiguous())
             groups.append((g_inp, {name: _run(g_inp, 4096, **kw)}))
+        groups.append((draw, retained(draw)))
         return groups
 
-    _judge_problems(record_property, launch, ("random", "large"), seed=SEED + 7637 + T, entry="logprob")
+    _judge_problems(
+        record_property,
+        launch,
+        ("random", "large", "first", "retained"),
+        seed=SEED + 7637 + T,
+        entry="logprob",
+        names={
+            "random": ("logp", "dX", "dW"),
+            "large": ("logp", "dX", "dW"),
+            "first": ("logp", "dX", "dW"),
+            "retained": ("dX", "dW"),
+        },
+    )
 
 
 _FRESH_PROCESS_TAU_SCRIPT = """
@@ -14012,31 +14166,58 @@ torch.cuda.synchronize()
 torch.save(dict(logp=logp.detach().cpu(), dX=dX.cpu(), dW=dW.cpu()), {out!r})
 """
 
+# One judged draw's step in a fresh process: the draw's inputs (:func:`_draw_inputs` of the draw's seed, the weight
+# :func:`_judge_weight`'s) and the test's backward form (``logprob_chunk_loop``) made again there.
+_FRESH_PROCESS_TAU_DRAW_SCRIPT = """
+import sys, torch
+sys.path.insert(0, {root!r})
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs, make_weight
+from tests.cake.test_helpers.cake_package import cake_package
+cake_backend = cake_package("cake.cake_lm_head_nondet_train", "cake_backend")
+cake_backend._set_logprob_vocab_major({vocab_major!r})
+W = make_weight({V}, {H}, seed={seed_w}, device="cuda")
+inp = make_inputs(
+    {T}, seed={seed}, H={H}, V={V}, device="cuda", W=W, ignore_frac={ignore_frac}, temperature="hetero"
+)
+X = inp.X.detach().requires_grad_(True)
+W = inp.W.detach().requires_grad_(True)
+logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
+    X, W, inp.labels, chunk_size={C}, backend="cake", temperature=inp.temperature,
+    gemm_tuning={tuning!r},
+)
+dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp)
+torch.cuda.synchronize()
+torch.save(dict(logp=logp.detach().cpu(), dX=dX.cpu(), dW=dW.cpu()), {out!r})
+"""
+
 
 def test_device_temperature_fresh_thread_process_and_changing_t(
-    logprob_chunk_loop, glm_weight, tmp_path
+    logprob_chunk_loop, glm_weight, tmp_path, record_property
 ):
     """With a heterogeneous temperature and one dX slice pinned (``_TAU_ONE``): the backward from a fresh thread and
     the whole step in a fresh process hold their contract; over calls whose ``T`` changes between them (two chunks,
     one, four) every one-slice call holds its contract and with the default dX slices the calls keep the one-slice
-    calls' ``logp`` / ``dW`` bits (:func:`_assert_fixed_order_bits`) and hold their contract."""
+    calls' ``logp`` / ``dW`` bits (:func:`_assert_fixed_order_bits`) and hold their contract.  At ``JUDGE_H`` /
+    ``JUDGE_V`` each draw's step runs on the main thread, from a new thread and in a new process, and all three are
+    judged against the naive tier (``name@main`` / ``name@fresh_thread`` / ``name@fresh_process``)."""
     _require_tau_program()
     T, C = 4097, 4096
     inp = _tau_inputs(T, W=glm_weight)
 
-    def grad_path():
-        X = inp.X.detach().requires_grad_(True)
-        W = inp.W.detach().requires_grad_(True)
+    def grad_path(problem=None):
+        problem = inp if problem is None else problem
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
         logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
             X,
             W,
-            inp.labels,
+            problem.labels,
             chunk_size=C,
             backend="cake",
-            temperature=inp.temperature,
+            temperature=problem.temperature,
             **_TAU_ONE,
         )
-        dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp)
+        dX, dW = torch.autograd.grad(logp, (X, W), problem.dlogp)
         torch.cuda.synchronize()
         return dict(logp=logp.detach(), dX=dX, dW=dW)
 
@@ -14091,6 +14272,61 @@ def test_device_temperature_fresh_thread_process_and_changing_t(
     for i, (a, b) in enumerate(zip(sliced, first, strict=True)):
         _assert_fixed_order_bits(a, b, ("sliced vs one slice", inputs[i].T))
         contract_lm_head(a, inputs[i], entry="logprob")
+    del inputs, first, sliced, main, fresh, outcome
+
+    def launch(j, s):
+        draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05, temperature="hetero")
+        results = dict(main=grad_path(draw))
+        found = {}
+
+        def new_thread():
+            try:
+                found["result"] = grad_path(draw)
+            except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                found["error"] = exc
+
+        thread = threading.Thread(target=new_thread, name="fresh-temperature-thread")
+        thread.start()
+        thread.join()
+        if "error" in found:
+            raise found["error"]
+        results["fresh_thread"] = found["result"]
+        saved = tmp_path / f"fresh_process_draw_{j}.pt"
+        script = _FRESH_PROCESS_TAU_DRAW_SCRIPT.format(
+            root=root,
+            vocab_major="0",  # the test's backward form (``logprob_chunk_loop``)
+            T=T,
+            seed=s,
+            seed_w=s + W_DRAW_OFFSET,
+            H=JUDGE_H,
+            V=JUDGE_V,
+            ignore_frac=0.05,
+            C=C,
+            tuning=_TAU_ONE["gemm_tuning"],
+            out=str(saved),
+        )
+        run = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert run.returncode == 0, (
+            f"draw {j}: fresh process failed ({run.returncode}):\n{run.stdout[-2000:]}\n{run.stderr[-4000:]}"
+        )
+        results["fresh_process"] = {k: v.to(CUDA) for k, v in torch.load(saved).items()}
+        saved.unlink()
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("main", "fresh_thread", "fresh_process"),
+        seed=SEED + 7637 + T,
+        entry="logprob",
+    )
 
 
 def test_device_temperature_ignored_rows(glm_weight):
@@ -15373,61 +15609,87 @@ def test_device_logprob_temperature_steps_hit_one_backward_binding(
         assert torch.equal(_bits(out[key]), _bits(value)), key
 
 
-def test_device_temperature_concurrent_threads(glm_weight, monkeypatch):
+def test_device_temperature_concurrent_threads(glm_weight, monkeypatch, record_property):
     """Log-probability steps with a per-token temperature and ignored rows on two threads, each on its own stream
     (four chunks: the hidden count with the temperature's device-count form and the dW side stream run).  The first
     thread's call waits between its count's copy and its read until the second thread's whole step returned.  Both
-    steps, and a single-thread step of each before them, hold their contract (one dX slice pinned)."""
+    steps, and a single-thread step of each before them, hold their contract (one dX slice pinned).  At ``JUDGE_H`` /
+    ``JUDGE_V`` each draw runs the same sequence on two problems of its own (one weight; the second problem's inputs
+    from the draw's seed plus ``SEED_OFFSETS["a second problem's X, labels and operands"]``), and every step is judged
+    against the naive tier (``name@first_serial`` / ``name@second_serial``: the single-thread steps; ``name@first`` /
+    ``name@second``: the two threads' steps)."""
     _require_temperature_forms()
     C, T = 256, 1000
+    ignores = {"first": 0.05, "second": 0.40}
+    finish = cake_backend._HiddenCount.finish
+    state: dict = {"paused": []}
+
+    def finish_after_the_other_step(self):
+        if threading.current_thread().name == "first" and not state["paused"]:
+            state["paused"].append(True)
+            state["begun"].wait(TIMEOUT_S)
+            state["read"].wait(TIMEOUT_S)
+        return finish(self)
+
+    monkeypatch.setattr(
+        cake_backend._HiddenCount, "finish", finish_after_the_other_step
+    )
+
+    def sequence(inputs):
+        counts = {name: int(i.labels.ge(0).sum()) for name, i in inputs.items()}
+        assert counts["second"] < counts["first"]  # the other count never indexes past
+        results = {
+            name: {f"{name}_serial": _logprob_temperature_step(inp, C)} for name, inp in inputs.items()
+        }
+        torch.cuda.synchronize()
+        state.update(begun=threading.Barrier(2), read=threading.Barrier(2), paused=[])
+
+        def first():
+            results["first"]["first"] = _logprob_temperature_step(inputs["first"], C)
+
+        def second():
+            state["begun"].wait(TIMEOUT_S)
+            results["second"]["second"] = _logprob_temperature_step(inputs["second"], C)
+            torch.cuda.current_stream().synchronize()
+            state["read"].wait(TIMEOUT_S)
+
+        _run_two_threads(first, second)
+        assert state["paused"] == [True]
+        return results
+
     inputs = {
         name: make_inputs(
             T,
             seed=seed,
             device=CUDA,
             W=glm_weight,
-            ignore_frac=ignore,
+            ignore_frac=ignores[name],
             temperature="hetero",
         )
-        for name, seed, ignore in (
-            ("first", SEED + 15, 0.05),
-            ("second", SEED + 16, 0.40),
-        )
+        for name, seed in (("first", SEED + 15), ("second", SEED + 16))
     }
-    counts = {name: int(i.labels.ge(0).sum()) for name, i in inputs.items()}
-    assert counts["second"] < counts["first"]  # the other count never indexes past
-    for inp in inputs.values():
-        contract_lm_head(_logprob_temperature_step(inp, C), inp, entry="logprob")
-    torch.cuda.synchronize()
-    begun, read = threading.Barrier(2), threading.Barrier(2)
-    finish = cake_backend._HiddenCount.finish
-    paused = []
+    for name, results in sequence(inputs).items():
+        for got in results.values():
+            contract_lm_head(got, inputs[name], entry="logprob")
+    del inputs
+    second = SEED_OFFSETS["a second problem's X, labels and operands"]
 
-    def finish_after_the_other_step(self):
-        if threading.current_thread().name == "first" and not paused:
-            paused.append(True)
-            begun.wait(TIMEOUT_S)
-            read.wait(TIMEOUT_S)
-        return finish(self)
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {
+            name: _draw_inputs(T, s + offset, W, ignore_frac=ignores[name], temperature="hetero")
+            for name, offset in (("first", 0), ("second", second))
+        }
+        results = sequence(draws)
+        return [(draws[name], results[name]) for name in ("first", "second")]
 
-    monkeypatch.setattr(
-        cake_backend._HiddenCount, "finish", finish_after_the_other_step
+    _judge_problems(
+        record_property,
+        launch,
+        ("first_serial", "first", "second_serial", "second"),
+        seed=SEED + 15 + T,
+        entry="logprob",
     )
-    got = {}
-
-    def first():
-        got["first"] = _logprob_temperature_step(inputs["first"], C)
-
-    def second():
-        begun.wait(TIMEOUT_S)
-        got["second"] = _logprob_temperature_step(inputs["second"], C)
-        torch.cuda.current_stream().synchronize()
-        read.wait(TIMEOUT_S)
-
-    _run_two_threads(first, second)
-    assert paused == [True]
-    for name, inp in inputs.items():
-        contract_lm_head(got[name], inp, entry="logprob")
 
 
 # ---------------------------------------------------------------------------
@@ -16564,10 +16826,13 @@ def test_device_one_pass_checkpoint_replay(glm_weight, T):
     contract_lm_head(dict(loss=loss.detach(), dX=X.grad, dW=W.grad), inp)
 
 
-def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight):
+def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight, record_property):
     """Two backward passes into the same ``W`` (the second call with a frozen X: the backward writes ``dW`` alone):
     ``W.grad`` is the autograd engine's sum of the two incoming gradients, each holding its contract; both backward
-    passes of a retained graph hold their contract."""
+    passes of a retained graph hold their contract.  At the production head (``H`` 6144, ``V`` 154880, where the
+    one-pass programs are registered) each draw runs the retained graph through the one-pass launches, and the loss
+    and both backward passes are judged against the naive tier (``name@first``: the loss and the pass that retains
+    the graph; ``name@retained``: the second pass)."""
     _require_one_pass(1)
     a = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     b = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 7, ignore_frac=0.0)
@@ -16588,14 +16853,38 @@ def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight):
     assert _same_bits(W.grad, seen_w[0] + seen_w[1])
     contract_lm_head(dict(dX=X.grad, dW=seen_w[0]), a)
     contract_lm_head(dict(dW=seen_w[1]), b)
-    X2 = a.X.detach().requires_grad_(True)
-    W2 = glm_weight.detach().requires_grad_(True)
-    loss = cake_backend.cake_lm_head_nondet_train_loss(
-        X2, W2, a.labels, loss_div=a.loss_div, chunk_size=4096
+
+    def passes(problem):
+        X2 = problem.X.detach().requires_grad_(True)
+        W2 = problem.W.detach().requires_grad_(True)
+        loss = cake_backend.cake_lm_head_nondet_train_loss(
+            X2, W2, problem.labels, loss_div=problem.loss_div, chunk_size=4096
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dx, dw = torch.autograd.grad(loss, (X2, W2), retain_graph=retain)
+            results[label] = dict(dX=dx, dW=dw)
+        results["first"]["loss"] = loss.detach()
+        return results
+
+    for result in passes(a).values():
+        contract_lm_head(result, a)
+    del a, b, X, W, seen_w
+
+    def launch(j, s):
+        draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        with _one_pass_rows({1}), _one_pass_launches() as launched:
+            results = passes(draw)
+        assert launched[:2] == _one_pass_stages(1)[:2], (j, launched)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 1,
+        names={"first": ("loss", "dX", "dW"), "retained": ("dX", "dW")},
     )
-    for retain in (True, False):
-        dx, dw = torch.autograd.grad(loss, (X2, W2), retain_graph=retain)
-        contract_lm_head(dict(dX=dx, dW=dw), a)
 
 
 @pytest.mark.parametrize("ignore_frac", [0.0, 1.0])

@@ -78,6 +78,7 @@ W_DRAW_OFFSET = 500_009
 #: Every generator seed offset a judged case uses, by input.
 SEED_OFFSETS = {
     "X, labels and the objective operands": 0,
+    "a second problem's X, labels and operands": 1,  # two problems of one shape in one draw (two threads' inputs)
     "replay weight update": 5,
     "support upstreams": 7,
     "support ids": 17,
@@ -86,6 +87,7 @@ SEED_OFFSETS = {
     "zero sets": 7992,
     "W": W_DRAW_OFFSET,
     "temperature": TEMPERATURE_SEED_OFFSET,  # the support inputs' temperature uses the same offset
+    "a second problem's temperature": 1 + TEMPERATURE_SEED_OFFSET,
     "teacher": _TEACHER_SEED_OFFSET,
 }
 
