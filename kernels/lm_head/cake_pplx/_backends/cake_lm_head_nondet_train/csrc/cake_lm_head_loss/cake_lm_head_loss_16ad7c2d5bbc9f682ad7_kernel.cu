@@ -49,6 +49,19 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
+
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
+
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(256) void
@@ -146,19 +159,31 @@ kernel_cake_lm_head_loss_16ad7c2d5bbc9f682ad7(__nv_bfloat16* __restrict__ Z, flo
                     for (int t_2 = 0; t_2 < 4; t_2++) {
                         if (live[t_2] != 0) {
                             float dzt = dzs[r_1 * 4 + t_2];
+                            float2 dz2 = make_float2(dzt, dzt);
                             #pragma unroll
-                            for (int e_2 = 0; e_2 < 8; e_2++) {
+                            for (int e_2 = 0; e_2 < 4; e_2++) {
+                                float2 x2 = make_float2(xf[(t_2 * 3 + j_1) * 8 + 2 * e_2], xf[(t_2 * 3 + j_1) * 8 + 2 * e_2 + 1]);
                                 if (t_2 == 0) {
-                                    o[e_2] = dzt * xf[(t_2 * 3 + j_1) * 8 + e_2];
+                                    float2 o2;
+                                    asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&o2) : "l"(*(const unsigned long long*)&dz2), "l"(*(const unsigned long long*)&x2));
+                                    o[2 * e_2] = o2.x;
+                                    o[2 * e_2 + 1] = o2.y;
                                 } else {
-                                    o[e_2] = __fmaf_rn(dzt, xf[(t_2 * 3 + j_1) * 8 + e_2], o[e_2]);
+                                    float2 f2 = fma_f32x2_rn_noftz(dz2, x2, make_float2(o[2 * e_2], o[2 * e_2 + 1]));
+                                    o[2 * e_2] = f2.x;
+                                    o[2 * e_2 + 1] = f2.y;
                                 }
                             }
                         }
                     }
+                    float2 g2 = make_float2(g, g);
                     #pragma unroll
-                    for (int e_3 = 0; e_3 < 8; e_3++) {
-                        o[e_3] = o[e_3] * g;
+                    for (int e_3 = 0; e_3 < 4; e_3++) {
+                        float2 _f32x2_mul_a_1 = make_float2(o[2 * e_3], o[2 * e_3 + 1]);
+                        float2 og;
+                        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&og) : "l"(*(const unsigned long long*)&_f32x2_mul_a_1), "l"(*(const unsigned long long*)&g2));
+                        o[2 * e_3] = og.x;
+                        o[2 * e_3 + 1] = og.y;
                     }
                     unsigned int packed[4];
                     #pragma unroll

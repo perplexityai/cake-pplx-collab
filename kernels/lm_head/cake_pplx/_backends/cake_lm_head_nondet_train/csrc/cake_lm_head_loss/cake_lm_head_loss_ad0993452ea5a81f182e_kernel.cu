@@ -87,6 +87,21 @@ __device__ __forceinline__ void mbarrier_wait(int mbar_addr, int phase) {
         :: "r"(mbar_addr), "r"(phase) : "memory");
 }
 
+__device__ __forceinline__ void mbarrier_wait_cluster_hint(
+        int mbar_addr, int phase, uint32_t suspend_time_hint) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred P1;\n\t"
+        "LAB_WAIT_CLUSTER_HINT:\n\t"
+        "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64"
+        " P1, [%0], %1, %2;\n\t"
+        "@P1 bra.uni DONE_CLUSTER_HINT;\n\t"
+        "bra.uni LAB_WAIT_CLUSTER_HINT;\n\t"
+        "DONE_CLUSTER_HINT:\n\t"
+        "}\n"
+        :: "r"(mbar_addr), "r"(phase), "r"(suspend_time_hint) : "memory");
+}
+
 
 
 
@@ -308,8 +323,22 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                     int ld_off_n = bid_n * 512 + it_sub * 256 + cta_rank * 128;
                     int ld_k_base = it_slice * k_slice_iters;
                     int ld_k_count = ((it_slice < k_slices - 1) ? k_slice_iters : k_iters - (k_slices - 1) * k_slice_iters);
+                    int it_raw_0 = ld_tile;
+                    int it_is_half_0 = ((it_raw_0 >= 2 * (m_tiles / 2 * (ldc / 512) * k_slices) - (int)num_bids / 2) ? 1 : 0);
+                    int it_rel_0 = ((it_is_half_0 == 1) ? it_raw_0 - (2 * (m_tiles / 2 * (ldc / 512) * k_slices) - (int)num_bids / 2) : 0);
+                    int it_item_0 = ((it_is_half_0 == 1) ? 2 * (m_tiles / 2 * (ldc / 512) * k_slices) - (int)num_bids / 2 + it_rel_0 / 2 : it_raw_0);
+                    int it_sub_0 = it_rel_0 % 2;
+                    int it_slice_0 = it_item_0 / (m_tiles / 2 * (ldc / 512));
+                    int it_pair_bid_0 = it_item_0 % (m_tiles / 2 * (ldc / 512)) * 2;
+                    int group_0 = it_pair_bid_0 / (group_m * (ldc / 512));
+                    int first_m_0 = group_0 * group_m;
+                    int remaining_0 = m_tiles - first_m_0;
+                    int group_size_0 = ((remaining_0 >= group_m) ? group_m : remaining_0);
+                    int local_0 = it_pair_bid_0 % (group_m * (ldc / 512));
+                    int bid_m_0 = first_m_0 + local_0 % group_size_0;
+                    int bid_n_0 = local_0 / group_size_0;
                     int live_rows = CNT[0];
-                    int live = (((bid_m >> 1) * 256 < live_rows) ? ld_k_count : 0);
+                    int live = (((bid_m_0 >> 1) * 256 < live_rows) ? ld_k_count : 0);
                     ld_k_count = live;
                     #pragma unroll 1
                     for (int ld_k = 0; ld_k < ld_k_count; ld_k++) {
@@ -323,18 +352,18 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                             tma_3d_gmem2smem_cta2(ring_mn_addr_0 + load_stage * 49152, (&B), ld_off_n + 256, ld_k0, 0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             tma_3d_gmem2smem_cta2(ring_mn_addr_0 + load_stage * 49152 + 8192, (&B), ld_off_n + 320, ld_k0, 0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         } else {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(32768)) : "memory");
                         }
                         load_stage += 1;
                         if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
                 }
-                mbarrier_wait(clc_full_addr + (load_clc_stage) * 8, _phase_clc_full);
+                mbarrier_wait_cluster_hint(clc_full_addr + (load_clc_stage) * 8, _phase_clc_full, 10000000);
                 uint32_t valid = 0;
                 asm volatile(
                     "{\n\t"
@@ -418,7 +447,7 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                     mbarrier_wait(epilogue_done_addr, _phase_epilogue_done);
                     #pragma unroll 1
                     for (int mm_k = 0; mm_k < mm_k_last; mm_k++) {
-                        mbarrier_wait(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag = ((mm_k == 0) ? 1 : 0);
 #if __CUDA_ARCH__ == 1070
@@ -510,7 +539,7 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                     elect_commit_cg2_multicast(mainloop_done_addr, (uint16_t)(3));
                     _phase_epilogue_done ^= 1;
                 }
-                mbarrier_wait(clc_full_addr + (mma_clc_stage) * 8, _phase_clc_full_1);
+                mbarrier_wait_cluster_hint(clc_full_addr + (mma_clc_stage) * 8, _phase_clc_full_1, 10000000);
                 uint32_t mm_valid = 0;
                 asm volatile(
                     "{\n\t"
@@ -566,7 +595,7 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
             unsigned int _phase_mainloop_done = 0;
             #pragma unroll 1
             for (unsigned int _ep = 0; _ep < (int)num_bids / 2; _ep++) {
-                mbarrier_wait(clc_full_addr + (epi_clc_stage) * 8, _phase_clc_full_2);
+                mbarrier_wait_cluster_hint(clc_full_addr + (epi_clc_stage) * 8, _phase_clc_full_2, 10000000);
                 uint32_t valid_1 = 0;
                 asm volatile(
                     "{\n\t"
@@ -701,7 +730,7 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                             "{\n\t"
                             ".reg .b32 remAddr32;\n\t"
                             "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                            "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
+                            "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                             "}"
                             :: "r"(clc_full_addr + (sched_clc_stage) * 8), "r"(lane), "r"((uint32_t)(16)) : "memory");
                     }
@@ -714,7 +743,7 @@ kernel_cake_lm_head_loss_ad0993452ea5a81f182e(const __grid_constant__ CUtensorMa
                             :: "r"(clc_resp_addr + sched_clc_stage * 16 + 0 * 16), "r"(clc_full_addr + sched_clc_stage * 8)
                             : "memory");
                     }
-                    mbarrier_wait(clc_full_addr + (sched_clc_stage) * 8, _phase_clc_full_3);
+                    mbarrier_wait_cluster_hint(clc_full_addr + (sched_clc_stage) * 8, _phase_clc_full_3, 10000000);
                     uint32_t sched_valid = 0;
                     asm volatile(
                         "{\n\t"

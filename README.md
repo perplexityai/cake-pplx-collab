@@ -45,7 +45,7 @@ To upgrade or downgrade one family, change the SHA on its line. The other famili
 
 All families install into one namespace package, `cake_pplx` (PEP 420). Neither `cake_pplx/` nor `cake_pplx/_backends/` contains an `__init__.py`, so each distribution only adds its own modules. Several families can be installed side by side, each from a different commit.
 
-Every family is at `VERSION` 0.1.0. Per-family release tags of the form `<family>/vX.Y.Z` are planned but do not exist yet. Until they do, pin by commit SHA.
+Each family has its own version in `kernels/<family>/VERSION`. Per-family release tags of the form `<family>/vX.Y.Z` are planned but do not exist yet. Until they do, pin by commit SHA.
 
 ## Use
 
@@ -68,7 +68,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for mok). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for dense_gemm, lm_head and mok). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |

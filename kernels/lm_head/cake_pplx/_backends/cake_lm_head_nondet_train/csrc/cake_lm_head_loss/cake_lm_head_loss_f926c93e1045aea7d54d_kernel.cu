@@ -252,6 +252,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
 
     __syncthreads();
     asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+    int chunk = 128;
 
     const unsigned int taddr = tmem_addr_storage[0];
     const unsigned int tmem_acc = taddr;
@@ -264,7 +265,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
             const int pw = warp;
             int a_idx[32];
             int b_idx[32];
-            int n_tiles = (M + 127) / 128;
+            int n_tiles = (M + (chunk - 1)) / chunk;
             int k_iters = H / 64;
             unsigned int _phase_meta_full = 0;
             unsigned int _phase_empty = 1;
@@ -274,38 +275,38 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                     mbarrier_wait(meta_full_addr + (ms) * 8, _phase_meta_full);
                     int _max_0 = ((meta_n[ms]) > (1) ? (meta_n[ms]) : (1));
                     int n_tok = ((_max_0) < (128) ? (_max_0) : (128));
-                    a_idx[0] = meta_ids[ms * 128 + pw * 32];
-                    a_idx[1] = meta_ids[ms * 128 + (pw * 32 + 1)];
-                    a_idx[2] = meta_ids[ms * 128 + (pw * 32 + 2)];
-                    a_idx[3] = meta_ids[ms * 128 + (pw * 32 + 3)];
-                    a_idx[4] = meta_ids[ms * 128 + (pw * 32 + 4)];
-                    a_idx[5] = meta_ids[ms * 128 + (pw * 32 + 5)];
-                    a_idx[6] = meta_ids[ms * 128 + (pw * 32 + 6)];
-                    a_idx[7] = meta_ids[ms * 128 + (pw * 32 + 7)];
-                    a_idx[8] = meta_ids[ms * 128 + (pw * 32 + 8)];
-                    a_idx[9] = meta_ids[ms * 128 + (pw * 32 + 9)];
-                    a_idx[10] = meta_ids[ms * 128 + (pw * 32 + 10)];
-                    a_idx[11] = meta_ids[ms * 128 + (pw * 32 + 11)];
-                    a_idx[12] = meta_ids[ms * 128 + (pw * 32 + 12)];
-                    a_idx[13] = meta_ids[ms * 128 + (pw * 32 + 13)];
-                    a_idx[14] = meta_ids[ms * 128 + (pw * 32 + 14)];
-                    a_idx[15] = meta_ids[ms * 128 + (pw * 32 + 15)];
-                    a_idx[16] = meta_ids[ms * 128 + (pw * 32 + 16)];
-                    a_idx[17] = meta_ids[ms * 128 + (pw * 32 + 17)];
-                    a_idx[18] = meta_ids[ms * 128 + (pw * 32 + 18)];
-                    a_idx[19] = meta_ids[ms * 128 + (pw * 32 + 19)];
-                    a_idx[20] = meta_ids[ms * 128 + (pw * 32 + 20)];
-                    a_idx[21] = meta_ids[ms * 128 + (pw * 32 + 21)];
-                    a_idx[22] = meta_ids[ms * 128 + (pw * 32 + 22)];
-                    a_idx[23] = meta_ids[ms * 128 + (pw * 32 + 23)];
-                    a_idx[24] = meta_ids[ms * 128 + (pw * 32 + 24)];
-                    a_idx[25] = meta_ids[ms * 128 + (pw * 32 + 25)];
-                    a_idx[26] = meta_ids[ms * 128 + (pw * 32 + 26)];
-                    a_idx[27] = meta_ids[ms * 128 + (pw * 32 + 27)];
-                    a_idx[28] = meta_ids[ms * 128 + (pw * 32 + 28)];
-                    a_idx[29] = meta_ids[ms * 128 + (pw * 32 + 29)];
-                    a_idx[30] = meta_ids[ms * 128 + (pw * 32 + 30)];
-                    a_idx[31] = meta_ids[ms * 128 + (pw * 32 + 31)];
+                    a_idx[0] = meta_ids[ms * 128 + ((1) ? pw * 8 : pw) * 4];
+                    a_idx[1] = meta_ids[ms * 128 + (((1) ? pw * 8 : pw) * 4 + 1)];
+                    a_idx[2] = meta_ids[ms * 128 + (((1) ? pw * 8 : pw) * 4 + 2)];
+                    a_idx[3] = meta_ids[ms * 128 + (((1) ? pw * 8 : pw) * 4 + 3)];
+                    a_idx[4] = meta_ids[ms * 128 + ((1) ? pw * 8 + 1 : pw + 4) * 4];
+                    a_idx[5] = meta_ids[ms * 128 + (((1) ? pw * 8 + 1 : pw + 4) * 4 + 1)];
+                    a_idx[6] = meta_ids[ms * 128 + (((1) ? pw * 8 + 1 : pw + 4) * 4 + 2)];
+                    a_idx[7] = meta_ids[ms * 128 + (((1) ? pw * 8 + 1 : pw + 4) * 4 + 3)];
+                    a_idx[8] = meta_ids[ms * 128 + ((1) ? pw * 8 + 2 : pw + 8) * 4];
+                    a_idx[9] = meta_ids[ms * 128 + (((1) ? pw * 8 + 2 : pw + 8) * 4 + 1)];
+                    a_idx[10] = meta_ids[ms * 128 + (((1) ? pw * 8 + 2 : pw + 8) * 4 + 2)];
+                    a_idx[11] = meta_ids[ms * 128 + (((1) ? pw * 8 + 2 : pw + 8) * 4 + 3)];
+                    a_idx[12] = meta_ids[ms * 128 + ((1) ? pw * 8 + 3 : pw + 12) * 4];
+                    a_idx[13] = meta_ids[ms * 128 + (((1) ? pw * 8 + 3 : pw + 12) * 4 + 1)];
+                    a_idx[14] = meta_ids[ms * 128 + (((1) ? pw * 8 + 3 : pw + 12) * 4 + 2)];
+                    a_idx[15] = meta_ids[ms * 128 + (((1) ? pw * 8 + 3 : pw + 12) * 4 + 3)];
+                    a_idx[16] = meta_ids[ms * 128 + ((1) ? pw * 8 + 4 : pw + 16) * 4];
+                    a_idx[17] = meta_ids[ms * 128 + (((1) ? pw * 8 + 4 : pw + 16) * 4 + 1)];
+                    a_idx[18] = meta_ids[ms * 128 + (((1) ? pw * 8 + 4 : pw + 16) * 4 + 2)];
+                    a_idx[19] = meta_ids[ms * 128 + (((1) ? pw * 8 + 4 : pw + 16) * 4 + 3)];
+                    a_idx[20] = meta_ids[ms * 128 + ((1) ? pw * 8 + 5 : pw + 20) * 4];
+                    a_idx[21] = meta_ids[ms * 128 + (((1) ? pw * 8 + 5 : pw + 20) * 4 + 1)];
+                    a_idx[22] = meta_ids[ms * 128 + (((1) ? pw * 8 + 5 : pw + 20) * 4 + 2)];
+                    a_idx[23] = meta_ids[ms * 128 + (((1) ? pw * 8 + 5 : pw + 20) * 4 + 3)];
+                    a_idx[24] = meta_ids[ms * 128 + ((1) ? pw * 8 + 6 : pw + 24) * 4];
+                    a_idx[25] = meta_ids[ms * 128 + (((1) ? pw * 8 + 6 : pw + 24) * 4 + 1)];
+                    a_idx[26] = meta_ids[ms * 128 + (((1) ? pw * 8 + 6 : pw + 24) * 4 + 2)];
+                    a_idx[27] = meta_ids[ms * 128 + (((1) ? pw * 8 + 6 : pw + 24) * 4 + 3)];
+                    a_idx[28] = meta_ids[ms * 128 + ((1) ? pw * 8 + 7 : pw + 28) * 4];
+                    a_idx[29] = meta_ids[ms * 128 + (((1) ? pw * 8 + 7 : pw + 28) * 4 + 1)];
+                    a_idx[30] = meta_ids[ms * 128 + (((1) ? pw * 8 + 7 : pw + 28) * 4 + 2)];
+                    a_idx[31] = meta_ids[ms * 128 + (((1) ? pw * 8 + 7 : pw + 28) * 4 + 3)];
                     b_idx[0] = meta_tok[ms * 128 + pw * 4];
                     b_idx[1] = meta_tok[ms * 128 + (pw * 4 + 1)];
                     b_idx[2] = meta_tok[ms * 128 + (pw * 4 + 2)];
@@ -343,6 +344,10 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                     if (ms == 4) { ms = 0; _phase_meta_full ^= 1; }
                     int _max_1 = ((((n_tok + 3) / 4 - pw + 3) / 4) > (0) ? (((n_tok + 3) / 4 - pw + 3) / 4) : (0));
                     int b_ops = ((_max_1) < (8) ? (_max_1) : (8));
+                    int n_pair = ((M - tile * chunk) < (chunk) ? (M - tile * chunk) : (chunk));
+                    int _max_3 = ((((n_pair + 3) / 4 - pw + 3) / 4) > (0) ? (((n_pair + 3) / 4 - pw + 3) / 4) : (0));
+                    int _min_2 = ((_max_3) < (8) ? (_max_3) : (8));
+                    int a_ops = ((1) ? 8 : _min_2);
                     #pragma unroll 1
                     for (int kb = 0; kb < k_iters; kb++) {
                         mbarrier_wait(empty_addr + (slot) * 8, _phase_empty);
@@ -382,14 +387,30 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
 #if CAKE_ARRIVE_FIRST
                         mbarrier_arrive_expect_tx(full_addr + (slot) * 8, 4096);
 #endif
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(pw * 32 * 128), (&W), col0, a_idx[0], a_idx[1], a_idx[2], a_idx[3], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 4) * 128), (&W), col0, a_idx[4], a_idx[5], a_idx[6], a_idx[7], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 8) * 128), (&W), col0, a_idx[8], a_idx[9], a_idx[10], a_idx[11], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 12) * 128), (&W), col0, a_idx[12], a_idx[13], a_idx[14], a_idx[15], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 16) * 128), (&W), col0, a_idx[16], a_idx[17], a_idx[18], a_idx[19], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 20) * 128), (&W), col0, a_idx[20], a_idx[21], a_idx[22], a_idx[23], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 24) * 128), (&W), col0, a_idx[24], a_idx[25], a_idx[26], a_idx[27], full_addr + (slot) * 8);
-                        tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)((pw * 32 + 28) * 128), (&W), col0, a_idx[28], a_idx[29], a_idx[30], a_idx[31], full_addr + (slot) * 8);
+                        if (0 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 : pw) * 512), (&W), col0, a_idx[0], a_idx[1], a_idx[2], a_idx[3], full_addr + (slot) * 8);
+                        }
+                        if (1 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 1 : pw + 4) * 512), (&W), col0, a_idx[4], a_idx[5], a_idx[6], a_idx[7], full_addr + (slot) * 8);
+                        }
+                        if (2 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 2 : pw + 8) * 512), (&W), col0, a_idx[8], a_idx[9], a_idx[10], a_idx[11], full_addr + (slot) * 8);
+                        }
+                        if (3 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 3 : pw + 12) * 512), (&W), col0, a_idx[12], a_idx[13], a_idx[14], a_idx[15], full_addr + (slot) * 8);
+                        }
+                        if (4 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 4 : pw + 16) * 512), (&W), col0, a_idx[16], a_idx[17], a_idx[18], a_idx[19], full_addr + (slot) * 8);
+                        }
+                        if (5 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 5 : pw + 20) * 512), (&W), col0, a_idx[20], a_idx[21], a_idx[22], a_idx[23], full_addr + (slot) * 8);
+                        }
+                        if (6 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 6 : pw + 24) * 512), (&W), col0, a_idx[24], a_idx[25], a_idx[26], a_idx[27], full_addr + (slot) * 8);
+                        }
+                        if (7 < a_ops) {
+                            tma_gather4_gmem2smem(smem_a_addr + slot * 32768 + (unsigned int)(((1) ? pw * 8 + 7 : pw + 28) * 512), (&W), col0, a_idx[28], a_idx[29], a_idx[30], a_idx[31], full_addr + (slot) * 8);
+                        }
 #if CAKE_ARRIVE_FIRST
 #else
                         mbarrier_arrive_expect_tx(full_addr + (slot) * 8, 4096);
@@ -406,7 +427,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
         { // mma_main
             unsigned int slot_1 = 0;
             unsigned int acc = 0;
-            int n_tiles_1 = (M + 127) / 128;
+            int n_tiles_1 = (M + (chunk - 1)) / chunk;
             int k_iters_1 = H / 64;
             unsigned int _phase_acc_empty = 1;
             unsigned int _phase_full = 0;
@@ -419,14 +440,9 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                     for (int kb_1 = 0; kb_1 < k_iters_1; kb_1++) {
                         mbarrier_wait(full_addr + (slot_1) * 8, _phase_full);
                         asm volatile("tcgen05.fence::after_thread_sync;");
-                        int first = ((kb_1 == 0) ? 1 : 0);
-#if __CUDA_ARCH__ == 1070
-                        int _smem_desc_lo_0 = (((smem_a_addr) >> 4) & 0x7FFF) + (slot_1) * 2048;
-                        int _smem_desc_lo_1 = (((smem_b_addr) >> 4) & 0x7FFF) + (slot_1) * 2048;
-#else
+                        int first_0 = ((kb_1 == 0 && 1) ? 1 : 0);
                         int _smem_desc_lo_0 = (((smem_a_addr) >> 4) & 0x3FFF) + (slot_1) * 2048;
                         int _smem_desc_lo_1 = (((smem_b_addr) >> 4) & 0x3FFF) + (slot_1) * 2048;
-#endif
                         asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -460,7 +476,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                     "mov.b64 db, {blo, bdhi};\n\t"
                     "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
-                    :: "r"(_smem_desc_lo_0), "r"(_smem_desc_lo_1), "r"((tmem_acc + (acc * 128))), "r"(((first) ? 0 : 1)) : "memory");
+                    :: "r"(_smem_desc_lo_0), "r"(_smem_desc_lo_1), "r"((tmem_acc + (acc * 128))), "r"(((first_0) ? 0 : 1)) : "memory");
                         tcgen05_commit(empty_addr + (slot_1) * 8);
                         slot_1 += 1;
                         if (slot_1 == 6) { slot_1 = 0; _phase_full ^= 1; }
@@ -476,87 +492,90 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
     if (warp == 5) {
         { // meta_main
             int ms_1 = 0;
-            int n_tiles_2 = (M + 127) / 128;
+            int n_tiles_2 = (M + (chunk - 1)) / chunk;
             unsigned int lanes_below = (1 << (unsigned int)lane) - 1;
             unsigned int _phase_meta_empty = 1;
             #pragma unroll 1
             for (int tile_2 = bid; tile_2 < n_tiles_2; tile_2 += num_bids) {
+                long long _min_0 = (((long long)tile_2 * (long long)chunk + (long long)chunk) < ((long long)M) ? ((long long)tile_2 * (long long)chunk + (long long)chunk) : ((long long)M));
+                long long last = ((0) ? _min_0 - 1ll : (long long)M - 1ll);
                 int key[4];
                 int vid[4];
                 int row[4];
-                long long pair_0 = (long long)tile_2 * 128ll + (long long)lane;
-                long long _min_0 = ((pair_0) < ((long long)M - 1ll) ? (pair_0) : ((long long)M - 1ll));
-                key[0] = (int)_min_0;
-                int _max_2 = ((ids[key[0]]) > (0) ? (ids[key[0]]) : (0));
-                int _min_1 = ((_max_2) < (V - 1) ? (_max_2) : (V - 1));
-                vid[0] = _min_1;
-                int const _table_search_3_value = key[0];
-                int _table_search_3 = 0;
-                int _table_search_3_hi = T - 1;
-                while (_table_search_3 < _table_search_3_hi) {
-                    int mid = _table_search_3 + _table_search_3_hi + 1 >> 1;
-                    if (_table_search_3_value >= offsets[mid]) {
-                        _table_search_3 = mid;
+                long long pair_0 = (long long)tile_2 * (long long)chunk + (long long)lane;
+                long long _min_1 = ((pair_0) < (last) ? (pair_0) : (last));
+                key[0] = (int)_min_1;
+                int _max_3_1 = ((ids[key[0]]) > (0) ? (ids[key[0]]) : (0));
+                int _min_2_1 = ((_max_3_1) < (V - 1) ? (_max_3_1) : (V - 1));
+                vid[0] = _min_2_1;
+                int const _table_search_4_value = key[0];
+                int _table_search_4 = 0;
+                int _table_search_4_hi = T - 1;
+                while (_table_search_4 < _table_search_4_hi) {
+                    int mid = _table_search_4 + _table_search_4_hi + 1 >> 1;
+                    if (_table_search_4_value >= offsets[mid]) {
+                        _table_search_4 = mid;
                     } else {
-                        _table_search_3_hi = mid - 1;
+                        _table_search_4_hi = mid - 1;
                     }
                 }
-                row[0] = _table_search_3;
-                long long pair_1 = (long long)tile_2 * 128ll + (long long)(32 + lane);
-                long long _min_4 = ((pair_1) < ((long long)M - 1ll) ? (pair_1) : ((long long)M - 1ll));
-                key[1] = (int)_min_4;
-                int _max_6 = ((ids[key[1]]) > (0) ? (ids[key[1]]) : (0));
-                int _min_5 = ((_max_6) < (V - 1) ? (_max_6) : (V - 1));
-                vid[1] = _min_5;
-                int const _table_search_7_value = key[1];
-                int _table_search_7 = 0;
-                int _table_search_7_hi = T - 1;
-                while (_table_search_7 < _table_search_7_hi) {
-                    int mid_1 = _table_search_7 + _table_search_7_hi + 1 >> 1;
-                    if (_table_search_7_value >= offsets[mid_1]) {
-                        _table_search_7 = mid_1;
+                row[0] = _table_search_4;
+                long long pair_1 = (long long)tile_2 * (long long)chunk + (long long)(32 + lane);
+                long long _min_5 = ((pair_1) < (last) ? (pair_1) : (last));
+                key[1] = (int)_min_5;
+                int _max_7 = ((ids[key[1]]) > (0) ? (ids[key[1]]) : (0));
+                int _min_6 = ((_max_7) < (V - 1) ? (_max_7) : (V - 1));
+                vid[1] = _min_6;
+                int const _table_search_8_value = key[1];
+                int _table_search_8 = 0;
+                int _table_search_8_hi = T - 1;
+                while (_table_search_8 < _table_search_8_hi) {
+                    int mid_1 = _table_search_8 + _table_search_8_hi + 1 >> 1;
+                    if (_table_search_8_value >= offsets[mid_1]) {
+                        _table_search_8 = mid_1;
                     } else {
-                        _table_search_7_hi = mid_1 - 1;
+                        _table_search_8_hi = mid_1 - 1;
                     }
                 }
-                row[1] = _table_search_7;
-                long long pair_2 = (long long)tile_2 * 128ll + (long long)(64 + lane);
-                long long _min_8 = ((pair_2) < ((long long)M - 1ll) ? (pair_2) : ((long long)M - 1ll));
-                key[2] = (int)_min_8;
-                int _max_10 = ((ids[key[2]]) > (0) ? (ids[key[2]]) : (0));
-                int _min_9 = ((_max_10) < (V - 1) ? (_max_10) : (V - 1));
-                vid[2] = _min_9;
-                int const _table_search_11_value = key[2];
-                int _table_search_11 = 0;
-                int _table_search_11_hi = T - 1;
-                while (_table_search_11 < _table_search_11_hi) {
-                    int mid_2 = _table_search_11 + _table_search_11_hi + 1 >> 1;
-                    if (_table_search_11_value >= offsets[mid_2]) {
-                        _table_search_11 = mid_2;
+                row[1] = _table_search_8;
+                long long pair_2 = (long long)tile_2 * (long long)chunk + (long long)(64 + lane);
+                long long _min_9 = ((pair_2) < (last) ? (pair_2) : (last));
+                key[2] = (int)_min_9;
+                int _max_11 = ((ids[key[2]]) > (0) ? (ids[key[2]]) : (0));
+                int _min_10 = ((_max_11) < (V - 1) ? (_max_11) : (V - 1));
+                vid[2] = _min_10;
+                int const _table_search_12_value = key[2];
+                int _table_search_12 = 0;
+                int _table_search_12_hi = T - 1;
+                while (_table_search_12 < _table_search_12_hi) {
+                    int mid_2 = _table_search_12 + _table_search_12_hi + 1 >> 1;
+                    if (_table_search_12_value >= offsets[mid_2]) {
+                        _table_search_12 = mid_2;
                     } else {
-                        _table_search_11_hi = mid_2 - 1;
+                        _table_search_12_hi = mid_2 - 1;
                     }
                 }
-                row[2] = _table_search_11;
-                long long pair_3 = (long long)tile_2 * 128ll + (long long)(96 + lane);
-                long long _min_12 = ((pair_3) < ((long long)M - 1ll) ? (pair_3) : ((long long)M - 1ll));
-                key[3] = (int)_min_12;
-                int _max_14 = ((ids[key[3]]) > (0) ? (ids[key[3]]) : (0));
-                int _min_13 = ((_max_14) < (V - 1) ? (_max_14) : (V - 1));
-                vid[3] = _min_13;
-                int const _table_search_15_value = key[3];
-                int _table_search_15 = 0;
-                int _table_search_15_hi = T - 1;
-                while (_table_search_15 < _table_search_15_hi) {
-                    int mid_3 = _table_search_15 + _table_search_15_hi + 1 >> 1;
-                    if (_table_search_15_value >= offsets[mid_3]) {
-                        _table_search_15 = mid_3;
+                row[2] = _table_search_12;
+                long long pair_3 = (long long)tile_2 * (long long)chunk + (long long)(96 + lane);
+                long long _min_13 = ((pair_3) < (last) ? (pair_3) : (last));
+                key[3] = (int)_min_13;
+                int _max_15 = ((ids[key[3]]) > (0) ? (ids[key[3]]) : (0));
+                int _min_14 = ((_max_15) < (V - 1) ? (_max_15) : (V - 1));
+                vid[3] = _min_14;
+                int const _table_search_16_value = key[3];
+                int _table_search_16 = 0;
+                int _table_search_16_hi = T - 1;
+                while (_table_search_16 < _table_search_16_hi) {
+                    int mid_3 = _table_search_16 + _table_search_16_hi + 1 >> 1;
+                    if (_table_search_16_value >= offsets[mid_3]) {
+                        _table_search_16 = mid_3;
                     } else {
-                        _table_search_15_hi = mid_3 - 1;
+                        _table_search_16_hi = mid_3 - 1;
                     }
                 }
-                row[3] = _table_search_15;
+                row[3] = _table_search_16;
                 int col[4];
+                int slot_2[4];
                 int head[4];
                 int n_tok_1 = 0;
                 int prev_last = -1;
@@ -564,47 +583,59 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                 int prev_0 = ((lane == 0) ? prev_last : up_0);
                 unsigned int heads_0 = __ballot_sync(0xFFFFFFFF, row[0] != prev_0);
                 head[0] = ((row[0] != prev_0) ? 1 : 0);
-                int _max_17 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
-                int _min_16 = ((_max_17) < (127) ? (_max_17) : (127));
-                col[0] = _min_16;
+                int _max_18 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) : (0));
+                int _min_17 = ((_max_18) < (127) ? (_max_18) : (127));
+                slot_2[0] = _min_17;
+                int _max_20 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
+                int _min_19 = ((_max_20) < (127) ? (_max_20) : (127));
+                col[0] = _min_19;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_0);
-                int _shfl_sync_18 = __shfl_sync(0xFFFFFFFF, row[0], 31);
-                prev_last = _shfl_sync_18;
+                int _shfl_sync_21 = __shfl_sync(0xFFFFFFFF, row[0], 31);
+                prev_last = _shfl_sync_21;
                 int up_1 = __shfl_up_sync(0xFFFFFFFF, row[1], 1, 32);
                 int prev_1 = ((lane == 0) ? prev_last : up_1);
                 unsigned int heads_1 = __ballot_sync(0xFFFFFFFF, row[1] != prev_1);
                 head[1] = ((row[1] != prev_1) ? 1 : 0);
-                int _max_20 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
-                int _min_19 = ((_max_20) < (127) ? (_max_20) : (127));
-                col[1] = _min_19;
+                int _max_23 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) : (0));
+                int _min_22 = ((_max_23) < (127) ? (_max_23) : (127));
+                slot_2[1] = _min_22;
+                int _max_25 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
+                int _min_24 = ((_max_25) < (127) ? (_max_25) : (127));
+                col[1] = _min_24;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_1);
-                int _shfl_sync_21 = __shfl_sync(0xFFFFFFFF, row[1], 31);
-                prev_last = _shfl_sync_21;
+                int _shfl_sync_26 = __shfl_sync(0xFFFFFFFF, row[1], 31);
+                prev_last = _shfl_sync_26;
                 int up_2 = __shfl_up_sync(0xFFFFFFFF, row[2], 1, 32);
                 int prev_2 = ((lane == 0) ? prev_last : up_2);
                 unsigned int heads_2 = __ballot_sync(0xFFFFFFFF, row[2] != prev_2);
                 head[2] = ((row[2] != prev_2) ? 1 : 0);
-                int _max_23 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
-                int _min_22 = ((_max_23) < (127) ? (_max_23) : (127));
-                col[2] = _min_22;
+                int _max_28 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) : (0));
+                int _min_27 = ((_max_28) < (127) ? (_max_28) : (127));
+                slot_2[2] = _min_27;
+                int _max_30 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
+                int _min_29 = ((_max_30) < (127) ? (_max_30) : (127));
+                col[2] = _min_29;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_2);
-                int _shfl_sync_24 = __shfl_sync(0xFFFFFFFF, row[2], 31);
-                prev_last = _shfl_sync_24;
+                int _shfl_sync_31 = __shfl_sync(0xFFFFFFFF, row[2], 31);
+                prev_last = _shfl_sync_31;
                 int up_3 = __shfl_up_sync(0xFFFFFFFF, row[3], 1, 32);
                 int prev_3 = ((lane == 0) ? prev_last : up_3);
                 unsigned int heads_3 = __ballot_sync(0xFFFFFFFF, row[3] != prev_3);
                 head[3] = ((row[3] != prev_3) ? 1 : 0);
-                int _max_26 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
-                int _min_25 = ((_max_26) < (127) ? (_max_26) : (127));
-                col[3] = _min_25;
+                int _max_33 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) : (0));
+                int _min_32 = ((_max_33) < (127) ? (_max_33) : (127));
+                slot_2[3] = _min_32;
+                int _max_35 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
+                int _min_34 = ((_max_35) < (127) ? (_max_35) : (127));
+                col[3] = _min_34;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_3);
-                int _shfl_sync_27 = __shfl_sync(0xFFFFFFFF, row[3], 31);
-                prev_last = _shfl_sync_27;
+                int _shfl_sync_36 = __shfl_sync(0xFFFFFFFF, row[3], 31);
+                prev_last = _shfl_sync_36;
                 mbarrier_wait(meta_empty_addr + (ms_1) * 8, _phase_meta_empty);
                 meta_ids[ms_1 * 128 + lane] = vid[0];
                 meta_col[ms_1 * 128 + lane] = col[0];
                 if (head[0] != 0) {
-                    meta_tok[ms_1 * 128 + col[0]] = row[0];
+                    meta_tok[ms_1 * 128 + slot_2[0]] = row[0];
                 }
                 if (lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + lane] = prev_last;
@@ -612,7 +643,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (32 + lane)] = vid[1];
                 meta_col[ms_1 * 128 + (32 + lane)] = col[1];
                 if (head[1] != 0) {
-                    meta_tok[ms_1 * 128 + col[1]] = row[1];
+                    meta_tok[ms_1 * 128 + slot_2[1]] = row[1];
                 }
                 if (32 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (32 + lane)] = prev_last;
@@ -620,7 +651,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (64 + lane)] = vid[2];
                 meta_col[ms_1 * 128 + (64 + lane)] = col[2];
                 if (head[2] != 0) {
-                    meta_tok[ms_1 * 128 + col[2]] = row[2];
+                    meta_tok[ms_1 * 128 + slot_2[2]] = row[2];
                 }
                 if (64 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (64 + lane)] = prev_last;
@@ -628,7 +659,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (96 + lane)] = vid[3];
                 meta_col[ms_1 * 128 + (96 + lane)] = col[3];
                 if (head[3] != 0) {
-                    meta_tok[ms_1 * 128 + col[3]] = row[3];
+                    meta_tok[ms_1 * 128 + slot_2[3]] = row[3];
                 }
                 if (96 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (96 + lane)] = prev_last;
@@ -649,7 +680,7 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
             int ms_2 = 0;
             const int quarter = warp % 4;
             const int lane_row = quarter * 32 + lane;
-            int n_tiles_3 = (M + 127) / 128;
+            int n_tiles_3 = (M + (chunk - 1)) / chunk;
             unsigned int _phase_meta_full_1 = 0;
             unsigned int _phase_acc_full = 0;
             #pragma unroll 1
@@ -825,8 +856,10 @@ kernel_cake_lm_head_loss_f926c93e1045aea7d54d(const __grid_constant__ CUtensorMa
                 }
                 acc_1 += 1;
                 if (acc_1 == 2) { acc_1 = 0; _phase_acc_full ^= 1; }
-                long long pair = (long long)tile_3 * 128ll + (long long)lane_row;
-                if (pair < (long long)M) {
+                long long pair = (long long)tile_3 * (long long)chunk + (long long)lane_row;
+                long long _min_0_1 = (((long long)tile_3 * (long long)chunk + (long long)chunk) < ((long long)M) ? ((long long)tile_3 * (long long)chunk + (long long)chunk) : ((long long)M));
+                long long stop = ((0) ? _min_0_1 : (long long)M);
+                if (pair < stop) {
                     z[pair] = (__nv_bfloat16)zv;
                 }
             }

@@ -215,6 +215,8 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_STATS_OUT,
       << KERNEL_NAME << ": requires (CMod(ldc, 512) == 0)";
   TVM_FFI_CHECK((a_M >= 1LL), ValueError)
       << KERNEL_NAME << ": requires (M >= 1)";
+  TVM_FFI_CHECK((a_k_iters >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (k_iters >= 1)";
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
