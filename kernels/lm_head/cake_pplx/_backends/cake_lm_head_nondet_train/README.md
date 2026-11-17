@@ -14,7 +14,8 @@ The public module is a stable API; this backend package is experimental (its
 own names carry no compatibility guarantee).  SM100 (B200 / GB200) is the
 acceptance architecture; SM103 (B300 / GB300) and
 SM107 (R200) are compiled from the same sources (SM107 runs SM103's programs,
-built for `sm_107a`, with SM103's GEMM tile rule tables except the long chunks'
+built for `sm_107a`, except the support logits gather GEMM, which has its own
+`sm_107a` program, with SM103's GEMM tile rule tables except the long chunks'
 3-deep dX operand ring and the logits GEMM's long-chunk raster height; its zero-gradient row skip has a 1946-row floor and
 SM103's two-slice counted dX).  The feature does not participate in automatic
 backend selection, autotuning or trace-apply.  Its libraries are loaded
@@ -466,7 +467,7 @@ row out of the gradient path:
 | | deterministic package | this package |
 | --- | --- | --- |
 | zero-weight row, finite inputs | full chunk path; its terms are exact zeros | skipped for the gradients; the same mathematics |
-| `loss` | FP64 sum over the valid rows | FP64 sum over `G` (the `Z` terms are 0; the grouping differs) |
+| `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs) |
 | `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ within the accuracy budgets) |
 | `logp` of a zero-weight row | loss-path logits GEMM + `row_finalize` | logp-only pass (`return_logp=True`); 0 in the internal output otherwise |
 | non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `loss` / `dX` / `dW` (`0 * inf`) | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |

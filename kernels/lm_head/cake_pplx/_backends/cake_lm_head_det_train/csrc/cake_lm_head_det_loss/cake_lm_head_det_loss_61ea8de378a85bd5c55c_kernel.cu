@@ -138,10 +138,10 @@ kernel_cake_lm_head_det_loss_61ea8de378a85bd5c55c(float* __restrict__ stats, __n
     }
     if (active == 1) {
         if (lane_0 == 0) {
-            lse[t] = lse_v;
-            logp[t] = logp_v;
-            d[r_safe] = d_v;
-            term[r_safe] = term_v;
+            lse[row0 + r] = lse_v;
+            logp[row0 + r] = logp_v;
+            d[r] = d_v;
+            term[r] = term_v;
         }
     }
 }

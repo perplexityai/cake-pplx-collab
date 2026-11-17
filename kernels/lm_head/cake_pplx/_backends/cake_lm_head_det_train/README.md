@@ -11,7 +11,8 @@ The public module `cake_pplx.cake_lm_head_det_train` is a stable API
 experimental, with no compatibility guarantee for its internal modules.
 SM100 (B200 / GB200) is the acceptance architecture; SM103 (B300 / GB300) and
 SM107 (R200) are compiled from the same sources (SM107 runs SM103's programs,
-built for `sm_107a`, under SM103's dispatch rules except the logits rasters,
+built for `sm_107a`, except the support logits gather GEMM, which has its own
+`sm_107a` program, under SM103's dispatch rules except the logits rasters,
 the long-chunk `dX` ring and the whole-chunk `dX` split).  The feature does
 not participate in automatic backend selection, autotuning or trace-apply.
 Its libraries are loaded prebuilt from `aot/` when the package ships them and
@@ -820,26 +821,29 @@ row out of the gradient path:
 previous mode; `zero_weight_loss_mode()` reads it):
 
 * `"exact"`: the loss is bitwise the loss of the same call without the split.
-  The plain path forms one term per valid row in `row_finalize`
-  (`term = w * clipped`, `clipped = ratio < 2 ? ratio : 2`, so a NaN or
-  infinite ratio clips to 2) and reduces the terms chunk by chunk over the
-  valid rows in `loss_reduce`: one 256-thread CTA, thread `i` adds
-  `term[i], term[i + 256], ...` into an FP64 register that starts at `+0`,
-  then a warp butterfly and a cross-warp butterfly; the first chunk stores
-  the chunk sum in the FP64 accumulator, every later chunk adds its sum, and
-  the last chunk stores `float(0 - acc)`.  The split keeps every chunk's
-  terms without another buffer: chunk 0's stay in the chunk-local `term`
-  buffer, chunk `c >= 1` writes its terms into the compact `loss_weights`
-  rows of chunk `c - 1` (gathered before the loop and read by no launch
-  after that chunk's `row_finalize`).  After the loop the terms go to their
-  rows' positions among the valid rows (`k + |{z < g_k}|`), each zero-weight
-  row's slot takes its weight (`+0` / `-0`: the term the plain path forms for
-  that row for any ratio), and the shipped `loss_reduce` runs over the plain
-  path's chunks of that array (`ceil(T_v / C)` launches, the same `rows_c`
-  and first / last flags) on the call's stream.  Every thread adds the same
-  values in the same order, so the FP64 sums and the FP32 rounding are the
-  plain path's.
-* `"regroup"`: the chunk loop's own `loss_reduce` over `G` (the same FP64 sum
+  The plain path forms one term per valid row in `row_finalize` (`term = w *
+  clipped`, `clipped = ratio < 2 ? ratio : 2`, so a NaN or infinite ratio
+  clips to 2) and reduces the terms chunk by chunk over the valid rows in
+  `loss_reduce`: one 256-thread CTA; in each block of 4096 rows thread `i`
+  sums its 16 terms `b + i + 256 j` (`+0` past the chunk's rows) by a pairwise
+  tree and adds its blocks' sums in block order, then a warp butterfly and a
+  cross-warp butterfly form the chunk sum.  The chunk sums are added as a
+  pairwise tree too: `loss_acc` (FP32, `LOSS_ACC_WORDS` = 32 words) is a
+  binary counter whose word `j` (0 to 30) holds the sum of `2^j` consecutive
+  chunks and whose word 31 counts the chunks, and the last chunk adds the
+  stored sums to its own in ascending order and stores `0 - total`.  Every add
+  is an FP32 add rounded to nearest.  The split keeps every chunk's terms
+  without another buffer: chunk 0's stay in the chunk-local `term` buffer,
+  chunk `c >= 1` writes its terms into the compact `loss_weights` rows of
+  chunk `c - 1` (gathered before the loop and read by no launch after that
+  chunk's `row_finalize`).  After the loop the terms go to their rows'
+  positions among the valid rows (`k + |{z < g_k}|`), each zero-weight row's
+  slot takes its weight (`+0` / `-0`: the term the plain path forms for that
+  row for any ratio), and the shipped `loss_reduce` runs over the plain path's
+  chunks of that array (`ceil(T_v / C)` launches, the same `rows_c` and first
+  / last flags) on the call's stream.  Every thread adds the same values in the
+  same order, so the FP32 sums and the rounding are the plain path's.
+* `"regroup"`: the chunk loop's own `loss_reduce` over `G` (the same FP32 sum
   of the same nonzero terms over the split's chunk boundaries); the loss may
   differ from the plain path's in its last FP32 bits.  No term placement and
   no extra launch.
@@ -850,7 +854,7 @@ previous mode; `zero_weight_loss_mode()` reads it):
 | --- | --- |
 | `logp`, `lse` of every row (`Z` rows from the logp-only pass) | identical (the same per-row logits and row-statistics arithmetic) |
 | `loss`, mode `"exact"` | identical, non-finite values in `Z` rows included (their term is `+-0` either way) |
-| `loss`, mode `"regroup"` | the same FP64 sum over other chunk boundaries: may differ in the last FP32 bits |
+| `loss`, mode `"regroup"` | the same FP32 sum over other chunk boundaries: may differ in the last FP32 bits |
 | `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X`, logits or `infer_logp` is not finite) |
 | `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise within the accuracy budget |
 | `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): within the accuracy budget; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
@@ -1361,7 +1365,8 @@ per index width, the two row stages, the gather and scatter of the dense form,
 the support logits gather GEMM and the segment gather-accumulate dX / dW /
 combine kernels in their BF16 and FP32-accumulate modes), exported from the
 kernel snapshot named in the pull request.  The `sm_107a` record registers
-every stage of the `sm_103a` record; its rule tables take the `sm_103a`
+every stage of the `sm_103a` record (the support logits gather GEMM from its
+own `sm_107a` configuration); its rule tables take the `sm_103a`
 entries except the logits rasters (`LOGITS_LONG_RASTER_GROUPS`; the logits slot
 of `RASTER_WIDE_GROUPS` keeps the record's 32), the long-chunk `dX` ring
 (`DX_LONG_CHUNK_STAGES`) and the whole-chunk `dX` split, which follows
@@ -1381,14 +1386,15 @@ the package imports in an isolated interpreter and raises its host-side errors;
 copy's libraries on a GPU node).  Benchmark:
 `benchmarks/bench_cake_lm_head_det_train.py`.
 
-Toolchain note: the package needs CUDA 12.9 or newer.  Every `build.json`
-entry has `min_cuda` 12.9 (`common.requires.cuda_toolkit.min` is 12.9), and
+Toolchain note: the package needs CUDA 12.9 or newer.  Every `sm_100a` and
+`sm_103a` entry of `build.json` has `min_cuda` 12.9
+(`common.requires.cuda_toolkit.min` is 12.9), and
 the loader refuses an older toolkit: `cake_build.jit_spec` raises and the JIT
 spec lists leave the entry out.  CUDA 12.8's ptxas cannot build the 256-bit
 global loads and stores (`ld.global.v8.b32` / `st.global.v8.b32`) of eight
 `sm_100a` programs, the logits GEMM among them ("Illegal vector size: 8");
-`sm_103a` needs 12.9 and `sm_107a` 13.4 by their architecture floors (every
-`sm_107a` entry has `min_cuda` 13.4).
+`sm_103a` needs 12.9 and `sm_107a` 13.5 by their architecture floors (every
+`sm_107a` entry has `min_cuda` 13.5).
 
 The `sm_100a` 2-CTA GEMM producer loops (logits, dX and dW) have two orders,
 and the toolkit that compiles them selects one.  Built by nvcc 12.9 or 13.0,

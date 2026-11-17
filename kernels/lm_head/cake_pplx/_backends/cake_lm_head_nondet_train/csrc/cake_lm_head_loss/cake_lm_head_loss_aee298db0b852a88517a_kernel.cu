@@ -152,10 +152,10 @@ kernel_cake_lm_head_loss_aee298db0b852a88517a(float* __restrict__ PU, float* __r
     }
     if (blockIdx.x == 0) {
         if (tid == 0) {
-            double terms[4];
+            float terms[4];
             #pragma unroll
             for (int t_1 = 0; t_1 < 4; t_1++) {
-                terms[t_1] = (double)0.0f;
+                terms[t_1] = 0.0f;
                 if (t_1 < T) {
                     long long yl = labels[t_1];
                     float _log_8 = logf(stat[2 * t_1 + 1]);
@@ -174,11 +174,19 @@ kernel_cake_lm_head_loss_aee298db0b852a88517a(float* __restrict__ PU, float* __r
                     ROWS[2 * t_1 + 1] = dt;
                     LOGP[t_1] = logp;
                     LAB[t_1] = yl;
-                    terms[t_1] = (double)logp;
+                    terms[t_1] = logp;
                 }
             }
-            double total = terms[0] + terms[2] + (terms[1] + terms[3]);
-            LOSS[0] = (float)(((double)0.0f - total) / (double)loss_div);
+            float s02;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(s02) : "f"(terms[0]), "f"(terms[2]));
+            float s13;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(s13) : "f"(terms[1]), "f"(terms[3]));
+            float _add_9;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_9) : "f"(s02), "f"(s13));
+            float fin = __fdiv_rn(_add_9, loss_div);
+            float _sub_10;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(0.0f), "f"(fin));
+            LOSS[0] = _sub_10;
         }
     }
 }

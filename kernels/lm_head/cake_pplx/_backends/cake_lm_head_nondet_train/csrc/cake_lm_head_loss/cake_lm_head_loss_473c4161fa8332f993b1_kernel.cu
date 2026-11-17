@@ -87,6 +87,21 @@ __device__ __forceinline__ void mbarrier_wait(int mbar_addr, int phase) {
         :: "r"(mbar_addr), "r"(phase) : "memory");
 }
 
+__device__ __forceinline__ void mbarrier_wait_cluster_hint(
+        int mbar_addr, int phase, uint32_t suspend_time_hint) {
+    asm volatile(
+        "{\n\t"
+        ".reg .pred P1;\n\t"
+        "LAB_WAIT_CLUSTER_HINT:\n\t"
+        "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64"
+        " P1, [%0], %1, %2;\n\t"
+        "@P1 bra.uni DONE_CLUSTER_HINT;\n\t"
+        "bra.uni LAB_WAIT_CLUSTER_HINT;\n\t"
+        "DONE_CLUSTER_HINT:\n\t"
+        "}\n"
+        :: "r"(mbar_addr), "r"(phase), "r"(suspend_time_hint) : "memory");
+}
+
 
 
 
@@ -300,7 +315,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                     int ld_off_n = bid_n * 512 + ld_half * 256 + cta_rank * 128;
                     #pragma unroll 1
                     for (int ld_k = 0; ld_k < k_iters; ld_k++) {
-                        mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                        mbarrier_wait_cluster_hint(mma_done_addr + (load_stage) * 8, _phase_mma_done, 10000000);
                         int ld_kk = ld_k_base + ld_k;
                         int ld_k0 = ld_k * 64;
                         tma_3d_gmem2smem_cta2(smem_v0_addr + load_stage * 49152, (&A), 0, ld_off_m, ld_k, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
@@ -310,18 +325,18 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                             tma_3d_gmem2smem_cta2(smem_v1_addr_0 + load_stage * 49152, (&B), ld_off_n + 256, ld_k0, 0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             tma_3d_gmem2smem_cta2(smem_v1_addr_0 + load_stage * 49152 + 8192, (&B), ld_off_n + 320, ld_k0, 0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         } else {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(32768)) : "memory");
                         }
                         load_stage += 1;
                         if (load_stage == 3) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
                 }
-                mbarrier_wait(clc_full_addr + (load_clc_stage) * 8, _phase_clc_full);
+                mbarrier_wait_cluster_hint(clc_full_addr + (load_clc_stage) * 8, _phase_clc_full, 10000000);
                 uint32_t valid = 0;
                 asm volatile(
                     "{\n\t"
@@ -364,7 +379,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
             if (elect_sync()) {
                 #pragma unroll 1
                 for (int _ = 0; _ < 3; _++) {
-                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    mbarrier_wait_cluster_hint(mma_done_addr + (load_stage) * 8, _phase_mma_done, 10000000);
                     load_stage += 1;
                     if (load_stage == 3) { load_stage = 0; _phase_mma_done ^= 1; }
                 }
@@ -393,11 +408,11 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                     int mm_k_last = ((mm_slice < k_slices - 1) ? k_slice_iters : k_iters - (k_slices - 1) * k_slice_iters);
                     #pragma unroll 1
                     for (int mm_kc = 0; mm_kc < 1; mm_kc++) {
-                        mbarrier_wait(epilogue_done_addr, _phase_epilogue_done);
+                        mbarrier_wait_cluster_hint(epilogue_done_addr, _phase_epilogue_done, 10000000);
                         int mm_steps = ((mm_kc < 0) ? 1 : k_iters);
                         #pragma unroll 1
                         for (int mm_k = 0; mm_k < mm_steps; mm_k++) {
-                            mbarrier_wait(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full);
+                            mbarrier_wait_cluster_hint(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full, 10000000);
                             asm volatile("tcgen05.fence::after_thread_sync;");
                             int init_flag = ((mm_k == 0) ? 1 : 0);
 #if __CUDA_ARCH__ == 1070
@@ -492,7 +507,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                         _phase_epilogue_done ^= 1;
                     }
                 }
-                mbarrier_wait(clc_full_addr + (mma_clc_stage) * 8, _phase_clc_full_1);
+                mbarrier_wait_cluster_hint(clc_full_addr + (mma_clc_stage) * 8, _phase_clc_full_1, 10000000);
                 uint32_t _clc_valid_2 = 0;
                 asm volatile(
                     "{\n\t"
@@ -549,7 +564,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
             unsigned int _phase_mainloop_done = 0;
             #pragma unroll 1
             for (unsigned int _ep = 0; _ep < (int)num_bids / 2; _ep++) {
-                mbarrier_wait(clc_full_addr + (epi_clc_stage) * 8, _phase_clc_full_2);
+                mbarrier_wait_cluster_hint(clc_full_addr + (epi_clc_stage) * 8, _phase_clc_full_2, 10000000);
                 uint32_t valid_1 = 0;
                 asm volatile(
                     "{\n\t"
@@ -609,7 +624,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                     int do_store = first_chunk * ((ep_kc == 0) ? 1 : 0);
                     float pmax = -3e+38f;
                     float psum = 0.0f;
-                    mbarrier_wait(mainloop_done_addr, _phase_mainloop_done);
+                    mbarrier_wait_cluster_hint(mainloop_done_addr, _phase_mainloop_done, 10000000);
                     asm volatile("tcgen05.fence::after_thread_sync;");
                     unsigned int epi_store_stage = 0;
                     int ep_row0x = bid_m_1 * 128;
@@ -684,13 +699,13 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                     mbarrier_arrive(thr_empty_addr + (sched_thr_stage) * 8);
                     sched_thr_stage += 1;
                     if (sched_thr_stage == 2) { sched_thr_stage = 0; _phase_thr_full ^= 1; }
-                    mbarrier_wait(clc_empty_addr + (sched_clc_stage) * 8, _phase_clc_empty);
+                    mbarrier_wait_cluster_hint(clc_empty_addr + (sched_clc_stage) * 8, _phase_clc_empty, 10000000);
                     if (lane < 2) {
                         asm volatile(
                             "{\n\t"
                             ".reg .b32 remAddr32;\n\t"
                             "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                            "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
+                            "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                             "}"
                             :: "r"(clc_full_addr + (sched_clc_stage) * 8), "r"(lane), "r"((uint32_t)(16)) : "memory");
                     }
@@ -703,7 +718,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                             :: "r"(clc_resp_addr + sched_clc_stage * 16 + 0 * 16), "r"(clc_full_addr + sched_clc_stage * 8)
                             : "memory");
                     }
-                    mbarrier_wait(clc_full_addr + (sched_clc_stage) * 8, _phase_clc_full_3);
+                    mbarrier_wait_cluster_hint(clc_full_addr + (sched_clc_stage) * 8, _phase_clc_full_3, 10000000);
                     uint32_t _clc_valid_0 = 0;
                     asm volatile(
                         "{\n\t"
@@ -732,7 +747,7 @@ kernel_cake_lm_head_loss_473c4161fa8332f993b1(const __grid_constant__ CUtensorMa
                 }
                 #pragma unroll
                 for (int _st = 0; _st < 2; _st++) {
-                    mbarrier_wait(clc_empty_addr + (sched_clc_stage) * 8, _phase_clc_empty);
+                    mbarrier_wait_cluster_hint(clc_empty_addr + (sched_clc_stage) * 8, _phase_clc_empty, 10000000);
                     sched_clc_stage += 1;
                     if (sched_clc_stage == 2) { sched_clc_stage = 0; _phase_clc_empty ^= 1; _phase_clc_full_3 ^= 1; }
                 }
