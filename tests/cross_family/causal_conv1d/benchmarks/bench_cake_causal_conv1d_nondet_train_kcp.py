@@ -95,9 +95,15 @@ phase the deterministic and non-deterministic Cake times, the best eligible arm 
 reason, e.g. a layout no eligible arm runs), ``det_over_nondet`` and ``sota_over_nondet``; the ``compare`` lines
 print it.
 
+``--pair`` adds the non-deterministic KCP package's opt-in FP32 (hi, lo) pair ``dweight`` (``dweight_sum="fp32_pair"``,
+the overlapped backward's pair main program) as a third mode, ``nondet_pair``, timed in the same interleaved rounds and
+gated the same way; ``pair_over_single`` is its time over the ``nondet`` time per phase and measure (above 1: the
+pair sums are slower), with the range of the per-round ratios.
+
 Example::
 
     python benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tokens 250340 --channels 512 1280
+    python benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tokens 250340 --channels 512 1280 --pair --sota none
     torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --rows customer --layout zigzag
     torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --json kcp_w4.json
     torchrun --nproc_per_node 8 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tensors 3 --layout zigzag
@@ -106,6 +112,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib
 import gc
 import json
@@ -155,6 +162,14 @@ MODES: dict[str, dict[str, Callable]] = {
         "supported": nondet_conv.is_cake_causal_conv1d_nondet_train_supported,
         "single": nondet_kcp_api.cake_causal_conv1d_nondet_kcp,
         "multi": nondet_kcp_api.cake_causal_conv1d_nondet_kcp_multi,
+    },
+}
+# The opt-in pair mode of ``--pair``: the non-deterministic KCP entry points with ``dweight_sum="fp32_pair"``.
+PAIR_MODE = {
+    "nondet_pair": {
+        "supported": nondet_conv.is_cake_causal_conv1d_nondet_train_supported,
+        "single": functools.partial(nondet_kcp_api.cake_causal_conv1d_nondet_kcp, dweight_sum="fp32_pair"),
+        "multi": functools.partial(nondet_kcp_api.cake_causal_conv1d_nondet_kcp_multi, dweight_sum="fp32_pair"),
     },
 }
 PHASES = ("fwd", "bwd", "ckpt")
@@ -755,6 +770,17 @@ def bench_row(
             for d, n in zip(samples["det"][key], samples["nondet"][key], strict=True)
         ]
         result["speedup_range"][key] = [min(ratios), max(ratios)]
+    if "nondet_pair" in entries:
+        result["pair_over_single"] = {
+            key: {
+                "ratio": entries["nondet_pair"][f"{key}_us"] / entries["nondet"][f"{key}_us"],
+                "range": [
+                    min(q / s for s, q in zip(samples["nondet"][key], samples["nondet_pair"][key], strict=True)),
+                    max(q / s for s, q in zip(samples["nondet"][key], samples["nondet_pair"][key], strict=True)),
+                ],
+            }
+            for key in keys
+        }
     if args.sota_arms:
         result["sota"] = sota_entries
         result["best_sota"], result["speedup_vs_sota"] = baselines.best_baseline(
@@ -803,6 +829,15 @@ def _format(result: dict, world: int) -> list[str]:
             f"{steady['peak_temp_bytes']} B | ckpt steady peak temp {entry['ckpt_steady']['peak_temp_bytes']} B "
             f"retained {entry['ckpt_steady']['retained_bytes']} B | ahead_late {entry['ahead_late']}"
         )
+    pair = result["modes"].get("nondet_pair")
+    if pair is not None:
+        for phase in PHASES:
+            ratio = result["pair_over_single"][f"{phase}_ahead"]
+            lines.append(
+                f"{head} {phase:4s} | nondet {nondet[f'{phase}_ahead_us']:9.2f} ahead | nondet_pair "
+                f"{pair[f'{phase}_ahead_us']:9.2f} ahead {pair[f'{phase}_gpu_us']:9.2f} gpu | pair/single ahead "
+                f"{ratio['ratio']:5.3f}x [{ratio['range'][0]:5.3f}, {ratio['range'][1]:5.3f}]"
+            )
     lines.append(
         f"{head} tokens per rank {result['tokens_local']} check {result['check']}"
     )
@@ -868,7 +903,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=["all"],
         help=f"non-Cake baselines: all (default), none, or names from {list(baselines.KCP_ARMS)}",
     )
+    parser.add_argument(
+        "--pair",
+        action="store_true",
+        help='also time the non-deterministic KCP package with dweight_sum="fp32_pair" (mode nondet_pair)',
+    )
     args = parser.parse_args(argv)
+    if args.pair:
+        MODES.update(PAIR_MODE)
     if args.rounds < 1 or args.tensors < 1:
         parser.error("--rounds and --tensors must be at least 1")
     if 0 < args.draws < 32:
