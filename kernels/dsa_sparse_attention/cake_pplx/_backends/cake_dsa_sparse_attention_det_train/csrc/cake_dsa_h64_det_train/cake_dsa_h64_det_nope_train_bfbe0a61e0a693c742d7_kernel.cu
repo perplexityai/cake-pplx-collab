@@ -189,6 +189,21 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
     #define idx_full_addr (mbar_base + 80)
     #define idx_free_addr (mbar_base + 96)
     #define k_full_addr (mbar_base + 112)
+#if __CUDA_ARCH__ == 1070
+    #define k_free_addr (mbar_base + 176)
+    #define s_full_addr (mbar_base + 184)
+    #define s_free_addr (mbar_base + 192)
+    #define dp_full_addr (mbar_base + 200)
+    #define dp_free_addr (mbar_base + 208)
+    #define p_full_addr (mbar_base + 216)
+    #define p_free_addr (mbar_base + 224)
+    #define ds_full_addr (mbar_base + 232)
+    #define ds_free_addr (mbar_base + 240)
+    #define dkv_a_full_addr (mbar_base + 248)
+    #define dkv_a_drained_addr (mbar_base + 256)
+    #define dkv_b_full_addr (mbar_base + 264)
+    #define dkv_b_drained_addr (mbar_base + 272)
+#else
     #define k_free_addr (mbar_base + 120)
     #define s_full_addr (mbar_base + 128)
     #define s_free_addr (mbar_base + 136)
@@ -202,6 +217,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
     #define dkv_a_drained_addr (mbar_base + 200)
     #define dkv_b_full_addr (mbar_base + 208)
     #define dkv_b_drained_addr (mbar_base + 216)
+#endif
 
     const int bid = blockIdx.x;
     const int num_bids = gridDim.x;
@@ -227,6 +243,15 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
     const int k_blk_addr = smem + 132096;
     __nv_bfloat16* do_blk = reinterpret_cast<__nv_bfloat16*>(smem_raw + 66560);
     const int do_blk_addr = smem + 66560;
+#if __CUDA_ARCH__ == 1070
+    __nv_bfloat16* qdo_k = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
+    const int qdo_k_addr = smem + 1024;
+    __nv_bfloat16* qdo_mn = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
+    const int qdo_mn_addr = smem + 1024;
+    __nv_bfloat16* qdo_c = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
+    const int qdo_c_addr = smem + 1024;
+#else
+#endif
     __nv_bfloat16* p_k = reinterpret_cast<__nv_bfloat16*>(smem_raw + 197632);
     const int p_k_addr = smem + 197632;
     __nv_bfloat16* ds_k = reinterpret_cast<__nv_bfloat16*>(smem_raw + 205824);
@@ -254,7 +279,11 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
     if (warp == 0 && lane == 0) { asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)((&kv_latent))) : "memory"); }
     if (warp == 4 && lane == 0) { asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)((&dq_latent))) : "memory"); }
 
+#if __CUDA_ARCH__ == 1070
+    // Mbarrier init (35 barriers at smem_raw[0..280))
+#else
     // Mbarrier init (28 barriers at smem_raw[0..224))
+#endif
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -283,34 +312,101 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
             // idx_free: 2 barriers, init_count=388
             mbarrier_init(smem + 96, 388);
             mbarrier_init(smem + 104, 388);
+#if __CUDA_ARCH__ == 1070
+            // --- pipeline 'k_pipe' ---
+            // k_full: 8 barriers, init_count=4
+#else
             // k_full: 1 barriers, init_count=4
+#endif
             mbarrier_init(smem + 112, 4);
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 120, 4);
+            mbarrier_init(smem + 128, 4);
+            mbarrier_init(smem + 136, 4);
+            mbarrier_init(smem + 144, 4);
+            mbarrier_init(smem + 152, 4);
+            mbarrier_init(smem + 160, 4);
+            mbarrier_init(smem + 168, 4);
+#else
+#endif
             // k_free: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 176, 1);
+#else
             mbarrier_init(smem + 120, 1);
+#endif
             // s_full: 1 barriers, init_count=1
-            mbarrier_init(smem + 128, 1);
-            // s_free: 1 barriers, init_count=128
-            mbarrier_init(smem + 136, 128);
-            // dp_full: 1 barriers, init_count=1
-            mbarrier_init(smem + 144, 1);
-            // dp_free: 1 barriers, init_count=128
-            mbarrier_init(smem + 152, 128);
-            // p_full: 1 barriers, init_count=128
-            mbarrier_init(smem + 160, 128);
-            // p_free: 1 barriers, init_count=1
-            mbarrier_init(smem + 168, 1);
-            // ds_full: 1 barriers, init_count=128
-            mbarrier_init(smem + 176, 128);
-            // ds_free: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
             mbarrier_init(smem + 184, 1);
+#else
+            mbarrier_init(smem + 128, 1);
+#endif
+            // s_free: 1 barriers, init_count=128
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 192, 128);
+#else
+            mbarrier_init(smem + 136, 128);
+#endif
+            // dp_full: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 200, 1);
+#else
+            mbarrier_init(smem + 144, 1);
+#endif
+            // dp_free: 1 barriers, init_count=128
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 208, 128);
+#else
+            mbarrier_init(smem + 152, 128);
+#endif
+            // p_full: 1 barriers, init_count=128
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 216, 128);
+#else
+            mbarrier_init(smem + 160, 128);
+#endif
+            // p_free: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 224, 1);
+#else
+            mbarrier_init(smem + 168, 1);
+#endif
+            // ds_full: 1 barriers, init_count=128
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 232, 128);
+#else
+            mbarrier_init(smem + 176, 128);
+#endif
+            // ds_free: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 240, 1);
+#else
+            mbarrier_init(smem + 184, 1);
+#endif
             // dkv_a_full: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 248, 1);
+#else
             mbarrier_init(smem + 192, 1);
+#endif
             // dkv_a_drained: 1 barriers, init_count=256
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 256, 256);
+#else
             mbarrier_init(smem + 200, 256);
+#endif
             // dkv_b_full: 1 barriers, init_count=1
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 264, 1);
+#else
             mbarrier_init(smem + 208, 1);
+#endif
             // dkv_b_drained: 1 barriers, init_count=256
+#if __CUDA_ARCH__ == 1070
+            mbarrier_init(smem + 272, 256);
+#else
             mbarrier_init(smem + 216, 256);
+#endif
             asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         }
     }
@@ -318,9 +414,17 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
     __syncwarp();
 
     // TMEM alloc (512 columns, 512 used)
+#if __CUDA_ARCH__ == 1070
+    volatile int* tmem_addr_storage = (volatile int*)(smem_raw + 280);
+#else
     volatile int* tmem_addr_storage = (volatile int*)(smem_raw + 224);
+#endif
     if (warp == 4) {
+#if __CUDA_ARCH__ == 1070
+        int _tmem_hold = smem + 280;
+#else
         int _tmem_hold = smem + 224;
+#endif
         asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" :: "r"(_tmem_hold), "r"(512) : "memory");
         __syncwarp();
         asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;");
@@ -338,6 +442,10 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
         { // gather_main
             int ntok = (num_queries - blockIdx.x + gridDim.x - 1) / gridDim.x;
             int tord = 0;
+#if __CUDA_ARCH__ == 1070
+            unsigned int g_kc = 0;
+#else
+#endif
             #pragma unroll 1
             for (int tk = 0; tk < ntok; tk++) {
                 int tok = blockIdx.x + tk * gridDim.x;
@@ -375,135 +483,290 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         mbarrier_arrive(idx_free_addr + ((int)((unsigned int)(tord + j) % 2)) * 8);
                         int _parity_k_free = (int)((unsigned int)(tord + j) % 2) ^ 1;
                         mbarrier_wait(k_free_addr, _parity_k_free);
+#if __CUDA_ARCH__ == 1070
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                         mbarrier_arrive_expect_tx(k_full_addr, 16384);
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 8192 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 8192 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 8192 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 8192 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 8192 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 8192 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 8192 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 8192 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(64), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 16384 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 16384 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 16384 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 16384 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 16384 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 16384 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 16384 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 16384 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(128), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 24576 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 24576 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 24576 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 24576 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 24576 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 24576 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 24576 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 24576 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(192), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 32768 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 32768 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 32768 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 32768 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 32768 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 32768 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 32768 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 32768 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(256), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 40960 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 40960 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 40960 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 40960 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 40960 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 40960 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 40960 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 40960 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(320), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 49152 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 49152 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 49152 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 49152 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 49152 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 49152 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 49152 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+                        mbarrier_arrive_expect_tx(k_full_addr + (g_kc) * 8, 2048);
+#else
                             :: "r"(k_blk_addr + 49152 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(384), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 57344 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 57344 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 57344 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 57344 + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 57344 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 57344 + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + 57344 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr + (g_kc) * 8), "l"(0x14F0000000000000ULL) : "memory");
+                        g_kc += 1;
+                        if (g_kc == 8) { g_kc = 0; }
+#else
                             :: "r"(k_blk_addr + 57344 + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(448), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                     }
                 }
                 tord += blocks;
@@ -833,28 +1096,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_0 = 8 * (m4 / 2) + r8;
                 int qchunk_1_0 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_0 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 2048) + (unsigned int)(qhead_2_0 % 16 * 128) + (unsigned int)((qchunk_1_0 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_0 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_0 * 128) + (unsigned int)((qchunk_1_0 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_40 = static_cast<uint32_t>(qaddr_1_0);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_40), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[3]))
                     : "memory");
                 int qhead_2_1 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_1 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_1 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_1 % 16 * 128) + (unsigned int)((qchunk_1_1 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_1 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_1 * 128) + (unsigned int)((qchunk_1_1 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_41 = static_cast<uint32_t>(qaddr_1_1);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_41), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[7]))
                     : "memory");
                 int qhead_2_2 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_2 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_2 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_2 % 16 * 128) + (unsigned int)((qchunk_1_2 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_2 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_2 * 128) + (unsigned int)((qchunk_1_2 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_42 = static_cast<uint32_t>(qaddr_1_2);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_42), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[11]))
                     : "memory");
                 int qhead_2_3 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_3 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_3 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_3 % 16 * 128) + (unsigned int)((qchunk_1_3 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_3 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_3 * 128) + (unsigned int)((qchunk_1_3 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_43 = static_cast<uint32_t>(qaddr_1_3);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_43), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_0[15]))
@@ -874,28 +1153,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_4 = 8 * (m4 / 2) + r8;
                 int qchunk_1_4 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_4 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 2048) + (unsigned int)(qhead_2_4 % 16 * 128) + (unsigned int)((qchunk_1_4 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_4 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_4 * 128) + (unsigned int)((qchunk_1_4 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_44 = static_cast<uint32_t>(qaddr_1_4);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_44), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[3]))
                     : "memory");
                 int qhead_2_5 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_5 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_5 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_5 % 16 * 128) + (unsigned int)((qchunk_1_5 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_5 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_5 * 128) + (unsigned int)((qchunk_1_5 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_45 = static_cast<uint32_t>(qaddr_1_5);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_45), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[7]))
                     : "memory");
                 int qhead_2_6 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_6 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_6 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_6 % 16 * 128) + (unsigned int)((qchunk_1_6 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_6 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_6 * 128) + (unsigned int)((qchunk_1_6 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_46 = static_cast<uint32_t>(qaddr_1_6);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_46), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[11]))
                     : "memory");
                 int qhead_2_7 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_7 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_7 = qdo_k_addr + (unsigned int)(w / 2 * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_7 % 16 * 128) + (unsigned int)((qchunk_1_7 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_7 = do_blk_addr + (unsigned int)(w / 2 * 8192) + (unsigned int)(qhead_2_7 * 128) + (unsigned int)((qchunk_1_7 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_47 = static_cast<uint32_t>(qaddr_1_7);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_47), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_1[15]))
@@ -915,28 +1210,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_8 = 8 * (m4 / 2) + r8;
                 int qchunk_1_8 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_8 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_8 % 16 * 128) + (unsigned int)((qchunk_1_8 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_8 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_8 * 128) + (unsigned int)((qchunk_1_8 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_48 = static_cast<uint32_t>(qaddr_1_8);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_48), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[3]))
                     : "memory");
                 int qhead_2_9 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_9 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_9 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_9 % 16 * 128) + (unsigned int)((qchunk_1_9 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_9 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_9 * 128) + (unsigned int)((qchunk_1_9 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_49 = static_cast<uint32_t>(qaddr_1_9);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_49), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[7]))
                     : "memory");
                 int qhead_2_10 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_10 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_10 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_10 % 16 * 128) + (unsigned int)((qchunk_1_10 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_10 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_10 * 128) + (unsigned int)((qchunk_1_10 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_50 = static_cast<uint32_t>(qaddr_1_10);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_50), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[11]))
                     : "memory");
                 int qhead_2_11 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_11 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_11 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_11 % 16 * 128) + (unsigned int)((qchunk_1_11 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_11 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_11 * 128) + (unsigned int)((qchunk_1_11 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_51 = static_cast<uint32_t>(qaddr_1_11);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_51), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_0[15]))
@@ -956,28 +1267,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_12 = 8 * (m4 / 2) + r8;
                 int qchunk_1_12 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_12 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_12 % 16 * 128) + (unsigned int)((qchunk_1_12 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_12 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_12 * 128) + (unsigned int)((qchunk_1_12 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_52 = static_cast<uint32_t>(qaddr_1_12);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_52), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[3]))
                     : "memory");
                 int qhead_2_13 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_13 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_13 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_13 % 16 * 128) + (unsigned int)((qchunk_1_13 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_13 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_13 * 128) + (unsigned int)((qchunk_1_13 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_53 = static_cast<uint32_t>(qaddr_1_13);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_53), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[7]))
                     : "memory");
                 int qhead_2_14 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_14 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_14 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_14 % 16 * 128) + (unsigned int)((qchunk_1_14 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_14 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_14 * 128) + (unsigned int)((qchunk_1_14 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_54 = static_cast<uint32_t>(qaddr_1_14);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_54), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[11]))
                     : "memory");
                 int qhead_2_15 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_15 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_15 = qdo_k_addr + (unsigned int)((2 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_15 % 16 * 128) + (unsigned int)((qchunk_1_15 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_15 = do_blk_addr + (unsigned int)((2 + w / 2) * 8192) + (unsigned int)(qhead_2_15 * 128) + (unsigned int)((qchunk_1_15 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_55 = static_cast<uint32_t>(qaddr_1_15);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_55), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_1[15]))
@@ -997,28 +1324,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_16 = 8 * (m4 / 2) + r8;
                 int qchunk_1_16 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_16 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_16 % 16 * 128) + (unsigned int)((qchunk_1_16 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_16 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_16 * 128) + (unsigned int)((qchunk_1_16 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_56 = static_cast<uint32_t>(qaddr_1_16);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_56), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[3]))
                     : "memory");
                 int qhead_2_17 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_17 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_17 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_17 % 16 * 128) + (unsigned int)((qchunk_1_17 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_17 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_17 * 128) + (unsigned int)((qchunk_1_17 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_57 = static_cast<uint32_t>(qaddr_1_17);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_57), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[7]))
                     : "memory");
                 int qhead_2_18 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_18 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_18 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_18 % 16 * 128) + (unsigned int)((qchunk_1_18 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_18 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_18 * 128) + (unsigned int)((qchunk_1_18 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_58 = static_cast<uint32_t>(qaddr_1_18);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_58), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[11]))
                     : "memory");
                 int qhead_2_19 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_19 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_19 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_19 % 16 * 128) + (unsigned int)((qchunk_1_19 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_19 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_19 * 128) + (unsigned int)((qchunk_1_19 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_59 = static_cast<uint32_t>(qaddr_1_19);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_59), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_2[15]))
@@ -1038,28 +1381,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_20 = 8 * (m4 / 2) + r8;
                 int qchunk_1_20 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_20 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_20 % 16 * 128) + (unsigned int)((qchunk_1_20 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_20 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_20 * 128) + (unsigned int)((qchunk_1_20 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_60 = static_cast<uint32_t>(qaddr_1_20);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_60), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[3]))
                     : "memory");
                 int qhead_2_21 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_21 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_21 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_21 % 16 * 128) + (unsigned int)((qchunk_1_21 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_21 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_21 * 128) + (unsigned int)((qchunk_1_21 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_61 = static_cast<uint32_t>(qaddr_1_21);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_61), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[7]))
                     : "memory");
                 int qhead_2_22 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_22 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_22 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_22 % 16 * 128) + (unsigned int)((qchunk_1_22 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_22 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_22 * 128) + (unsigned int)((qchunk_1_22 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_62 = static_cast<uint32_t>(qaddr_1_22);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_62), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[11]))
                     : "memory");
                 int qhead_2_23 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_23 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_23 = qdo_k_addr + (unsigned int)((4 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_23 % 16 * 128) + (unsigned int)((qchunk_1_23 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_23 = do_blk_addr + (unsigned int)((4 + w / 2) * 8192) + (unsigned int)(qhead_2_23 * 128) + (unsigned int)((qchunk_1_23 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_63 = static_cast<uint32_t>(qaddr_1_23);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_63), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_3[15]))
@@ -1079,28 +1438,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_24 = 8 * (m4 / 2) + r8;
                 int qchunk_1_24 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_24 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_24 % 16 * 128) + (unsigned int)((qchunk_1_24 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_24 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_24 * 128) + (unsigned int)((qchunk_1_24 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_64 = static_cast<uint32_t>(qaddr_1_24);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_64), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[3]))
                     : "memory");
                 int qhead_2_25 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_25 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_25 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_25 % 16 * 128) + (unsigned int)((qchunk_1_25 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_25 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_25 * 128) + (unsigned int)((qchunk_1_25 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_65 = static_cast<uint32_t>(qaddr_1_25);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_65), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[7]))
                     : "memory");
                 int qhead_2_26 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_26 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_26 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_26 % 16 * 128) + (unsigned int)((qchunk_1_26 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_26 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_26 * 128) + (unsigned int)((qchunk_1_26 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_66 = static_cast<uint32_t>(qaddr_1_26);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_66), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[11]))
                     : "memory");
                 int qhead_2_27 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_27 = 4 * (w % 2) + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_27 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_27 % 16 * 128) + (unsigned int)((qchunk_1_27 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_27 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_27 * 128) + (unsigned int)((qchunk_1_27 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_67 = static_cast<uint32_t>(qaddr_1_27);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_67), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_4[15]))
@@ -1120,28 +1495,44 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                 }
                 int qhead_2_28 = 8 * (m4 / 2) + r8;
                 int qchunk_1_28 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_28 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 2048) + (unsigned int)(qhead_2_28 % 16 * 128) + (unsigned int)((qchunk_1_28 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_28 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_28 * 128) + (unsigned int)((qchunk_1_28 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_68 = static_cast<uint32_t>(qaddr_1_28);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_68), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[0])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[1])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[2])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[3]))
                     : "memory");
                 int qhead_2_29 = 16 + 8 * (m4 / 2) + r8;
                 int qchunk_1_29 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_29 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 4096 + 2048) + (unsigned int)(qhead_2_29 % 16 * 128) + (unsigned int)((qchunk_1_29 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_29 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_29 * 128) + (unsigned int)((qchunk_1_29 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_69 = static_cast<uint32_t>(qaddr_1_29);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_69), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[4])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[5])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[6])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[7]))
                     : "memory");
                 int qhead_2_30 = 32 + 8 * (m4 / 2) + r8;
                 int qchunk_1_30 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_30 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 8192 + 2048) + (unsigned int)(qhead_2_30 % 16 * 128) + (unsigned int)((qchunk_1_30 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_30 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_30 * 128) + (unsigned int)((qchunk_1_30 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_70 = static_cast<uint32_t>(qaddr_1_30);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_70), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[8])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[9])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[10])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[11]))
                     : "memory");
                 int qhead_2_31 = 48 + 8 * (m4 / 2) + r8;
                 int qchunk_1_31 = 4 * (w % 2) + 2 + m4 % 2;
+#if __CUDA_ARCH__ == 1070
+                unsigned int qaddr_1_31 = qdo_k_addr + (unsigned int)((6 + w / 2) * 16384 + 12288 + 2048) + (unsigned int)(qhead_2_31 % 16 * 128) + (unsigned int)((qchunk_1_31 ^ r8) * 16);
+#else
                 unsigned int qaddr_1_31 = do_blk_addr + (unsigned int)((6 + w / 2) * 8192) + (unsigned int)(qhead_2_31 * 128) + (unsigned int)((qchunk_1_31 ^ r8) * 16);
+#endif
                 uint32_t _stmatrix_addr_71 = static_cast<uint32_t>(qaddr_1_31);
                 asm volatile("stmatrix.sync.aligned.m8n8.x4.trans.shared.b16 [%0], {%1, %2, %3, %4};\n"
                     :: "r"(_stmatrix_addr_71), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[12])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[13])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[14])), "r"(*reinterpret_cast<const uint32_t*>(&dq_bf16_1_r_5[15]))
@@ -4886,6 +5277,11 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
             { // mma_main
                 int ntok_3 = (num_queries - blockIdx.x + gridDim.x - 1) / gridDim.x;
                 int tord_3 = 0;
+#if __CUDA_ARCH__ == 1070
+                unsigned int m_kc = 0;
+                unsigned int _phase_k_full = 0;
+#else
+#endif
                 #pragma unroll 1
                 for (int tk_3 = 0; tk_3 < ntok_3; tk_3++) {
                     int tok_2 = blockIdx.x + tk_3 * gridDim.x;
@@ -4902,16 +5298,28 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         #pragma unroll 1
                         for (int i = 0; i < blocks_3; i++) {
                             if (i == 0) {
+#if __CUDA_ARCH__ == 1070
+#else
                                 int _parity_k_full = (int)((unsigned int)(tord_3 + i) % 2);
                                 mbarrier_wait(k_full_addr, _parity_k_full);
+#endif
                                 if (tord_3 > 0) {
                                     int _parity_s_free = (int)((unsigned int)(tord_3 + i) % 2) ^ 1;
                                     mbarrier_wait(s_free_addr, _parity_s_free);
                                 }
+#if __CUDA_ARCH__ == 1070
+                                int _parity_do_full = (int)((unsigned int)tk_3 % 2);
+                                mbarrier_wait(do_full_addr, _parity_do_full);
+                                int _parity_dp_free = (int)((unsigned int)(tord_3 + i) % 2) ^ 1;
+                                mbarrier_wait(dp_free_addr, _parity_dp_free);
+#else
+#endif
                                 asm volatile("tcgen05.fence::after_thread_sync;");
 #if __CUDA_ARCH__ == 1070
-                                int _smem_desc_lo_0 = ((q_k_addr) >> 4) & 0x7FFF;
-                                int _smem_desc_lo_1 = ((k_k_addr) >> 4) & 0x7FFF;
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_0 = (((qdo_c_addr) >> 4) & 0x7FFF) + (0) * 1024;
+                                int _smem_desc_lo_1 = (((k_blk_addr) >> 4) & 0x7FFF) + (0) * 512;
 #else
                                 int _smem_desc_lo_0 = ((q_k_addr) >> 4) & 0x3FFF;
                                 int _smem_desc_lo_1 = ((k_k_addr) >> 4) & 0x3FFF;
@@ -4927,7 +5335,11 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         ""
                         "mov.b32 adhi, 0x40004040;\n\t"
                         "mov.b32 bdhi, 0x40004040;\n\t"
+#if __CUDA_ARCH__ == 1070
+                        "mov.b32 id, 135267472;\n\t"
+#else
                         "mov.b32 id, 68158608;\n\t"
+#endif
                         "mov.b32 alo, %0;\n\t"
                         "mov.b32 blo, %1;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -4948,6 +5360,8 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#if __CUDA_ARCH__ == 1070
+#else
                         "add.u32 alo, alo, 506;\n\t"
                         "add.u32 blo, blo, 506;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5088,26 +5502,34 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#endif
                         "}\n"
                         :: "r"(_smem_desc_lo_0), "r"(_smem_desc_lo_1), "r"(tmem_tmem), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+#else
                                 tcgen05_commit(s_full_addr);
                             }
                             if (i == 0) {
                                 int _parity_do_full = (int)((unsigned int)tk_3 % 2);
                                 mbarrier_wait(do_full_addr, _parity_do_full);
+#endif
                                 asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                                int _smem_desc_lo_2 = (((qdo_c_addr) >> 4) & 0x7FFF) + (1) * 1024;
+                                int _smem_desc_lo_3 = (((k_blk_addr) >> 4) & 0x7FFF) + (1) * 512;
+                                asm volatile(
+#else
                             }
                             int _parity_dp_free = (int)((unsigned int)(tord_3 + i) % 2) ^ 1;
                             mbarrier_wait(dp_free_addr, _parity_dp_free);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_2 = ((do_k_addr) >> 4) & 0x7FFF;
-                            int _smem_desc_lo_3 = ((v_k_addr) >> 4) & 0x7FFF;
-#else
                             int _smem_desc_lo_2 = ((do_k_addr) >> 4) & 0x3FFF;
                             int _smem_desc_lo_3 = ((v_k_addr) >> 4) & 0x3FFF;
-#endif
                             asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -5118,7 +5540,11 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         ""
                         "mov.b32 adhi, 0x40004040;\n\t"
                         "mov.b32 bdhi, 0x40004040;\n\t"
+#if __CUDA_ARCH__ == 1070
+                        "mov.b32 id, 135267472;\n\t"
+#else
                         "mov.b32 id, 68158608;\n\t"
+#endif
                         "mov.b32 alo, %0;\n\t"
                         "mov.b32 blo, %1;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5139,6 +5565,8 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#if __CUDA_ARCH__ == 1070
+#else
                         "add.u32 alo, alo, 506;\n\t"
                         "add.u32 blo, blo, 506;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5279,7 +5707,14 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#endif
                         "}\n"
+#if __CUDA_ARCH__ == 1070
+                        :: "r"(_smem_desc_lo_2), "r"(_smem_desc_lo_3), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+#else
                         :: "r"(_smem_desc_lo_2), "r"(_smem_desc_lo_3), "r"((tmem_tmem + (1048576))), "r"(0) : "memory");
                             tcgen05_commit(dp_full_addr);
                             int _parity_p_full = (int)((unsigned int)(tord_3 + i) % 2);
@@ -5288,15 +5723,15 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                             if (tord_3 + i > 0) {
                                 int _parity_dkv_b_drained = (int)((unsigned int)(tord_3 + i) % 2) ^ 1;
                                 mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
+#endif
                                 asm volatile("tcgen05.fence::after_thread_sync;");
-                            }
 #if __CUDA_ARCH__ == 1070
-                            int _mma_a_lo_0 = ((((do_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
-                            int _mma_b_lo_0 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                                int _smem_desc_lo_4 = (((qdo_c_addr) >> 4) & 0x7FFF) + (2) * 1024;
+                                int _smem_desc_lo_5 = (((k_blk_addr) >> 4) & 0x7FFF) + (2) * 512;
 #else
+                            }
                             int _mma_a_lo_0 = ((((do_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (0) * 1024;
                             int _mma_b_lo_0 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5331,11 +5766,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_mma_a_lo_0), "r"(_mma_b_lo_0), "r"((tmem_tmem + (64))), "r"(0) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_4 = ((((do_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
-#else
                             int _smem_desc_lo_4 = ((((do_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (1) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5378,13 +5809,8 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                                 mbarrier_wait(dq_drained_addr, _parity_dq_drained);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                             }
-#if __CUDA_ARCH__ == 1070
-                            int _mma_a_lo_1 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
-                            int _mma_b_lo_1 = (((ds_mn_addr) >> 4) & 0x7FFF) | 0x2000000;
-#else
                             int _mma_a_lo_1 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (0) * 1024;
                             int _mma_b_lo_1 = (((ds_mn_addr) >> 4) & 0x3FFF) | 0x2000000;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5419,11 +5845,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_mma_a_lo_1), "r"(_mma_b_lo_1), "r"((tmem_tmem + (192))), "r"(((i == 0) ? 0 : 1)) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_5 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
-#else
                             int _smem_desc_lo_5 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (1) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5458,11 +5880,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_5), "r"(_mma_b_lo_1), "r"((tmem_tmem + (256))), "r"(((i == 0) ? 0 : 1)) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_6 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
-#else
                             int _smem_desc_lo_6 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (2) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5497,11 +5915,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_6), "r"(_mma_b_lo_1), "r"((tmem_tmem + (320))), "r"(((i == 0) ? 0 : 1)) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_7 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
-#else
                             int _smem_desc_lo_7 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (3) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5537,13 +5951,8 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "}\n"
                         :: "r"(_smem_desc_lo_7), "r"(_mma_b_lo_1), "r"((tmem_tmem + (384))), "r"(((i == 0) ? 0 : 1)) : "memory");
                             tcgen05_commit(k_free_addr);
-#if __CUDA_ARCH__ == 1070
-                            int _mma_a_lo_2 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
-                            int _mma_b_lo_2 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
-#else
                             int _mma_a_lo_2 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (0) * 1024;
                             int _mma_b_lo_2 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5578,11 +5987,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_mma_a_lo_2), "r"(_mma_b_lo_2), "r"((tmem_tmem + (64))), "r"(1) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_8 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
-#else
                             int _smem_desc_lo_8 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (1) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5621,11 +6026,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                             int _parity_dkv_a_drained = (int)((unsigned int)(tord_3 + i) % 2);
                             mbarrier_wait(dkv_a_drained_addr, _parity_dkv_a_drained);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_9 = ((((do_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
-#else
                             int _smem_desc_lo_9 = ((((do_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (2) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5660,11 +6061,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_9), "r"(_mma_b_lo_0), "r"((tmem_tmem + (64))), "r"(0) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_10 = ((((do_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
-#else
                             int _smem_desc_lo_10 = ((((do_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (3) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5700,11 +6097,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "}\n"
                         :: "r"(_smem_desc_lo_10), "r"(_mma_b_lo_0), "r"((tmem_tmem + (128))), "r"(0) : "memory");
                             tcgen05_commit(p_free_addr);
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_11 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
-#else
                             int _smem_desc_lo_11 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (2) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5739,11 +6132,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_11), "r"(_mma_b_lo_2), "r"((tmem_tmem + (64))), "r"(1) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_12 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
-#else
                             int _smem_desc_lo_12 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (3) * 1024;
-#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -5786,10 +6175,6 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                                 int _parity_s_free_1 = (int)((unsigned int)(tord_3 + i) % 2);
                                 mbarrier_wait(s_free_addr, _parity_s_free_1);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                                int _smem_desc_lo_13 = ((q_k_addr) >> 4) & 0x7FFF;
-                                int _smem_desc_lo_14 = ((k_k_addr) >> 4) & 0x7FFF;
-#else
                                 int _smem_desc_lo_13 = ((q_k_addr) >> 4) & 0x3FFF;
                                 int _smem_desc_lo_14 = ((k_k_addr) >> 4) & 0x3FFF;
 #endif
@@ -5804,7 +6189,11 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         ""
                         "mov.b32 adhi, 0x40004040;\n\t"
                         "mov.b32 bdhi, 0x40004040;\n\t"
+#if __CUDA_ARCH__ == 1070
+                        "mov.b32 id, 135267472;\n\t"
+#else
                         "mov.b32 id, 68158608;\n\t"
+#endif
                         "mov.b32 alo, %0;\n\t"
                         "mov.b32 blo, %1;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5825,6 +6214,54 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#if __CUDA_ARCH__ == 1070
+                        "}\n"
+                        :: "r"(_smem_desc_lo_4), "r"(_smem_desc_lo_5), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_6 = (((qdo_c_addr) >> 4) & 0x7FFF) + (3) * 1024;
+                                int _smem_desc_lo_7 = (((k_blk_addr) >> 4) & 0x7FFF) + (3) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+#else
+                        "add.u32 alo, alo, 506;\n\t"
+                        "add.u32 blo, blo, 506;\n\t"
+#endif
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+#if __CUDA_ARCH__ == 1070
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+#else
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "add.u32 alo, alo, 506;\n\t"
                         "add.u32 blo, blo, 506;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5930,26 +6367,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 da, {alo, adhi};\n\t"
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
-                        "add.u32 alo, alo, 2;\n\t"
-                        "add.u32 blo, blo, 2;\n\t"
-                        "mov.b64 da, {alo, adhi};\n\t"
-                        "mov.b64 db, {blo, bdhi};\n\t"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
-                        "add.u32 alo, alo, 2;\n\t"
-                        "add.u32 blo, blo, 2;\n\t"
-                        "mov.b64 da, {alo, adhi};\n\t"
-                        "mov.b64 db, {blo, bdhi};\n\t"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
-                        "add.u32 alo, alo, 2;\n\t"
-                        "add.u32 blo, blo, 2;\n\t"
-                        "mov.b64 da, {alo, adhi};\n\t"
-                        "mov.b64 db, {blo, bdhi};\n\t"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
-                        "add.u32 alo, alo, 506;\n\t"
-                        "add.u32 blo, blo, 506;\n\t"
-                        "mov.b64 da, {alo, adhi};\n\t"
-                        "mov.b64 db, {blo, bdhi};\n\t"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+#endif
                         "add.u32 alo, alo, 2;\n\t"
                         "add.u32 blo, blo, 2;\n\t"
                         "mov.b64 da, {alo, adhi};\n\t"
@@ -5966,8 +6384,1524 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         "mov.b64 db, {blo, bdhi};\n\t"
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
+#if __CUDA_ARCH__ == 1070
+                        :: "r"(_smem_desc_lo_6), "r"(_smem_desc_lo_7), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_8 = (((qdo_c_addr) >> 4) & 0x7FFF) + (4) * 1024;
+                                int _smem_desc_lo_9 = (((k_blk_addr) >> 4) & 0x7FFF) + (4) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_8), "r"(_smem_desc_lo_9), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_10 = (((qdo_c_addr) >> 4) & 0x7FFF) + (5) * 1024;
+                                int _smem_desc_lo_11 = (((k_blk_addr) >> 4) & 0x7FFF) + (5) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_10), "r"(_smem_desc_lo_11), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_12 = (((qdo_c_addr) >> 4) & 0x7FFF) + (6) * 1024;
+                                int _smem_desc_lo_13 = (((k_blk_addr) >> 4) & 0x7FFF) + (6) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_12), "r"(_smem_desc_lo_13), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_14 = (((qdo_c_addr) >> 4) & 0x7FFF) + (7) * 1024;
+                                int _smem_desc_lo_15 = (((k_blk_addr) >> 4) & 0x7FFF) + (7) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_14), "r"(_smem_desc_lo_15), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+#else
                         :: "r"(_smem_desc_lo_13), "r"(_smem_desc_lo_14), "r"(tmem_tmem), "r"(0) : "memory");
+#endif
                                 tcgen05_commit(s_full_addr);
+#if __CUDA_ARCH__ == 1070
+                                tcgen05_commit(dp_full_addr);
+                            }
+                            int _parity_p_full = (int)((unsigned int)(tord_3 + i) % 2);
+                            mbarrier_wait(p_full_addr, _parity_p_full);
+                            asm volatile("tcgen05.fence::after_thread_sync;");
+                            if (tord_3 + i > 0) {
+                                int _parity_dkv_b_drained = (int)((unsigned int)(tord_3 + i) % 2) ^ 1;
+                                mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                            }
+                            int _smem_desc_lo_16 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_17 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_16), "r"(_smem_desc_lo_17), "r"((tmem_tmem + (64))), "r"(0) : "memory");
+                            int _smem_desc_lo_18 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_19 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_18), "r"(_smem_desc_lo_19), "r"((tmem_tmem + (128))), "r"(0) : "memory");
+                            int _smem_desc_lo_20 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_21 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_20), "r"(_smem_desc_lo_21), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_22 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_23 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_22), "r"(_smem_desc_lo_23), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_24 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_25 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_24), "r"(_smem_desc_lo_25), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_26 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_27 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_26), "r"(_smem_desc_lo_27), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_28 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_29 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_28), "r"(_smem_desc_lo_29), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_30 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_31 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_30), "r"(_smem_desc_lo_31), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _parity_ds_full = (int)((unsigned int)(tord_3 + i) % 2);
+                            mbarrier_wait(ds_full_addr, _parity_ds_full);
+                            asm volatile("tcgen05.fence::after_thread_sync;");
+                            if (i == 0) {
+                                int _parity_dq_drained = (int)((unsigned int)tk_3 % 2) ^ 1;
+                                mbarrier_wait(dq_drained_addr, _parity_dq_drained);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                            }
+                            int _mma_b_lo_3 = (((ds_mn_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            int _smem_desc_lo_32 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_32), "r"(_mma_b_lo_3), "r"((tmem_tmem + (192))), "r"(((i == 0) ? 0 : 1)) : "memory");
+                            int _smem_desc_lo_33 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_33), "r"(_mma_b_lo_3), "r"((tmem_tmem + (256))), "r"(((i == 0) ? 0 : 1)) : "memory");
+                            int _smem_desc_lo_34 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_34), "r"(_mma_b_lo_3), "r"((tmem_tmem + (320))), "r"(((i == 0) ? 0 : 1)) : "memory");
+                            int _smem_desc_lo_35 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_35), "r"(_mma_b_lo_3), "r"((tmem_tmem + (384))), "r"(((i == 0) ? 0 : 1)) : "memory");
+                            int _smem_desc_lo_36 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 128;\n\t"
+                        "add.u32 blo, %1, 128;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_36), "r"(_mma_b_lo_3), "r"((tmem_tmem + (192))), "r"(1) : "memory");
+                            int _smem_desc_lo_37 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 128;\n\t"
+                        "add.u32 blo, %1, 128;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_37), "r"(_mma_b_lo_3), "r"((tmem_tmem + (256))), "r"(1) : "memory");
+                            int _smem_desc_lo_38 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 128;\n\t"
+                        "add.u32 blo, %1, 128;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_38), "r"(_mma_b_lo_3), "r"((tmem_tmem + (320))), "r"(1) : "memory");
+                            int _smem_desc_lo_39 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 128;\n\t"
+                        "add.u32 blo, %1, 128;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_39), "r"(_mma_b_lo_3), "r"((tmem_tmem + (384))), "r"(1) : "memory");
+                            int _smem_desc_lo_40 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 256;\n\t"
+                        "add.u32 blo, %1, 256;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_40), "r"(_mma_b_lo_3), "r"((tmem_tmem + (192))), "r"(1) : "memory");
+                            int _smem_desc_lo_41 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 256;\n\t"
+                        "add.u32 blo, %1, 256;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_41), "r"(_mma_b_lo_3), "r"((tmem_tmem + (256))), "r"(1) : "memory");
+                            int _smem_desc_lo_42 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 256;\n\t"
+                        "add.u32 blo, %1, 256;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_42), "r"(_mma_b_lo_3), "r"((tmem_tmem + (320))), "r"(1) : "memory");
+                            int _smem_desc_lo_43 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 256;\n\t"
+                        "add.u32 blo, %1, 256;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_43), "r"(_mma_b_lo_3), "r"((tmem_tmem + (384))), "r"(1) : "memory");
+                            int _smem_desc_lo_44 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 384;\n\t"
+                        "add.u32 blo, %1, 384;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_44), "r"(_mma_b_lo_3), "r"((tmem_tmem + (192))), "r"(1) : "memory");
+                            int _smem_desc_lo_45 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 384;\n\t"
+                        "add.u32 blo, %1, 384;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_45), "r"(_mma_b_lo_3), "r"((tmem_tmem + (256))), "r"(1) : "memory");
+                            int _smem_desc_lo_46 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 384;\n\t"
+                        "add.u32 blo, %1, 384;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::use [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_46), "r"(_mma_b_lo_3), "r"((tmem_tmem + (320))), "r"(1) : "memory");
+                            int _smem_desc_lo_47 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135365776;\n\t"
+                        "add.u32 alo, %0, 384;\n\t"
+                        "add.u32 blo, %1, 384;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_47), "r"(_mma_b_lo_3), "r"((tmem_tmem + (384))), "r"(1) : "memory");
+                            tcgen05_commit(k_free_addr);
+                            int _smem_desc_lo_48 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_49 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_48), "r"(_smem_desc_lo_49), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_50 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_51 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_50), "r"(_smem_desc_lo_51), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_52 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_53 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_52), "r"(_smem_desc_lo_53), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_54 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_55 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_54), "r"(_smem_desc_lo_55), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_56 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_57 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_56), "r"(_smem_desc_lo_57), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_58 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_59 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_58), "r"(_smem_desc_lo_59), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_60 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_61 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_60), "r"(_smem_desc_lo_61), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_62 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_63 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_62), "r"(_smem_desc_lo_63), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            tcgen05_commit(dkv_a_full_addr);
+                            int _parity_dkv_a_drained = (int)((unsigned int)(tord_3 + i) % 2);
+                            mbarrier_wait(dkv_a_drained_addr, _parity_dkv_a_drained);
+                            asm volatile("tcgen05.fence::after_thread_sync;");
+                            int _smem_desc_lo_64 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_65 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_64), "r"(_smem_desc_lo_65), "r"((tmem_tmem + (64))), "r"(0) : "memory");
+                            int _smem_desc_lo_66 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_67 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_66), "r"(_smem_desc_lo_67), "r"((tmem_tmem + (128))), "r"(0) : "memory");
+                            int _smem_desc_lo_68 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_69 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_68), "r"(_smem_desc_lo_69), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_70 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_71 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_70), "r"(_smem_desc_lo_71), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_72 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_73 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_72), "r"(_smem_desc_lo_73), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_74 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_75 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_74), "r"(_smem_desc_lo_75), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_76 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_77 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_76), "r"(_smem_desc_lo_77), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_78 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_79 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_78), "r"(_smem_desc_lo_79), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            tcgen05_commit(p_free_addr);
+                            int _smem_desc_lo_80 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_81 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_80), "r"(_smem_desc_lo_81), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_82 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_83 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_82), "r"(_smem_desc_lo_83), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_84 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_85 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_84), "r"(_smem_desc_lo_85), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_86 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_87 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_86), "r"(_smem_desc_lo_87), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_88 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_89 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_88), "r"(_smem_desc_lo_89), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_90 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_91 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_90), "r"(_smem_desc_lo_91), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            int _smem_desc_lo_92 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_93 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::fill [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_92), "r"(_smem_desc_lo_93), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+                            int _smem_desc_lo_94 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_95 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+                            asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135300240;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16.collector::a::discard.collector::b::lastuse [%2], da, db, id, p0;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_94), "r"(_smem_desc_lo_95), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+                            tcgen05_commit(dkv_b_full_addr);
+                            tcgen05_commit(ds_free_addr);
+                            if (blocks_3 > i + 1) {
+                                int _parity_s_free_1 = (int)((unsigned int)(tord_3 + i) % 2);
+                                mbarrier_wait(s_free_addr, _parity_s_free_1);
+                                int _parity_dp_free_1 = (int)((unsigned int)(tord_3 + i) % 2);
+                                mbarrier_wait(dp_free_addr, _parity_dp_free_1);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_96 = (((qdo_c_addr) >> 4) & 0x7FFF) + (0) * 1024;
+                                int _smem_desc_lo_97 = (((k_blk_addr) >> 4) & 0x7FFF) + (0) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_96), "r"(_smem_desc_lo_97), "r"(tmem_tmem), "r"(0) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_98 = (((qdo_c_addr) >> 4) & 0x7FFF) + (1) * 1024;
+                                int _smem_desc_lo_99 = (((k_blk_addr) >> 4) & 0x7FFF) + (1) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_98), "r"(_smem_desc_lo_99), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_100 = (((qdo_c_addr) >> 4) & 0x7FFF) + (2) * 1024;
+                                int _smem_desc_lo_101 = (((k_blk_addr) >> 4) & 0x7FFF) + (2) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_100), "r"(_smem_desc_lo_101), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_102 = (((qdo_c_addr) >> 4) & 0x7FFF) + (3) * 1024;
+                                int _smem_desc_lo_103 = (((k_blk_addr) >> 4) & 0x7FFF) + (3) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_102), "r"(_smem_desc_lo_103), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_104 = (((qdo_c_addr) >> 4) & 0x7FFF) + (4) * 1024;
+                                int _smem_desc_lo_105 = (((k_blk_addr) >> 4) & 0x7FFF) + (4) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_104), "r"(_smem_desc_lo_105), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_106 = (((qdo_c_addr) >> 4) & 0x7FFF) + (5) * 1024;
+                                int _smem_desc_lo_107 = (((k_blk_addr) >> 4) & 0x7FFF) + (5) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_106), "r"(_smem_desc_lo_107), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_108 = (((qdo_c_addr) >> 4) & 0x7FFF) + (6) * 1024;
+                                int _smem_desc_lo_109 = (((k_blk_addr) >> 4) & 0x7FFF) + (6) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_108), "r"(_smem_desc_lo_109), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                mbarrier_wait(k_full_addr + (m_kc) * 8, _phase_k_full);
+                                asm volatile("tcgen05.fence::after_thread_sync;");
+                                int _smem_desc_lo_110 = (((qdo_c_addr) >> 4) & 0x7FFF) + (7) * 1024;
+                                int _smem_desc_lo_111 = (((k_blk_addr) >> 4) & 0x7FFF) + (7) * 512;
+                                asm volatile(
+                        "{\n\t"
+                        ".reg .pred p0, p1;\n\t"
+                        ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
+                        ".reg .b64 da, db;\n\t"
+                        ""
+                        "setp.ne.b32 p0, %3, 0;\n\t"
+                        "setp.ne.b32 p1, 1, 0;\n\t"
+                        ""
+                        "mov.b32 adhi, 0x40004040;\n\t"
+                        "mov.b32 bdhi, 0x40004040;\n\t"
+                        "mov.b32 id, 135267472;\n\t"
+                        "mov.b32 alo, %0;\n\t"
+                        "mov.b32 blo, %1;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "add.u32 alo, alo, 2;\n\t"
+                        "add.u32 blo, blo, 2;\n\t"
+                        "mov.b64 da, {alo, adhi};\n\t"
+                        "mov.b64 db, {blo, bdhi};\n\t"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
+                        "}\n"
+                        :: "r"(_smem_desc_lo_110), "r"(_smem_desc_lo_111), "r"(tmem_tmem), "r"(1) : "memory");
+                                m_kc += 1;
+                                if (m_kc == 8) { m_kc = 0; _phase_k_full ^= 1; }
+                                tcgen05_commit(s_full_addr);
+                                tcgen05_commit(dp_full_addr);
+#else
+#endif
                             }
                         }
                         tcgen05_commit(dq_done_addr);
@@ -5988,6 +7922,15 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                     int _parity_dq_done_1 = (int)((unsigned int)tk_4 % 2) ^ 1;
                     mbarrier_wait(dq_done_addr, _parity_dq_done_1);
                     if (elect_sync()) {
+#if __CUDA_ARCH__ == 1070
+                        #pragma unroll 1
+                        for (int c = 0; c < 8; c++) {
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c), (&q_latent), 0, 0, c, token_1, qdo_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c + 4096), (&q_latent), 0, 16, c, token_1, qdo_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c + 8192), (&q_latent), 0, 32, c, token_1, qdo_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c + 12288), (&q_latent), 0, 48, c, token_1, qdo_full_addr);
+                        }
+#else
                         tma_4d_gmem2smem(q_k_addr, (&q_latent), 0, 0, 0, token_1, qdo_full_addr);
                         tma_4d_gmem2smem(q_k_addr + 8192, (&q_latent), 0, 0, 1, token_1, qdo_full_addr);
                         tma_4d_gmem2smem(q_k_addr + 16384, (&q_latent), 0, 0, 2, token_1, qdo_full_addr);
@@ -5996,11 +7939,21 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         tma_4d_gmem2smem(q_k_addr + 40960, (&q_latent), 0, 0, 5, token_1, qdo_full_addr);
                         tma_4d_gmem2smem(q_k_addr + 49152, (&q_latent), 0, 0, 6, token_1, qdo_full_addr);
                         tma_4d_gmem2smem(q_k_addr + 57344, (&q_latent), 0, 0, 7, token_1, qdo_full_addr);
+#endif
                         mbarrier_arrive_expect_tx(qdo_full_addr, 65536);
                     }
                     int _parity_do_free = (int)((unsigned int)tk_4 % 2) ^ 1;
                     mbarrier_wait(do_free_addr, _parity_do_free);
                     if (elect_sync()) {
+#if __CUDA_ARCH__ == 1070
+                        #pragma unroll 1
+                        for (int c_1 = 0; c_1 < 8; c_1++) {
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c_1 + 2048), (&dout), 0, 0, c_1, token_1, do_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c_1 + 4096 + 2048), (&dout), 0, 16, c_1, token_1, do_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c_1 + 8192 + 2048), (&dout), 0, 32, c_1, token_1, do_full_addr);
+                            tma_4d_gmem2smem(qdo_k_addr + (unsigned int)(16384 * c_1 + 12288 + 2048), (&dout), 0, 48, c_1, token_1, do_full_addr);
+                        }
+#else
                         tma_4d_gmem2smem(do_k_addr, (&dout), 0, 0, 0, token_1, do_full_addr);
                         tma_4d_gmem2smem(do_k_addr + 8192, (&dout), 0, 0, 1, token_1, do_full_addr);
                         tma_4d_gmem2smem(do_k_addr + 16384, (&dout), 0, 0, 2, token_1, do_full_addr);
@@ -6009,6 +7962,7 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                         tma_4d_gmem2smem(do_k_addr + 40960, (&dout), 0, 0, 5, token_1, do_full_addr);
                         tma_4d_gmem2smem(do_k_addr + 49152, (&dout), 0, 0, 6, token_1, do_full_addr);
                         tma_4d_gmem2smem(do_k_addr + 57344, (&dout), 0, 0, 7, token_1, do_full_addr);
+#endif
                         mbarrier_arrive_expect_tx(do_full_addr, 65536);
                     }
                     stats[lane_0_2] = lse[token_1 * 64 + lane_0_2] * 1.442695f;
@@ -6161,17 +8115,10 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                                 }
                             }
                         }
-#if __CUDA_ARCH__ == 1000
-                        int _warp_redux_3;
-                        asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_3) : "r"(best));
-                        best = _warp_redux_3;
-#else
-                        int _warp_redux_3_1;
-                        asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_3_1) : "r"(best));
-                        best = _warp_redux_3_1;
-#endif
-                        if (best >= 0) {
-                            last_valid = best;
+                        int best_w;
+                        asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(best_w) : "r"(best));
+                        if (best_w >= 0) {
+                            last_valid = best_w;
                             break;
                         }
                     }
@@ -6196,24 +8143,24 @@ kernel_cake_dsa_h64_det_nope_train_bfbe0a61e0a693c742d7(const __grid_constant__ 
                             if (whole_tile != 0) {
                                 int _vec_load_1[8];
                                 {
-                                    uint32_t _iv_4_0;
-                                    uint32_t _iv_4_1;
-                                    uint32_t _iv_4_2;
-                                    uint32_t _iv_4_3;
-                                    uint32_t _iv_4_4;
-                                    uint32_t _iv_4_5;
-                                    uint32_t _iv_4_6;
-                                    uint32_t _iv_4_7;
+                                    uint32_t _iv_3_0;
+                                    uint32_t _iv_3_1;
+                                    uint32_t _iv_3_2;
+                                    uint32_t _iv_3_3;
+                                    uint32_t _iv_3_4;
+                                    uint32_t _iv_3_5;
+                                    uint32_t _iv_3_6;
+                                    uint32_t _iv_3_7;
                                     asm volatile("ld.global.nc.L1::evict_first.L2::evict_normal.L2::256B.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                                        : "=r"(_iv_4_0), "=r"(_iv_4_1), "=r"(_iv_4_2), "=r"(_iv_4_3), "=r"(_iv_4_4), "=r"(_iv_4_5), "=r"(_iv_4_6), "=r"(_iv_4_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
-                                    _vec_load_1[0 + 0] = (int32_t)_iv_4_0;
-                                    _vec_load_1[0 + 1] = (int32_t)_iv_4_1;
-                                    _vec_load_1[0 + 2] = (int32_t)_iv_4_2;
-                                    _vec_load_1[0 + 3] = (int32_t)_iv_4_3;
-                                    _vec_load_1[0 + 4] = (int32_t)_iv_4_4;
-                                    _vec_load_1[0 + 5] = (int32_t)_iv_4_5;
-                                    _vec_load_1[0 + 6] = (int32_t)_iv_4_6;
-                                    _vec_load_1[0 + 7] = (int32_t)_iv_4_7;
+                                        : "=r"(_iv_3_0), "=r"(_iv_3_1), "=r"(_iv_3_2), "=r"(_iv_3_3), "=r"(_iv_3_4), "=r"(_iv_3_5), "=r"(_iv_3_6), "=r"(_iv_3_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
+                                    _vec_load_1[0 + 0] = (int32_t)_iv_3_0;
+                                    _vec_load_1[0 + 1] = (int32_t)_iv_3_1;
+                                    _vec_load_1[0 + 2] = (int32_t)_iv_3_2;
+                                    _vec_load_1[0 + 3] = (int32_t)_iv_3_3;
+                                    _vec_load_1[0 + 4] = (int32_t)_iv_3_4;
+                                    _vec_load_1[0 + 5] = (int32_t)_iv_3_5;
+                                    _vec_load_1[0 + 6] = (int32_t)_iv_3_6;
+                                    _vec_load_1[0 + 7] = (int32_t)_iv_3_7;
                                 }
                                 values[0] = _vec_load_1[0];
                                 values[1] = _vec_load_1[1];

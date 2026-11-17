@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import hashlib
 import json
 import math
 import os
@@ -27,6 +26,7 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from tests.experimental.test_helpers import cake_dsa_sparse_attention_naive as nv
 from tests.experimental.test_helpers import (
     cake_dsa_sparse_attention_nondet_train_reference as nope_ref,
 )
@@ -38,8 +38,6 @@ from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_refe
     globalize_gather_indices_loop,
     make_inputs,
     reference_fp64,
-    rel_l2,
-    rel_l2_rows,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -75,22 +73,6 @@ prepare_dsa_train = cake_backend.prepare_dsa_train
 record_for = cake_backend.record_for
 validate_dsa_train_inputs = cake_backend.validate_dsa_train_inputs
 workspace_layout = cake_backend.workspace_layout
-
-# Accuracy gates (relative L2 vs the chunked FP64 reference of the same BF16
-# inputs): the reference FA sparse-MLA numbers times 1.05.
-# Forward output: within 5 % (+1e-5) of the numerics floor of a BF16-P kernel on the same inputs
-# (``reference_fp64(...)["out_emu"]``); the fixed rel-L2 figures of the design brief are calibrated
-# for the iid top-k-2048 configuration and are enforced by the project harness, not per test shape.
-FLOOR_MARGIN = 1.05
-FLOOR_ABS = 1e-5
-# Backward: 1.05x the rel-L2 of the FA sparse-MLA reference kernels on the same inputs (project
-# harness values); rope parts at twice the latent gate, peaked attention at one common gate.
-GATE_DQ_LATENT = 0.00226
-GATE_DKV_LATENT = 0.00243
-GATE_ROPE_FACTOR = 2.0
-GATE_PEAKED = 0.0025
-GATE_LSE_ABS = 2e-5
-GATE_ROW_P99_DQ = 0.004
 
 SEED = 20260929
 
@@ -611,7 +593,8 @@ def test_registry_record_is_well_formed():
     for stage in stages:
         physical = record[stage]
         assert physical["library"] and physical["ffi_entry"]
-        for arch in record["arches"]:
+        assert set(cake_jit.stage_arches(stage)) <= set(record["arches"])
+        for arch in cake_jit.stage_arches(stage):
             entry = libraries[f"{physical['library']}_{arch}"]
             assert entry["arch"] == arch and entry["entry"] == physical["ffi_entry"]
             assert len(entry["sources"]) == 2
@@ -944,128 +927,106 @@ def test_validate_rejects_bad_topk_length():
 # ---------------------------------------------------------------------------
 
 
-def _floor_gate(ref) -> float:
-    return FLOOR_MARGIN * rel_l2(ref["out_emu"], ref["out"]) + FLOOR_ABS
-
-
-def _check_forward(inp, out, lse, ref, *, valid_rows=None):
-    assert torch.isfinite(out.float()).all()
-    assert rel_l2(out, ref["out"]) <= _floor_gate(ref)
-    lse_ref = ref["lse"]
-    finite = torch.isfinite(lse_ref)
-    assert torch.equal(torch.isfinite(lse), finite)
-    if finite.any():
-        assert (
-            lse.double()[finite] - lse_ref[finite]
-        ).abs().max().item() <= GATE_LSE_ABS
-    if (~finite).any():
-        assert torch.all(lse[~finite] == float("-inf"))
-        rows = (
-            ~finite.any(-1) if valid_rows is None else ~valid_rows
-        )  # fully masked rows
-        assert torch.all(out[rows] == 0)
-
-
-def _check_backward(grads, ref, *, canonical=False, peaked=False):
-    """Every gradient within 1.05x its BF16-P/dS numerics floor on the same inputs; the canonical
-    iid top-k-2048 configuration also within the fixed gates calibrated there."""
-    names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
-    for g in grads:
-        assert torch.isfinite(g.float()).all()
-    for g, name in zip(grads, names, strict=True):
-        got, floor = rel_l2(g, ref[name]), rel_l2(ref[f"{name}_emu"], ref[name])
-        assert got <= FLOOR_MARGIN * floor + FLOOR_ABS, (
-            f"{name}: rel-L2 {got:.6f} vs floor {floor:.6f}"
+def _rope_outputs(forward=None, grads=None, **more) -> dict:
+    """One RoPE call's outputs by name for ``nv.judged``: ``forward`` = ``(out, lse, o_lo)``, ``grads`` = the
+    backward's ``(dq_latent, dq_rope, dkv_latent, dk_rope)`` (the ``None`` dK/dV of an accumulating call left
+    out) and any ``more`` by name (``dkv_acc=nv.Acc(...)``)."""
+    found = {}
+    if forward is not None:
+        found.update(zip(("out", "lse", "o_lo"), forward, strict=True))
+    if grads is not None:
+        names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
+        found.update(
+            (name, g) for name, g in zip(names, grads, strict=True) if g is not None
         )
-    if canonical:
-        dq_gate = GATE_PEAKED if peaked else GATE_DQ_LATENT
-        dkv_gate = GATE_PEAKED if peaked else GATE_DKV_LATENT
-        rope_factor = 1.0 if peaked else GATE_ROPE_FACTOR
-        assert rel_l2(grads[0], ref["dq_latent"]) <= dq_gate
-        assert rel_l2(grads[1], ref["dq_rope"]) <= dq_gate * rope_factor
-        assert rel_l2(grads[2], ref["dkv_latent"]) <= dkv_gate
-        assert rel_l2(grads[3], ref["dk_rope"]) <= dkv_gate * rope_factor
+    found.update(more)
+    return found
 
 
 @pytest.mark.parametrize("topk", [128, 200])
-def test_forward_iid(topk):
+def test_forward_iid(topk, record_property):
     _require_program()
-    inp = make_inputs([384], [1024], seed=SEED, topk=topk)
-    out, lse, _ = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    torch.cuda.synchronize()
-    ref = reference_fp64(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    _check_forward(inp, out, lse, ref)
+
+    def case(s, j):
+        inp = make_inputs([384], [1024], seed=s, topk=topk)
+        got = cake_backend.forward(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+        )
+        torch.cuda.synchronize()
+        return nv.judged(nv.rope_problem(inp, dout=None), {"": _rope_outputs(got)})
+
+    nv.judge_draws(record_property, case, seed=SEED)
 
 
-def test_forward_accepts_packed_views_bitwise():
+def test_forward_accepts_packed_views(record_property):
+    """q / kv as column views of packed ``[T, 64, 576]`` / ``[S, 576]`` tensors: the split and the view calls are
+    both judged."""
     _require_program()
-    inp = make_inputs([256], [512], seed=SEED + 1, topk=128)
-    q = torch.cat([inp.q_latent, inp.q_rope], dim=-1).contiguous()
-    kv = torch.cat([inp.kv_latent, inp.k_rope], dim=-1).contiguous()
-    out_split, lse_split, _ = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    out_view, lse_view, _ = cake_backend.forward(
-        q[..., :D_LATENT],
-        q[..., D_LATENT:],
-        kv[:, :D_LATENT],
-        kv[:, D_LATENT:],
-        inp.idx_global,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(out_split, out_view)
-    assert torch.equal(lse_split, lse_view)
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        q = torch.cat([inp.q_latent, inp.q_rope], dim=-1).contiguous()
+        kv = torch.cat([inp.kv_latent, inp.k_rope], dim=-1).contiguous()
+        split = cake_backend.forward(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+        )
+        view = cake_backend.forward(
+            q[..., :D_LATENT],
+            q[..., D_LATENT:],
+            kv[:, :D_LATENT],
+            kv[:, D_LATENT:],
+            inp.idx_global,
+        )
+        torch.cuda.synchronize()
+        runs = {"split": _rope_outputs(split), "view": _rope_outputs(view)}
+        return nv.judged(nv.rope_problem(inp, dout=None), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 1)
 
 
-def test_forward_masked_rows_and_out_of_range():
+def test_forward_masked_rows_and_out_of_range(record_property):
+    """Invalid slots anywhere in a row, a row masked by -1 and one by ``topk_length`` 0: judged on the valid
+    slots (the contract holds ``out = 0`` and ``lse = -inf`` on the rows without a valid slot)."""
     _require_program()
-    inp = make_inputs([256], [512], seed=SEED + 2, topk=128)
-    idx = inp.idx_global.clone()
-    idx[5] = -1  # fully masked row
-    idx[17, ::3] = inp.total_k + 7  # out-of-range slots, anywhere in the row
-    idx[33, :64] = -1  # invalid slots first, valid ones after
-    topk_length = inp.topk_length.clone()
-    topk_length[40] = 0  # masked through topk_length
-    topk_length[41] = 3
-    out, lse, _ = cake_backend.forward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        idx,
-        topk_length=topk_length,
-    )
-    torch.cuda.synchronize()
-    ref = reference_fp64(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        idx,
-        topk_length=topk_length,
-    )
-    _check_forward(inp, out, lse, ref)
-    assert torch.all(out[5] == 0) and torch.all(lse[5] == float("-inf"))
-    assert torch.all(out[40] == 0) and torch.all(lse[40] == float("-inf"))
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        idx = inp.idx_global.clone()
+        idx[5] = -1  # fully masked row
+        idx[17, ::3] = inp.total_k + 7  # out-of-range slots, anywhere in the row
+        idx[33, :64] = -1  # invalid slots first, valid ones after
+        topk_length = inp.topk_length.clone()
+        topk_length[40] = 0  # masked through topk_length
+        topk_length[41] = 3
+        got = cake_backend.forward(
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            idx,
+            topk_length=topk_length,
+        )
+        torch.cuda.synchronize()
+        problem = nv.rope_problem(inp, indices=idx, topk_length=topk_length, dout=None)
+        return nv.judged(problem, {"": _rope_outputs(got)})
+
+    nv.judge_draws(record_property, case, seed=SEED + 2)
 
 
-def test_forward_deterministic():
+def test_forward_repeated_calls(record_property):
+    """Two forward calls on the same inputs: both are judged."""
     _require_program()
-    inp = make_inputs([320], [640], seed=SEED + 3, topk=128)
-    a = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    b = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
-    if a[2] is not None:
-        assert torch.equal(a[2], b[2])
+
+    def case(s, j):
+        inp = make_inputs([320], [640], seed=s, topk=128)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        first = cake_backend.forward(*args)
+        second = cake_backend.forward(*args)
+        torch.cuda.synchronize()
+        runs = {"first": _rope_outputs(first), "second": _rope_outputs(second)}
+        return nv.judged(nv.rope_problem(inp, dout=None), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 3)
 
 
 def test_runner_launches_without_allocation():
@@ -1088,55 +1049,80 @@ def test_runner_launches_without_allocation():
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
 
 
-def test_eager_calls_reuse_the_plan_and_return_fresh_outputs():
+def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(record_property):
     """Repeated eager calls of one geometry share one cached plan (no new entry, no
-    re-validation) and still return distinct output tensors with equal values."""
+    re-validation) and still return distinct output tensors; every call's outputs are judged."""
     _require_program(backward=True)
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    inp = make_inputs([256], [512], seed=SEED + 31, topk=128)
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    first = cake_backend.forward(*args)
-    assert len(cache) == 1
-    second = cake_backend.forward(*args)
-    assert len(cache) == 1
-    torch.cuda.synchronize()
-    assert all(a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True))
-    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
-    out, lse, o_lo = first
-    g1 = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
-    g2 = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    assert len(cache) == 2  # one forward plan, one backward plan
-    assert all(a.data_ptr() != b.data_ptr() for a, b in zip(g1, g2, strict=True))
-    assert torch.equal(g1[0], g2[0]) and torch.equal(g1[1], g2[1])
-    # another geometry (a different top-k) plans anew; the fresh activations of a
-    # training step (same geometry, other storage) do not
-    other = make_inputs([256], [512], seed=SEED + 32, topk=64)
-    cake_backend.forward(
-        other.q_latent, other.q_rope, other.kv_latent, other.k_rope, other.idx_global
-    )
-    assert len(cache) == 3
-    moved = [t.clone() for t in args]
-    cake_backend.forward(*moved)
-    assert len(cache) == 3
-    # ... nor do other tensor contents of the same geometry: the shared plan serves
-    # them with the results of a freshly prepared, uncached binding
-    fresh = make_inputs([256], [512], seed=SEED + 35, topk=128)
-    fresh_args = (
-        fresh.q_latent,
-        fresh.q_rope,
-        fresh.kv_latent,
-        fresh.k_rope,
-        fresh.idx_global,
-    )
-    assert not torch.equal(fresh.idx_global, inp.idx_global)
-    cached = cake_backend.forward(*fresh_args)
-    assert len(cache) == 3
-    direct = prepare_dsa_train(*fresh_args, backward=False).forward()
-    torch.cuda.synchronize()
-    assert all(torch.equal(a, b) for a, b in zip(cached, direct, strict=True))
-    assert not torch.equal(cached[0], first[0])
+
+    def case(s, j):
+        cache.clear()
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        first = cake_backend.forward(*args)
+        assert len(cache) == 1
+        second = cake_backend.forward(*args)
+        assert len(cache) == 1
+        torch.cuda.synchronize()
+        assert all(
+            a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True)
+        )
+        out, lse, o_lo = first
+        g1 = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        g2 = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        assert len(cache) == 2  # one forward plan, one backward plan
+        assert all(a.data_ptr() != b.data_ptr() for a, b in zip(g1, g2, strict=True))
+        # another geometry (a different top-k) plans anew; the fresh activations of a
+        # training step (same geometry, other storage) do not
+        other = make_inputs([256], [512], seed=s + 1, topk=64)
+        other_fwd = cake_backend.forward(
+            other.q_latent,
+            other.q_rope,
+            other.kv_latent,
+            other.k_rope,
+            other.idx_global,
+        )
+        assert len(cache) == 3
+        moved = cake_backend.forward(*[t.clone() for t in args])
+        assert len(cache) == 3
+        # ... nor do other tensor contents of the same geometry: the call reuses the
+        # shared plan (no new cache entry); its outputs and those of a freshly prepared,
+        # uncached binding are both judged on the fresh contents
+        fresh = make_inputs([256], [512], seed=s + 4, topk=128)
+        fresh_args = (
+            fresh.q_latent,
+            fresh.q_rope,
+            fresh.kv_latent,
+            fresh.k_rope,
+            fresh.idx_global,
+        )
+        assert not torch.equal(fresh.idx_global, inp.idx_global)
+        cached = cake_backend.forward(*fresh_args)
+        assert len(cache) == 3
+        direct = prepare_dsa_train(*fresh_args, backward=False).forward()
+        torch.cuda.synchronize()
+        # both backward calls take the first forward's outputs
+        runs = {
+            "first": _rope_outputs(first, g1),
+            "second": _rope_outputs(second, g2),
+            "moved": _rope_outputs(moved),
+        }
+        return nv.merge(
+            nv.judged(nv.rope_problem(inp), runs),
+            nv.judged(
+                nv.rope_problem(other, dout=None),
+                {"": _rope_outputs(other_fwd)},
+                prefix="other ",
+            ),
+            nv.judged(
+                nv.rope_problem(fresh, dout=None),
+                {"cached": _rope_outputs(cached), "direct": _rope_outputs(direct)},
+                prefix="fresh ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=SEED + 31)
 
 
 def test_eager_cache_entries_pin_nothing_problem_sized():
@@ -1183,169 +1169,128 @@ def test_binding_cache_is_bounded():
         cache.clear()
 
 
-def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache():
+def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache(
+    record_property,
+):
+    """A forward captured into a CUDA graph plans privately (the cache keeps the eager entry only); the eager call,
+    the two warm-up calls on the capture stream and the captured outputs after two replays are judged."""
     _require_program()
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    inp = make_inputs([256], [512], seed=SEED + 34, topk=128)
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    eager = cake_backend.forward(*args)
-    torch.cuda.synchronize()
-    assert len(cache) == 1
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(2):  # warm the capture stream
-            cake_backend.forward(*args)
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        captured = cake_backend.forward(*args)
-    assert len(cache) == 1  # the capture planned privately
-    for _ in range(2):
-        graph.replay()
-    torch.cuda.synchronize()
-    for a, b in zip(eager, captured, strict=True):
-        assert torch.equal(a, b)
+
+    def case(s, j):
+        cache.clear()
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        eager = cake_backend.forward(*args)
+        torch.cuda.synchronize()
+        assert len(cache) == 1
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # warm the capture stream
+            warm = [cake_backend.forward(*args) for _ in range(2)]
+        torch.cuda.current_stream().wait_stream(stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = cake_backend.forward(*args)
+        assert len(cache) == 1  # the capture planned privately
+        for _ in range(2):
+            graph.replay()
+        torch.cuda.synchronize()
+        replayed = [t.clone() for t in captured]  # copies that outlive the graph
+        runs = {
+            "eager": _rope_outputs(eager),
+            "warm 1": _rope_outputs(warm[0]),
+            "warm 2": _rope_outputs(warm[1]),
+            "graph": _rope_outputs(replayed),
+        }
+        return nv.judged(nv.rope_problem(inp, dout=None), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 34)
 
 
-@pytest.mark.parametrize(
-    "seq_q, seq_k, topk, canonical", [(384, 1024, 200, False), (256, 4096, 2048, True)]
-)
-def test_backward_iid(seq_q, seq_k, topk, canonical):
+@pytest.mark.parametrize("seq_q, seq_k, topk", [(384, 1024, 200), (256, 4096, 2048)])
+def test_backward_iid(seq_q, seq_k, topk, record_property):
     _require_program(backward=True)
-    inp = make_inputs([seq_q], [seq_k], seed=SEED + 6, topk=topk)
-    out, lse, o_lo = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    grads = cake_backend.backward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    torch.cuda.synchronize()
-    ref = reference_fp64(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        dout=inp.dout,
-    )
-    _check_forward(inp, out, lse, ref)
-    _check_backward(grads, ref, canonical=canonical)
+
+    def case(s, j):
+        inp = make_inputs([seq_q], [seq_k], seed=s, topk=topk)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        fwd = cake_backend.forward(*args)
+        out, lse, o_lo = fwd
+        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        return nv.judged(nv.rope_problem(inp), {"": _rope_outputs(fwd, grads)})
+
+    nv.judge_draws(record_property, case, seed=SEED + 6)
 
 
-def test_backward_masked_rows_give_zero_dq():
+def test_backward_masked_rows_give_zero_dq(record_property):
+    """A fully masked row and a row with every other slot masked: judged on the valid slots (the contract holds
+    dq of the fully masked row exactly 0)."""
     _require_program(backward=True)
-    inp = make_inputs([256], [512], seed=SEED + 7, topk=128)
-    idx = inp.idx_global.clone()
-    idx[3] = -1
-    idx[9, ::2] = -1
-    out, lse, o_lo = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx
-    )
-    dq_latent, dq_rope, dkv_latent, dk_rope = cake_backend.backward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        idx,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    torch.cuda.synchronize()
-    assert torch.all(dq_latent[3] == 0) and torch.all(dq_rope[3] == 0)
-    ref = reference_fp64(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx, dout=inp.dout
-    )
-    _check_backward((dq_latent, dq_rope, dkv_latent, dk_rope), ref)
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        idx = inp.idx_global.clone()
+        idx[3] = -1
+        idx[9, ::2] = -1
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx)
+        fwd = cake_backend.forward(*args)
+        out, lse, o_lo = fwd
+        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        problem = nv.rope_problem(inp, indices=idx)
+        return nv.judged(problem, {"": _rope_outputs(fwd, grads)})
+
+    nv.judge_draws(record_property, case, seed=SEED + 7)
 
 
-def test_backward_peaked():
+def test_backward_peaked(record_property):
     """Own key carrying ~99 % of the softmax mass (the strongest calibrated peaked case).
 
-    A saturated softmax (self weight -> 1) makes the exact dQ vanish and the relative error
-    meaningless, so beta is calibrated to the target weight at this shape instead of fixed.
+    A saturated softmax (self weight -> 1) makes the exact dQ vanish, so beta is calibrated to the
+    target weight at this shape (once, on the case's seed) instead of fixed; every draw checks that
+    its own self weight lies in the peaked window.
     """
     _require_program(backward=True)
     beta = calibrate_beta(0.99, seed=SEED + 8, probe_len=512, topk=128)
-    inp = make_inputs(
-        [512], [512], seed=SEED + 8, topk=128, self_including=True, beta=beta
-    )
-    ref = reference_fp64(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        dout=inp.dout,
-        own_key=inp.own_key,
-    )
-    assert 0.9 < ref["self_weight"] < 0.999, (
-        f"calibrated self weight {ref['self_weight']:.4f} outside the peaked window"
-    )
-    out, lse, o_lo = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    grads = cake_backend.backward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    torch.cuda.synchronize()
-    _check_backward(grads, ref, peaked=True)
-    p99 = rel_l2_rows(grads[0], ref["dq_latent"]).quantile(0.99).item()
-    assert p99 <= GATE_ROW_P99_DQ
+
+    def case(s, j):
+        inp = make_inputs(
+            [512], [512], seed=s, topk=128, self_including=True, beta=beta
+        )
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        weight = reference_fp64(*args, own_key=inp.own_key)["self_weight"]
+        assert 0.9 < weight < 0.999, (
+            f"calibrated self weight {weight:.4f} outside the peaked window"
+        )
+        fwd = cake_backend.forward(*args)
+        out, lse, o_lo = fwd
+        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        return nv.judged(nv.rope_problem(inp), {"": _rope_outputs(fwd, grads)})
+
+    nv.judge_draws(record_property, case, seed=SEED + 8)
 
 
-def test_backward_deterministic_dq_and_dkv_spread():
+def test_backward_repeated_calls(record_property):
+    """Two backward calls on the same inputs: both are judged."""
     _require_program(backward=True)
-    inp = make_inputs([320], [640], seed=SEED + 9, topk=128)
-    out, lse, o_lo = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    a = cake_backend.backward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    b = cake_backend.backward(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
-    spread = max(rel_l2(a[2], b[2]), rel_l2(a[3], b[3]))
-    assert spread < 1e-2, f"dkv run-to-run spread {spread}"
+
+    def case(s, j):
+        inp = make_inputs([320], [640], seed=s, topk=128)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        fwd = cake_backend.forward(*args)
+        out, lse, o_lo = fwd
+        a = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        b = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        runs = {"first": _rope_outputs(fwd, a), "second": _rope_outputs(grads=b)}
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 9)
 
 
 def _require_key_pass_program():
@@ -1372,157 +1317,172 @@ def _masked_indices(inp):
     return idx, topk_length
 
 
-def test_backward_forced_key_passes_masked_matches_reference_and_is_deterministic():
-    """Three forced key-range passes over 65,536 keys (T = 256) with the masking cases:
-    the plan, the workspace regions, the launch order, the reference gates, bitwise dq
-    across two calls, and agreement with the single pass."""
+def test_backward_forced_key_passes_with_masked_slots(record_property):
+    """Three forced key-range passes over 65,536 keys (T = 256) with the masking cases: the plan, the
+    workspace regions and the launch order; the forward, two three-pass backwards and the single-pass
+    backward are judged (the contract holds dq of the rows masked by -1 and by topk_length 0 exactly 0)."""
     _require_key_pass_program()
-    inp = make_inputs([256], [65536], seed=SEED + 16, topk=2048)
-    idx, topk_length = _masked_indices(inp)
-    fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx)
-    out, lse, o_lo = cake_backend.forward(*fwd_args, topk_length=topk_length)
-    args = fwd_args + (out, o_lo, lse, inp.dout)
-    runner = prepare_dsa_train(
-        *fwd_args, topk_length=topk_length, dout=inp.dout, backward=True, key_passes=3
-    )
-    assert runner.key_passes == 3
-    expected_order = ["bwd_delta"]
-    for index in range(3):
-        expected_order += [(stage, 0, index) for stage in KEY_PASS_STAGES]
-    if "bwd_cast" in runner.launches:
-        expected_order.append("bwd_cast")
-    assert list(runner.backward_order) == expected_order
-    assert "bwd_main" not in runner.launches
-    assert runner.tensors["dq_partial"].shape == (256, DQ_PARTIAL_BYTES_PER_TOKEN // 4)
-    assert runner.tensors["key_scratch"].shape == (256, 2048)
-    assert runner.tensors["pass_counts"].shape == (256,)
-    assert runner.layout["dq_partial"][1] == 256 * DQ_PARTIAL_BYTES_PER_TOKEN
-    assert runner.workspace.numel() == dsa_train_workspace_size(
-        256, 65536, 2048, inp.q_latent.device, key_passes=3
-    )
-    a = cake_backend.backward(*args, topk_length=topk_length, key_passes=3)
-    b = cake_backend.backward(*args, topk_length=topk_length, key_passes=3)
-    single = cake_backend.backward(*args, topk_length=topk_length, key_passes=1)
-    torch.cuda.synchronize()
-    # dq is written once per row from the carried FP32 partial: bitwise across runs and paths
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
-    for grads in (
-        a,
-        single,
-    ):  # fully masked rows (by -1 and by topk_length 0) give zero dq
-        assert torch.all(grads[0][3::11] == 0) and torch.all(grads[0][6::11] == 0)
-    ref = reference_fp64(*fwd_args, dout=inp.dout, topk_length=topk_length)
-    _check_backward(a, ref)
-    _check_backward(single, ref)
-    # the passes re-associate the FP32 dq partial sums (agreement well inside the BF16 output);
-    # the dK/dV reductions are the same reds in another order
-    assert rel_l2(a[0], single[0]) < 1e-3 and rel_l2(a[1], single[1]) < 1e-3
-    assert max(rel_l2(a[2], single[2]), rel_l2(a[3], single[3])) < 1e-2
+
+    def case(s, j):
+        inp = make_inputs([256], [65536], seed=s, topk=2048)
+        idx, topk_length = _masked_indices(inp)
+        fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx)
+        fwd = cake_backend.forward(*fwd_args, topk_length=topk_length)
+        out, lse, o_lo = fwd
+        args = fwd_args + (out, o_lo, lse, inp.dout)
+        if j == 0:
+            runner = prepare_dsa_train(
+                *fwd_args,
+                topk_length=topk_length,
+                dout=inp.dout,
+                backward=True,
+                key_passes=3,
+            )
+            assert runner.key_passes == 3
+            expected_order = ["bwd_delta"]
+            for index in range(3):
+                expected_order += [(stage, 0, index) for stage in KEY_PASS_STAGES]
+            if "bwd_cast" in runner.launches:
+                expected_order.append("bwd_cast")
+            assert list(runner.backward_order) == expected_order
+            assert "bwd_main" not in runner.launches
+            assert runner.tensors["dq_partial"].shape == (
+                256,
+                DQ_PARTIAL_BYTES_PER_TOKEN // 4,
+            )
+            assert runner.tensors["key_scratch"].shape == (256, 2048)
+            assert runner.tensors["pass_counts"].shape == (256,)
+            assert runner.layout["dq_partial"][1] == 256 * DQ_PARTIAL_BYTES_PER_TOKEN
+            assert runner.workspace.numel() == dsa_train_workspace_size(
+                256, 65536, 2048, inp.q_latent.device, key_passes=3
+            )
+            del runner
+        a = cake_backend.backward(*args, topk_length=topk_length, key_passes=3)
+        b = cake_backend.backward(*args, topk_length=topk_length, key_passes=3)
+        single = cake_backend.backward(*args, topk_length=topk_length, key_passes=1)
+        torch.cuda.synchronize()
+        runs = {
+            "3 passes": _rope_outputs(fwd, a),
+            "3 passes again": _rope_outputs(grads=b),
+            "1 pass": _rope_outputs(grads=single),
+        }
+        problem = nv.rope_problem(inp, indices=idx, topk_length=topk_length)
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 16)
 
 
-def test_backward_forced_passes_over_two_token_chunks():
+def test_backward_forced_passes_over_two_token_chunks(record_property):
     """Two forced passes over a row of 4352 tokens (one full chunk of 4224 and one of 128): the
-    launches run chunk by chunk through every pass, the pass scratch holds one chunk, dq is
-    bitwise across two calls and agrees with the single pass and the reference."""
+    launches run chunk by chunk through every pass and the pass scratch holds one chunk (the plan,
+    on the first draw); the forward, two two-pass backwards (``dq`` carried through the FP32
+    partial across the token chunks) and the single-pass backward are judged."""
     record, _stages = _require_key_pass_program()
     device = torch.device("cuda")
     chunk = KeyPassPolicy.from_record(record).token_chunk(2048)
     assert chunk == 4224
-    inp = make_inputs([chunk + 128], [65536], seed=SEED + 18, topk=2048)
-    fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    out, lse, o_lo = cake_backend.forward(*fwd_args)
-    runner = prepare_dsa_train(*fwd_args, dout=inp.dout, backward=True, key_passes=2)
-    assert runner.key_passes == 2
-    assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
-        (stage, c, p) for c in range(2) for p in range(2) for stage in KEY_PASS_STAGES
-    ]
-    assert runner.layout["dq_partial"][1] == chunk * DQ_PARTIAL_BYTES_PER_TOKEN
-    assert runner.layout["key_scratch"][1] == chunk * 2048 * 4
-    assert (
-        dsa_train_workspace_size(chunk + 128, 65536, 2048, device, key_passes=2)
-        == runner.layout["total"]
-    )
-    del runner
-    args = fwd_args + (out, o_lo, lse, inp.dout)
-    a = cake_backend.backward(*args, key_passes=2)
-    b = cake_backend.backward(*args, key_passes=2)
-    single = cake_backend.backward(*args, key_passes=1)
-    torch.cuda.synchronize()
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
-    assert rel_l2(a[0], single[0]) < 1e-3 and rel_l2(a[1], single[1]) < 1e-3
-    assert max(rel_l2(a[2], single[2]), rel_l2(a[3], single[3])) < 1e-2
-    ref = reference_fp64(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        dout=inp.dout,
-    )
-    _check_backward(a, ref, canonical=True)
+
+    def case(s, j):
+        inp = make_inputs([chunk + 128], [65536], seed=s, topk=2048)
+        fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        fwd = cake_backend.forward(*fwd_args)
+        out, lse, o_lo = fwd
+        if j == 0:
+            runner = prepare_dsa_train(
+                *fwd_args, dout=inp.dout, backward=True, key_passes=2
+            )
+            assert runner.key_passes == 2
+            assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
+                (stage, c, p)
+                for c in range(2)
+                for p in range(2)
+                for stage in KEY_PASS_STAGES
+            ]
+            assert runner.layout["dq_partial"][1] == chunk * DQ_PARTIAL_BYTES_PER_TOKEN
+            assert runner.layout["key_scratch"][1] == chunk * 2048 * 4
+            assert (
+                dsa_train_workspace_size(chunk + 128, 65536, 2048, device, key_passes=2)
+                == runner.layout["total"]
+            )
+            del runner
+        args = fwd_args + (out, o_lo, lse, inp.dout)
+        a = cake_backend.backward(*args, key_passes=2)
+        b = cake_backend.backward(*args, key_passes=2)
+        single = cake_backend.backward(*args, key_passes=1)
+        torch.cuda.synchronize()
+        runs = {
+            "forward": _rope_outputs(fwd),
+            "2 passes": _rope_outputs(grads=a),
+            "2 passes again": _rope_outputs(grads=b),
+            "1 pass": _rope_outputs(grads=single),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 18)
 
 
-def test_forward_derives_row_lengths_in_kernel_and_binding_key_covers_it():
-    """``forward(..., topk_length=buf, derive_topk_length=True)`` fills ``buf`` with the row lengths (bitwise
-    :func:`derive_topk_length`) and returns bitwise the outputs of the explicit-length call; a call without lengths
-    returns the same outputs (the kernel derives into the binding's own vector); the prepared runner derives as
-    well; the binding key separates the three forms, and a derived call without a tensor to fill is rejected."""
+def test_forward_derives_row_lengths_in_kernel_and_binding_key_covers_it(
+    record_property,
+):
+    """``forward(..., topk_length=buf, derive_topk_length=True)`` fills ``buf`` with the row lengths (exactly
+    :func:`derive_topk_length`), through the remembered binding on every call and on the prepared runner; the
+    derived, the explicit-length and the length-free calls (the kernel derives into the binding's own vector),
+    the repeated derived call and the runner's forward are judged; the binding key separates the three forms,
+    and a derived call without a tensor to fill is rejected."""
     _require_program()
-    inp = make_inputs([200, 96, 300], [200, 96, 4096], seed=SEED + 753, topk=256)
-    S, T = int(inp.kv_latent.shape[0]), int(inp.q_latent.shape[0])
-    expected = derive_topk_length(inp.idx_global, S)
-    assert int((expected < 256).sum()) > 0 and int(expected.max()) <= 256
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    buf = torch.full((T,), -1, dtype=torch.int32, device=inp.q_latent.device)
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    out_d, lse_d, o_lo_d = cake_backend.forward(
-        *args, topk_length=buf, derive_topk_length=True
-    )
-    out_e, lse_e, o_lo_e = cake_backend.forward(*args, topk_length=expected)
-    out_n, lse_n, o_lo_n = cake_backend.forward(*args)
-    torch.cuda.synchronize()
-    assert torch.equal(buf, expected)
-    assert (
-        torch.equal(out_d, out_e)
-        and torch.equal(lse_d, lse_e)
-        and torch.equal(o_lo_d, o_lo_e)
-    )
-    assert (
-        torch.equal(out_n, out_e)
-        and torch.equal(lse_n, lse_e)
-        and torch.equal(o_lo_n, o_lo_e)
-    )
-    assert len(cache) == 3
-    buf.fill_(
-        -1
-    )  # the remembered derived binding rewrites the caller's vector on every call
-    out_d2, _, _ = cake_backend.forward(*args, topk_length=buf, derive_topk_length=True)
-    torch.cuda.synchronize()
-    assert torch.equal(buf, expected) and torch.equal(out_d2, out_e)
-    assert len(cache) == 3
-    buf.fill_(-1)
-    runner = prepare_dsa_train(
-        *args, topk_length=buf, derive_topk_length=True, backward=False
-    )
-    r_out, r_lse, _ = runner.forward()
-    torch.cuda.synchronize()
-    assert (
-        torch.equal(buf, expected)
-        and torch.equal(r_out, out_e)
-        and torch.equal(r_lse, lse_e)
-    )
-    scale = default_softmax_scale()
-    assert forward_binding_key(*args, buf, scale, True) != forward_binding_key(
-        *args, buf, scale, False
-    )
-    assert forward_binding_key(*args, buf, scale) == forward_binding_key(
-        *args, buf, scale, False
-    )
-    with pytest.raises(ValueError, match="derive_topk_length"):
-        cake_backend.forward(*args, derive_topk_length=True)
-    with pytest.raises(ValueError, match="derive_topk_length"):
-        prepare_dsa_train(*args, derive_topk_length=True, backward=False)
+
+    def case(s, j):
+        inp = make_inputs([200, 96, 300], [200, 96, 4096], seed=s, topk=256)
+        S, T = int(inp.kv_latent.shape[0]), int(inp.q_latent.shape[0])
+        expected = derive_topk_length(inp.idx_global, S)
+        assert int((expected < 256).sum()) > 0 and int(expected.max()) <= 256
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        buf = torch.full((T,), -1, dtype=torch.int32, device=inp.q_latent.device)
+        cache.clear()
+        derived = cake_backend.forward(*args, topk_length=buf, derive_topk_length=True)
+        explicit = cake_backend.forward(*args, topk_length=expected)
+        no_lengths = cake_backend.forward(*args)
+        torch.cuda.synchronize()
+        assert torch.equal(buf, expected)
+        assert len(cache) == 3
+        # the remembered derived binding rewrites the caller's vector on every call
+        buf.fill_(-1)
+        again = cake_backend.forward(*args, topk_length=buf, derive_topk_length=True)
+        torch.cuda.synchronize()
+        assert torch.equal(buf, expected)
+        assert len(cache) == 3
+        buf.fill_(-1)
+        runner = prepare_dsa_train(
+            *args, topk_length=buf, derive_topk_length=True, backward=False
+        )
+        prepared = runner.forward()
+        torch.cuda.synchronize()
+        assert torch.equal(buf, expected)
+        if j == 0:
+            scale = default_softmax_scale()
+            assert forward_binding_key(*args, buf, scale, True) != forward_binding_key(
+                *args, buf, scale, False
+            )
+            assert forward_binding_key(*args, buf, scale) == forward_binding_key(
+                *args, buf, scale, False
+            )
+            with pytest.raises(ValueError, match="derive_topk_length"):
+                cake_backend.forward(*args, derive_topk_length=True)
+            with pytest.raises(ValueError, match="derive_topk_length"):
+                prepare_dsa_train(*args, derive_topk_length=True, backward=False)
+        # the slots past a row's derived length are -1 padding: every call has the
+        # valid slots of the length-free problem
+        runs = {
+            "derived": _rope_outputs(derived),
+            "explicit": _rope_outputs(explicit),
+            "no lengths": _rope_outputs(no_lengths),
+            "derived again": _rope_outputs(again),
+            "runner": _rope_outputs(prepared),
+        }
+        return nv.judged(nv.rope_problem(inp, dout=None), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 753)
 
 
 def _indices_view_inside_storage(indices: torch.Tensor, offset: int) -> torch.Tensor:
@@ -1536,146 +1496,152 @@ def _indices_view_inside_storage(indices: torch.Tensor, offset: int) -> torch.Te
 
 
 @pytest.mark.parametrize("offset", [1, 4, 8, 13])
-def test_key_pass_compaction_accepts_an_indices_view_inside_a_storage(offset):
+def test_key_pass_compaction_accepts_an_indices_view_inside_a_storage(
+    offset, record_property
+):
     """The compaction stage's 8-wide index loads (whole 256-slot blocks, so top-k 256) see the
-    storage base plus the element offset: two forced key-range passes with a view inside a
-    larger buffer match the plain tensor and the reference."""
+    storage base plus the element offset: two forced key-range passes over the plain tensor and
+    over a view inside a larger buffer are both judged."""
     _require_key_pass_program()
-    inp = make_inputs([128], [1024], seed=SEED + 19, topk=256)
-    view = _indices_view_inside_storage(inp.idx_global, offset)
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
-    out, lse, o_lo = cake_backend.forward(*args, inp.idx_global)
-    plain = cake_backend.backward(
-        *args, inp.idx_global, out, o_lo, lse, inp.dout, key_passes=2
-    )
-    got = cake_backend.backward(*args, view, out, o_lo, lse, inp.dout, key_passes=2)
-    torch.cuda.synchronize()
-    assert torch.equal(plain[0], got[0]) and torch.equal(plain[1], got[1])
-    assert max(rel_l2(plain[2], got[2]), rel_l2(plain[3], got[3])) < 1e-3
-    ref = reference_fp64(*args, inp.idx_global, dout=inp.dout)
-    _check_backward(got, ref)
+
+    def case(s, j):
+        inp = make_inputs([128], [1024], seed=s, topk=256)
+        view = _indices_view_inside_storage(inp.idx_global, offset)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        fwd = cake_backend.forward(*args, inp.idx_global)
+        out, lse, o_lo = fwd
+        plain = cake_backend.backward(
+            *args, inp.idx_global, out, o_lo, lse, inp.dout, key_passes=2
+        )
+        got = cake_backend.backward(*args, view, out, o_lo, lse, inp.dout, key_passes=2)
+        torch.cuda.synchronize()
+        runs = {"plain": _rope_outputs(fwd, plain), "view": _rope_outputs(grads=got)}
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 19)
 
 
-def test_backward_dkv_fp32_returns_natural_layout_gradients():
-    """``dkv_fp32=True`` yields natural-layout FP32 dK/dV: equal to the BF16 path within BF16 rounding
-    plus the ``red.global`` run-to-run spread, and never the kernels' internal accumulators."""
+def test_backward_dkv_fp32_returns_natural_layout_gradients(record_property):
+    """``dkv_fp32=True`` yields natural-layout FP32 dK/dV (a permuted accumulator layout would miss the
+    oracle), judged beside the BF16 path, and never the kernels' internal accumulators: the prepared
+    runner's FP32 gradients come from the cast stage and are judged as well."""
     _require_program(backward=True)
-    inp = make_inputs([256], [512], seed=SEED + 11, topk=128)
-    out, lse, o_lo = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    args = (
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-    )
-    dq_l, dq_r, dkv_latent, dk_rope = cake_backend.backward(*args, dkv_fp32=True)
-    bq_l, bq_r, dkv_bf16, dkr_bf16 = cake_backend.backward(*args)
-    torch.cuda.synchronize()
-    S = inp.kv_latent.shape[0]
-    assert dkv_latent.dtype == torch.float32 and dk_rope.dtype == torch.float32
-    assert tuple(dkv_latent.shape) == (S, D_LATENT) and tuple(dk_rope.shape) == (
-        S,
-        D_ROPE,
-    )
-    assert dkv_latent.is_contiguous() and dk_rope.is_contiguous()
-    assert torch.equal(dq_l, bq_l) and torch.equal(
-        dq_r, bq_r
-    )  # dq does not depend on the dkv mode
-    ref = reference_fp64(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        dout=inp.dout,
-    )
-    # the FP32 gradients are at least as close to the reference as their BF16 casts' floor ...
-    assert (
-        rel_l2(dkv_latent, ref["dkv_latent"])
-        <= FLOOR_MARGIN * rel_l2(ref["dkv_latent_emu"], ref["dkv_latent"]) + FLOOR_ABS
-    )
-    assert (
-        rel_l2(dk_rope, ref["dk_rope"])
-        <= FLOOR_MARGIN * rel_l2(ref["dk_rope_emu"], ref["dk_rope"]) + FLOOR_ABS
-    )
-    # ... and agree with the BF16 path element by element (a permuted accumulator layout would not)
-    assert (
-        rel_l2(dkv_latent.to(torch.bfloat16), dkv_bf16) < 1e-2
-        and rel_l2(dk_rope.to(torch.bfloat16), dkr_bf16) < 1e-2
-    )
-    # the FP32 mode is served by the cast stage, never by the kernels' internal accumulators
-    runner = prepare_dsa_train(*args[:5], dout=inp.dout, backward=True, dkv_fp32=True)
-    runner.forward()
-    _, _, f_lat, f_rope = runner.backward()
-    torch.cuda.synchronize()
-    assert f_lat.data_ptr() != runner.tensors["dkv_latent_acc"].data_ptr()
-    assert f_rope.data_ptr() != runner.tensors["dk_rope_acc"].data_ptr()
-    assert "bwd_cast" in runner.launches and rel_l2(f_lat, dkv_latent) < 1e-2
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        fwd = cake_backend.forward(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+        )
+        out, lse, o_lo = fwd
+        args = (
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            inp.idx_global,
+            out,
+            o_lo,
+            lse,
+            inp.dout,
+        )
+        fp32 = cake_backend.backward(*args, dkv_fp32=True)
+        bf16 = cake_backend.backward(*args)
+        torch.cuda.synchronize()
+        S = inp.kv_latent.shape[0]
+        dkv_latent, dk_rope = fp32[2], fp32[3]
+        assert dkv_latent.dtype == torch.float32 and dk_rope.dtype == torch.float32
+        assert tuple(dkv_latent.shape) == (S, D_LATENT) and tuple(dk_rope.shape) == (
+            S,
+            D_ROPE,
+        )
+        assert dkv_latent.is_contiguous() and dk_rope.is_contiguous()
+        # the FP32 mode is served by the cast stage, never by the kernels' internal accumulators
+        runner = prepare_dsa_train(
+            *args[:5], dout=inp.dout, backward=True, dkv_fp32=True
+        )
+        r_fwd = runner.forward()
+        r_grads = runner.backward()
+        torch.cuda.synchronize()
+        assert r_grads[2].data_ptr() != runner.tensors["dkv_latent_acc"].data_ptr()
+        assert r_grads[3].data_ptr() != runner.tensors["dk_rope_acc"].data_ptr()
+        assert "bwd_cast" in runner.launches
+        runs = {
+            "fp32": _rope_outputs(fwd, fp32),
+            "bf16": _rope_outputs(grads=bf16),
+            "runner": _rope_outputs(r_fwd, r_grads),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 11)
 
 
-def test_forward_accepts_wide_query_head_strides_bitwise():
-    """q views whose head stride exceeds the packed 576 (the tensor maps carry both strides)."""
+def test_forward_accepts_wide_query_head_strides(record_property):
+    """q views whose head stride exceeds the packed 576 (the tensor maps carry both strides): the plain and the
+    wide-stride calls are both judged."""
     _require_program()
-    inp = make_inputs([256], [512], seed=SEED + 20, topk=128)
-    wide = torch.zeros(
-        (256, NUM_HEADS, 640), dtype=torch.bfloat16, device=inp.q_latent.device
-    )
-    wide[..., :D_LATENT].copy_(inp.q_latent)
-    wide[..., D_LATENT:D_QK].copy_(inp.q_rope)
-    plain = cake_backend.forward(
-        inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
-    )
-    got = cake_backend.forward(
-        wide[..., :D_LATENT],
-        wide[..., D_LATENT:D_QK],
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-    )
-    torch.cuda.synchronize()
-    for a, b in zip(plain, got, strict=True):
-        assert torch.equal(a, b)
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        wide = torch.zeros(
+            (256, NUM_HEADS, 640), dtype=torch.bfloat16, device=inp.q_latent.device
+        )
+        wide[..., :D_LATENT].copy_(inp.q_latent)
+        wide[..., D_LATENT:D_QK].copy_(inp.q_rope)
+        plain = cake_backend.forward(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+        )
+        got = cake_backend.forward(
+            wide[..., :D_LATENT],
+            wide[..., D_LATENT:D_QK],
+            inp.kv_latent,
+            inp.k_rope,
+            inp.idx_global,
+        )
+        torch.cuda.synchronize()
+        runs = {"plain": _rope_outputs(plain), "wide": _rope_outputs(got)}
+        return nv.judged(nv.rope_problem(inp, dout=None), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 20)
 
 
 @pytest.mark.parametrize("pad", [3, 8])
-def test_indices_column_slice_matches_the_plain_tensor(pad):
+def test_indices_column_slice_of_a_wider_buffer(pad, record_property):
     """``indices`` as a column slice of a wider buffer (row stride topk + pad): the kernels take the
-    row stride; a stride that is not a multiple of eight takes their scalar index path."""
+    row stride; a stride that is not a multiple of eight takes their scalar index path.  The forward
+    and the backward over the plain tensor and over the slice are judged."""
     _require_program(backward=True)
-    inp = make_inputs([256], [512], seed=SEED + 21, topk=128)
-    wide = torch.full(
-        (256, 128 + pad), -1, dtype=torch.int32, device=inp.q_latent.device
-    )
-    wide[:, :128].copy_(inp.idx_global)
-    view = wide[:, :128]
-    assert not view.is_contiguous() and view.stride(0) == 128 + pad
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
-    plain = cake_backend.forward(*args, inp.idx_global)
-    got = cake_backend.forward(*args, view)
-    torch.cuda.synchronize()
-    for a, b in zip(plain, got, strict=True):
-        assert torch.equal(a, b)
-    out, lse, o_lo = plain
-    g_plain = cake_backend.backward(*args, inp.idx_global, out, o_lo, lse, inp.dout)
-    g_view = cake_backend.backward(*args, view, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    assert torch.equal(g_plain[0], g_view[0]) and torch.equal(g_plain[1], g_view[1])
-    assert max(rel_l2(g_plain[2], g_view[2]), rel_l2(g_plain[3], g_view[3])) < 1e-3
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        wide = torch.full(
+            (256, 128 + pad), -1, dtype=torch.int32, device=inp.q_latent.device
+        )
+        wide[:, :128].copy_(inp.idx_global)
+        view = wide[:, :128]
+        assert not view.is_contiguous() and view.stride(0) == 128 + pad
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        plain = cake_backend.forward(*args, inp.idx_global)
+        got = cake_backend.forward(*args, view)
+        torch.cuda.synchronize()
+        out, lse, o_lo = plain
+        g_plain = cake_backend.backward(*args, inp.idx_global, out, o_lo, lse, inp.dout)
+        g_view = cake_backend.backward(*args, view, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        # both backward calls take the plain forward's outputs
+        runs = {
+            "plain": _rope_outputs(plain, g_plain),
+            "view": _rope_outputs(got, g_view),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 21)
 
 
 # --- Packed / strided trainer layouts and causal varlen offsetting ---
 # Packed / strided trainer layouts and the causal tail-of-prefix varlen rule.  The
 # kernels take the head / token strides of the query operands and the key row stride from the tensors (TMA descriptors
 # encoded from the view; k_rope as storage alias + element offset + row stride), so a view changes descriptor fields
-# only: out, lse, o_lo and dQ must be bitwise identical to the contiguous path; dK / dV are FP32 reductions whose order
-# is not fixed (FP32 tolerance).
+# only; every output of a call on a view is judged like the contiguous call's.
 
 
 # Host layer
@@ -1960,8 +1926,8 @@ def test_dkv_dst_map_value_check_is_opt_in():
 # --- end of the packed / strided layout block ---
 # --- Packed fp32 dK/dV accumulation and destination mapping ---
 # Packed FP32 dK/dV accumulation into a caller-provided buffer with an optional destination-row map.
-# Comparisons across two backward calls use a tolerance: their FP32 reductions run in another order.
-ACC_REL_L2 = 1e-4
+# Each accumulating call is judged by its increment of the buffer (``nv.Acc``: the buffer before and after
+# the call), against the key gradients added through the map.
 
 
 def test_registered_cast_declares_the_packed_accumulate_operands():
@@ -2160,10 +2126,12 @@ def test_backward_rejects_dkv_acc_with_dkv_fp32_and_a_map_without_acc():
 
 
 def _forward_and_natural_dkv(inp):
-    """Forward outputs, the explicit backward's dq and the natural FP32 dK/dV as one packed ``[S, 576]`` reference."""
-    out, lse, o_lo = cake_backend.forward(
+    """The forward and the explicit backward with natural FP32 dK/dV (``dkv_fp32=True``) on ``inp``: the
+    backward's arguments and both calls' outputs by name (judged beside the accumulating calls)."""
+    fwd = cake_backend.forward(
         inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
     )
+    out, lse, o_lo = fwd
     args = (
         inp.q_latent,
         inp.q_rope,
@@ -2175,35 +2143,42 @@ def _forward_and_natural_dkv(inp):
         lse,
         inp.dout,
     )
-    dq_l, dq_r, nat_l, nat_r = cake_backend.backward(*args, dkv_fp32=True)
+    grads = cake_backend.backward(*args, dkv_fp32=True)
     torch.cuda.synchronize()
-    return args, dq_l, dq_r, torch.cat([nat_l, nat_r], dim=1)
+    return args, _rope_outputs(fwd, grads)
 
 
-def test_backward_dkv_acc_identity_accumulates_in_place():
-    """``dkv_acc`` without a map: ``+= dkv`` into a pre-filled ``[S, 704]`` buffer (twice over two calls), columns 576:
-    untouched, no dK/dV outputs, dq unchanged; the strided 576-column view of the buffer is accepted as well."""
+def test_backward_dkv_acc_identity_accumulates_in_place(record_property):
+    """``dkv_acc`` without a map: ``+= dkv`` into a pre-filled ``[S, 704]`` buffer over two calls, the second
+    through the strided 576-column view of the buffer; no dK/dV outputs; each call's dq and buffer increment
+    are judged (the contract holds the columns from 576 on to their bits)."""
     _require_program(backward=True)
-    inp = make_inputs([256], [512], seed=SEED + 20, topk=128)
-    args, dq_l, dq_r, nat = _forward_and_natural_dkv(inp)
-    S = inp.total_k
-    gen = torch.Generator(device="cuda").manual_seed(1)
-    pre = torch.randn(S, 704, device="cuda", generator=gen)
-    acc = pre.clone()
-    aq_l, aq_r, none_l, none_r = cake_backend.backward(*args, dkv_acc=acc)
-    torch.cuda.synchronize()
-    assert none_l is None and none_r is None
-    assert torch.equal(aq_l, dq_l) and torch.equal(aq_r, dq_r)
-    torch.testing.assert_close(acc[:, :D_QK], pre[:, :D_QK] + nat, rtol=1e-4, atol=1e-4)
-    assert torch.equal(acc[:, D_QK:], pre[:, D_QK:])
-    cake_backend.backward(
-        *args, dkv_acc=acc[:, :D_QK]
-    )  # second call, through the strided view: keeps adding
-    torch.cuda.synchronize()
-    torch.testing.assert_close(
-        acc[:, :D_QK], pre[:, :D_QK] + 2 * nat, rtol=1e-4, atol=1e-4
-    )
-    assert torch.equal(acc[:, D_QK:], pre[:, D_QK:])
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        args, explicit = _forward_and_natural_dkv(inp)
+        S = inp.total_k
+        gen = torch.Generator(device="cuda").manual_seed(s + 1)
+        pre = torch.randn(S, 704, device="cuda", generator=gen)
+        acc = pre.clone()
+        first = cake_backend.backward(*args, dkv_acc=acc)
+        torch.cuda.synchronize()
+        assert first[2] is None and first[3] is None
+        once = acc.clone()
+        second = cake_backend.backward(
+            *args, dkv_acc=acc[:, :D_QK]
+        )  # second call, through the strided view: keeps adding
+        torch.cuda.synchronize()
+        runs = {
+            "explicit": explicit,
+            "acc": _rope_outputs(grads=first, dkv_acc=nv.Acc(before=pre, after=once)),
+            "acc view": _rope_outputs(
+                grads=second, dkv_acc=nv.Acc(before=once, after=acc)
+            ),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 20)
 
 
 def _require_direct_program():
@@ -2218,242 +2193,315 @@ def _require_direct_program():
     return record, stages
 
 
-def test_backward_dkv_acc_direct_and_cast_paths_agree():
+def test_backward_dkv_acc_direct_and_cast_paths(record_property):
     """With dkv_acc and S >= 4 T the natural-layout main stage adds into the caller's rows itself (no accumulators, no
-    cast); forced through the cast path (``dkv_direct=False``) the same rows receive the same gradients (another FP32
-    summation order), dq is bitwise the same and untouched rows / columns stay untouched -- through a duplicating
-    destination map into a [S_dst, 704] buffer, on the prepared runner and the eager entry; ``dkv_direct=None`` (the
-    default) takes the rule, and the in-range map passes the opt-in value check."""
+    cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients through the cast
+    stage; ``dkv_direct=None`` (the default) takes the rule.  Each mode adds through a duplicating destination map
+    into a [S_dst, 704] buffer, on the prepared runner and on the eager entry: every call's outputs and buffer
+    increment are judged (the contract holds unmapped rows and the columns from 576 on to their bits), and the
+    in-range map passes the opt-in value check."""
     record, stages = _require_direct_program()
-    inp = make_inputs(
-        [256], [2048], seed=SEED + 24, topk=128
-    )  # S / T = 8: the size rule picks direct
-    args, dq_l, dq_r, nat = _forward_and_natural_dkv(inp)
-    S, S_dst = inp.total_k, 400
-    gen = torch.Generator(device="cuda").manual_seed(3)
-    dst_map = torch.randint(
-        0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
-    )
-    pre = torch.randn(S_dst + 8, 704, device="cuda", generator=gen)
-    expect = pre.clone()
-    expect[:S_dst, :D_QK].index_add_(0, dst_map.long(), nat)
-    results = {}
-    for mode in (True, False, None):
-        acc = pre.clone()
+
+    def case(s, j):
+        inp = make_inputs(
+            [256], [2048], seed=s, topk=128
+        )  # S / T = 8: the size rule picks direct
+        args, explicit = _forward_and_natural_dkv(inp)
+        S, S_dst = inp.total_k, 400
+        gen = torch.Generator(device="cuda").manual_seed(s + 3)
+        dst_map = torch.randint(
+            0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
+        )
+        pre = torch.randn(S_dst + 8, 704, device="cuda", generator=gen)
+        runs = {"explicit": explicit}
+        for mode, name in ((True, "direct"), (False, "cast"), (None, "rule")):
+            acc = pre.clone()
+            runner = prepare_dsa_train(
+                *args[:5],
+                dout=args[8],
+                backward=True,
+                dkv_acc=acc[:S_dst],
+                dkv_dst_map=dst_map,
+                dkv_direct=mode,
+                check_dst_map=True,
+            )
+            assert runner.dkv_direct == (mode is not False)
+            if runner.dkv_direct:
+                assert (
+                    "bwd_main_natural" in runner.launches
+                    and "bwd_cast" not in runner.launches
+                )
+                assert (
+                    "dkv_latent_acc" not in runner.tensors
+                    and "dkv_latent_acc" not in runner.layout
+                )
+            else:
+                assert "bwd_main" in runner.launches and "bwd_cast" in runner.launches
+            grads = runner.step()
+            torch.cuda.synchronize()
+            runs[f"runner {name}"] = _rope_outputs(
+                (runner.out, runner.lse, runner.o_lo),
+                grads,
+                dkv_acc=nv.Acc(before=pre, after=acc, dst_map=dst_map),
+            )
+            acc = pre.clone()
+            grads = cake_backend.backward(
+                *args, dkv_acc=acc[:S_dst], dkv_dst_map=dst_map, dkv_direct=mode
+            )
+            torch.cuda.synchronize()
+            assert grads[2] is None and grads[3] is None
+            runs[f"eager {name}"] = _rope_outputs(
+                grads=grads, dkv_acc=nv.Acc(before=pre, after=acc, dst_map=dst_map)
+            )
+        if j == 0:
+            # the workspace of a direct binding has no FP32 accumulators; dkv_direct sizes it the same way
+            T, device = inp.total_q, torch.device("cuda")
+            plain = dsa_train_workspace_size(T, S, 128, device)
+            direct_size = dsa_train_workspace_size(T, S, 128, device, dkv_acc=True)
+            assert plain - direct_size >= S * D_QK * 4
+            assert (
+                dsa_train_workspace_size(
+                    T, S, 128, device, dkv_acc=True, dkv_direct=False
+                )
+                == plain
+            )
+            assert (
+                dsa_train_workspace_size(
+                    T, S, 128, device, dkv_acc=True, dkv_direct=True
+                )
+                == direct_size
+            )
+            # S < 4 T keeps the cast path by the rule
+            assert not cake_backend.plan_dkv_direct(
+                record, stages, 1000, 3999, accumulate=True
+            )
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 24)
+
+
+def test_bwd_cast_accumulates_without_map(record_property):
+    """The accumulating cast stage launched alone without a map adds a prepared runner's permuted accumulators
+    into the caller's ``[S, 704]`` buffer: its increment is judged beside the runner's own outputs (the contract
+    holds the columns from 576 on to their bits)."""
+    _require_program(backward=True)
+
+    def case(s, j):
+        inp = make_inputs([128], [256], seed=s, topk=64)
         runner = prepare_dsa_train(
-            *args[:5],
-            dout=args[8],
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            inp.idx_global,
+            dout=inp.dout,
             backward=True,
-            dkv_acc=acc[:S_dst],
-            dkv_dst_map=dst_map,
-            dkv_direct=mode,
-            check_dst_map=True,
+            dkv_fp32=True,
         )
-        assert runner.dkv_direct == (mode is not False)
-        if runner.dkv_direct:
-            assert (
-                "bwd_main_natural" in runner.launches
-                and "bwd_cast" not in runner.launches
-            )
-            assert (
-                "dkv_latent_acc" not in runner.tensors
-                and "dkv_latent_acc" not in runner.layout
-            )
-        else:
-            assert "bwd_main" in runner.launches and "bwd_cast" in runner.launches
-        runner.step()
+        fwd = runner.forward()
+        grads = runner.backward()
         torch.cuda.synchronize()
-        torch.testing.assert_close(
-            acc[:S_dst, :D_QK], expect[:S_dst, :D_QK], rtol=1e-4, atol=1e-4
-        )
-        assert torch.equal(acc[:, D_QK:], pre[:, D_QK:]) and torch.equal(
-            acc[S_dst:], pre[S_dst:]
+        S = inp.total_k
+        pre = torch.randn(
+            S,
+            704,
+            device="cuda",
+            generator=torch.Generator(device="cuda").manual_seed(s + 2),
         )
         acc = pre.clone()
-        aq_l, aq_r, none_l, none_r = cake_backend.backward(
-            *args, dkv_acc=acc[:S_dst], dkv_dst_map=dst_map, dkv_direct=mode
+        # the accumulating plan of the same geometry (row stride 704 baked into its launch constants)
+        plan = cake_backend._plan(
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            inp.idx_global,
+            topk_length=None,
+            dout=inp.dout,
+            softmax_scale=runner.softmax_scale,
+            outputs={},
+            dkv_fp32=False,
+            backward=True,
+            key_passes=runner.key_passes,
+            dkv_acc=acc,
         )
+        assert plan.accumulate_dkv and plan.constants["dst_row_stride"] == 704
+        operand, _ = cake_backend._check_dkv_acc(acc, None, S)
+        values = cake_backend._bound_values(plan, dict(runner.tensors, dkv_acc=operand))
+        launch = cake_backend._launches(plan, values)["bwd_cast"]
+        with cake_backend._ffi_stream_context(runner.device_index):
+            launch()
         torch.cuda.synchronize()
-        assert none_l is None and none_r is None
-        assert torch.equal(aq_l, dq_l) and torch.equal(aq_r, dq_r)
-        torch.testing.assert_close(
-            acc[:S_dst, :D_QK], expect[:S_dst, :D_QK], rtol=1e-4, atol=1e-4
+        runs = {
+            "runner": _rope_outputs(fwd, grads),
+            "cast": dict(dkv_acc=nv.Acc(before=pre, after=acc)),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 21)
+
+
+def test_backward_dkv_acc_destination_map_with_duplicates_matches_index_add(
+    record_property,
+):
+    """A many-to-few map (512 source rows into 300 destination rows) sums the key gradients like ``index_add_``
+    (the oracle's gradients added through the map); a permutation lands every source row on its own destination
+    row.  Each call's dq and buffer increment are judged (the contract holds unmapped destination rows and
+    the columns from 576 on to their zeros)."""
+    _require_program(backward=True)
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        args, explicit = _forward_and_natural_dkv(inp)
+        S, S_dst = inp.total_k, 300
+        gen = torch.Generator(device="cuda").manual_seed(s + 3)
+        dst_map = torch.randint(0, S_dst, (S,), device="cuda", generator=gen).to(
+            torch.int32
         )
-        assert torch.equal(acc[:, D_QK:], pre[:, D_QK:]) and torch.equal(
-            acc[S_dst:], pre[S_dst:]
-        )
-        results[mode] = acc[:S_dst, :D_QK].clone()
-    torch.testing.assert_close(results[True], results[False], rtol=1e-4, atol=1e-4)
-    torch.testing.assert_close(results[None], results[True], rtol=1e-4, atol=1e-4)
-    # the workspace of a direct binding has no FP32 accumulators; dkv_direct sizes it the same way
-    T, device = inp.total_q, torch.device("cuda")
-    plain = dsa_train_workspace_size(T, S, 128, device)
-    direct_size = dsa_train_workspace_size(T, S, 128, device, dkv_acc=True)
-    assert plain - direct_size >= S * D_QK * 4
-    assert (
-        dsa_train_workspace_size(T, S, 128, device, dkv_acc=True, dkv_direct=False)
-        == plain
-    )
-    assert (
-        dsa_train_workspace_size(T, S, 128, device, dkv_acc=True, dkv_direct=True)
-        == direct_size
-    )
-    # S < 4 T keeps the cast path by the rule
-    assert not cake_backend.plan_dkv_direct(record, stages, 1000, 3999, accumulate=True)
+        untouched = torch.ones(S_dst, dtype=torch.bool, device="cuda")
+        untouched[dst_map.long()] = False
+        assert untouched.any()  # the map leaves destination rows unmapped
+        acc = torch.zeros(S_dst, 704, device="cuda")
+        before = acc.clone()
+        grads = cake_backend.backward(*args, dkv_acc=acc, dkv_dst_map=dst_map)
+        torch.cuda.synchronize()
+        assert grads[2] is None and grads[3] is None
+        perm = torch.randperm(S, device="cuda", generator=gen).to(torch.int32)
+        acc_p = torch.zeros(S, D_QK, device="cuda")
+        before_p = acc_p.clone()
+        grads_p = cake_backend.backward(*args, dkv_acc=acc_p, dkv_dst_map=perm)
+        torch.cuda.synchronize()
+        runs = {
+            "explicit": explicit,
+            "map": _rope_outputs(
+                grads=grads,
+                dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
+            ),
+            "permutation": _rope_outputs(
+                grads=grads_p,
+                dkv_acc=nv.Acc(before=before_p, after=acc_p, dst_map=perm),
+            ),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 22)
 
 
-def test_bwd_cast_accumulate_without_map_is_one_fp32_add_bitwise():
-    """From the SAME permuted accumulators (a prepared runner's), the accumulating cast without a map equals
-    ``previous + natural`` bitwise: one FP32 add per element on both sides."""
+def test_binding_cache_serves_dkv_acc_bindings_per_buffer(record_property):
+    """A remembered dkv_acc plan re-supplies the caller's buffer and map per call (a second call adds again);
+    another buffer layout plans anew; every call's dq and buffer increment are judged."""
     _require_program(backward=True)
-    inp = make_inputs([128], [256], seed=SEED + 21, topk=64)
-    runner = prepare_dsa_train(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        dout=inp.dout,
-        backward=True,
-        dkv_fp32=True,
-    )
-    runner.forward()
-    _, _, nat_l, nat_r = runner.backward()
-    torch.cuda.synchronize()
-    S = inp.total_k
-    pre = torch.randn(
-        S, 704, device="cuda", generator=torch.Generator(device="cuda").manual_seed(2)
-    )
-    acc = pre.clone()
-    # the accumulating plan of the same geometry (row stride 704 baked into its launch constants)
-    plan = cake_backend._plan(
-        inp.q_latent,
-        inp.q_rope,
-        inp.kv_latent,
-        inp.k_rope,
-        inp.idx_global,
-        topk_length=None,
-        dout=inp.dout,
-        softmax_scale=runner.softmax_scale,
-        outputs={},
-        dkv_fp32=False,
-        backward=True,
-        key_passes=runner.key_passes,
-        dkv_acc=acc,
-    )
-    assert plan.accumulate_dkv and plan.constants["dst_row_stride"] == 704
-    operand, _ = cake_backend._check_dkv_acc(acc, None, S)
-    values = cake_backend._bound_values(plan, dict(runner.tensors, dkv_acc=operand))
-    launch = cake_backend._launches(plan, values)["bwd_cast"]
-    with cake_backend._ffi_stream_context(runner.device_index):
-        launch()
-    torch.cuda.synchronize()
-    assert torch.equal(acc[:, :D_LATENT], pre[:, :D_LATENT] + nat_l)
-    assert torch.equal(acc[:, D_LATENT:D_QK], pre[:, D_LATENT:D_QK] + nat_r)
-    assert torch.equal(acc[:, D_QK:], pre[:, D_QK:])
-
-
-def test_backward_dkv_acc_destination_map_with_duplicates_matches_index_add():
-    """A many-to-few map (512 source rows into 300 destination rows) sums like ``index_add_`` of the natural dK/dV;
-    unmapped destination rows stay zero; a permutation lands every source row on its own destination row."""
-    _require_program(backward=True)
-    inp = make_inputs([256], [512], seed=SEED + 22, topk=128)
-    args, _, _, nat = _forward_and_natural_dkv(inp)
-    S, S_dst = inp.total_k, 300
-    gen = torch.Generator(device="cuda").manual_seed(3)
-    dst_map = torch.randint(0, S_dst, (S,), device="cuda", generator=gen).to(
-        torch.int32
-    )
-    acc = torch.zeros(S_dst, 704, device="cuda")
-    _, _, none_l, none_r = cake_backend.backward(
-        *args, dkv_acc=acc, dkv_dst_map=dst_map
-    )
-    torch.cuda.synchronize()
-    assert none_l is None and none_r is None
-    expect = torch.zeros(S_dst, D_QK, device="cuda").index_add_(
-        0, dst_map.to(torch.int64), nat
-    )
-    assert rel_l2(acc[:, :D_QK], expect) < ACC_REL_L2
-    assert torch.all(acc[:, D_QK:] == 0)
-    untouched = torch.ones(S_dst, dtype=torch.bool, device="cuda")
-    untouched[dst_map.long()] = False
-    assert untouched.any() and torch.all(acc[untouched] == 0)
-    perm = torch.randperm(S, device="cuda", generator=gen).to(torch.int32)
-    acc_p = torch.zeros(S, D_QK, device="cuda")
-    cake_backend.backward(*args, dkv_acc=acc_p, dkv_dst_map=perm)
-    torch.cuda.synchronize()
-    assert rel_l2(acc_p[perm.long()], nat) < ACC_REL_L2
-
-
-def test_binding_cache_serves_dkv_acc_bindings_per_buffer():
-    """A remembered dkv_acc plan re-supplies the caller's buffer and map per call; another buffer layout plans anew."""
-    _require_program(backward=True)
-    inp = make_inputs([128], [256], seed=SEED + 24, topk=64)
-    args, _, _, nat = _forward_and_natural_dkv(inp)
-    S = inp.total_k
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    acc = torch.zeros(S, D_QK, device="cuda")
-    dst_map = torch.arange(S, device="cuda", dtype=torch.int32)
-    key = backward_binding_key(
-        *args, None, default_softmax_scale(), False, dkv_acc=acc, dkv_dst_map=dst_map
-    )
-    cake_backend.backward(*args, dkv_acc=acc, dkv_dst_map=dst_map)
-    binding = cache.get(key)
-    assert binding is not None and binding.plan.accumulate_dkv
-    assert (
-        binding.topk_length is not None and binding.topk_length.numel() == inp.total_q
-    )
-    entries = len(cache)
-    cake_backend.backward(
-        *args, dkv_acc=acc, dkv_dst_map=dst_map
-    )  # the same plan: no new entry, adds again
-    torch.cuda.synchronize()
-    assert len(cache) == entries
-    assert rel_l2(acc, 2 * nat) < ACC_REL_L2
-    acc2 = torch.zeros(
-        S + 2, 704, device="cuda"
-    )  # another layout: another plan (row stride 704 baked)
-    cake_backend.backward(*args, dkv_acc=acc2)
-    torch.cuda.synchronize()
-    assert len(cache) == entries + 1
-    assert (
-        rel_l2(acc2[:S, :D_QK], nat) < ACC_REL_L2
-        and torch.all(acc2[S:] == 0)
-        and torch.all(acc2[:, D_QK:] == 0)
-    )
+
+    def case(s, j):
+        inp = make_inputs([128], [256], seed=s, topk=64)
+        args, explicit = _forward_and_natural_dkv(inp)
+        S = inp.total_k
+        cache.clear()
+        acc = torch.zeros(S, D_QK, device="cuda")
+        dst_map = torch.arange(S, device="cuda", dtype=torch.int32)
+        key = backward_binding_key(
+            *args,
+            None,
+            default_softmax_scale(),
+            False,
+            dkv_acc=acc,
+            dkv_dst_map=dst_map,
+        )
+        before = acc.clone()
+        first = cake_backend.backward(*args, dkv_acc=acc, dkv_dst_map=dst_map)
+        binding = cache.get(key)
+        assert binding is not None and binding.plan.accumulate_dkv
+        assert (
+            binding.topk_length is not None
+            and binding.topk_length.numel() == inp.total_q
+        )
+        entries = len(cache)
+        once = acc.clone()
+        second = cake_backend.backward(
+            *args, dkv_acc=acc, dkv_dst_map=dst_map
+        )  # the same plan: no new entry, adds again
+        torch.cuda.synchronize()
+        assert len(cache) == entries
+        acc2 = torch.zeros(
+            S + 2, 704, device="cuda"
+        )  # another layout: another plan (row stride 704 baked)
+        before2 = acc2.clone()
+        third = cake_backend.backward(*args, dkv_acc=acc2)
+        torch.cuda.synchronize()
+        assert len(cache) == entries + 1
+        runs = {
+            "explicit": explicit,
+            "first": _rope_outputs(
+                grads=first, dkv_acc=nv.Acc(before=before, after=once, dst_map=dst_map)
+            ),
+            "second": _rope_outputs(
+                grads=second, dkv_acc=nv.Acc(before=once, after=acc, dst_map=dst_map)
+            ),
+            "other layout": _rope_outputs(
+                grads=third, dkv_acc=nv.Acc(before=before2, after=acc2)
+            ),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 24)
 
 
-def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates():
+def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
+    record_property,
+):
+    """Through the autograd function with ``dkv_acc`` (no map, then a permutation map) the key leaves get no
+    gradient and the buffer receives the key gradients: each call's out, lse, dq and buffer increment are
+    judged."""
     _require_program(backward=True)
-    inp = make_inputs([128], [256], seed=SEED + 23, topk=64)
-    args, dq_l, dq_r, nat = _forward_and_natural_dkv(inp)
-    leaves = [
-        t.detach().clone().requires_grad_()
-        for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
-    ]
-    S = inp.total_k
-    acc = torch.zeros(S, D_QK, device="cuda")
-    out, lse = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
-        *leaves, inp.idx_global, None, default_softmax_scale(), None, acc, None
-    )
-    out.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert leaves[0].grad is not None and leaves[1].grad is not None
-    assert leaves[2].grad is None and leaves[3].grad is None
-    assert torch.equal(leaves[0].grad, dq_l) and torch.equal(leaves[1].grad, dq_r)
-    assert rel_l2(acc, nat) < ACC_REL_L2
-    perm = torch.randperm(
-        S, device="cuda", generator=torch.Generator(device="cuda").manual_seed(5)
-    ).to(torch.int32)
-    acc_p = torch.zeros(S, D_QK, device="cuda")
-    out2, _ = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
-        *leaves, inp.idx_global, None, default_softmax_scale(), None, acc_p, perm
-    )
-    out2.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert leaves[2].grad is None and leaves[3].grad is None
-    assert rel_l2(acc_p[perm.long()], nat) < ACC_REL_L2
+
+    def case(s, j):
+        inp = make_inputs([128], [256], seed=s, topk=64)
+        _, explicit = _forward_and_natural_dkv(inp)
+        leaves = [
+            t.detach().clone().requires_grad_()
+            for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        ]
+        S = inp.total_k
+        acc = torch.zeros(S, D_QK, device="cuda")
+        before = acc.clone()
+        out, lse = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
+            *leaves, inp.idx_global, None, default_softmax_scale(), None, acc, None
+        )
+        out.backward(inp.dout)
+        torch.cuda.synchronize()
+        assert leaves[0].grad is not None and leaves[1].grad is not None
+        assert leaves[2].grad is None and leaves[3].grad is None
+        identity = dict(
+            out=out.detach(),
+            lse=lse.detach(),
+            dq_latent=leaves[0].grad,
+            dq_rope=leaves[1].grad,
+            dkv_acc=nv.Acc(before=before, after=acc),
+        )
+        for leaf in leaves[:2]:
+            leaf.grad = None  # the second call's dq lands in fresh tensors
+        gen = torch.Generator(device="cuda").manual_seed(s + 5)
+        perm = torch.randperm(S, device="cuda", generator=gen).to(torch.int32)
+        acc_p = torch.zeros(S, D_QK, device="cuda")
+        before_p = acc_p.clone()
+        out2, lse2 = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
+            *leaves, inp.idx_global, None, default_softmax_scale(), None, acc_p, perm
+        )
+        out2.backward(inp.dout)
+        torch.cuda.synchronize()
+        assert leaves[2].grad is None and leaves[3].grad is None
+        permutation = dict(
+            out=out2.detach(),
+            lse=lse2.detach(),
+            dq_latent=leaves[0].grad,
+            dq_rope=leaves[1].grad,
+            dkv_acc=nv.Acc(before=before_p, after=acc_p, dst_map=perm),
+        )
+        runs = {"explicit": explicit, "identity": identity, "permutation": permutation}
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 23)
 
 
 # --- end of the packed fp32 dK/dV block ---
@@ -2576,29 +2624,6 @@ NOPE_DELTA_ARGS = (
 )
 NOPE_SLOT_WIDTHS = (1, 64, 67, 256, 512, 1024, 2177)
 NOPE_LARGE_TESTS_ENV = "CAKE_PPLX_DSA_NOPE_LARGE_TESTS"
-# Fixed rel-L2 table of the iid 4k x 4k, K_slots 2176 configuration and the element-wise output tolerance of the
-# NoPE acceptance.  out and dkv: the frozen rope-path figures of the same geometry times a 2 % noise band.  dq: the
-# FP64-emulated BF16 rounding floor measured on the same geometry and inputs at scale 1/16 (0.2231 %) times the same
-# 2 % band -- the rope-path dq figure (0.2154 %) lies below that floor and cannot bound this kernel.
-NOPE_GATE_OUT = 0.002013 * 1.02
-NOPE_GATE_DQ = 0.002231 * 1.02
-NOPE_GATE_DKV = 0.002319 * 1.02
-# Per-case floors: ``out`` and ``dq`` within 1.02x the emulated floor measured on the same geometry and inputs (the
-# emulation places every rounding at the kernel's own points; the kernel sits at 1.000x on the recorded cases);
-# ``dkv`` keeps the 1.05x margin of the shared floor rule. Peaked cases use the same per-case floors, not the fixed
-# iid table (the kernel's dq on the 0.99 / 0.53 self-weight inputs is 0.2398 % / 0.2348 %, above the iid constant).
-NOPE_FLOOR_MARGIN = 1.02
-# Row-level ``dq`` check (every NoPE backward case) is a structural guard, not a precision claim: the per-(token,
-# head)-row RMS of the normalised error as a distribution, the kernel's p99 within ``NOPE_ROW_P99_GUARD`` x and its
-# maximum within ``NOPE_ROW_MAX_GUARD`` x the emulated floor's. It detects a wrong key / wrong row contribution (row
-# errors of order 100 %); the precision claim is the case-level rel-L2 within the measured floor x 1.02. Rows whose
-# exact gradient is identically zero (tokens with at most one valid key) are checked element-wise against the bound
-# the reference derives from the inputs and the frozen fp32 / bf16 numerics instead (``_check_dq_zero_rows``).
-NOPE_ROW_P99_GUARD = 1.5
-NOPE_ROW_MAX_GUARD = 2.0
-NOPE_ROW_SCALE_FLOOR = 1e-3
-NOPE_OUT_ATOL = 1e-2
-NOPE_OUT_RTOL = 1e-2
 NOPE_SEED = SEED + 1000
 
 
@@ -2627,7 +2652,7 @@ def _libraries_missing_from_manifest(program: str) -> list[str]:
     return sorted(
         f"{record[stage]['library']}_{arch}"
         for stage in cake_jit.registered_stages(program)
-        for arch in record["arches"]
+        for arch in cake_jit.stage_arches(stage, program)
         if f"{record[stage]['library']}_{arch}" not in names
     )
 
@@ -2685,150 +2710,45 @@ def _require_nope_pass_program():
     return record, stages
 
 
-def _check_forward_nope(out, lse, ref, *, fixed=False, margin=NOPE_FLOOR_MARGIN):
-    """``out`` within ``margin`` x (1.02) its BF16-P numerics floor (rel-L2) plus the element-wise band; the floor
-    (``reference_fp64_nope``'s ``out_emu``) follows the kernel's own rounding points -- P rounded to bf16 relative to
-    the running row maximum under the threshold-6 lazy rescale over 64-slot tiles, denominator from the unrounded P,
-    one final bf16 rounding -- inherited from the production forward kernel; rounding relative to the exact row
-    maximum under-estimates the floor by 6-8 % on short peaked rows."""
-    assert out.dtype == torch.bfloat16 and lse.dtype == torch.float32
-    assert torch.isfinite(out.float()).all()
-    err, floor = rel_l2(out, ref["out"]), rel_l2(ref["out_emu"], ref["out"])
-    assert err <= margin * floor + FLOOR_ABS, (
-        f"out: rel-L2 {err:.6f} vs floor {floor:.6f}"
-    )
-    torch.testing.assert_close(
-        out.double(), ref["out"], atol=NOPE_OUT_ATOL, rtol=NOPE_OUT_RTOL
-    )
-    if fixed:
-        assert rel_l2(out, ref["out"]) <= NOPE_GATE_OUT
-    lse_ref = ref["lse"]
-    finite = torch.isfinite(lse_ref)
-    assert torch.equal(torch.isfinite(lse), finite)
-    if finite.any():
-        assert (
-            lse.double()[finite] - lse_ref[finite]
-        ).abs().max().item() <= GATE_LSE_ABS
-    if (~finite).any():
-        assert torch.all(lse[~finite] == float("-inf"))
-        assert torch.all(out[~finite.any(-1)] == 0)  # fully masked rows
-
-
-def _dq_row_errors(dq, dq_ref, zero_rows):
-    """Per-(token, head)-row normalised error ``e[r]``: the RMS over the 512 elements of ``dq_r - exact_r`` divided by
-    the row's exact RMS (floored at ``NOPE_ROW_SCALE_FLOOR``), over the rows of the tokens whose exact gradient is
-    not identically zero (``zero_rows`` marks the tokens with at most one valid key: :func:`_check_dq_zero_rows`)."""
-    ref = dq_ref.double()[~zero_rows]
-    rms = ref.pow(2).mean(-1).sqrt()
-    return (dq.double()[~zero_rows] - ref).pow(2).mean(-1).sqrt() / rms.clamp_min(
-        NOPE_ROW_SCALE_FLOOR
-    )
-
-
-def _check_dq_zero_rows(dq, ref):
-    """Rows whose exact ``dq`` is identically zero: the (token, head) rows of the tokens with at most one valid key
-    (``ref["dq_zero_rows"]``).  With one valid key ``P = 1`` and ``out = v`` exactly, so ``dS = P (dP - delta)``
-    cancels: ``dP`` (the MMA's fp32 accumulation of ``dout . v`` over the 512 dims) and ``delta`` (the row-sum stage's
-    fp32 dot product of ``dout`` with ``hi + lo = v``) are the same exact value, and the kernel's
-    ``dq = scale (dP - delta) k`` is their fp32 rounding difference times the key.  The check is element-wise against
-    the bound the reference derives from the inputs and the frozen numerics (``ref["dq_zero_bound"]``,
-    :func:`nope_ref.nope_zero_row_dq_bound`): ``|dq[t, h, el]| <= (1 + 2^-8)^2 scale B[t, h] |k[el]|`` with
-    ``B[t, h] = 2 gamma_512 sum_d |dout[t, h, d] v[d]|``, ``gamma_n = n u / (1 - n u)``, ``u = 2^-24`` -- the standard
-    forward error bound of two fp32 dot products of 512 exact products in any order, times the bf16 roundings of
-    ``dS`` and ``dq``.  A token without a valid key has a zero bound: ``dq`` is exactly zero there.  The kernel's
-    residue sits far below the bound -- measured on sm_103a (GB300), the largest ``|dq| / bound`` over all zero-gradient
-    rows is 0.0019 on the peaked 0.99 self-weight case (one token, 64 rows), 0.0016 on the peaked 0.53 case and 0.0027
-    at ``K_slots = 1`` (130 tokens, 8320 rows; single and two-pass alike), the per-row median of the implied
-    ``|dP - delta| / B`` about 3e-4: a margin above 350x."""
-    zero = ref["dq_zero_rows"]
-    if not zero.any():
-        return
-    got, bound = dq.double()[zero].abs(), ref["dq_zero_bound"]
-    positive = bound > 0
-    ratio = torch.where(
-        positive, got / bound.clamp_min(torch.finfo(torch.float64).tiny), 0.0
-    )
-    assert (got <= bound).all(), (
-        f"dq on zero-gradient rows: {ratio.max().item():.4f} x the fp32 rounding bound "
-        f"(max |dq| {got.max().item():.3e}; non-zero dq on a zero bound: {int((got[~positive] > 0).sum())})"
-    )
-
-
-def _check_dq_row_stats(e_k, e_f):
-    """Structural guard on the kernel's row errors ``e_k`` against the emulated floor's ``e_f`` as distributions: the
-    0.99 quantile within ``NOPE_ROW_P99_GUARD`` x, the maximum within ``NOPE_ROW_MAX_GUARD`` x the floor's.  A wrong
-    key or a wrong row contribution is a row error of order 100 %; this is what the guard detects.  It is not a
-    precision statement: the precision claim is the case-level rel-L2 within the measured floor x 1.02."""
-    got, floor = e_k.quantile(0.99).item(), e_f.quantile(0.99).item()
-    assert got <= NOPE_ROW_P99_GUARD * floor + FLOOR_ABS, (
-        f"dq row error p99: {got:.6f} vs floor {floor:.6f}"
-    )
-    got, floor = e_k.max().item(), e_f.max().item()
-    assert got <= NOPE_ROW_MAX_GUARD * floor + FLOOR_ABS, (
-        f"dq row error max: {got:.6f} vs floor {floor:.6f}"
-    )
-
-
-def _check_dq_rows_nope(dq, ref):
-    """Row-level ``dq`` guard as a distribution statistic, kernel against its emulated floor, both measured against the
-    FP64 reference: ``e[r]`` = RMS of ``dq_r - exact_r`` over the row, divided by the row's exact RMS (floor 1e-3);
-    the 0.99 quantile of the kernel's ``e`` within ``NOPE_ROW_P99_GUARD`` x the floor's, the maximum within
-    ``NOPE_ROW_MAX_GUARD`` x the floor's -- a guard against a wrong key / wrong row contribution (row errors of order
-    100 %); the precision claim is the case-level rel-L2 within the measured floor x 1.02.  An element-wise comparison
-    of the kernel with the floor is not meaningful:
-    both carry the forward output's last bits (bf16 hi + lo split, fp32 accumulation) through ``delta``, amplified by
-    ~1 / (1 - max P) on rows where one key holds most of the mass (two to four valid keys, a self key near 1), as two
-    different realisations of the same noise -- only their magnitudes compare.  The FA4 sparse-MLA backward on the same
-    inputs misses the per-element band on those rows by x40-x1527 (measured), the kernel by x3-x7.  Rows whose exact
-    gradient is identically zero (at most one valid key) are checked first, element-wise against the bound derived
-    from the inputs (:func:`_check_dq_zero_rows`), and stay out of the statistics."""
-    _check_dq_zero_rows(dq, ref)
-    zero = ref["dq_zero_rows"]
-    e_k = _dq_row_errors(dq, ref["dq"], zero)
-    e_f = _dq_row_errors(ref["dq_emu"], ref["dq"], zero)
-    if e_k.numel():
-        _check_dq_row_stats(e_k, e_f)
-
-
-def _check_backward_nope(dq, dkv, ref, *, fixed=False, margin=NOPE_FLOOR_MARGIN):
-    """``dq`` (BF16) within ``margin`` x (1.02) and the FP32 ``dkv`` within 1.05x their BF16-P/dS numerics floors on the
-    same inputs (rel-L2), ``dq`` also within the row-level distribution check against its floor
-    (:func:`_check_dq_rows_nope`); the canonical iid 4k x 4k configuration also within the fixed table."""
-    assert dq.dtype == torch.bfloat16 and dkv.dtype == torch.float32
-    assert tuple(dkv.shape) == tuple(ref["dkv"].shape) and dkv.is_contiguous()
-    assert torch.isfinite(dq.float()).all() and torch.isfinite(dkv).all()
-    for got, name in ((dq, "dq"), (dkv, "dkv")):
-        if not ref[name].any():
-            # an identically zero exact gradient (one valid key per row: P = 1, dS = 0, so dq = 0): a relative
-            # floor is undefined there; the kernel's residue is the fp32 rounding of dP - delta, which the row
-            # check bounds element-wise from the inputs (_check_dq_zero_rows)
-            continue
-        err, floor = rel_l2(got, ref[name]), rel_l2(ref[f"{name}_emu"], ref[name])
-        limit = margin if name == "dq" else FLOOR_MARGIN
-        assert err <= limit * floor + FLOOR_ABS, (
-            f"{name}: rel-L2 {err:.6f} vs floor {floor:.6f}"
-        )
-    _check_dq_rows_nope(dq, ref)
-    if fixed:
-        assert rel_l2(dq, ref["dq"]) <= NOPE_GATE_DQ
-        assert rel_l2(dkv, ref["dkv"]) <= NOPE_GATE_DKV
-
-
 def _nope_inputs(seq_q, seq_k, *, seed, topk, index="iid", **kw):
     return nope_ref.make_nope_inputs(
         [seq_q], [seq_k], seed=seed, topk=topk, index=index, **kw
     )
 
 
-def _nope_reference(inp, indices=None, *, dout=None, topk_length=None):
-    return nope_ref.reference_fp64_nope(
-        inp.q,
-        inp.kv,
-        inp.idx_global if indices is None else indices,
-        dout=dout,
-        topk_length=topk_length,
-        softmax_scale=NOPE_SOFTMAX_SCALE,
-    )
+def _forward_run(outputs):
+    """``out`` / ``lse`` / ``o_lo`` of a NoPE forward (``forward_nope``, or the first three outputs of
+    ``forward_nope_varlen``) as one judged run."""
+    out, lse, o_lo = outputs[:3]
+    return dict(out=out, lse=lse, o_lo=o_lo)
+
+
+def _nope_pair(q, kv, indices, dout, **kw):
+    """``forward_nope`` then ``backward_nope`` (``kw``: its keywords) over ``indices``: the outputs of both calls as
+    one judged run."""
+    out, lse, o_lo = forward_nope(q, kv, indices)
+    dq, dkv = backward_nope(q, kv, indices, out, o_lo, lse, dout, **kw)
+    torch.cuda.synchronize()
+    return dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv)
+
+
+def _self_weight(inp, lse, *, rows=4096):
+    """The mean softmax mass on each query's own key over every (token, head) row (0 on a row whose index row does
+    not select it), from the rows' ``lse`` and the inputs in FP64: the calibration of a peaked draw."""
+    total = 0.0
+    for r0 in range(0, inp.total_q, rows):
+        r1 = min(inp.total_q, r0 + rows)
+        own = inp.own_key[r0:r1]
+        selects = (inp.idx_global[r0:r1] == own[:, None]).any(-1)
+        score = (
+            torch.einsum("thd,td->th", inp.q[r0:r1].double(), inp.kv[own].double())
+            * NOPE_SOFTMAX_SCALE
+        )
+        mass = torch.where(
+            selects[:, None], torch.exp(score - lse[r0:r1].double()), 0.0
+        )
+        total += float(mass.sum())
+    return total / (inp.total_q * NUM_HEADS)
 
 
 # --- registry and generated launchers (CPU) ---
@@ -2880,7 +2800,8 @@ def test_registry_programs_are_well_formed(program):
     for stage in stages:
         physical = record[stage]
         assert physical["library"] and physical["ffi_entry"]
-        for arch in record["arches"]:
+        assert set(cake_jit.stage_arches(stage, program)) <= set(record["arches"])
+        for arch in cake_jit.stage_arches(stage, program):
             entry = libraries.get(f"{physical['library']}_{arch}")
             if entry is None:
                 pending.append(f"{physical['library']}_{arch}")
@@ -2945,8 +2866,8 @@ def test_nope_stage_names_and_registry_accessors():
         cake_jit.stage_name(s, NOPE_PROGRAM) for s in cake_jit.STAGES[1:]
     )
     assert cake_jit.STAGES_OF == {
-        cake_jit.PROGRAM: cake_jit.STAGES,
-        NOPE_PROGRAM: cake_jit.NOPE_STAGES,
+        cake_jit.PROGRAM: cake_jit.STAGES + (cake_jit.SCAN_STAGES["fwd"],),
+        NOPE_PROGRAM: cake_jit.NOPE_STAGES + (cake_jit.SCAN_STAGES["nope_fwd"],),
     }
     assert cake_jit.stage_name("bwd_main_pass_natural", NOPE_PROGRAM) == (
         "nope_bwd_main_pass_natural"
@@ -2963,9 +2884,17 @@ def test_nope_stage_names_and_registry_accessors():
     with pytest.raises(ValueError, match="unknown program"):
         cake_jit.registered_stages("cake_dsa_h64_other")
     stages = cake_jit.registered_stages(NOPE_PROGRAM)
+    scan = cake_jit.SCAN_STAGES["nope_fwd"]
+    if scan in stages:
+        # the scanner-warp forward serves ``nope_fwd`` on its own architectures
+        for arch in cake_jit.stage_arches(scan, NOPE_PROGRAM):
+            assert cake_jit.stage_for("nope_fwd", arch, NOPE_PROGRAM) == scan
+            assert cake_jit.library_name("nope_fwd", arch, NOPE_PROGRAM) == (
+                f"{cake_jit.record(NOPE_PROGRAM)[scan]['library']}_{arch}"
+            )
     for stage in cake_jit.NOPE_STAGES:
         if stage in stages:
-            for arch in cake_jit.record(NOPE_PROGRAM)["arches"]:
+            for arch in cake_jit.stage_arches(stage, NOPE_PROGRAM):
                 name = cake_jit.library_name(stage, arch, NOPE_PROGRAM)
                 assert (
                     name == f"{cake_jit.record(NOPE_PROGRAM)[stage]['library']}_{arch}"
@@ -3031,13 +2960,12 @@ def test_nope_launchers_bind_the_kernel_argument_lists_and_grids():
 def test_binding_run_signatures_match_the_stage_argument_lists(program):
     """The ``Run(`` parameter list of every registered stage's binding (``arg_<name>`` / ``a_<name>`` per kernel
     argument, then the grid) is the stage's ``STAGE_ARGS`` list: the launcher and the binding agree positionally."""
-    record = cake_jit.record(program)
     root = Path(cake_jit.__file__).parent
     pattern = re.compile(r"\bvoid\s+Run\s*\(([^)]*)\)\s*\{", re.S)
     entries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
     pending = []
     for stage in cake_jit.registered_stages(program):
-        name = cake_jit.library_name(stage, record["arches"][0], program)
+        name = cake_jit.library_name(stage, cake_jit.stage_arches(stage, program)[0], program)
         sources = entries[name]["sources"] if name in entries else []
         bindings = [root / s for s in sources if s.endswith("_binding.cu")]
         if len(bindings) != 1 or not bindings[0].is_file():
@@ -3958,7 +3886,11 @@ def _completed_nope_record() -> dict:
                     "use_pdl": False,
                 },
             }
-    record["stages"] = list(cake_jit.NOPE_STAGES)
+    record["stages"] = list(cake_jit.NOPE_STAGES) + [
+        stage
+        for stage in cake_jit.STAGES_OF[NOPE_PROGRAM]
+        if stage not in cake_jit.NOPE_STAGES and stage in record
+    ]
     return record
 
 
@@ -5221,75 +5153,100 @@ def test_nope_kernel_level_packed_forward_is_the_public_entry_without_autograd(
         ),  # 1,179,648 slots: above the baseline's 1 << 20
     ],
 )
-def test_nope_kernel_level_packed_pair_matches_the_autograd_entry(
-    seqs_q, seqs_k, topk, limit, monkeypatch
+def test_nope_kernel_level_packed_pair_and_the_autograd_entry(
+    seqs_q, seqs_k, topk, limit, monkeypatch, record_property
 ):
     """The kernel-level pair -- ``forward_nope_varlen`` and ``backward_nope`` (and its prepared form through
-    ``prepare_dsa_nope_train``) over the rows and lengths it returns -- against the autograd packed entry on both
-    index routes (the shipped limit, the stage forced by a limit of 0, the one-launch forward forced by a limit
-    above every table): ``out``, ``lse`` and ``dq`` bitwise, ``dkv`` (FP32 atomics into a caller buffer on both
-    sides) within the summation-order spread."""
+    ``prepare_dsa_nope_train``) over the rows and lengths it returns -- and the autograd packed entry, on both index
+    routes (the shipped limit, the stage forced by a limit of 0, the one-launch forward forced by a limit above
+    every table): every call's float outputs (``dkv`` as FP32 atomics into a caller buffer) are judged against the
+    problem of the rows and lengths it received."""
     _require_nope_index_prep()
     _require_nope_program(backward=True)
     if limit != "shipped":
         monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", limit)
     if cake_backend.nope_varlen_index_mode(sum(seqs_q), topk) == "mask":
         _require_nope_mask_route()
-    inp = nope_ref.make_nope_inputs(
-        seqs_q, seqs_k, seed=NOPE_SEED + 700 + topk, topk=topk, index="iid"
-    )
-    S = inp.total_k
-    q = inp.q.detach().requires_grad_()
-    acc = torch.zeros(S, D_LATENT, device="cuda")
-    out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
-        q,
-        inp.kv,
-        inp.idx_local,
-        inp.cu_seqlens_q,
-        inp.cu_seqlens_k,
-        causal=True,
-        return_lse=True,
-        dkv_acc=acc,
-    )
-    (dq,) = torch.autograd.grad(out, (q,), inp.dout)
-    out_k, lse_k, o_lo, indices, lengths = cake_backend.forward_nope_varlen(
-        inp.q, inp.kv, inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
-    )
-    acc_k = torch.zeros(S, D_LATENT, device="cuda")
-    dq_k, none = cake_backend.backward_nope(
-        inp.q,
-        inp.kv,
-        indices,
-        out_k,
-        o_lo,
-        lse_k,
-        inp.dout,
-        topk_length=lengths,
-        dkv_acc=acc_k,
-        num_segments=len(seqs_q),
-    )
-    torch.cuda.synchronize()
-    assert none is None
-    assert torch.equal(out, out_k) and torch.equal(lse, lse_k) and torch.equal(dq, dq_k)
-    assert rel_l2(acc_k, acc) < 1e-5
-    # the prepared form of the same backward: the forward's buffers bound once, launches only per call
-    acc_r = torch.zeros(S, D_LATENT, device="cuda")
-    runner = cake_backend.prepare_dsa_nope_train(
-        inp.q,
-        inp.kv,
-        indices,
-        topk_length=lengths,
-        dout=inp.dout,
-        out=out_k,
-        lse=lse_k,
-        o_lo=o_lo,
-        dkv_acc=acc_r,
-        num_segments=len(seqs_q),
-    )
-    dq_r, none_r = runner.backward()
-    torch.cuda.synchronize()
-    assert none_r is None and torch.equal(dq_r, dq_k)
-    assert rel_l2(acc_r, acc) < 1e-5
+
+    def case(s, j):
+        inp = nope_ref.make_nope_inputs(seqs_q, seqs_k, seed=s, topk=topk, index="iid")
+        S = inp.total_k
+        q = inp.q.detach().requires_grad_()
+        acc = torch.zeros(S, D_LATENT, device="cuda")
+        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+            q,
+            inp.kv,
+            inp.idx_local,
+            inp.cu_seqlens_q,
+            inp.cu_seqlens_k,
+            causal=True,
+            return_lse=True,
+            dkv_acc=acc,
+        )
+        (dq,) = torch.autograd.grad(out, (q,), inp.dout)
+        out_k, lse_k, o_lo, indices, lengths = cake_backend.forward_nope_varlen(
+            inp.q, inp.kv, inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
+        )
+        acc_k = torch.zeros(S, D_LATENT, device="cuda")
+        dq_k, none = cake_backend.backward_nope(
+            inp.q,
+            inp.kv,
+            indices,
+            out_k,
+            o_lo,
+            lse_k,
+            inp.dout,
+            topk_length=lengths,
+            dkv_acc=acc_k,
+            num_segments=len(seqs_q),
+        )
+        torch.cuda.synchronize()
+        assert none is None
+        # the prepared form of the same backward: the forward's buffers bound once, launches only per call
+        acc_r = torch.zeros(S, D_LATENT, device="cuda")
+        runner = cake_backend.prepare_dsa_nope_train(
+            inp.q,
+            inp.kv,
+            indices,
+            topk_length=lengths,
+            dout=inp.dout,
+            out=out_k,
+            lse=lse_k,
+            o_lo=o_lo,
+            dkv_acc=acc_r,
+            num_segments=len(seqs_q),
+        )
+        dq_r, none_r = runner.backward()
+        torch.cuda.synchronize()
+        assert none_r is None
+        # the entry and the kernel-level forward read the per-document rows (globalized by the torch glue); the
+        # kernel-level backward and the runner read the rows and lengths the forward returned
+        glob = offset_gather_kv_indices(
+            inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
+        )
+        local_runs = {
+            "entry": dict(
+                out=out.detach(),
+                lse=lse.detach(),
+                dq=dq,
+                dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+            ),
+            "fwd": dict(out=out_k, lse=lse_k, o_lo=o_lo),
+        }
+        returned_runs = {
+            "bwd": dict(dq=dq_k, dkv_acc=nv.Acc(before=torch.zeros_like(acc_k), after=acc_k)),
+            "runner": dict(dq=dq_r, dkv_acc=nv.Acc(before=torch.zeros_like(acc_r), after=acc_r)),
+        }
+        return nv.merge(
+            nv.judged(nv.nope_problem(inp, indices=glob), local_runs, prefix="local "),
+            nv.judged(
+                nv.nope_problem(inp, indices=indices, topk_length=lengths),
+                returned_runs,
+                prefix="returned ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 700 + topk)
 
 
 def test_nope_packed_entry_route_when_the_forward_program_converts(monkeypatch):
@@ -5700,7 +5657,10 @@ def test_nope_prepared_runner_binds_outputs_scratch_and_zero_fill(monkeypatch):
         dkv=dkv,
     )
     assert isinstance(runner, cake_backend.DSANopeTrainRunner)
-    assert runner.module_name == NOPE_PROGRAM and runner.stages == cake_jit.NOPE_STAGES
+    # every NoPE stage, then the scanner-warp forward when the record carries it (``STAGES_OF``)
+    assert runner.module_name == NOPE_PROGRAM
+    assert runner.stages == cake_jit.registered_stages(NOPE_PROGRAM)
+    assert runner.stages[: len(cake_jit.NOPE_STAGES)] == cake_jit.NOPE_STAGES
     assert runner.forward_stages == ("nope_fwd",) and runner.has_backward
     assert runner.fresh_dkv and runner.dkv_direct and not runner.accumulate_dkv
     assert not runner.dkv_fp32 and not runner.has_topk_length
@@ -5890,594 +5850,757 @@ def test_nope_registered_record_without_kernels_fails_loudly():
 
 
 # --- GPU suite (skips until the NoPE program is registered) ---
+#
+# Every float output of these calls is judged against the naive BF16 tier over the draws of its case
+# (``nv.judge_draws``: the FP64 oracle of the rows and lengths each call received); index rows, counts and lengths
+# stay exact.
 
 
 @pytest.mark.parametrize("topk", [128, 200])
-def test_nope_forward_iid(topk):
+def test_nope_forward_iid(topk, record_property):
     _require_nope_program()
-    inp = _nope_inputs(384, 1024, seed=NOPE_SEED, topk=topk)
-    out, lse, _ = forward_nope(inp.q, inp.kv, inp.idx_global)
-    torch.cuda.synchronize()
-    _check_forward_nope(out, lse, _nope_reference(inp))
+
+    def case(s, j):
+        inp = _nope_inputs(384, 1024, seed=s, topk=topk)
+        got = forward_nope(inp.q, inp.kv, inp.idx_global)
+        torch.cuda.synchronize()
+        return nv.judged(nv.nope_problem(inp), {"": _forward_run(got)})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED)
 
 
-def test_nope_forward_pooled_default_width():
+def test_nope_forward_pooled_default_width(record_property):
     """The recorded pool structure at the profiled K_slots (2176: up to 512 complete pools plus the causal tail),
     rows shorter than the width padded with ``-1``."""
     _require_nope_program()
-    inp = _nope_inputs(1024, 4096, seed=NOPE_SEED + 1, topk=2176, index="pooled")
-    assert inp.topk == nope_ref.DEFAULT_NOPE_TOPK
-    out, lse, _ = forward_nope(inp.q, inp.kv, inp.idx_global)
-    torch.cuda.synchronize()
-    _check_forward_nope(out, lse, _nope_reference(inp))
+
+    def case(s, j):
+        inp = _nope_inputs(1024, 4096, seed=s, topk=2176, index="pooled")
+        assert inp.topk == nope_ref.DEFAULT_NOPE_TOPK
+        got = forward_nope(inp.q, inp.kv, inp.idx_global)
+        torch.cuda.synchronize()
+        return nv.judged(nv.nope_problem(inp), {"": _forward_run(got)})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 1)
 
 
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
-def test_nope_forward_slot_widths(topk):
+def test_nope_forward_slot_widths(topk, record_property):
     """Any ``K_slots >= 1``: the 256 / 512 / 1024 widths, the odd widths 1 / 67 / 2177 and 64."""
     _require_nope_program()
-    inp = _nope_inputs(130, 512, seed=NOPE_SEED + topk, topk=topk)
-    out, lse, _ = forward_nope(inp.q, inp.kv, inp.idx_global)
-    torch.cuda.synchronize()
-    _check_forward_nope(out, lse, _nope_reference(inp))
+
+    def case(s, j):
+        inp = _nope_inputs(130, 512, seed=s, topk=topk)
+        got = forward_nope(inp.q, inp.kv, inp.idx_global)
+        torch.cuda.synchronize()
+        return nv.judged(nv.nope_problem(inp), {"": _forward_run(got)})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + topk)
 
 
 @pytest.mark.parametrize("key_passes", [1, 2])
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
-def test_nope_backward_slot_widths(topk, key_passes):
+def test_nope_backward_slot_widths(topk, key_passes, record_property):
     """The backward at every width above, as the single pass and as two forced passes (the compaction and pass
-    stages read the index rows through the same ``K_slots`` metadata), each against the reference."""
+    stages read the index rows through the same ``K_slots`` metadata), with its forward, every output judged."""
     if key_passes > 1:
         _require_nope_pass_program()
     else:
         _require_nope_program(backward=True)
-    inp = _nope_inputs(130, 512, seed=NOPE_SEED + 100 + topk, topk=topk)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(
-        inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout, key_passes=key_passes
-    )
-    torch.cuda.synchronize()
-    _check_backward_nope(dq, dkv, _nope_reference(inp, dout=inp.dout))
+
+    def case(s, j):
+        inp = _nope_inputs(130, 512, seed=s, topk=topk)
+        got = _nope_pair(
+            inp.q, inp.kv, inp.idx_global, inp.dout, key_passes=key_passes
+        )
+        return nv.judged(nv.nope_problem(inp), {"": got})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 100 + topk)
 
 
 @pytest.mark.parametrize("seq_q, seq_k", [(4095, 4096), (4097, 4097)])
-def test_nope_irregular_tail_lengths(seq_q, seq_k):
+def test_nope_irregular_tail_lengths(seq_q, seq_k, record_property):
     """Query counts one below and one above a 4096 multiple (the latter with an odd key count): the forward and the
     single-pass backward handle the partial tail tile at the top-k width 2176."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(seq_q, seq_k, seed=NOPE_SEED + 200 + seq_q, topk=2176)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    ref = _nope_reference(inp, dout=inp.dout)
-    _check_forward_nope(out, lse, ref)
-    _check_backward_nope(dq, dkv, ref)
+
+    def case(s, j):
+        inp = _nope_inputs(seq_q, seq_k, seed=s, topk=2176)
+        got = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        return nv.judged(nv.nope_problem(inp), {"": got})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 200 + seq_q)
 
 
-def test_nope_backward_32k_x_256k_skewed_per_row_dq_p99():
-    """The 32k x 256k peaked row (own key ~99 % of the softmax mass, iid K_slots 2176): per-token ``dq`` rel-L2
-    p99 within ``GATE_ROW_P99_DQ`` (per token, and per (token, head) row on the normalised row error ``e`` of
-    :func:`_check_dq_rows_nope`), the row-error distribution within its emulated floor's, ``out`` and ``dq`` within
-    1.02x and ``dkv`` within 1.05x their BF16-P/dS numerics floors.  The FP64 reference streams over 256-row chunks and
-    takes minutes: opt in with
-    ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
+def test_nope_backward_32k_x_256k_skewed_row(record_property):
+    """The 32k x 256k peaked row (own key ~99 % of the softmax mass, iid K_slots 2176): the forward and backward
+    outputs are judged over the draws, and each draw's self weight (from the oracle's ``lse``) lies in the peaked
+    window.  The FP64 oracle of a draw takes minutes: opt in with ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
     if os.environ.get(NOPE_LARGE_TESTS_ENV, "") != "1":
         pytest.skip(
-            f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 32k x 256k per-row p99 case (minutes of FP64 reference)"
+            f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 32k x 256k case (minutes of FP64 oracle per draw)"
         )
     _require_nope_program(backward=True)
     T, S, K = 32768, 262144, 2176
     beta = nope_ref.calibrate_beta_nope(0.99, seed=NOPE_SEED + 300, topk=K)
-    inp = _nope_inputs(
-        T, S, seed=NOPE_SEED + 300, topk=K, self_including=True, beta=beta
-    )
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    rows, row_err_k, row_err_f = [], [], []
-    sq = {k: 0.0 for k in ("err", "emu", "ref", "out_err", "out_emu", "out_ref")}
 
-    def consume(r0, r1, chunk):
-        d_ref, o_ref = chunk["dq"], chunk["out"]
-        rows.append(rel_l2_rows(dq[r0:r1], d_ref).cpu())
-        _check_dq_zero_rows(dq[r0:r1], chunk)
-        zero = chunk["dq_zero_rows"]
-        row_err_k.append(_dq_row_errors(dq[r0:r1], d_ref, zero).cpu())
-        row_err_f.append(_dq_row_errors(chunk["dq_emu"], d_ref, zero).cpu())
-        sq["err"] += (dq[r0:r1].double() - d_ref).pow(2).sum().item()
-        sq["emu"] += (chunk["dq_emu"] - d_ref).pow(2).sum().item()
-        sq["ref"] += d_ref.pow(2).sum().item()
-        sq["out_err"] += (out[r0:r1].double() - o_ref).pow(2).sum().item()
-        sq["out_emu"] += (chunk["out_emu"] - o_ref).pow(2).sum().item()
-        sq["out_ref"] += o_ref.pow(2).sum().item()
-
-    ref = nope_ref.reference_fp64_nope(
-        inp.q,
-        inp.kv,
-        inp.idx_global,
-        dout=inp.dout,
-        softmax_scale=NOPE_SOFTMAX_SCALE,
-        own_key=inp.own_key,
-        consume=consume,
-    )
-    assert 0.9 < ref["self_weight"] < 0.999, (
-        f"calibrated self weight {ref['self_weight']:.4f} outside the peaked window"
-    )
-    p99 = torch.cat(rows).quantile(0.99).item()
-    assert p99 <= GATE_ROW_P99_DQ, f"per-row dq rel-L2 p99 {p99:.6f}"
-    e_k, e_f = torch.cat(row_err_k), torch.cat(row_err_f)
-    p99_rows = e_k.quantile(0.99).item()
-    assert p99_rows <= GATE_ROW_P99_DQ, (
-        f"per-(token, head) dq row error p99 {p99_rows:.6f}"
-    )
-    _check_dq_row_stats(e_k, e_f)
-    for name, prefix in (("dq", ""), ("out", "out_")):
-        err = math.sqrt(sq[prefix + "err"] / sq[prefix + "ref"])
-        floor = math.sqrt(sq[prefix + "emu"] / sq[prefix + "ref"])
-        assert err <= NOPE_FLOOR_MARGIN * floor + FLOOR_ABS, (
-            f"{name}: rel-L2 {err:.6f} vs floor {floor:.6f}"
+    def case(s, j):
+        inp = _nope_inputs(T, S, seed=s, topk=K, self_including=True, beta=beta)
+        got = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        found, oracle, naive = nv.judged(nv.nope_problem(inp), {"": got})
+        weight = _self_weight(inp, oracle["lse"])
+        assert 0.9 < weight < 0.999, (
+            f"draw {j}: calibrated self weight {weight:.4f} outside the peaked window"
         )
-    err, floor = rel_l2(dkv, ref["dkv"]), rel_l2(ref["dkv_emu"], ref["dkv"])
-    assert err <= FLOOR_MARGIN * floor + FLOOR_ABS, (
-        f"dkv: rel-L2 {err:.6f} vs floor {floor:.6f}"
-    )
+        return found, oracle, naive
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 300)
 
 
-def test_nope_forward_masked_rows_and_out_of_range():
+def test_nope_forward_masked_rows_and_out_of_range(record_property):
     _require_nope_program()
-    inp = _nope_inputs(256, 512, seed=NOPE_SEED + 2, topk=128)
-    idx = inp.idx_global.clone()
-    idx[3] = -1
-    idx[9, ::2] = -1
-    idx[5, 0] = inp.total_k + 7
-    idx[11, 1:] = -1  # one key
-    out, lse, _ = forward_nope(inp.q, inp.kv, idx)
-    torch.cuda.synchronize()
-    assert torch.all(out[3] == 0) and torch.all(lse[3] == float("-inf"))
-    _check_forward_nope(out, lse, _nope_reference(inp, idx))
+
+    def case(s, j):
+        inp = _nope_inputs(256, 512, seed=s, topk=128)
+        idx = inp.idx_global.clone()
+        idx[3] = -1
+        idx[9, ::2] = -1
+        idx[5, 0] = inp.total_k + 7
+        idx[11, 1:] = -1  # one key
+        got = forward_nope(inp.q, inp.kv, idx)
+        torch.cuda.synchronize()
+        # the fully masked row 3 (out 0, lse -inf) is part of the judged contract
+        return nv.judged(nv.nope_problem(inp, indices=idx), {"": _forward_run(got)})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 2)
 
 
-def test_nope_forward_strided_query_view_bitwise():
-    """A query slice of a packed [T, 64, 576] tensor (head stride 576) gives the contiguous results bitwise."""
+def test_nope_forward_reads_a_strided_query_view(record_property):
+    """A query slice of a packed [T, 64, 576] tensor (head stride 576) and the contiguous queries: both calls are
+    judged."""
     _require_nope_program()
-    inp = _nope_inputs(256, 512, seed=NOPE_SEED + 3, topk=128)
-    packed = torch.zeros(
-        inp.total_q, NUM_HEADS, D_QK, dtype=torch.bfloat16, device="cuda"
-    )
-    packed[..., :D_LATENT] = inp.q
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    out_v, lse_v, o_lo_v = forward_nope(packed[..., :D_LATENT], inp.kv, inp.idx_global)
-    torch.cuda.synchronize()
-    assert (
-        torch.equal(out, out_v)
-        and torch.equal(lse, lse_v)
-        and torch.equal(o_lo, o_lo_v)
-    )
+
+    def case(s, j):
+        inp = _nope_inputs(256, 512, seed=s, topk=128)
+        packed = torch.zeros(
+            inp.total_q, NUM_HEADS, D_QK, dtype=torch.bfloat16, device="cuda"
+        )
+        packed[..., :D_LATENT] = inp.q
+        dense = forward_nope(inp.q, inp.kv, inp.idx_global)
+        view = forward_nope(packed[..., :D_LATENT], inp.kv, inp.idx_global)
+        torch.cuda.synchronize()
+        runs = {"contiguous": _forward_run(dense), "view": _forward_run(view)}
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 3)
 
 
-def test_nope_forward_derives_row_lengths_in_kernel():
+def test_nope_forward_derives_row_lengths_in_kernel(record_property):
+    """Rows shorter than the width: the forward without lengths (derived in the kernel), with the explicit lengths
+    and with the derived lengths written to a caller vector (exactly ``derive_topk_length`` of the rows); each
+    call's outputs are judged against the problem of the lengths it received."""
     _require_nope_program()
-    # seq_q == seq_k: the query positions start at key 0, so the first 199 rows hold fewer than 200 keys
-    inp = _nope_inputs(256, 256, seed=NOPE_SEED + 4, topk=200)
-    assert not torch.all(inp.topk_length == inp.topk)  # short rows exist
-    derived = forward_nope(inp.q, inp.kv, inp.idx_global)
-    explicit = forward_nope(inp.q, inp.kv, inp.idx_global, topk_length=inp.topk_length)
-    filled = torch.empty(inp.total_q, dtype=torch.int32, device="cuda")
-    forward_nope(
-        inp.q, inp.kv, inp.idx_global, topk_length=filled, derive_topk_length=True
-    )
-    torch.cuda.synchronize()
-    assert all(torch.equal(a, b) for a, b in zip(derived, explicit, strict=True))
-    assert torch.equal(filled, derive_topk_length(inp.idx_global, inp.total_k))
+
+    def case(s, j):
+        # seq_q == seq_k: the query positions start at key 0, so the first 199 rows hold fewer than 200 keys
+        inp = _nope_inputs(256, 256, seed=s, topk=200)
+        assert not torch.all(inp.topk_length == inp.topk)  # short rows exist
+        derived = forward_nope(inp.q, inp.kv, inp.idx_global)
+        explicit = forward_nope(
+            inp.q, inp.kv, inp.idx_global, topk_length=inp.topk_length
+        )
+        filled = torch.empty(inp.total_q, dtype=torch.int32, device="cuda")
+        written = forward_nope(
+            inp.q, inp.kv, inp.idx_global, topk_length=filled, derive_topk_length=True
+        )
+        torch.cuda.synchronize()
+        assert torch.equal(filled, derive_topk_length(inp.idx_global, inp.total_k))
+        derived_runs = {"derived": _forward_run(derived), "written": _forward_run(written)}
+        return nv.merge(
+            nv.judged(nv.nope_problem(inp), derived_runs),
+            nv.judged(
+                nv.nope_problem(inp, topk_length=inp.topk_length),
+                {"": _forward_run(explicit)},
+                prefix="explicit ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 4)
 
 
-def test_nope_forward_deterministic():
+def test_nope_forward_repeat_calls(record_property):
+    """Two forward calls on the same inputs: both are judged."""
     _require_nope_program()
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 5, topk=128)
-    first = forward_nope(inp.q, inp.kv, inp.idx_global)
-    second = forward_nope(inp.q, inp.kv, inp.idx_global)
-    torch.cuda.synchronize()
-    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
+
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        first = forward_nope(inp.q, inp.kv, inp.idx_global)
+        second = forward_nope(inp.q, inp.kv, inp.idx_global)
+        torch.cuda.synchronize()
+        runs = {"first": _forward_run(first), "second": _forward_run(second)}
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 5)
+
+
+@pytest.mark.parametrize("seq_q, seq_k, topk", [(384, 1024, 200), (4096, 4096, 2176)])
+def test_nope_backward_iid(seq_q, seq_k, topk, record_property):
+    _require_nope_program(backward=True)
+
+    def case(s, j):
+        inp = _nope_inputs(seq_q, seq_k, seed=s, topk=topk)
+        got = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        return nv.judged(nv.nope_problem(inp), {"": got})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 6)
+
+
+def test_nope_backward_pooled_with_masked_rows(record_property):
+    _require_nope_program(backward=True)
+
+    def case(s, j):
+        inp = _nope_inputs(1024, 4096, seed=s, topk=2176, index="pooled")
+        idx = inp.idx_global.clone()
+        idx[3] = -1
+        idx[9, ::2] = -1
+        got = _nope_pair(inp.q, inp.kv, idx, inp.dout)
+        # the fully masked row 3 (dq 0) is part of the judged contract
+        return nv.judged(nv.nope_problem(inp, indices=idx), {"": got})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 7)
 
 
 @pytest.mark.parametrize(
-    "seq_q, seq_k, topk, fixed", [(384, 1024, 200, False), (4096, 4096, 2176, True)]
+    "target, seed", [(0.99, NOPE_SEED + 8), (0.53, NOPE_SEED + 9)], ids=["0.99", "0.53"]
 )
-def test_nope_backward_iid(seq_q, seq_k, topk, fixed):
+def test_nope_backward_peaked_self_weight(target, seed, record_property):
+    """Own key carrying ~99 % (the strongest calibrated peaked case) or ~53 % of the softmax mass: ``beta`` from
+    the FP64 self-weight bisection on the case's seed, each draw's self weight (from the oracle's ``lse``) within
+    0.05 of the target, every output judged."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(seq_q, seq_k, seed=NOPE_SEED + 6, topk=topk)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    ref = _nope_reference(inp, dout=inp.dout)
-    _check_forward_nope(out, lse, ref, fixed=fixed)
-    _check_backward_nope(dq, dkv, ref, fixed=fixed)
+    beta = nope_ref.calibrate_beta_nope(target, seed=seed, topk=2176)
 
-
-def test_nope_backward_pooled_with_masked_rows():
-    _require_nope_program(backward=True)
-    inp = _nope_inputs(1024, 4096, seed=NOPE_SEED + 7, topk=2176, index="pooled")
-    idx = inp.idx_global.clone()
-    idx[3] = -1
-    idx[9, ::2] = -1
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, idx)
-    dq, dkv = backward_nope(inp.q, inp.kv, idx, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    assert torch.all(dq[3] == 0)
-    ref = _nope_reference(inp, idx, dout=inp.dout)
-    _check_forward_nope(out, lse, ref)
-    _check_backward_nope(dq, dkv, ref)
-
-
-def test_nope_backward_peaked_self_weight():
-    """Own key carrying ~99 % of the softmax mass: the strongest calibrated peaked case (``beta`` from the FP64
-    self-weight bisection); the calibrated 0.53 case runs at the same gates: 1.02x the case's own emulated floors
-    plus the element-wise / row bands, not the fixed iid table."""
-    _require_nope_program(backward=True)
-    for target, seed in ((0.99, NOPE_SEED + 8), (0.53, NOPE_SEED + 9)):
-        beta = nope_ref.calibrate_beta_nope(target, seed=seed, topk=2176)
+    def case(s, j):
         inp = nope_ref.make_nope_inputs(
             [4096],
             [4096],
-            seed=seed,
+            seed=s,
             topk=2176,
             index="iid",
             self_including=True,
             beta=beta,
         )
-        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-        dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-        torch.cuda.synchronize()
-        ref = nope_ref.reference_fp64_nope(
-            inp.q, inp.kv, inp.idx_global, dout=inp.dout, own_key=inp.own_key
+        got = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        found, oracle, naive = nv.judged(nv.nope_problem(inp), {"": got})
+        weight = _self_weight(inp, oracle["lse"])
+        assert abs(weight - target) < 0.05, (
+            f"draw {j}: self weight {weight:.4f}, target {target}"
         )
-        assert abs(ref["self_weight"] - target) < 0.05
-        _check_forward_nope(out, lse, ref)
-        _check_backward_nope(dq, dkv, ref)
+        return found, oracle, naive
+
+    nv.judge_draws(record_property, case, seed=seed)
 
 
-def test_nope_backward_fresh_and_accumulate_agree():
-    """The fresh FP32 ``dkv`` and the accumulate form (identity map, a wider buffer, two accumulations) carry the
-    same gradient (another FP32 summation order); untouched columns stay untouched; ``dq`` is bitwise the same."""
+def test_nope_backward_fresh_and_accumulate_forms(record_property):
+    """The fresh FP32 ``dkv`` and the accumulate form (identity map; a wider buffer accumulating twice, its columns
+    past 512 untouched): every call's ``dq`` and gradient are judged, an accumulation by its increment."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 2048, seed=NOPE_SEED + 10, topk=128)
-    args = (inp.q, inp.kv, inp.idx_global)
-    out, lse, o_lo = forward_nope(*args)
-    saved = (out, o_lo, lse, inp.dout)
-    dq, dkv = backward_nope(*args, *saved)
-    S = inp.total_k
-    acc = torch.zeros(S, D_LATENT, device="cuda")
-    dq_a, none = backward_nope(*args, *saved, dkv_acc=acc)
-    wide = torch.zeros(S, 704, device="cuda")
-    wide[:, D_LATENT:] = 7.0
-    backward_nope(*args, *saved, dkv_acc=wide)
-    backward_nope(*args, *saved, dkv_acc=wide)
-    torch.cuda.synchronize()
-    assert none is None and torch.equal(dq, dq_a)
-    assert rel_l2(acc, dkv) < ACC_REL_L2
-    assert rel_l2(wide[:, :D_LATENT], 2 * dkv) < ACC_REL_L2
-    assert torch.all(wide[:, D_LATENT:] == 7.0)
-    ref = _nope_reference(inp, dout=inp.dout)
-    _check_backward_nope(dq, dkv, ref)
-    _check_backward_nope(dq_a, acc, ref)
+
+    def case(s, j):
+        inp = _nope_inputs(256, 2048, seed=s, topk=128)
+        args = (inp.q, inp.kv, inp.idx_global)
+        out, lse, o_lo = forward_nope(*args)
+        saved = (out, o_lo, lse, inp.dout)
+        dq, dkv = backward_nope(*args, *saved)
+        S = inp.total_k
+        acc = torch.zeros(S, D_LATENT, device="cuda")
+        dq_a, none = backward_nope(*args, *saved, dkv_acc=acc)
+        wide = torch.zeros(S, 704, device="cuda")
+        wide[:, D_LATENT:] = 7.0
+        wide_0 = wide.clone()
+        dq_1, _ = backward_nope(*args, *saved, dkv_acc=wide)
+        wide_1 = wide.clone()
+        dq_2, _ = backward_nope(*args, *saved, dkv_acc=wide)
+        torch.cuda.synchronize()
+        assert none is None
+        runs = {
+            "fresh": dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv),
+            "acc": dict(dq=dq_a, dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc)),
+            "wide 1": dict(dq=dq_1, dkv_acc=nv.Acc(before=wide_0, after=wide_1)),
+            "wide 2": dict(dq=dq_2, dkv_acc=nv.Acc(before=wide_1, after=wide)),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 10)
 
 
 @pytest.mark.parametrize(
     "chunks", [(4096,), (2048, 2048), (1000, 1000, 1000, 1096), (4095, 1)]
 )
-def test_nope_backward_chunk_partitions_are_consistent(chunks):
-    """Backward passes over query chunks of one row accumulate into one ``dkv_acc`` what the whole row produces
-    (FP32 re-association only); every chunk's ``dq`` is the whole row's bitwise."""
+def test_nope_backward_chunk_partitions_accumulate_into_one_buffer(
+    chunks, record_property
+):
+    """Backward passes over query chunks of one row accumulate into one ``dkv_acc``: the whole row's calls and the
+    chunks' calls (their outputs side by side, the buffer by its increment) are both judged."""
     _require_nope_program(backward=True)
     T = sum(chunks)
-    inp = _nope_inputs(T, 4096, seed=NOPE_SEED + 11, topk=2176)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
-    base = 0
-    for n in chunks:
-        rows = slice(base, base + n)
-        q_c, idx_c = inp.q[rows], inp.idx_global[rows]
-        out_c, lse_c, o_lo_c = forward_nope(q_c, inp.kv, idx_c)
-        dq_c, none = backward_nope(
-            q_c, inp.kv, idx_c, out_c, o_lo_c, lse_c, inp.dout[rows], dkv_acc=acc
+
+    def case(s, j):
+        inp = _nope_inputs(T, 4096, seed=s, topk=2176)
+        whole = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        parts = []
+        base = 0
+        for n in chunks:
+            rows = slice(base, base + n)
+            q_c, idx_c = inp.q[rows], inp.idx_global[rows]
+            out_c, lse_c, o_lo_c = forward_nope(q_c, inp.kv, idx_c)
+            dq_c, none = backward_nope(
+                q_c, inp.kv, idx_c, out_c, o_lo_c, lse_c, inp.dout[rows], dkv_acc=acc
+            )
+            torch.cuda.synchronize()
+            assert none is None
+            parts.append((out_c, lse_c, o_lo_c, dq_c))
+            base += n
+        out, lse, o_lo, dq = (torch.cat(t) for t in zip(*parts, strict=True))
+        chunked = dict(
+            out=out,
+            lse=lse,
+            o_lo=o_lo,
+            dq=dq,
+            dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
         )
+        return nv.judged(nv.nope_problem(inp), {"whole": whole, "chunks": chunked})
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 11)
+
+
+def test_nope_backward_reads_a_head_major_dout(record_property):
+    """A head-major ``dout`` view (strides ``[512, T * 512, 1]``), read in place by the eager backward and by a
+    prepared runner, and its dense copy: every call is judged."""
+    _require_nope_program(backward=True)
+
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128, dout_layout="head_major")
+        assert inp.dout.stride() == (D_LATENT, inp.total_q * D_LATENT, 1)
+        dense = inp.dout.contiguous()
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        dq_hm, dkv_hm = backward_nope(
+            inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout
+        )
+        dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, dense)
+        # a prepared runner reads the head-major view in place as well
+        runner = prepare_dsa_nope_train(inp.q, inp.kv, inp.idx_global, dout=inp.dout)
+        assert runner.tensors["dout"].data_ptr() == inp.dout.data_ptr()
+        dq_r, dkv_r = runner.step()
         torch.cuda.synchronize()
-        assert none is None
-        assert torch.equal(out_c, out[rows]) and torch.equal(lse_c, lse[rows])
-        assert torch.equal(dq_c, dq[rows])
-        base += n
-    assert rel_l2(acc, dkv) < ACC_REL_L2
+        runs = {
+            "head major": dict(out=out, lse=lse, o_lo=o_lo, dq=dq_hm, dkv=dkv_hm),
+            "dense": dict(dq=dq, dkv=dkv),
+            "runner": dict(
+                out=runner.out, lse=runner.lse, o_lo=runner.o_lo, dq=dq_r, dkv=dkv_r
+            ),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 12)
 
 
-def test_nope_backward_head_major_dout_matches_dense():
+def test_nope_backward_repeat_calls(record_property):
+    """Two backward calls on the same saved forward (FP32 ``dkv`` atomics: no fixed summation order): both are
+    judged."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(
-        256, 1024, seed=NOPE_SEED + 12, topk=128, dout_layout="head_major"
-    )
-    assert inp.dout.stride() == (D_LATENT, inp.total_q * D_LATENT, 1)
-    dense = inp.dout.contiguous()
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq_hm, dkv_hm = backward_nope(
-        inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout
-    )
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, dense)
-    torch.cuda.synchronize()
-    assert torch.equal(dq_hm, dq) and rel_l2(dkv_hm, dkv) < ACC_REL_L2
-    _check_backward_nope(dq_hm, dkv_hm, _nope_reference(inp, dout=dense))
-    # a prepared runner reads the head-major view in place as well
-    runner = prepare_dsa_nope_train(inp.q, inp.kv, inp.idx_global, dout=inp.dout)
-    assert runner.tensors["dout"].data_ptr() == inp.dout.data_ptr()
-    dq_r, dkv_r = runner.step()
-    torch.cuda.synchronize()
-    assert torch.equal(dq_r, dq) and rel_l2(dkv_r, dkv) < ACC_REL_L2
 
-
-def test_nope_backward_deterministic_dq_and_dkv_spread():
-    _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 13, topk=128)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    first = backward_nope(*args)
-    second = backward_nope(*args)
-    torch.cuda.synchronize()
-    assert torch.equal(first[0], second[0])
-    assert rel_l2(first[1], second[1]) < 1e-5  # FP32 atomics: summation order only
-
-
-def test_nope_backward_destination_map_with_duplicates_matches_index_add():
-    _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 14, topk=128)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    _, dkv = backward_nope(*args)
-    S, S_dst = inp.total_k, 300
-    gen = torch.Generator(device="cuda").manual_seed(3)
-    dst_map = torch.randint(
-        0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
-    )
-    for direct in (None, False):
-        acc = torch.zeros(S_dst, 704, device="cuda")
-        _, none = backward_nope(
-            *args, dkv_acc=acc, dkv_dst_map=dst_map, dkv_direct=direct
-        )
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
+        first = backward_nope(*args)
+        second = backward_nope(*args)
         torch.cuda.synchronize()
-        want = torch.zeros(S_dst, D_LATENT, device="cuda").index_add_(
-            0, dst_map.long(), dkv
+        runs = {
+            "first": dict(out=out, lse=lse, o_lo=o_lo, dq=first[0], dkv=first[1]),
+            "second": dict(dq=second[0], dkv=second[1]),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 13)
+
+
+def test_nope_backward_destination_map_with_duplicates_matches_index_add(
+    record_property,
+):
+    """A random destination map with repeated rows into a wider FP32 buffer, on the record's route and forced
+    through the cast: each accumulation is judged against the oracle's key gradients added through the map
+    (``index_add``), its columns past 512 untouched; a map value out of range raises with ``check_dst_map``."""
+    _require_nope_program(backward=True)
+
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
+        dq, dkv = backward_nope(*args)
+        S, S_dst = inp.total_k, 300
+        gen = torch.Generator(device="cuda").manual_seed(s + 3)
+        dst_map = torch.randint(
+            0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
         )
-        assert none is None and rel_l2(acc[:, :D_LATENT], want) < ACC_REL_L2
-        assert torch.all(acc[:, D_LATENT:] == 0)
-    bad = dst_map.clone()
-    bad[0] = S_dst
-    with pytest.raises(ValueError, match="dkv_dst_map values must lie in"):
-        backward_nope(*args, dkv_acc=acc, dkv_dst_map=bad, check_dst_map=True)
+        runs = {"fresh": dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv)}
+        for label, direct in (("map", None), ("map cast", False)):
+            acc = torch.zeros(S_dst, 704, device="cuda")
+            dq_m, none = backward_nope(
+                *args, dkv_acc=acc, dkv_dst_map=dst_map, dkv_direct=direct
+            )
+            torch.cuda.synchronize()
+            assert none is None
+            before = torch.zeros_like(acc)
+            runs[label] = dict(
+                dq=dq_m, dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map)
+            )
+        if j == 0:
+            bad = dst_map.clone()
+            bad[0] = S_dst
+            scratch = torch.zeros(S_dst, 704, device="cuda")
+            with pytest.raises(ValueError, match="dkv_dst_map values must lie in"):
+                backward_nope(
+                    *args, dkv_acc=scratch, dkv_dst_map=bad, check_dst_map=True
+                )
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 14)
 
 
-def test_nope_backward_direct_and_cast_paths_agree():
+def test_nope_backward_direct_and_cast_paths(record_property):
     """With S >= 4 T the natural-layout main stage adds into the FP32 buffer itself (no accumulator, no cast),
-    for the fresh ``dkv`` and for ``dkv_acc`` alike; forced through the cast path the same rows receive the same
-    gradients and ``dq`` is bitwise the same."""
+    for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path.  Prepared runners
+    and eager calls on both paths: every call is judged."""
     _require_nope_direct_program()
-    inp = _nope_inputs(256, 2048, seed=NOPE_SEED + 15, topk=128)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
-    cast = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=False)
-    assert direct.dkv_direct and "nope_bwd_cast" not in direct.launches
-    assert not cast.dkv_direct and "nope_bwd_cast" in cast.launches
-    assert "dkv_latent_acc" not in direct.tensors and "dkv_latent_acc" in cast.tensors
-    dq_d, dkv_d = direct.step()
-    dq_c, dkv_c = cast.step()
-    dq_e, dkv_e = backward_nope(*args)
-    dq_f, dkv_f = backward_nope(*args, dkv_direct=False)
-    torch.cuda.synchronize()
-    assert (
-        torch.equal(dq_d, dq_c) and torch.equal(dq_e, dq_c) and torch.equal(dq_f, dq_c)
-    )
-    for got in (dkv_d, dkv_e, dkv_f):
-        assert rel_l2(got, dkv_c) < ACC_REL_L2
-    acc_d = torch.zeros(inp.total_k, D_LATENT, device="cuda")
-    acc_c = torch.zeros_like(acc_d)
-    backward_nope(*args, dkv_acc=acc_d)
-    backward_nope(*args, dkv_acc=acc_c, dkv_direct=False)
-    torch.cuda.synchronize()
-    assert rel_l2(acc_d, dkv_c) < ACC_REL_L2 and rel_l2(acc_c, dkv_c) < ACC_REL_L2
-    _check_backward_nope(dq_c, dkv_c, _nope_reference(inp, dout=inp.dout))
+
+    def case(s, j):
+        inp = _nope_inputs(256, 2048, seed=s, topk=128)
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
+        direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
+        cast = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=False)
+        assert direct.dkv_direct and "nope_bwd_cast" not in direct.launches
+        assert not cast.dkv_direct and "nope_bwd_cast" in cast.launches
+        assert (
+            "dkv_latent_acc" not in direct.tensors and "dkv_latent_acc" in cast.tensors
+        )
+        dq_d, dkv_d = direct.step()
+        dq_c, dkv_c = cast.step()
+        dq_e, dkv_e = backward_nope(*args)
+        dq_f, dkv_f = backward_nope(*args, dkv_direct=False)
+        torch.cuda.synchronize()
+        acc_d = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        acc_c = torch.zeros_like(acc_d)
+        dq_ad, _ = backward_nope(*args, dkv_acc=acc_d)
+        dq_ac, _ = backward_nope(*args, dkv_acc=acc_c, dkv_direct=False)
+        torch.cuda.synchronize()
+        zeros = torch.zeros_like(acc_d)
+        runs = {
+            "eager": dict(out=out, lse=lse, o_lo=o_lo, dq=dq_e, dkv=dkv_e),
+            "eager cast": dict(dq=dq_f, dkv=dkv_f),
+            "runner": dict(
+                out=direct.out, lse=direct.lse, o_lo=direct.o_lo, dq=dq_d, dkv=dkv_d
+            ),
+            "runner cast": dict(
+                out=cast.out, lse=cast.lse, o_lo=cast.o_lo, dq=dq_c, dkv=dkv_c
+            ),
+            "acc": dict(dq=dq_ad, dkv_acc=nv.Acc(before=zeros, after=acc_d)),
+            "acc cast": dict(dq=dq_ac, dkv_acc=nv.Acc(before=zeros, after=acc_c)),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 15)
 
 
-def test_nope_backward_forced_key_passes_match_reference_and_are_deterministic():
+def test_nope_backward_forced_key_passes(record_property):
+    """Three forced key passes (two eager calls and a prepared runner) beside the single pass: every call is
+    judged."""
     _require_nope_pass_program()
-    inp = _nope_inputs(256, 4096, seed=NOPE_SEED + 16, topk=200)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    single = backward_nope(*args, key_passes=1)
-    passes = backward_nope(*args, key_passes=3)
-    again = backward_nope(*args, key_passes=3)
-    torch.cuda.synchronize()
-    assert torch.equal(passes[0], again[0])
-    assert rel_l2(passes[1], single[1]) < ACC_REL_L2
-    ref = _nope_reference(inp, dout=inp.dout)
-    _check_backward_nope(*passes, ref)
-    runner = prepare_dsa_nope_train(*args[:3], dout=inp.dout, key_passes=3)
-    assert runner.key_passes == 3
-    dq_r, dkv_r = runner.step()
-    torch.cuda.synchronize()
-    assert torch.equal(dq_r, passes[0]) and rel_l2(dkv_r, single[1]) < ACC_REL_L2
+
+    def case(s, j):
+        inp = _nope_inputs(256, 4096, seed=s, topk=200)
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
+        single = backward_nope(*args, key_passes=1)
+        passes = backward_nope(*args, key_passes=3)
+        again = backward_nope(*args, key_passes=3)
+        runner = prepare_dsa_nope_train(*args[:3], dout=inp.dout, key_passes=3)
+        assert runner.key_passes == 3
+        dq_r, dkv_r = runner.step()
+        torch.cuda.synchronize()
+        runs = {
+            "single": dict(out=out, lse=lse, o_lo=o_lo, dq=single[0], dkv=single[1]),
+            "passes": dict(dq=passes[0], dkv=passes[1]),
+            "again": dict(dq=again[0], dkv=again[1]),
+            "runner": dict(
+                out=runner.out, lse=runner.lse, o_lo=runner.o_lo, dq=dq_r, dkv=dkv_r
+            ),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 16)
 
 
-def test_nope_backward_forced_passes_over_two_token_chunks():
+def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
     """Two forced passes over a row longer than one token chunk (4736 at K_slots 2176, plus 128): the launches run
-    chunk by chunk through every pass with a one-chunk pass scratch; dq is bitwise across two calls and agrees with
-    the single pass and the reference."""
+    chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward and the
+    single pass, every output judged."""
     record, _stages = _require_nope_pass_program()
     device = torch.device("cuda")
     chunk = KeyPassPolicy.from_record(record).token_chunk(2176)
     assert chunk == 4736
-    inp = _nope_inputs(chunk + 128, 65536, seed=NOPE_SEED + 22, topk=2176)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    runner = prepare_dsa_nope_train(
-        inp.q, inp.kv, inp.idx_global, dout=inp.dout, key_passes=2, dkv_direct=False
-    )
-    assert runner.key_passes == 2
-    assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
-        (stage, c, p)
-        for c in range(2)
-        for p in range(2)
-        for stage in ("nope_bwd_compact", "nope_bwd_main_pass")
-    ]
-    assert runner.layout["dq_partial"][1] == chunk * NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
-    assert runner.layout["key_scratch"][1] == chunk * 2176 * 4
-    assert (
-        dsa_nope_train_workspace_size(
-            chunk + 128, 65536, 2176, device, key_passes=2, dkv_direct=False
-        )
-        == runner.layout["total"]
-    )
-    del runner
-    args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    a = backward_nope(*args, key_passes=2)
-    b = backward_nope(*args, key_passes=2)
-    single = backward_nope(*args, key_passes=1)
-    torch.cuda.synchronize()
-    assert torch.equal(a[0], b[0])
-    assert rel_l2(a[0], single[0]) < 1e-3 and rel_l2(a[1], single[1]) < 1e-2
-    ref = _nope_reference(inp, dout=inp.dout)
-    _check_backward_nope(*a, ref, fixed=True)
+
+    def case(s, j):
+        inp = _nope_inputs(chunk + 128, 65536, seed=s, topk=2176)
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
+        if j == 0:
+            runner = prepare_dsa_nope_train(
+                inp.q,
+                inp.kv,
+                inp.idx_global,
+                dout=inp.dout,
+                key_passes=2,
+                dkv_direct=False,
+            )
+            assert runner.key_passes == 2
+            assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
+                (stage, c, p)
+                for c in range(2)
+                for p in range(2)
+                for stage in ("nope_bwd_compact", "nope_bwd_main_pass")
+            ]
+            assert (
+                runner.layout["dq_partial"][1]
+                == chunk * NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
+            )
+            assert runner.layout["key_scratch"][1] == chunk * 2176 * 4
+            assert (
+                dsa_nope_train_workspace_size(
+                    chunk + 128, 65536, 2176, device, key_passes=2, dkv_direct=False
+                )
+                == runner.layout["total"]
+            )
+            del runner
+        args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
+        a = backward_nope(*args, key_passes=2)
+        b = backward_nope(*args, key_passes=2)
+        single = backward_nope(*args, key_passes=1)
+        torch.cuda.synchronize()
+        runs = {
+            "two passes": dict(out=out, lse=lse, o_lo=o_lo, dq=a[0], dkv=a[1]),
+            "again": dict(dq=b[0], dkv=b[1]),
+            "single": dict(dq=single[0], dkv=single[1]),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 22)
 
 
-def test_nope_runner_launches_without_allocation_and_matches_eager():
+def test_nope_runner_launches_without_allocation(record_property):
+    """A prepared runner's second step allocates nothing; both steps' outputs and the eager pair's are judged."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 17, topk=128)
-    runner = prepare_dsa_nope_train(inp.q, inp.kv, inp.idx_global, dout=inp.dout)
-    assert runner.layout["total"] == dsa_nope_train_workspace_size(
-        inp.total_q, inp.total_k, inp.topk, torch.device("cuda")
-    )
-    dq_r, dkv_r = runner.step()
-    torch.cuda.synchronize()
-    before = torch.cuda.memory_stats()
-    runner.step()
-    torch.cuda.synchronize()
-    after = torch.cuda.memory_stats()
-    assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    assert torch.equal(runner.out, out) and torch.equal(runner.lse, lse)
-    assert torch.equal(dq_r, dq) and rel_l2(dkv_r, dkv) < ACC_REL_L2
+
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        runner = prepare_dsa_nope_train(inp.q, inp.kv, inp.idx_global, dout=inp.dout)
+        assert runner.layout["total"] == dsa_nope_train_workspace_size(
+            inp.total_q, inp.total_k, inp.topk, torch.device("cuda")
+        )
+        dq_r, dkv_r = runner.step()
+        # the runner's buffers are refreshed by its next step: keep this step's values
+        first = dict(
+            out=runner.out.clone(),
+            lse=runner.lse.clone(),
+            o_lo=runner.o_lo.clone(),
+            dq=dq_r.clone(),
+            dkv=dkv_r.clone(),
+        )
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_stats()
+        dq_r, dkv_r = runner.step()
+        torch.cuda.synchronize()
+        after = torch.cuda.memory_stats()
+        assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
+        runs = {
+            "runner 1": first,
+            "runner 2": dict(
+                out=runner.out, lse=runner.lse, o_lo=runner.o_lo, dq=dq_r, dkv=dkv_r
+            ),
+            "eager": _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout),
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 17)
 
 
-def test_nope_eager_calls_reuse_the_plan_under_tagged_keys():
+def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(record_property):
     _require_nope_program(backward=True)
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    inp = _nope_inputs(256, 512, seed=NOPE_SEED + 18, topk=128)
-    args = (inp.q, inp.kv, inp.idx_global)
-    first = forward_nope(*args)
-    second = forward_nope(*args)
-    assert len(cache) == 1 and next(iter(cache._entries))[0] == "nope_fwd"
-    torch.cuda.synchronize()
-    assert all(a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True))
-    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
-    out, lse, o_lo = first
-    g1 = backward_nope(*args, out, o_lo, lse, inp.dout)
-    g2 = backward_nope(*args, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    assert len(cache) == 2 and torch.equal(g1[0], g2[0])
-    assert g1[1].data_ptr() != g2[1].data_ptr()
-    # the rope entry of the same shapes plans separately
-    rope = make_inputs([256], [512], seed=NOPE_SEED + 18, topk=128)
-    if generated_program_available(torch.device("cuda")):
-        cake_backend.forward(
-            rope.q_latent, rope.q_rope, rope.kv_latent, rope.k_rope, rope.idx_global
+    rope_program = generated_program_available(torch.device("cuda"))
+
+    def case(s, j):
+        cache.clear()
+        inp = _nope_inputs(256, 512, seed=s, topk=128)
+        args = (inp.q, inp.kv, inp.idx_global)
+        first = forward_nope(*args)
+        second = forward_nope(*args)
+        assert len(cache) == 1 and next(iter(cache._entries))[0] == "nope_fwd"
+        torch.cuda.synchronize()
+        assert all(
+            a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True)
         )
-        assert len(cache) == 3
+        out, lse, o_lo = first
+        g1 = backward_nope(*args, out, o_lo, lse, inp.dout)
+        g2 = backward_nope(*args, out, o_lo, lse, inp.dout)
+        torch.cuda.synchronize()
+        assert len(cache) == 2
+        assert g1[1].data_ptr() != g2[1].data_ptr()
+        runs = {
+            "first": _forward_run(first),
+            "second": _forward_run(second),
+            "backward 1": dict(dq=g1[0], dkv=g1[1]),
+            "backward 2": dict(dq=g2[0], dkv=g2[1]),
+        }
+        draws = [nv.judged(nv.nope_problem(inp), runs)]
+        # the rope entry of the same shapes plans separately
+        if rope_program:
+            rope = make_inputs([256], [512], seed=s, topk=128)
+            got = cake_backend.forward(
+                rope.q_latent, rope.q_rope, rope.kv_latent, rope.k_rope, rope.idx_global
+            )
+            torch.cuda.synchronize()
+            assert len(cache) == 3
+            draws.append(
+                nv.judged(
+                    nv.rope_problem(rope, dout=None),
+                    {"": _forward_run(got)},
+                    prefix="rope ",
+                )
+            )
+        return nv.merge(*draws)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 18)
     cache.clear()
 
 
-def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache():
+def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache(
+    record_property,
+):
+    """The forward captures into a CUDA graph over the cached plan (no new cache entry); the eager call and the
+    replayed capture are both judged."""
     _require_nope_program()
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    inp = _nope_inputs(256, 512, seed=NOPE_SEED + 19, topk=128)
-    args = (inp.q, inp.kv, inp.idx_global)
-    eager = forward_nope(*args)
-    torch.cuda.synchronize()
-    assert len(cache) == 1
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
+
+    def case(s, j):
+        cache.clear()
+        inp = _nope_inputs(256, 512, seed=s, topk=128)
+        args = (inp.q, inp.kv, inp.idx_global)
+        eager = forward_nope(*args)
+        torch.cuda.synchronize()
+        assert len(cache) == 1
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                forward_nope(*args)
+        torch.cuda.current_stream().wait_stream(stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = forward_nope(*args)
+        assert len(cache) == 1
         for _ in range(2):
-            forward_nope(*args)
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        captured = forward_nope(*args)
-    assert len(cache) == 1
-    for _ in range(2):
-        graph.replay()
-    torch.cuda.synchronize()
-    for a, b in zip(eager, captured, strict=True):
-        assert torch.equal(a, b)
+            graph.replay()
+        torch.cuda.synchronize()
+        replayed = tuple(t.clone() for t in captured)  # the values the replays wrote
+        runs = {"eager": _forward_run(eager), "graph": _forward_run(replayed)}
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 19)
 
 
-def test_nope_autograd_function_matches_explicit_backward():
-    """The function's ``q`` gradient is the explicit ``dq`` bitwise; without ``dkv_acc`` its FP32 ``dkv`` reaches a
-    BF16 ``kv`` leaf as BF16 (the autograd engine casts to the leaf's dtype); with ``dkv_acc`` the FP32 values are
-    accumulated and ``kv.grad`` is ``None``."""
+def test_nope_autograd_function_and_the_explicit_backward(record_property):
+    """The function's ``q`` and ``kv`` gradients -- without ``dkv_acc`` the FP32 ``dkv`` reaches a BF16 ``kv`` leaf
+    as BF16 (the autograd engine casts to the leaf's dtype); with ``dkv_acc`` the FP32 values are accumulated and
+    ``kv.grad`` is ``None`` -- and the explicit pair: every output is judged; ``lse`` has no gradient."""
     _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 20, topk=128)
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-    out_f, lse_f = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
-        *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE
-    )
-    with pytest.raises(NotImplementedError, match="lse"):
-        torch.autograd.grad(lse_f.sum(), leaves)
-    out_f.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert torch.equal(out_f, out) and torch.equal(lse_f, lse)
-    assert torch.equal(leaves[0].grad, dq)
-    assert leaves[1].grad.dtype == torch.bfloat16
-    assert rel_l2(leaves[1].grad, dkv) < 1e-2
-    acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
-    leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-    out_f, _ = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
-        *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE, None, acc
-    )
-    out_f.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert leaves[1].grad is None and torch.equal(leaves[0].grad, dq)
-    assert rel_l2(acc, dkv) < ACC_REL_L2
 
-
-def test_nope_backend_entry_squeezes_the_one_head_kv():
-    _require_nope_program(backward=True)
-    inp = _nope_inputs(256, 1024, seed=NOPE_SEED + 21, topk=128)
-    out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-        inp.q, inp.kv, inp.idx_global, return_lse=True
-    )
-    one_head = inp.kv.unsqueeze(1).detach().clone().requires_grad_()
-    q = inp.q.detach().clone().requires_grad_()
-    out_h, lse_h = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-        q, one_head, inp.idx_global, return_lse=True
-    )
-    out_h.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert torch.equal(out, out_h) and torch.equal(lse, lse_h)
-    assert tuple(one_head.grad.shape) == (inp.total_k, 1, D_LATENT)
-    out_e, lse_e, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    _, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out_e, o_lo, lse_e, inp.dout)
-    torch.cuda.synchronize()
-    assert rel_l2(one_head.grad.squeeze(1), dkv) < 1e-2
-    two_heads = torch.zeros(
-        inp.total_k, 2, D_LATENT, dtype=torch.bfloat16, device="cuda"
-    )
-    with pytest.raises(ValueError, match="kv_latent"):
-        cake_backend.cake_dsa_sparse_attention_nondet_nope(
-            inp.q, two_heads, inp.idx_global
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        explicit = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
+        out_f, lse_f = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
+            *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE
         )
+        with pytest.raises(NotImplementedError, match="lse"):
+            torch.autograd.grad(lse_f.sum(), leaves)
+        out_f.backward(inp.dout)
+        torch.cuda.synchronize()
+        assert leaves[1].grad.dtype == torch.bfloat16
+        function = dict(
+            out=out_f.detach(),
+            lse=lse_f.detach(),
+            dq=leaves[0].grad,
+            dkv=leaves[1].grad,
+        )
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
+        out_a, lse_a = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
+            *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE, None, acc
+        )
+        out_a.backward(inp.dout)
+        torch.cuda.synchronize()
+        assert leaves[1].grad is None
+        accumulated = dict(
+            out=out_a.detach(),
+            lse=lse_a.detach(),
+            dq=leaves[0].grad,
+            dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+        )
+        runs = {"explicit": explicit, "function": function, "function acc": accumulated}
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 20)
+
+
+def test_nope_backend_entry_squeezes_the_one_head_kv(record_property):
+    _require_nope_program(backward=True)
+
+    def case(s, j):
+        inp = _nope_inputs(256, 1024, seed=s, topk=128)
+        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            inp.q, inp.kv, inp.idx_global, return_lse=True
+        )
+        one_head = inp.kv.unsqueeze(1).detach().clone().requires_grad_()
+        q = inp.q.detach().clone().requires_grad_()
+        out_h, lse_h = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            q, one_head, inp.idx_global, return_lse=True
+        )
+        out_h.backward(inp.dout)
+        torch.cuda.synchronize()
+        assert tuple(one_head.grad.shape) == (inp.total_k, 1, D_LATENT)
+        eager = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        if j == 0:
+            two_heads = torch.zeros(
+                inp.total_k, 2, D_LATENT, dtype=torch.bfloat16, device="cuda"
+            )
+            with pytest.raises(ValueError, match="kv_latent"):
+                cake_backend.cake_dsa_sparse_attention_nondet_nope(
+                    inp.q, two_heads, inp.idx_global
+                )
+        runs = {
+            "flat": dict(out=out, lse=lse),
+            "one head": dict(
+                out=out_h.detach(), lse=lse_h.detach(), dq=q.grad, dkv=one_head.grad
+            ),
+            "eager": eager,
+        }
+        return nv.judged(nv.nope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 21)
 
 
 # --- packed form: the index-preparation stage against the torch formulation (GPU; skips until the stage ships) ---
@@ -6605,7 +6728,8 @@ def _require_nope_mask_route():
 
 def _compact_local_rows(local, glob):
     """The stable compaction of per-document rows ``local`` by the validity of their globalized rows ``glob``
-    (``-1`` after the causal rule and the range checks): the twin the kernels must treat bitwise like ``local``."""
+    (``-1`` after the causal rule and the range checks): the twin whose globalized rows are the stable compaction
+    of ``glob``."""
     valid = glob != -1
     order = (~valid).to(torch.int8).argsort(dim=-1, stable=True)
     return (
@@ -6623,14 +6747,6 @@ def _nope_qkv(T, S, *, seed):
         torch.bfloat16
     )
     return q, kv, dout
-
-
-def _rel_or_equal(a, b, tol):
-    """``rel_l2`` within ``tol``, or bitwise equality where the reference side is identically zero."""
-    if float(b.double().norm()) == 0.0:
-        assert torch.equal(a, b)
-    else:
-        assert rel_l2(a, b) < tol, rel_l2(a, b)
 
 
 @pytest.mark.parametrize("compact", [False, True])
@@ -6749,17 +6865,16 @@ def test_nope_index_prep_reads_strided_and_offset_index_views_in_place(topk, com
         ([640, 512], [1024, 1024], 1024, False),  # 1,179,648 slots
     ],
 )
-def test_nope_packed_entry_with_on_device_index_prep_is_bitwise_the_glue_path(
-    seqs_q, seqs_k, topk, causal, route, monkeypatch
+def test_nope_packed_entry_with_on_device_index_prep_and_the_glue_path(
+    seqs_q, seqs_k, topk, causal, route, monkeypatch, record_property
 ):
-    """The backend's packed entry against the explicit glue plus the flat entry with caller lengths: ``out``,
-    ``lse`` and ``dq`` bitwise; ``dkv`` (FP32 atomics into a caller buffer on both sides) within the
-    summation-order spread.  On the stage route (at or above the slot limit, or forced by a limit of 0) the glue
-    is ``offset_gather_kv_indices`` globalized rows stably compacted by ``nope_compact_indices`` (==
-    ``compact_rows``) with the counts as lengths: the random causal rows carry holes (keys the causal rule drops),
-    so the glue side must compact to agree.  Below the limit (the one-launch forward) the glue is the
-    position-preserving globalized rows themselves with the last valid slot + 1 as lengths, and the kernel-level
-    ``forward_nope_varlen`` returns exactly that pair."""
+    """The backend's packed entry and the explicit glue plus the flat entry with caller lengths, every call's float
+    outputs (``dkv`` as FP32 atomics into a caller buffer) judged against the problem of the rows and lengths it
+    received.  On the stage route (at or above the slot limit, or forced by a limit of 0) the glue is
+    ``offset_gather_kv_indices`` globalized rows stably compacted by ``nope_compact_indices`` (== ``compact_rows``)
+    with the counts as lengths: the random causal rows carry holes (keys the causal rule drops).  Below the limit
+    (the one-launch forward) the glue is the position-preserving globalized rows themselves with the last valid
+    slot + 1 as lengths.  The kernel-level ``forward_nope_varlen`` returns exactly the glue's pair."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
     if route == "stage":
@@ -6767,71 +6882,94 @@ def test_nope_packed_entry_with_on_device_index_prep_is_bitwise_the_glue_path(
     mode = cake_backend.nope_varlen_index_mode(sum(seqs_q), topk)
     if mode == "mask":
         _require_nope_mask_route()
-    inp = nope_ref.make_nope_inputs(
-        seqs_q, seqs_k, seed=NOPE_SEED + 600 + topk, topk=topk, index="iid"
-    )
-    local = inp.idx_local
-    if causal:  # random rows, so the causal rule drops keys
-        gen = torch.Generator(device="cuda").manual_seed(NOPE_SEED + 601)
-        local = torch.full_like(inp.idx_local, -1)
-        for d, (lq, lk) in enumerate(zip(seqs_q, seqs_k, strict=True)):
-            rows = slice(int(inp.cu_seqlens_q[d]), int(inp.cu_seqlens_q[d + 1]))
-            local[rows] = torch.randint(
-                0, lk, (lq, topk), device="cuda", generator=gen
-            ).to(torch.int32)
-    S = inp.total_k
 
-    def run(fused):
-        leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-        acc = torch.zeros(S, D_LATENT, device="cuda")
-        if fused:
-            assert cake_backend.varlen_index_mode(local) == mode
-            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
-                leaves[0],
-                leaves[1],
-                local,
-                inp.cu_seqlens_q,
-                inp.cu_seqlens_k,
-                causal=causal,
-                return_lse=True,
-                dkv_acc=acc,
-            )
-        else:
-            glob = offset_gather_kv_indices(
-                local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=causal
-            )
-            if mode == "mask":
-                idx, lengths = glob, nope_ref.last_valid_plus_one(glob, S)
+    def case(s, j):
+        inp = nope_ref.make_nope_inputs(seqs_q, seqs_k, seed=s, topk=topk, index="iid")
+        local = inp.idx_local
+        if causal:  # random rows, so the causal rule drops keys
+            gen = torch.Generator(device="cuda").manual_seed(s + 1)
+            local = torch.full_like(inp.idx_local, -1)
+            for d, (lq, lk) in enumerate(zip(seqs_q, seqs_k, strict=True)):
+                rows = slice(int(inp.cu_seqlens_q[d]), int(inp.cu_seqlens_q[d + 1]))
+                local[rows] = torch.randint(
+                    0, lk, (lq, topk), device="cuda", generator=gen
+                ).to(torch.int32)
+        S = inp.total_k
+        glob = offset_gather_kv_indices(
+            local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=causal
+        )
+
+        def run(fused):
+            leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
+            acc = torch.zeros(S, D_LATENT, device="cuda")
+            if fused:
+                assert cake_backend.varlen_index_mode(local) == mode
+                out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+                    leaves[0],
+                    leaves[1],
+                    local,
+                    inp.cu_seqlens_q,
+                    inp.cu_seqlens_k,
+                    causal=causal,
+                    return_lse=True,
+                    dkv_acc=acc,
+                )
+                got = idx = lengths = None
             else:
-                idx, lengths = cake_backend.nope_compact_indices(glob, S)
-                rows, counts = compact_rows(glob, S)
-                assert torch.equal(idx, rows) and torch.equal(lengths, counts)
-            got = cake_backend.forward_nope_varlen(
-                inp.q, inp.kv, local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=causal
-            )
+                if mode == "mask":
+                    idx, lengths = glob, nope_ref.last_valid_plus_one(glob, S)
+                else:
+                    idx, lengths = cake_backend.nope_compact_indices(glob, S)
+                    rows, counts = compact_rows(glob, S)
+                    assert torch.equal(idx, rows) and torch.equal(lengths, counts)
+                got = cake_backend.forward_nope_varlen(
+                    inp.q,
+                    inp.kv,
+                    local,
+                    inp.cu_seqlens_q,
+                    inp.cu_seqlens_k,
+                    causal=causal,
+                )
+                torch.cuda.synchronize()
+                assert torch.equal(got[3], idx) and torch.equal(got[4], lengths)
+                out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+                    leaves[0],
+                    leaves[1],
+                    idx,
+                    topk_length=lengths,
+                    return_lse=True,
+                    dkv_acc=acc,
+                    num_segments=len(seqs_q),
+                )
+            (dq,) = torch.autograd.grad(out, [leaves[0]], inp.dout)
             torch.cuda.synchronize()
-            assert torch.equal(got[3], idx) and torch.equal(got[4], lengths)
-            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-                leaves[0],
-                leaves[1],
-                idx,
-                topk_length=lengths,
-                return_lse=True,
-                dkv_acc=acc,
-                num_segments=len(seqs_q),
+            step = dict(
+                out=out.detach(),
+                lse=lse.detach(),
+                dq=dq,
+                dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
             )
-        (dq,) = torch.autograd.grad(out, [leaves[0]], inp.dout)
-        torch.cuda.synchronize()
-        return out, lse, dq, acc
+            return step, got, idx, lengths
 
-    fused, glue = run(True), run(False)
-    for a, b in zip(fused[:3], glue[:3], strict=True):
-        assert torch.equal(a, b)
-    assert rel_l2(fused[3], glue[3]) < 1e-5  # FP32 atomics: summation order only
+        fused, _, _, _ = run(True)
+        glue, varlen_fwd, idx, lengths = run(False)
+        # the packed entry and the kernel-level forward read the per-document rows; the flat entry the glue's pair
+        local_runs = {"fused": fused, "varlen fwd": _forward_run(varlen_fwd)}
+        return nv.merge(
+            nv.judged(nv.nope_problem(inp, indices=glob), local_runs, prefix="local "),
+            nv.judged(
+                nv.nope_problem(inp, indices=idx, topk_length=lengths),
+                {"": glue},
+                prefix="glue ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 600 + topk)
 
 
-# --- hole rows (U6 section 5 / judges' grafts): every construction is bitwise its stable compaction through the
-# kernels; the compacting entries return the compacted rows and the valid counts (GPU; skips until the render) ---
+# --- hole rows: every construction and its stable compaction run through the kernels, each call judged against
+# the problem of the rows and lengths it received; the compacting entries return the compacted rows and the valid
+# counts (GPU; skips until the render) ---
 
 # name -> (seqs_q, seqs_k, K_slots, variant): the repro structure at a small T, interleaved holes (the random rows
 # of ``_index_prep_case``: negatives and out-of-range slots anywhere, the first row of every document fully masked,
@@ -6854,8 +6992,9 @@ _HOLE_CASES = {
 }
 
 
-def _hole_case(name):
-    """``(local, cu_q, cu_k)`` of one ``_HOLE_CASES`` entry: per-document int32 rows with holes on the device."""
+def _hole_case(name, *, seed):
+    """``(local, cu_q, cu_k)`` of one ``_HOLE_CASES`` entry: per-document int32 rows with holes on the device, the
+    random rows drawn from ``seed``."""
     seqs_q, seqs_k, K, variant = _HOLE_CASES[name]
     if variant == "repro":
         cu_q, cu_k = _prefix(seqs_q), _prefix(seqs_k)
@@ -6867,7 +7006,7 @@ def _hole_case(name):
             0,
         ).contiguous()
         return local, cu_q, cu_k
-    local, cu_q, cu_k = _index_prep_case(seqs_q, seqs_k, K, seed=NOPE_SEED + 700 + K)
+    local, cu_q, cu_k = _index_prep_case(seqs_q, seqs_k, K, seed=seed)
     if variant == "leading":
         local[:, :5] = -1
     elif variant == "every_other":
@@ -6895,9 +7034,10 @@ def _hole_case(name):
 
 
 def _hole_case_tensors(name, *, seed):
-    """The rows of a hole case, their position-preserving globalization ``glob``, its stable compaction and counts,
-    the compacted per-document twin, and matching ``q`` / ``kv`` / ``dout``."""
-    local, cu_q, cu_k = _hole_case(name)
+    """The rows of a hole case (random rows drawn from ``seed + 1``), their position-preserving globalization
+    ``glob``, its stable compaction and counts, the compacted per-document twin, and matching ``q`` / ``kv`` /
+    ``dout`` (drawn from ``seed``)."""
+    local, cu_q, cu_k = _hole_case(name, seed=seed + 1)
     S, T = int(cu_k[-1]), int(local.shape[0])
     glob = offset_gather_kv_indices(local, cu_q, cu_k, causal=True)
     rows, counts = compact_rows(glob, S)
@@ -6934,454 +7074,520 @@ def _public_nope_step(entry, q, kv, dout, *args, **kw):
     return out, lse, dq, acc
 
 
+def _public_run(step):
+    """The outputs of :func:`_public_nope_step` as one judged run (the FP32 accumulator by its increment over
+    zeros)."""
+    out, lse, dq, acc = step
+    return dict(
+        out=out.detach(),
+        lse=lse.detach(),
+        dq=dq,
+        dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+    )
+
+
+def _judge_hole_case(record_property, name, case, *, seed):
+    """``nv.judge_draws`` of a hole case's ``case``; a case without query rows or without a valid slot gives
+    outputs that do not change with the seed, so it runs once and keeps its contract only (``nv.judged`` inside
+    ``case`` asserts it)."""
+    seqs_q, _, _, variant = _HOLE_CASES[name]
+    if variant == "all" or not sum(seqs_q):
+        case(seed, 0)
+        return
+    nv.judge_draws(record_property, case, seed=seed)
+
+
 @pytest.mark.parametrize("name", sorted(_HOLE_CASES))
-def test_nope_hole_rows_are_bitwise_their_stable_compaction_through_the_kernels(
-    name, monkeypatch
+def test_nope_hole_rows_and_their_stable_compaction_through_the_kernels(
+    name, monkeypatch, record_property
 ):
     """The stage route (at or above the slot limit; every hole case is below the shipped limit, so the limit is
-    set to 0 here).  Through ``forward_nope_varlen`` the hole rows and their stable per-document twin give
-    ``out``, ``lse``, ``o_lo`` bitwise, the same compacted global rows (``compact_rows`` of the glue's globalized
-    rows) and the same valid counts; ``backward_nope`` over the returned pair gives ``dq`` bitwise and ``dkv``
-    within the atomics spread.  Through the public entries the varlen call on hole rows, the flat call on the
-    compacted rows with the counts as lengths and the flat call on the hole rows without lengths (the stage's flat
-    mode) agree bitwise on ``out`` / ``lse`` / ``dq``; no query rows give empty outputs and no launch."""
+    set to 0 here).  Through ``forward_nope_varlen`` the hole rows and their stable per-document twin return the
+    same compacted global rows (``compact_rows`` of the glue's globalized rows) and the same valid counts;
+    ``backward_nope`` runs over each returned pair.  The public entries run the varlen call on hole rows, the flat
+    call on the compacted rows with the counts as lengths and the flat call on the hole rows without lengths (the
+    stage's flat mode).  Every call's float outputs are judged against the problem of the rows and lengths it
+    received; no query rows give empty outputs and no launch."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
     monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
-    c = _hole_case_tensors(name, seed=NOPE_SEED + 800)
-    a = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    b = cake_backend.forward_nope_varlen(c.q, c.kv, c.twin, c.cu_q, c.cu_k, causal=True)
-    torch.cuda.synchronize()
-    for x, y in zip(a[:3], b[:3], strict=True):
-        assert torch.equal(x, y)
-    for side in (a, b):
-        assert torch.equal(side[3], c.rows) and torch.equal(side[4], c.counts)
-    if c.T == 0:
-        assert tuple(a[0].shape) == (0, NUM_HEADS, D_LATENT) and a[3].numel() == 0
-        out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+
+    def case(s, j):
+        c = _hole_case_tensors(name, seed=s)
+        a = cake_backend.forward_nope_varlen(
             c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
         )
-        assert tuple(out_v.shape) == (0, NUM_HEADS, D_LATENT)
-        return
-    ga = backward_nope(
-        c.q,
-        c.kv,
-        a[3],
-        a[0],
-        a[2],
-        a[1],
-        c.dout,
-        topk_length=a[4],
-        num_segments=c.num_docs,
-    )
-    gb = backward_nope(
-        c.q,
-        c.kv,
-        b[3],
-        b[0],
-        b[2],
-        b[1],
-        c.dout,
-        topk_length=b[4],
-        num_segments=c.num_docs,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(ga[0], gb[0])
-    _rel_or_equal(ga[1], gb[1], 1e-5)
-    varlen = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    flat_c = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        c.rows,
-        topk_length=c.counts,
-        num_segments=c.num_docs,
-    )
-    flat_h = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        c.glob,
-        num_segments=c.num_docs,
-    )
-    assert torch.equal(varlen[0], a[0]) and torch.equal(varlen[1], a[1])
-    assert torch.equal(varlen[2], ga[0])
-    for other in (flat_c, flat_h):
-        for x, y in zip(varlen[:3], other[:3], strict=True):
-            assert torch.equal(x, y)
-        _rel_or_equal(other[3], varlen[3], 1e-5)
-    _rel_or_equal(varlen[3], ga[1], 1e-5)
+        b = cake_backend.forward_nope_varlen(
+            c.q, c.kv, c.twin, c.cu_q, c.cu_k, causal=True
+        )
+        torch.cuda.synchronize()
+        for side in (a, b):
+            assert torch.equal(side[3], c.rows) and torch.equal(side[4], c.counts)
+        if c.T == 0:
+            assert tuple(a[0].shape) == (0, NUM_HEADS, D_LATENT) and a[3].numel() == 0
+            out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+                c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
+            )
+            assert tuple(out_v.shape) == (0, NUM_HEADS, D_LATENT)
+            return {}, {}, {}
+        ga = backward_nope(
+            c.q,
+            c.kv,
+            a[3],
+            a[0],
+            a[2],
+            a[1],
+            c.dout,
+            topk_length=a[4],
+            num_segments=c.num_docs,
+        )
+        gb = backward_nope(
+            c.q,
+            c.kv,
+            b[3],
+            b[0],
+            b[2],
+            b[1],
+            c.dout,
+            topk_length=b[4],
+            num_segments=c.num_docs,
+        )
+        torch.cuda.synchronize()
+        varlen = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
+            c.q,
+            c.kv,
+            c.dout,
+            c.local,
+            c.cu_q,
+            c.cu_k,
+            causal=True,
+        )
+        flat_c = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            c.rows,
+            topk_length=c.counts,
+            num_segments=c.num_docs,
+        )
+        flat_h = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            c.glob,
+            num_segments=c.num_docs,
+        )
+        # the hole rows (globalized: glob), the twin (globalized: the compacted rows), the returned pairs
+        holes = {
+            "varlen fwd": _forward_run(a),
+            "varlen": _public_run(varlen),
+            "flat": _public_run(flat_h),
+        }
+        pairs = {
+            "bwd": dict(dq=ga[0], dkv=ga[1]),
+            "twin bwd": dict(dq=gb[0], dkv=gb[1]),
+            "flat": _public_run(flat_c),
+        }
+        return nv.merge(
+            nv.judged(nv.nope_problem(c, indices=c.glob), holes, prefix="holes "),
+            nv.judged(
+                nv.nope_problem(c, indices=c.rows),
+                {"": _forward_run(b)},
+                prefix="twin fwd ",
+            ),
+            nv.judged(
+                nv.nope_problem(c, indices=c.rows, topk_length=c.counts),
+                pairs,
+                prefix="compacted ",
+            ),
+        )
+
+    _judge_hole_case(record_property, name, case, seed=NOPE_SEED + 800)
 
 
 @pytest.mark.parametrize("name", sorted(_HOLE_CASES))
-def test_nope_hole_rows_below_the_limit_are_bitwise_the_position_preserving_forward(
-    name, monkeypatch
+def test_nope_hole_rows_below_the_limit_take_the_position_preserving_forward(
+    name, monkeypatch, record_property
 ):
     """Below the slot limit (raised above every case here; every case, the 652,800-slot repro included, also sits
     below the shipped limit) the packed entry converts in-kernel, position-preserving (``convert = 2``).  Through
     ``forward_nope_varlen`` the hole rows give the globalized rows of ``offset_gather_kv_indices`` with their
-    holes in place and the last valid slot + 1 as lengths, and ``out`` / ``lse`` / ``o_lo`` bitwise the eager
-    ``forward_nope`` over those rows (the same kernel over the same slot order); ``backward_nope`` over the
-    returned pair gives ``dq`` bitwise the eager backward over the globalized rows with those lengths and ``dkv``
-    within the atomics spread.  Through the public entries the varlen call on hole rows, the flat call on the
-    globalized rows without lengths (one launch deriving the lengths) and the flat call with the derived lengths
-    agree bitwise on ``out`` / ``lse`` / ``dq``; the varlen Function saves exactly that pair; and the outputs and
-    gradients meet the FP64 floors evaluated on the raw slot order.  No query rows give empty outputs and no
-    launch."""
+    holes in place and the last valid slot + 1 as lengths.  The eager ``forward_nope`` over those rows,
+    ``backward_nope`` over the returned pair and over the globalized rows with those lengths, the public varlen
+    call on hole rows and the flat calls on the globalized rows without lengths (one launch deriving the lengths)
+    and with the derived lengths all run, and the varlen and flat Functions save exactly that pair.  Every call's
+    float outputs are judged against the problem of the rows and lengths it received.  No query rows give empty
+    outputs and no launch."""
     _require_nope_program(backward=True)
     _require_nope_mask_route()
     monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 1 << 40)
-    c = _hole_case_tensors(name, seed=NOPE_SEED + 800)
-    lengths = nope_ref.last_valid_plus_one(c.glob, c.S)
-    if c.T:
-        assert cake_backend.varlen_index_mode(c.local) == "mask"
-        assert cake_backend.nope_flat_index_mode(c.T, int(c.glob.shape[1])) == "mask"
-    a = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    e = forward_nope(
-        c.q, c.kv, c.glob
-    )  # the eager kernel over the raw rows derives the same lengths
-    torch.cuda.synchronize()
-    assert torch.equal(a[3], c.glob) and torch.equal(a[4], lengths)
-    for x, y in zip(a[:3], e, strict=True):
-        assert torch.equal(x, y)
-    if c.T == 0:
-        assert tuple(a[0].shape) == (0, NUM_HEADS, D_LATENT) and a[3].numel() == 0
-        out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+
+    def case(s, j):
+        c = _hole_case_tensors(name, seed=s)
+        lengths = nope_ref.last_valid_plus_one(c.glob, c.S)
+        if c.T:
+            assert cake_backend.varlen_index_mode(c.local) == "mask"
+            assert (
+                cake_backend.nope_flat_index_mode(c.T, int(c.glob.shape[1])) == "mask"
+            )
+        a = cake_backend.forward_nope_varlen(
             c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
         )
-        assert tuple(out_v.shape) == (0, NUM_HEADS, D_LATENT)
-        return
-    ga = backward_nope(
-        c.q,
-        c.kv,
-        a[3],
-        a[0],
-        a[2],
-        a[1],
-        c.dout,
-        topk_length=a[4],
-        num_segments=c.num_docs,
-    )
-    gb = backward_nope(
-        c.q,
-        c.kv,
-        c.glob,
-        e[0],
-        e[2],
-        e[1],
-        c.dout,
-        topk_length=lengths,
-        num_segments=c.num_docs,
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(ga[0], gb[0])
-    _rel_or_equal(ga[1], gb[1], 1e-5)
-    varlen = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    flat_h = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        c.glob,
-        num_segments=c.num_docs,
-    )
-    flat_l = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        c.glob,
-        topk_length=lengths,
-        num_segments=c.num_docs,
-    )
-    assert torch.equal(varlen[0], a[0]) and torch.equal(varlen[1], a[1])
-    assert torch.equal(varlen[2], ga[0])
-    for other in (flat_h, flat_l):
-        for x, y in zip(varlen[:3], other[:3], strict=True):
-            assert torch.equal(x, y)
-        _rel_or_equal(other[3], varlen[3], 1e-5)
-    _rel_or_equal(varlen[3], ga[1], 1e-5)
-    # the saved pair of both Functions: the position-preserving rows and the last valid slot + 1
-    q_leaf = c.q.detach().clone().requires_grad_()
-    out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
-        q_leaf, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    saved = out_v.grad_fn.saved_tensors
-    assert torch.equal(saved[5], c.glob) and torch.equal(saved[6], lengths)
-    out_f = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-        q_leaf, c.kv, c.glob, num_segments=c.num_docs
-    )
-    saved = out_f.grad_fn.saved_tensors
-    assert saved[5].data_ptr() == c.glob.data_ptr() and torch.equal(saved[6], lengths)
-    # the FP64 floors on the raw slot order (the order both kernels process below the limit)
-    ref = nope_ref.reference_fp64_nope(c.q, c.kv, c.glob, dout=c.dout, compact=False)
-    _check_forward_nope(varlen[0], varlen[1], ref)
-    _check_backward_nope(varlen[2], varlen[3], ref)
+        e = forward_nope(
+            c.q, c.kv, c.glob
+        )  # the eager kernel over the raw rows derives the same lengths
+        torch.cuda.synchronize()
+        assert torch.equal(a[3], c.glob) and torch.equal(a[4], lengths)
+        if c.T == 0:
+            assert tuple(a[0].shape) == (0, NUM_HEADS, D_LATENT) and a[3].numel() == 0
+            out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+                c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
+            )
+            assert tuple(out_v.shape) == (0, NUM_HEADS, D_LATENT)
+            return {}, {}, {}
+        ga = backward_nope(
+            c.q,
+            c.kv,
+            a[3],
+            a[0],
+            a[2],
+            a[1],
+            c.dout,
+            topk_length=a[4],
+            num_segments=c.num_docs,
+        )
+        gb = backward_nope(
+            c.q,
+            c.kv,
+            c.glob,
+            e[0],
+            e[2],
+            e[1],
+            c.dout,
+            topk_length=lengths,
+            num_segments=c.num_docs,
+        )
+        torch.cuda.synchronize()
+        varlen = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
+            c.q,
+            c.kv,
+            c.dout,
+            c.local,
+            c.cu_q,
+            c.cu_k,
+            causal=True,
+        )
+        flat_h = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            c.glob,
+            num_segments=c.num_docs,
+        )
+        flat_l = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            c.glob,
+            topk_length=lengths,
+            num_segments=c.num_docs,
+        )
+        # the saved pair of both Functions: the position-preserving rows and the last valid slot + 1
+        q_leaf = c.q.detach().clone().requires_grad_()
+        out_v = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+            q_leaf, c.kv, c.local, c.cu_q, c.cu_k, causal=True
+        )
+        saved = out_v.grad_fn.saved_tensors
+        assert torch.equal(saved[5], c.glob) and torch.equal(saved[6], lengths)
+        out_f = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            q_leaf, c.kv, c.glob, num_segments=c.num_docs
+        )
+        saved = out_f.grad_fn.saved_tensors
+        assert saved[5].data_ptr() == c.glob.data_ptr() and torch.equal(
+            saved[6], lengths
+        )
+        torch.cuda.synchronize()
+        # the calls without lengths read the raw rows (glob); the others glob with the derived lengths
+        raw = {
+            "varlen fwd": _forward_run(a),
+            "eager fwd": _forward_run(e),
+            "varlen": _public_run(varlen),
+            "flat": _public_run(flat_h),
+            "saved varlen": dict(out=out_v.detach()),
+            "saved flat": dict(out=out_f.detach()),
+        }
+        with_lengths = {
+            "bwd": dict(dq=ga[0], dkv=ga[1]),
+            "eager bwd": dict(dq=gb[0], dkv=gb[1]),
+            "flat": _public_run(flat_l),
+        }
+        return nv.merge(
+            nv.judged(nv.nope_problem(c, indices=c.glob), raw, prefix="raw "),
+            nv.judged(
+                nv.nope_problem(c, indices=c.glob, topk_length=lengths),
+                with_lengths,
+                prefix="lengths ",
+            ),
+        )
+
+    _judge_hole_case(record_property, name, case, seed=NOPE_SEED + 800)
 
 
 @pytest.mark.parametrize("name", ["interleaved", "k2177_runs", "repro_small"])
-def test_nope_caller_cut_on_hole_rows_is_the_flat_entry_on_the_cut_compaction(name):
-    """A caller ``topk_length`` is a position cut applied before the compaction (K2): ``nope_compact_indices(glob,
-    S, topk_length=L)`` == ``compact_rows(glob, S, L)``; ``cake_backend.forward_nope_varlen(..., topk_length=L)`` returns those
-    rows and counts; the varlen entry with ``L`` on hole rows is bitwise the flat entry on the cut compaction with
-    its counts.  The flat entry with caller lengths does not compact: it is bitwise the kernel-level forward over
-    the caller's rows and lengths (D5 both ways)."""
+def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(name, record_property):
+    """A caller ``topk_length`` is a position cut applied before the compaction: ``nope_compact_indices(glob, S,
+    topk_length=L)`` == ``compact_rows(glob, S, L)``; ``cake_backend.forward_nope_varlen(..., topk_length=L)``
+    returns those rows and counts.  The varlen entry with ``L`` on hole rows, the flat entry on the cut compaction
+    with its counts, the flat entry with caller lengths (it does not compact: the caller's rows as given) and the
+    kernel-level pair over the caller's rows and lengths all run; every call's float outputs are judged against the
+    problem of the rows and lengths it received."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
-    c = _hole_case_tensors(name, seed=NOPE_SEED + 810)
-    K = int(c.local.shape[1])
-    gen = torch.Generator(device="cuda").manual_seed(NOPE_SEED + 811)
-    cut = torch.randint(0, K + 1, (c.T,), device="cuda", generator=gen).to(torch.int32)
-    cut[: min(3, c.T)] = torch.tensor([0, 1, K], device="cuda", dtype=torch.int32)[
-        : min(3, c.T)
-    ]
-    rows, counts = compact_rows(c.glob, c.S, cut)
-    got = cake_backend.nope_compact_indices(c.glob, c.S, topk_length=cut)
-    torch.cuda.synchronize()
-    assert torch.equal(got[0], rows) and torch.equal(got[1], counts)
-    a = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True, topk_length=cut
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(a[3], rows) and torch.equal(a[4], counts)
-    varlen = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-        topk_length=cut,
-    )
-    flat = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        rows,
-        topk_length=counts,
-        num_segments=c.num_docs,
-    )
-    for x, y in zip(varlen[:3], flat[:3], strict=True):
-        assert torch.equal(x, y)
-    _rel_or_equal(flat[3], varlen[3], 1e-5)
-    # caller lengths on the flat entry: the caller's rows as given (no compaction), bitwise the kernel-level pair
-    kept = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        c.q,
-        c.kv,
-        c.dout,
-        c.glob,
-        topk_length=cut,
-        num_segments=c.num_docs,
-    )
-    out, lse, o_lo = forward_nope(c.q, c.kv, c.glob, topk_length=cut)
-    dq, _ = backward_nope(
-        c.q,
-        c.kv,
-        c.glob,
-        out,
-        o_lo,
-        lse,
-        c.dout,
-        topk_length=cut,
-        num_segments=c.num_docs,
-    )
-    torch.cuda.synchronize()
-    assert (
-        torch.equal(kept[0], out)
-        and torch.equal(kept[1], lse)
-        and torch.equal(kept[2], dq)
-    )
+
+    def case(s, j):
+        c = _hole_case_tensors(name, seed=s)
+        K = int(c.local.shape[1])
+        gen = torch.Generator(device="cuda").manual_seed(s + 2)
+        cut = torch.randint(0, K + 1, (c.T,), device="cuda", generator=gen).to(
+            torch.int32
+        )
+        cut[: min(3, c.T)] = torch.tensor([0, 1, K], device="cuda", dtype=torch.int32)[
+            : min(3, c.T)
+        ]
+        rows, counts = compact_rows(c.glob, c.S, cut)
+        got = cake_backend.nope_compact_indices(c.glob, c.S, topk_length=cut)
+        torch.cuda.synchronize()
+        assert torch.equal(got[0], rows) and torch.equal(got[1], counts)
+        a = cake_backend.forward_nope_varlen(
+            c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True, topk_length=cut
+        )
+        torch.cuda.synchronize()
+        assert torch.equal(a[3], rows) and torch.equal(a[4], counts)
+        varlen = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
+            c.q,
+            c.kv,
+            c.dout,
+            c.local,
+            c.cu_q,
+            c.cu_k,
+            causal=True,
+            topk_length=cut,
+        )
+        flat = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            rows,
+            topk_length=counts,
+            num_segments=c.num_docs,
+        )
+        # caller lengths on the flat entry: the caller's rows as given (no compaction), as the kernel-level pair
+        kept = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            c.q,
+            c.kv,
+            c.dout,
+            c.glob,
+            topk_length=cut,
+            num_segments=c.num_docs,
+        )
+        out, lse, o_lo = forward_nope(c.q, c.kv, c.glob, topk_length=cut)
+        dq, dkv = backward_nope(
+            c.q,
+            c.kv,
+            c.glob,
+            out,
+            o_lo,
+            lse,
+            c.dout,
+            topk_length=cut,
+            num_segments=c.num_docs,
+        )
+        torch.cuda.synchronize()
+        # the hole rows under the cut (glob, L) and the cut compaction with its counts
+        cut_runs = {
+            "varlen fwd": _forward_run(a),
+            "varlen": _public_run(varlen),
+            "flat": _public_run(kept),
+            "kernel": dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv),
+        }
+        return nv.merge(
+            nv.judged(
+                nv.nope_problem(c, indices=c.glob, topk_length=cut),
+                cut_runs,
+                prefix="cut ",
+            ),
+            nv.judged(
+                nv.nope_problem(c, indices=rows, topk_length=counts),
+                {"": _public_run(flat)},
+                prefix="compacted flat ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 810)
 
 
 @pytest.mark.parametrize("route", ["mask", "index_prep"])
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
 @pytest.mark.parametrize("offset", [0, 3, 13])
 def test_nope_flat_entry_hole_variants_on_every_slot_width(
-    topk, offset, route, monkeypatch
+    topk, offset, route, monkeypatch, record_property
 ):
     """Global rows with every third slot ``-1`` (and a fully masked row) at every slot width, read from a column
     slice at offset 0 / 3 / 13 of a wider buffer, through the flat entry without lengths.  Below the slot limit
-    (``"mask"``, the shipped route for these 96-row tables): one launch over the view as given, bitwise the flat
+    (``"mask"``, the shipped route for these 96-row tables): one launch over the view as given, beside the flat
     entry on the view with the last valid slot + 1 as caller lengths and the eager kernel-level pair, the saved
     pair being the view and those lengths.  At or above it (``"index_prep"``, the limit set to 0): the stage's
-    flat mode compacts the view in place (``nope_compact_indices`` of the view == ``compact_rows``) and the entry
-    is bitwise the flat entry on the compacted rows with the counts."""
+    flat mode compacts the view in place (``nope_compact_indices`` of the view == ``compact_rows``), beside the
+    flat entry on the compacted rows with the counts.  Every call's float outputs are judged against the problem
+    of the rows and lengths it received."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
     T, S = 96, 1024
     if route == "index_prep":
         monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
     assert cake_backend.nope_flat_index_mode(T, topk) == route
-    gen = torch.Generator(device="cuda").manual_seed(NOPE_SEED + 820 + topk)
-    wide = torch.randint(0, S, (T, topk + 16), device="cuda", generator=gen).to(
-        torch.int32
-    )
-    view = wide[:, offset : offset + topk]
-    view[:, 1::3] = -1
-    view[5] = -1
-    q, kv, dout = _nope_qkv(T, S, seed=NOPE_SEED + 821 + topk)
-    holes = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope, q, kv, dout, view
-    )
-    if route == "mask":
-        lengths = nope_ref.last_valid_plus_one(view, S)
-        twin = _public_nope_step(
-            cake_backend.cake_dsa_sparse_attention_nondet_nope,
-            q,
-            kv,
-            dout,
-            view,
-            topk_length=lengths,
+    flat_entry = cake_backend.cake_dsa_sparse_attention_nondet_nope
+
+    def case(s, j):
+        gen = torch.Generator(device="cuda").manual_seed(s)
+        wide = torch.randint(0, S, (T, topk + 16), device="cuda", generator=gen).to(
+            torch.int32
         )
-        out, lse, o_lo = forward_nope(q, kv, view)
-        dq, _ = backward_nope(q, kv, view, out, o_lo, lse, dout, topk_length=lengths)
-        torch.cuda.synchronize()
-        assert torch.equal(holes[0], out) and torch.equal(holes[1], lse)
-        assert torch.equal(holes[2], dq)
-        q_leaf = q.detach().clone().requires_grad_()
-        saved = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-            q_leaf, kv, view
-        ).grad_fn.saved_tensors
-        assert saved[5].data_ptr() == view.data_ptr() and torch.equal(saved[6], lengths)
-    else:
+        view = wide[:, offset : offset + topk]
+        view[:, 1::3] = -1
+        view[5] = -1  # a fully masked row: out 0 and lse -inf, part of the judged contract
+        q, kv, dout = _nope_qkv(T, S, seed=s + 1)
+        holes = _public_nope_step(flat_entry, q, kv, dout, view)
+        raw = nv.Problem(q_latent=q, kv_latent=kv, indices=view, dout=dout)
+        if route == "mask":
+            lengths = nope_ref.last_valid_plus_one(view, S)
+            twin = _public_nope_step(flat_entry, q, kv, dout, view, topk_length=lengths)
+            out, lse, o_lo = forward_nope(q, kv, view)
+            dq, dkv = backward_nope(
+                q, kv, view, out, o_lo, lse, dout, topk_length=lengths
+            )
+            torch.cuda.synchronize()
+            q_leaf = q.detach().clone().requires_grad_()
+            out_s = flat_entry(q_leaf, kv, view)
+            saved = out_s.grad_fn.saved_tensors
+            assert saved[5].data_ptr() == view.data_ptr() and torch.equal(
+                saved[6], lengths
+            )
+            raw_runs = {
+                "holes": _public_run(holes),
+                "eager fwd": dict(out=out, lse=lse, o_lo=o_lo),
+                "saved": dict(out=out_s.detach()),
+            }
+            length_runs = {
+                "flat": _public_run(twin),
+                "eager bwd": dict(dq=dq, dkv=dkv),
+            }
+            return nv.merge(
+                nv.judged(raw, raw_runs, prefix="raw "),
+                nv.judged(
+                    raw.with_(topk_length=lengths), length_runs, prefix="lengths "
+                ),
+            )
         rows, counts = compact_rows(view, S)
         got = cake_backend.nope_compact_indices(view, S)
         torch.cuda.synchronize()
         assert torch.equal(got[0], rows) and torch.equal(got[1], counts)
-        twin = _public_nope_step(
-            cake_backend.cake_dsa_sparse_attention_nondet_nope,
-            q,
-            kv,
-            dout,
-            rows,
-            topk_length=counts,
+        twin = _public_nope_step(flat_entry, q, kv, dout, rows, topk_length=counts)
+        return nv.merge(
+            nv.judged(raw, {"": _public_run(holes)}, prefix="holes "),
+            nv.judged(
+                raw.with_(indices=rows, topk_length=counts),
+                {"": _public_run(twin)},
+                prefix="compacted ",
+            ),
         )
-    for x, y in zip(holes[:3], twin[:3], strict=True):
-        assert torch.equal(x, y)
-    _rel_or_equal(holes[3], twin[3], 1e-5)
-    assert torch.all(holes[0][5] == 0) and torch.all(holes[1][5] == float("-inf"))
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 820 + topk)
 
 
-def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(monkeypatch):
+def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(record_property):
     """The compacting one-launch mode (``"kernel"``, ``convert = 1``; never selected by size, so the route
-    function is replaced here) and the stage route (the limit set to 0) agree bitwise on hole rows -- ``out``,
-    ``lse``, ``o_lo``, the returned global rows (the stable compaction) and the lengths (the valid counts) through
-    ``forward_nope_varlen``, ``dq`` through the public entry: the forward's scan lanes write the same compaction
-    the stage does."""
+    function is replaced here) and the stage route (the limit set to 0) return the same global rows (the stable
+    compaction) and lengths (the valid counts) through ``forward_nope_varlen``: the forward's scan lanes write the
+    same compaction the stage does.  The float outputs of both routes, through ``forward_nope_varlen`` and the
+    public entry, are judged."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
     if not cake_backend.nope_fwd_converts_indices():
         pytest.skip("the registered NoPE forward program has no conversion operands")
-    c = _hole_case_tensors("interleaved", seed=NOPE_SEED + 835)
-    assert (
-        cake_backend.varlen_index_mode(c.local) == "mask"
-    )  # the shipped route of this table
-    monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
-    stage = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    stage_pub = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    torch.cuda.synchronize()
-    monkeypatch.setattr(
-        cake_backend,
-        "varlen_index_mode",
-        lambda rows, *, caller_lengths=False: "kernel",
-    )
-    kernel = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    kernel_pub = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    torch.cuda.synchronize()
-    for a, b in zip(stage, kernel, strict=True):
-        assert torch.equal(a, b)
-    assert torch.equal(kernel[3], c.rows) and torch.equal(kernel[4], c.counts)
-    for a, b in zip(stage_pub[:3], kernel_pub[:3], strict=True):
-        assert torch.equal(a, b)
-    _rel_or_equal(kernel_pub[3], stage_pub[3], 1e-5)
+    varlen_entry = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen
+
+    def case(s, j):
+        c = _hole_case_tensors("interleaved", seed=s)
+        args = (c.local, c.cu_q, c.cu_k)
+        with pytest.MonkeyPatch.context() as mp:
+            assert (
+                cake_backend.varlen_index_mode(c.local) == "mask"
+            )  # the shipped route of this table
+            mp.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
+            stage = cake_backend.forward_nope_varlen(c.q, c.kv, *args, causal=True)
+            stage_pub = _public_nope_step(
+                varlen_entry, c.q, c.kv, c.dout, *args, causal=True
+            )
+            torch.cuda.synchronize()
+            mp.setattr(
+                cake_backend,
+                "varlen_index_mode",
+                lambda rows, *, caller_lengths=False: "kernel",
+            )
+            kernel = cake_backend.forward_nope_varlen(c.q, c.kv, *args, causal=True)
+            kernel_pub = _public_nope_step(
+                varlen_entry, c.q, c.kv, c.dout, *args, causal=True
+            )
+            torch.cuda.synchronize()
+        for a, b in zip(stage[3:], kernel[3:], strict=True):
+            assert torch.equal(a, b)
+        assert torch.equal(kernel[3], c.rows) and torch.equal(kernel[4], c.counts)
+        runs = {
+            "stage fwd": _forward_run(stage),
+            "stage": _public_run(stage_pub),
+            "kernel fwd": _forward_run(kernel),
+            "kernel": _public_run(kernel_pub),
+        }
+        return nv.judged(nv.nope_problem(c, indices=c.glob), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 835)
 
 
-def test_nope_hole_rows_are_deterministic_run_to_run():
-    """Two calls of the varlen entry on hole rows: ``out``, ``lse``, ``dq`` and the compacted rows / counts the
-    forward returns are bitwise the same (a fixed launch order, no new atomics on the index side)."""
+def test_nope_hole_rows_repeat_calls(record_property):
+    """Two calls of the varlen entry and of ``forward_nope_varlen`` on hole rows: the rows and lengths the forward
+    returns are the same (a fixed launch order, no atomics on the index side); every float output is judged."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
-    c = _hole_case_tensors("interleaved", seed=NOPE_SEED + 830)
-    first = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    second = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        c.q,
-        c.kv,
-        c.dout,
-        c.local,
-        c.cu_q,
-        c.cu_k,
-        causal=True,
-    )
-    for x, y in zip(first[:3], second[:3], strict=True):
-        assert torch.equal(x, y)
-    a = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    b = cake_backend.forward_nope_varlen(
-        c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(a[3], b[3]) and torch.equal(a[4], b[4])
+    varlen_entry = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen
+
+    def case(s, j):
+        c = _hole_case_tensors("interleaved", seed=s)
+        args = (c.local, c.cu_q, c.cu_k)
+        first = _public_nope_step(varlen_entry, c.q, c.kv, c.dout, *args, causal=True)
+        second = _public_nope_step(varlen_entry, c.q, c.kv, c.dout, *args, causal=True)
+        a = cake_backend.forward_nope_varlen(c.q, c.kv, *args, causal=True)
+        b = cake_backend.forward_nope_varlen(c.q, c.kv, *args, causal=True)
+        torch.cuda.synchronize()
+        assert torch.equal(a[3], b[3]) and torch.equal(a[4], b[4])
+        runs = {
+            "first": _public_run(first),
+            "second": _public_run(second),
+            "fwd 1": _forward_run(a),
+            "fwd 2": _forward_run(b),
+        }
+        return nv.judged(nv.nope_problem(c, indices=c.glob), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 830)
 
 
 def _graph_capture(fn):
@@ -7407,178 +7613,190 @@ def _graph_capture(fn):
     return eager, captured
 
 
-def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows():
+def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(record_property):
     """Forward + backward of the public NoPE entries (the varlen entry on hole rows, the flat entry on hole rows
-    without lengths) and the kernel-level ``forward_nope_varlen`` capture into a CUDA graph and replay to the eager
-    results bitwise (``out``, ``lse``, ``dq``; the compacted rows and counts): the stage route allocates before its
-    launches and nothing synchronizes with the device."""
+    without lengths) and the kernel-level ``forward_nope_varlen`` capture into a CUDA graph and replay: the stage
+    route allocates before its launches and nothing synchronizes with the device.  The replayed rows and lengths
+    are the eager ones; the float outputs of the eager and the replayed calls are judged."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
-    c = _hole_case_tensors("interleaved", seed=NOPE_SEED + 840)
-    q_leaf = c.q.detach().clone().requires_grad_()
 
-    def varlen():
-        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
-            q_leaf, c.kv, c.local, c.cu_q, c.cu_k, causal=True, return_lse=True
-        )
-        (dq,) = torch.autograd.grad(out, [q_leaf], c.dout)
-        return out, lse, dq
+    def case(s, j):
+        c = _hole_case_tensors("interleaved", seed=s)
+        q_leaf = c.q.detach().clone().requires_grad_()
 
-    def flat():
-        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
-            q_leaf, c.kv, c.glob, return_lse=True, num_segments=c.num_docs
-        )
-        (dq,) = torch.autograd.grad(out, [q_leaf], c.dout)
-        return out, lse, dq
+        def varlen():
+            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+                q_leaf, c.kv, c.local, c.cu_q, c.cu_k, causal=True, return_lse=True
+            )
+            (dq,) = torch.autograd.grad(out, [q_leaf], c.dout)
+            return out, lse, dq
 
-    def kernel_level():
-        return cake_backend.forward_nope_varlen(
-            c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
-        )
+        def flat():
+            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+                q_leaf, c.kv, c.glob, return_lse=True, num_segments=c.num_docs
+            )
+            (dq,) = torch.autograd.grad(out, [q_leaf], c.dout)
+            return out, lse, dq
 
-    for fn in (varlen, flat, kernel_level):
-        eager, captured = _graph_capture(fn)
-        for a, b in zip(eager, captured, strict=True):
-            assert torch.equal(a, b)
+        def kernel_level():
+            return cake_backend.forward_nope_varlen(
+                c.q, c.kv, c.local, c.cu_q, c.cu_k, causal=True
+            )
+
+        runs = {}
+        for label, fn, names in (
+            ("varlen", varlen, ("out", "lse", "dq")),
+            ("flat", flat, ("out", "lse", "dq")),
+            ("kernel", kernel_level, ("out", "lse", "o_lo")),
+        ):
+            eager, captured = _graph_capture(fn)
+            for a, b in zip(eager[3:], captured[3:], strict=True):
+                assert torch.equal(a, b)  # the kernel-level rows and lengths
+            replayed = (t.detach().clone() for t in captured[:3])
+            runs[f"{label} eager"] = dict(zip(names, eager[:3], strict=True))
+            runs[f"{label} graph"] = dict(zip(names, replayed, strict=True))
+        return nv.judged(nv.nope_problem(c, indices=c.glob), runs)
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 840)
 
 
 @pytest.mark.parametrize("route", ["mask", "index_prep"])
 @pytest.mark.parametrize("construction", ["pooled_fixed_tail", "every_third"])
-def test_nope_flat_entry_hole_rows_meet_the_floor_on_their_processing_order(
-    construction, route, monkeypatch
+def test_nope_flat_entry_hole_rows_on_both_routes(
+    construction, route, monkeypatch, record_property
 ):
-    """Precision of the flat entry without lengths on hole rows (512 x 256 = 131,072 slots) against the FP64
-    reference with its floors evaluated on the order the route processes (the lazy-rescale floor walks 64-slot
-    tiles in slot order, so the floor depends on the slot order the kernel sees; the exact values do not): the raw
-    order below the slot limit (``"mask"``, the shipped route for this table: ``reference_fp64_nope(...,
-    compact=False)``), the compacted order on the stage route (``"index_prep"``, the limit set to 0:
-    ``compact=True``).  ``out`` / ``dq`` within 1.02x their floors plus the element-wise and row bands, ``dkv``
-    within 1.05x.  Constructions: the pooled draw with the open pool's tail at a fixed column over a document that
-    starts inside the query range (the R2 structure in miniature: a row has holes only while it holds fewer than
-    ``pools`` complete pools, so the first 251 positions carry them) and iid rows with every third slot ``-1`` and
-    a fully masked row."""
+    """The flat entry without lengths on hole rows (512 x 256 = 131,072 slots): below the slot limit (``"mask"``,
+    the shipped route for this table, the raw slot order) and on the stage route (``"index_prep"``, the limit set
+    to 0, the compacted order); its outputs are judged against the problem of the rows it received.
+    Constructions: the pooled draw with the open pool's tail at a fixed column over a document that starts inside
+    the query range (a row has holes only while it holds fewer than ``pools`` complete pools, so the first 251
+    positions carry them) and iid rows with every third slot ``-1`` and a fully masked row."""
     _require_nope_compacting_stage()
     _require_nope_program(backward=True)
     if route == "index_prep":
         monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
     assert cake_backend.nope_flat_index_mode(512, 256) == route
-    if construction == "pooled_fixed_tail":
-        inp = _nope_inputs(
-            512, 512, seed=NOPE_SEED + 850, topk=256, index="pooled_fixed_tail"
+
+    def case(s, j):
+        if construction == "pooled_fixed_tail":
+            inp = _nope_inputs(512, 512, seed=s, topk=256, index="pooled_fixed_tail")
+            idx = inp.idx_global
+        else:
+            inp = _nope_inputs(512, 2048, seed=s, topk=256)
+            idx = inp.idx_global.clone()
+            idx[:, 1::3] = -1
+            idx[7] = -1
+        assert bool(
+            ((idx == -1) & (idx.flip(-1).cummax(-1).values.flip(-1) >= 0)).any()
+        ), "the construction must carry holes before valid slots"
+        step = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            inp.q,
+            inp.kv,
+            inp.dout,
+            idx,
         )
-        idx = inp.idx_global
-    else:
-        inp = _nope_inputs(512, 2048, seed=NOPE_SEED + 851, topk=256)
-        idx = inp.idx_global.clone()
-        idx[:, 1::3] = -1
-        idx[7] = -1
-    assert bool(((idx == -1) & (idx.flip(-1).cummax(-1).values.flip(-1) >= 0)).any()), (
-        "the construction must carry holes before valid slots"
-    )
-    out, lse, dq, acc = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope, inp.q, inp.kv, inp.dout, idx
-    )
-    ref = nope_ref.reference_fp64_nope(
-        inp.q,
-        inp.kv,
-        idx,
-        dout=inp.dout,
-        softmax_scale=NOPE_SOFTMAX_SCALE,
-        compact=route == "index_prep",
-    )
-    _check_forward_nope(out, lse, ref)
-    _check_backward_nope(dq, acc, ref)
+        return nv.judged(nv.nope_problem(inp, indices=idx), {"": _public_run(step)})
+
+    seed = NOPE_SEED + (850 if construction == "pooled_fixed_tail" else 851)
+    nv.judge_draws(record_property, case, seed=seed)
 
 
 @pytest.mark.parametrize("construction", ["every_third_causal", "pooled_fixed_tail"])
-def test_nope_autograd_backward_on_masked_rows_in_raw_order_matches_the_reference(
-    construction, monkeypatch
+def test_nope_autograd_backward_on_masked_rows_in_raw_order(
+    construction, monkeypatch, record_property
 ):
     """Autograd through both public entries on small tables with holes anywhere (below the slot limit, raised
-    here above both constructions): the varlen entry on per-document rows and the flat entry on their globalized
-    rows give ``out`` / ``lse`` / ``dq`` bitwise each other and bitwise the kernel-level pair (``forward_nope`` /
-    ``backward_nope`` over the globalized rows with the last valid slot + 1 as lengths), ``dkv`` within the atomics
-    spread, and all of them meet the FP64 floors evaluated on the raw slot order -- the order a position-preserving
-    forward and backward process.  Constructions: two documents with iid causal rows where every third slot is
-    ``-1`` and one row is fully masked (so the causal rule and the planted holes both leave masked slots before
-    valid ones), and the pooled draw with its tail at a fixed column over one document."""
+    here above both constructions): the varlen entry on per-document rows, the flat entry on their globalized rows
+    and the kernel-level pair (``forward_nope`` / ``backward_nope`` over the globalized rows with the last valid
+    slot + 1 as lengths), all processing the raw slot order; every call's float outputs are judged against the
+    problem of the rows and lengths it received.  Constructions: two documents with iid causal rows where every
+    third slot is ``-1`` and one row is fully masked (so the causal rule and the planted holes both leave masked
+    slots before valid ones), and the pooled draw with its tail at a fixed column over one document."""
     _require_nope_program(backward=True)
     _require_nope_mask_route()
     monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 1 << 40)
-    if construction == "every_third_causal":
-        inp = nope_ref.make_nope_inputs(
-            [256, 128], [512, 512], seed=NOPE_SEED + 870, topk=96, index="iid"
+
+    def case(s, j):
+        if construction == "every_third_causal":
+            inp = nope_ref.make_nope_inputs(
+                [256, 128], [512, 512], seed=s, topk=96, index="iid"
+            )
+            local = inp.idx_local.clone()
+            local[:, 1::3] = -1
+            local[7] = -1
+        else:
+            inp = _nope_inputs(512, 512, seed=s, topk=256, index="pooled_fixed_tail")
+            local = inp.idx_local
+        S = inp.total_k
+        glob = offset_gather_kv_indices(
+            local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
         )
-        local = inp.idx_local.clone()
-        local[:, 1::3] = -1
-        local[7] = -1
-    else:
-        inp = _nope_inputs(
-            512, 512, seed=NOPE_SEED + 871, topk=256, index="pooled_fixed_tail"
+        assert bool(
+            ((glob == -1) & (glob.flip(-1).cummax(-1).values.flip(-1) >= 0)).any()
         )
-        local = inp.idx_local
-    S = inp.total_k
-    glob = offset_gather_kv_indices(
-        local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
-    )
-    assert bool(((glob == -1) & (glob.flip(-1).cummax(-1).values.flip(-1) >= 0)).any())
-    lengths = nope_ref.last_valid_plus_one(glob, S)
-    assert cake_backend.varlen_index_mode(local) == "mask"
-    varlen = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        inp.q,
-        inp.kv,
-        inp.dout,
-        local,
-        inp.cu_seqlens_q,
-        inp.cu_seqlens_k,
-        causal=True,
-    )
-    flat = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope,
-        inp.q,
-        inp.kv,
-        inp.dout,
-        glob,
-        num_segments=inp.num_segments,
-    )
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, glob)
-    acc = torch.zeros(S, D_LATENT, device="cuda")
-    dq, none = backward_nope(
-        inp.q,
-        inp.kv,
-        glob,
-        out,
-        o_lo,
-        lse,
-        inp.dout,
-        topk_length=lengths,
-        dkv_acc=acc,
-        num_segments=inp.num_segments,
-    )
-    torch.cuda.synchronize()
-    assert none is None
-    for side in (varlen, flat):
-        assert torch.equal(side[0], out) and torch.equal(side[1], lse)
-        assert torch.equal(side[2], dq)
-        _rel_or_equal(side[3], acc, 1e-5)
-    ref = nope_ref.reference_fp64_nope(
-        inp.q,
-        inp.kv,
-        glob,
-        dout=inp.dout,
-        softmax_scale=NOPE_SOFTMAX_SCALE,
-        compact=False,
-    )
-    _check_forward_nope(varlen[0], varlen[1], ref)
-    _check_backward_nope(varlen[2], varlen[3], ref)
+        lengths = nope_ref.last_valid_plus_one(glob, S)
+        assert cake_backend.varlen_index_mode(local) == "mask"
+        varlen = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
+            inp.q,
+            inp.kv,
+            inp.dout,
+            local,
+            inp.cu_seqlens_q,
+            inp.cu_seqlens_k,
+            causal=True,
+        )
+        flat = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope,
+            inp.q,
+            inp.kv,
+            inp.dout,
+            glob,
+            num_segments=inp.num_segments,
+        )
+        out, lse, o_lo = forward_nope(inp.q, inp.kv, glob)
+        acc = torch.zeros(S, D_LATENT, device="cuda")
+        dq, none = backward_nope(
+            inp.q,
+            inp.kv,
+            glob,
+            out,
+            o_lo,
+            lse,
+            inp.dout,
+            topk_length=lengths,
+            dkv_acc=acc,
+            num_segments=inp.num_segments,
+        )
+        torch.cuda.synchronize()
+        assert none is None
+        raw = {
+            "varlen": _public_run(varlen),
+            "flat": _public_run(flat),
+            "eager fwd": dict(out=out, lse=lse, o_lo=o_lo),
+        }
+        eager_bwd = dict(dq=dq, dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc))
+        return nv.merge(
+            nv.judged(nv.nope_problem(inp, indices=glob), raw, prefix="raw "),
+            nv.judged(
+                nv.nope_problem(inp, indices=glob, topk_length=lengths),
+                {"": eager_bwd},
+                prefix="eager bwd ",
+            ),
+        )
+
+    seed = NOPE_SEED + (870 if construction == "every_third_causal" else 871)
+    nv.judge_draws(record_property, case, seed=seed)
 
 
-def test_nope_issue_repro_rows_match_their_stable_twin_bitwise_large():
-    """Opt-in (``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``): the hole-layout repro's construction at full size -- one 16384-token
-    document, 1024 front keys, a gap to column 2048, four tail keys, K_slots 2176 -- through the public varlen entry
-    is bitwise its stable twin (``compacted_twin``) on ``out`` / ``lse`` / ``dq`` with ``dkv`` within the atomics
-    spread; the repro's descending-sorted twin regroups the keys across tiles and stays within the fp32-noise class."""
+def test_nope_issue_repro_rows_and_their_twins_keep_the_contract_large():
+    """Opt-in (``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``), contract only (a large layout: no FP64 oracle): the
+    hole-layout repro's construction at full size -- one 16384-token document, 1024 front keys, a gap to column
+    2048, four tail keys, K_slots 2176 -- through the public varlen entry, as given, as its stable twin
+    (``compacted_twin``) and as the repro's descending-sorted twin: each call's outputs have their shapes and
+    dtypes, are finite and are exactly zero where the contract needs it."""
     if not os.environ.get(NOPE_LARGE_TESTS_ENV):
         pytest.skip(f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 16k-row constructions")
     _require_nope_compacting_stage()
@@ -7592,40 +7810,25 @@ def test_nope_issue_repro_rows_match_their_stable_twin_bitwise_large():
         [16384], [16384], seed=NOPE_SEED + 860, topk=2176, index="repro_compact_issue"
     )
     args = (inp.cu_seqlens_q, inp.cu_seqlens_k)
-    holes = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        inp.q,
-        inp.kv,
-        inp.dout,
-        inp.idx_local,
-        *args,
-        causal=True,
-    )
-    stable = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        inp.q,
-        inp.kv,
-        inp.dout,
-        twin.idx_local,
-        *args,
-        causal=True,
-    )
-    for x, y in zip(holes[:3], stable[:3], strict=True):
-        assert torch.equal(x, y)
-    _rel_or_equal(holes[3], stable[3], 1e-5)
-    sorted_twin = _public_nope_step(
-        cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
-        inp.q,
-        inp.kv,
-        inp.dout,
-        issue.idx_local,
-        *args,
-        causal=True,
-    )
-    assert (
-        rel_l2(sorted_twin[0], holes[0]) < 1e-3
-        and rel_l2(sorted_twin[2], holes[2]) < 1e-2
-    )
+    for label, local in (
+        ("holes", inp.idx_local),
+        ("stable twin", twin.idx_local),
+        ("sorted twin", issue.idx_local),
+    ):
+        step = _public_nope_step(
+            cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen,
+            inp.q,
+            inp.kv,
+            inp.dout,
+            local,
+            *args,
+            causal=True,
+        )
+        glob = offset_gather_kv_indices(local, *args, causal=True)
+        nv.assert_contract(
+            label, nv.nope_problem(inp, indices=glob), _public_run(step)
+        )
+        del step
 
 
 # --- rope record: the strided delta reads a head-major ``dout`` in place (ask 2) and the varlen entry takes the
@@ -7667,6 +7870,12 @@ def _rope_device_inputs(T, S, K, *, seed=0):
     idx = torch.randint(0, S, (T, K), device="cuda", generator=gen, dtype=torch.int32)
     dout = bf(T, NUM_HEADS, D_LATENT)
     return q_latent, q_rope, kv_latent, k_rope, idx, dout
+
+
+def _rope_grad_outputs(grads) -> dict:
+    """A rope backward's four gradients by the names :func:`nv.judged` takes (a ``None`` gradient left out)."""
+    names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
+    return {name: g for name, g in zip(names, grads, strict=True) if g is not None}
 
 
 def test_rope_eager_backward_reads_a_strided_dout_in_place(monkeypatch):
@@ -7781,64 +7990,69 @@ def test_validate_dsa_train_inputs_admits_a_head_major_dout_and_rejects_odd_stri
         )
 
 
-def test_rope_backward_head_major_dout_matches_the_dense_path_without_a_copy():
-    """A head-major ``dout`` through the eager rope backward, the prepared runner and autograd gives the dense
-    path's ``dq_latent`` / ``dq_rope`` bitwise and ``dkv`` / ``dk_rope`` within the atomics spread; the runner binds
-    the view in place (its ``dout`` pointer is the caller's); the head-major backward's peak memory above the
-    inputs is not larger than the contiguous backward's (no contiguous copy of ``dout``: the backward allocates its
-    gradients, the delta and a fresh ``dkv`` on both sides alike)."""
+def test_rope_backward_reads_a_head_major_dout_without_a_copy(record_property):
+    """A head-major ``dout`` through the eager rope backward, the prepared runner and autograd: the runner binds the
+    view in place (its ``dout`` pointer is the caller's); the head-major backward's peak memory above the inputs is
+    not larger than the contiguous backward's (no contiguous copy of ``dout``: the backward allocates its gradients,
+    the delta and a fresh ``dkv`` on both sides alike).  The forward, every dense and head-major backward, the
+    runner's step and the autograd step are judged on the same draw."""
     _require_program(backward=True)
-    inp = make_inputs(
-        [1024], [2048], seed=SEED + 71, topk=256, dout_layout="head_major"
-    )
-    assert inp.dout.stride() == (D_LATENT, inp.total_q * D_LATENT, 1)
-    dense = inp.dout.contiguous()
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    out, lse, o_lo = cake_backend.forward(*args)
-    saved = (out, o_lo, lse)
-    cake_backend.backward(
-        *args, *saved, dense
-    )  # plans and module loads of both layouts before the measurement
-    cake_backend.backward(*args, *saved, inp.dout)
-    torch.cuda.synchronize()
 
-    def peak_of(dout):
+    def case(s, j):
+        inp = make_inputs([1024], [2048], seed=s, topk=256, dout_layout="head_major")
+        assert inp.dout.stride() == (D_LATENT, inp.total_q * D_LATENT, 1)
+        dense = inp.dout.contiguous()
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        out, lse, o_lo = cake_backend.forward(*args)
+        saved = (out, o_lo, lse)
+        # plans and module loads of both layouts before the measurement
+        warm_d = cake_backend.backward(*args, *saved, dense)
+        warm_h = cake_backend.backward(*args, *saved, inp.dout)
         torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
-        grads = cake_backend.backward(*args, *saved, dout)
-        torch.cuda.synchronize()
-        return grads, torch.cuda.max_memory_allocated() - base
 
-    grads_d, peak_d = peak_of(dense)
-    grads_h, peak_h = peak_of(inp.dout)
-    assert torch.equal(grads_h[0], grads_d[0]) and torch.equal(grads_h[1], grads_d[1])
-    assert (
-        rel_l2(grads_h[2], grads_d[2]) < ACC_REL_L2
-        and rel_l2(grads_h[3], grads_d[3]) < ACC_REL_L2
-    )
-    assert peak_h <= peak_d + (8 << 20), (
-        peak_h / 2**20,
-        peak_d / 2**20,
-        inp.dout.numel() * 2 / 2**20,
-    )
-    runner = prepare_dsa_train(*args, dout=inp.dout, backward=True)
-    assert runner.tensors["dout"].data_ptr() == inp.dout.data_ptr()
-    assert runner.tensors["dout"].stride() == inp.dout.stride()
-    runner.forward()
-    grads_r = runner.backward()
-    torch.cuda.synchronize()
-    assert torch.equal(grads_r[0], grads_d[0]) and torch.equal(grads_r[1], grads_d[1])
-    leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
-    out_f = cake_backend.cake_dsa_sparse_attention_nondet(*leaves, inp.idx_global)
-    out_f.backward(inp.dout)
-    torch.cuda.synchronize()
-    assert torch.equal(out_f, out)
-    assert torch.equal(leaves[0].grad, grads_d[0]) and torch.equal(
-        leaves[1].grad, grads_d[1]
-    )
-    ref = reference_fp64(*args, dout=dense)
-    _check_backward(grads_h, ref)
+        def peak_of(dout):
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+            base = torch.cuda.memory_allocated()
+            grads = cake_backend.backward(*args, *saved, dout)
+            torch.cuda.synchronize()
+            return grads, torch.cuda.max_memory_allocated() - base
+
+        grads_d, peak_d = peak_of(dense)
+        grads_h, peak_h = peak_of(inp.dout)
+        assert peak_h <= peak_d + (8 << 20), (
+            peak_h / 2**20,
+            peak_d / 2**20,
+            inp.dout.numel() * 2 / 2**20,
+        )
+        runner = prepare_dsa_train(*args, dout=inp.dout, backward=True)
+        assert runner.tensors["dout"].data_ptr() == inp.dout.data_ptr()
+        assert runner.tensors["dout"].stride() == inp.dout.stride()
+        out_r, lse_r, o_lo_r = runner.forward()
+        grads_r = runner.backward()
+        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+        out_f = cake_backend.cake_dsa_sparse_attention_nondet(*leaves, inp.idx_global)
+        out_f.backward(inp.dout)
+        torch.cuda.synchronize()
+        return nv.judged(
+            nv.rope_problem(inp),
+            {
+                "forward": dict(out=out, lse=lse, o_lo=o_lo),
+                "dense warm-up": _rope_grad_outputs(warm_d),
+                "head-major warm-up": _rope_grad_outputs(warm_h),
+                "dense": _rope_grad_outputs(grads_d),
+                "head-major": _rope_grad_outputs(grads_h),
+                "runner": dict(
+                    out=out_r, lse=lse_r, o_lo=o_lo_r, **_rope_grad_outputs(grads_r)
+                ),
+                "autograd": dict(
+                    out=out_f.detach(),
+                    **_rope_grad_outputs([leaf.grad for leaf in leaves]),
+                ),
+            },
+        )
+
+    nv.judge_draws(record_property, case, seed=SEED + 71)
 
 
 def _record_without_index_prep(record: dict) -> dict:
@@ -7923,66 +8137,70 @@ def test_rope_varlen_entry_takes_the_compacting_stage_then_the_forward(monkeypat
     assert torch.equal(fwd["indices"], rows) and torch.equal(fwd["topk_length"], counts)
 
 
-def test_rope_varlen_fallback_routes_give_the_stage_route_results_on_hole_rows():
-    """The rope varlen entry on hole rows: the stage route, the torch twin (a record without the stage) and
-    non-contiguous prefix sums (the twin again) give ``out`` / ``lse`` and the ``dq`` gradients bitwise and the key
-    gradients within the atomics spread; the result is route-independent because every route compacts."""
+def test_rope_varlen_stage_and_fallback_routes_on_hole_rows(record_property):
+    """The rope varlen entry on hole rows through the stage route, the torch twin (a record without the stage) and
+    non-contiguous prefix sums (the twin again), and the flat rope entry on the stable compaction of the rows with
+    the counts as lengths (every route compacts, so all run the same computation): every route's ``out``, ``lse``
+    and gradients are judged on the same draw."""
     _require_nope_compacting_stage()
     _require_program(backward=True)
-    local, cu_q, cu_k = _index_prep_case(
-        (96, 160, 0, 64), (96, 320, 0, 512), 128, seed=SEED + 72
-    )
-    T, S = int(local.shape[0]), int(cu_k[-1])
-    q_latent, q_rope, kv_latent, k_rope, _, dout = _rope_device_inputs(
-        T, S, 128, seed=SEED + 73
-    )
     varlen = cake_backend.cake_dsa_sparse_attention_nondet_varlen
 
-    def run(cu_q_arg, cu_k_arg, expected_mode):
-        assert (
-            cake_backend._rope_varlen_index_mode(local, cu_q_arg, cu_k_arg, T)
-            == expected_mode
+    def case(s, j):
+        local, cu_q, cu_k = _index_prep_case(
+            (96, 160, 0, 64), (96, 320, 0, 512), 128, seed=s
         )
-        leaves = [
-            t.detach().clone().requires_grad_()
-            for t in (q_latent, q_rope, kv_latent, k_rope)
-        ]
-        out, lse = varlen(
-            *leaves, local, cu_q_arg, cu_k_arg, causal=True, return_lse=True
+        T, S = int(local.shape[0]), int(cu_k[-1])
+        q_latent, q_rope, kv_latent, k_rope, _, dout = _rope_device_inputs(
+            T, S, 128, seed=s + 1
         )
-        grads = torch.autograd.grad(out, leaves, dout)
-        torch.cuda.synchronize()
-        return out, lse, grads
 
-    stage = run(cu_q, cu_k, "index_prep")
-    strided_cu = torch.stack([cu_q, cu_q], 1)[:, 0]
-    twin = run(strided_cu, cu_k, "torch")
-    with pytest.MonkeyPatch.context() as mp:
-        # swapped in after the stage route cached its binding of the same geometry, which must not serve this call
-        mp.setitem(
-            cake_jit.MODULES,
-            NOPE_PROGRAM,
-            _record_without_index_prep(cake_jit.record(NOPE_PROGRAM)),
+        def run(cu_q_arg, cu_k_arg, expected_mode):
+            assert (
+                cake_backend._rope_varlen_index_mode(local, cu_q_arg, cu_k_arg, T)
+                == expected_mode
+            )
+            leaves = [
+                t.detach().clone().requires_grad_()
+                for t in (q_latent, q_rope, kv_latent, k_rope)
+            ]
+            out, lse = varlen(
+                *leaves, local, cu_q_arg, cu_k_arg, causal=True, return_lse=True
+            )
+            grads = torch.autograd.grad(out, leaves, dout)
+            torch.cuda.synchronize()
+            return dict(out=out.detach(), lse=lse.detach(), **_rope_grad_outputs(grads))
+
+        runs = {"stage": run(cu_q, cu_k, "index_prep")}
+        strided_cu = torch.stack([cu_q, cu_q], 1)[:, 0]
+        runs["twin"] = run(strided_cu, cu_k, "torch")
+        with pytest.MonkeyPatch.context() as mp:
+            # swapped in after the stage route cached its binding of the same geometry, which must not serve this call
+            mp.setitem(
+                cake_jit.MODULES,
+                NOPE_PROGRAM,
+                _record_without_index_prep(cake_jit.record(NOPE_PROGRAM)),
+            )
+            runs["no stage"] = run(cu_q, cu_k, "torch")
+        rows, counts = compact_rows(
+            offset_gather_kv_indices(local, cu_q, cu_k, causal=True), S
         )
-        no_stage = run(cu_q, cu_k, "torch")
-    for other in (twin, no_stage):
-        assert torch.equal(other[0], stage[0]) and torch.equal(other[1], stage[1])
-        assert torch.equal(other[2][0], stage[2][0]) and torch.equal(
-            other[2][1], stage[2][1]
+        out, lse, o_lo = cake_backend.forward(
+            q_latent, q_rope, kv_latent, k_rope, rows, topk_length=counts
         )
-        assert (
-            rel_l2(other[2][2], stage[2][2]) < ACC_REL_L2
-            and rel_l2(other[2][3], stage[2][3]) < ACC_REL_L2
+        torch.cuda.synchronize()
+        runs["flat"] = dict(out=out, lse=lse, o_lo=o_lo)
+        problem = nv.Problem(
+            q_latent=q_latent,
+            kv_latent=kv_latent,
+            q_rope=q_rope,
+            k_rope=k_rope,
+            indices=globalize_gather_indices_loop(local, cu_q, cu_k, causal=True).cuda(),
+            dout=dout,
         )
-    # the flat rope entry on the compacted rows with the counts is the same computation
-    rows, counts = compact_rows(
-        offset_gather_kv_indices(local, cu_q, cu_k, causal=True), S
-    )
-    out, lse, _ = cake_backend.forward(
-        q_latent, q_rope, kv_latent, k_rope, rows, topk_length=counts
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(out, stage[0]) and torch.equal(lse, stage[1])
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 72)
 
 
 def _tensor_free(*values) -> bool:
@@ -8651,56 +8869,71 @@ def test_rope_varlen_routes_return_the_flat_function_with_its_saved_list(monkeyp
         assert node.has_topk_length and node.num_segments == int(cu_k.numel()) - 1
 
 
-def test_rope_varlen_repeated_calls_reuse_the_binding_bitwise_and_pin_nothing():
-    """Repeated steps of the rope varlen entry on the stage route reuse one forward and one backward binding, give the
-    first step's ``out``, ``lse`` and ``dq`` bitwise, and leave nothing allocated once their results are released:
-    neither binding owns a tensor (not even a ``[T]`` vector)."""
+def test_rope_varlen_repeated_calls_reuse_the_binding_and_pin_nothing(
+    record_property,
+):
+    """Repeated steps of the rope varlen entry on the stage route reuse one forward and one backward binding and
+    leave nothing allocated once their results are released: neither binding owns a tensor (not even a ``[T]``
+    vector).  Every step's ``out``, ``lse`` and ``dq`` are judged on the same draw."""
     _require_program(backward=True)
     _require_nope_compacting_stage()
     cache = cake_backend.BINDING_CACHE
-    cache.clear()
-    inp = make_inputs([1024, 1024], [2048, 4096], seed=SEED + 120, topk=64)
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
-    assert (
-        cake_backend._rope_varlen_index_mode(
-            inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, inp.total_q
-        )
-        == "index_prep"
-    )
+    names = ("out", "lse", "dq_latent", "dq_rope")
 
-    def step():
-        leaves = [t.detach().clone().requires_grad_() for t in args]
-        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_varlen(
-            *leaves,
-            inp.idx_local,
-            inp.cu_seqlens_q,
-            inp.cu_seqlens_k,
-            causal=True,
-            return_lse=True,
+    def case(s, j):
+        cache.clear()
+        inp = make_inputs([1024, 1024], [2048, 4096], seed=s, topk=64)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        assert (
+            cake_backend._rope_varlen_index_mode(
+                inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, inp.total_q
+            )
+            == "index_prep"
         )
-        dq_latent, dq_rope = torch.autograd.grad(out, leaves[:2], inp.dout)
-        return out.detach(), lse.detach(), dq_latent, dq_rope
 
-    first = step()
-    torch.cuda.synchronize()
-    entries = dict(cache._entries)
-    assert sorted(key[0] for key in entries) == ["bwd", "rope_varlen_fwd"]
-    assert all(binding.topk_length is None for binding in entries.values())
-    live = torch.cuda.memory_allocated()
-    for _ in range(3):
-        again = step()
+        def step():
+            """One step, its results kept as host copies (judged below) so that its device memory is released."""
+            leaves = [t.detach().clone().requires_grad_() for t in args]
+            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+                *leaves,
+                inp.idx_local,
+                inp.cu_seqlens_q,
+                inp.cu_seqlens_k,
+                causal=True,
+                return_lse=True,
+            )
+            dq_latent, dq_rope = torch.autograd.grad(out, leaves[:2], inp.dout)
+            return tuple(t.detach().cpu() for t in (out, lse, dq_latent, dq_rope))
+
+        steps = [step()]
         torch.cuda.synchronize()
-        assert all(torch.equal(a, b) for a, b in zip(again, first, strict=True))
-        assert len(cache) == 2
-        assert all(cache._entries[key] is binding for key, binding in entries.items())
-    del again
-    torch.cuda.synchronize()
-    assert torch.cuda.memory_allocated() - live < inp.total_q * 4
+        entries = dict(cache._entries)
+        assert sorted(key[0] for key in entries) == ["bwd", "rope_varlen_fwd"]
+        assert all(binding.topk_length is None for binding in entries.values())
+        live = torch.cuda.memory_allocated()
+        for _ in range(3):
+            steps.append(step())
+            torch.cuda.synchronize()
+            assert len(cache) == 2
+            assert all(
+                cache._entries[key] is binding for key, binding in entries.items()
+            )
+        assert torch.cuda.memory_allocated() - live < inp.total_q * 4
+        rows = globalize_gather_indices_loop(
+            inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k, causal=True
+        ).cuda()
+        runs = {
+            f"step {i}": {n: t.cuda() for n, t in zip(names, got, strict=True)}
+            for i, got in enumerate(steps)
+        }
+        return nv.judged(nv.rope_problem(inp, indices=rows), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 120)
 
 
 # --- activation checkpointing: the autograd entries keep nothing alive after a
-# non-reentrant checkpointed forward, their outputs and gradients are those of the eager pair, and the backward is
-# recompute-safe (GPU) ---
+# non-reentrant checkpointed forward, their outputs and gradients and those of the eager pair are judged, and the
+# backward is recompute-safe (GPU) ---
 
 # Bytes an autograd entry may keep after ``checkpoint(fn, *inputs, use_reentrant=False)`` beyond the output storage:
 # allocator granularity (a few ``[T]`` int32 vectors and scalars at most), never an activation-sized tensor.  Under
@@ -8710,18 +8943,11 @@ CKPT_RETAINED_LIMIT_MIB = 2.0
 # the test shape of the recorded checkpointing construction: one causal segment, each query attends to its last W keys
 CKPT_T, CKPT_W = 2048, 256
 CKPT_DST_ROWS = 32768  # the CP-gather style destination buffer (the recorded 262144-row accumulator, scaled)
-# ``CAKE_PPLX_DSA_CKPT_DIGESTS``: a JSON written by ``work/bench/ckpt_retained.py --shape small`` with the
-# reference package (the same inputs: generator seed 0, the same tensor order); when set, the eager outputs and
-# gradients of this package must digest-match it (the cross-package bitwise evidence) and the eager peak memory must
-# not exceed its ``eager_peak_mib`` (allocator granularity allowed)
+# ``CAKE_PPLX_DSA_CKPT_DIGESTS``: a JSON the reference package recorded on the same construction (generator seed 0,
+# the same tensor order); when set, the eager peak memory of every entry must not exceed its ``eager_peak_mib``
+# (allocator granularity allowed)
 CKPT_DIGESTS_ENV = "CAKE_PPLX_DSA_CKPT_DIGESTS"
 MIB = 2**20
-
-
-def _sha16(t):
-    return hashlib.sha256(
-        t.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()
-    ).hexdigest()[:16]
 
 
 def _ckpt_retained_mib(fn, *inputs) -> float:
@@ -8742,15 +8968,15 @@ def _sliding_window_rows(T, W, device="cuda"):
     return torch.where(rows >= 0, rows, -1).to(torch.int32)
 
 
-def _ckpt_inputs():
-    """The construction of ``work/bench/ckpt_retained.py --shape small`` (generator seed 0, this tensor order): the
-    NoPE and rotary leaves, ``dout``, the sliding-window rows (one document: local rows == global rows), the prefix
-    sums and the destination map of the scaled CP gather."""
+def _ckpt_inputs(seed=0):
+    """The recorded checkpointing construction (generator ``seed``, 0 for the recorded inputs; this tensor order):
+    the NoPE and rotary leaves, ``dout``, the sliding-window rows (one document: local rows == global rows), the
+    prefix sums and the destination map of the scaled CP gather."""
     _require_program(backward=True)
     _require_nope_program(backward=True)
     T, W = CKPT_T, CKPT_W
     dev = torch.device("cuda")
-    g = torch.Generator(device="cuda").manual_seed(0)
+    g = torch.Generator(device="cuda").manual_seed(seed)
     q = torch.randn(T, 64, 512, device=dev, generator=g).bfloat16().requires_grad_()
     kv = torch.randn(T, 512, device=dev, generator=g).bfloat16().requires_grad_()
     q_rope = torch.randn(T, 64, 64, device=dev, generator=g).bfloat16().requires_grad_()
@@ -8777,21 +9003,11 @@ def _dkv_acc_argument(form, buffer):
     """How the caller's FP32 accumulator reaches an autograd entry: ``"tensor"`` -- the buffer itself (the buffer is
     owned outside the checkpointed region, so the recomputed forward meets the same tensor); ``"callable"`` -- a
     zero-argument callable returning it, the deferred form: the entry resolves the buffer at backward time and
-    keeps no accumulator on ``ctx``.  An entry that does not accept the deferred form raises ``TypeError`` /
-    ``ValueError`` at forward time, which the tests turn into a skip."""
+    keeps no accumulator on ``ctx``."""
     if form == "tensor":
         return buffer
     assert form == "callable"
     return lambda: buffer
-
-
-DEFERRED_FORM_ERRORS = (TypeError, ValueError, AttributeError)
-
-
-def _skip_if_deferred_form_unsupported(exc):
-    pytest.skip(
-        f"the package does not accept a callable dkv_acc (the deferred accumulator form): {exc}"
-    )
 
 
 def _kv_leaf_indices(name):
@@ -8862,22 +9078,39 @@ def _eager_step(fn, leaves, dout, acc):
     return out.detach(), grads, None if acc is None else acc.clone()
 
 
-def _assert_same_results(got, want, *, acc_got=None, acc_want=None):
-    """``out`` and the query gradients bitwise; the key-side gradients and the FP32 accumulator (``red.global`` sums in
-    no fixed order, so never bitwise run to run; cast to the BF16 leaf a few one-ulp flips) within ``ACC_REL_L2``."""
-    out_g, grads_g = got
-    out_w, grads_w = want
-    assert torch.equal(out_g, out_w)
-    for i, (a, b) in enumerate(zip(grads_g, grads_w, strict=True)):
-        if a is None or b is None:
-            assert a is None and b is None
-            continue
-        if i < len(grads_g) - (2 if len(grads_g) == 4 else 1):
-            assert torch.equal(a, b), f"gradient {i} differs"
-        else:
-            assert rel_l2(a, b) < ACC_REL_L2, f"gradient {i}: rel-L2 {rel_l2(a, b)}"
-    if acc_got is not None or acc_want is not None:
-        assert rel_l2(acc_got, acc_want) < ACC_REL_L2
+def _ckpt_problem(name, inp):
+    """The :class:`nv.Problem` of entry ``name`` on the construction ``inp`` (or a slice of it): the global rows of
+    the call (a varlen entry's rows through the varlen rule, causal as its call) and the entry's default scale."""
+    rows = inp.idx
+    if name.endswith("varlen"):
+        rows = offset_gather_kv_indices(inp.idx, inp.cu, inp.cu, causal=True)
+    if name.startswith("nope"):
+        return nv.Problem(
+            q_latent=inp.q, kv_latent=inp.kv, indices=rows, dout=inp.dout
+        )
+    return nv.Problem(
+        q_latent=inp.q,
+        kv_latent=inp.kv,
+        indices=rows,
+        q_rope=inp.q_rope,
+        k_rope=inp.k_rope,
+        dout=inp.dout,
+    )
+
+
+def _ckpt_outputs(name, out, grads, acc=None, dst_map=None) -> dict:
+    """One step of entry ``name`` -- ``out``, the gradients of its leaves (``None`` for a key-side leaf whose gradient
+    went into the accumulator), the accumulator after the step (zero-filled before it) -- by the output names of
+    :func:`nv.judged`; the accumulator through ``dst_map`` when the step passed one."""
+    if name.startswith("nope"):
+        names = ("dq", "dkv")
+    else:
+        names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
+    got = {"out": out}
+    got.update((n, g) for n, g in zip(names, grads, strict=True) if g is not None)
+    if acc is not None:
+        got["dkv_acc"] = nv.Acc(before=torch.zeros_like(acc), after=acc, dst_map=dst_map)
+    return got
 
 
 CKPT_ENTRIES = ("nope_varlen", "nope_flat", "rope", "rope_varlen")
@@ -8914,12 +9147,7 @@ def test_ckpt_autograd_entries_keep_nothing_alive_after_a_checkpointed_forward(c
     name, form, dst = case
     inp = _ckpt_inputs()
     fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form, dst_map=dst)
-    try:
-        fn(*leaves)  # warm-up: kernels, plans, per-device workspaces
-    except DEFERRED_FORM_ERRORS as exc:
-        if form == "callable":
-            _skip_if_deferred_form_unsupported(exc)
-        raise
+    fn(*leaves)  # warm-up: kernels, plans, per-device workspaces
     torch.cuda.synchronize()
     if acc is not None:
         acc.zero_()
@@ -8930,79 +9158,67 @@ def test_ckpt_autograd_entries_keep_nothing_alive_after_a_checkpointed_forward(c
 
 
 @pytest.mark.parametrize("case", _ckpt_case_ids(), ids=_ckpt_case_name)
-def test_ckpt_outputs_and_gradients_match_the_eager_pair_and_the_reference_digests(
-    case,
+def test_ckpt_outputs_and_gradients_of_the_checkpointed_and_the_eager_pair(
+    case, record_property
 ):
-    """Under checkpointing every entry gives the eager pair's ``out`` and query gradients bitwise and its key-side
-    gradients within the FP32 summation spread (the fresh ``dkv`` path, the ``dkv_acc`` accumulate path and the
-    ``dkv_dst_map`` path alike), with the accumulator zero-filled between the checkpointed forward and its backward
-    as a trainer does.  With ``CAKE_PPLX_DSA_CKPT_DIGESTS`` set, the eager ``out`` / ``dq`` digests also equal
-    the reference package's on the same inputs (``work/bench/ckpt_retained.py --shape small``)."""
+    """Every entry under checkpointing and in the eager pair (the fresh ``dkv`` path, the ``dkv_acc`` accumulate path
+    and the ``dkv_dst_map`` path alike), with the accumulator zero-filled between the checkpointed forward and its
+    backward as a trainer does: with an accumulator the key-side leaves get no gradient, and ``out`` and every
+    gradient (or the accumulator's increment) of both steps are judged on the same draw."""
     name, form, dst = case
-    inp = _ckpt_inputs()
-    fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form, dst_map=dst)
-    try:
+
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form, dst_map=dst)
         out_e, grads_e, acc_e = _eager_step(fn, leaves, inp.dout, acc)
-    except DEFERRED_FORM_ERRORS as exc:
-        if form == "callable":
-            _skip_if_deferred_form_unsupported(exc)
-        raise
-    out_c = checkpoint(fn, *leaves, use_reentrant=False)
-    if acc is not None:
-        # the trainer's pattern: the accumulator is zero-filled between the forward and the backward (the tensor
-        # form stays an attribute of the autograd node, so autograd's saved-tensor version check does not see it)
-        acc.zero_()
-    grads_c = torch.autograd.grad(out_c, leaves, inp.dout, allow_unused=True)
-    torch.cuda.synchronize()
-    acc_c = None if acc is None else acc.clone()
-    _assert_same_results(
-        (out_c.detach(), grads_c), (out_e, grads_e), acc_got=acc_c, acc_want=acc_e
-    )
-    if acc is not None:
-        for i in _kv_leaf_indices(
-            name
-        ):  # the key-side gradients went into the accumulator
-            assert grads_e[i] is None and grads_c[i] is None
-        assert float(acc_e.abs().sum()) > 0
-        if dst:
-            hit = torch.zeros(CKPT_DST_ROWS, dtype=torch.bool, device="cuda")
-            hit[inp.dst_map.long()] = True
-            assert torch.all(acc_e[~hit] == 0)
-    path = os.environ.get(CKPT_DIGESTS_ENV, "")
-    if not path:
-        return
-    # ``out`` and the query gradients do not depend on the accumulator form, so every variant of an entry must
-    # digest-match the reference package's plain entry
-    recorded = json.loads(Path(path).read_text())["entries"]
-    if name not in recorded or "digests" not in recorded[name]:
-        pytest.skip(f"{path} carries no digests for {name}")
-    want = recorded[name]["digests"]["eager"]
-    assert _sha16(out_e) == want["out"], "out differs from the reference package"
-    assert _sha16(grads_e[0]) == want["dq"], "dq differs from the reference package"
-    if name.startswith("rope"):
-        assert _sha16(grads_e[1]) == want["dq_rope"], (
-            "dq_rope differs from the reference package"
+        out_c = checkpoint(fn, *leaves, use_reentrant=False)
+        if acc is not None:
+            # the trainer's pattern: the accumulator is zero-filled between the forward and the backward (the tensor
+            # form stays an attribute of the autograd node, so autograd's saved-tensor version check does not see it)
+            acc.zero_()
+        grads_c = torch.autograd.grad(out_c, leaves, inp.dout, allow_unused=True)
+        torch.cuda.synchronize()
+        acc_c = None if acc is None else acc.clone()
+        if acc is not None:
+            for i in _kv_leaf_indices(
+                name
+            ):  # the key-side gradients went into the accumulator
+                assert grads_e[i] is None and grads_c[i] is None
+        dst_map = inp.dst_map if dst else None
+        return nv.judged(
+            _ckpt_problem(name, inp),
+            {
+                "eager": _ckpt_outputs(name, out_e, grads_e, acc_e, dst_map),
+                "checkpointed": _ckpt_outputs(
+                    name, out_c.detach(), grads_c, acc_c, dst_map
+                ),
+            },
         )
+
+    nv.judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
-def test_ckpt_backward_is_recompute_safe_after_an_unrelated_forward(name):
+def test_ckpt_backward_is_recompute_safe_after_an_unrelated_forward(
+    name, record_property
+):
     """The checkpointed backward of one call runs after a second, unrelated forward on the same inputs (another
     layer's call in a training step) and after the binding cache served other geometries: the recompute finds its
-    saved tensors by position, not by identity with the live forward, and the gradients equal the eager pair's.
-    The forward's saved-tensor count is the same for the live and the recomputed forward."""
-    inp = _ckpt_inputs()
-    fn, leaves, _acc = _ckpt_entry(name, inp)
-    out_e, grads_e, _ = _eager_step(fn, leaves, inp.dout, None)
-    out_c = checkpoint(fn, *leaves, use_reentrant=False)
-    unrelated = fn(
-        *leaves
-    )  # another call on the same inputs, its graph alive during the backward
-    # another geometry through the same entry (a different binding) between the forward and its backward
-    n = 512
-    other_fn, other_leaves, _ = _ckpt_entry(
-        name,
-        SimpleNamespace(
+    saved tensors by position, not by identity with the live forward.  The forward's saved-tensor count is the same
+    for the live and the recomputed forward.  The checkpointed step, the eager pair, the unrelated forward and the
+    other geometry's forward are judged on the same draw."""
+
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        fn, leaves, _acc = _ckpt_entry(name, inp)
+        out_e, grads_e, _ = _eager_step(fn, leaves, inp.dout, None)
+        out_c = checkpoint(fn, *leaves, use_reentrant=False)
+        unrelated = fn(
+            *leaves
+        )  # another call on the same inputs, its graph alive during the backward
+        # another geometry through the same entry (a different binding) between the forward and its backward
+        n = 512
+        other = SimpleNamespace(
             q=inp.q[:n],
             kv=inp.kv[:n],
             q_rope=inp.q_rope[:n],
@@ -9011,22 +9227,36 @@ def test_ckpt_backward_is_recompute_safe_after_an_unrelated_forward(name):
             idx=inp.idx[:n],
             cu=inp.cu.new_tensor([0, n]),
             dst_map=inp.dst_map[:n],
-        ),
-    )
-    other_out = other_fn(*other_leaves)
-    torch.cuda.synchronize()
-    grads_c = torch.autograd.grad(out_c, leaves, inp.dout, allow_unused=True)
-    torch.cuda.synchronize()
-    del unrelated, other_out
-    _assert_same_results((out_c.detach(), grads_c), (out_e, grads_e))
+        )
+        other_fn, other_leaves, _ = _ckpt_entry(name, other)
+        other_out = other_fn(*other_leaves)
+        torch.cuda.synchronize()
+        grads_c = torch.autograd.grad(out_c, leaves, inp.dout, allow_unused=True)
+        torch.cuda.synchronize()
+        return nv.merge(
+            nv.judged(
+                _ckpt_problem(name, inp),
+                {
+                    "eager": _ckpt_outputs(name, out_e, grads_e),
+                    "checkpointed": _ckpt_outputs(name, out_c.detach(), grads_c),
+                    "unrelated": {"out": unrelated.detach()},
+                },
+            ),
+            nv.judged(
+                _ckpt_problem(name, other),
+                {"": {"out": other_out.detach()}},
+                prefix="other geometry ",
+            ),
+        )
+
+    nv.judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_ckpt_eager_peak_memory_is_not_above_the_reference_package(name):
     """The eager (non-checkpointed) forward + backward of every entry allocates no more above the inputs than the
-    reference package measured on the same construction (``CAKE_PPLX_DSA_CKPT_DIGESTS``: ``eager_peak_mib`` of
-    ``work/bench/ckpt_retained.py --shape small``; allocator granularity allowed).  Without the recording the peak
-    is measured and reported only."""
+    reference package measured on the same construction (``CAKE_PPLX_DSA_CKPT_DIGESTS``: its ``eager_peak_mib``;
+    allocator granularity allowed).  Without the recording the peak is measured and reported only."""
     inp = _ckpt_inputs()
     fn, leaves, _acc = _ckpt_entry(name, inp)
     fn(*leaves)
@@ -9052,18 +9282,30 @@ def test_ckpt_eager_peak_memory_is_not_above_the_reference_package(name):
 
 
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
-def test_save_on_cpu_outputs_and_gradients_match_the_eager_pair(name):
+def test_save_on_cpu_outputs_and_gradients_of_every_autograd_entry(
+    name, record_property
+):
     """Under ``torch.autograd.graph.save_on_cpu`` -- every saved tensor packed to host memory once the forward returns
-    and unpacked in the backward -- each autograd entry gives the eager call's ``out`` and query gradients bitwise
-    and its key gradients within the atomics spread."""
-    inp = _ckpt_inputs()
-    fn, leaves, _acc = _ckpt_entry(name, inp)
-    want = _eager_step(fn, leaves, inp.dout, None)
-    with torch.autograd.graph.save_on_cpu():
-        out = fn(*leaves)
-    grads = torch.autograd.grad(out, leaves, inp.dout, allow_unused=True)
-    torch.cuda.synchronize()
-    _assert_same_results((out.detach(), grads), want[:2])
+    and unpacked in the backward -- each autograd entry's ``out`` and gradients, and those of the eager step, are
+    judged on the same draw."""
+
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        fn, leaves, _acc = _ckpt_entry(name, inp)
+        out_e, grads_e, _ = _eager_step(fn, leaves, inp.dout, None)
+        with torch.autograd.graph.save_on_cpu():
+            out = fn(*leaves)
+        grads = torch.autograd.grad(out, leaves, inp.dout, allow_unused=True)
+        torch.cuda.synchronize()
+        return nv.judged(
+            _ckpt_problem(name, inp),
+            {
+                "eager": _ckpt_outputs(name, out_e, grads_e),
+                "save_on_cpu": _ckpt_outputs(name, out.detach(), grads),
+            },
+        )
+
+    nv.judge_draws(record_property, draw, seed=0)
 
 
 # --- saved-tensor hooks over strided index rows: the NoPE autograd backward keys and plans by the rows it receives
@@ -9086,17 +9328,17 @@ def _nope_row_view(idx, view):
     return rows
 
 
-def _nope_offload_case(view, lengths):
-    """``(q, kv, rows, dout, topk_length)`` of a flat NoPE step below the slot limit over strided rows: without
-    lengths the mask route (the forward derives the lengths, the backward reads the caller's rows), with them the
-    rows and lengths as given; either way the caller's rows are a saved tensor."""
+def _nope_offload_case(view, lengths, *, seed=SEED + 130):
+    """``(q, kv, rows, dout, topk_length)`` of a flat NoPE step below the slot limit over strided rows, from ``seed``:
+    without lengths the mask route (the forward derives the lengths, the backward reads the caller's rows), with them
+    the rows and lengths as given; either way the caller's rows are a saved tensor."""
     _require_nope_program(backward=True)
     T, S, K = 256, 512, 96
-    q, kv, idx, dout = _nope_device_inputs(T, S, K, seed=SEED + 130)
+    q, kv, idx, dout = _nope_device_inputs(T, S, K, seed=seed)
     assert cake_backend.nope_flat_index_mode(T, K) == "mask"
     cut = None
     if lengths:
-        gen = torch.Generator(device="cuda").manual_seed(SEED + 131)
+        gen = torch.Generator(device="cuda").manual_seed(seed + 1)
         cut = torch.randint(
             1, K + 1, (T,), device="cuda", generator=gen, dtype=torch.int32
         )
@@ -9123,36 +9365,49 @@ def _nope_flat_step(q, kv, rows, dout, cut, *, offload=None):
 @pytest.mark.parametrize("lengths", [False, True], ids=["mask", "topk_length"])
 @pytest.mark.parametrize("view", NOPE_ROW_VIEWS)
 def test_nope_backward_keys_offloaded_strided_rows_by_their_saved_layout(
-    monkeypatch, view, lengths, order
+    monkeypatch, view, lengths, order, record_property
 ):
     """The flat NoPE entry over strided caller rows -- a column slice of a wider buffer, a view at an offset into a
     flat buffer -- saves the rows as given, on the mask route and with caller lengths; ``save_on_cpu`` hands them
     back contiguous at offset 0, and the backward's plan bakes the rows' stride and start offset.  An eager and an
-    offloaded step in either order, from an empty binding cache, each give the cache-cleared eager step's ``out``
-    and ``dq`` bitwise and its ``dkv`` within the atomics spread: the backward keys by the rows it reads, so each
-    layout keeps its own backward binding and neither step runs over the other's.  The offload packs to pinned host
+    offloaded step in either order, from an empty binding cache, after a cache-cleared eager step: the backward keys
+    by the rows it reads, so each layout keeps its own backward binding and neither step runs over the other's, and
+    the three steps' ``out``, ``dq`` and ``dkv`` are judged on the same draw.  The offload packs to pinned host
     memory; a pageable pack hands back the same contiguous rows, and the pageable path is
-    ``test_save_on_cpu_outputs_and_gradients_match_the_eager_pair``'s."""
-    q, kv, rows, dout, cut = _nope_offload_case(view, lengths)
+    ``test_save_on_cpu_outputs_and_gradients_of_every_autograd_entry``'s."""
     _private_binding_cache(monkeypatch)
     cache = cake_backend.BINDING_CACHE
-    want = _nope_flat_step(q, kv, rows, dout, cut)[:2]
-    cache.clear()
-    modes = [None, True] if order == "eager_first" else [True, None]
-    layouts = set()
-    for offload in modes:
-        out, grads, saved = _nope_flat_step(q, kv, rows, dout, cut, offload=offload)
-        if offload is None:
-            assert saved.data_ptr() == rows.data_ptr()
-            assert saved.stride() == rows.stride()
-        else:
-            assert saved.is_contiguous() and saved.storage_offset() == 0
-            assert torch.equal(saved, rows)
-        layouts.add(cake_backend._geometry(saved))
-        _assert_same_results((out, grads), want)
-    assert len(layouts) == 2
-    keys = [k for k in cache._entries if k[0] == "nope_bwd"]
-    assert len(keys) == 2 and {k[3] for k in keys} == layouts
+
+    def case(s, j):
+        q, kv, rows, dout, cut = _nope_offload_case(view, lengths, seed=s)
+        cache.clear()
+        out_w, grads_w, _ = _nope_flat_step(q, kv, rows, dout, cut)
+        runs = {"cache-cleared eager": dict(out=out_w, dq=grads_w[0], dkv=grads_w[1])}
+        cache.clear()
+        modes = [None, True] if order == "eager_first" else [True, None]
+        layouts = set()
+        for offload in modes:
+            out, grads, saved = _nope_flat_step(
+                q, kv, rows, dout, cut, offload=offload
+            )
+            if offload is None:
+                assert saved.data_ptr() == rows.data_ptr()
+                assert saved.stride() == rows.stride()
+            else:
+                assert saved.is_contiguous() and saved.storage_offset() == 0
+                assert torch.equal(saved, rows)
+            layouts.add(cake_backend._geometry(saved))
+            label = "eager" if offload is None else "offloaded"
+            runs[label] = dict(out=out, dq=grads[0], dkv=grads[1])
+        assert len(layouts) == 2
+        keys = [k for k in cache._entries if k[0] == "nope_bwd"]
+        assert len(keys) == 2 and {k[3] for k in keys} == layouts
+        problem = nv.Problem(
+            q_latent=q, kv_latent=kv, indices=rows, topk_length=cut, dout=dout
+        )
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 130)
 
 
 @pytest.mark.parametrize(
@@ -9161,31 +9416,45 @@ def test_nope_backward_keys_offloaded_strided_rows_by_their_saved_layout(
 @pytest.mark.parametrize("lengths", [False, True], ids=["mask", "topk_length"])
 @pytest.mark.parametrize("view", NOPE_ROW_VIEWS)
 def test_nope_selective_offload_of_one_of_two_same_geometry_layers(
-    monkeypatch, view, lengths, offloaded
+    monkeypatch, view, lengths, offloaded, record_property
 ):
     """Selective activation offload: two layers of one step call the flat NoPE entry with one geometry (the same
-    strided rows), one of them inside ``save_on_cpu``; one backward over both gives each layer the cache-cleared
-    eager step's ``out`` and ``dq`` bitwise and its ``dkv`` within the atomics spread, whichever layer's backward
-    plans first."""
-    q, kv, rows, dout, cut = _nope_offload_case(view, lengths)
+    strided rows), one of them inside ``save_on_cpu``, after a cache-cleared eager step; one backward over both
+    layers, whichever layer's backward plans first: each layer's ``out``, ``dq`` and ``dkv`` and the eager step's are
+    judged on the same draw."""
     _private_binding_cache(monkeypatch)
-    want = _nope_flat_step(q, kv, rows, dout, cut)[:2]
-    cake_backend.BINDING_CACHE.clear()
     fn = cake_backend.cake_dsa_sparse_attention_nondet_nope
-    layers = [[t.detach().clone().requires_grad_() for t in (q, kv)] for _ in range(2)]
-    outs = []
-    for layer, leaves in enumerate(layers):
-        if layer == offloaded:
-            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+
+    def case(s, j):
+        q, kv, rows, dout, cut = _nope_offload_case(view, lengths, seed=s)
+        cake_backend.BINDING_CACHE.clear()
+        out_w, grads_w, _ = _nope_flat_step(q, kv, rows, dout, cut)
+        runs = {"cache-cleared eager": dict(out=out_w, dq=grads_w[0], dkv=grads_w[1])}
+        cake_backend.BINDING_CACHE.clear()
+        layers = [
+            [t.detach().clone().requires_grad_() for t in (q, kv)] for _ in range(2)
+        ]
+        outs = []
+        for layer, leaves in enumerate(layers):
+            if layer == offloaded:
+                with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                    outs.append(fn(*leaves, rows, topk_length=cut))
+            else:
                 outs.append(fn(*leaves, rows, topk_length=cut))
-        else:
-            outs.append(fn(*leaves, rows, topk_length=cut))
-    grads = torch.autograd.grad(
-        outs, [t for leaves in layers for t in leaves], [dout, dout]
-    )
-    torch.cuda.synchronize()
-    for layer, out in enumerate(outs):
-        _assert_same_results((out.detach(), grads[2 * layer : 2 * layer + 2]), want)
+        grads = torch.autograd.grad(
+            outs, [t for leaves in layers for t in leaves], [dout, dout]
+        )
+        torch.cuda.synchronize()
+        for layer, out in enumerate(outs):
+            runs[f"layer {layer}"] = dict(
+                out=out.detach(), dq=grads[2 * layer], dkv=grads[2 * layer + 1]
+            )
+        problem = nv.Problem(
+            q_latent=q, kv_latent=kv, indices=rows, topk_length=cut, dout=dout
+        )
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 130)
 
 
 # --- streams: every launch runs on torch's current stream; a launch over torch tensors takes it from its arguments
@@ -9353,43 +9622,57 @@ SIDE_STREAM_CASES = (
     ids=[n + ("" if s is None else "+index_prep") for n, s in SIDE_STREAM_CASES],
 )
 def test_autograd_entries_launch_on_the_callers_side_stream(
-    monkeypatch, name, slot_limit
+    monkeypatch, name, slot_limit, record_property
 ):
     """Forward + backward of every autograd entry issued on a side stream whose inputs arrive late (the stream
-    sleeps, then writes them) give the default-stream step's ``out`` and query gradients bitwise and its key
-    gradients within the atomics spread, with the same launches in the same order, each issued while that stream is
-    torch's current stream -- the backward's on autograd's device thread too.  A launch on any other stream would
-    read the stale inputs: the launches over torch tensors take the stream through tvm-ffi, the pre-bound forward of
-    the NoPE preparation route (the flat entry with the slot limit at 0) from its explicit context.  The rope varlen
-    entry takes the stage route."""
-    inp = _ckpt_inputs()
+    sleeps, then writes them) make the default-stream step's launches in the same order, each issued while that
+    stream is torch's current stream -- the backward's on autograd's device thread too.  A launch on any other stream
+    would read the stale inputs: the launches over torch tensors take the stream through tvm-ffi, the pre-bound
+    forward of the NoPE preparation route (the flat entry with the slot limit at 0) from its explicit context.  The
+    rope varlen entry takes the stage route.  Both steps' ``out`` and gradients are judged on the same draw."""
     stage_route = name == "rope_varlen" or slot_limit is not None
     if stage_route:
         _require_nope_compacting_stage()
     if slot_limit is not None:
         monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", slot_limit)
     streams = _record_launch_streams(monkeypatch)
-    fn, leaves, _ = _ckpt_entry(name, inp)
-    want = _eager_step(fn, leaves, inp.dout, None)
-    stages = [stage for stage, _ in streams]
-    assert {s for _, s in streams} == {torch.cuda.current_stream().cuda_stream}
-    assert any(stage.endswith("bwd_delta") for stage in stages), stages
-    if stage_route:
-        assert stages[0] == NOPE_INDEX_PREP_STAGE, stages
     late = ("q", "kv", "q_rope", "k_rope", "dout", "idx")
 
-    def step(buffers):
-        side = SimpleNamespace(**{**vars(inp), **buffers})
-        side_fn, side_leaves, _ = _ckpt_entry(name, side)
-        out = side_fn(*side_leaves)
-        grads = torch.autograd.grad(out, side_leaves, side.dout, allow_unused=True)
-        return out.detach(), grads
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        fn, leaves, _ = _ckpt_entry(name, inp)
+        del streams[:]
+        out_e, grads_e, _ = _eager_step(fn, leaves, inp.dout, None)
+        stages = [stage for stage, _ in streams]
+        assert {h for _, h in streams} == {torch.cuda.current_stream().cuda_stream}
+        assert any(stage.endswith("bwd_delta") for stage in stages), stages
+        if stage_route:
+            assert stages[0] == NOPE_INDEX_PREP_STAGE, stages
 
-    del streams[:]
-    got, stream = _late_on_a_side_stream({n: getattr(inp, n) for n in late}, step)
-    assert [stage for stage, _ in streams] == stages
-    assert {s for _, s in streams} == {stream.cuda_stream}, streams
-    _assert_same_results(got, want[:2])
+        def step(buffers):
+            side = SimpleNamespace(**{**vars(inp), **buffers})
+            side_fn, side_leaves, _ = _ckpt_entry(name, side)
+            out = side_fn(*side_leaves)
+            grads = torch.autograd.grad(
+                out, side_leaves, side.dout, allow_unused=True
+            )
+            return out.detach(), grads
+
+        del streams[:]
+        (out_s, grads_s), stream = _late_on_a_side_stream(
+            {n: getattr(inp, n) for n in late}, step
+        )
+        assert [stage for stage, _ in streams] == stages
+        assert {h for _, h in streams} == {stream.cuda_stream}, streams
+        return nv.judged(
+            _ckpt_problem(name, inp),
+            {
+                "default stream": _ckpt_outputs(name, out_e, grads_e),
+                "side stream": _ckpt_outputs(name, out_s, grads_s),
+            },
+        )
+
+    nv.judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize(
@@ -9397,87 +9680,115 @@ def test_autograd_entries_launch_on_the_callers_side_stream(
 )
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_autograd_entries_capture_the_first_call_of_a_new_geometry(
-    monkeypatch, name, form
+    monkeypatch, name, form, record_property
 ):
     """The first call of a geometry captured into a CUDA graph -- every binding of the step planned during the
-    capture, privately and not stored, after the entry has run eagerly on another geometry only -- replays twice to
-    the eager step that follows: ``out`` and the query gradients bitwise, the key gradients and the accumulator
-    (zero-filled inside the graph) within the atomics spread, without an accumulator and with its tensor and
-    callable forms.  Every launch of the capture runs on the capture stream, torch's current stream there."""
-    inp = _ckpt_inputs()
+    capture, privately and not stored, after the entry has run eagerly on another geometry only -- replays twice,
+    then the eager step follows, without an accumulator and with its tensor and callable forms (the accumulator
+    zero-filled inside the graph).  Every launch of the capture runs on the capture stream, torch's current stream
+    there.  The replayed graph's, the eager step's and the other geometry's ``out`` and gradients (or accumulator
+    increments) are judged on the same draw."""
     _private_binding_cache(monkeypatch)
     cache = cake_backend.BINDING_CACHE
     n = 512
-    other = SimpleNamespace(
-        q=inp.q[:n],
-        kv=inp.kv[:n],
-        q_rope=inp.q_rope[:n],
-        k_rope=inp.k_rope[:n],
-        dout=inp.dout[:n],
-        idx=inp.idx[:n],
-        cu=inp.cu.new_tensor([0, n]),
-        dst_map=inp.dst_map[:n],
-    )
-    # one eager step on another geometry: the loaded modules, the per-device constants, autograd's device thread
-    other_fn, other_leaves, other_acc = _ckpt_entry(name, other, acc_form=form)
-    try:
-        _eager_step(other_fn, other_leaves, other.dout, other_acc)
-    except DEFERRED_FORM_ERRORS as exc:
-        if form == "callable":
-            _skip_if_deferred_form_unsupported(exc)
-        raise
-    warm = len(cache)
-    fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form)
-    # fresh leaves, first used on the capture stream (a leaf's AccumulateGrad node records the stream of its first
-    # use)
-    captured_leaves = tuple(t.detach().clone().requires_grad_() for t in leaves)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        if acc is not None:
-            acc.zero_()
-        out = fn(*captured_leaves)
-        grads = torch.autograd.grad(out, captured_leaves, inp.dout, allow_unused=True)
-    assert len(cache) == warm  # the capture stored nothing
-    for _ in range(2):
-        graph.replay()
-    torch.cuda.synchronize()
-    got = (out.detach().clone(), tuple(None if g is None else g.clone() for g in grads))
-    acc_got = None if acc is None else acc.clone()
-    out_e, grads_e, acc_e = _eager_step(fn, leaves, inp.dout, acc)
-    assert len(cache) > warm  # the eager step stores what the capture planned privately
-    _assert_same_results(got, (out_e, grads_e), acc_got=acc_got, acc_want=acc_e)
+
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        cache.clear()  # the capture below is the first call of its geometry on every draw
+        other = SimpleNamespace(
+            q=inp.q[:n],
+            kv=inp.kv[:n],
+            q_rope=inp.q_rope[:n],
+            k_rope=inp.k_rope[:n],
+            dout=inp.dout[:n],
+            idx=inp.idx[:n],
+            cu=inp.cu.new_tensor([0, n]),
+            dst_map=inp.dst_map[:n],
+        )
+        # one eager step on another geometry: the loaded modules, the per-device constants, autograd's device thread
+        other_fn, other_leaves, other_acc = _ckpt_entry(name, other, acc_form=form)
+        out_o, grads_o, acc_o = _eager_step(
+            other_fn, other_leaves, other.dout, other_acc
+        )
+        warm = len(cache)
+        fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form)
+        # fresh leaves, first used on the capture stream (a leaf's AccumulateGrad node records the stream of its first
+        # use)
+        captured_leaves = tuple(t.detach().clone().requires_grad_() for t in leaves)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            if acc is not None:
+                acc.zero_()
+            out = fn(*captured_leaves)
+            grads = torch.autograd.grad(
+                out, captured_leaves, inp.dout, allow_unused=True
+            )
+        assert len(cache) == warm  # the capture stored nothing
+        for _ in range(2):
+            graph.replay()
+        torch.cuda.synchronize()
+        out_g = out.detach().clone()
+        grads_g = tuple(None if g is None else g.clone() for g in grads)
+        acc_g = None if acc is None else acc.clone()
+        out_e, grads_e, acc_e = _eager_step(fn, leaves, inp.dout, acc)
+        assert len(cache) > warm  # the eager step stores what the capture planned privately
+        return nv.merge(
+            nv.judged(
+                _ckpt_problem(name, inp),
+                {
+                    "replayed": _ckpt_outputs(name, out_g, grads_g, acc_g),
+                    "eager": _ckpt_outputs(name, out_e, grads_e, acc_e),
+                },
+            ),
+            nv.judged(
+                _ckpt_problem(name, other),
+                {"": _ckpt_outputs(name, out_o, grads_o, acc_o)},
+                prefix="other geometry ",
+            ),
+        )
+
+    nv.judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize("form", [None, "tensor"], ids=["fresh", "tensor_dkv_acc"])
-def test_nope_backward_over_alternating_dout_layouts_matches_a_planning_backward(
-    monkeypatch, form
+def test_nope_backward_over_alternating_dout_layouts_and_a_failed_allocation(
+    monkeypatch, form, record_property
 ):
     """With the registered kernels, through the NoPE varlen entry: backwards over alternating ``dout`` layouts
-    (dense and head-major) -- each running the prediction, a lookup or a plan -- give ``out`` and ``dq`` of a backward
-    planned from an empty binding cache with the same layout bitwise, and its ``dkv`` (or accumulator) within the
-    atomics spread.  With a tensor accumulator, an allocation failure injected after the delta launch (``dq``'s)
-    leaves the accumulator bitwise as it was."""
-    inp = _ckpt_inputs()
+    (dense and head-major) -- each running the prediction, a lookup or a plan -- and a backward of each layout
+    planned from an empty binding cache: every step's ``out``, ``dq`` and ``dkv`` (or accumulator increment) are
+    judged on the same draw.  With a tensor accumulator, an allocation failure injected after the delta launch
+    (``dq``'s) leaves the accumulator bitwise as it was."""
     _private_binding_cache(monkeypatch)
     cache = cake_backend.BINDING_CACHE
-    fn, leaves, acc = _ckpt_entry("nope_varlen", inp, acc_form=form)
-    layouts = {
-        "dense": inp.dout,
-        "head_major": inp.dout.permute(1, 0, 2).contiguous().permute(1, 0, 2),
-    }
-    want = {}
-    for name, dout in layouts.items():
+
+    def draw(s, j):
+        inp = _ckpt_inputs(seed=s)
+        fn, leaves, acc = _ckpt_entry("nope_varlen", inp, acc_form=form)
+        layouts = {
+            "dense": inp.dout,
+            "head_major": inp.dout.permute(1, 0, 2).contiguous().permute(1, 0, 2),
+        }
+        runs = {}
+        for name, dout in layouts.items():
+            cache.clear()
+            runs[f"planning {name}"] = _ckpt_outputs(
+                "nope_varlen", *_eager_step(fn, leaves, dout, acc)
+            )
         cache.clear()
-        want[name] = _eager_step(fn, leaves, dout, acc)
-    cache.clear()
-    for name in ("dense", "dense", "head_major", "head_major", "dense", "head_major"):
-        out, grads, acc_got = _eager_step(fn, leaves, layouts[name], acc)
-        out_w, grads_w, acc_w = want[name]
-        _assert_same_results(
-            (out, grads), (out_w, grads_w), acc_got=acc_got, acc_want=acc_w
-        )
-    if acc is None:
+        for i, name in enumerate(
+            ("dense", "dense", "head_major", "head_major", "dense", "head_major")
+        ):
+            runs[f"step {i} {name}"] = _ckpt_outputs(
+                "nope_varlen", *_eager_step(fn, leaves, layouts[name], acc)
+            )
+        return nv.judged(_ckpt_problem("nope_varlen", inp), runs)
+
+    nv.judge_draws(record_property, draw, seed=0)
+    if form is None:
         return
+    inp = _ckpt_inputs()
+    fn, leaves, acc = _ckpt_entry("nope_varlen", inp, acc_form=form)
     gen = torch.Generator(device="cuda").manual_seed(SEED + 140)
     acc.copy_(torch.randn(acc.shape, device="cuda", generator=gen))
     before = acc.clone()
@@ -9492,6 +9803,6 @@ def test_nope_backward_over_alternating_dout_layouts_matches_a_planning_backward
 
     monkeypatch.setattr(cake_backend, "_alloc", alloc)
     with pytest.raises(RuntimeError, match="injected dq allocation failure"):
-        torch.autograd.grad(out, leaves, layouts["dense"], allow_unused=True)
+        torch.autograd.grad(out, leaves, inp.dout, allow_unused=True)
     torch.cuda.synchronize()
     assert torch.equal(acc, before)

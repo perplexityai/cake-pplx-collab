@@ -14,7 +14,9 @@ region in the storage of ``o_lo``).  Trainer layout (the GLM-5.2 rows): the publ
 ``cake_dsa_sparse_attention_det_varlen(..., causal=True, dkv_acc=, dkv_dst_map=)`` through autograd, fed the
 layout views as they are, with the caller's fp32 ``dkv_acc`` allocated inside the timed forward.  The NoPE arm calls
 ``cake_dsa_sparse_attention_det_nope_varlen`` through autograd into an fp32 ``dkv_acc [S, 512]`` zero-filled inside
-the timed backward, once per step.
+the timed backward, once per step.  The arms ``det_nope_p2`` / ``det_nope_p4`` call that entry with
+``key_passes=2`` / ``4`` (the backward's main stage as that many key-range passes; the NoPE policy alone keeps one
+pass); run them on the long-key rows, e.g. ``nope_chunk_4096x269564``, ``nope_tail_4096x131072``, ``p8949_nope``.
 
 Columns.  ``fwd_ms``: the training forward.  ``step_ms``: forward + backward.  ``bwd_ms``: ``step_ms - fwd_ms``
 (every arm, the same derivation).  ``bwd_again_ms``: a backward over an already-consumed forward (the retained graph
@@ -40,6 +42,8 @@ Usage::
         --arms det,nondet --json det.json
     python benchmarks/bench_cake_dsa_sparse_attention_det_train.py --rows chunk_4096x268757 tail_2123x67923 \\
         nope_glm53_a --arms det,nondet,det_nope,nondet_nope,fa4,fa4_nope
+    python benchmarks/bench_cake_dsa_sparse_attention_det_train.py --rows nope_chunk_4096x269564 \\
+        nope_tail_4096x131072 p8949_nope --arms det_nope,det_nope_p2,det_nope_p4
 """
 
 import argparse
@@ -231,10 +235,12 @@ class ArmDet(nb.ArmCake):
 
 class ArmDetNope:
     """The deterministic package's native zero-RoPE varlen entry through autograd (the protocol of the
-    non-deterministic script's ``cake_nope`` arm: fp32 ``dkv_acc [S, 512]`` zero-filled inside the backward)."""
+    non-deterministic script's ``cake_nope`` arm: fp32 ``dkv_acc [S, 512]`` zero-filled inside the backward), with
+    the entry's ``key_passes`` (``None``: the NoPE key-pass policy)."""
 
     name = "det_nope"
     deterministic = True
+    key_passes = None
 
     def __init__(self, inp):
         program = cake_jit.NOPE_PROGRAM
@@ -250,7 +256,9 @@ class ArmDetNope:
 
     def versions(self):
         return dict(
-            module=self.program, entry="cake_dsa_sparse_attention_det_nope_varlen"
+            module=self.program,
+            entry="cake_dsa_sparse_attention_det_nope_varlen",
+            key_passes=self.key_passes,
         )
 
     def forward(self):
@@ -269,6 +277,7 @@ class ArmDetNope:
             causal=True,
             softmax_scale=DEFAULT_NOPE_SCALE,
             return_lse=True,
+            key_passes=self.key_passes,
             dkv_acc=dkv_acc,
         )
         return dict(out=out, lse=lse, dkv_acc=dkv_acc)
@@ -279,6 +288,16 @@ class ArmDetNope:
             st["out"], (self.q,), self.inp.dout, retain_graph=True
         )
         return dict(dq=dq, dkv=st["dkv_acc"])
+
+
+class ArmDetNopeP2(ArmDetNope):
+    name = "det_nope_p2"
+    key_passes = 2
+
+
+class ArmDetNopeP4(ArmDetNope):
+    name = "det_nope_p4"
+    key_passes = 4
 
 
 class ArmDetScratch(ArmDet):
@@ -295,6 +314,8 @@ ROPE_ARMS = {
 }
 NOPE_ARMS = {
     ArmDetNope.name: ArmDetNope,
+    ArmDetNopeP2.name: ArmDetNopeP2,
+    ArmDetNopeP4.name: ArmDetNopeP4,
     "nondet_nope": nb.ArmCakeNope,
     "fa4_nope": nb.ArmFA4Nope,
     "fa4_nope_a2": nb.ArmFA4NopeA2,

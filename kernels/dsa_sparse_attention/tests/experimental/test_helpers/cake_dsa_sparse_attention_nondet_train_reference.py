@@ -212,13 +212,6 @@ def compact_rows(
     ``nope_compact_indices`` / ``offset_gather_kv_indices(..., compact=True)`` on already globalized rows): a
     stable argsort of the invalidity flags, a gather, a ``-1`` fill.  Valid-first rows are a fixed point (same
     bytes, ``count == last valid slot + 1``).
-
-    The order matters: the exact FP64 forward and gradients are permutation-invariant over a row's valid set,
-    but the emulated bf16 floors (:func:`_out_emu_lazy_rescale` walks the row in 64-slot tiles in slot order)
-    are not -- moving a key across a tile boundary changes the tile maxima, the rescale points and the bf16
-    roundings of P.  The floor of a hole row must therefore be evaluated on the order the kernel processes:
-    the compacted order for the compacting entries (``reference_fp64_nope(..., compact=True)``), the raw order
-    for the eager kernel-level entries, which keep raw-row semantics.
     """
     valid = (indices >= 0) & (indices < int(num_kv))
     if topk_length is not None:
@@ -342,27 +335,22 @@ def reference_fp64(
     """Chunked FP64 reference from the BF16 inputs.
 
     Returns ``out [T, 64, 512]``, natural-log ``lse [T, 64]`` (``-inf`` for
-    fully masked rows), ``out_emu`` (the same forward with the numerics of a
-    BF16-P kernel emulated in fp64: probabilities rounded to BF16 relative to
-    the exact row maximum, row sum over the unrounded values, output rounded
-    to BF16 -- its error against ``out`` is the floor such a kernel can reach)
-    and, with ``dout``, ``dq_latent``, ``dq_rope``, ``dkv_latent [S, 512]``,
-    ``dk_rope [S, 64]`` plus their ``*_emu`` BF16-P/dS numerics floors (P and dS
-    rounded to BF16 at the MMA inputs, BF16 outputs); with ``own_key`` also the mean softmax mass on the
-    query's own key (``self_weight``).  Slots that are ``-1``, ``>= S`` or
-    ``>= topk_length[t]`` are invalid.  ``compact=True`` evaluates the row as a
-    compacting entry processes it (:func:`compact_rows` after the ``topk_length``
-    cut, lengths = counts); every quantity here is permutation-invariant over the
-    valid set (the exact-max emulation included), so only the slot order of the
+    fully masked rows) and, with ``dout``, ``dq_latent``, ``dq_rope``,
+    ``dkv_latent [S, 512]`` and ``dk_rope [S, 64]``; with ``own_key`` also the
+    mean softmax mass on the query's own key (``self_weight``).  Slots that are
+    ``-1``, ``>= S`` or ``>= topk_length[t]`` are invalid.  ``compact=True``
+    evaluates the row as a compacting entry processes it (:func:`compact_rows`
+    after the ``topk_length`` cut, lengths = counts); every quantity here is
+    permutation-invariant over the valid set, so only the slot order of the
     inputs the kernels see changes, not the numbers.
 
     With ``consume`` the per-query results are streamed instead of kept: after
     every ``chunk_rows`` query rows ``consume(r0, r1, chunk)`` receives the
-    slice ``chunk`` (``out``, ``lse``, ``out_emu`` and, with ``dout``,
-    ``dq_latent``, ``dq_rope``, ``dq_latent_emu``, ``dq_rope_emu``; FP64, rows
-    ``r0:r1``) and the returned dict holds only the key-side results.  The
-    numbers are those of the unstreamed call; only the retained memory differs
-    (a 131072-query problem keeps 136 GiB of FP64 per-query results otherwise).
+    slice ``chunk`` (``out``, ``lse`` and, with ``dout``, ``dq_latent`` and
+    ``dq_rope``; FP64, rows ``r0:r1``) and the returned dict holds only the
+    key-side results.  The numbers are those of the unstreamed call; only the
+    retained memory differs (a 131072-query problem keeps 68 GiB of FP64
+    per-query results otherwise).
     """
     device = q_latent.device
     total_q, total_k = int(q_latent.shape[0]), int(kv_latent.shape[0])
@@ -371,12 +359,11 @@ def reference_fp64(
     kf, vf = k_rope.double(), kv_latent.double()
     want_grad = dout is not None
     stream = consume is not None
-    out = out_emu = lse = dql = dqr = dql_emu = dqr_emu = None
+    out = lse = dql = dqr = None
     if not stream:
         out = torch.empty(
             total_q, NUM_HEADS, D_LATENT, dtype=torch.float64, device=device
         )
-        out_emu = torch.empty_like(out)
         lse = torch.empty(total_q, NUM_HEADS, dtype=torch.float64, device=device)
         dql = torch.empty_like(out) if want_grad else None
         dqr = (
@@ -394,13 +381,6 @@ def reference_fp64(
         if want_grad
         else None
     )
-    # BF16-P/dS numerics floor of the backward: P and dS rounded to BF16 where a kernel feeds them to
-    # its MMAs, FP32-exact accumulation, BF16 outputs (dQ directly, dKV/dKr after the FP32 sum).
-    if not stream:
-        dql_emu = torch.empty_like(dql) if want_grad else None
-        dqr_emu = torch.empty_like(dqr) if want_grad else None
-    dkvl_emu = torch.zeros_like(dkvl) if want_grad else None
-    dkr_emu = torch.zeros_like(dkr) if want_grad else None
     self_w = torch.zeros((), dtype=torch.float64, device=device)
     slot = torch.arange(indices.shape[1], device=device)
     for r0 in range(0, total_q, chunk_rows):
@@ -417,23 +397,10 @@ def reference_fp64(
         l = torch.logsumexp(s, dim=-1)
         p = torch.exp(s - l[..., None]).nan_to_num(0.0)
         o = torch.einsum("thw,twd->thd", p, vg)
-        if not stream:
-            out[r0:r1], lse[r0:r1] = o, l
-        m = s.amax(dim=-1, keepdim=True)
-        m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))
-        p_rel = torch.exp(s - m).nan_to_num(0.0)
-        num = torch.einsum("thw,twd->thd", p_rel.to(torch.bfloat16).double(), vg)
-        o_emu = (
-            (num / p_rel.sum(-1, keepdim=True))
-            .nan_to_num(0.0)
-            .to(torch.bfloat16)
-            .double()
-        )
         if stream:
-            chunk = dict(out=o, lse=l, out_emu=o_emu)
+            chunk = dict(out=o, lse=l)
         else:
-            out_emu[r0:r1] = o_emu
-        del p_rel, num, o_emu
+            out[r0:r1], lse[r0:r1] = o, l
         if own_key is not None:
             is_own = (ix == own_key[r0:r1, None]) & valid
             self_w += (p * is_own[:, None, :]).sum()
@@ -453,64 +420,17 @@ def reference_fp64(
                 "thw,thd->twd", p, g
             )
             dkvl.index_add_(0, ix[valid], dvl[valid])
-            p_b = p.to(torch.bfloat16).double()
-            ds_b = ds.to(torch.bfloat16).double()
-            dqr_emu_c = (
-                torch.einsum("thw,twd->thd", ds_b, kg).to(torch.bfloat16).double()
-            )
-            dql_emu_c = (
-                torch.einsum("thw,twd->thd", ds_b, vg).to(torch.bfloat16).double()
-            )
-            if stream:
-                chunk.update(dq_rope_emu=dqr_emu_c, dq_latent_emu=dql_emu_c)
-            else:
-                dqr_emu[r0:r1], dql_emu[r0:r1] = dqr_emu_c, dql_emu_c
-            del dqr_emu_c, dql_emu_c
-            dkr_emu.index_add_(
-                0, ix[valid], torch.einsum("thw,thd->twd", ds_b, qr)[valid]
-            )
-            dkvl_emu.index_add_(
-                0,
-                ix[valid],
-                (
-                    torch.einsum("thw,thd->twd", ds_b, ql)
-                    + torch.einsum("thw,thd->twd", p_b, g)
-                )[valid],
-            )
-            del p_b, ds_b
         if stream:
             consume(r0, r1, chunk)
             del chunk
-    result = {} if stream else dict(out=out, lse=lse, out_emu=out_emu)
+    result = {} if stream else dict(out=out, lse=lse)
     if want_grad:
         if not stream:
-            result.update(
-                dq_latent=dql,
-                dq_rope=dqr,
-                dq_latent_emu=dql_emu,
-                dq_rope_emu=dqr_emu,
-            )
-        result.update(
-            dkv_latent=dkvl,
-            dk_rope=dkr,
-            dkv_latent_emu=dkvl_emu.to(torch.bfloat16).double(),
-            dk_rope_emu=dkr_emu.to(torch.bfloat16).double(),
-        )
+            result.update(dq_latent=dql, dq_rope=dqr)
+        result.update(dkv_latent=dkvl, dk_rope=dkr)
     if own_key is not None:
         result["self_weight"] = (self_w / (total_q * NUM_HEADS)).item()
     return result
-
-
-def rel_l2(a: torch.Tensor, ref: torch.Tensor) -> float:
-    a = a.double().reshape(-1)
-    ref = ref.double().reshape(-1)
-    return (a - ref).norm().item() / max(ref.norm().item(), 1e-30)
-
-
-def rel_l2_rows(a: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    a = a.double().reshape(a.shape[0], -1)
-    ref = ref.double().reshape(ref.shape[0], -1)
-    return (a - ref).norm(dim=1) / ref.norm(dim=1).clamp_min(1e-30)
 
 
 def calibrate_beta(
@@ -558,17 +478,6 @@ def calibrate_beta(
 # four tokens, ``K_slots = round_up(4 * P + 3, 128)`` with the pool capacity ``P``
 # capped at 512 (2176 slots).
 DEFAULT_NOPE_SCALE = 1.0 / 16
-# Unit roundoffs of round-to-nearest fp32 and bf16 and the forward error constant gamma_n = n u / (1 - n u) (Higham,
-# Accuracy and Stability of Numerical Algorithms, 2nd ed., section 3.1): a sum of n exact fp32 terms carries at most
-# gamma_{n - 1} x the sum of their magnitudes of rounding error in any summation order.
-FP32_UNIT_ROUNDOFF = 2.0**-24
-BF16_UNIT_ROUNDOFF = 2.0**-8
-
-
-def gamma_fp32(n: int) -> float:
-    return n * FP32_UNIT_ROUNDOFF / (1.0 - n * FP32_UNIT_ROUNDOFF)
-
-
 POOL_TOKENS = 4
 TAIL_SLOTS = 3
 SLOT_ALIGN = 128
@@ -952,123 +861,6 @@ def compacted_twin(inp: NopeInputs) -> NopeInputs:
     )
 
 
-_LOG2E = 1.4426950408889634
-
-
-def _out_emu_lazy_rescale(
-    s: torch.Tensor,
-    vg: torch.Tensor,
-    *,
-    tile: int = 64,
-    threshold: float = 6.0,
-    vote_group: int = 32,
-    mma_k: int = 16,
-) -> torch.Tensor:
-    """Emulated forward output at the kernel's own rounding points (an fp32 value returned
-    in fp64, before the final bf16 rounding; the caller rounds it to the BF16-P numerics
-    floor of ``out`` and splits it into the bf16 high + low parts the backward reads).
-
-    ``s`` ``[rows, 64, K]`` fp64 scaled scores (natural log units, ``-inf`` at invalid
-    slots), ``vg`` ``[rows, K, 512]`` fp64 gathered values.  The forward kernel walks the
-    index row in tiles of 64 consecutive slots, keeps a running row maximum ``mi`` (log2
-    units) that it raises only when a tile's maximum exceeds it by more than ``threshold``
-    (the lazy rescale; the vote is taken over ``vote_group`` consecutive heads of the
-    token, so a head whose own tile maximum is above ``mi`` by less than the threshold
-    still follows its group), rounds ``P = exp2(s * log2(e) - mi)`` to bf16 for the PV
-    MMA, accumulates the denominator from the unrounded P, rescales numerator and
-    denominator by ``exp2(mi_old - mi_new)`` at the rescale points and rounds the
-    normalised output to bf16 once.
-
-    The accumulation of ``O`` (bf16 P x bf16 V products, exact in fp32) and of the
-    denominator ``l`` is fp32 in slot order: fp32 partial sums per ``mma_k``-key MMA step
-    added to the fp32 accumulator, the rescale factors applied in fp32 per tile, and
-    ``out = O * (1 / l)`` in fp32 (a plain fp32 reciprocal stands for the kernel's
-    ``rcp.approx``, 2^-23 and below the modelled effect).  The fp32 accumulation is
-    modelled statistically -- the same magnitude class, not the tensor core's exact
-    summation order.  It matters only through ``delta`` on rows whose exact gradient is
-    ~0 (one dominant key): an fp32-level realisation error eps ~ 1e-6 on the forward
-    output flips ~eps * 2^16 ~ 6 % of the 16-bit hi + lo roundings, which widens the
-    delta-path residue RMS by ~1.3x (sqrt(0.083 + 0.065) / 0.29); an fp64 accumulation
-    under-estimates the per-row floor there by that factor.  ``ex2.approx`` (P, rescale
-    factors) is not modelled: two orders below bf16 rounding.
-    """
-    assert torch.get_float32_matmul_precision() == "highest", (
-        "the fp32 accumulation model needs exact fp32 matmul (no TF32)"
-    )
-    rows, heads, slots = s.shape
-    s2 = s * _LOG2E
-    pad = (-slots) % tile
-    if pad:
-        s2 = torch.nn.functional.pad(s2, (0, pad), value=float("-inf"))
-        vg = torch.nn.functional.pad(vg, (0, 0, 0, pad))
-    v32 = vg.float()  # bf16 values: exact in fp32
-    mi = torch.full((rows, heads), float("-inf"), dtype=s2.dtype, device=s2.device)
-    num = torch.zeros(rows, heads, vg.shape[-1], dtype=torch.float32, device=s2.device)
-    den = torch.zeros(rows, heads, dtype=torch.float32, device=s2.device)
-    groups = heads // vote_group
-    for t in range(0, s2.shape[-1], tile):
-        st = s2[..., t : t + tile]
-        cur = st.amax(-1)
-        # -inf - -inf is NaN: no vote from a still-empty row
-        pred = (cur - mi) > threshold
-        vote = (
-            pred.view(rows, groups, vote_group)
-            .any(-1, keepdim=True)
-            .expand(rows, groups, vote_group)
-            .reshape(rows, heads)
-        )
-        nxt = torch.where(vote, torch.maximum(cur, mi), mi)
-        factor = torch.where(vote, torch.exp2(mi - nxt), torch.ones_like(mi))
-        factor = torch.where(torch.isnan(factor), torch.ones_like(factor), factor)
-        f32 = factor.float()
-        num = num * f32[..., None]
-        den = den * f32
-        mi = nxt
-        p = torch.exp2(st - mi[..., None]).nan_to_num(0.0)
-        p_b = p.to(torch.bfloat16).float()
-        for k in range(0, tile, mma_k):
-            num = num + torch.einsum(
-                "thw,twd->thd",
-                p_b[..., k : k + mma_k],
-                v32[:, t + k : t + k + mma_k],
-            )
-        den = den + p.float().sum(-1)
-    out = (num * torch.reciprocal(den)[..., None]).nan_to_num(0.0)
-    return out.double()
-
-
-@torch.no_grad()
-def nope_zero_row_dq_bound(
-    dout: torch.Tensor, v: torch.Tensor, softmax_scale: float
-) -> torch.Tensor:
-    """Element-wise bound on the backward kernel's ``|dq|`` for query tokens whose exact
-    ``dq`` is identically zero: ``dout [Z, 64, 512]`` are their output gradients and
-    ``v [Z, 512]`` the one valid key of each (zero for a token without a valid key); returns
-    the fp64 bound ``[Z, 64, 512]``.
-
-    With one valid key the forward is exact -- ``P = 1``, ``l = 1``, ``out = v`` (a bf16
-    value, so its low part is 0) -- and ``dS = P (dP - delta)`` cancels: ``dP = dout . v``
-    and ``delta = dout . (hi + lo) = dout . v`` are the same exact value.  The kernel takes
-    them from two fp32 reductions of the same 512 exact products (bf16 x bf16 fits fp32):
-    the MMA accumulation of ``dP`` and the row-sum stage's dot product ``delta``.  Under
-    round-to-nearest fp32 additions (``u = 2^-24``) each carries at most
-    ``gamma_512 x sum_d |dout_d v_d|`` of error in any summation order, so
-    ``|dP - delta| <= B = 2 gamma_512 sum_d |dout_d v_d|`` and, with ``dq = dS k``
-    (``k = v``, the shared latent) and the bf16 roundings of ``dS`` and ``dq``,
-    ``|dq_el| <= (1 + 2^-8)^2 softmax_scale B |v_el|``.  A token without a valid key has
-    ``B = 0``: its ``dq`` must be exactly zero.
-    """
-    v = v.double()
-    b = (dout.double().abs() * v.abs()[:, None, :]).sum(-1)
-    b *= 2.0 * gamma_fp32(D_LATENT)
-    return (
-        (1.0 + BF16_UNIT_ROUNDOFF) ** 2
-        * softmax_scale
-        * b[:, :, None]
-        * v.abs()[:, None, :]
-    )
-
-
 def reference_fp64_nope(
     q: torch.Tensor,
     kv: torch.Tensor,
@@ -1080,57 +872,19 @@ def reference_fp64_nope(
     own_key: Optional[torch.Tensor] = None,
     chunk_rows: int = 256,
     consume: Optional[Callable[[int, int, dict], None]] = None,
-    out_emu_model: str = "lazy_rescale",
     compact: bool = False,
 ) -> dict:
-    """Chunked FP64 reference of the NoPE problem from the BF16 inputs (the oracle of
-    GOAL §5 for the zero-RoPE family; ``indices`` are global key rows).
-
-    ``out_emu_model``: ``"lazy_rescale"`` (default) places the bf16 rounding of P where
-    the forward kernel places it (running row maximum with the threshold-6 lazy rescale
-    over 64-slot tiles, see :func:`_out_emu_lazy_rescale`); ``"exact_max"`` rounds P
-    relative to the exact row maximum (the earlier, optimistic model).
-
-    ``compact``: the slot order the floors are emulated on.  The exact ``out`` / ``lse`` /
-    ``dq`` / ``dkv`` are permutation-invariant over a row's valid set, the lazy-rescale
-    emulation is not (it walks the row in 64-slot tiles in slot order; an all-invalid tile
-    contributes exact zeros, a key moved across a tile boundary changes the tile maxima,
-    the rescale points and the bf16 roundings of P).  ``compact=False`` (default) emulates
-    the raw row -- the order the eager kernel-level entries process; ``compact=True``
-    first applies :func:`compact_rows` (after the ``topk_length`` cut, lengths = counts) --
-    the order the compacting entries (the packed NoPE entry, the flat autograd entry
-    without caller lengths) process.  On valid-first rows both orders coincide.
-
-    The emulated gradients ``dq_emu`` / ``dkv_emu`` take the softmax row sum ``delta`` the
-    way the backward kernel reads it: ``dout . (hi + lo)`` of the emulated forward output
-    split into its bf16 high and bf16 low parts (the kernel's ``out`` and ``o_lo``), not
-    the exact ``dout . out``.  ``dS = P (dP - delta)`` cancels on rows where one key
-    carries most of the mass (two to four valid keys, a self key near 1), so the error of
-    that ``delta`` -- the forward's bf16-P rounding carried by ``hi + lo`` and the 2^-18
-    split residue -- is amplified by about ``1 / (1 - max P)`` there and dominates the
-    floor of ``dq`` on those rows; the exact-``delta`` gradients ``dq`` / ``dkv`` stay the
-    reference distance.  On that same amplified path the emulated gradients accumulate
-    ``dP_j = dout . v_j`` (512 dims, the kernel's fp32 MMA) and ``delta = dout . (hi + lo)``
-    (the fp32 dot product of the row-sum stage) in fp32, modelled statistically (torch's
-    fp32 reduction order, not the kernel's; ~2^-24 x sqrt(512) relative each); everything
-    else stays fp64.
+    """Chunked FP64 reference of the NoPE problem from the BF16 inputs (``indices`` are
+    global key rows).
 
     ``p = softmax_j(q . kv_j * softmax_scale)`` over the valid slots, ``out = p @ kv``.
     Returns ``out [T, 64, 512]``, natural-log ``lse [T, 64]`` (``-inf`` for fully masked
-    rows), ``out_emu`` (BF16-P numerics floor, as :func:`reference_fp64`) and, with
-    ``dout``, ``dq [T, 64, 512]``, the combined ``dkv [S, 512] = dk + dv`` (the gradient of
-    the shared latent: ``dS^T q`` plus ``P^T dout``), ``dq_emu`` / ``dkv_emu`` (BF16 P/dS at
-    the MMA inputs, BF16 outputs), ``dq_zero_rows [T]`` (the tokens with at most one valid
-    key, whose exact ``dq`` is identically zero), ``dq_zero_bound [Z, 64, 512]`` (the
-    element-wise bound on the kernel's ``dq`` on those tokens, in their order:
-    :func:`nope_zero_row_dq_bound`) and, with ``own_key``, ``self_weight``.  Slots that are
-    ``-1``, ``>= S`` or ``>= topk_length[t]`` are invalid.  ``consume`` streams the
-    per-query results as in :func:`reference_fp64` (``out``, ``lse``, ``out_emu``, ``dq``,
-    ``dq_emu``, ``dq_zero_rows``, ``dq_zero_bound``).
+    rows) and, with ``dout``, ``dq [T, 64, 512]`` and the combined ``dkv [S, 512] = dk + dv``
+    (the gradient of the shared latent: ``dS^T q`` plus ``P^T dout``); with ``own_key``
+    also ``self_weight``.  Slots that are ``-1``, ``>= S`` or ``>= topk_length[t]`` are
+    invalid.  ``compact`` and ``consume`` (``out``, ``lse`` and ``dq`` streamed) as in
+    :func:`reference_fp64`.
     """
-    assert torch.get_float32_matmul_precision() == "highest", (
-        "the fp32 accumulation model needs exact fp32 matmul (no TF32)"
-    )
     device = q.device
     total_q, total_k = int(q.shape[0]), int(kv.shape[0])
     if compact:
@@ -1138,23 +892,18 @@ def reference_fp64_nope(
     vf = kv.double()
     want_grad = dout is not None
     stream = consume is not None
-    out = out_emu = lse = dq = dq_emu = None
+    out = lse = dq = None
     if not stream:
         out = torch.empty(
             total_q, NUM_HEADS, D_LATENT, dtype=torch.float64, device=device
         )
-        out_emu = torch.empty_like(out)
         lse = torch.empty(total_q, NUM_HEADS, dtype=torch.float64, device=device)
         dq = torch.empty_like(out) if want_grad else None
-        dq_emu = torch.empty_like(out) if want_grad else None
     dkv = (
         torch.zeros(total_k, D_LATENT, dtype=torch.float64, device=device)
         if want_grad
         else None
     )
-    dkv_emu = torch.zeros_like(dkv) if want_grad else None
-    zero_rows = torch.zeros(total_q, dtype=torch.bool, device=device)
-    zero_bound = []
     self_w = torch.zeros((), dtype=torch.float64, device=device)
     slot = torch.arange(indices.shape[1], device=device)
     for r0 in range(0, total_q, chunk_rows):
@@ -1171,44 +920,14 @@ def reference_fp64_nope(
         l = torch.logsumexp(s, dim=-1)
         p = torch.exp(s - l[..., None]).nan_to_num(0.0)
         o = torch.einsum("thw,twd->thd", p, vg)
-        if not stream:
-            out[r0:r1], lse[r0:r1] = o, l
-        if out_emu_model == "lazy_rescale":
-            o_emu_full = _out_emu_lazy_rescale(s, vg)
-        elif out_emu_model == "exact_max":
-            m = s.amax(dim=-1, keepdim=True)
-            m = torch.where(torch.isfinite(m), m, torch.zeros_like(m))
-            p_rel = torch.exp(s - m).nan_to_num(0.0)
-            num = torch.einsum("thw,twd->thd", p_rel.to(torch.bfloat16).double(), vg)
-            o_emu_full = (num / p_rel.sum(-1, keepdim=True)).nan_to_num(0.0)
-            del p_rel, num
-        else:
-            raise ValueError(f"unknown out_emu_model {out_emu_model!r}")
-        o_emu = o_emu_full.to(torch.bfloat16).double()
-        # the kernel's forward output as its backward reads it: bf16 high part plus bf16 low part
-        o_emu_hl = o_emu + (o_emu_full - o_emu).to(torch.bfloat16).double()
-        del o_emu_full
         if stream:
-            chunk = dict(out=o, lse=l, out_emu=o_emu)
+            chunk = dict(out=o, lse=l)
         else:
-            out_emu[r0:r1] = o_emu
-        del o_emu
+            out[r0:r1], lse[r0:r1] = o, l
         if own_key is not None:
             is_own = (ix == own_key[r0:r1, None]) & valid
             self_w += (p * is_own[:, None, :]).sum()
         if want_grad:
-            # tokens whose exact dq is identically zero (at most one valid key) and the element-wise bound on the
-            # kernel's fp32 rounding residue there, from the inputs
-            zero_c = valid.sum(-1) <= 1
-            v_one = (vg[zero_c] * valid[zero_c][:, :, None]).sum(1)
-            bound_c = nope_zero_row_dq_bound(dout[r0:r1][zero_c], v_one, softmax_scale)
-            del v_one
-            if stream:
-                chunk.update(dq_zero_rows=zero_c, dq_zero_bound=bound_c)
-            else:
-                zero_rows[r0:r1] = zero_c
-                zero_bound.append(bound_c)
-            del zero_c, bound_c
             g = dout[r0:r1].double()
             dp = torch.einsum("thd,twd->thw", g, vg)
             ds = p * (dp - (g * o).sum(-1, keepdim=True)) * softmax_scale
@@ -1224,50 +943,14 @@ def reference_fp64_nope(
             )
             dkv.index_add_(0, ix[valid], dkv_c[valid])
             del dkv_c
-            p_b = p.to(torch.bfloat16).double()
-            # emulated dS: fp32 dP (dout . v over the 512 dims, the kernel's fp32 MMA) and fp32 delta (dout . (hi + lo)
-            # of the emulated output, the row-sum stage), both statistically modelled in torch's reduction order;
-            # P x (dP - delta) at bf16 for the MMA input
-            g32 = g.float()
-            dp32 = torch.einsum("thd,twd->thw", g32, vg.float())
-            delta32 = (g32 * o_emu_hl.float()).sum(-1, keepdim=True)
-            ds_b = (
-                (p * (dp32.double() - delta32.double()) * softmax_scale)
-                .to(torch.bfloat16)
-                .double()
-            )
-            del g32, dp32, delta32
-            dq_emu_c = (
-                torch.einsum("thw,twd->thd", ds_b, vg).to(torch.bfloat16).double()
-            )
-            if stream:
-                chunk.update(dq_emu=dq_emu_c)
-            else:
-                dq_emu[r0:r1] = dq_emu_c
-            del dq_emu_c
-            dkv_emu.index_add_(
-                0,
-                ix[valid],
-                (
-                    torch.einsum("thw,thd->twd", ds_b, ql)
-                    + torch.einsum("thw,thd->twd", p_b, g)
-                )[valid],
-            )
-            del p_b, ds_b
-        del o_emu_hl
         if stream:
             consume(r0, r1, chunk)
             del chunk
-    result = {} if stream else dict(out=out, lse=lse, out_emu=out_emu)
+    result = {} if stream else dict(out=out, lse=lse)
     if want_grad:
         if not stream:
-            result.update(
-                dq=dq,
-                dq_emu=dq_emu,
-                dq_zero_rows=zero_rows,
-                dq_zero_bound=torch.cat(zero_bound, 0),
-            )
-        result.update(dkv=dkv, dkv_emu=dkv_emu.to(torch.bfloat16).double())
+            result.update(dq=dq)
+        result.update(dkv=dkv)
     if own_key is not None:
         result["self_weight"] = (self_w / (total_q * NUM_HEADS)).item()
     return result

@@ -36,6 +36,38 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
+// The bytes a tensor's elements cover, [first, one past the last): along each axis its stride reaches (size - 1) *
+// stride elements from the data pointer, below it for a negative stride; an empty tensor covers none.
+std::pair<intptr_t, intptr_t> ByteSpan(const TensorView& t) {
+  const intptr_t base = reinterpret_cast<intptr_t>(DataPtr(t));
+  if (t.numel() == 0) return {base, base};
+  const intptr_t item = (static_cast<intptr_t>(t.dtype().bits) * t.dtype().lanes + 7) / 8;
+  intptr_t lo = 0, hi = 0;
+  for (int axis = 0; axis < t.ndim(); ++axis) {
+    const intptr_t reach = static_cast<intptr_t>(t.size(axis) - 1) * t.stride(axis);
+    (reach < 0 ? lo : hi) += reach;
+  }
+  return {base + lo * item, base + (hi + 1) * item};
+}
+
+// The checked `CK.disjoint(a, b)`: the two tensors share no byte.
+void CheckDisjoint(const TensorView& a, const char* a_name, const TensorView& b, const char* b_name, const char* atom) {
+  const auto [a_lo, a_hi] = ByteSpan(a);
+  const auto [b_lo, b_hi] = ByteSpan(b);
+  TVM_FFI_CHECK(a_hi <= b_lo || b_hi <= a_lo, ValueError)
+      << KERNEL_NAME << ": " << atom << ": '" << a_name << "' covers bytes ["
+      << reinterpret_cast<void*>(a_lo) << ", " << reinterpret_cast<void*>(a_hi) << ") and '" << b_name << "' ["
+      << reinterpret_cast<void*>(b_lo) << ", " << reinterpret_cast<void*>(b_hi) << "), which meet";
+}
+
+// The checked `CK.exact_or_disjoint(a, b, offset=k)`: b's data pointer `offset` bytes (k of a's elements) past a's, or
+// two tensors that share no byte.
+void CheckExactOrDisjoint(const TensorView& a, const char* a_name, const TensorView& b, const char* b_name,
+                          intptr_t offset, const char* atom) {
+  if (reinterpret_cast<intptr_t>(DataPtr(b)) == reinterpret_cast<intptr_t>(DataPtr(a)) + offset) return;
+  CheckDisjoint(a, a_name, b, b_name, atom);
+}
+
 [[noreturn]] void NoInt64(int64_t a, const char* op, int64_t b) {
   TVM_FFI_THROW(ValueError) << KERNEL_NAME << ": " << a << " " << op << " " << b
                             << " has no int64 value in a host check";
@@ -45,6 +77,12 @@ int64_t CheckedAdd(int64_t a, int64_t b) {
   int64_t sum;
   if (__builtin_add_overflow(a, b, &sum)) NoInt64(a, "+", b);
   return sum;
+}
+
+int64_t CheckedMul(int64_t a, int64_t b) {
+  int64_t product;
+  if (__builtin_mul_overflow(a, b, &product)) NoInt64(a, "*", b);
+  return product;
 }
 
 int64_t CMod(int64_t a, int64_t b) {
@@ -104,6 +142,11 @@ void Run(TensorView a_bound, TensorView a_det_globals, TensorView a_e_lat, Tenso
       << KERNEL_NAME << ": requires (CMod(dkv_stride, 4) == 0)";
   TVM_FFI_CHECK((a_dkv_stride >= 512LL), ValueError)
       << KERNEL_NAME << ": requires (dkv_stride >= 512)";
+  CheckExactOrDisjoint(a_bound, "bound", a_dkv_acc, "dkv_acc", 0, "requires exact_or_disjoint(bound, dkv_acc, view=i32)");
+  TVM_FFI_CHECK((CheckedMul(2LL, a_bound_stride) == a_dkv_stride), ValueError)
+      << KERNEL_NAME << ": requires ((2 * bound_stride) == dkv_stride)";
+  TVM_FFI_CHECK((a_dkv_stride >= CheckedAdd(CheckedMul(2LL, a_part_stride), 2LL)), ValueError)
+      << KERNEL_NAME << ": requires (dkv_stride >= ((2 * part_stride) + 2))";
   TVM_FFI_CHECK((a_zero_acc >= 0LL), ValueError)
       << KERNEL_NAME << ": requires (zero_acc >= 0)";
   TVM_FFI_CHECK((a_zero_acc <= 2LL), ValueError)
