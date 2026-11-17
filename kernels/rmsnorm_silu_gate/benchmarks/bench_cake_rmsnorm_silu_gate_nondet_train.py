@@ -58,8 +58,9 @@ program, the same bits; ``cake_jit.LONG_BACKWARD_ROWS_PER_SM``).
 An FP32 weight gradient runs the exact tiny backward up to 512 rows, the
 static backward up to 256 rows per SM on SM100 and SM103 (64 on SM107) and the
 claimed backward past that.  At ``--heads 48`` the default token counts reach
-every forward kernel of packed rows and every BF16 backward kernel that a band
-of a 148-SM B200 runs (2048 tokens: the extra-long forward).
+every forward kernel of packed rows but the extra-long one (401 to 520 rows
+per SM, 1234 to 1603 tokens) and every BF16 backward kernel that a band of a
+148-SM B200 runs (2048 tokens: the pipelined forward).
 
 Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, 100
 calls after 10 warm-up calls); each stage reports

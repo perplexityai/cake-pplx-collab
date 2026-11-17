@@ -28,7 +28,8 @@ shared by every token and head)::
 
 The backward recomputes the statistics and the gate from ``x`` and ``z`` and
 returns BF16 ``dx`` and ``dz`` and the weight gradient summed over every token
-and head, rounded once to FP32 (and that to BF16 for a BF16 weight gradient).
+and head in FP32 (no FP64; the band list below says how each backward sums
+and rounds it), then rounded to BF16 for a BF16 weight gradient.
 The autograd function saves only its inputs, which keeps
 ``torch.utils.checkpoint(..., use_reentrant=False)`` free of FP32 temporaries.
 No call synchronizes the host or the device; ``T`` and ``H`` are runtime

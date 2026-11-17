@@ -29,8 +29,10 @@ compares this package with the deterministic one.  ``y``, ``dx``, ``dz`` and an
 FP32 weight gradient (accumulated or not) must be the same bits on every
 launch and on every path: streams, CUDA Graph replays, autograd,
 ``compute_grad_weight`` (``False`` the bits of the BF16 bands' module), grids
-smaller than the work (the static, the claimed, the row-claims, the fused
-and the repeatable backwards at 1, 3 and 7 CTAs; the repeatable backward's
+smaller than the work (the static and the claimed backwards of an FP32
+weight gradient and the fused and the repeatable backwards at 1, 3 and 7
+CTAs; the libraries no band selects, ``UNBANDED_LIBRARIES``, only at the
+host's grid on a forced route; the repeatable backward's
 weight gradient the bits of its grid, whose chunks follow it), a workspace
 reused across shapes; so must a BF16 weight gradient of every backward but
 the fused backward (``bwd_bf16_fused``, which runs a BF16 weight gradient's
@@ -42,11 +44,10 @@ so that their BF16 weight gradient may vary in its last bits from run to run:
 there every launch's BF16 weight gradient, alone and accumulated, is judged
 against the naive implementation instead.  The matrix covers dynamic token and head
 counts (``H = 48`` and small or irregular row counts), ``[T, H, 128]`` strided
-and flattened layouts (also in the bands of the claimed, the row-claims, the
-fused and the repeatable backwards, whose sm_100a and sm_103a claimed and
-row-claims mid programs and fused and repeatable programs on every
-architecture warm packed rows with a bulk prefetch and other layouts with a
-prefetch per thread),
+and flattened layouts (also in the bands of the FP32 claimed, the fused and
+the repeatable backwards; the BF16 claimed and the row-claims programs, which
+no band runs, only on the forced route, on contiguous and projection
+inputs),
 near-zero variance, saturated gates, weight-gradient terms that cancel per
 column, FP32 and BF16 weight gradients,
 accumulation, ``compute_grad_weight=False``, the small-row backwards (one

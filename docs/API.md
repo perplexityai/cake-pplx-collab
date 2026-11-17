@@ -133,7 +133,7 @@ The backward recomputes `rstd` and the gate from `x` and `z`. With `n = x*rstd`,
 
 - `dz = BF16(dy*(n*weight)*s*(1 + z*(1 - s)))`
 - `dx = BF16(rstd*a*weight - x*rstd^3*mean(a*weight*x))`
-- `dw = sum of a*n over all tokens and heads`, rounded once to FP32, then to BF16 for a BF16 gradient.
+- `dw = sum of a*n over all tokens and heads`, summed in FP32 (no FP64) and returned in FP32, or rounded to BF16 for a BF16 gradient. Each module section below says how its sum is ordered and rounded.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`.
 
