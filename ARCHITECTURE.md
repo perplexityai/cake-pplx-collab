@@ -178,7 +178,7 @@ Each backend package has these files:
 
 | File | Purpose |
 |---|---|
-| `build.json` | Self-contained build manifest, schema `cake-build/1`. It lists per-library sources, the sha256 closure, the arch flags (`sm_100a`, `sm_103a`, `sm_107a`; fmha: `sm_100a`, `sm_103a`), compile and link flags, and the minimum CUDA version. |
+| `build.json` | Self-contained build manifest, schema `cake-build/1`. It lists per-library sources, the sha256 closure, the arch flags (`sm_100a`, `sm_103a`, `sm_107a`), compile and link flags, and the minimum CUDA version. |
 | `cake_build.py` | Library loader. It loads `aot/<name>.so` when a builder made it, else builds the library through the JIT shim. |
 | `_cake_pplx_jit.py` | JIT shim. It compiles one manifest entry with `nvcc` and caches the result under `$CAKE_PPLX_CACHE_DIR` (default `~/.cache/cake_pplx`). |
 | `cake_jit.py` | The package's library registry, used by the backend code. |
@@ -221,6 +221,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exception: fmha is validated on GB200 (`sm_100a`) and GB300 (`sm_103a`) and has no `sm_107a` build.
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exception: fmha is validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.

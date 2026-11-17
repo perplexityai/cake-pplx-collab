@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 15 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family except fmha supports `sm_100a`, `sm_103a` and `sm_107a`; fmha supports `sm_100a` and `sm_103a`. Some families limit shapes per architecture.
+This page covers the public modules of all 15 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -935,7 +935,7 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 - Three kernels run in order on the current stream. The preprocess computes `rowsum(out * dout)` and `lse * log2(e)` and clears an FP32 `dQ` accumulator. The main kernel runs one CTA per 128 keys of one head: it sums `dK`/`dV` in FP32, stores them once, and adds its `dQ` tiles into the accumulator. The postprocess writes `dq = bf16(acc * softmax_scale)`.
 - The family has no forward kernel and no autograd entry. The caller brings `out` and `lse` from its own forward and calls the backward from its own `torch.autograd.Function`.
 
-**Architectures.** `sm_100a`, `sm_103a`, with every variant (head dim 64 and 128, causal or not) on both. There is no `sm_107a` build: other devices, R200 included, raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` and 12.9 for `sm_103a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`, with every variant (head dim 64 and 128, causal or not) on each. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
 
 **Inputs.**
 
@@ -983,7 +983,6 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - There is no det module, and `dq` is not bitwise reproducible run to run.
 - No grouped-query or multi-query attention, variable-length segments, dropout, sliding window, softcap or attention bias.
 - The causal mask is top-left and needs `Sq == Skv`.
-- There is no `sm_107a` build.
 
 ---
 
