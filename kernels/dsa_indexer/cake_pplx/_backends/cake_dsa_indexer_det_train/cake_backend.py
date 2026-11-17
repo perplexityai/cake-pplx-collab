@@ -49,8 +49,7 @@ Contract
   never selected; negative offsets, empty segments and rows without visible
   keys are defined (all padding).
 * Selection: the exact global top ``min(top_k, visible)`` keys per row, ranked
-  by score descending then key id descending (``+0.0 == -0.0`` for ranking);
-  the returned score bits are the computed FP32 bits.
+  by score descending then key id descending (``+0.0 == -0.0`` for ranking).
 * Repeatable: identical inputs give identical ids and score bits; the program
   the host dispatches (unit geometry, key-range split, CTA pair, unroll, unit
   order, sampled threshold; the CUB block radix sort or the prefix-popcount
@@ -234,8 +233,8 @@ CONTRACT_ALIASES = {
 # ``NUMERICS["zero_sign_policy"]``): ``positive_accumulator`` -- the FMA chains
 # start from ``+0.0``, so a row whose head terms are all zero scores ``+0.0``;
 # ``ieee_sum`` -- the sum starts from the ``h = 0`` term, so an all-zero sum is
-# ``-0.0`` iff every term is ``-0.0``.  Either way the computed bits are
-# returned unchanged and ``+0.0 == -0.0`` for ranking.
+# ``-0.0`` iff every term is ``-0.0``.  Either way ``+0.0 == -0.0`` for
+# ranking.
 ZERO_SIGN_POLICIES = ("positive_accumulator", "ieee_sum")
 
 

@@ -157,8 +157,7 @@ def cake_dsa_indexer_det_train_topk(
         unique; unused tail slots hold ``-1``.
     scores : Optional[torch.Tensor]
         ``None`` with ``return_scores=False``; else FP32 ``[T, top_k]`` scores
-        aligned with ``indices`` (a selected ``-0.0`` stays ``-0.0``); tail
-        slots hold ``-inf``.
+        aligned with ``indices``; tail slots hold ``-inf``.
 
     Identical inputs give identical ids and score bits; the result does not
     depend on the internal query / key partition or on the program the host

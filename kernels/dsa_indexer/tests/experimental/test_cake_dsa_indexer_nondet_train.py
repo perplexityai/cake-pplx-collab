@@ -1785,7 +1785,7 @@ def _duplicated_key_inputs(lq: int, n_distinct: int, reps: int, seed: int):
 
 
 def _assert_cut_groups_keep_the_larger_ids(inputs, out, group) -> int:
-    """Where the cutoff of a row splits a replica group (bit-identical scores), the row keeps the group's largest
+    """Where the cutoff of a row splits a replica group (equal scores), the row keeps the group's largest
     ids; returns the number of such cut groups."""
     K = inputs.top_k
     ids = naive.canonical(out)[0].cpu()
@@ -1810,7 +1810,7 @@ def _assert_cut_groups_keep_the_larger_ids(inputs, out, group) -> int:
 
 
 def test_near_tie_duplicated_keys_prefer_larger_ids(record_property):
-    """Replicated keys give bit-identical scores under any scheme of a fixed reduction: the larger id must win.  32
+    """Replicated keys of integer inputs tie exactly (every score is exact in FP32): the larger id must win.  32
     draws of integer inputs whose 300 distinct keys are each replicated 8 times in a random order: the exact
     selection's ids (which keep the larger ids of a cut replica group), and the replica-group rule checked directly on
     draw 0."""
@@ -2214,7 +2214,7 @@ def test_forced_split_writes_every_slot_of_padded_rows(name):
 
 
 def test_forced_split_keeps_the_larger_ids_of_a_cut_tie_group():
-    """Replicated keys (bit-identical scores) through a forced key-range split: 64 queries over 4681 distinct keys
+    """Replicated keys (equal scores on integer inputs) through a forced key-range split: 64 queries over 4681 distinct keys
     of integer inputs replicated 7 times (32767 keys; 2048 is not a multiple of 7, so the cutoff cuts replica groups).
     The split call holds the exact contract, and every cut group keeps its largest ids, as on the unsplit call."""
     _require_program()

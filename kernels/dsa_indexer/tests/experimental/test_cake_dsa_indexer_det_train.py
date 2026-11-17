@@ -4328,8 +4328,8 @@ def test_exact_cases_are_knob_invariant(name):
 # -- the attention-sink + local-band distribution -----------------------------------------------------------------
 # Small context-parallel geometries whose long units overflow the candidate buffer and run the sampled first
 # threshold (the attention-sink regime: the nearest key tile of every unit -- the diagonal -- holds a hot band of top-k
-# keys), judged like the random rows against the FP64 / FP32 reference under both settings of the far-sample
-# switch and compared bitwise with the sampled threshold switched off and with the forced re-stream.  Host plan,
+# keys), judged like the random rows (the scores against the FP64 oracle beside the naive BF16 tier) under both
+# settings of the far-sample switch and compared bitwise with the sampled threshold switched off and with the forced re-stream.  Host plan,
 # hand-evaluated from the registry policies (the test asserts the host-visible parts): narrow units (l6 on sm_107a for ``cp16_16k``), ``cand_cap`` 8192,
 # ``check_period`` 16; ``cp16_16k`` (mean unit tiles 64) samples 8 tiles at stride 16 on its 125-128-tile units,
 # ``tail_30848`` (mean 239) samples 16 tiles at stride 15 / 16 on its 238-241-tile units.  The 241-tile units of

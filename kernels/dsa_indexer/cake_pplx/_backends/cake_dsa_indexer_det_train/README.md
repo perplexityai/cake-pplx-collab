@@ -75,7 +75,7 @@ between package versions.
 | output | contents | repeats bit for bit | not specified |
 |---|---|---|---|
 | `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids in ascending order, then `-1` in every other slot | every slot: the selected ids, their order and the `-1` tail | nothing |
-| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the computed FP32 score of the id in the same slot (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | every slot's bits | nothing |
+| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the computed FP32 score of the id in the same slot; `-inf` in every padding slot; `None` with `return_scores=False` | every slot's bits | nothing |
 
 Neither the program that the host dispatches nor the partition knobs of the
 backend change these bits (see "Selection, ties, output order, padding").
@@ -112,8 +112,7 @@ FMA order is fixed, and `fma(+0, w', +0) = +0` for either sign of `w'`, so a
 row whose head terms are all zero yields `+0.0`; a `-0.0` score cannot arise
 from this reduction (registry field `NUMERICS["zero_sign_policy"] =
 "positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, an
-equal-score tie goes to the larger key id, and the written score keeps the
-computed bits -- it is never canonicalised.  The tests hold the signed-zero
+equal-score tie goes to the larger key id.  The tests hold the signed-zero
 cases to the exact selection of
 `tests/experimental/test_helpers/cake_dsa_indexer_reference.py`.
 
