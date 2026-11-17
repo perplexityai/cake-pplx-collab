@@ -344,3 +344,14 @@ def test_a_marker_is_active_on_the_architectures_its_caps_list(monkeypatch):
             assert "sm_100a max 1.1000; sm_107a l2 1.2000, max 1.3000" in mark.kwargs["reason"]
     finally:
         gaps.arch.cache_clear()
+
+
+def test_every_known_gap_has_caps_of_the_cap_form():
+    """Each item of :data:`tests.experimental._mok_gaps.CAPS` is a test item id (``<test function>[<id>]``) whose
+    output ends its id, and each of its architectures has a nonempty ``{norm: cap}`` of caps of the cap form (the
+    marker refuses any other at collection)."""
+    for item, caps in gaps.CAPS.items():
+        function, _, rest = item.partition("[")
+        assert function.startswith("test_") and rest.endswith("]"), item
+        assert rest[:-1].endswith(("d_scores", "dw_routed_gate", "dw_routed_up", "dw_routed_down")), item
+        assert caps and gaps._checked(item, caps) is caps, item
