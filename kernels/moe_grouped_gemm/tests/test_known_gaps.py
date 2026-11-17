@@ -5,7 +5,7 @@ is launched.
 
 * The table names collected tests only, of known GPU models (the suites are collected in
   a subprocess that sees no GPU), and caps both max-norm miss ratios of each output of a
-  gap.
+  gap; a device gets the gaps and caps of its own GPU model only.
 * The xfail covers a test's known miss only, each ratio at most its cap
   (``known_gaps.covers``): the failures are those ``judge_draws`` raises on CPU tensors
   whose errors against their oracle are set by construction, and plain failures.
@@ -103,6 +103,29 @@ def test_every_known_gap_caps_each_of_its_outputs():
                 ):
                     bad.append((model, key, output, caps))
     assert not bad, bad
+
+
+def test_a_device_gets_the_gaps_and_caps_of_its_own_model():
+    """``known_gaps.known_gap`` on a device of each GPU model of the table returns that
+    model's gap only: a key listed on several models gets each model's own caps, a key not
+    listed on a model gets none there, and a device of no known model gets none."""
+    names = {model: name for name, model in known_gaps.DEVICE_MODELS.items()}
+    assert set(names) == set(known_gaps.KNOWN_GAPS)
+    differ = absent = 0
+    for key in sorted(known_gaps.LISTED):
+        listed = {model: gaps[key] for model, gaps in known_gaps.KNOWN_GAPS.items() if key in gaps}
+        for model, name in names.items():
+            got = known_gaps.known_gap(name, key)
+            if model in listed:
+                assert got is not None and got[0] == listed[model].reason, (model, key, got)
+                assert got[2] == listed[model].caps, (model, key, got)
+            else:
+                assert got is None, (model, key, got)
+                absent += 1
+        assert known_gaps.known_gap("NVIDIA H100 80GB HBM3", key) is None
+        differ += len({tuple(sorted(gap.caps.items())) for gap in listed.values()}) > 1
+    # not vacuous: some keys have other caps on another model, some are not listed on all
+    assert differ and absent, (differ, absent)
 
 
 # ---------------------------------------------------------------------------
@@ -362,12 +385,19 @@ _SUITES = (
     "test_cake_moe_grouped_gemm_det_train_synthetic",
     "test_cake_moe_grouped_gemm_nondet_train_synthetic",
 )
-#: The synthetic gaps of each suite's tests (``test_unlisted`` has none).
+#: The synthetic gaps of each suite's tests on the device's GPU model, a B200
+#: (``test_unlisted`` and ``test_other_model`` have none).
 _GAPS = {
     "test_miss": {"max_only": (3.0, 3.0)},
     "test_above_cap": {"max_only": (3.0, 2.9999)},
     "test_plain_failure": {"max_only": (3.0, 3.0)},
     "test_pass": {"max_only": (3.0, 3.0)},
+}
+#: The synthetic gaps on another GPU model, a GB300, which must not apply on the B200: a
+#: cap that would cover ``test_above_cap``, and a test listed on the GB300 only.
+_OTHER_GAPS = {
+    "test_above_cap": {"max_only": (3.0, 3.0)},
+    "test_other_model": {"max_only": (3.0, 3.0)},
 }
 #: Each synthetic test's outcome in the deterministic and the non-deterministic suite.
 _OUTCOMES = {
@@ -376,6 +406,7 @@ _OUTCOMES = {
     "test_plain_failure": ("FAILED", "FAILED"),
     "test_pass": ("FAILED", "XPASS"),
     "test_unlisted": ("FAILED", "FAILED"),
+    "test_other_model": ("FAILED", "FAILED"),
 }
 _SYNTHETIC_SUITE = """
 from tests.test_known_gaps import _judge
@@ -399,6 +430,10 @@ def test_pass():
 
 def test_unlisted():
     _judge(["meets", "max_only"])
+
+
+def test_other_model():
+    _judge(["meets", "max_only"])
 """
 _SYNTHETIC_CONFTEST = """
 from pathlib import Path
@@ -414,13 +449,14 @@ torch.cuda.current_device = lambda: 0
 torch.cuda.get_device_name = lambda device=None: "NVIDIA B200"
 known_gaps.ROOT = Path(__file__).resolve().parent
 known_gaps.KNOWN_GAPS = {
-    "B200": {
-        f"{suite}.py::{name}": known_gaps.Gap(caps, "synthetic gap")
+    model: {
+        f"{suite}.py::{name}": known_gaps.Gap(caps, f"synthetic gap on the {model}")
         for suite in SUITES
-        for name, caps in GAPS.items()
+        for name, caps in gaps.items()
     }
+    for model, gaps in (("B200", GAPS), ("GB300", OTHER_GAPS))
 }
-known_gaps.LISTED = frozenset(known_gaps.KNOWN_GAPS["B200"])
+known_gaps.LISTED = frozenset(key for gaps in known_gaps.KNOWN_GAPS.values() for key in gaps)
 """
 
 
@@ -428,21 +464,24 @@ def test_the_conftest_fixture_and_hook_apply_the_rule(tmp_path):
     """The conftest's fixture and hook (``tests/conftest.py``) in a pytest run of a
     deterministic and a non-deterministic synthetic suite, on a device named as a B200 (no
     GPU is used): a listed miss at its caps is an XFAIL; a listed miss above a cap, a plain
-    failure of a listed test and an unlisted test's miss fail; a listed test that passes
-    fails in the deterministic suite (a strict XPASS) and is an XPASS in the
-    non-deterministic one.  The failure reports say why the xfail does not cover them."""
+    failure of a listed test, an unlisted test's miss and the miss of a test listed on
+    another GPU model only fail, and the other model's caps do not apply; a listed test
+    that passes fails in the deterministic suite (a strict XPASS) and is an XPASS in the
+    non-deterministic one.  The reports of the two listed-test failures say why the xfail
+    does not cover them (for the miss above its cap: the output, its ratio and its cap)."""
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "conftest.py").write_text(
-        f"SUITES = {_SUITES!r}\nGAPS = {_GAPS!r}\n{_SYNTHETIC_CONFTEST}"
+        f"SUITES = {_SUITES!r}\nGAPS = {_GAPS!r}\nOTHER_GAPS = {_OTHER_GAPS!r}\n"
+        f"{_SYNTHETIC_CONFTEST}"
     )
     for suite in _SUITES:
         (tmp_path / f"{suite}.py").write_text(_SYNTHETIC_SUITE)
-    path = [str(known_gaps.ROOT), os.environ.get("PYTHONPATH", "")]
+    path = os.pathsep.join(filter(None, [str(known_gaps.ROOT), os.environ.get("PYTHONPATH")]))
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-rA"]
         + [f"{suite}.py" for suite in _SUITES],
         cwd=tmp_path,
-        env=dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONPATH=os.pathsep.join(filter(None, path))),
+        env=dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONPATH=path),
         capture_output=True,
         text=True,
         timeout=900,
@@ -462,8 +501,10 @@ def test_the_conftest_fixture_and_hook_apply_the_rule(tmp_path):
         ("max_only: largest max-norm miss ratio 3 is above its cap 2.9999", 2),
         ("the failure is not a miss of the naive tier alone (a NaiveTierMiss)", 2),
         ("XPASS(strict)", 1),
+        ("synthetic gap on the B200", 1),
     ):
         assert done.stdout.count(reason) >= count, (reason, log)
+    assert "synthetic gap on the GB300" not in done.stdout, log
 
 
 # ---------------------------------------------------------------------------
