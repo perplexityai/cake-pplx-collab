@@ -1075,7 +1075,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 - **Rope form:** `O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent`, over the keys that each row's indices select (K = V = latent).
 - **NoPE form:** `O = softmax(softmax_scale * q . kv^T) . kv`.
 
-Each entry runs the forward eagerly and the backward through autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
+The autograd entries run the forward eagerly and the backward through autograd; the `*_train_*_forward` / `*_train_*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only.
 
@@ -1133,7 +1133,7 @@ The backward adds `dK`/`dV` into FP32 accumulators with unordered atomics, and n
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_dsa_sparse_attention_nondet` | Same as the det rope entry | `key_passes=None` applies the registered policy: `ceil(S*2304 B / 100 MiB)` passes when that exceeds 1 and T <= 4224 at top-k 2048. `1` forces one pass, and a larger value (<= S) forces that many. `dkv_direct=None` reads `CAKE_PPLX_DSA_DKV_DIRECT`; `True`/`False` select direct vs accumulate-and-cast for `dkv_acc`. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dkv` is accumulated in FP32 with atomics, then cast to BF16 or added into `dkv_acc`. |
+| `cake_dsa_sparse_attention_nondet` | Same as the det rope entry | `key_passes=None` applies the per-architecture policy of the registry record (see [Key-range passes for the DRAM regime](../kernels/dsa_sparse_attention/cake_pplx/_backends/cake_dsa_sparse_attention_nondet_train/README.md#key-range-passes-for-the-dram-regime)): on one-segment rows, `ceil(S*2304 B / 100 MiB)` passes when that exceeds 1 and the row is one chunk (T <= 4224 at top-k 2048) or, on `sm_103a`/`sm_107a`, a tail row (`2T <= S`, at least 131,072 keys; at most 3 passes on `sm_103a`); `sm_107a` runs a fixed 2 passes with a 131,072-key floor; a count above 4 runs one pass. `1` forces one pass, and a larger value (<= S) forces that many. `dkv_direct=None` reads `CAKE_PPLX_DSA_DKV_DIRECT`; `True`/`False` select direct vs accumulate-and-cast for `dkv_acc`. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dkv` is accumulated in FP32 with atomics, then cast to BF16 or added into `dkv_acc`. |
 | `cake_dsa_sparse_attention_nondet_varlen` | Same as det varlen | As det varlen | Packed rope form. |
 | `cake_dsa_sparse_attention_nondet_nope` | Same as det nope | `key_passes=None` uses one pass, and a value > 1 forces passes. For this program, the `dkv_direct` rule is 1 key per query token. | `dq` is BF16. `dkv` is FP32 via atomics, handed over through `dkv_acc` or cast by autograd. |
 | `cake_dsa_sparse_attention_nondet_nope_varlen` | Same as det nope_varlen | As det | Packed NoPE form. Without `check_cu_seqlens`, only structural checks run (dtype, rank, length, contiguity, device). |
@@ -1142,7 +1142,7 @@ The backward adds `dK`/`dV` into FP32 accumulators with unordered atomics, and n
 | `cake_dsa_sparse_attention_nondet_train_nope_forward` | Same as det | As det | Returns `(out, lse, o_lo)`. |
 | `cake_dsa_sparse_attention_nondet_train_nope_backward` | Same as det | As det | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. |
 | `cake_dsa_sparse_attention_nondet_train_nope_varlen_forward` | Same as det | As det | Returns `(out, lse, o_lo, indices, topk_length)`. |
-| `cake_dsa_sparse_attention_nondet_train_nope_varlen_backward` | Same as det | As det | Returns `(dq, dkv)`. |
+| `cake_dsa_sparse_attention_nondet_train_nope_varlen_backward` | Same as det | As det | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. |
 
 Other public names:
 

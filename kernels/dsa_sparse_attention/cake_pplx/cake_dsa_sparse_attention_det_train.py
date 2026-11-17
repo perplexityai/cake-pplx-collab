@@ -755,9 +755,13 @@ def cake_dsa_sparse_attention_det_train_nope_forward(
     The inputs are those of :func:`cake_dsa_sparse_attention_det_nope`, and the
     outputs those of :func:`cake_dsa_sparse_attention_det_train_forward`. Pass
     them unchanged to
-    :func:`cake_dsa_sparse_attention_det_train_nope_backward`. Every output
-    repeats bit for bit and is that of the autograd entry's forward on the same
-    inputs.
+    :func:`cake_dsa_sparse_attention_det_train_nope_backward`. The call reads
+    the rows as given. Every output repeats bit for bit. It is that of the
+    autograd entry's forward on the same inputs when the call passes
+    ``topk_length``, the table has fewer than
+    ``cake_backend.NOPE_CONVERT_SLOT_LIMIT`` slots, or the rows have no holes
+    (at or above that limit, without ``topk_length``, the autograd entry
+    compacts the rows first).
     """
     return _backend(backend).forward_nope(
         q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
@@ -793,9 +797,11 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
     caller owns the zeroing) and returns ``(dq, None)``. The call leaves
     ``o_lo`` unchanged. ``key_passes`` and ``check_dst_map`` as in
     :func:`cake_dsa_sparse_attention_det_nope`; ``dkv_direct``: accepted and
-    validated, without effect. Every gradient repeats bit for bit and is that
-    of the autograd entry's backward on the same inputs and ``key_passes``.
-    Nothing raises or warns under ``torch.use_deterministic_algorithms(True)``.
+    validated, without effect. Every gradient repeats bit for bit. It is that
+    of the autograd entry's backward on the same inputs and ``key_passes``
+    under the conditions of
+    :func:`cake_dsa_sparse_attention_det_train_nope_forward`. Nothing raises or
+    warns under ``torch.use_deterministic_algorithms(True)``.
     """
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()

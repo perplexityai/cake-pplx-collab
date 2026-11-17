@@ -19,11 +19,10 @@ all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
 in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
 or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
 `nope_bwd_delta` and `index_prep`, which need 12.8.  The feature does not
-participate in automatic backend selection, autotuning or trace-apply.
-Its libraries are
-loaded prebuilt from `aot/` when the package ships them and JIT-built through
-the package's JIT shim from `build.json` otherwise (see "Layout of this
-package").
+participate in automatic backend selection, autotuning or trace-apply.  Its
+libraries are loaded prebuilt from `aot/` when the package ships them and
+JIT-built through the package's JIT shim from `build.json` otherwise (see
+"Layout of this package").
 
 ## Mode and names
 
@@ -181,8 +180,8 @@ trainer's packed layouts are consumed in place
   the descriptor cannot address it (base not 16-byte aligned, strides not
   multiples of 8 elements, channel stride != 1); `prepare_dsa_train` rejects
   such a view.
-* A strided view is read in place (only descriptor fields and pointer offsets
-  change).
+* For a strided view, only descriptor fields and pointer offsets differ from
+  a contiguous tensor.
 
 ### Packed fp32 dKV accumulation and destination mapping
 

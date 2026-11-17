@@ -213,8 +213,8 @@ def cake_dsa_sparse_attention_nondet(
     layouts: unit innermost stride; head / token / key-row strides that are
     positive multiples of 8 elements (16 bytes, the TMA descriptor stride
     granule); head stride and key row stride at least the slice width; a
-    16-byte-aligned base address.  A strided view is read in place (only
-    descriptor fields and pointer offsets change).
+    16-byte-aligned base address.  For a strided view, only descriptor fields
+    and pointer offsets differ from a contiguous tensor.
 
     Parameters
     ----------
@@ -247,12 +247,17 @@ def cake_dsa_sparse_attention_nondet(
         scores over the valid keys (``-inf`` for fully masked rows).
     key_passes : Optional[int]
         Number of key-range passes of the backward's main stage.  ``None``
-        (default) applies the registered policy: the key range is split into
-        ``ceil(S * 2304 B / 100 MiB)`` passes when that exceeds one and the
-        whole row fits the pass workspace budget (``T <= 4224`` at top-k 2048),
-        so that each pass's FP32 dK/dV accumulator slice stays L2-resident;
-        otherwise a single pass runs.  ``1`` forces the single pass; a larger
-        value forces that many passes (``<= S``).  The passes carry dQ through
+        (default) applies the per-architecture policy of the registry record
+        (the backend README's "Key-range passes for the DRAM regime"): on a
+        one-segment row the key range is split into
+        ``ceil(S * 2304 B / 100 MiB)`` passes, so that each pass's FP32 dK/dV
+        accumulator slice stays L2-resident, when that exceeds one and the row
+        is one token chunk (``T <= 4224`` at top-k 2048) or, on ``sm_103a`` /
+        ``sm_107a``, a tail row (``2 T <= S``, at least 131,072 keys; at most 3
+        passes on ``sm_103a``); ``sm_107a`` runs a fixed 2 passes with a
+        131,072-key floor; a count above 4 runs one pass; otherwise a single
+        pass runs.  ``1`` forces the single pass; a larger value forces that
+        many passes (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
         topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
         written once per row and the dK/dV accumulation is unchanged.
