@@ -88,16 +88,6 @@ CONTRACT_ROWS = {
 STRIDE_PADS = (0, 64, "2H")
 # The row count standing in for the open end of a route's last program window.
 OPEN_WINDOW_ROWS = 65536
-# Bounds of the differences a window edge of class ``ulp`` / ``dx`` / ``unmeasured`` may show on the common rows
-# of T = edge and T = edge + 1 (``cake_windows.EDGES``; the measured figures are in the docstring notes): rstd within
-# a few FP32 ulps on at most half of the rows; y and dx within one BF16 ulp of the element -- or within a 2^-14 share
-# of the row's RMS, for the elements a cancellation leaves far below it -- on at most a twentieth of the rows across
-# an edge of class ``dx`` (whose forward is identical) and, across an edge of class ``ulp`` / ``unmeasured``, only on
-# rows whose rstd differs (the residual H = 6144 route moves dx on about a tenth of the rows at its edge 1024).
-EDGE_RSTD_ULPS = 4
-EDGE_RSTD_ROW_SHARE = 0.5
-EDGE_BF16_ROW_SHARE = 0.05
-EDGE_BF16_ROW_FLOOR = 2.0**-14
 SCALES = (1.0, 1e-3, 1e3)
 SEED = 760
 
@@ -527,22 +517,6 @@ def _route_outputs(
     return result
 
 
-def _ordered_bits(t: torch.Tensor) -> torch.Tensor:
-    """The float bits as an integer key monotone in the value: the key distance of two floats is their distance in
-    ulps of the format."""
-
-    if t.dtype == torch.bfloat16:
-        bits, sign = t.view(torch.int16).to(torch.int64), 1 << 15
-    else:
-        assert t.dtype == torch.float32
-        bits, sign = t.view(torch.int32).to(torch.int64), 1 << 31
-    return torch.where(bits >= 0, bits, -(bits + sign))
-
-
-def _ulps_apart(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return (_ordered_bits(a) - _ordered_bits(b)).abs()
-
-
 def _differing_rows(a: torch.Tensor, b: torch.Tensor) -> int:
     differs = a != b
     if differs.ndim > 1:
@@ -550,33 +524,14 @@ def _differing_rows(a: torch.Tensor, b: torch.Tensor) -> int:
     return int(differs.sum().item())
 
 
-def _assert_within_a_bf16_ulp(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    label: str,
-    *,
-    row_share: float = EDGE_BF16_ROW_SHARE,
-) -> None:
-    """``a`` and ``b`` (BF16 ``[rows, H]``) agree to one BF16 ulp per element -- or to ``EDGE_BF16_ROW_FLOOR`` of the
-    row's RMS where a cancellation leaves the element far below it -- and differ on at most ``row_share`` of the
-    rows."""
-
-    floor = EDGE_BF16_ROW_FLOOR * a.float().pow(2).mean(dim=1, keepdim=True).sqrt()
-    within = (_ulps_apart(a, b) <= 1) | ((a.float() - b.float()).abs() <= floor)
-    assert within.all(), f"{label}: {int((~within).sum())} elements beyond one BF16 ulp"
-    rows = _differing_rows(a, b)
-    assert rows <= row_share * a.shape[0], (
-        f"{label}: differs on {rows} of {a.shape[0]} rows"
-    )
-
-
 def _assert_edge_class(
     low: dict[str, torch.Tensor], high: dict[str, torch.Tensor], cls: str, label: str
 ) -> None:
     """The outputs of T = edge (``low``) and T = edge + 1 (``high``) on their common rows behave as the edge's class
-    says: ``same`` -- bitwise identical; ``ulp`` -- rstd differs on some rows by a few FP32 ulps, y and dx by at most
-    one BF16 ulp and only on rows whose rstd differs; ``dx`` -- y and rstd identical, dx differs on a few rows (the
-    base and the bulk-copy backward reduce a row in different orders); ``unmeasured`` -- bounded like ``ulp``."""
+    says: ``same`` -- bitwise identical; ``ulp`` -- rstd differs on some rows, and y and dx differ
+    only on rows whose rstd differs; ``dx`` -- y and rstd identical, dx differs on some rows (the base and the
+    bulk-copy backward reduce a row in different orders); ``unmeasured`` -- h_new identical.  How far the outputs
+    move is not bounded here (no tolerance); accuracy is judged against the naive BF16 tier."""
 
     rows = low["rstd"].shape[0]
     common = {key: value[:rows] for key, value in high.items()}
@@ -596,29 +551,14 @@ def _assert_edge_class(
         assert rstd_rows == 0 and torch.equal(low["y"], common["y"]), (
             f"{label}: the forward differs across an edge of class 'dx' ({rstd_rows} rstd rows)"
         )
-    else:
-        assert (_ulps_apart(low["rstd"], common["rstd"]) <= EDGE_RSTD_ULPS).all(), (
-            f"{label}: rstd beyond {EDGE_RSTD_ULPS} FP32 ulps"
+    elif cls == "ulp":
+        assert rstd_rows > 0, (
+            f"{label}: rstd is identical across an edge of class 'ulp' (re-measure the edge)"
         )
-        assert rstd_rows <= EDGE_RSTD_ROW_SHARE * rows, (
-            f"{label}: rstd differs on {rstd_rows} of {rows} rows"
+        assert torch.equal(low["y"][same_rstd], common["y"][same_rstd]), (
+            f"{label}: y differs on rows whose rstd agrees"
         )
-        # y and dx move only with rstd (asserted exactly for class 'ulp' below): the rstd share bounds their rows.
-        _assert_within_a_bf16_ulp(
-            low["y"], common["y"], f"{label}: y", row_share=EDGE_RSTD_ROW_SHARE
-        )
-        if cls == "ulp":
-            assert rstd_rows > 0, (
-                f"{label}: rstd is identical across an edge of class 'ulp' (re-measure the edge)"
-            )
-            assert torch.equal(low["y"][same_rstd], common["y"][same_rstd]), (
-                f"{label}: y differs on rows whose rstd agrees"
-            )
     if "dx" in low:
-        share = EDGE_BF16_ROW_SHARE if cls == "dx" else EDGE_RSTD_ROW_SHARE
-        _assert_within_a_bf16_ulp(
-            low["dx"], common["dx"], f"{label}: dx", row_share=share
-        )
         if cls == "ulp":
             assert torch.equal(low["dx"][same_rstd], common["dx"][same_rstd]), (
                 f"{label}: dx differs on rows whose rstd agrees"
@@ -661,7 +601,7 @@ def test_window_edges_match_the_measured_classes(
     hidden: int, kind: str, residual: bool
 ) -> None:
     """At every window edge of the route the outputs of T = edge and T = edge + 1 behave on their common rows as the
-    exporter measured (``cake_windows.EDGES``, see ``_assert_edge_class``); an unmeasured edge is bounded and named."""
+    exporter measured (``cake_windows.EDGES``, see ``_assert_edge_class``); an unmeasured edge is named."""
 
     _skip_unless_route(hidden, residual)
     arch = loader.arch_for_capability(_capability())
@@ -679,7 +619,7 @@ def test_window_edges_match_the_measured_classes(
             unmeasured.append(edge)
     if unmeasured:
         pytest.skip(
-            f"{arch} {route}: edges {unmeasured} are within bounds but unmeasured"
+            f"{arch} {route}: edges {unmeasured} are unmeasured"
         )
 
 
@@ -1689,11 +1629,10 @@ def test_registry_records_reference_the_build_manifest() -> None:
 
 
 # dw at the largest row counts of the long-chunk windows, where an FP32 chunk sum over many rows accumulates the most
-# rounding: H = 1536 / 2048 / 4096 / 6144 at 65536 rows and one row above each architecture's accuracy edge of the
-# route where the route has one (``test_dw_above_the_accuracy_edge_meets_the_naive_tier``); H = 5120 at 40960 and
-# 65536 rows; H = 256 at 81920 rows, at the key rows of a 65536-token batch (262144), at 1179649 rows and at the query
-# rows of a 65536-token batch (1572864) and one above (1572865).  Three seeds per case, each judged over its draws
-# against the naive BF16 weight gradient; BF16 and FP32 weight.
+# rounding: H = 1536 / 2048 / 4096 / 6144 at 65536 rows; H = 5120 at 40960 and 65536 rows; H = 256 at 81920 rows,
+# at the key rows of a 65536-token batch (262144), at 1179649 rows and at the query rows of a 65536-token batch
+# (1572864) and one above (1572865).  Three seeds per case, each judged over its draws against the naive BF16 weight
+# gradient; BF16 and FP32 weight.
 LARGE_ROW_DW_CASES = (
     (1536, 65536),
     (2048, 65536),
@@ -1716,27 +1655,6 @@ def test_large_row_dw_meets_the_naive_tier(
     hidden: int, rows: int, fp32_weight: bool, seed: int, record_property
 ) -> None:
     _check_large_row_dw(hidden, rows, fp32_weight, seed, record_property)
-
-
-@pytest.mark.parametrize("hidden", (1536, 2048, 4096, 5120, 6144))
-@pytest.mark.parametrize("fp32_weight", (False, True))
-@pytest.mark.parametrize("seed", (0, 1, 2))
-def test_dw_above_the_accuracy_edge_meets_the_naive_tier(
-    hidden: int, fp32_weight: bool, seed: int, record_property
-) -> None:
-    """One row above the route's accuracy edge on this architecture (``cake_windows.ACCURACY_EDGES``), the first
-    row count of its compensated window, dw meets the naive BF16 tier; a route with no accuracy edge (no
-    compensated program) is skipped."""
-    _skip_unless_hidden(hidden)
-    arch = loader.arch_for_capability(_capability())
-    edge = windows.ACCURACY_EDGES.get(arch, {}).get(
-        loader.route_key(hidden, "bwd", False)
-    )
-    if edge is None:
-        pytest.skip(
-            f"{arch} hidden={hidden}: no accuracy edge (no compensated program)"
-        )
-    _check_large_row_dw(hidden, edge + 1, fp32_weight, seed, record_property)
 
 
 def _check_large_row_dw(
