@@ -11802,8 +11802,8 @@ def _d3_router_draw(op, T, v):
 )
 def test_router_rows_match_fp64_reference_and_rerun_bit_exact(op, T, record_property):
     """The router's prepared launch of the default split count, judged against the naive BF16 tier over 32 draws.
-    On the last draw a rerun into a NaN-poisoned ``out`` allocates nothing and gives the same bits, and so does the
-    eager entry point of the row (its second call hits the cached plan and allocates only ``out``)."""
+    On the last draw a rerun into a NaN-poisoned ``out`` allocates nothing and gives the same bits; the eager entry
+    point of the row gives the same bits too, and its second call hits the cached plan and allocates only ``out``."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
