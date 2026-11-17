@@ -150,7 +150,7 @@ kernel_cake_dsa_h64_det_train_f4ebce39fc25de804572(unsigned long long* __restric
                 *reinterpret_cast<int4*>(dkv_acc + lbase + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase = (long long)row * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase = (long long)row * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase + (long long)(lane_1 * 4)) = _iv4;
