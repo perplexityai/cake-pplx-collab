@@ -57,6 +57,26 @@ WIDTH = 4
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16}
 PHASES = ("fwd", "bwd", "step", "ckpt")
 CAKE_DISTRIBUTION = "cake-pplx-causal-conv1d"
+# The CUDA toolkit wheels of the interpreter (the Cake JIT and the runtime) and the baselines' libraries.
+CUDA_WHEELS = ("nvidia-cuda-runtime", "nvidia-cuda-nvrtc", "nvidia-cuda-nvcc", "nvidia-cuda-cccl")
+SOTA_LIBRARIES = (
+    "fla-core",
+    "flash-linear-attention",
+    "causal-conv1d",
+    "nvidia-cudnn-frontend",
+    "nvidia-cutlass-dsl",
+    "megatron-core",
+    "attn-gym",
+    "triton",
+    "cupti-python",
+)
+
+
+def _version(name: str):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _package_identity() -> dict:
@@ -120,26 +140,12 @@ class Worker:
             "l2_bytes": props.L2_cache_size,
             "gpu_timer": self.timer.method,
             "pid": os.getpid(),
+            "cuda_wheels": {name: _version(name) for name in CUDA_WHEELS},
         }
         if self.role == "cake":
             out["package"] = _package_identity()
         else:
-            versions = {}
-            for name in (
-                "fla-core",
-                "flash-linear-attention",
-                "causal-conv1d",
-                "nvidia-cudnn-frontend",
-                "nvidia-cutlass-dsl",
-                "megatron-core",
-                "triton",
-                "cupti-python",
-            ):
-                try:
-                    versions[name] = importlib.metadata.version(name)
-                except importlib.metadata.PackageNotFoundError:
-                    versions[name] = None
-            out["libraries"] = versions
+            out["libraries"] = {name: _version(name) for name in SOTA_LIBRARIES}
         return out
 
     def row_cmd(self, req: dict) -> dict:
