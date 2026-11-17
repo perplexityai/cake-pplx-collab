@@ -1665,7 +1665,6 @@ def _main_accumulator_constants(
 #: The (plan, architecture) pairs whose main launches walk the tokens in descending order (``token_base = T - 1``,
 #: ``token_step = -1``) when the backward runs a single key pass: those where no measured row of the plan is slower
 #: with it.  Every other pair and every multi-pass backward keep ascending order.
-#: The forward and dQ keep their bits; dK / dV (atomic adds) stay within the unchanged budget.
 DESCENDING_TOKEN_PLANS = frozenset(
     {
         ("rope", "sm_103a"),
