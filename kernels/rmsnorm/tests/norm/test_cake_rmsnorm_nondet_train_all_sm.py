@@ -233,9 +233,7 @@ def _inputs(rows: int, hidden: int, residual: bool, w: str, draw: int = 0):
     u = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16) if residual else None
     # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
     weight = (
-        (1 + 0.1 * torch.randn(hidden, **kwargs))
-        .to(torch.bfloat16)
-        .to(ref.W_DTYPES[w])
+        (1 + 0.1 * torch.randn(hidden, **kwargs)).to(torch.bfloat16).to(ref.W_DTYPES[w])
     )
     g = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16)
     g_h = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16) if residual else None

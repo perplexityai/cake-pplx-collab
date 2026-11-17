@@ -618,9 +618,7 @@ def test_window_edges_match_the_measured_classes(
         if cls == "unmeasured":
             unmeasured.append(edge)
     if unmeasured:
-        pytest.skip(
-            f"{arch} {route}: edges {unmeasured} are unmeasured"
-        )
+        pytest.skip(f"{arch} {route}: edges {unmeasured} are unmeasured")
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
