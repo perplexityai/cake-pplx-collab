@@ -17,27 +17,25 @@ Multi-GPU rows of the non-deterministic ``cake_causal_conv1d_nondet_kcp``: ``W``
 deterministic KCP suite's partitions (contiguous, zigzag, per-document zigzag, ragged tables with a zero-token rank,
 one-token fragments, a fragment that reads its history from three predecessor ranks), plus W = 16 rows (``-k w16``) on
 the layouts any world size partitions: contiguous, zigzag and per-document zigzag (the ragged tables are written for at
-most eight ranks).  Per row and rank:
+most eight ranks).  The outputs are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``): every
+rank draws the whole pack from each of 32 seeds (the same on every rank), runs the call on its tokens and judges its
+``y`` / ``dx`` rows and the sum of the ranks' ``dweight`` partials (all-gathered and added in rank order) against the
+float64 oracle of the whole pack and PyTorch's BF16 naive convolution.  No bit rule holds the package: its outputs
+are never compared bit for bit with another launch and never with the deterministic package.  Per row and rank:
 
-- ``y`` is bitwise the single-rank zero-history convolution of the whole pack on the rank's tokens (anchor) and
-  the deterministic KCP call's; ``dx`` is bitwise the deterministic KCP call's;
-- an independent reference: the rank's ``y`` and ``dx`` (its tokens gathered from the global FP64 oracle of the
-  whole pack under the KCP SiLU' policy) within one BF16 ulp, and the all-reduced ``dweight`` partial sum within
-  the package budget of the global FP64 ``dweight``;
-- the rank-local FP32 ``dweight`` partial is within the package budget of the deterministic partial, on each of
-  ``REPEATS`` launches (``dx`` bitwise on every one; the worst case is recorded), and the sum of the partials over
-  the ranks is within ``W`` x the budget of the deterministic sum;
-- checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward), nested
-  checkpoints and ``retain_graph`` accumulation: ``y`` / ``dx`` bitwise the direct pass, ``dweight`` within budget,
-  and the per-phase collective counts of the deterministic suite (one halo exchange per direction, one more in a
-  plain recompute, none in a recompute with a handle);
+- ``REPEATS`` launches of the direct pass on each draw, every launch judged;
+- checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward) and
+  nested checkpoints, judged; the per-phase collective counts of the deterministic suite (one halo exchange per
+  direction, one more in a plain recompute, none in a recompute with a handle); ``retain_graph`` accumulation
+  (judged as the gradients of ``2 dy``);
 - the handle retains exactly the history pool;
 - the two-launch forward (knobs ``fwd_main`` x ``fwd_overlap``, the same on every rank): ``LAST_CALL["fwd"]`` names
   the form the rank ran (the overlapped form on a rank with tokens, the history-row program when the rank receives
-  history rows) and ``y`` / ``hist`` are bitwise the one-launch forward's (``fwd_main`` 0, ``fwd_overlap`` 0: the
-  previous forward) and the deterministic KCP forward's;
+  history rows) and every ``y`` is judged;
 - a 1-thread kernel resident on another stream does not stall the backward (the
-  main backward is an ordinary launch; ``busy <= 2 x alone``).
+  main backward is an ordinary launch; ``busy <= 2 x alone``), and the outputs of backward calls launched beside it
+  are judged;
+- the rank-agreement check runs once per phase and refuses a mismatched call on every rank.
 
 Launch forms as the deterministic suite: ``torch.multiprocessing`` (skipped with fewer than ``W`` visible devices)
 or one process per Slurm task (``SLURM_NTASKS == W``).  Skipped until the exporter renders the package.
@@ -51,13 +49,13 @@ import json
 import os
 import statistics
 import tempfile
+import types
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.test_cake_causal_conv1d_det_train_kcp import Y_ATOL, Y_RTOL, _reference
 from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
     ROWS,
     WIDTH,
@@ -69,7 +67,8 @@ from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
     _row_id,
 )
 
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
+# The seed of every rank's pack (draw 0 of the judges).
+SEED = 7815
 REPEATS = 20
 # W = 16 (16-way context parallelism) on the deterministic rows' packs, for the layouts any world size partitions.
 ROWS_W16 = [
@@ -84,7 +83,6 @@ def _run_rank(
 ) -> dict:
     from torch.utils.checkpoint import checkpoint
 
-    import cake_pplx.cake_causal_conv1d_det_train as conv
     import cake_pplx.cake_causal_conv1d_nondet_train_kcp as kcp_api
     from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
         kcp as conv_kcp,
@@ -92,9 +90,7 @@ def _run_rank(
     from cake_pplx._backends.cake_kda_det_train_kcp import (
         cake_kcp_plan as plan,
     )
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    det_kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
+    from tests.cake.test_helpers.cake_causal_conv1d_oracle import judge_draws, problem
 
     lengths, _w, layout, C = row
     device = torch.device("cuda", local_id % max(torch.cuda.device_count(), 1))
@@ -109,25 +105,35 @@ def _run_rank(
         part, group, rank, device, conv_kernel_size=WIDTH
     )
     T = cu[-1]
-    g = torch.Generator(device="cpu").manual_seed(7815)
-    x_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
-    w_all = (torch.randn(C, WIDTH, generator=g) * 0.5).contiguous()
-    dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
-    x = _local(part, rank, cu, x_all).to(device)
-    dy = _local(part, rank, cu, dy_all).to(device)
-    w = w_all.to(device)
+    cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
+    rows = _local(part, rank, cu, torch.arange(T)).to(device)
     n_hist = int(ctx.halo.n_hist_rows)
 
-    def leaves():
-        return x.detach().clone().requires_grad_(
-            True
-        ), w.detach().clone().requires_grad_(True)
+    def pack(seed: int) -> types.SimpleNamespace:
+        """The whole pack drawn from ``seed`` (the same on every rank) and the rank's tokens of it."""
+
+        g = torch.Generator(device="cpu").manual_seed(seed)
+        x_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
+        w_all = (torch.randn(C, WIDTH, generator=g) * 0.5).contiguous()
+        dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
+        return types.SimpleNamespace(
+            x=_local(part, rank, cu, x_all).to(device),
+            w=w_all.to(device),
+            dy=_local(part, rank, cu, dy_all).to(device),
+            x_all=x_all.to(device),
+            dy_all=dy_all.to(device),
+        )
+
+    # The pack of the collective-count, retention and side-kernel checks: draw 0 of every judge below.
+    first = pack(SEED)
+    x, w, dy = first.x, first.w, first.dy
 
     def fn(x_, w_, h_):
         return kcp_api.cake_causal_conv1d_nondet_kcp(x_, w_, ctx, recompute_handle=h_)
 
-    def run(mode: str, handle=None, *, twice: bool = False, reentrant: bool = False):
-        xl, wl = leaves()
+    def run(mode: str, handle=None, *, twice: bool = False, reentrant: bool = False, p=first):
+        xl = p.x.detach().clone().requires_grad_(True)
+        wl = p.w.detach().clone().requires_grad_(True)
         with _Counter() as cc:
             if mode == "direct":
                 y = fn(xl, wl, handle)
@@ -160,171 +166,73 @@ def _run_rank(
                     context_fn=lambda: (contextlib.nullcontext(), cc.recompute_cm()),
                 )  # fmt: skip
             cc.phase = "bwd"
-            y.backward(dy, retain_graph=twice)
+            y.backward(p.dy, retain_graph=twice)
             if twice:
-                y.backward(dy)
-        out = {"y": y.detach(), "dx": xl.grad, "dw": wl.grad}
+                y.backward(p.dy)
+        out = {"y": y.detach(), "dx": xl.grad, "dweight": wl.grad}
         counts = {
-            t: {p: cc.get(t, p) for p in ("orig", "recompute", "bwd")}
+            t: {ph: cc.get(t, ph) for ph in ("orig", "recompute", "bwd")}
             for t in ("calls", "waits")
         }
         return out, counts
 
-    def bits(t: torch.Tensor) -> torch.Tensor:
-        return t.contiguous().view(
-            torch.int16 if t.element_size() == 2 else torch.int32
-        )
+    def world_dweight(dw: torch.Tensor) -> torch.Tensor:
+        """The ranks' ``dweight`` partials all-gathered and added in rank order (the same order on every rank)."""
 
-    def same(a: torch.Tensor, b: torch.Tensor) -> bool:
-        return (
-            a.dtype == b.dtype and a.shape == b.shape and torch.equal(bits(a), bits(b))
-        )
-
-    def ratio(a: torch.Tensor, b: torch.Tensor, scale: float = 1.0) -> float:
-        """The worst ``|a - b| / (atol + rtol |b|)`` at ``scale`` x the budget (``<= 1``: within budget)."""
-
-        if a.numel() == 0:
-            return 0.0
-        a, b = a.double(), b.double()
-        if not torch.isfinite(a).all():
-            return float("inf")
-        return float(
-            ((a - b).abs() / (scale * DW_ATOL + scale * DW_RTOL * b.abs())).max()
-        )
-
-    def ulp_ratio(a: torch.Tensor, b: torch.Tensor) -> float:
-        """The worst ``|a - b| / (Y_ATOL + Y_RTOL |b|)`` (``<= 1``: within one BF16 ulp)."""
-
-        if a.numel() == 0:
-            return 0.0
-        a, b = a.double(), b.double()
-        if not torch.isfinite(a).all():
-            return float("inf")
-        return float(((a - b).abs() / (Y_ATOL + Y_RTOL * b.abs())).max())
-
-    def eq(a, b, scale: float = 1.0) -> bool:
-        return (
-            same(a["y"], b["y"])
-            and same(a["dx"], b["dx"])
-            and ratio(a["dw"], b["dw"], scale) <= 1.0
-        )
+        partials = [torch.empty_like(dw) for _ in range(W)]
+        dist.all_gather(partials, dw.contiguous())
+        total = partials[0].clone()
+        for partial in partials[1:]:
+            total += partial
+        return total
 
     flags: dict[str, bool] = {}
     info: dict[str, object] = {"n_hist_rows": n_hist, "T_r": int(x.shape[0])}
-    # The deterministic KCP call on the same inputs (the bitwise / budget reference).
-    xd, wd = leaves()
-    yd = det_kcp.cake_causal_conv1d_det_kcp(xd, wd, ctx)
-    yd.backward(dy)
-    det = {"y": yd.detach(), "dx": xd.grad, "dw": wd.grad}
-    # The first nondet call of the context runs the rank-agreement check (one all_gather_into_tensor per
-    # phase, before that phase's exchange); every later call issues only the halo exchanges.
+
+    def judged(label: str, call, *, dy_scale: int = 1) -> None:
+        """Every rank judges ``call(p)`` -- the outputs by name, ``dweight`` the rank's partial(s), summed over the
+        ranks here -- on its rows over the draws, against the naive tier of the whole pack (``dy`` times
+        ``dy_scale``).  The verdict is the flag ``judged:<label>``."""
+
+        def launch(_draw: int, seed: int):
+            p = pack(seed)
+            outputs = dict(call(p))
+            if not rows.numel():
+                # a rank without tokens: its y / dx are empty and judge nothing (every draw's would look alike)
+                outputs = {name: v for name, v in outputs.items() if name == "dweight"}
+            if "dweight" in outputs:
+                values = outputs["dweight"]
+                outputs["dweight"] = (
+                    world_dweight(values)
+                    if isinstance(values, torch.Tensor)
+                    else [world_dweight(v) for v in values]
+                )
+            return outputs, problem(
+                p.x_all, p.w, cu_dev, None, p.dy_all * dy_scale, rows=rows
+            )
+
+        failures = judge_draws(launch, seed=SEED, label=f"{_row_id(row)} {label}")
+        info[f"judge_failures:{label}"] = failures[:8]
+        flags[f"judged:{label}"] = not failures
+
+    # The first call of the context runs the rank-agreement check (one all_gather_into_tensor per phase, before that
+    # phase's exchange); every later call issues only the halo exchanges.
     _, c_first = run("direct")
     flags["agreement_check_once_per_phase"] = c_first["calls"] == {
         "orig": 2,
         "recompute": 0,
         "bwd": 2,
     }
-    direct, c_direct = run("direct")
-    plain, c_plain = run("ckpt")
+    _, c_direct = run("direct")
+    _, c_plain = run("ckpt")
     hd = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
-    withh, c_h = run("ckpt", hd)
-    plain_re, c_plain_re = run("ckpt", reentrant=True)
+    _, c_h = run("ckpt", hd)
+    _, c_plain_re = run("ckpt", reentrant=True)
     hd_re = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
-    withh_re, c_h_re = run("ckpt", hd_re, reentrant=True)
+    _, c_h_re = run("ckpt", hd_re, reentrant=True)
     info["counts"] = {
         "direct": c_direct, "plain": c_plain, "handle": c_h, "plain_reentrant": c_plain_re, "handle_reentrant": c_h_re,
     }  # fmt: skip
-    cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
-    y_single = conv.cake_causal_conv1d_det(x_all.to(device), w, cu_dev)
-    flags["y_eq_single_rank"] = same(direct["y"], _local(part, rank, cu, y_single))
-    flags["y_dx_eq_deterministic"] = same(direct["y"], det["y"]) and same(
-        direct["dx"], det["dx"]
-    )
-    flags["dw_within_budget_of_deterministic"] = ratio(direct["dw"], det["dw"]) <= 1.0
-    # The two-launch forward: every (fwd_main, fwd_overlap) form, the same on every rank, records its form in
-    # LAST_CALL["fwd"] (the overlapped form with the exchange in flight on a rank with tokens; the history-row program
-    # when the rank receives history rows and the form has two launches) and gives y / hist bitwise the one-launch
-    # forward's (fwd_main 0, fwd_overlap 0) and the deterministic KCP forward's.
-    y_det_f, hist_det_f = det_kcp.cake_causal_conv1d_det_train_kcp_forward(x, w, ctx)
-    torch.cuda.synchronize(device)
-    one = None
-    fwd_bitwise, fwd_recorded = True, True
-    for fwd_main in (0, 1):
-        for fwd_overlap in (0, 1):
-            conv_kcp._set_test_knobs({"fwd_main": fwd_main, "fwd_overlap": fwd_overlap})
-            try:
-                for _ in range(2):
-                    y_f, hist_f = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
-                        x, w, ctx
-                    )
-                    torch.cuda.synchronize(device)
-                    if one is None:
-                        one = (y_f.clone(), hist_f.clone())
-                    want = (
-                        {
-                            "main": "sr" if fwd_main else "f",
-                            "form": "pair" if fwd_overlap else "wait",
-                            "repair": bool(fwd_main or fwd_overlap) and n_hist > 0,
-                        }
-                        if x.shape[0]
-                        else {"main": None, "form": "wait", "repair": False}
-                    )
-                    fwd_recorded = fwd_recorded and conv_kcp.LAST_CALL["fwd"] == want
-                    fwd_bitwise = (
-                        fwd_bitwise
-                        and same(y_f, one[0])
-                        and same(hist_f, one[1])
-                        and same(y_f, y_det_f)
-                        and same(hist_f, hist_det_f)
-                        and same(y_f, det["y"])
-                    )
-            finally:
-                conv_kcp._set_test_knobs(None)
-                conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-    flags["fwd_forms_bitwise"] = fwd_bitwise
-    flags["fwd_forms_recorded"] = fwd_recorded
-    # The independent reference: the global FP64 oracle of the whole pack, the rank's tokens gathered from it.
-    y_ref, dx_ref, dw_ref = _reference(x_all.to(device), w, cu_dev, dy_all.to(device))
-    info["y_ratio_to_one_bf16_ulp_vs_fp64"] = ulp_ratio(
-        direct["y"], _local(part, rank, cu, y_ref)
-    )
-    info["dx_ratio_to_one_bf16_ulp_vs_fp64"] = ulp_ratio(
-        direct["dx"], _local(part, rank, cu, dx_ref)
-    )
-    flags["y_within_one_bf16_ulp_of_fp64"] = (
-        info["y_ratio_to_one_bf16_ulp_vs_fp64"] <= 1.0
-    )
-    flags["dx_within_one_bf16_ulp_of_fp64"] = (
-        info["dx_ratio_to_one_bf16_ulp_vs_fp64"] <= 1.0
-    )
-    # Repeated launches: dx bitwise every time, dweight within budget every time.
-    worst, patterns, dx_ok = 0.0, set(), True
-    for _ in range(REPEATS):
-        again, _ = run("direct")
-        dx_ok = dx_ok and same(again["dx"], det["dx"]) and same(again["y"], det["y"])
-        worst = max(worst, ratio(again["dw"], det["dw"]))
-        patterns.add(bytes(again["dw"].contiguous().view(torch.uint8).cpu().numpy()))
-    info["repeats"] = {
-        "n": REPEATS,
-        "worst_dw_ratio_to_budget": worst,
-        "distinct_dw_patterns": len(patterns),
-    }
-    flags["repeats_dx_bitwise"] = dx_ok
-    flags["repeats_dw_within_budget"] = worst <= 1.0
-    # The rank partials' sum (the framework's reduction) against the deterministic partials' sum.
-    total, total_det = direct["dw"].clone(), det["dw"].clone()
-    dist.all_reduce(total)
-    dist.all_reduce(total_det)
-    info["dw_sum_ratio_to_budget"] = ratio(total, total_det, float(W))
-    flags["dw_sum_within_budget"] = info["dw_sum_ratio_to_budget"] <= 1.0
-    info["dw_sum_ratio_to_budget_vs_fp64"] = ratio(total, dw_ref)
-    flags["dw_sum_within_budget_of_fp64"] = (
-        info["dw_sum_ratio_to_budget_vs_fp64"] <= 1.0
-    )
-    flags["plain_eq_direct"] = eq(plain, direct)
-    flags["handle_eq_plain"] = eq(withh, plain)
-    flags["reentrant_plain_eq_direct"] = eq(plain_re, direct)
-    flags["reentrant_handle_eq_direct"] = eq(withh_re, direct)
     for t in ("calls", "waits"):
         flags[f"positive_control_{t}"] = c_direct[t] == {"orig": 1, "recompute": 0, "bwd": 1} and c_plain[t] == {
             "orig": 1, "recompute": 1, "bwd": 1,
@@ -334,24 +242,66 @@ def _run_rank(
             "orig": 1, "recompute": 0, "bwd": 1,
         }  # fmt: skip
     flags["handle_bytes"] = hd.nbytes() == n_hist * C * 2 == hd_re.nbytes()
+
+    # Repeated launches of the direct pass on each draw: every launch judged; the number of distinct dweight bit
+    # patterns of the first draw is recorded (no bound is placed on it).
+    patterns: set[bytes] = set()
+    draws: list[int] = []
+
+    def repeats(p):
+        found = {"y": [], "dx": [], "dweight": []}
+        for _ in range(REPEATS):
+            out, _ = run("direct", p=p)
+            for name, value in out.items():
+                found[name].append(value)
+            if not draws:
+                patterns.add(bytes(out["dweight"].contiguous().view(torch.uint8).cpu().numpy()))
+        draws.append(len(draws))
+        return found
+
+    judged("direct repeats", repeats)
+    info["repeats"] = {"n": REPEATS, "distinct_dw_patterns_first_draw": len(patterns)}
+
+    # Checkpoints with and without a recompute handle, reentrant or not, and nested checkpoints.
+    def checkpoints(p):
+        found = {"y": [], "dx": [], "dweight": []}
+        for mode, handle, reentrant in (
+            ("ckpt", None, False),
+            ("ckpt", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), False),
+            ("ckpt", None, True),
+            ("ckpt", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), True),
+            ("nested_out", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), False),
+            ("nested_in", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), False),
+        ):
+            out, _ = run(mode, handle, reentrant=reentrant, p=p)
+            for name, value in out.items():
+                found[name].append(value)
+        return found
+
+    judged("checkpoints", checkpoints)
+
+    # retain_graph accumulation: the gradients of two passes of dy are those of 2 dy (the convolution is linear in
+    # dy and doubling a BF16 dy is exact), judged as such.
     twice, c_twice = run(
         "ckpt", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), twice=True
     )
     info["counts"]["handle_twice"] = c_twice
-    flags["twice_accumulates"] = (
-        same(twice["dx"], direct["dx"] + direct["dx"])
-        and ratio(twice["dw"], direct["dw"] + direct["dw"], 2.0) <= 1.0
-        and c_twice["calls"] == {"orig": 1, "recompute": 0, "bwd": 2}
-    )
-    nest_out, c_nest_out = run(
+    flags["twice_counts"] = c_twice["calls"] == {"orig": 1, "recompute": 0, "bwd": 2}
+
+    def accumulated(p):
+        out, _ = run(
+            "ckpt", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), twice=True, p=p
+        )
+        return {"dx": out["dx"], "dweight": out["dweight"]}
+
+    judged("retain_graph accumulation", accumulated, dy_scale=2)
+    _, c_nest_out = run(
         "nested_out", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
     )
-    nest_in, c_nest_in = run(
+    _, c_nest_in = run(
         "nested_in", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
     )
     info["counts"]["nested_out"], info["counts"]["nested_in"] = c_nest_out, c_nest_in
-    flags["nested_out_eq_direct"] = eq(nest_out, direct)
-    flags["nested_in_eq_direct"] = eq(nest_in, direct)
     flags["nested_out_counts"] = c_nest_out["calls"] == {
         "orig": 1,
         "recompute": 0,
@@ -362,12 +312,49 @@ def _run_rank(
         "recompute": 1,
         "bwd": 1,
     }
+
+    # The two-launch forward: every (fwd_main, fwd_overlap) form, the same on every rank, records its form in
+    # LAST_CALL["fwd"] (the overlapped form with the exchange in flight on a rank with tokens; the history-row program
+    # when the rank receives history rows and the form has two launches); every call's y judged.
+    fwd_recorded = [True]
+
+    def forms(p):
+        found = []
+        for fwd_main in (0, 1):
+            for fwd_overlap in (0, 1):
+                conv_kcp._set_test_knobs({"fwd_main": fwd_main, "fwd_overlap": fwd_overlap})
+                try:
+                    for _ in range(2):
+                        y_f, _ = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
+                            p.x, p.w, ctx
+                        )
+                        torch.cuda.synchronize(device)
+                        want = (
+                            {
+                                "main": "sr" if fwd_main else "f",
+                                "form": "pair" if fwd_overlap else "wait",
+                                "repair": bool(fwd_main or fwd_overlap) and n_hist > 0,
+                            }
+                            if p.x.shape[0]
+                            else {"main": None, "form": "wait", "repair": False}
+                        )
+                        fwd_recorded[0] = fwd_recorded[0] and conv_kcp.LAST_CALL["fwd"] == want
+                        found.append(y_f)
+                finally:
+                    conv_kcp._set_test_knobs(None)
+                    conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+        return {"y": found}
+
+    judged("forward forms", forms)
+    flags["fwd_forms_recorded"] = fwd_recorded[0]
+
     retained = {}
     for name, h in (
         ("plain", None),
         ("handle", conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()),
     ):
-        xl, wl = leaves()
+        xl = x.detach().clone().requires_grad_(True)
+        wl = w.detach().clone().requires_grad_(True)
         torch.cuda.synchronize(device)
         gc.collect()
         before = _requested(device)
@@ -393,12 +380,9 @@ def _run_rank(
             with torch.cuda.stream(side):
                 torch.cuda._sleep(10_000_000)
         start.record()
-        dx_t, _ = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
-            x, w, ctx, dy, hist
-        )
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(x, w, ctx, dy, hist)
         end.record()
         torch.cuda.synchronize(device)
-        timed.dx = dx_t
         return start.elapsed_time(end)
 
     def side_kernel_ms() -> float:
@@ -416,11 +400,24 @@ def _run_rank(
     busy = statistics.median(timed(True) for _ in range(7))
     sleep = side_kernel_ms()
     info["side_kernel_ms"] = {"alone": alone, "busy": busy, "side": sleep}
-    flags["side_kernel_dx_bitwise"] = same(timed.dx, det["dx"])
     # A stall waits for the side kernel, so busy reaches its sleep (milliseconds).
     # These rows are tiny: one more wave of CTAs beside the SM that the side kernel
     # holds can exceed 2x alone (about 0.1 ms) without a stall.
     flags["side_kernel_no_stall"] = busy <= max(2.0 * alone, 0.5 * sleep)
+
+    def beside(p):
+        _, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(p.x, p.w, ctx)
+        torch.cuda.synchronize(device)
+        dist.barrier()
+        with torch.cuda.stream(side):
+            torch.cuda._sleep(10_000_000)
+        dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
+            p.x, p.w, ctx, p.dy, hist
+        )
+        torch.cuda.synchronize(device)
+        return {"dx": dx, "dweight": dw}
+
+    judged("beside the side kernel", beside)
     # Rank agreement: on a fresh context of the same partition, rank 0 calls with C channels and every other
     # rank with C + 8.  The first forward's check raises the same ValueError on every rank, before any exchange; a
     # matching call on that context then runs (the failed check recorded nothing).

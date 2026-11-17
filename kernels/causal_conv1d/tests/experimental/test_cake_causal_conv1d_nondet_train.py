@@ -17,42 +17,37 @@ Tests of the backend of the non-deterministic Cake packed width-4 depthwise caus
 package (``cake_pplx.cake_causal_conv1d_nondet_train``, backend
 ``cake_pplx._backends.cake_causal_conv1d_nondet_train``; SM100 / SM103 / SM107).
 
-Every kernel output is compared with an independent plain-torch reference of the same math with document-local
-shifts, under the deterministic package's budgets: BF16 ``y`` and ``dx`` within ``atol 1e-3 + rtol 2^-7`` (one
-BF16 ulp) with no element outside; the gradients within ``atol 5e-2 + rtol 1e-4`` of the FP64 sum under the
-default SiLU' policy and within ``atol 1e-3 + rtol 2e-6`` of the FP64 reference under
-``silu_grad_preactivation="fp32"`` (a BF16 gradient out widened by its own rounding).  Against the deterministic
-package (when importable) ``y`` and ``dx`` are bitwise equal at every case and route, and ``dweight`` / ``dbias``
-are within the same budgets of the deterministic ones.  The relaxed property is the run-to-run bits of the
-gradients only: >= 20 repeated launches keep ``dx`` bitwise and every gradient within budget, and the worst
-case over the repeats is recorded.  The fp32 policy keeps the perf-size precision gate (rel-L2 <= 2e-7 at S =
-250340, C 512 and 1280) as its worst case over the repeats.
+Every floating output (``y``, ``dx``, ``dweight``, ``dbias``) has no tolerance: it is judged against the naive
+BF16 tier (``tests.cake.test_helpers.cake_naive``; PyTorch in BF16 on the same inputs) over 32 independent random
+inputs of each case, by its error against the float64 oracle of the function (SiLU' at the unrounded preactivation
+on every route and policy), in the L2 and the max norm: the median and the largest of its errors over the draws at
+most 1.005 times the tier's, and 0 wherever the tier's is 0 (``tests.cake.test_helpers.cake_causal_conv1d_oracle``).
+The package is not deterministic: no bit rule holds its outputs, and the suite never compares it with the
+deterministic package.  ``REPEATS`` launches on each draw's inputs are all judged (the larger error of the launches
+of a draw counts), and so are the fp32 policy's ``PRECISION_REPEATS`` launches at the perf size.
 
 The workspace contract: a caller-owned zeroed workspace and the package's per-(device, stream) workspace read
 back all zero after every launch, over changed shapes and routes; NaN-poisoned outputs are fully overwritten;
-CUDA Graph capture / replay with and without a caller-owned workspace, one package buffer per capture and stream
-shared by the capture's backward calls; two streams with two workspaces at once;
+CUDA Graph capture / replay with and without a caller-owned workspace (each replay on a draw's inputs, judged),
+one package buffer per capture and stream shared by the capture's backward calls; two streams with two workspaces at once;
 the backward is ONE ordinary launch (no reduce program) and keeps its speed beside a kernel resident on another
 stream.  Autograd, non-reentrant activation checkpointing (2 x forward +
 backward) and gradient accumulation; torch's deterministic mode.
 
 The opt-in ``bwd_grid_mult`` (every value of ``BWD_GRID_MULTS``) on every route, at single-tile, multi-sub-tile and
 partial-last-tile channel counts and at small and large ``S``: the backward launches that many times its untrimmed
-grid, ``dx`` stays bitwise the deterministic default's, the gradients stay within budget of the reference and of the
-deterministic default, the workspace (the same size at every multiple) reads back zero after every launch, under
-CUDA Graph capture / replay and through the autograd entry (plain and checkpointed).
+grid, its outputs are judged against the naive tier, the workspace (the same size at every multiple) reads back zero
+after every launch, under CUDA Graph capture / replay and through the autograd entry (plain and checkpointed).
 
 The narrower channel tiles of ``TILE_OVERRIDES``: one row per architecture (``OVERRIDE_CASES``) launches the row's
-tiles, on a caller-owned workspace of the public size and on the package's, with ``dx`` bitwise the deterministic
-package's, the gradients within budget of the reference and of the deterministic package, and the workspace zero
-after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
+tiles, on a caller-owned workspace of the public size and on the package's, with every output judged against the
+naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
 the side-stream one-SM trim of a three-tile narrow row's grid.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
-``cake_causal_conv1d_nondet_train``), and the deterministic package for the parity checks through the same table;
-a vendored build without the deterministic package skips those checks.  Every test skips until the exporter has
-rendered the package (``build.json`` and ``csrc/``).
+``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
+and ``csrc/``).
 """
 
 from __future__ import annotations
@@ -64,6 +59,19 @@ import weakref
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import (
+    assert_judged,
+    naive_bf16,
+    oracle,
+    problem,
+)
+from tests.cake.test_helpers.cake_naive import (
+    DRAWS,
+    TierJudge,
+    contract,
+    draw_seed,
+    seed_all,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 
 KEY = "cake_causal_conv1d_nondet_train"
@@ -74,16 +82,9 @@ loader = cake_package(KEY, "cake_jit")
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WIDTH = 4
 F32, BF16 = torch.float32, torch.bfloat16
-# The deterministic package's tolerances (the budgets this package keeps).
-Y_ATOL, Y_RTOL = 1e-3, 2**-7
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
-DW_FP32G_ATOL, DW_FP32G_RTOL = 1e-3, 2e-6
-FP32G_REL_L2_GATE = 2e-7
-BLOCK = 8192
-COMPARE_CHUNK = 2**26
 PERF_FRACTIONS = (0.37, 0.29, 0.21)
 SEED = 8065
-# Repeated launches per row of the run-to-run checks (the worst case over them is the reported figure).
+# Launches per draw of the repeated-launch rows (every launch is judged).
 REPEATS = 20
 
 # (S, C, documents): one-token and short documents, empty documents before / between / after others, boundaries
@@ -117,7 +118,7 @@ ROUTE_CASES = (
     (65, 256, (64, 1)),
     (4097, 1344, (1000, 0, 3, 3094)),
 )
-# A large row per architecture class for the run-to-run checks (many CTAs per channel tile race on the accumulators).
+# A large row per architecture class for the repeated launches (many CTAs per channel tile race on the accumulators).
 REPEAT_CASES = (
     (65536, 512, "perf"),
     (65536, 1280, "perf"),
@@ -145,10 +146,13 @@ NARROW_CASES = {
 # Wide channel counts on every route: C = 4096 (four documents, one empty) and C = 10240 (a packed q / k / v
 # projection width), at small S.
 WIDE_CASES = ((4097, 4096, (1000, 0, 3, 3094)), (2048, 10240, "perf"))
+# Launches per draw of the fp32 policy's perf-size rows (every launch is judged).
 PRECISION_REPEATS = 5
 # S x C > 2^31 elements (64-bit offsets) at a token count past the sm_107a token floor.
 LARGE_CASE = (262401, 8192, "perf")
-LARGE_CASE_FREE_BYTES = 40 * 2**30
+# The large case's inputs and outputs (x, dy, y, dx: 4 x 4.3 GB), its float64 oracle of y and dx (2 x 17.2 GB) and
+# the naive tier's BF16 y and dx with their blocks (about 4 x 4.3 GB), with headroom.
+LARGE_CASE_FREE_BYTES = 96 * 2**30
 GRAPH_CASES = (
     (65, 256, (64, 1)),
     (5, 136, (2, 0, 3)),
@@ -156,7 +160,6 @@ GRAPH_CASES = (
     (4097, 1280, (1000, 0, 3, 3094)),
     (4097, 2560, (1000, 0, 3, 3094)),
 )
-GRAPH_REPLAYS = 4
 # The ``bwd_grid_mult`` rows: fewer tokens than CTAs (S = 5, 65), a single-tile C, the multi-sub-tile tiles (1280,
 # 1536, 2560) and the partial last channel tiles (136, 1160, 1344), at small S and at large S (65536, the perf size).
 GRID_MULT_CASES = (
@@ -224,7 +227,7 @@ pytestmark = pytest.mark.skipif(
     not _supported(),
     reason=(
         "the non-deterministic cake_causal_conv1d_nondet_train package needs an SM100 / SM103 / SM107 device and "
-        "its rendered build.json / csrc (TODO-EXPORT until the exporter renders it)"
+        "its rendered build.json / csrc"
     ),
 )
 
@@ -236,15 +239,6 @@ def warmup_jit():
         for spec in loader.specs_for_arch(arch):
             spec.build_and_load()
     yield
-
-
-def _det():
-    """The deterministic package (parity checks), or a skip when this build does not carry it."""
-
-    try:
-        return cake_package("cake_causal_conv1d_det_train")
-    except Exception as exc:  # noqa: BLE001 - a vendored copy without the det package skips the parity checks
-        pytest.skip(f"the deterministic package is not importable here: {exc}")
 
 
 def _case_id(case) -> str:
@@ -276,16 +270,6 @@ def _combo_route(weight_dtype, bias_dtype, policy, dweight_dtype=None) -> str:
         fp32_grad=policy == "fp32",
         bf16_taps_or_dweight=BF16 in (weight_dtype, dweight_dtype or weight_dtype),
     )
-
-
-def _det_or_none():
-    """The deterministic package, or ``None`` when this build does not carry it (the parity checks are skipped,
-    the reference checks still run)."""
-
-    try:
-        return cake_package("cake_causal_conv1d_det_train")
-    except Exception:  # noqa: BLE001 - a vendored copy without the det package
-        return None
 
 
 def _arch() -> str:
@@ -335,8 +319,9 @@ def _token_floors(arch: str, kind: str) -> dict[str, tuple[int, int]]:
     return floors
 
 
-def _generator(*keys: int) -> torch.Generator:
-    seed = SEED
+def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
+    """A generator of the device seeded from ``seed`` (a draw's, or :data:`SEED`) and ``keys``."""
+
     for key in keys:
         seed = (seed * 1_000_003 + int(key)) % (2**31 - 1)
     return torch.Generator(device=_device()).manual_seed(seed)
@@ -367,14 +352,11 @@ def _cu_seqlens(S: int, docs) -> torch.Tensor:
     )
 
 
-def _doc_ids(S: int, cu: torch.Tensor) -> torch.Tensor:
-    return torch.bucketize(torch.arange(S, device=cu.device), cu[1:].long(), right=True)
+def _inputs(S: int, C: int, docs, *, key: int = 0, weight_dtype=F32, seed: int = SEED):
+    """``(x, w, cu, dy)``: BF16 ``x`` / ``dy`` of N(0, 1), taps of N(0, 0.25) in ``weight_dtype``, drawn from
+    ``seed`` (a draw's seed; :data:`SEED` is draw 0's)."""
 
-
-def _inputs(S: int, C: int, docs, *, key: int = 0, weight_dtype=F32):
-    """``(x, w, cu, dy)``: BF16 ``x`` / ``dy`` of N(0, 1), taps of N(0, 0.25) in ``weight_dtype``."""
-
-    generator = _generator(S, C, key)
+    generator = _generator(S, C, key, seed=seed)
     x = torch.randn(
         S, C, dtype=torch.float32, device=_device(), generator=generator
     ).to(BF16)
@@ -387,8 +369,8 @@ def _inputs(S: int, C: int, docs, *, key: int = 0, weight_dtype=F32):
     return x, w.to(weight_dtype), _cu_seqlens(S, docs), dy
 
 
-def _bias_input(C: int, dtype, *, key: int = 0) -> torch.Tensor:
-    generator = _generator(C, 97, key)
+def _bias_input(C: int, dtype, *, key: int = 0, seed: int = SEED) -> torch.Tensor:
+    generator = _generator(C, 97, key, seed=seed)
     return (
         0.5 * torch.randn(C, dtype=torch.float32, device=_device(), generator=generator)
     ).to(dtype)
@@ -405,118 +387,6 @@ def _route_inputs(S: int, C: int, docs, kind: str, *, key: int = 0):
         else _bias_input(C, settings["bias_dtype"], key=key)
     )
     return x, w, cu, dy, b, settings["policy"]
-
-
-def _shift_down(v: torch.Tensor, ids: torch.Tensor, d: int) -> torch.Tensor:
-    out = torch.zeros_like(v)
-    if d == 0:
-        return v.clone()
-    if d < v.shape[0]:
-        same = (ids[d:] == ids[:-d]).unsqueeze(1)
-        out[d:] = torch.where(same, v[:-d], 0.0)
-    return out
-
-
-def _shift_up(v: torch.Tensor, ids: torch.Tensor, d: int) -> torch.Tensor:
-    out = torch.zeros_like(v)
-    if d == 0:
-        return v.clone()
-    if d < v.shape[0]:
-        same = (ids[:-d] == ids[d:]).unsqueeze(1)
-        out[:-d] = torch.where(same, v[d:], 0.0)
-    return out
-
-
-def _preactivation(x, ids, w, b):
-    pre = torch.zeros_like(x)
-    for k in range(WIDTH):
-        pre = pre + w[:, k].to(x.dtype) * _shift_down(x, ids, WIDTH - 1 - k)
-    if b is not None:
-        pre = pre + b.to(x.dtype)
-    return pre
-
-
-def reference_forward(x, w, cu, b=None) -> torch.Tensor:
-    S = x.shape[0]
-    ids = _doc_ids(S, cu)
-    y = torch.empty_like(x)
-    for a in range(0, S, BLOCK):
-        bb = min(a + BLOCK, S)
-        lo = max(a - (WIDTH - 1), 0)
-        pre = _preactivation(x[lo:bb].float(), ids[lo:bb], w, b)[a - lo :]
-        y[a:bb] = (pre * torch.sigmoid(pre)).bfloat16()
-    return y
-
-
-def reference_backward(x, w, cu, dy, *, b=None, policy="bf16"):
-    """``dx`` (BF16), ``dweight`` and ``dbias`` (FP64 sums; ``dbias`` ``None`` without a bias); ``policy`` as the
-    deterministic suite's reference (``"bf16"``: SiLU' at the BF16-rounded FP32 preactivation; ``"fp32"``: FP64
-    throughout)."""
-
-    S, C = x.shape
-    ids = _doc_ids(S, cu)
-    dx = torch.empty_like(x)
-    dw = torch.zeros(C, WIDTH, device=x.device, dtype=torch.float64)
-    db = None if b is None else torch.zeros(C, device=x.device, dtype=torch.float64)
-    for a in range(0, S, BLOCK):
-        bb = min(a + BLOCK, S)
-        lo, hi = max(a - (WIDTH - 1), 0), min(bb + (WIDTH - 1), S)
-        win = ids[lo:hi]
-        if policy == "fp32":
-            xf = x[lo:hi].double()
-            p = _preactivation(xf, win, w, b)
-        else:
-            xf = x[lo:hi].float()
-            p = _preactivation(xf, win, w, b).bfloat16().float()
-        s = torch.sigmoid(p)
-        dpre = dy[lo:hi].to(xf.dtype) * (s * (1.0 + p * (1.0 - s)))
-        dxw = torch.zeros_like(dpre)
-        for k in range(WIDTH):
-            dxw = dxw + w[:, k].to(xf.dtype) * _shift_up(dpre, win, WIDTH - 1 - k)
-        dx[a:bb] = dxw[a - lo : bb - lo].bfloat16()
-        rows = slice(a - lo, bb - lo)
-        for k in range(WIDTH):
-            xs = _shift_down(xf, win, WIDTH - 1 - k)[rows].double()
-            dw[:, k] += (dpre[rows].double() * xs).sum(dim=0)
-        if db is not None:
-            db += dpre[rows].double().sum(dim=0)
-    return dx, dw, db
-
-
-def _grad_tolerance(policy: str, dtype: torch.dtype) -> tuple[float, float]:
-    atol, rtol = (
-        (DW_ATOL, DW_RTOL) if policy == "bf16" else (DW_FP32G_ATOL, DW_FP32G_RTOL)
-    )
-    if dtype == torch.bfloat16:
-        return atol * (1 + 2**-8), 2**-7
-    return atol, rtol
-
-
-def _assert_within(actual, expected, *, atol, rtol, label) -> float:
-    """No element outside ``atol + rtol |expected|``; returns the worst ``|actual - expected| / bound``."""
-
-    assert tuple(actual.shape) == tuple(expected.shape), label
-    flat_actual, flat_expected = actual.reshape(-1), expected.reshape(-1)
-    count, first, worst = 0, None, 0.0
-    for start in range(0, flat_actual.numel(), COMPARE_CHUNK):
-        a = flat_actual[start : start + COMPARE_CHUNK].double()
-        b = flat_expected[start : start + COMPARE_CHUNK].double()
-        assert torch.isfinite(a).all(), f"{label} has non-finite values"
-        bound = atol + rtol * b.abs()
-        ratio = (a - b).abs() / bound
-        worst = max(worst, float(ratio.max().item()) if ratio.numel() else 0.0)
-        outside = ratio > 1.0
-        chunk_count = int(outside.sum().item())
-        if chunk_count and first is None:
-            index = int(outside.nonzero()[0].item())
-            first = (start + index, a[index].item(), b[index].item())
-        count += chunk_count
-    if count:
-        raise AssertionError(
-            f"{label}: {count} of {flat_actual.numel()} elements outside atol={atol} rtol={rtol}; first at flat "
-            f"index {first[0]}: got {first[1]!r}, expected {first[2]!r}"
-        )
-    return worst
 
 
 def _forward(x, w, cu, **kwargs) -> torch.Tensor:
@@ -538,30 +408,58 @@ def _backward(x, w, cu, dy, b=None, policy="bf16", **kwargs):
     return grads[0], grads[1], (grads[2] if b is not None else None)
 
 
-def _det_backward(det, x, w, cu, dy, b=None, policy="bf16", **kwargs):
-    grads = det.cake_causal_conv1d_det_train_backward(
-        x, w, cu, dy, bias=b, silu_grad_preactivation=policy, **kwargs
-    )
-    return grads[0], grads[1], (grads[2] if b is not None else None)
+def _grads(dx, dw, db) -> dict:
+    """The gradients of one backward call by output name (``dbias`` only with a bias)."""
 
-
-def _check_grads(dx, dw, db, refs, *, policy, label) -> tuple[float, float]:
-    """``dx`` within one BF16 ulp of the reference, ``dw`` / ``db`` within the policy's budget; returns the worst
-    gradient ratios ``(dw, db)``."""
-
-    dx_ref, dw_ref, db_ref = refs
-    _assert_within(dx, dx_ref, atol=Y_ATOL, rtol=Y_RTOL, label=f"dx {label}")
-    atol, rtol = _grad_tolerance(policy, dw.dtype)
-    worst_dw = _assert_within(
-        dw.float(), dw_ref.float(), atol=atol, rtol=rtol, label=f"dweight {label}"
-    )
-    worst_db = 0.0
+    out = {"dx": dx, "dweight": dw}
     if db is not None:
-        atol, rtol = _grad_tolerance(policy, db.dtype)
-        worst_db = _assert_within(
-            db.float(), db_ref.float(), atol=atol, rtol=rtol, label=f"dbias {label}"
-        )
-    return worst_dw, worst_db
+        out["dbias"] = db
+    return out
+
+
+def _forward_backward(x, w, cu, dy, b, policy, **kwargs) -> dict:
+    """``y`` of one forward call and the gradients of one backward call, by output name."""
+
+    y = _forward(x, w, cu, bias=b)
+    return {"y": y, **_grads(*_backward(x, w, cu, dy, b, policy, **kwargs))}
+
+
+def _judge(
+    S: int,
+    C: int,
+    docs,
+    call,
+    *,
+    weight_dtype=F32,
+    bias_dtype=None,
+    policy: str = "bf16",
+    key: int = 0,
+    label: str = "",
+    perturb=None,
+) -> None:
+    """One problem judged over the draws: each draw's inputs (``weight_dtype`` taps, a ``bias_dtype`` bias or none;
+    ``perturb(x, dy)`` returns the draw's ``x`` and ``dy`` changed) and ``call(x, w, cu, dy, b, policy)``, which
+    launches and returns the outputs by name (a value, or a list of the values of several launches on the draw)."""
+
+    def launch(_draw: int, seed: int):
+        x, w, cu, dy = _inputs(S, C, docs, key=key, weight_dtype=weight_dtype, seed=seed)
+        b = None if bias_dtype is None else _bias_input(C, bias_dtype, key=key, seed=seed)
+        if perturb is not None:
+            x, dy = perturb(x, dy)
+        return call(x, w, cu, dy, b, policy), problem(x, w, cu, b, dy)
+
+    assert_judged(
+        launch,
+        seed=SEED,
+        label=label
+        or f"S={S} C={C} docs={docs} w={_dtype_id(weight_dtype)} b={_dtype_id(bias_dtype)} {policy}",
+    )
+
+
+def _route_judge(S: int, C: int, docs, kind: str, call, **kwargs) -> None:
+    """:func:`_judge` with the dtypes and the policy that resolve to backward route ``kind``."""
+
+    _judge(S, C, docs, call, **ROUTE_SETTINGS[kind], **kwargs)
 
 
 def _stream_workspace(device: torch.device) -> torch.Tensor | None:
@@ -572,32 +470,29 @@ def _stream_workspace(device: torch.device) -> torch.Tensor | None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Accuracy against the independent reference and parity with the deterministic package.
+# Accuracy against the naive tier.
 
 
 @pytest.mark.parametrize("case", CASES, ids=_case_id)
 def test_forward_backward_match_reference(case) -> None:
     S, C, docs = case
-    x, w, cu, dy = _inputs(S, C, docs)
-    y = _forward(x, w, cu)
-    assert y.dtype == BF16 and tuple(y.shape) == tuple(x.shape) and y.is_contiguous()
-    _assert_within(
-        y, reference_forward(x, w, cu), atol=Y_ATOL, rtol=Y_RTOL, label=f"y {case}"
-    )
-    dx, dw, _ = _backward(x, w, cu, dy)
-    assert dx.dtype == BF16 and dw.dtype == F32 and tuple(dw.shape) == (C, WIDTH)
-    _check_grads(
-        dx, dw, None, reference_backward(x, w, cu, dy), policy="bf16", label=str(case)
-    )
+
+    def call(x, w, cu, dy, b, policy):
+        y = _forward(x, w, cu)
+        assert y.dtype == BF16 and tuple(y.shape) == tuple(x.shape) and y.is_contiguous()
+        dx, dw, _ = _backward(x, w, cu, dy)
+        assert dx.dtype == BF16 and dw.dtype == F32 and tuple(dw.shape) == (C, WIDTH)
+        return {"y": y, **_grads(dx, dw, None)}
+
+    _judge(S, C, docs, call, label=str(case))
 
 
 @pytest.mark.parametrize("combo", DTYPE_COMBOS, ids=_combo_id)
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
 def test_routes_match_reference(case, combo) -> None:
     """Every backward route in every dtype combination (FP32 / BF16 taps, no / FP32 / BF16 bias, both SiLU'
-    policies, FP32 / BF16 ``dweight`` and ``dbias`` outs): ``y``, ``dx``, ``dweight`` and ``dbias`` against the
-    reference; ``y`` / ``dx`` bitwise the deterministic package's for the same call and its ``dweight`` /
-    ``dbias`` within the route's budget of the deterministic ones (when that package is importable)."""
+    policies, FP32 / BF16 ``dweight`` and ``dbias`` outs): ``y``, ``dx``, ``dweight`` and ``dbias`` judged against
+    the naive tier, the gradients written into the caller's outs."""
 
     weight_dtype, bias_dtype, policy, dweight_dtype, dbias_dtype = combo
     kind = _combo_route(weight_dtype, bias_dtype, policy, dweight_dtype)
@@ -605,130 +500,48 @@ def test_routes_match_reference(case, combo) -> None:
     S, C, docs = case
     device = _device()
     label = f"{kind} {_combo_id(combo)} {case}"
-    x, w, cu, dy = _inputs(S, C, docs, key=1, weight_dtype=weight_dtype)
-    b = None if bias_dtype is None else _bias_input(C, bias_dtype, key=1)
-    y = _forward(x, w, cu, bias=b)
-    _assert_within(
-        y, reference_forward(x, w, cu, b), atol=Y_ATOL, rtol=Y_RTOL, label=f"y {label}"
-    )
 
-    def outs():
-        return {
+    def call(x, w, cu, dy, b, policy):
+        y = _forward(x, w, cu, bias=b)
+        out = {
             "dweight": torch.empty(C, WIDTH, dtype=dweight_dtype, device=device),
             "dbias": None
             if b is None
             else torch.empty(C, dtype=dbias_dtype, device=device),
         }
+        dx, dw, db = _backward(x, w, cu, dy, b, policy, **out)
+        assert dw is out["dweight"] and db is out["dbias"], label
+        return {"y": y, **_grads(dx, dw, db)}
 
-    out = outs()
-    dx, dw, db = _backward(x, w, cu, dy, b, policy, **out)
-    assert dw is out["dweight"] and db is out["dbias"], label
-    refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-    _check_grads(dx, dw, db, refs, policy=policy, label=label)
-    det = _det_or_none()
-    if det is None:
-        return
-    assert torch.equal(y, det.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)), (
-        f"y differs from the deterministic package ({label})"
+    _judge(
+        S,
+        C,
+        docs,
+        call,
+        weight_dtype=weight_dtype,
+        bias_dtype=bias_dtype,
+        policy=policy,
+        key=1,
+        label=label,
     )
-    dx_d, dw_d, db_d = _det_backward(det, x, w, cu, dy, b, policy, **outs())
-    assert torch.equal(dx, dx_d), f"dx differs from the deterministic package ({label})"
-    for got, expected, name in ((dw, dw_d, "dweight"), (db, db_d, "dbias")):
-        if got is None:
-            continue
-        assert got.dtype == expected.dtype, f"{name} {label}"
-        atol, rtol = _grad_tolerance(policy, got.dtype)
-        _assert_within(
-            got.float(),
-            expected.float(),
-            atol=atol,
-            rtol=rtol,
-            label=f"{name} vs det {label}",
-        )
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 @pytest.mark.parametrize("case", WIDE_CASES, ids=_case_id)
-def test_wide_channel_rows(case, kind, record_property) -> None:
+def test_wide_channel_rows(case, kind) -> None:
     """C = 4096 and C = 10240 on every backward route (the fp32g routes included): ``y``, ``dx``, ``dweight`` and
-    ``dbias`` against the reference; ``y`` / ``dx`` bitwise the deterministic package's and its ``dweight`` /
-    ``dbias`` within the route's budget of the deterministic ones (when that package is importable)."""
+    ``dbias`` judged against the naive tier."""
 
     _require_route(kind)
     S, C, docs = case
-    label = f"{kind} {case}"
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=3)
-    y = _forward(x, w, cu, bias=b)
-    _assert_within(
-        y, reference_forward(x, w, cu, b), atol=Y_ATOL, rtol=Y_RTOL, label=f"y {label}"
-    )
-    dx, dw, db = _backward(x, w, cu, dy, b, policy)
-    refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-    worst_dw, worst_db = _check_grads(dx, dw, db, refs, policy=policy, label=label)
-    record_property("dweight_worst_ratio_to_budget", worst_dw)
-    det = _det_or_none()
-    if det is None:
-        return
-    assert torch.equal(y, det.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)), (
-        f"y differs from the deterministic package ({label})"
-    )
-    dx_d, dw_d, db_d = _det_backward(det, x, w, cu, dy, b, policy)
-    assert torch.equal(dx, dx_d), f"dx differs from the deterministic package ({label})"
-    for got, expected, name in ((dw, dw_d, "dweight"), (db, db_d, "dbias")):
-        if got is None:
-            continue
-        atol, rtol = _grad_tolerance(policy, got.dtype)
-        _assert_within(
-            got.float(),
-            expected.float(),
-            atol=atol,
-            rtol=rtol,
-            label=f"{name} vs det {label}",
-        )
-
-
-@pytest.mark.parametrize("policy", ("bf16", "fp32"))
-@pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
-def test_bf16_dweight_out_with_f32_taps_keeps_dx_bitwise(case, policy) -> None:
-    """FP32 taps with a BF16 ``dweight`` out (``bwd_dt`` under the default policy, the fp32g route's BF16 store
-    under ``"fp32"``) give the FP32-out call's ``dx`` bits: the tap load form is the same, only the store differs;
-    the BF16 ``dweight`` is the FP32 one's within one BF16 rounding."""
-
-    _require_route(
-        _combo_route(F32, None, policy), _combo_route(F32, None, policy, BF16)
-    )
-    S, C, docs = case
-    x, w, cu, dy = _inputs(S, C, docs, key=7)
-    dx, dw, _ = _backward(x, w, cu, dy, None, policy)
-    dx_dt, dw_dt, _ = _backward(
-        x,
-        w,
-        cu,
-        dy,
-        None,
-        policy,
-        dweight=torch.empty(C, WIDTH, dtype=BF16, device=_device()),
-    )
-    assert dw.dtype == F32 and dw_dt.dtype == BF16
-    assert torch.equal(dx_dt, dx), (
-        f"BF16-out dx differs from the FP32-out dx at {case} {policy}"
-    )
-    atol, rtol = _grad_tolerance(policy, BF16)
-    _assert_within(
-        dw_dt.float(),
-        dw,
-        atol=atol,
-        rtol=rtol,
-        label=f"bf16 dweight vs the f32 one {case} {policy}",
-    )
+    _route_judge(S, C, docs, kind, _forward_backward, key=3, label=f"{kind} {case}")
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     """Exactly one program of the route runs per call and every program the route ships on this architecture runs
-    for some ``(S, C)``: each matches the reference on both sides of its channel threshold (and of its token floor,
-    where its rule has one) on a caller-owned workspace that reads back zero, with ``dx`` bitwise the deterministic
-    package's (when importable)."""
+    for some ``(S, C)``: each is judged against the naive tier on both sides of its channel threshold (and of its
+    token floor, where its rule has one) on a caller-owned workspace that reads back zero after every launch."""
 
     _require_route(kind)
     arch, device = _arch(), _device()
@@ -741,7 +554,6 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     # A token-floored program runs from its floor only: both sides of the floor at its channel threshold.
     for T, floor in _token_floors(arch, kind).values():
         rows += [(S, "perf", C) for S in (floor - 8, floor) for C in (T - 8, T, T + 8)]
-    det = _det_or_none()
     seen = []
     launch = pkg.run_module
 
@@ -754,29 +566,24 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     for S, docs, C in rows:
         (selected,) = loader.selected_modules(arch, kind, C=C, S=S)
         label = f"{kind} S={S} C={C} docs={docs} program={selected}"
-        x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=6)
         workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
-        seen.clear()
-        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-        assert seen == [selected], f"{label}: launched {seen}"
+
+        def call(x, w, cu, dy, b, policy, workspace=workspace, selected=selected, label=label):
+            seen.clear()
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            assert seen == [selected], f"{label}: launched {seen}"
+            assert int(torch.count_nonzero(workspace)) == 0, label
+            return _grads(dx, dw, db)
+
+        _route_judge(S, C, docs, kind, call, key=6, label=label)
         launched.add(selected)
-        _check_grads(
-            dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-            policy=policy, label=label,
-        )  # fmt: skip
-        assert int(torch.count_nonzero(workspace)) == 0, label
-        if det is not None:
-            dx_d, _, _ = _det_backward(det, x, w, cu, dy, b, policy)
-            assert torch.equal(dx, dx_d), (
-                f"dx differs from the deterministic package ({label})"
-            )
     assert launched == set(names), f"never launched {set(names) - launched}"
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_large_case_over_two_to_the_31_elements(kind) -> None:
-    """``S x C > 2^31`` elements (64-bit offsets) at ``C`` 8192: ``y``, ``dx``, ``dweight`` and ``dbias`` against
-    the reference, ``dx`` bitwise the deterministic package's (when importable), the workspace left zero."""
+    """``S x C > 2^31`` elements (64-bit offsets) at ``C`` 8192: ``y``, ``dx``, ``dweight`` and ``dbias`` judged
+    against the naive tier, the workspace left zero."""
 
     _require_route(kind)
     free, _total = torch.cuda.mem_get_info(_device())
@@ -788,129 +595,58 @@ def test_large_case_over_two_to_the_31_elements(kind) -> None:
     assert S * C > 2**31
     device = _device()
     label = f"{kind} {_case_id(LARGE_CASE)}"
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=5)
-    y = _forward(x, w, cu, bias=b)
-    _assert_within(
-        y, reference_forward(x, w, cu, b), atol=Y_ATOL, rtol=Y_RTOL, label=f"y {label}"
-    )
-    del y
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
-    dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-    assert int(torch.count_nonzero(workspace)) == 0, label
-    _check_grads(
-        dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-        policy=policy, label=label,
-    )  # fmt: skip
-    det = _det_or_none()
-    if det is not None:
-        dx_d, _, _ = _det_backward(det, x, w, cu, dy, b, policy)
-        assert torch.equal(dx, dx_d), (
-            f"dx differs from the deterministic package ({label})"
-        )
-        del dx_d
-    del x, dy, dx
+
+    def call(x, w, cu, dy, b, policy):
+        y = _forward(x, w, cu, bias=b)
+        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+        assert int(torch.count_nonzero(workspace)) == 0, label
+        return {"y": y, **_grads(dx, dw, db)}
+
+    _route_judge(S, C, docs, kind, call, key=5, label=label)
     torch.cuda.empty_cache()
-
-
-@pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
-@pytest.mark.parametrize("case", CASES, ids=_case_id)
-def test_matches_the_deterministic_package(case, kind, record_property) -> None:
-    """``y`` and ``dx`` are bitwise the deterministic package's (the same programs / per-thread arithmetic);
-    ``dweight`` / ``dbias`` are within the route's budget of the deterministic ones."""
-
-    det = _det()
-    _require_route(kind)
-    S, C, docs = case
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=2)
-    y = _forward(x, w, cu, bias=b)
-    assert torch.equal(y, det.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)), (
-        f"y differs from the deterministic package ({kind} {case})"
-    )
-    dx, dw, db = _backward(x, w, cu, dy, b, policy)
-    dx_d, dw_d, db_d = _det_backward(det, x, w, cu, dy, b, policy)
-    assert torch.equal(dx, dx_d), (
-        f"dx differs from the deterministic package ({kind} {case})"
-    )
-    atol, rtol = _grad_tolerance(policy, dw.dtype)
-    worst = _assert_within(
-        dw.float(),
-        dw_d.float(),
-        atol=atol,
-        rtol=rtol,
-        label=f"dweight vs det {kind} {case}",
-    )
-    record_property(
-        "dweight_vs_det_max_abs", float((dw.double() - dw_d.double()).abs().max())
-    )
-    record_property("dweight_vs_det_worst_ratio_to_budget", worst)
-    if db is not None:
-        atol, rtol = _grad_tolerance(policy, db.dtype)
-        _assert_within(
-            db.float(),
-            db_d.float(),
-            atol=atol,
-            rtol=rtol,
-            label=f"dbias vs det {kind} {case}",
-        )
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 @pytest.mark.parametrize("case", REPEAT_CASES, ids=_case_id)
 def test_repeated_launches_worst_case(case, kind, record_property) -> None:
-    """``REPEATS`` launches on the same inputs: ``dx`` bitwise equal every time (and to the deterministic
-    package's when importable), every ``dweight`` / ``dbias`` within the route's budget of the reference; the
-    worst case over the repeats and the number of distinct ``dweight`` bit patterns are recorded (the order of
-    the cross-CTA sums may vary; no bound is placed on that count)."""
+    """``REPEATS`` launches on each draw's inputs into one workspace: every launch's ``dx``, ``dweight`` and
+    ``dbias`` judged against the naive tier (the worst launch of a draw counts), the workspace zero after every
+    launch; the number of distinct ``dweight`` bit patterns of the first draw is recorded (the order of the
+    cross-CTA sums may vary; no bound is placed on that count)."""
 
     _require_route(kind)
     S, C, docs = case
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=3)
-    refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, _device())
-    dx0 = None
-    worst_dw = worst_db = 0.0
     patterns = set()
-    for repeat in range(REPEATS):
-        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-        if dx0 is None:
-            dx0 = dx.clone()
-        else:
-            assert torch.equal(dx, dx0), (
-                f"dx changed at repeat {repeat} ({kind} {case})"
+    draws = []
+
+    def call(x, w, cu, dy, b, policy):
+        found = {"dx": [], "dweight": [], "dbias": []}
+        for repeat in range(REPEATS):
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"the workspace is not zero after repeat {repeat}"
             )
-        r_dw, r_db = _check_grads(
-            dx, dw, db, refs, policy=policy, label=f"{kind} {case} repeat {repeat}"
-        )
-        worst_dw, worst_db = max(worst_dw, r_dw), max(worst_db, r_db)
-        patterns.add(bytes(dw.contiguous().view(torch.uint8).cpu().numpy()))
-        assert int(torch.count_nonzero(workspace)) == 0, (
-            f"the workspace is not zero after repeat {repeat}"
-        )
-    print(
-        f"{kind} S={S} C={C}: {REPEATS} launches, worst dweight |err|/budget {worst_dw:.3f}, "
-        f"dbias {worst_db:.3f}, {len(patterns)} distinct dweight bit patterns"
-    )
+            for name, value in _grads(dx, dw, db).items():
+                found[name].append(value)
+            if not draws:
+                patterns.add(bytes(dw.contiguous().view(torch.uint8).cpu().numpy()))
+        draws.append(len(draws))
+        return {name: values for name, values in found.items() if values}
+
+    _route_judge(S, C, docs, kind, call, key=3, label=f"{kind} {case}")
+    print(f"{kind} S={S} C={C}: {REPEATS} launches per draw, {len(patterns)} distinct dweight bit patterns")
     record_property("repeats", REPEATS)
-    record_property("worst_dweight_ratio_to_budget", worst_dw)
-    record_property("worst_dbias_ratio_to_budget", worst_db)
     record_property("distinct_dweight_patterns", len(patterns))
-    try:
-        det = cake_package("cake_causal_conv1d_det_train")
-    except Exception:  # noqa: BLE001 - parity only where the det package is importable
-        return
-    dx_d, _, _ = _det_backward(det, x, w, cu, dy, b, policy)
-    assert torch.equal(dx0, dx_d), (
-        f"dx differs from the deterministic package ({kind} {case})"
-    )
 
 
 @pytest.mark.parametrize("own_workspace", (True, False), ids=("own-ws", "pkg-ws"))
 def test_tile_override_row(own_workspace, monkeypatch, record_property) -> None:
     """The architecture's ``OVERRIDE_CASES`` row of ``TILE_OVERRIDES`` launches the row's narrower channel tiles
     (``ct_vec``, ``threads // ct_vec`` sub-tiles, ``ceil(C / vec / ct_vec)`` tiles) on a caller-owned workspace of
-    the public size, or the package's: ``dx`` within budget of the reference and bitwise the deterministic package's
-    (when importable), ``dweight`` / ``dbias`` within the route's budget of the reference and of the deterministic
-    package, the workspace zero after the call."""
+    the public size, or the package's: ``dx``, ``dweight`` and ``dbias`` judged against the naive tier, the
+    workspace zero after every call."""
 
     arch, device = _arch(), _device()
     kind, S, C = OVERRIDE_CASES[arch]
@@ -940,39 +676,22 @@ def test_tile_override_row(own_workspace, monkeypatch, record_property) -> None:
 
     monkeypatch.setattr(pkg, "run_module", record_launch)
     label = f"{arch} {kind} S={S} C={C} ct_vec={ct_vec}"
-    x, w, cu, dy, b, policy = _route_inputs(S, C, "perf", kind, key=9)
     workspace = (
         pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
         if own_workspace
         else None
     )
-    dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-    assert seen == [(name, wanted)], f"{label}: launched {seen}"
-    worst_dw, worst_db = _check_grads(
-        dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-        policy=policy, label=label,
-    )  # fmt: skip
-    held = workspace if own_workspace else _stream_workspace(device)
-    assert held is not None and int(torch.count_nonzero(held)) == 0, label
+
+    def call(x, w, cu, dy, b, policy):
+        seen.clear()
+        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+        assert seen == [(name, wanted)], f"{label}: launched {seen}"
+        held = workspace if own_workspace else _stream_workspace(device)
+        assert held is not None and int(torch.count_nonzero(held)) == 0, label
+        return _grads(dx, dw, db)
+
+    _route_judge(S, C, "perf", kind, call, key=9, label=label)
     record_property("override_ct_vec", ct_vec)
-    record_property("worst_dweight_ratio_to_budget", worst_dw)
-    record_property("worst_dbias_ratio_to_budget", worst_db)
-    det = _det_or_none()
-    if det is None:
-        return
-    dx_d, dw_d, db_d = _det_backward(det, x, w, cu, dy, b, policy)
-    assert torch.equal(dx, dx_d), f"dx differs from the deterministic package ({label})"
-    for got, ref, what in ((dw, dw_d, "dweight"), (db, db_d, "dbias")):
-        if got is None:
-            continue
-        atol, rtol = _grad_tolerance(policy, got.dtype)
-        _assert_within(
-            got.float(),
-            ref.float(),
-            atol=atol,
-            rtol=rtol,
-            label=f"{what} vs det {label}",
-        )
 
 
 @pytest.mark.parametrize("own_workspace", (True, False), ids=("own-ws", "pkg-ws"))
@@ -980,9 +699,8 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
     """Every ``NARROW_CASES`` row of the architecture's ``NARROW_TILES`` launches 32-vector channel tiles (``32``,
     ``threads // 32`` sub-tiles, ``ceil(C / vec / 32)`` tiles) instead of :func:`channel_split`'s single tile, on
     the grid the host plans for the call (``_call_plan``: ``launch_grid`` with the side-stream trim), on a
-    caller-owned workspace of the public size or the package's: ``dx`` within budget of the reference and bitwise
-    the deterministic package's (when importable), ``dweight`` / ``dbias`` within the route's budget of the
-    reference and of the deterministic package, the workspace zero after the call."""
+    caller-owned workspace of the public size or the package's: ``dx``, ``dweight`` and ``dbias`` judged against the
+    naive tier, the workspace zero after every call."""
 
     arch, device = _arch(), _device()
     cases = NARROW_CASES.get(arch, ())
@@ -1002,8 +720,6 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
         return launch(name, values, device_index=device_index, grid=grid)
 
     monkeypatch.setattr(pkg, "run_module", record_launch)
-    det = _det_or_none()
-    worst = [0.0, 0.0]
     for kind, S, C in cases:
         _require_route(kind)
         label = f"{arch} {kind} S={S} C={C}"
@@ -1022,7 +738,6 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
                 strict=True,
             )
         ), f"{label}: the row must differ from the default split"
-        x, w, cu, dy, b, policy = _route_inputs(S, C, "perf", kind, key=11)
         _, _, _, grid, _ = pkg._call_plan(
             arch,
             kind,
@@ -1030,44 +745,25 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
             C,
             len(doc_lengths(S, "perf")),
             device_index=device.index,
-            policy=policy,
+            policy=ROUTE_SETTINGS[kind]["policy"],
         )
         workspace = (
             pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
             if own_workspace
             else None
         )
-        seen.clear()
-        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-        torch.cuda.synchronize(device)
-        assert seen == [(name, wanted, grid)], f"{label}: launched {seen}"
-        worst_dw, worst_db = _check_grads(
-            dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-            policy=policy, label=label,
-        )  # fmt: skip
-        worst = [max(worst[0], worst_dw), max(worst[1], worst_db)]
-        held = workspace if own_workspace else _stream_workspace(device)
-        assert held is not None and int(torch.count_nonzero(held)) == 0, label
-        if det is None:
-            continue
-        dx_d, dw_d, db_d = _det_backward(det, x, w, cu, dy, b, policy)
-        assert torch.equal(dx, dx_d), (
-            f"dx differs from the deterministic package ({label})"
-        )
-        for got, ref, what in ((dw, dw_d, "dweight"), (db, db_d, "dbias")):
-            if got is None:
-                continue
-            atol, rtol = _grad_tolerance(policy, got.dtype)
-            _assert_within(
-                got.float(),
-                ref.float(),
-                atol=atol,
-                rtol=rtol,
-                label=f"{what} vs det {label}",
-            )
+
+        def call(x, w, cu, dy, b, policy, name=name, wanted=wanted, grid=grid, workspace=workspace, label=label):
+            seen.clear()
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            torch.cuda.synchronize(device)
+            assert seen == [(name, wanted, grid)], f"{label}: launched {seen}"
+            held = workspace if own_workspace else _stream_workspace(device)
+            assert held is not None and int(torch.count_nonzero(held)) == 0, label
+            return _grads(dx, dw, db)
+
+        _route_judge(S, C, "perf", kind, call, key=11, label=label)
     record_property("narrow_rows", len(cases))
-    record_property("worst_dweight_ratio_to_budget", worst[0])
-    record_property("worst_dbias_ratio_to_budget", worst[1])
 
 
 def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
@@ -1075,8 +771,8 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
     single-wave launch of ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
     ``ctas_per_sm`` CTAs (``full % 3 >= ctas_per_sm``; B200: 296 % 3 = 2) launches ``ctas_per_sm`` fewer, as at a
     route-free plan of three tiles; a grid ``launch_grid`` already trimmed to whole ranks is kept.  The trimmed
-    launch's ``dx`` is bitwise the whole grid's, both gradients are within budget of the reference and the workspace
-    reads back zero."""
+    launch's outputs and those of the whole grid are judged against the naive tier, and the workspace reads back
+    zero."""
 
     arch, device = _arch(), _device()
     sms = torch.cuda.get_device_properties(device).multi_processor_count
@@ -1115,34 +811,31 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
         cut = untrimmed[0] == full and full % tiles >= k
         expected = (full - k, 1, 1) if cut else tuple(untrimmed)
         label = f"{arch} {kind} S={S} C={C} full={full} k={k}"
-        x, w, cu, dy, b, policy = _route_inputs(S, C, "perf", kind, key=43)
-        refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-        launched.clear()
-        dx, dw, db = _backward(x, w, cu, dy, b, policy)
-        torch.cuda.synchronize(device)
-        assert launched == [(tiles, expected)], f"{label}: launched {launched}"
-        _check_grads(dx, dw, db, refs, policy=policy, label=label)
-        held = _stream_workspace(device)
-        assert held is None or int(torch.count_nonzero(held)) == 0, label
-        if cut:
-            with monkeypatch.context() as m:
-                m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
-                pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-                launched.clear()
-                dx_full, dw_full, db_full = _backward(x, w, cu, dy, b, policy)
-                torch.cuda.synchronize(device)
+
+        def call(x, w, cu, dy, b, policy, tiles=tiles, expected=expected, cut=cut, untrimmed=untrimmed, label=label):
             pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-            assert launched == [(tiles, tuple(untrimmed))], f"{label}: {launched}"
-            assert torch.equal(dx, dx_full), label
-            _check_grads(
-                dx_full,
-                dw_full,
-                db_full,
-                refs,
-                policy=policy,
-                label=f"{label} whole grid",
-            )
+            launched.clear()
+            runs = [_backward(x, w, cu, dy, b, policy)]
+            torch.cuda.synchronize(device)
+            assert launched == [(tiles, expected)], f"{label}: launched {launched}"
+            held = _stream_workspace(device)
+            assert held is None or int(torch.count_nonzero(held)) == 0, label
+            if cut:
+                with monkeypatch.context() as m:
+                    m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
+                    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                    launched.clear()
+                    runs.append(_backward(x, w, cu, dy, b, policy))
+                    torch.cuda.synchronize(device)
+                pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                assert launched == [(tiles, tuple(untrimmed))], f"{label}: {launched}"
+            found = {}
+            for run in runs:
+                for out, value in _grads(*run).items():
+                    found.setdefault(out, []).append(value)
+            return found
+
+        _route_judge(S, C, "perf", kind, call, key=43, label=label)
         checked += 1
     assert checked, (
         f"{arch}: no three-tile NARROW_TILES row on an occupancy single-wave record"
@@ -1151,115 +844,84 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 @pytest.mark.parametrize("case", GRID_MULT_CASES, ids=_case_id)
-def test_bwd_grid_mult_keeps_dx_and_the_budgets(case, kind, record_property) -> None:
-    """Every ``bwd_grid_mult`` on every route: ``dx`` bitwise the deterministic package's default ``dx`` (this
-    package's default where the deterministic package is not importable), ``dweight`` / ``dbias`` within the
-    route's budget of the reference and of the deterministic default, and the caller-owned workspace (allocated at
-    that multiple) and the package's stream workspace read back all zero after every launch."""
+def test_bwd_grid_mult_outputs_and_workspace(case, kind) -> None:
+    """Every ``bwd_grid_mult`` on every route, on a caller-owned workspace (allocated at that multiple) and on the
+    package's stream workspace: every launch's ``dx``, ``dweight`` and ``dbias`` judged against the naive tier (the
+    worst launch of a draw counts), and the workspace read back all zero after every launch."""
 
     _require_route(kind)
     S, C, docs = case
     device = _device()
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=31)
-    refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-    det = _det_or_none()
-    if det is None:
-        default = _backward(x, w, cu, dy, b, policy)
-    else:
-        default = _det_backward(det, x, w, cu, dy, b, policy)
-    worst = 0.0
-    for mult in pkg.BWD_GRID_MULTS:
-        workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(
+    workspaces = {
+        mult: pkg.cake_causal_conv1d_nondet_train_backward_workspace(
             S, C, device, bwd_grid_mult=mult
         )
-        for own in (True, False):
-            kwargs = {"workspace": workspace} if own else {}
-            dx, dw, db = _backward(
-                x, w, cu, dy, b, policy, bwd_grid_mult=mult, **kwargs
-            )
-            label = f"{kind} S={S} C={C} bwd_grid_mult={mult} own={own}"
-            assert torch.equal(dx, default[0]), f"dx differs from the default ({label})"
-            worst = max(
-                worst, *_check_grads(dx, dw, db, refs, policy=policy, label=label)
-            )
-            for got, expected, name in (
-                (dw, default[1], "dweight"),
-                (db, default[2], "dbias"),
-            ):
-                if got is not None:
-                    atol, rtol = _grad_tolerance(policy, got.dtype)
-                    _assert_within(
-                        got.float(),
-                        expected.float(),
-                        atol=atol,
-                        rtol=rtol,
-                        label=f"{name} vs the default {label}",
-                    )
-            held = workspace if own else _stream_workspace(device)
-            assert held is not None and int(torch.count_nonzero(held)) == 0, (
-                f"workspace not zero ({label})"
-            )
-    record_property("worst_grad_ratio_to_budget", worst)
+        for mult in pkg.BWD_GRID_MULTS
+    }
 
+    def call(x, w, cu, dy, b, policy):
+        found = {}
+        for mult in pkg.BWD_GRID_MULTS:
+            for own in (True, False):
+                kwargs = {"workspace": workspaces[mult]} if own else {}
+                run = _backward(x, w, cu, dy, b, policy, bwd_grid_mult=mult, **kwargs)
+                label = f"{kind} S={S} C={C} bwd_grid_mult={mult} own={own}"
+                held = workspaces[mult] if own else _stream_workspace(device)
+                assert held is not None and int(torch.count_nonzero(held)) == 0, (
+                    f"workspace not zero ({label})"
+                )
+                for out, value in _grads(*run).items():
+                    found.setdefault(out, []).append(value)
+        return found
 
-def _rel_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    return float(
-        torch.linalg.vector_norm(actual.double() - expected.double())
-        / torch.linalg.vector_norm(expected.double())
-    )
+    _route_judge(S, C, docs, kind, call, key=31, label=f"{kind} {case}")
 
 
 @pytest.mark.parametrize("case", PRECISION_CASES, ids=_case_id)
-def test_fp32_grad_perf_size_precision(case, record_property) -> None:
-    """The fp32 policy's perf-size gate with FP64 accumulators: the worst rel-L2 of ``dweight`` against the FP64
-    reference over ``PRECISION_REPEATS`` launches is at most ``FP32G_REL_L2_GATE`` (the FP64 final reduction's
-    accuracy is kept), and below the default policy's."""
+def test_fp32_grad_perf_size_precision(case) -> None:
+    """The fp32 policy at the perf size (S = 250340): ``PRECISION_REPEATS`` launches per draw, every launch's ``dx``
+    and ``dweight`` judged against the naive tier (the worst launch of a draw counts)."""
 
     _require_route("bwd_fp32g")
     S, C, docs = case
-    x, w, cu, dy = _inputs(S, C, docs)
-    _dx, dw_ref, _ = reference_backward(x, w, cu, dy, policy="fp32")
-    worst = 0.0
-    for _ in range(PRECISION_REPEATS):
-        _dx, dw, _ = _backward(x, w, cu, dy, None, "fp32")
-        worst = max(worst, _rel_l2(dw, dw_ref))
-    _dx, dw_default, _ = _backward(x, w, cu, dy, None, "bf16")
-    rel_l2_default = _rel_l2(dw_default, dw_ref)
-    print(
-        f"S={S} C={C}: worst dweight rel-L2 vs FP64 over {PRECISION_REPEATS} launches -- fp32 policy {worst:.3e} "
-        f"(gate {FP32G_REL_L2_GATE:.1e}), bf16 policy {rel_l2_default:.3e}"
-    )
-    record_property("dweight_rel_l2_fp32_worst", worst)
-    record_property("dweight_rel_l2_bf16", rel_l2_default)
-    assert worst <= FP32G_REL_L2_GATE
-    assert worst < rel_l2_default
+
+    def call(x, w, cu, dy, b, policy):
+        found = {}
+        for _ in range(PRECISION_REPEATS):
+            for out, value in _grads(*_backward(x, w, cu, dy, None, "fp32")).items():
+                found.setdefault(out, []).append(value)
+        return found
+
+    _judge(S, C, docs, call, policy="fp32", label=f"fp32 {case}")
     torch.cuda.empty_cache()
 
 
 def test_document_isolation() -> None:
-    """Perturbing one document (the 3-token document, rows 1000..1002) changes no output or ``dx`` row of another
-    document."""
+    """Perturbing one document (the 3-token document, rows 1000..1002, drawn again) leaves every document's outputs
+    judged against the naive tier of the changed problem."""
 
     S, C, docs = 4097, 512, (1000, 0, 3, 3094)
-    x, w, cu, dy = _inputs(S, C, docs, key=5)
-    y, (dx, _, _) = _forward(x, w, cu), _backward(x, w, cu, dy)
-    x2 = x.clone()
-    x2[1000:1003] = torch.randn(3, C, device=_device()).to(BF16)
-    y2, (dx2, _, _) = _forward(x2, w, cu), _backward(x2, w, cu, dy)
-    others = torch.cat([torch.arange(0, 1000), torch.arange(1003, S)]).to(_device())
-    assert torch.equal(y[others], y2[others]) and torch.equal(dx[others], dx2[others])
+
+    def perturb(x, dy):
+        x = x.clone()
+        x[1000:1003] = torch.randn(3, C, device=_device()).to(BF16)
+        return x, dy
+
+    _judge(S, C, docs, _forward_backward, key=5, perturb=perturb, label="perturbed document")
 
 
-def test_batched_layout_matches_the_packed_one() -> None:
+def test_batched_layout() -> None:
+    """``[1, S, C]`` inputs give ``[1, S, C]`` outputs, judged against the naive tier."""
+
     S, C, docs = 1000, 512, "perf"
-    x, w, cu, dy = _inputs(S, C, docs)
-    y = _forward(x, w, cu)
-    dx, dw, _ = _backward(x, w, cu, dy)
-    y3 = _forward(x.unsqueeze(0), w, cu)
-    dx3, dw3, _ = _backward(x.unsqueeze(0), w, cu, dy.unsqueeze(0))
-    assert tuple(y3.shape) == (1, S, C) and torch.equal(y3[0], y)
-    assert torch.equal(dx3[0], dx)
-    _assert_within(dw3, dw, atol=DW_ATOL, rtol=DW_RTOL, label="[1, S, C] dweight")
+
+    def call(x, w, cu, dy, b, policy):
+        y3 = _forward(x.unsqueeze(0), w, cu)
+        dx3, dw3, _ = _backward(x.unsqueeze(0), w, cu, dy.unsqueeze(0))
+        assert tuple(y3.shape) == (1, S, C) and tuple(dx3.shape) == (1, S, C)
+        return {"y": y3, **_grads(dx3, dw3, None)}
+
+    _judge(S, C, docs, call, label="[1, S, C]")
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1286,7 +948,7 @@ def test_workspace_bytes_depend_on_channels_only() -> None:
                     1, C, device, bwd_grid_mult=mult
                 )
             )
-        # The largest owner holds FP64 bias accumulators (40 bytes per channel) where the architecture has them.
+        # At least one FP32 word per tap and channel (the bias routes' owners hold five per channel).
         assert nbytes >= 4 * WIDTH * C
         ws = pkg.cake_causal_conv1d_nondet_train_backward_workspace(1, C, device)
         assert ws.dtype == torch.uint8 and ws.numel() == nbytes
@@ -1296,8 +958,8 @@ def test_workspace_bytes_depend_on_channels_only() -> None:
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_changed_shapes_reuse_one_zero_workspace(kind) -> None:
     """One caller-owned workspace, sized for the largest ``C``, serves a sequence of shapes of the route (and the
-    package's own stream workspace serves the same sequence): every result is within budget and the buffer reads
-    back all zero after every launch."""
+    package's own stream workspace serves the same sequence): every result is judged against the naive tier and the
+    buffer reads back all zero after every launch."""
 
     _require_route(kind)
     device = _device()
@@ -1308,41 +970,42 @@ def test_changed_shapes_reuse_one_zero_workspace(kind) -> None:
     )
     for own in (True, False):
         for S, C, docs in shapes:
-            x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=6)
-            refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-            kwargs = {"workspace": workspace} if own else {}
-            dx, dw, db = _backward(x, w, cu, dy, b, policy, **kwargs)
-            _check_grads(
-                dx, dw, db, refs, policy=policy, label=f"{kind} S={S} C={C} own={own}"
-            )
-            held = workspace if own else _stream_workspace(device)
-            assert held is not None
-            assert int(torch.count_nonzero(held)) == 0, (
-                f"workspace not zero after {kind} S={S} C={C} (caller-owned: {own})"
-            )
+            label = f"{kind} S={S} C={C} own={own}"
+
+            def call(x, w, cu, dy, b, policy, own=own, label=label):
+                kwargs = {"workspace": workspace} if own else {}
+                run = _backward(x, w, cu, dy, b, policy, **kwargs)
+                held = workspace if own else _stream_workspace(device)
+                assert held is not None
+                assert int(torch.count_nonzero(held)) == 0, (
+                    f"workspace not zero after {label}"
+                )
+                return _grads(*run)
+
+            _route_judge(S, C, docs, kind, call, key=6, label=label)
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_nan_poisoned_outputs_are_overwritten(kind) -> None:
     _require_route(kind)
+    device = _device()
     for S, C, docs in ROUTE_CASES:
-        x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=7)
-        dx = torch.full_like(x, float("nan"))
-        dw = torch.full((C, WIDTH), float("nan"), dtype=w.dtype, device=_device())
-        db = (
-            None
-            if b is None
-            else torch.full((C,), float("nan"), dtype=b.dtype, device=_device())
-        )
-        y = torch.full_like(x, float("nan"))
-        _forward(x, w, cu, bias=b, out=y)
-        got = _backward(x, w, cu, dy, b, policy, dx=dx, dweight=dw, dbias=db)
-        assert got[0] is dx and got[1] is dw and got[2] is db
-        assert torch.isfinite(y.float()).all()
-        _check_grads(
-            dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-            policy=policy, label=f"NaN-poisoned {kind} S={S} C={C}",
-        )  # fmt: skip
+
+        def call(x, w, cu, dy, b, policy, C=C):
+            dx = torch.full_like(x, float("nan"))
+            dw = torch.full((C, WIDTH), float("nan"), dtype=w.dtype, device=device)
+            db = (
+                None
+                if b is None
+                else torch.full((C,), float("nan"), dtype=b.dtype, device=device)
+            )
+            y = torch.full_like(x, float("nan"))
+            _forward(x, w, cu, bias=b, out=y)
+            got = _backward(x, w, cu, dy, b, policy, dx=dx, dweight=dw, dbias=db)
+            assert got[0] is dx and got[1] is dw and got[2] is db
+            return {"y": y, **_grads(dx, dw, db)}
+
+        _route_judge(S, C, docs, kind, call, key=7, label=f"NaN-poisoned {kind} S={S} C={C}")
 
 
 def test_workspace_validation() -> None:
@@ -1386,18 +1049,26 @@ def _held_views(workspace: torch.Tensor) -> dict | None:
 def test_workspace_views_are_built_once_per_workspace() -> None:
     """The ``acc`` / ``work`` tensors of a workspace are built once per layout and reused by later calls; they
     alias its storage but not the tensor, follow the storage when it moves, and are dropped with the
-    workspace; an entry left under the workspace's ``id`` by a dead workspace is never served."""
+    workspace; an entry left under the workspace's ``id`` by a dead workspace is never served.  The calls' outputs
+    are judged against the naive tier."""
 
     S, C, docs = 1000, 1280, "perf"
     device = _device()
-    x, w, cu, dy = _inputs(S, C, docs)
-    refs = reference_backward(x, w, cu, dy)
     nbytes = pkg.cake_causal_conv1d_nondet_train_backward_workspace_bytes(S, C, device)
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
     entries = len(pkg._ACCUMULATOR_VIEWS)
-    for call in range(2):
-        dx, dw, _ = _backward(x, w, cu, dy, workspace=workspace)
-        _check_grads(dx, dw, None, refs, policy="bf16", label=f"call {call}")
+
+    def calls(count, ws):
+        def call(x, w, cu, dy, b, policy):
+            found = {}
+            for _ in range(count):
+                for out, value in _grads(*_backward(x, w, cu, dy, workspace=ws)).items():
+                    found.setdefault(out, []).append(value)
+            return found
+
+        return call
+
+    _judge(S, C, docs, calls(2, workspace), label="two calls")
     held = _held_views(workspace)
     assert held is not None and len(held) == 1
     ((ptr, acc, work),) = held.values()
@@ -1409,8 +1080,7 @@ def test_workspace_views_are_built_once_per_workspace() -> None:
     moved = torch.zeros(nbytes, dtype=torch.uint8, device=device)
     workspace.set_(moved.untyped_storage(), 0, (nbytes,), (1,))
     del moved
-    dx, dw, _ = _backward(x, w, cu, dy, workspace=workspace)
-    _check_grads(dx, dw, None, refs, policy="bf16", label="moved storage")
+    _judge(S, C, docs, calls(1, workspace), label="moved storage")
     ((ptr, acc, work),) = _held_views(workspace).values()
     assert ptr == workspace.data_ptr()
     assert acc.untyped_storage().data_ptr() == workspace.untyped_storage().data_ptr()
@@ -1425,8 +1095,7 @@ def test_workspace_views_are_built_once_per_workspace() -> None:
     )
     del dead
     assert pkg._ACCUMULATOR_VIEWS[id(workspace)][0]() is None
-    dx, dw, _ = _backward(x, w, cu, dy, workspace=workspace)
-    _check_grads(dx, dw, None, refs, policy="bf16", label="dead entry under the id")
+    _judge(S, C, docs, calls(1, workspace), label="dead entry under the id")
     ((ptr, acc, work),) = _held_views(workspace).values()
     assert ptr == workspace.data_ptr()
     assert acc.untyped_storage().data_ptr() == workspace.untyped_storage().data_ptr()
@@ -1444,17 +1113,16 @@ def test_workspace_views_are_built_once_per_workspace() -> None:
 def _capture_and_replay(
     cases, kind: str, *, key: int, own_workspace: bool, bwd_grid_mult: int = 1
 ) -> int:
-    """One forward + backward graph per shape (the backward at ``bwd_grid_mult``), replayed ``GRAPH_REPLAYS`` times
-    into NaN-filled outputs: ``y`` and ``dx`` equal eager (default ``bwd_grid_mult``) bitwise, the gradients are
-    within budget of the reference, and a caller-owned workspace reads back all zero after every replay."""
+    """One forward + backward graph per shape (the backward at ``bwd_grid_mult``), replayed once per draw on that
+    draw's inputs (copied into the captured input tensors) into NaN-filled outputs: every replay's ``y``, ``dx``,
+    ``dweight`` and ``dbias`` judged against the naive tier, and a caller-owned workspace read back all zero after
+    every replay.  Returns the replays."""
 
     device = _device()
+    settings = ROUTE_SETTINGS[kind]
     captured = []
     for S, C, docs in cases:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=key)
-        eager_y = _forward(x, w, cu, bias=b)
-        eager_dx, _, _ = _backward(x, w, cu, dy, b, policy)
-        refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
         y = torch.empty_like(x)
         dx = torch.empty_like(x)
         dw = torch.empty(C, WIDTH, dtype=w.dtype, device=device)
@@ -1505,40 +1173,34 @@ def _capture_and_replay(
         with torch.cuda.graph(graph, stream=side):
             step()
         torch.cuda.synchronize(device)
-        captured.append(
-            (
-                graph,
-                (x, w, cu, dy, b),
-                (y, dx, dw, db),
-                (eager_y, eager_dx),
-                refs,
-                policy,
-                workspace,
-            )
-        )
+        captured.append(((S, C, docs), graph, (x, w, cu, dy, b), (y, dx, dw, db), workspace))
     replays = 0
-    for graph, _alive, (y, dx, dw, db), (
-        eager_y,
-        eager_dx,
-    ), refs, policy, workspace in captured:
-        for _replay in range(GRAPH_REPLAYS):
-            for t in (y, dx, dw, db):
+    for (S, C, docs), graph, inputs, (y, dx, dw, db), workspace in captured:
+
+        def replay(xn, wn, cu, dyn, bn, policy, graph=graph, inputs=inputs, outs=(y, dx, dw, db), workspace=workspace):
+            nonlocal replays
+            for held, value in zip(inputs, (xn, wn, cu, dyn, bn), strict=True):
+                if held is not None:
+                    held.copy_(value)
+            for t in outs:
                 if t is not None:
                     t.fill_(float("nan"))
             graph.replay()
             torch.cuda.synchronize(device)
             replays += 1
-            assert torch.equal(y, eager_y), (
-                f"y of replay {replays} differs from eager ({kind})"
-            )
-            assert torch.equal(dx, eager_dx), (
-                f"dx of replay {replays} differs from eager ({kind})"
-            )
-            _check_grads(
-                dx, dw, db, refs, policy=policy, label=f"replay {replays} ({kind})"
-            )
             if workspace is not None:
                 assert int(torch.count_nonzero(workspace)) == 0
+            return {"y": outs[0], **_grads(*outs[1:])}
+
+        _judge(
+            S,
+            C,
+            docs,
+            replay,
+            **settings,
+            key=key,
+            label=f"replay {kind} S={S} C={C} bwd_grid_mult={bwd_grid_mult} own={own_workspace}",
+        )
     return replays
 
 
@@ -1548,15 +1210,14 @@ def test_cuda_graph_replays(kind, own_workspace) -> None:
     _require_route(kind)
     cases = GRAPH_CASES if kind == "bwd" else ROUTE_CASES[:3]
     replays = _capture_and_replay(cases, kind, key=11, own_workspace=own_workspace)
-    assert replays == GRAPH_REPLAYS * len(cases)
+    assert replays == DRAWS * len(cases)
 
 
 @pytest.mark.parametrize("bwd_grid_mult", (2, 3, 4))
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_cuda_graph_replays_with_bwd_grid_mult(kind, bwd_grid_mult) -> None:
     """CUDA Graph capture / replay of a ``bwd_grid_mult`` 2-4 backward, with a caller-owned workspace and with the
-    package's: ``dx`` of every replay bitwise the eager default's, the gradients within budget, the caller-owned
-    workspace zero after every replay."""
+    package's: every replay judged against the naive tier, the caller-owned workspace zero after every replay."""
 
     _require_route(kind)
     cases = ROUTE_CASES[:3]
@@ -1568,7 +1229,7 @@ def test_cuda_graph_replays_with_bwd_grid_mult(kind, bwd_grid_mult) -> None:
             own_workspace=own_workspace,
             bwd_grid_mult=bwd_grid_mult,
         )
-        assert replays == GRAPH_REPLAYS * len(cases)
+        assert replays == DRAWS * len(cases)
 
 
 def test_capture_zeroes_one_backward_workspace_per_capture_and_stream(
@@ -1576,8 +1237,8 @@ def test_capture_zeroes_one_backward_workspace_per_capture_and_stream(
 ) -> None:
     """Without a caller workspace, the backward calls that one CUDA Graph capture records on one stream share one
     zeroed package buffer (one fill per capture and stream), and a second capture gets a buffer of its own; replays
-    of both graphs into NaN-filled outputs keep ``dx`` bitwise the eager one and the gradients within budget, and
-    the buffer reads back zero after the replays."""
+    of both graphs on each draw's inputs into NaN-filled outputs are judged against the naive tier, and the buffer
+    reads back zero after the replays."""
 
     pytest.importorskip("cuda.bindings")
     device = _device()
@@ -1591,8 +1252,6 @@ def test_capture_zeroes_one_backward_workspace_per_capture_and_stream(
     # the largest workspace first, so the later calls of a capture fit in the first call's buffer
     shapes = ((4097, 1280, (1000, 0, 3, 3094)), (65, 256, (64, 1)), (1000, 512, "perf"))
     problems = [_inputs(S, C, docs, key=41) for S, C, docs in shapes]
-    eager = [_backward(x, w, cu, dy)[0] for x, w, cu, dy in problems]
-    refs = [reference_backward(x, w, cu, dy) for x, w, cu, dy in problems]
     side = torch.cuda.Stream(device=device)
     side.wait_stream(torch.cuda.current_stream(device))
     with torch.cuda.stream(side):
@@ -1619,19 +1278,23 @@ def test_capture_zeroes_one_backward_workspace_per_capture_and_stream(
         assert len(launched) == len(shapes) and len(set(launched)) == 1, launched
         captured.append((graph, outs, launched[0]))
     assert captured[0][2] != captured[1][2], "two captures share a package workspace"
-    for graph, outs, _ in captured:
-        for replay in range(GRAPH_REPLAYS):
-            for dx, dw in outs:
-                dx.fill_(float("nan"))
-                dw.fill_(float("nan"))
-            graph.replay()
-            torch.cuda.synchronize(device)
-            for (dx, dw), dx_eager, refs_i, shape in zip(
-                outs, eager, refs, shapes, strict=True
-            ):
-                label = f"capture replay {replay} {shape}"
-                assert torch.equal(dx, dx_eager), label
-                _check_grads(dx, dw, None, refs_i, policy="bf16", label=label)
+    for index, (graph, outs, _) in enumerate(captured):
+        for i in range(len(shapes)):
+
+            def launch(_draw, seed, graph=graph, outs=outs, i=i):
+                fresh = [_inputs(S, C, docs, key=41, seed=seed) for S, C, docs in shapes]
+                for held, value in zip(problems, fresh, strict=True):
+                    for h, v in zip(held, value, strict=True):
+                        h.copy_(v)
+                for dx, dw in outs:
+                    dx.fill_(float("nan"))
+                    dw.fill_(float("nan"))
+                graph.replay()
+                torch.cuda.synchronize(device)
+                x, w, cu, dy = fresh[i]
+                return _grads(*outs[i], None), problem(x, w, cu, None, dy)
+
+            assert_judged(launch, seed=SEED, label=f"capture {index} replay {shapes[i]}")
     held = pkg._CAPTURE_WORKSPACES.get((device.index, side.cuda_stream))
     assert held is not None and held[1].untyped_storage().data_ptr() == captured[1][2]
     assert int(torch.count_nonzero(held[1])) == 0
@@ -1639,50 +1302,51 @@ def test_capture_zeroes_one_backward_workspace_per_capture_and_stream(
 
 def test_two_streams_with_two_workspaces() -> None:
     """Two backward calls running at once on two streams, each with its own workspace (caller-owned, then the
-    package's per-stream buffers): both match the single-stream result (``dx`` bitwise, gradients within
-    budget) and every workspace is zero afterwards."""
+    package's per-stream buffers): both judged against the naive tier on every draw, and every workspace is zero
+    afterwards."""
 
     device = _device()
     S, C, docs = 65536, 1280, "perf"
-    problems = [_inputs(S, C, docs, key=k) for k in (21, 22)]
-    expected = [_backward(x, w, cu, dy) for x, w, cu, dy in problems]
-    refs = [reference_backward(x, w, cu, dy) for x, w, cu, dy in problems]
-    streams = [torch.cuda.Stream(device=device) for _ in problems]
+    keys = (21, 22)
+    streams = [torch.cuda.Stream(device=device) for _ in keys]
     for own in (True, False):
         workspaces = [
             pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
             if own
             else None
-            for _ in problems
+            for _ in keys
         ]
-        results = [None, None]
-        torch.cuda.synchronize(device)
-        for i, ((x, w, cu, dy), stream) in enumerate(
-            zip(problems, streams, strict=True)
-        ):
-            with torch.cuda.stream(stream):
-                kwargs = {"workspace": workspaces[i]} if own else {}
-                results[i] = _backward(x, w, cu, dy, **kwargs)
-        torch.cuda.synchronize(device)
-        for i, stream in enumerate(streams):
-            dx, dw, _ = results[i]
-            assert torch.equal(dx, expected[i][0]), f"dx of stream {i} (own={own})"
-            _check_grads(
-                dx, dw, None, refs[i], policy="bf16", label=f"stream {i} own={own}"
-            )
-            if own:
-                assert int(torch.count_nonzero(workspaces[i])) == 0
-            else:
-                with torch.cuda.stream(stream):
-                    held = _stream_workspace(device)
-                assert held is not None and int(torch.count_nonzero(held)) == 0
+        for i in range(len(keys)):
+
+            def launch(_draw, seed, i=i, workspaces=workspaces, own=own):
+                problems = [_inputs(S, C, docs, key=k, seed=seed) for k in keys]
+                results = [None, None]
+                torch.cuda.synchronize(device)
+                for j, ((x, w, cu, dy), stream) in enumerate(
+                    zip(problems, streams, strict=True)
+                ):
+                    with torch.cuda.stream(stream):
+                        kwargs = {"workspace": workspaces[j]} if own else {}
+                        results[j] = _backward(x, w, cu, dy, **kwargs)
+                torch.cuda.synchronize(device)
+                for j, stream in enumerate(streams):
+                    if own:
+                        assert int(torch.count_nonzero(workspaces[j])) == 0
+                    else:
+                        with torch.cuda.stream(stream):
+                            held = _stream_workspace(device)
+                        assert held is not None and int(torch.count_nonzero(held)) == 0
+                x, w, cu, dy = problems[i]
+                return _grads(*results[i]), problem(x, w, cu, None, dy)
+
+            assert_judged(launch, seed=SEED, label=f"stream {i} own={own}")
 
 
 def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
     """A backward call is ONE ordinary launch of the program ``C`` selects (no reduce program): its arguments
-    carry the ``acc`` / ``work`` views of the record's accumulator layout (FP32 or FP64 ``slots x taps x C`` words
-    as the rule names them, uint32 ``n_ch_tiles`` counters), zero at launch, and the grid of the call's plan, at
-    least one CTA per channel tile."""
+    carry the ``acc`` / ``work`` views of the record's accumulator layout (FP32 ``slots x taps x C`` words as the
+    rule names them, one FP32 word per sum and accumulator copy on every route; uint32 ``n_ch_tiles`` counters), zero
+    at launch, and the grid of the call's plan, at least one CTA per channel tile."""
 
     S, C, docs = 1000, 1280, "perf"
     device = _device()
@@ -1716,7 +1380,7 @@ def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
         )
         assert grid[0] >= values["n_ch_tiles"]
         layout = loader.accumulator_layout(record, C, values["n_ch_tiles"])
-        acc_dtype = torch.float64 if "fp32g" in kind else torch.float32
+        acc_dtype = torch.float32
         taps = 5 if "bias" in kind else 4
         words = record["workspace_rule"]["slots"] * taps
         assert loader.accumulator_words_per_channel(record) == words
@@ -1786,8 +1450,7 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
     x SM count`` CTAs less ``ctas_per_sm`` when the last channel-tile rank of that grid holds at least
     ``ctas_per_sm`` CTAs (so a kernel on another stream that keeps one SM's shared memory leaves the launch one
     wave), else the whole grid; the other backward routes launch ``launch_grid``'s grid.  The trimmed launch's
-    ``dx`` is bitwise the whole grid's, both gradients are within budget of the reference and the workspace reads
-    back zero."""
+    outputs and those of the whole grid are judged against the naive tier and the workspace reads back zero."""
 
     _require_route(kind)
     device = _device()
@@ -1826,49 +1489,44 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
         rows.setdefault(trims, (C, full, k))
     assert set(rows) == {True, False}, rows
     for trims, (C, full, k) in sorted(rows.items()):
-        x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=41)
-        refs = reference_backward(x, w, cu, dy, b=b, policy=policy)
-        launched.clear()
-        dx, dw, db = _backward(x, w, cu, dy, b, policy)
-        torch.cuda.synchronize(device)
         cut = trims and kind in ("bwd", "bwd_fp32g")
-        assert launched == [(full - k if cut else full, 1, 1)], (kind, C, launched)
-        _check_grads(dx, dw, db, refs, policy=policy, label=f"{kind} C={C}")
-        held = _stream_workspace(device)
-        assert held is None or int(torch.count_nonzero(held)) == 0, (kind, C)
-        if cut:
-            with monkeypatch.context() as m:
-                m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
+
+        def call(x, w, cu, dy, b, policy, C=C, full=full, k=k, cut=cut):
+            launched.clear()
+            runs = [_backward(x, w, cu, dy, b, policy)]
+            torch.cuda.synchronize(device)
+            assert launched == [(full - k if cut else full, 1, 1)], (kind, C, launched)
+            held = _stream_workspace(device)
+            assert held is None or int(torch.count_nonzero(held)) == 0, (kind, C)
+            if cut:
+                with monkeypatch.context() as m:
+                    m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
+                    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                    launched.clear()
+                    runs.append(_backward(x, w, cu, dy, b, policy))
+                    torch.cuda.synchronize(device)
                 pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-                launched.clear()
-                dx_full, dw_full, db_full = _backward(x, w, cu, dy, b, policy)
-                torch.cuda.synchronize(device)
-            pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-            assert launched == [(full, 1, 1)], (kind, C, launched)
-            assert torch.equal(dx, dx_full), (kind, C)
-            _check_grads(
-                dx_full,
-                dw_full,
-                db_full,
-                refs,
-                policy=policy,
-                label=f"{kind} C={C} whole grid",
-            )
+                assert launched == [(full, 1, 1)], (kind, C, launched)
+            found = {}
+            for run in runs:
+                for out, value in _grads(*run).items():
+                    found.setdefault(out, []).append(value)
+            return found
+
+        _route_judge(S, C, docs, kind, call, key=41, label=f"{kind} C={C}")
 
 
 @pytest.mark.parametrize("kind", ("bwd_fp32g", "bwd_bias_fp32g"))
 @pytest.mark.parametrize("C", (512, 8192))
 def test_fp32g_accumulators_follow_the_rendered_rule(kind, C, monkeypatch) -> None:
-    """An fp32g backward at ``C`` 512 and 8192 hands its program an FP64 ``acc`` of the size the rendered rule names
-    (``slots x taps x C``, however many accumulator copies the program keeps) inside the public workspace; the
-    results stay within budget of the reference, ``dx`` is the deterministic package's, and the workspace reads
-    back zero."""
+    """An fp32g backward at ``C`` 512 and 8192 hands its program an FP32 ``acc`` (one FP32 word per sum and
+    accumulator copy) of the size the rendered rule names (``slots x taps x C``, however many accumulator copies the
+    program keeps) inside the public workspace; the outputs are judged against the naive tier, and the workspace
+    reads back zero."""
 
     _require_route(kind)
-    det = _det()
     S, docs = 4097, (1000, 0, 3, 3094)
     device = _device()
-    x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=11)
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
     seen = []
     launch = pkg.run_module
@@ -1879,28 +1537,25 @@ def test_fp32g_accumulators_follow_the_rendered_rule(kind, C, monkeypatch) -> No
         )
         return launch(name, values, device_index=device_index, grid=grid)
 
-    monkeypatch.setattr(pkg, "run_module", record_launch)
-    dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-    monkeypatch.undo()
-    ((name, acc_dtype, acc_numel, n_ch_tiles),) = seen
-    record = loader.MODULES[name]
-    layout = loader.accumulator_layout(record, C, n_ch_tiles)
-    assert acc_dtype == torch.float64
-    assert (
-        acc_numel
-        == layout["acc_elems"]
-        == loader.accumulator_words_per_channel(record) * C
-    )
-    assert workspace.numel() >= layout["total_bytes"]
-    _check_grads(
-        dx, dw, db, reference_backward(x, w, cu, dy, b=b, policy=policy),
-        policy=policy, label=f"{kind} C={C}",
-    )  # fmt: skip
-    dx_d, _, _ = _det_backward(det, x, w, cu, dy, b, policy)
-    assert torch.equal(dx, dx_d), (
-        f"dx differs from the deterministic package ({kind} C={C})"
-    )
-    assert int(torch.count_nonzero(workspace)) == 0
+    def call(x, w, cu, dy, b, policy):
+        seen.clear()
+        with monkeypatch.context() as m:
+            m.setattr(pkg, "run_module", record_launch)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+        ((name, acc_dtype, acc_numel, n_ch_tiles),) = seen
+        record = loader.MODULES[name]
+        layout = loader.accumulator_layout(record, C, n_ch_tiles)
+        assert acc_dtype == torch.float32
+        assert (
+            acc_numel
+            == layout["acc_elems"]
+            == loader.accumulator_words_per_channel(record) * C
+        )
+        assert workspace.numel() >= layout["total_bytes"]
+        assert int(torch.count_nonzero(workspace)) == 0
+        return _grads(dx, dw, db)
+
+    _route_judge(S, C, docs, kind, call, key=11, label=f"{kind} C={C}")
 
 
 def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
@@ -1908,7 +1563,7 @@ def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
 ) -> None:
     """One 1-thread kernel resident on another stream must not stall the
     one-launch backward (``busy <= 2 x alone``, medians of 7 after 3 warm-ups, CUDA events on the current stream);
-    ``dx`` is bitwise unchanged beside it and ``dweight`` stays within budget."""
+    the outputs of backward calls launched beside it are judged against the naive tier."""
 
     device = _device()
     S, C, docs = 261393, 512, "perf"
@@ -1935,7 +1590,6 @@ def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     for _ in range(3):
         timed(False)
     alone = statistics.median(timed(False) for _ in range(7))
-    dx_alone, dw_alone = dx.clone(), dw.clone()
     busy = statistics.median(timed(True) for _ in range(7))
     print(
         f"backward alone {alone:.3f} ms, beside a resident kernel {busy:.3f} ms ({busy / alone:.2f}x)"
@@ -1943,13 +1597,20 @@ def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     record_property("backward_alone_ms", f"{alone:.4f}")
     record_property("backward_beside_side_kernel_ms", f"{busy:.4f}")
     record_property("busy_over_alone", f"{busy / alone:.3f}")
-    assert torch.equal(dx, dx_alone), "dx changed beside the side kernel"
-    _assert_within(
-        dw, dw_alone, atol=DW_ATOL, rtol=DW_RTOL, label="dweight beside the side kernel"
-    )
     assert busy <= 2.0 * alone, (
         f"the backward stalled behind a kernel resident on another stream: {busy:.3f} ms vs {alone:.3f} ms"
     )
+
+    def beside(x, w, cu, dy, b, policy):
+        torch.cuda.synchronize(device)
+        with torch.cuda.stream(side):
+            torch.cuda._sleep(10_000_000)
+        torch.cuda._sleep(1_000_000)
+        run = _backward(x, w, cu, dy, workspace=workspace)
+        torch.cuda.synchronize(device)
+        return _grads(*run)
+
+    _judge(S, C, docs, beside, label="beside the side kernel")
 
 
 def test_zero_tokens_return_empty_outputs() -> None:
@@ -1976,137 +1637,138 @@ def test_zero_tokens_return_empty_outputs() -> None:
 
 @pytest.mark.parametrize("combo", AUTOGRAD_COMBOS, ids=_combo_id)
 def test_autograd_end_to_end(combo) -> None:
-    """``cake_causal_conv1d_nondet`` with FP32 / BF16 taps, no / FP32 / BF16 bias, under both SiLU' policies: the
-    forward's bits, ``dx`` bitwise the direct backward's, the parameter gradients within budget of the reference, in
-    the parameters' dtypes; a non-contiguous incoming gradient is materialized."""
+    """``cake_causal_conv1d_nondet`` with FP32 / BF16 taps, no / FP32 / BF16 bias, under both SiLU' policies: ``y``
+    and the gradients, in the parameters' dtypes, judged against the naive tier, with a contiguous and a
+    non-contiguous (materialized) incoming gradient."""
 
     weight_dtype, bias_dtype, policy = combo
     kind = _combo_route(weight_dtype, bias_dtype, policy)
     _require_route(kind)
     S, C, docs = 1000, 512, "perf"
-    x0, w0, cu, dy = _inputs(S, C, docs, key=3, weight_dtype=weight_dtype)
-    b0 = None if bias_dtype is None else _bias_input(C, bias_dtype, key=3)
-    refs = reference_backward(x0, w0, cu, dy, b=b0, policy=policy)
-    dx_direct, _, _ = _backward(x0, w0, cu, dy, b0, policy)
-    for incoming in (dy, dy.t().contiguous().t()):
-        x = x0.detach().clone().requires_grad_(True)
-        w = w0.detach().clone().requires_grad_(True)
-        b = None if b0 is None else b0.detach().clone().requires_grad_(True)
-        y = pkg.cake_causal_conv1d_nondet(x, w, cu, b, silu_grad_preactivation=policy)
-        assert torch.equal(y.detach(), _forward(x0, w0, cu, bias=b0))
-        y.backward(incoming)
-        assert x.grad.dtype == BF16 and torch.equal(x.grad, dx_direct)
-        assert w.grad.dtype == w0.dtype and (b is None or b.grad.dtype == b0.dtype)
-        _check_grads(
-            x.grad,
-            w.grad,
-            None if b is None else b.grad,
-            refs,
-            policy=policy,
-            label=f"autograd {kind} {_combo_id(combo)}",
-        )
+
+    def call(x0, w0, cu, dy, b0, policy):
+        found = {}
+        for incoming in (dy, dy.t().contiguous().t()):
+            x = x0.detach().clone().requires_grad_(True)
+            w = w0.detach().clone().requires_grad_(True)
+            b = None if b0 is None else b0.detach().clone().requires_grad_(True)
+            y = pkg.cake_causal_conv1d_nondet(x, w, cu, b, silu_grad_preactivation=policy)
+            y.backward(incoming)
+            assert x.grad.dtype == BF16
+            assert w.grad.dtype == w0.dtype and (b is None or b.grad.dtype == b0.dtype)
+            outs = {"y": y.detach(), **_grads(x.grad, w.grad, None if b is None else b.grad)}
+            for out, value in outs.items():
+                found.setdefault(out, []).append(value)
+        return found
+
+    _judge(
+        S,
+        C,
+        docs,
+        call,
+        weight_dtype=weight_dtype,
+        bias_dtype=bias_dtype,
+        policy=policy,
+        key=3,
+        label=f"autograd {kind} {_combo_id(combo)}",
+    )
 
 
 def test_non_reentrant_checkpoint_is_two_forwards_and_a_backward() -> None:
-    """``torch.utils.checkpoint(..., use_reentrant=False)`` around the autograd entry (2 x forward + backward):
-    ``y`` and ``dx`` equal the unchecked call's bitwise, the gradients are within budget."""
+    """``torch.utils.checkpoint(..., use_reentrant=False)`` around the autograd entry (2 x forward + backward) and
+    the unchecked call: ``y`` and the gradients of both judged against the naive tier."""
 
     from torch.utils.checkpoint import checkpoint
 
     _require_route("bwd_bias")
     S, C, docs = 4097, 1280, (1000, 0, 3, 3094)
-    x0, w0, cu, dy, b0, policy = _route_inputs(S, C, docs, "bwd_bias", key=13)
-    refs = reference_backward(x0, w0, cu, dy, b=b0, policy=policy)
-    results = []
-    for ckpt in (False, True):
-        x = x0.detach().clone().requires_grad_(True)
-        w = w0.detach().clone().requires_grad_(True)
-        b = b0.detach().clone().requires_grad_(True)
 
-        def layer(x, w, b):
-            return pkg.cake_causal_conv1d_nondet(
-                x, w, cu, b, silu_grad_preactivation=policy
-            )
+    def call(x0, w0, cu, dy, b0, policy):
+        found = {}
+        for ckpt in (False, True):
+            x = x0.detach().clone().requires_grad_(True)
+            w = w0.detach().clone().requires_grad_(True)
+            b = b0.detach().clone().requires_grad_(True)
 
-        y = checkpoint(layer, x, w, b, use_reentrant=False) if ckpt else layer(x, w, b)
-        y.backward(dy)
-        results.append((y.detach(), x.grad, w.grad, b.grad))
-        _check_grads(
-            x.grad, w.grad, b.grad, refs, policy=policy, label=f"checkpoint={ckpt}"
-        )
-    assert torch.equal(results[0][0], results[1][0]) and torch.equal(
-        results[0][1], results[1][1]
-    )
+            def layer(x, w, b):
+                return pkg.cake_causal_conv1d_nondet(
+                    x, w, cu, b, silu_grad_preactivation=policy
+                )
+
+            y = checkpoint(layer, x, w, b, use_reentrant=False) if ckpt else layer(x, w, b)
+            y.backward(dy)
+            for out, value in {"y": y.detach(), **_grads(x.grad, w.grad, b.grad)}.items():
+                found.setdefault(out, []).append(value)
+        return found
+
+    _route_judge(S, C, docs, "bwd_bias", call, key=13, label="checkpoint")
 
 
 def test_gradient_accumulation() -> None:
-    """Two backward passes accumulate into the parameters' ``.grad`` (autograd's sum of the two gradients) within
-    twice the budget of the reference sum."""
+    """Two backward passes accumulate into the parameters' ``.grad`` (autograd's sum of the two gradients): the sum
+    judged against the naive tier's sum of its two BF16 ``dweight`` (the float64 oracle's sum of the two)."""
 
     S, C, docs = 4097, 512, (1000, 0, 3, 3094)
-    x0, w0, cu, dy = _inputs(S, C, docs, key=17)
-    dy2 = torch.randn_like(dy.float()).to(BF16)
-    w = w0.detach().clone().requires_grad_(True)
-    for g in (dy, dy2):
-        pkg.cake_causal_conv1d_nondet(x0, w, cu).backward(g)
-    _, dw1, _ = reference_backward(x0, w0, cu, dy)
-    _, dw2, _ = reference_backward(x0, w0, cu, dy2)
-    _assert_within(
-        w.grad,
-        dw1 + dw2,
-        atol=2 * DW_ATOL,
-        rtol=2 * DW_RTOL,
-        label="accumulated dweight",
-    )
+    judge = TierJudge(DRAWS)
+    failures = []
+    for j in range(DRAWS):
+        seed = draw_seed(SEED, j)
+        seed_all(seed)
+        x0, w0, cu, dy = _inputs(S, C, docs, key=17, seed=seed)
+        dy2 = torch.randn_like(dy.float()).to(BF16)
+        w = w0.detach().clone().requires_grad_(True)
+        for g in (dy, dy2):
+            pkg.cake_causal_conv1d_nondet(x0, w, cu).backward(g)
+        want = sum(oracle(x0, w0, cu, None, g, outputs=("dweight",))["dweight"] for g in (dy, dy2))
+        naive = sum(naive_bf16(x0, w0, cu, None, g, outputs=("dweight",))["dweight"] for g in (dy, dy2))
+        if message := contract("dweight", w.grad, want):
+            failures.append(f"draw {j}: {message}")
+            continue
+        judge.add("dweight", j, w.grad, want, {"bf16": naive})
+    failures += judge.failures()
+    assert not failures, "\n".join(failures)
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 def test_bwd_grid_mult_through_autograd(kind) -> None:
     """The autograd entry carries ``bwd_grid_mult`` to its backward: at every multiple, plain and under
-    non-reentrant checkpointing, ``y`` is the forward's, ``x.grad`` bitwise the default direct backward's ``dx``
-    and the parameter gradients within budget of the reference."""
+    non-reentrant checkpointing, ``y`` and the gradients judged against the naive tier."""
 
     from torch.utils.checkpoint import checkpoint
 
     _require_route(kind)
     S, C, docs = 4097, 1344, (1000, 0, 3, 3094)
-    x0, w0, cu, dy, b0, policy = _route_inputs(S, C, docs, kind, key=34)
-    refs = reference_backward(x0, w0, cu, dy, b=b0, policy=policy)
-    y_default = _forward(x0, w0, cu, bias=b0)
-    dx_default, _, _ = _backward(x0, w0, cu, dy, b0, policy)
-    for mult in pkg.BWD_GRID_MULTS:
-        for ckpt in (False, True):
-            x = x0.detach().clone().requires_grad_(True)
-            w = w0.detach().clone().requires_grad_(True)
-            b = None if b0 is None else b0.detach().clone().requires_grad_(True)
 
-            def layer(x, w, b, mult=mult):
-                return pkg.cake_causal_conv1d_nondet(
-                    x,
-                    w,
-                    cu,
-                    b,
-                    silu_grad_preactivation=policy,
-                    bwd_grid_mult=mult,
+    def call(x0, w0, cu, dy, b0, policy):
+        found = {}
+        for mult in pkg.BWD_GRID_MULTS:
+            for ckpt in (False, True):
+                x = x0.detach().clone().requires_grad_(True)
+                w = w0.detach().clone().requires_grad_(True)
+                b = None if b0 is None else b0.detach().clone().requires_grad_(True)
+
+                def layer(x, w, b, mult=mult):
+                    return pkg.cake_causal_conv1d_nondet(
+                        x,
+                        w,
+                        cu,
+                        b,
+                        silu_grad_preactivation=policy,
+                        bwd_grid_mult=mult,
+                    )
+
+                y = (
+                    checkpoint(layer, x, w, b, use_reentrant=False)
+                    if ckpt
+                    else layer(x, w, b)
                 )
+                y.backward(dy)
+                outs = {"y": y.detach(), **_grads(x.grad, w.grad, None if b is None else b.grad)}
+                for out, value in outs.items():
+                    found.setdefault(out, []).append(value)
+        return found
 
-            y = (
-                checkpoint(layer, x, w, b, use_reentrant=False)
-                if ckpt
-                else layer(x, w, b)
-            )
-            assert torch.equal(y.detach(), y_default)
-            y.backward(dy)
-            label = f"autograd {kind} bwd_grid_mult={mult} checkpoint={ckpt}"
-            assert torch.equal(x.grad, dx_default), label
-            _check_grads(
-                x.grad,
-                w.grad,
-                None if b is None else b.grad,
-                refs,
-                policy=policy,
-                label=label,
-            )
+    _route_judge(S, C, docs, kind, call, key=34, label=f"autograd {kind}")
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2115,12 +1777,11 @@ def test_bwd_grid_mult_through_autograd(kind) -> None:
 
 def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` the backward raises (``warn_only=True``: warns and runs the
-    non-deterministic backward); the forward (the deterministic programs' bits) runs without an alert.  The mode is
-    read when the backward runs: an autograd graph recorded with the mode off raises once it is on."""
+    non-deterministic backward, whose outputs are judged against the naive tier); the forward runs without an alert.
+    The mode is read when the backward runs: an autograd graph recorded with the mode off raises once it is on."""
 
     S, C, docs = 1000, 512, "perf"
     x, w, cu, dy = _inputs(S, C, docs)
-    expected_y = _forward(x, w, cu)
     recorded = pkg.cake_causal_conv1d_nondet(x.clone().requires_grad_(True), w, cu)
     prev, prev_warn = (
         torch.are_deterministic_algorithms_enabled(),
@@ -2128,7 +1789,8 @@ def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
     )
     try:
         torch.use_deterministic_algorithms(True)
-        assert torch.equal(_forward(x, w, cu), expected_y)
+        y = _forward(x, w, cu)
+        assert y.dtype == BF16 and tuple(y.shape) == (S, C)
         with pytest.raises(
             RuntimeError, match="cake_causal_conv1d_nondet_train_backward"
         ):
@@ -2144,18 +1806,14 @@ def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
         ):
             recorded.backward(dy)
         torch.use_deterministic_algorithms(True, warn_only=True)
-        with pytest.warns(
-            UserWarning, match="cake_causal_conv1d_nondet_train_backward"
-        ):
-            dx, dw, _ = _backward(x, w, cu, dy)
-        _check_grads(
-            dx,
-            dw,
-            None,
-            reference_backward(x, w, cu, dy),
-            policy="bf16",
-            label="warn_only",
-        )
+
+        def call(x, w, cu, dy, b, policy):
+            with pytest.warns(
+                UserWarning, match="cake_causal_conv1d_nondet_train_backward"
+            ):
+                return _grads(*_backward(x, w, cu, dy))
+
+        _judge(S, C, docs, call, label="warn_only")
     finally:
         torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
 
@@ -2203,13 +1861,12 @@ def test_fp32_dweight_must_be_16_byte_aligned() -> None:
     """The backward programs store one channel's four FP32 ``dweight`` taps with one 16-byte store: an FP32
     ``dweight`` out off the 16-byte grid is refused (``ValueError``) before anything launches; a 16-byte aligned
     view inside a larger buffer is written, and a BF16 ``dweight`` or an FP32 / BF16 ``dbias`` (stored per
-    element) is accepted at any element offset."""
+    element) is accepted at any element offset; the written views are judged against the naive tier."""
 
     S, C, docs = 1000, 512, "perf"
     device = _device()
     x, w, cu, dy = _inputs(S, C, docs, key=8)
     b = _bias_input(C, F32, key=8)
-    refs = reference_backward(x, w, cu, dy, b=b)
     n = C * WIDTH
     buf = torch.zeros(n + 4, dtype=F32, device=device)
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
@@ -2223,29 +1880,38 @@ def test_fp32_dweight_must_be_16_byte_aligned() -> None:
     assert (
         int(torch.count_nonzero(buf)) == 0 and int(torch.count_nonzero(workspace)) == 0
     )
-    aligned = buf[4:].view(C, WIDTH)
-    db_view = torch.zeros(C + 1, dtype=F32, device=device)[1:]
-    dx, dw, db = _backward(
-        x, w, cu, dy, b, dweight=aligned, dbias=db_view, workspace=workspace
-    )
-    assert dw is aligned and db is db_view
-    _check_grads(dx, dw, db, refs, policy="bf16", label="16-byte aligned dweight view")
-    for dweight_offset, dbias_offset in ((4, 1), (2, 3)):
-        dw16 = torch.zeros(n + 4, dtype=BF16, device=device)[dweight_offset:][:n].view(
-            C, WIDTH
-        )
-        db16 = torch.zeros(C + 4, dtype=BF16, device=device)[dbias_offset:][:C]
-        assert dw16.data_ptr() % 16 != 0
+
+    def aligned_view(x, w, cu, dy, b, policy):
+        aligned = torch.zeros(n + 4, dtype=F32, device=device)[4:].view(C, WIDTH)
+        db_view = torch.zeros(C + 1, dtype=F32, device=device)[1:]
         dx, dw, db = _backward(
-            x, w, cu, dy, b, dweight=dw16, dbias=db16, workspace=workspace
+            x, w, cu, dy, b, dweight=aligned, dbias=db_view, workspace=workspace
         )
-        assert dw is dw16 and db is db16
-        _check_grads(
-            dx,
-            dw,
-            db,
-            refs,
-            policy="bf16",
+        assert dw is aligned and db is db_view
+        return _grads(dx, dw, db)
+
+    _judge(S, C, docs, aligned_view, bias_dtype=F32, key=8, label="16-byte aligned dweight view")
+    for dweight_offset, dbias_offset in ((4, 1), (2, 3)):
+
+        def bf16_outs(x, w, cu, dy, b, policy, dweight_offset=dweight_offset, dbias_offset=dbias_offset):
+            dw16 = torch.zeros(n + 4, dtype=BF16, device=device)[dweight_offset:][:n].view(
+                C, WIDTH
+            )
+            db16 = torch.zeros(C + 4, dtype=BF16, device=device)[dbias_offset:][:C]
+            assert dw16.data_ptr() % 16 != 0
+            dx, dw, db = _backward(
+                x, w, cu, dy, b, dweight=dw16, dbias=db16, workspace=workspace
+            )
+            assert dw is dw16 and db is db16
+            return _grads(dx, dw, db)
+
+        _judge(
+            S,
+            C,
+            docs,
+            bf16_outs,
+            bias_dtype=F32,
+            key=8,
             label=f"bf16 outs at element offsets {dweight_offset} / {dbias_offset}",
         )
     assert int(torch.count_nonzero(workspace)) == 0

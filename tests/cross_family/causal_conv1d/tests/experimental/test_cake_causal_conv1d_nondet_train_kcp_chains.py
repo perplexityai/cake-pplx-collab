@@ -19,11 +19,12 @@ one or two tokens long, each reading its history rows from up to three predecess
 three successor ranks.  One GPU emulates the ``W`` ranks one after the other: the package's halo exchange
 (``kcp._exchange``, one ``all_to_all_single`` per direction) is replaced by the receive pool the ``W`` ranks' send rows
 give the rank (the rank-agreement check runs inside the exchange and needs a process group: its own tests cover it).
-Per row and rank:
+Per row:
 
-- ``y`` and ``dx`` are bitwise the single-rank call on the unpartitioned pack, at the rank's tokens;
-- the rank's ``y`` and ``dx`` are within one BF16 ulp of the FP64 oracle, and the sum of the ranks' ``dweight`` within
-  the package budget of the FP64 ``dweight``;
+- the ranks' ``y`` and ``dx`` (put back in global order), the sum of the ranks' ``dweight`` (in rank order) and the
+  outputs of the single-rank call on the unpartitioned pack are judged by the naive judge
+  (``tests/cake/test_helpers/cake_naive.py``: over 32 random draws against the float64 oracle and PyTorch's BF16
+  naive convolution; no bit rule);
 - every pool row a rank receives is one its peers sent it (the emulated exchange checks the split tables agree).
 
 Skipped until the exporter renders the package.
@@ -38,17 +39,10 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
-from tests.test_cake_causal_conv1d_det_train_kcp import (
-    WIDTH,
-    Y_ATOL,
-    Y_RTOL,
-    _assert_within,
-    _bits,
-    _reference,
-)
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import assert_judged, problem
+from tests.test_cake_causal_conv1d_det_train_kcp import WIDTH
 from tests.test_cake_causal_conv1d_det_train_kcp_dist import _local, _partition
 
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
 # (documents, W, C): short documents cut into one- and two-token pieces, a long one, a one-token one (pieces of zero
 # tokens on most ranks), at 32 and 64 ranks.
 ROWS = [
@@ -133,7 +127,7 @@ def _single_rank(lengths, x, w, dy, device):
 @pytest.mark.parametrize(
     "row", ROWS, ids=lambda row: f"w{row[1]}-c{row[2]}-{'-'.join(map(str, row[0]))}"
 )
-def test_chains_match_the_single_rank_call(row, monkeypatch) -> None:
+def test_chains_match_reference(row, monkeypatch) -> None:
     from cake_pplx._backends.cake_kda_det_train_kcp import (
         cake_kcp_plan as plan,
     )
@@ -161,82 +155,56 @@ def test_chains_match_the_single_rank_call(row, monkeypatch) -> None:
         )
         for r in range(W)
     ]
-    g = torch.Generator(device="cpu").manual_seed(7815)
     T = cu[-1]
-    x_all = torch.randn(T, C, generator=g).to(torch.bfloat16).to(device)
-    w = (torch.randn(C, WIDTH, generator=g) * 0.5).contiguous().to(device)
-    dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16).to(device)
-    xs = [_local(part, r, cu, x_all) for r in range(W)]
-    dys = [_local(part, r, cu, dy_all) for r in range(W)]
+    cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
+    rows = [_local(part, r, cu, torch.arange(T)).to(device) for r in range(W)]
+    assert torch.equal(torch.sort(torch.cat(rows)).values.cpu(), torch.arange(T))
 
-    y_one, dx_one, dw_one = _single_rank(lengths, x_all, w, dy_all, device)
-    y_ref, dx_ref, dw_ref = _reference(
-        x_all, w, torch.tensor(cu, device=device), dy_all
-    )
+    def launch(_draw: int, seed: int):
+        g = torch.Generator(device="cpu").manual_seed(seed)
+        x_all = torch.randn(T, C, generator=g).to(torch.bfloat16).to(device)
+        w = (torch.randn(C, WIDTH, generator=g) * 0.5).contiguous().to(device)
+        dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16).to(device)
+        xs = [_local(part, r, cu, x_all) for r in range(W)]
+        dys = [_local(part, r, cu, dy_all) for r in range(W)]
+        y_one, dx_one, dw_one = _single_rank(lengths, x_all, w, dy_all, device)
 
-    # forward: the send rows of every rank, then each rank's call on its pool
-    fwd = _Halo(ctxs, "fwd")
-    monkeypatch.setattr(conv_kcp, "_exchange", fwd)
-    for r in range(W):
-        conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(xs[r], w, ctxs[r])
-    fwd.deliver()
-    ys, hists = [], []
-    for r in range(W):
-        y, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
-            xs[r], w, ctxs[r]
-        )
-        ys.append(y)
-        hists.append(hist)
-    # backward: the head rows every rank sends, then each rank's call on its tail pool
-    bwd = _Halo(ctxs, "bwd")
-    monkeypatch.setattr(conv_kcp, "_exchange", bwd)
-    for r in range(W):
-        conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
-            xs[r], w, ctxs[r], dys[r], hists[r]
-        )
-    bwd.deliver()
-    dxs, dws = [], []
-    for r in range(W):
-        dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
-            xs[r], w, ctxs[r], dys[r], hists[r]
-        )
-        dxs.append(dx)
-        dws.append(dw.clone())
-    torch.cuda.synchronize()
+        # forward: the send rows of every rank, then each rank's call on its pool
+        fwd = _Halo(ctxs, "fwd")
+        monkeypatch.setattr(conv_kcp, "_exchange", fwd)
+        for r in range(W):
+            conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(xs[r], w, ctxs[r])
+        fwd.deliver()
+        hists = []
+        y_world = torch.full_like(x_all, float("nan"))
+        for r in range(W):
+            y, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
+                xs[r], w, ctxs[r]
+            )
+            y_world[rows[r]] = y
+            hists.append(hist)
+        # backward: the head rows every rank sends, then each rank's call on its tail pool
+        bwd = _Halo(ctxs, "bwd")
+        monkeypatch.setattr(conv_kcp, "_exchange", bwd)
+        for r in range(W):
+            conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
+                xs[r], w, ctxs[r], dys[r], hists[r]
+            )
+        bwd.deliver()
+        dx_world = torch.full_like(x_all, float("nan"))
+        dw_sum = None
+        for r in range(W):
+            dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
+                xs[r], w, ctxs[r], dys[r], hists[r]
+            )
+            dx_world[rows[r]] = dx
+            dw_sum = dw.clone() if dw_sum is None else dw_sum + dw
+        torch.cuda.synchronize()
+        outputs = {
+            "y": [y_world, y_one],
+            "dx": [dx_world, dx_one],
+            "dweight": [dw_sum, dw_one],
+        }
+        return outputs, problem(x_all, w, cu_dev, None, dy_all)
 
-    failures = []
-    for r in range(W):
-        for name, got, want in (("y", ys[r], y_one), ("dx", dxs[r], dx_one)):
-            ref = _local(part, r, cu, want)
-            if got.shape != ref.shape or not torch.equal(_bits(got), _bits(ref)):
-                bad = (
-                    int((_bits(got) != _bits(ref)).sum())
-                    if got.shape == ref.shape
-                    else -1
-                )
-                failures.append(
-                    f"rank {r}: {name}: {bad} elements differ from the single-rank call's bits"
-                )
-    assert not failures, "\n".join(failures[:20])
-    for r in range(W):
-        _assert_within(
-            ys[r],
-            _local(part, r, cu, y_ref),
-            atol=Y_ATOL,
-            rtol=Y_RTOL,
-            label=f"rank {r} y",
-        )
-        _assert_within(
-            dxs[r],
-            _local(part, r, cu, dx_ref),
-            atol=Y_ATOL,
-            rtol=Y_RTOL,
-            label=f"rank {r} dx",
-        )
-    dw_sum = torch.stack([d.double() for d in dws]).sum(0)
-    _assert_within(
-        dw_sum, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label="sum of the ranks' dweight"
-    )
-    _assert_within(
-        dw_one, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label="single-rank dweight"
-    )
+    assert_judged(launch, seed=7815, label=f"w{W}-c{C}")
