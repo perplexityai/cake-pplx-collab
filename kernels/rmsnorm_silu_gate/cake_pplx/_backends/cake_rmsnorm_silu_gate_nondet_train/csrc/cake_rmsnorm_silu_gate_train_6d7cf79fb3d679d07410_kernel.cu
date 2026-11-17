@@ -1835,15 +1835,285 @@ kernel_cake_rmsnorm_silu_gate_train_6d7cf79fb3d679d07410(__nv_bfloat16* __restri
             long long top = carry << 10ll & 281474976710655ll;
             digits[6] = digits[6] >> 38ll | top;
             carry = carry >> 38ll;
-            double exact = (double)carry;
-            exact = exact * 281474976710656.0 + (double)digits[6];
-            exact = exact * 281474976710656.0 + (double)digits[5];
-            exact = exact * 281474976710656.0 + (double)digits[4];
-            exact = exact * 281474976710656.0 + (double)digits[3];
-            exact = exact * 281474976710656.0 + (double)digits[2];
-            exact = exact * 281474976710656.0 + (double)digits[1];
-            exact = exact * 281474976710656.0 + (double)digits[0];
-            float rounded = ((spec != 0.0f) ? spec : (float)(exact * 1.401298464324817e-45));
+            unsigned int vwords[12];
+            unsigned long long dlo_0 = (unsigned long long)digits[0];
+            unsigned long long dhi_0 = (unsigned long long)digits[1];
+            vwords[0] = (unsigned int)(dlo_0 & 4294967295ull);
+            vwords[1] = (unsigned int)(dlo_0 >> 32ull | (dhi_0 & 65535ull) << 16ull);
+            vwords[2] = (unsigned int)(dhi_0 >> 16ull);
+            unsigned long long dlo_1 = (unsigned long long)digits[2];
+            unsigned long long dhi_1 = (unsigned long long)digits[3];
+            vwords[3] = (unsigned int)(dlo_1 & 4294967295ull);
+            vwords[4] = (unsigned int)(dlo_1 >> 32ull | (dhi_1 & 65535ull) << 16ull);
+            vwords[5] = (unsigned int)(dhi_1 >> 16ull);
+            unsigned long long dlo_2 = (unsigned long long)digits[4];
+            unsigned long long dhi_2 = (unsigned long long)digits[5];
+            vwords[6] = (unsigned int)(dlo_2 & 4294967295ull);
+            vwords[7] = (unsigned int)(dlo_2 >> 32ull | (dhi_2 & 65535ull) << 16ull);
+            vwords[8] = (unsigned int)(dhi_2 >> 16ull);
+            vwords[9] = (unsigned int)((unsigned long long)digits[6] & 4294967295ull);
+            long long vtop = carry << 16ll | digits[6] >> 32ll;
+            long long rw_top = vtop;
+            int rw_neg = 0;
+            if (rw_top < 0ll) {
+                rw_neg = 1;
+                unsigned long long rw_c = 1ull;
+                unsigned long long rw_t_0 = (unsigned long long)(vwords[0] ^ 4294967295u) + rw_c;
+                vwords[0] = (unsigned int)(rw_t_0 & 4294967295ull);
+                rw_c = rw_t_0 >> 32ull;
+                unsigned long long rw_t_1 = (unsigned long long)(vwords[1] ^ 4294967295u) + rw_c;
+                vwords[1] = (unsigned int)(rw_t_1 & 4294967295ull);
+                rw_c = rw_t_1 >> 32ull;
+                unsigned long long rw_t_2 = (unsigned long long)(vwords[2] ^ 4294967295u) + rw_c;
+                vwords[2] = (unsigned int)(rw_t_2 & 4294967295ull);
+                rw_c = rw_t_2 >> 32ull;
+                unsigned long long rw_t_3 = (unsigned long long)(vwords[3] ^ 4294967295u) + rw_c;
+                vwords[3] = (unsigned int)(rw_t_3 & 4294967295ull);
+                rw_c = rw_t_3 >> 32ull;
+                unsigned long long rw_t_4 = (unsigned long long)(vwords[4] ^ 4294967295u) + rw_c;
+                vwords[4] = (unsigned int)(rw_t_4 & 4294967295ull);
+                rw_c = rw_t_4 >> 32ull;
+                unsigned long long rw_t_5 = (unsigned long long)(vwords[5] ^ 4294967295u) + rw_c;
+                vwords[5] = (unsigned int)(rw_t_5 & 4294967295ull);
+                rw_c = rw_t_5 >> 32ull;
+                unsigned long long rw_t_6 = (unsigned long long)(vwords[6] ^ 4294967295u) + rw_c;
+                vwords[6] = (unsigned int)(rw_t_6 & 4294967295ull);
+                rw_c = rw_t_6 >> 32ull;
+                unsigned long long rw_t_7 = (unsigned long long)(vwords[7] ^ 4294967295u) + rw_c;
+                vwords[7] = (unsigned int)(rw_t_7 & 4294967295ull);
+                rw_c = rw_t_7 >> 32ull;
+                unsigned long long rw_t_8 = (unsigned long long)(vwords[8] ^ 4294967295u) + rw_c;
+                vwords[8] = (unsigned int)(rw_t_8 & 4294967295ull);
+                rw_c = rw_t_8 >> 32ull;
+                unsigned long long rw_t_9 = (unsigned long long)(vwords[9] ^ 4294967295u) + rw_c;
+                vwords[9] = (unsigned int)(rw_t_9 & 4294967295ull);
+                rw_c = rw_t_9 >> 32ull;
+                rw_top = -1ll - rw_top + (long long)rw_c;
+            }
+            vwords[10] = (unsigned int)((unsigned long long)rw_top & 4294967295ull);
+            vwords[11] = (unsigned int)((unsigned long long)rw_top >> 32ull);
+            int rw_tw = -1;
+            if (vwords[0] != 0) {
+                rw_tw = 0;
+            }
+            if (vwords[1] != 0) {
+                rw_tw = 1;
+            }
+            if (vwords[2] != 0) {
+                rw_tw = 2;
+            }
+            if (vwords[3] != 0) {
+                rw_tw = 3;
+            }
+            if (vwords[4] != 0) {
+                rw_tw = 4;
+            }
+            if (vwords[5] != 0) {
+                rw_tw = 5;
+            }
+            if (vwords[6] != 0) {
+                rw_tw = 6;
+            }
+            if (vwords[7] != 0) {
+                rw_tw = 7;
+            }
+            if (vwords[8] != 0) {
+                rw_tw = 8;
+            }
+            if (vwords[9] != 0) {
+                rw_tw = 9;
+            }
+            if (vwords[10] != 0) {
+                rw_tw = 10;
+            }
+            if (vwords[11] != 0) {
+                rw_tw = 11;
+            }
+            unsigned int rw_a = 0;
+            unsigned int rw_b = 0;
+            unsigned int rw_w = 0;
+            unsigned int rw_low = 0;
+            if (rw_tw == 0) {
+                rw_a = vwords[0];
+            }
+            if (rw_tw == 1) {
+                rw_b = vwords[0];
+            }
+            if (rw_tw == 2) {
+                rw_w = vwords[0];
+            }
+            if (rw_tw > 2) {
+                rw_low = rw_low | vwords[0];
+            }
+            if (rw_tw == 1) {
+                rw_a = vwords[1];
+            }
+            if (rw_tw == 2) {
+                rw_b = vwords[1];
+            }
+            if (rw_tw == 3) {
+                rw_w = vwords[1];
+            }
+            if (rw_tw > 3) {
+                rw_low = rw_low | vwords[1];
+            }
+            if (rw_tw == 2) {
+                rw_a = vwords[2];
+            }
+            if (rw_tw == 3) {
+                rw_b = vwords[2];
+            }
+            if (rw_tw == 4) {
+                rw_w = vwords[2];
+            }
+            if (rw_tw > 4) {
+                rw_low = rw_low | vwords[2];
+            }
+            if (rw_tw == 3) {
+                rw_a = vwords[3];
+            }
+            if (rw_tw == 4) {
+                rw_b = vwords[3];
+            }
+            if (rw_tw == 5) {
+                rw_w = vwords[3];
+            }
+            if (rw_tw > 5) {
+                rw_low = rw_low | vwords[3];
+            }
+            if (rw_tw == 4) {
+                rw_a = vwords[4];
+            }
+            if (rw_tw == 5) {
+                rw_b = vwords[4];
+            }
+            if (rw_tw == 6) {
+                rw_w = vwords[4];
+            }
+            if (rw_tw > 6) {
+                rw_low = rw_low | vwords[4];
+            }
+            if (rw_tw == 5) {
+                rw_a = vwords[5];
+            }
+            if (rw_tw == 6) {
+                rw_b = vwords[5];
+            }
+            if (rw_tw == 7) {
+                rw_w = vwords[5];
+            }
+            if (rw_tw > 7) {
+                rw_low = rw_low | vwords[5];
+            }
+            if (rw_tw == 6) {
+                rw_a = vwords[6];
+            }
+            if (rw_tw == 7) {
+                rw_b = vwords[6];
+            }
+            if (rw_tw == 8) {
+                rw_w = vwords[6];
+            }
+            if (rw_tw > 8) {
+                rw_low = rw_low | vwords[6];
+            }
+            if (rw_tw == 7) {
+                rw_a = vwords[7];
+            }
+            if (rw_tw == 8) {
+                rw_b = vwords[7];
+            }
+            if (rw_tw == 9) {
+                rw_w = vwords[7];
+            }
+            if (rw_tw > 9) {
+                rw_low = rw_low | vwords[7];
+            }
+            if (rw_tw == 8) {
+                rw_a = vwords[8];
+            }
+            if (rw_tw == 9) {
+                rw_b = vwords[8];
+            }
+            if (rw_tw == 10) {
+                rw_w = vwords[8];
+            }
+            if (rw_tw > 10) {
+                rw_low = rw_low | vwords[8];
+            }
+            if (rw_tw == 9) {
+                rw_a = vwords[9];
+            }
+            if (rw_tw == 10) {
+                rw_b = vwords[9];
+            }
+            if (rw_tw == 11) {
+                rw_w = vwords[9];
+            }
+            if (rw_tw > 11) {
+                rw_low = rw_low | vwords[9];
+            }
+            if (rw_tw == 10) {
+                rw_a = vwords[10];
+            }
+            if (rw_tw == 11) {
+                rw_b = vwords[10];
+            }
+            if (rw_tw == 12) {
+                rw_w = vwords[10];
+            }
+            if (rw_tw > 12) {
+                rw_low = rw_low | vwords[10];
+            }
+            if (rw_tw == 11) {
+                rw_a = vwords[11];
+            }
+            if (rw_tw == 12) {
+                rw_b = vwords[11];
+            }
+            if (rw_tw == 13) {
+                rw_w = vwords[11];
+            }
+            if (rw_tw > 13) {
+                rw_low = rw_low | vwords[11];
+            }
+            unsigned int rw_bits = 0;
+            if (rw_tw >= 0) {
+                int rw_lz = __clz((int)rw_a);
+                int rw_bp = 32 * rw_tw + 31 - rw_lz;
+                if (rw_bp <= 23) {
+                    rw_bits = rw_a;
+                } else {
+                    unsigned long long rw_wide = (unsigned long long)rw_w << (unsigned long long)rw_lz;
+                    unsigned long long rw_hi = ((unsigned long long)rw_a << 32ull | (unsigned long long)rw_b) << (unsigned long long)rw_lz;
+                    rw_hi = rw_hi | rw_wide >> 32ull;
+                    unsigned int rw_mant = (unsigned int)(rw_hi >> 40ull);
+                    unsigned int rw_sticky = 0;
+                    if ((rw_hi & 549755813887ull) != 0ull) {
+                        rw_sticky = 1;
+                    }
+                    if ((rw_wide & 4294967295ull) != 0ull) {
+                        rw_sticky = 1;
+                    }
+                    if (rw_low != 0) {
+                        rw_sticky = 1;
+                    }
+                    rw_bits = ((unsigned int)(rw_bp - 23) << 23) + rw_mant;
+                    if ((rw_hi >> 39ull & 1ull) != 0ull) {
+                        if ((rw_sticky | rw_mant & 1) != 0) {
+                            rw_bits = rw_bits + 1;
+                        }
+                    }
+                    if (rw_bp >= 277) {
+                        rw_bits = 2139095040;
+                    }
+                }
+                if (rw_neg != 0) {
+                    rw_bits = rw_bits | 2147483648u;
+                }
+            }
+            unsigned int vbits = rw_bits;
+            float rounded = ((spec != 0.0f) ? spec : __uint_as_float(vbits));
             dw[tid] = (__nv_bfloat16)rounded;
         }
     }

@@ -299,14 +299,13 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
             }
             if (u == padded_block) {
                 float total = 0.0f;
-                total = __fmaf_rn(xs[0], xs[0], total);
-                total = __fmaf_rn(xs[1], xs[1], total);
-                total = __fmaf_rn(xs[2], xs[2], total);
-                total = __fmaf_rn(xs[3], xs[3], total);
-                total = __fmaf_rn(xs[4], xs[4], total);
-                total = __fmaf_rn(xs[5], xs[5], total);
-                total = __fmaf_rn(xs[6], xs[6], total);
-                total = __fmaf_rn(xs[7], xs[7], total);
+                float2 dx2_lo = make_float2(0.0f, 0.0f);
+                float2 dx2_hi = make_float2(0.0f, 0.0f);
+                dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[0], xs[1]), make_float2(xs[0], xs[1]), dx2_lo);
+                dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[2], xs[3]), make_float2(xs[2], xs[3]), dx2_hi);
+                dx2_lo = fma_f32x2_rn_noftz(make_float2(xs[4], xs[5]), make_float2(xs[4], xs[5]), dx2_lo);
+                dx2_hi = fma_f32x2_rn_noftz(make_float2(xs[6], xs[7]), make_float2(xs[6], xs[7]), dx2_hi);
+                total = dx2_lo.x + dx2_lo.y + (dx2_hi.x + dx2_hi.y);
                 float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, total, 1);
                 total = total + _shfl_xor_sync_8;
                 float _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, total, 2);
@@ -648,14 +647,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     zs[7] = dz2_3.y;
                     gs[6] = dn2_3.x;
                     gs[7] = dn2_3.y;
-                    dot = __fmaf_rn(gs[0], xs[0], dot);
-                    dot = __fmaf_rn(gs[1], xs[1], dot);
-                    dot = __fmaf_rn(gs[2], xs[2], dot);
-                    dot = __fmaf_rn(gs[3], xs[3], dot);
-                    dot = __fmaf_rn(gs[4], xs[4], dot);
-                    dot = __fmaf_rn(gs[5], xs[5], dot);
-                    dot = __fmaf_rn(gs[6], xs[6], dot);
-                    dot = __fmaf_rn(gs[7], xs[7], dot);
                 } else {
                     float _exp_98 = __nv_expf(zs[0] * -1.0f);
                     float den_0 = 1.0f + _exp_98;
@@ -665,7 +656,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_0 = gs[0] * gate_0;
                     float dzj_0 = gs[0] * (nj_0 * wv[0]) * sig_0 * __fmaf_rn(zs[0], 1.0f - sig_0, 1.0f);
                     float dnj_0 = aj_0 * wv[0];
-                    dot = __fmaf_rn(dnj_0, xs[0], dot);
                     acc[0] = __fmaf_rn(__uint_as_float(__as_u32(aj_0) & keep), __uint_as_float(__as_u32(nj_0) & keep), acc[0]);
                     zs[0] = dzj_0;
                     gs[0] = dnj_0;
@@ -677,7 +667,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_1 = gs[1] * gate_1;
                     float dzj_1 = gs[1] * (nj_1 * wv[1]) * sig_1 * __fmaf_rn(zs[1], 1.0f - sig_1, 1.0f);
                     float dnj_1 = aj_1 * wv[1];
-                    dot = __fmaf_rn(dnj_1, xs[1], dot);
                     acc[1] = __fmaf_rn(__uint_as_float(__as_u32(aj_1) & keep), __uint_as_float(__as_u32(nj_1) & keep), acc[1]);
                     zs[1] = dzj_1;
                     gs[1] = dnj_1;
@@ -689,7 +678,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_2 = gs[2] * gate_2;
                     float dzj_2 = gs[2] * (nj_2 * wv[2]) * sig_2 * __fmaf_rn(zs[2], 1.0f - sig_2, 1.0f);
                     float dnj_2 = aj_2 * wv[2];
-                    dot = __fmaf_rn(dnj_2, xs[2], dot);
                     acc[2] = __fmaf_rn(__uint_as_float(__as_u32(aj_2) & keep), __uint_as_float(__as_u32(nj_2) & keep), acc[2]);
                     zs[2] = dzj_2;
                     gs[2] = dnj_2;
@@ -701,7 +689,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_3 = gs[3] * gate_3;
                     float dzj_3 = gs[3] * (nj_3 * wv[3]) * sig_3 * __fmaf_rn(zs[3], 1.0f - sig_3, 1.0f);
                     float dnj_3 = aj_3 * wv[3];
-                    dot = __fmaf_rn(dnj_3, xs[3], dot);
                     acc[3] = __fmaf_rn(__uint_as_float(__as_u32(aj_3) & keep), __uint_as_float(__as_u32(nj_3) & keep), acc[3]);
                     zs[3] = dzj_3;
                     gs[3] = dnj_3;
@@ -713,7 +700,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_4 = gs[4] * gate_4;
                     float dzj_4 = gs[4] * (nj_4 * wv[4]) * sig_4 * __fmaf_rn(zs[4], 1.0f - sig_4, 1.0f);
                     float dnj_4 = aj_4 * wv[4];
-                    dot = __fmaf_rn(dnj_4, xs[4], dot);
                     acc[4] = __fmaf_rn(__uint_as_float(__as_u32(aj_4) & keep), __uint_as_float(__as_u32(nj_4) & keep), acc[4]);
                     zs[4] = dzj_4;
                     gs[4] = dnj_4;
@@ -725,7 +711,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_5 = gs[5] * gate_5;
                     float dzj_5 = gs[5] * (nj_5 * wv[5]) * sig_5 * __fmaf_rn(zs[5], 1.0f - sig_5, 1.0f);
                     float dnj_5 = aj_5 * wv[5];
-                    dot = __fmaf_rn(dnj_5, xs[5], dot);
                     acc[5] = __fmaf_rn(__uint_as_float(__as_u32(aj_5) & keep), __uint_as_float(__as_u32(nj_5) & keep), acc[5]);
                     zs[5] = dzj_5;
                     gs[5] = dnj_5;
@@ -737,7 +722,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_6 = gs[6] * gate_6;
                     float dzj_6 = gs[6] * (nj_6 * wv[6]) * sig_6 * __fmaf_rn(zs[6], 1.0f - sig_6, 1.0f);
                     float dnj_6 = aj_6 * wv[6];
-                    dot = __fmaf_rn(dnj_6, xs[6], dot);
                     acc[6] = __fmaf_rn(__uint_as_float(__as_u32(aj_6) & keep), __uint_as_float(__as_u32(nj_6) & keep), acc[6]);
                     zs[6] = dzj_6;
                     gs[6] = dnj_6;
@@ -749,11 +733,17 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_7 = gs[7] * gate_7;
                     float dzj_7 = gs[7] * (nj_7 * wv[7]) * sig_7 * __fmaf_rn(zs[7], 1.0f - sig_7, 1.0f);
                     float dnj_7 = aj_7 * wv[7];
-                    dot = __fmaf_rn(dnj_7, xs[7], dot);
                     acc[7] = __fmaf_rn(__uint_as_float(__as_u32(aj_7) & keep), __uint_as_float(__as_u32(nj_7) & keep), acc[7]);
                     zs[7] = dzj_7;
                     gs[7] = dnj_7;
                 }
+                float2 dx2_lo_0 = make_float2(0.0f, 0.0f);
+                float2 dx2_hi_0 = make_float2(0.0f, 0.0f);
+                dx2_lo_0 = fma_f32x2_rn_noftz(make_float2(gs[0], gs[1]), make_float2(xs[0], xs[1]), dx2_lo_0);
+                dx2_hi_0 = fma_f32x2_rn_noftz(make_float2(gs[2], gs[3]), make_float2(xs[2], xs[3]), dx2_hi_0);
+                dx2_lo_0 = fma_f32x2_rn_noftz(make_float2(gs[4], gs[5]), make_float2(xs[4], xs[5]), dx2_lo_0);
+                dx2_hi_0 = fma_f32x2_rn_noftz(make_float2(gs[6], gs[7]), make_float2(xs[6], xs[7]), dx2_hi_0);
+                dot = dx2_lo_0.x + dx2_lo_0.y + (dx2_hi_0.x + dx2_hi_0.y);
                 float _shfl_xor_sync_106 = __shfl_xor_sync(0xFFFFFFFF, dot, 1);
                 dot = dot + _shfl_xor_sync_106;
                 float _shfl_xor_sync_107 = __shfl_xor_sync(0xFFFFFFFF, dot, 2);
@@ -826,14 +816,13 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                 }
             } else {
                 float total_1 = 0.0f;
-                total_1 = __fmaf_rn(xs[0], xs[0], total_1);
-                total_1 = __fmaf_rn(xs[1], xs[1], total_1);
-                total_1 = __fmaf_rn(xs[2], xs[2], total_1);
-                total_1 = __fmaf_rn(xs[3], xs[3], total_1);
-                total_1 = __fmaf_rn(xs[4], xs[4], total_1);
-                total_1 = __fmaf_rn(xs[5], xs[5], total_1);
-                total_1 = __fmaf_rn(xs[6], xs[6], total_1);
-                total_1 = __fmaf_rn(xs[7], xs[7], total_1);
+                float2 dx2_lo_1 = make_float2(0.0f, 0.0f);
+                float2 dx2_hi_1 = make_float2(0.0f, 0.0f);
+                dx2_lo_1 = fma_f32x2_rn_noftz(make_float2(xs[0], xs[1]), make_float2(xs[0], xs[1]), dx2_lo_1);
+                dx2_hi_1 = fma_f32x2_rn_noftz(make_float2(xs[2], xs[3]), make_float2(xs[2], xs[3]), dx2_hi_1);
+                dx2_lo_1 = fma_f32x2_rn_noftz(make_float2(xs[4], xs[5]), make_float2(xs[4], xs[5]), dx2_lo_1);
+                dx2_hi_1 = fma_f32x2_rn_noftz(make_float2(xs[6], xs[7]), make_float2(xs[6], xs[7]), dx2_hi_1);
+                total_1 = dx2_lo_1.x + dx2_lo_1.y + (dx2_hi_1.x + dx2_hi_1.y);
                 float _shfl_xor_sync_110 = __shfl_xor_sync(0xFFFFFFFF, total_1, 1);
                 total_1 = total_1 + _shfl_xor_sync_110;
                 float _shfl_xor_sync_111 = __shfl_xor_sync(0xFFFFFFFF, total_1, 2);
@@ -1173,14 +1162,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     zs[7] = dz2_7.y;
                     gs[6] = dn2_7.x;
                     gs[7] = dn2_7.y;
-                    dot_1 = __fmaf_rn(gs[0], xs[0], dot_1);
-                    dot_1 = __fmaf_rn(gs[1], xs[1], dot_1);
-                    dot_1 = __fmaf_rn(gs[2], xs[2], dot_1);
-                    dot_1 = __fmaf_rn(gs[3], xs[3], dot_1);
-                    dot_1 = __fmaf_rn(gs[4], xs[4], dot_1);
-                    dot_1 = __fmaf_rn(gs[5], xs[5], dot_1);
-                    dot_1 = __fmaf_rn(gs[6], xs[6], dot_1);
-                    dot_1 = __fmaf_rn(gs[7], xs[7], dot_1);
                 } else {
                     float _exp_200 = __nv_expf(zs[0] * -1.0f);
                     float den_8 = 1.0f + _exp_200;
@@ -1190,7 +1171,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_8 = gs[0] * gate_8;
                     float dzj_8 = gs[0] * (nj_8 * wv[0]) * sig_8 * __fmaf_rn(zs[0], 1.0f - sig_8, 1.0f);
                     float dnj_8 = aj_8 * wv[0];
-                    dot_1 = __fmaf_rn(dnj_8, xs[0], dot_1);
                     acc[0] = __fmaf_rn(aj_8, nj_8, acc[0]);
                     zs[0] = dzj_8;
                     gs[0] = dnj_8;
@@ -1202,7 +1182,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_9 = gs[1] * gate_9;
                     float dzj_9 = gs[1] * (nj_9 * wv[1]) * sig_9 * __fmaf_rn(zs[1], 1.0f - sig_9, 1.0f);
                     float dnj_9 = aj_9 * wv[1];
-                    dot_1 = __fmaf_rn(dnj_9, xs[1], dot_1);
                     acc[1] = __fmaf_rn(aj_9, nj_9, acc[1]);
                     zs[1] = dzj_9;
                     gs[1] = dnj_9;
@@ -1214,7 +1193,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_10 = gs[2] * gate_10;
                     float dzj_10 = gs[2] * (nj_10 * wv[2]) * sig_10 * __fmaf_rn(zs[2], 1.0f - sig_10, 1.0f);
                     float dnj_10 = aj_10 * wv[2];
-                    dot_1 = __fmaf_rn(dnj_10, xs[2], dot_1);
                     acc[2] = __fmaf_rn(aj_10, nj_10, acc[2]);
                     zs[2] = dzj_10;
                     gs[2] = dnj_10;
@@ -1226,7 +1204,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_11 = gs[3] * gate_11;
                     float dzj_11 = gs[3] * (nj_11 * wv[3]) * sig_11 * __fmaf_rn(zs[3], 1.0f - sig_11, 1.0f);
                     float dnj_11 = aj_11 * wv[3];
-                    dot_1 = __fmaf_rn(dnj_11, xs[3], dot_1);
                     acc[3] = __fmaf_rn(aj_11, nj_11, acc[3]);
                     zs[3] = dzj_11;
                     gs[3] = dnj_11;
@@ -1238,7 +1215,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_12 = gs[4] * gate_12;
                     float dzj_12 = gs[4] * (nj_12 * wv[4]) * sig_12 * __fmaf_rn(zs[4], 1.0f - sig_12, 1.0f);
                     float dnj_12 = aj_12 * wv[4];
-                    dot_1 = __fmaf_rn(dnj_12, xs[4], dot_1);
                     acc[4] = __fmaf_rn(aj_12, nj_12, acc[4]);
                     zs[4] = dzj_12;
                     gs[4] = dnj_12;
@@ -1250,7 +1226,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_13 = gs[5] * gate_13;
                     float dzj_13 = gs[5] * (nj_13 * wv[5]) * sig_13 * __fmaf_rn(zs[5], 1.0f - sig_13, 1.0f);
                     float dnj_13 = aj_13 * wv[5];
-                    dot_1 = __fmaf_rn(dnj_13, xs[5], dot_1);
                     acc[5] = __fmaf_rn(aj_13, nj_13, acc[5]);
                     zs[5] = dzj_13;
                     gs[5] = dnj_13;
@@ -1262,7 +1237,6 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_14 = gs[6] * gate_14;
                     float dzj_14 = gs[6] * (nj_14 * wv[6]) * sig_14 * __fmaf_rn(zs[6], 1.0f - sig_14, 1.0f);
                     float dnj_14 = aj_14 * wv[6];
-                    dot_1 = __fmaf_rn(dnj_14, xs[6], dot_1);
                     acc[6] = __fmaf_rn(aj_14, nj_14, acc[6]);
                     zs[6] = dzj_14;
                     gs[6] = dnj_14;
@@ -1274,11 +1248,17 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
                     float aj_15 = gs[7] * gate_15;
                     float dzj_15 = gs[7] * (nj_15 * wv[7]) * sig_15 * __fmaf_rn(zs[7], 1.0f - sig_15, 1.0f);
                     float dnj_15 = aj_15 * wv[7];
-                    dot_1 = __fmaf_rn(dnj_15, xs[7], dot_1);
                     acc[7] = __fmaf_rn(aj_15, nj_15, acc[7]);
                     zs[7] = dzj_15;
                     gs[7] = dnj_15;
                 }
+                float2 dx2_lo_1_1 = make_float2(0.0f, 0.0f);
+                float2 dx2_hi_1_1 = make_float2(0.0f, 0.0f);
+                dx2_lo_1_1 = fma_f32x2_rn_noftz(make_float2(gs[0], gs[1]), make_float2(xs[0], xs[1]), dx2_lo_1_1);
+                dx2_hi_1_1 = fma_f32x2_rn_noftz(make_float2(gs[2], gs[3]), make_float2(xs[2], xs[3]), dx2_hi_1_1);
+                dx2_lo_1_1 = fma_f32x2_rn_noftz(make_float2(gs[4], gs[5]), make_float2(xs[4], xs[5]), dx2_lo_1_1);
+                dx2_hi_1_1 = fma_f32x2_rn_noftz(make_float2(gs[6], gs[7]), make_float2(xs[6], xs[7]), dx2_hi_1_1);
+                dot_1 = dx2_lo_1_1.x + dx2_lo_1_1.y + (dx2_hi_1_1.x + dx2_hi_1_1.y);
                 float _shfl_xor_sync_208 = __shfl_xor_sync(0xFFFFFFFF, dot_1, 1);
                 dot_1 = dot_1 + _shfl_xor_sync_208;
                 float _shfl_xor_sync_209 = __shfl_xor_sync(0xFFFFFFFF, dot_1, 2);
@@ -1660,15 +1640,285 @@ kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3(__nv_bfloat16* __restri
             long long top = carry << 10ll & 281474976710655ll;
             digits[6] = digits[6] >> 38ll | top;
             carry = carry >> 38ll;
-            double exact = (double)carry;
-            exact = exact * 281474976710656.0 + (double)digits[6];
-            exact = exact * 281474976710656.0 + (double)digits[5];
-            exact = exact * 281474976710656.0 + (double)digits[4];
-            exact = exact * 281474976710656.0 + (double)digits[3];
-            exact = exact * 281474976710656.0 + (double)digits[2];
-            exact = exact * 281474976710656.0 + (double)digits[1];
-            exact = exact * 281474976710656.0 + (double)digits[0];
-            float rounded = ((spec != 0.0f) ? spec : (float)(exact * 1.401298464324817e-45));
+            unsigned int vwords[12];
+            unsigned long long dlo_0 = (unsigned long long)digits[0];
+            unsigned long long dhi_0 = (unsigned long long)digits[1];
+            vwords[0] = (unsigned int)(dlo_0 & 4294967295ull);
+            vwords[1] = (unsigned int)(dlo_0 >> 32ull | (dhi_0 & 65535ull) << 16ull);
+            vwords[2] = (unsigned int)(dhi_0 >> 16ull);
+            unsigned long long dlo_1 = (unsigned long long)digits[2];
+            unsigned long long dhi_1 = (unsigned long long)digits[3];
+            vwords[3] = (unsigned int)(dlo_1 & 4294967295ull);
+            vwords[4] = (unsigned int)(dlo_1 >> 32ull | (dhi_1 & 65535ull) << 16ull);
+            vwords[5] = (unsigned int)(dhi_1 >> 16ull);
+            unsigned long long dlo_2 = (unsigned long long)digits[4];
+            unsigned long long dhi_2 = (unsigned long long)digits[5];
+            vwords[6] = (unsigned int)(dlo_2 & 4294967295ull);
+            vwords[7] = (unsigned int)(dlo_2 >> 32ull | (dhi_2 & 65535ull) << 16ull);
+            vwords[8] = (unsigned int)(dhi_2 >> 16ull);
+            vwords[9] = (unsigned int)((unsigned long long)digits[6] & 4294967295ull);
+            long long vtop = carry << 16ll | digits[6] >> 32ll;
+            long long rw_top = vtop;
+            int rw_neg = 0;
+            if (rw_top < 0ll) {
+                rw_neg = 1;
+                unsigned long long rw_c = 1ull;
+                unsigned long long rw_t_0 = (unsigned long long)(vwords[0] ^ 4294967295u) + rw_c;
+                vwords[0] = (unsigned int)(rw_t_0 & 4294967295ull);
+                rw_c = rw_t_0 >> 32ull;
+                unsigned long long rw_t_1 = (unsigned long long)(vwords[1] ^ 4294967295u) + rw_c;
+                vwords[1] = (unsigned int)(rw_t_1 & 4294967295ull);
+                rw_c = rw_t_1 >> 32ull;
+                unsigned long long rw_t_2 = (unsigned long long)(vwords[2] ^ 4294967295u) + rw_c;
+                vwords[2] = (unsigned int)(rw_t_2 & 4294967295ull);
+                rw_c = rw_t_2 >> 32ull;
+                unsigned long long rw_t_3 = (unsigned long long)(vwords[3] ^ 4294967295u) + rw_c;
+                vwords[3] = (unsigned int)(rw_t_3 & 4294967295ull);
+                rw_c = rw_t_3 >> 32ull;
+                unsigned long long rw_t_4 = (unsigned long long)(vwords[4] ^ 4294967295u) + rw_c;
+                vwords[4] = (unsigned int)(rw_t_4 & 4294967295ull);
+                rw_c = rw_t_4 >> 32ull;
+                unsigned long long rw_t_5 = (unsigned long long)(vwords[5] ^ 4294967295u) + rw_c;
+                vwords[5] = (unsigned int)(rw_t_5 & 4294967295ull);
+                rw_c = rw_t_5 >> 32ull;
+                unsigned long long rw_t_6 = (unsigned long long)(vwords[6] ^ 4294967295u) + rw_c;
+                vwords[6] = (unsigned int)(rw_t_6 & 4294967295ull);
+                rw_c = rw_t_6 >> 32ull;
+                unsigned long long rw_t_7 = (unsigned long long)(vwords[7] ^ 4294967295u) + rw_c;
+                vwords[7] = (unsigned int)(rw_t_7 & 4294967295ull);
+                rw_c = rw_t_7 >> 32ull;
+                unsigned long long rw_t_8 = (unsigned long long)(vwords[8] ^ 4294967295u) + rw_c;
+                vwords[8] = (unsigned int)(rw_t_8 & 4294967295ull);
+                rw_c = rw_t_8 >> 32ull;
+                unsigned long long rw_t_9 = (unsigned long long)(vwords[9] ^ 4294967295u) + rw_c;
+                vwords[9] = (unsigned int)(rw_t_9 & 4294967295ull);
+                rw_c = rw_t_9 >> 32ull;
+                rw_top = -1ll - rw_top + (long long)rw_c;
+            }
+            vwords[10] = (unsigned int)((unsigned long long)rw_top & 4294967295ull);
+            vwords[11] = (unsigned int)((unsigned long long)rw_top >> 32ull);
+            int rw_tw = -1;
+            if (vwords[0] != 0) {
+                rw_tw = 0;
+            }
+            if (vwords[1] != 0) {
+                rw_tw = 1;
+            }
+            if (vwords[2] != 0) {
+                rw_tw = 2;
+            }
+            if (vwords[3] != 0) {
+                rw_tw = 3;
+            }
+            if (vwords[4] != 0) {
+                rw_tw = 4;
+            }
+            if (vwords[5] != 0) {
+                rw_tw = 5;
+            }
+            if (vwords[6] != 0) {
+                rw_tw = 6;
+            }
+            if (vwords[7] != 0) {
+                rw_tw = 7;
+            }
+            if (vwords[8] != 0) {
+                rw_tw = 8;
+            }
+            if (vwords[9] != 0) {
+                rw_tw = 9;
+            }
+            if (vwords[10] != 0) {
+                rw_tw = 10;
+            }
+            if (vwords[11] != 0) {
+                rw_tw = 11;
+            }
+            unsigned int rw_a = 0;
+            unsigned int rw_b = 0;
+            unsigned int rw_w = 0;
+            unsigned int rw_low = 0;
+            if (rw_tw == 0) {
+                rw_a = vwords[0];
+            }
+            if (rw_tw == 1) {
+                rw_b = vwords[0];
+            }
+            if (rw_tw == 2) {
+                rw_w = vwords[0];
+            }
+            if (rw_tw > 2) {
+                rw_low = rw_low | vwords[0];
+            }
+            if (rw_tw == 1) {
+                rw_a = vwords[1];
+            }
+            if (rw_tw == 2) {
+                rw_b = vwords[1];
+            }
+            if (rw_tw == 3) {
+                rw_w = vwords[1];
+            }
+            if (rw_tw > 3) {
+                rw_low = rw_low | vwords[1];
+            }
+            if (rw_tw == 2) {
+                rw_a = vwords[2];
+            }
+            if (rw_tw == 3) {
+                rw_b = vwords[2];
+            }
+            if (rw_tw == 4) {
+                rw_w = vwords[2];
+            }
+            if (rw_tw > 4) {
+                rw_low = rw_low | vwords[2];
+            }
+            if (rw_tw == 3) {
+                rw_a = vwords[3];
+            }
+            if (rw_tw == 4) {
+                rw_b = vwords[3];
+            }
+            if (rw_tw == 5) {
+                rw_w = vwords[3];
+            }
+            if (rw_tw > 5) {
+                rw_low = rw_low | vwords[3];
+            }
+            if (rw_tw == 4) {
+                rw_a = vwords[4];
+            }
+            if (rw_tw == 5) {
+                rw_b = vwords[4];
+            }
+            if (rw_tw == 6) {
+                rw_w = vwords[4];
+            }
+            if (rw_tw > 6) {
+                rw_low = rw_low | vwords[4];
+            }
+            if (rw_tw == 5) {
+                rw_a = vwords[5];
+            }
+            if (rw_tw == 6) {
+                rw_b = vwords[5];
+            }
+            if (rw_tw == 7) {
+                rw_w = vwords[5];
+            }
+            if (rw_tw > 7) {
+                rw_low = rw_low | vwords[5];
+            }
+            if (rw_tw == 6) {
+                rw_a = vwords[6];
+            }
+            if (rw_tw == 7) {
+                rw_b = vwords[6];
+            }
+            if (rw_tw == 8) {
+                rw_w = vwords[6];
+            }
+            if (rw_tw > 8) {
+                rw_low = rw_low | vwords[6];
+            }
+            if (rw_tw == 7) {
+                rw_a = vwords[7];
+            }
+            if (rw_tw == 8) {
+                rw_b = vwords[7];
+            }
+            if (rw_tw == 9) {
+                rw_w = vwords[7];
+            }
+            if (rw_tw > 9) {
+                rw_low = rw_low | vwords[7];
+            }
+            if (rw_tw == 8) {
+                rw_a = vwords[8];
+            }
+            if (rw_tw == 9) {
+                rw_b = vwords[8];
+            }
+            if (rw_tw == 10) {
+                rw_w = vwords[8];
+            }
+            if (rw_tw > 10) {
+                rw_low = rw_low | vwords[8];
+            }
+            if (rw_tw == 9) {
+                rw_a = vwords[9];
+            }
+            if (rw_tw == 10) {
+                rw_b = vwords[9];
+            }
+            if (rw_tw == 11) {
+                rw_w = vwords[9];
+            }
+            if (rw_tw > 11) {
+                rw_low = rw_low | vwords[9];
+            }
+            if (rw_tw == 10) {
+                rw_a = vwords[10];
+            }
+            if (rw_tw == 11) {
+                rw_b = vwords[10];
+            }
+            if (rw_tw == 12) {
+                rw_w = vwords[10];
+            }
+            if (rw_tw > 12) {
+                rw_low = rw_low | vwords[10];
+            }
+            if (rw_tw == 11) {
+                rw_a = vwords[11];
+            }
+            if (rw_tw == 12) {
+                rw_b = vwords[11];
+            }
+            if (rw_tw == 13) {
+                rw_w = vwords[11];
+            }
+            if (rw_tw > 13) {
+                rw_low = rw_low | vwords[11];
+            }
+            unsigned int rw_bits = 0;
+            if (rw_tw >= 0) {
+                int rw_lz = __clz((int)rw_a);
+                int rw_bp = 32 * rw_tw + 31 - rw_lz;
+                if (rw_bp <= 23) {
+                    rw_bits = rw_a;
+                } else {
+                    unsigned long long rw_wide = (unsigned long long)rw_w << (unsigned long long)rw_lz;
+                    unsigned long long rw_hi = ((unsigned long long)rw_a << 32ull | (unsigned long long)rw_b) << (unsigned long long)rw_lz;
+                    rw_hi = rw_hi | rw_wide >> 32ull;
+                    unsigned int rw_mant = (unsigned int)(rw_hi >> 40ull);
+                    unsigned int rw_sticky = 0;
+                    if ((rw_hi & 549755813887ull) != 0ull) {
+                        rw_sticky = 1;
+                    }
+                    if ((rw_wide & 4294967295ull) != 0ull) {
+                        rw_sticky = 1;
+                    }
+                    if (rw_low != 0) {
+                        rw_sticky = 1;
+                    }
+                    rw_bits = ((unsigned int)(rw_bp - 23) << 23) + rw_mant;
+                    if ((rw_hi >> 39ull & 1ull) != 0ull) {
+                        if ((rw_sticky | rw_mant & 1) != 0) {
+                            rw_bits = rw_bits + 1;
+                        }
+                    }
+                    if (rw_bp >= 277) {
+                        rw_bits = 2139095040;
+                    }
+                }
+                if (rw_neg != 0) {
+                    rw_bits = rw_bits | 2147483648u;
+                }
+            }
+            unsigned int vbits = rw_bits;
+            float rounded = ((spec != 0.0f) ? spec : __uint_as_float(vbits));
             dw[tid] = rounded;
         }
     }
