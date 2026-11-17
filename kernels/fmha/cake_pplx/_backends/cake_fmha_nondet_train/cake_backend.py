@@ -216,6 +216,44 @@ def _fp32(value: float) -> float:
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
+# The kernel parameters of each stage in the order its stage launcher passes them positionally (``_positional``).
+_POSITIONAL = {
+    "bwd_pre": ("O", "dO", "LSE", "LSE_log2", "dPsum", "dQ_accum", "seqlen_q", "num_heads"),
+    "bwd_main": (
+        "dQ_accum",
+        "LSE_log2_gmem",
+        "dPsum_gmem",
+        "dK_gmem",
+        "dV_gmem",
+        "Q",
+        "K",
+        "V",
+        "dO",
+        "dK",
+        "dV",
+        "seqlen_q",
+        "seqlen_kv",
+        "softmax_scale",
+        "softmax_scale_log2",
+        "num_m_blocks",
+        "num_heads",
+    ),
+    "bwd_post": ("dQ_accum", "dQ", "seqlen_q", "softmax_scale", "num_heads"),
+}
+
+
+@functools.cache
+def _positional(name: str, stage: str) -> bool:
+    """Whether record ``name`` serves ``stage``, takes the parameters of ``_POSITIONAL[stage]`` in that order and
+    :func:`.cake_jit.grid` gives ``stage`` the grid ``(S / BLOCK, H, B)``; its stage launcher then passes the
+    arguments positionally to the FFI entry, and otherwise launches through :func:`_launch`.  An unknown record is
+    the ``KeyError`` of :func:`record`."""
+    if record(name)["stage"] != stage or parameters(name) != _POSITIONAL[stage]:
+        return False
+    rows = 11 if stage == "bwd_main" else 7
+    return tuple(cake_jit.grid(stage, 3, 5, 7 * BLOCK, 11 * BLOCK)) == (rows, 5, 3)
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Stage launchers: caller-owned buffers, the current stream, no allocation, no check of the operands' contents
 
@@ -235,6 +273,9 @@ def launch_bwd_pre(
     ``lse`` is ``-inf``), FP32 ``[B*H, Sq]`` (row ``b*H + h``), and clears ``dq_accum`` (FP32, ``B*H*Sq*D``
     elements)."""
     B, Sq, H, _ = out.shape
+    if _positional(name, "bwd_pre"):
+        _entry(name, device_arch(out.device.index))(out, dout, lse, lse_log2, dpsum, dq_accum, Sq, H, Sq // BLOCK, H, B)
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Sq)}
     values = {
         "O": out,
@@ -270,6 +311,30 @@ def launch_bwd_main(
     B, Sq, H, _ = q.shape
     Skv = k.shape[1]
     scale = float(softmax_scale)
+    if _positional(name, "bwd_main"):
+        _entry(name, device_arch(q.device.index))(
+            dq_accum,
+            lse_log2,
+            dpsum,
+            dk,
+            dv,
+            q,
+            k,
+            v,
+            dout,
+            dk,
+            dv,
+            Sq,
+            Skv,
+            scale,
+            _fp32(scale * LOG2_E),
+            Sq // BLOCK,
+            H,
+            Skv // BLOCK,
+            H,
+            B,
+        )
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Skv)}
     values = {
         "dQ_accum": dq_accum,
@@ -303,6 +368,9 @@ def launch_bwd_post(
     """Launch the postprocess record ``name``: it writes ``dq = bf16(dq_accum * softmax_scale)``, BF16
     ``[B, Sq, H, D]``, from the FP32 accumulator of the main stage."""
     B, Sq, H, _ = dq.shape
+    if _positional(name, "bwd_post"):
+        _entry(name, device_arch(dq.device.index))(dq_accum, dq, Sq, float(softmax_scale), H, Sq // BLOCK, H, B)
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Sq)}
     values = {
         "dQ_accum": dq_accum,
