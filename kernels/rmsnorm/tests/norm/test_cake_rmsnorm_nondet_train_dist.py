@@ -171,7 +171,15 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
             dist.reduce_scatter_tensor(outp, inp)
 
     def timed(call, comm=None):
-        """``(call ms, ms from the call's start to the side stream's completion or None, outputs)``."""
+        """``(call ms, ms from the call's start to the side stream's completion or None, outputs)``.
+
+        The timed span holds the call alone.  The copies of its outputs that the
+        checks keep are taken after ``end``: a case keeps a copy of every call's
+        outputs, so the copies grow the caching allocator, and a ``cudaMalloc``
+        holds the host thread -- and with it the compute stream the span
+        measures -- for as long as the driver takes.  The call's own outputs
+        reuse the blocks of the previous call's outputs, released once copied.
+        """
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         done = None
@@ -182,8 +190,10 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 done.record(side)
         torch.cuda._sleep(PRE_SLEEP_CYCLES)
         start.record()
-        result = call()
+        outputs = call()
         end.record()
+        result = tuple(t.clone() for t in outputs)
+        del outputs
         torch.cuda.synchronize()
         return (
             start.elapsed_time(end),
@@ -243,7 +253,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         return x, u, g, g_h, weight
 
     def run(forward, backward, ws, eps, x, u, g, g_h, weight):
-        """One forward and backward call on ``ws``: every output, cloned."""
+        """One forward and backward call on ``ws``: the outputs it allocated."""
         outputs = forward(x, weight, eps, residual=u)
         normalized = outputs[2] if u is not None else x
         dx, dw = backward(
@@ -254,7 +264,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
             g_residual=g_h,
             workspace=ws,
         )
-        return tuple(t.clone() for t in (*outputs, dx, dw))
+        return (*outputs, dx, dw)
 
     for index, case in enumerate(CASES):
         collective, mode, deterministic, hidden, residual, w, rows = case
