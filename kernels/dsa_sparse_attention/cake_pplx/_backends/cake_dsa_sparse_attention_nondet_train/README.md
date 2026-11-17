@@ -93,7 +93,7 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   `topk_length` the forward kernel derives each row's length (last valid slot
   + 1) itself while it runs and the training entry hands that vector to the
   backward, so both skip the trailing invalid key blocks of short rows; the
-  results are those of the full row.
+  skipped blocks hold only invalid slots.
 * The varlen form takes per-document indices (`gather_kv_indices`, relative
   to `cu_seqlens_k[d]`) and turns them into global key rows on device.  The
   NoPE varlen entry follows the size rule of its own section below

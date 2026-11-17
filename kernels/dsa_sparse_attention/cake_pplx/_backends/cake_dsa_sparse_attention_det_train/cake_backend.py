@@ -2658,8 +2658,8 @@ def prepare_dsa_train(
     Without it the forward kernel derives them itself (last valid slot + 1 per
     row) into the binding's own ``[T]`` vector while it runs and skips the
     trailing invalid key blocks; the backward stages of such a binding treat
-    every slot as potentially valid (the results are those of the full row
-    either way).  ``derive_topk_length=True`` makes the forward derive the
+    every slot as potentially valid (the skipped blocks hold only
+    invalid slots).  ``derive_topk_length=True`` makes the forward derive the
     lengths into the caller's ``topk_length`` tensor instead (its contents are
     ignored on entry), so a training step can hand them to its backward.
     """

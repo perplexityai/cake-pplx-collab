@@ -213,8 +213,8 @@ def cake_dsa_sparse_attention_nondet(
     layouts: unit innermost stride; head / token / key-row strides that are
     positive multiples of 8 elements (16 bytes, the TMA descriptor stride
     granule); head stride and key row stride at least the slice width; a
-    16-byte-aligned base address.  A strided view runs the kernels of the
-    contiguous copy (only descriptor fields and pointer offsets change).
+    16-byte-aligned base address.  A strided view is read in place (only
+    descriptor fields and pointer offsets change).
 
     Parameters
     ----------
