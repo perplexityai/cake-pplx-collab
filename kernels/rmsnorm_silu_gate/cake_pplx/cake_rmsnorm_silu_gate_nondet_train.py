@@ -76,29 +76,29 @@ the repeatable backward.  The kernels are those of the standalone package
   program), so ``y``'s bits can
   differ between bands while each program repeats them for the same inputs
   on the same device.
-- The backward is one kernel; ``dx`` and ``dz`` are one row arithmetic in
-  every band but the fused and the repeatable ones (the deterministic
-  package's backward need not give these
-  bits; the repeatable band gives its bits, and the fused band does on
-  SM100).  A call of few rows
+- The backward is one kernel; each backward program repeats ``dx`` and
+  ``dz`` bit for bit for the same inputs on the same device, but the
+  programs' ``.f32x2`` FMA chains for a row's sums differ by program and by
+  architecture, so their last bits can differ between bands (the
+  deterministic package's backward need not give these bits; the
+  repeatable band gives its bits).  A call of few rows
   runs one thread-block cluster of 16 CTAs, which adds the weight-gradient
   partials of each column in a fixed order in FP32, rounds that sum once
   (to BF16 for a BF16 weight gradient) and uses no workspace.  The short
   backward (256-thread CTAs, every CTA's FP32 partials added in rank order)
   runs a BF16 weight gradient or ``compute_grad_weight=False`` up to 256 rows;
   its weight gradient repeats its bits, which need not be the deterministic
-  package's.  The exact tiny backward (the FP32 weight-gradient terms of the
-  deterministic backward at 2e989556, summed in plain FP32 words in an order
-  of its own)
+  package's.  The exact tiny backward (its FP32 weight-gradient terms summed
+  in plain FP32 words in an order of its own)
   runs an FP32 weight gradient up to 512 rows on every architecture and a BF16
   one (or ``compute_grad_weight=False``) from 257 up to 512 rows on SM100 and
   SM107.  Past those rows the rows (``T * H``) and the SM count pick the
   kernel by bands of rows per SM.  The chunked backwards of an FP32 weight
   gradient run over the chunks of rows of the deterministic backward at
   2e989556 (8-row blocks, ``max(1, ceil(blocks / 8192))`` blocks a
-  chunk), at most 8 CTAs per SM: each chunk's FP32 weight-gradient partial is
-  that backward's, and the partials are added exactly, as signed 64-bit
-  integer windows of their FP32 values (an addition of integers does not
+  chunk), at most 8 CTAs per SM: the chunks' FP32 weight-gradient partials
+  are added exactly, as signed 64-bit integer windows of their FP32 values
+  (an addition of integers does not
   depend on its order); the CTA that arrives last rounds the exact sum once
   into the weight gradient, in integer arithmetic (no FP64).  So that weight
   gradient is the same bits at any grid, and an infinite or ``NaN`` partial
@@ -121,9 +121,9 @@ the repeatable backward.  The kernels are those of the standalone package
   arithmetic: 256-thread CTAs (16 lanes a row, 16-row blocks,
   ``min(ceil(rows / 16), 4 * SMs)`` of them), which claim the blocks in chunks
   when there are more blocks than CTAs, with that backward's approximate gate
-  and ``rstd``, so ``dx`` and ``dz`` are the same bits at any grid (on
-  SM100 the deterministic package's; on SM103 and SM107 a row's sums run on
-  other FMA chains, so their last bits may differ from that package's).  It
+  and ``rstd``, so ``dx`` and ``dz`` are the same bits at any grid (a row's
+  sums run on FMA chains of its own, set per architecture, so their last
+  bits may differ from that package's).  It
   adds each thread's FP32 runs of at most 16 rows into FP32 words and each
   CTA's FP32 column sums into 8 FP32 replicas with FP32 atomic adds; the CTA
   that arrives last sums the replicas in FP32 and rounds the sum to BF16 (no
@@ -138,8 +138,8 @@ the repeatable backward.  The kernels are those of the standalone package
   each chunk's weight-gradient terms added exactly into fixed-point digits in
   the workspace and the sum rounded once by the CTA that arrives last.  Its
   ``dx``, ``dz`` and weight gradient are the deterministic package's bits,
-  the same for the rows and the SM count (the weight gradient not the sum of
-  the chunk partials of the deterministic backward at 2e989556).  Packed rows (``grad_out``, ``x`` and ``z`` each with head stride
+  the same for the rows and the SM count.  Packed rows (``grad_out``, ``x``
+  and ``z`` each with head stride
   128 and token stride ``H * 128``) run its copy of the deterministic
   package's look-ahead program, the same build, from 2560 rows per SM on
   SM100 and SM103 and from 1536 on SM107, with the same bits.
@@ -475,31 +475,31 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     in FP32, the statistics and the gate recomputed from ``x`` and ``z``.
 
     One kernel of the non-deterministic package (the rows, the SM count and
-    the dtype of ``dw`` pick it; see the module): ``dx`` and ``dz`` are one
-    row arithmetic in every band but the fused and the repeatable ones (there
-    the deterministic package's row arithmetic: in the repeatable band its
-    bits, in the fused band its bits on SM100).  A
+    the dtype of ``dw`` pick it; see the module): each backward program
+    repeats ``dx`` and ``dz`` bit for bit, but the programs' ``.f32x2`` FMA
+    chains for a row's sums differ by program and by architecture, so their
+    last bits can differ between bands (the fused and the repeatable band run
+    the deterministic package's row arithmetic; the repeatable band gives its
+    bits).  A
     chunked backward (an FP32 ``dw``) runs over the chunks of rows of the
-    deterministic backward at 2e989556: each chunk's FP32
-    weight-gradient partial is that backward's, and the partials are added
-    exactly as 64-bit integer windows; the CTA that arrives last rounds the
-    exact sum once into ``dw`` in integer arithmetic (adding
-    ``grad_weight``'s value first when accumulating).  A call of few rows runs
-    one cluster of 16 CTAs
-    (``dx`` and ``dz`` the same arithmetic) that adds the partials of a ``dw``
+    deterministic backward at 2e989556: the chunks' FP32 weight-gradient
+    partials are added exactly as 64-bit integer windows; the CTA that
+    arrives last rounds the exact sum once into ``dw`` in integer arithmetic
+    (adding ``grad_weight``'s value first when accumulating).  A call of few
+    rows runs one cluster of 16 CTAs that adds the partials of a ``dw``
     column in a fixed order in FP32 and uses no workspace: up to 256 rows
     with a BF16 ``dw`` or ``compute_grad_weight=False`` (the
     short backward, whose ``dw`` repeats its bits, which need not be the
     deterministic backward's), else up to 512 rows (the exact tiny backward,
-    the FP32 terms of the deterministic backward at 2e989556 summed in plain
-    FP32 words in an order of its own; SM103 runs
+    its FP32 terms summed in plain FP32 words in an order of its own; SM103
+    runs
     it for an FP32 ``dw`` only).  The fused band (a BF16 ``dw`` or
     ``compute_grad_weight=False`` past 512 rows on SM100 and past 256 rows on
     SM103 up to 1000 rows per SM, on SM107 past 64 up to 256 rows per SM; an
     FP32 ``dw`` has none) runs
     the fused backward, the deterministic package's fused backward's schedule
-    and row arithmetic (``dx`` and ``dz`` the same bits at any grid, its
-    bits on SM100) with FP32 runs of rows added into FP32 words and the
+    and row arithmetic (``dx`` and ``dz`` the same bits at any grid) with
+    FP32 runs of rows added into FP32 words and the
     CTAs' FP32 column sums added into FP32 replicas with FP32 atomic adds:
     the last bits of that ``dw`` may vary from run to run.
     Past 1000 rows per SM (on SM107 past 512 rows up to 64 rows per SM and past

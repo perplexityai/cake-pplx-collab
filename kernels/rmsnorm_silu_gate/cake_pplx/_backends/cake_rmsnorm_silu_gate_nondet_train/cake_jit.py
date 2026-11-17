@@ -32,21 +32,24 @@ A role is one kernel of a call: ``fwd`` (the forward: ``rstd`` from
 ``rsqrt.approx`` and the SiLU gate from ``ex2.approx`` and ``rcp.approx``,
 every row's arithmetic fixed, so ``y`` is the same bits on every call) and
 ``bwd_bf16`` / ``bwd_f32`` (the backward: ``dx``, ``dz`` and the weight
-gradient in one kernel; ``dx`` and ``dz`` are one row arithmetic in every
-backward program but the fused one (the deterministic package's fused
-backward's row arithmetic, with its approximate gate and ``rstd``, and the
-repeatable one, that program itself), all within one BF16 ulp of FP64 plus
-1/64 ulp of the tensor's largest finite magnitude; the chunked programs sum
-the FP32
-partial of each chunk of rows exactly, as integers, into a weight gradient
-rounded once to FP32 from the exact sum in integer arithmetic, then to BF16
-for a BF16 one, so every output is the same bits at any grid and in any order of
-the CTAs; the repeatable program of a BF16 weight gradient, the
-deterministic package's fused backward, adds each chunk's weight-gradient
+gradient in one kernel; each backward program repeats ``dx`` and ``dz`` bit
+for bit for the same inputs on the same device, and the programs'
+``.f32x2`` FMA chains for a row's sums differ by program and by
+architecture, so the last bits of ``dx`` and ``dz`` can differ between
+programs (the fused one runs the deterministic package's fused backward's
+row arithmetic, with its approximate gate and ``rstd``, and the repeatable
+one is that program itself); the tests hold every floating output to the
+PyTorch BF16 naive implementation of the same operation; the chunked
+programs sum the FP32 partial of each chunk of rows exactly, as integers,
+into a weight gradient rounded once to FP32 from the exact sum in integer
+arithmetic, then to BF16 for a BF16 one, so every output is the same bits
+at any grid and in any order of the CTAs; the repeatable program of a BF16
+weight gradient, the deterministic package's fused backward, adds each
+chunk's weight-gradient
 terms exactly into fixed-point digits, so every output is the same bits
 for the rows and the SM count; the fused and the row-claims
-programs of a BF16 weight gradient add each CTA's FP32 pair column sums,
-rounded to FP32 words, into FP32 replicas with FP32 atomic adds, which the
+programs of a BF16 weight gradient add each CTA's FP32 column sums, one
+plain FP32 word a column, into FP32 replicas with FP32 atomic adds, which the
 CTA that arrives last sums, so only their weight gradient may vary in its
 last bits from run to run).
 ``ROUTES[arch][role]`` names the one module a role runs on an architecture;
@@ -137,8 +140,8 @@ takes) is one thread-block cluster of 16 CTAs that sums the weight gradient
 on chip in a fixed order and rounds it once, with no workspace: the exact
 tiny backward (``<role>_t512``: 4 teams of the 128-thread CTA of the
 deterministic backward at ``2e989556`` a CTA, up to 512 rows; the
-weight gradient that pair's FP32 terms summed in plain FP32 words in an
-order of its own, so not that pair's bits) and, for a BF16 weight gradient, the short
+weight gradient its FP32 terms summed in plain FP32 words in an order of
+its own) and, for a BF16 weight gradient, the short
 backward (``bwd_bf16_short``: 256-thread CTAs with the row-claims backward's
 row arithmetic, each CTA finishing 8 columns from every CTA's FP32 partials
 in rank order in FP32, up to 256 rows).  The fused backward of a BF16
@@ -148,10 +151,9 @@ runs the deterministic package's fused backward's schedule and row
 arithmetic: 256-thread CTAs, 16 lanes a row, 16-row blocks, at most 4 CTAs
 per SM (with more blocks than CTAs the CTAs claim the blocks in chunks of a
 halving table), the next block warmed in L2 up to the architecture's share
-of blocks a CTA, the approximate gate and ``rstd``, so ``dx`` and ``dz``
-are that program's bits on sm_100a (on sm_103a and sm_107a a row's sums run
-on other FMA chains, so their last bits differ; within the same bound as
-every backward's).  Its
+of blocks a CTA, the approximate gate and ``rstd``; a row's sums run on FMA
+chains of its own, set per architecture, so the last bits of ``dx`` and
+``dz`` may differ from that program's.  Its
 weight gradient is the row-claims backward's kind: each thread's FP32 runs
 of at most 16 rows added into FP32 words, a CTA's FP32 column sums
 added into 8 FP32 replicas in ``dw_sums`` and the
@@ -164,10 +166,10 @@ architecture (``bwd_bf16_rep``) is a build of the deterministic package's
 fused backward kernel file under this package's name (its build
 ``{"math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share":
 None, "threads": 256}``), the same schedule and row arithmetic as the
-fused backward's (so ``dx`` and ``dz`` are the fused backward's bits), each
-chunk's weight-gradient terms added exactly into fixed-point digits and the
-sum rounded once by the CTA that arrives last, so its ``dw`` is the
-deterministic package's bits too, the same for the rows and the SM count.
+fused backward's, each chunk's weight-gradient terms added exactly into
+fixed-point digits and the sum rounded once by the CTA that arrives last,
+so its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits, the
+same for the rows and the SM count.
 Its long program (``bwd_bf16_rep_long``, every architecture; build
 ``{"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16",
 "prefetch_share": None, "threads": 256}``) is the same build in the

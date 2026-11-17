@@ -43,9 +43,9 @@ The fused band runs the fused backward (its build `{"math": "ax",
 `compute_grad_weight=False`): the deterministic package's fused backward's
 schedule and row arithmetic (the approximate gate and `rstd`, the
 next-block prefetch up to the architecture's share), so its `dx` and `dz`
-are the same bits at any grid (the deterministic package's bits on
-`sm_100a`; on `sm_103a` and `sm_107a` a row's sums run on other FMA chains,
-so their last bits may differ from that package's), with the row-claims
+are the same bits at any grid (a row's sums run on FMA chains of its own,
+set per architecture, so their last bits may differ from that package's),
+with the row-claims
 backward's kind of weight gradient: FP32 runs of rows added into plain FP32
 words, each CTA's FP32 column sums added into 8 FP32 replicas with FP32
 atomic adds and the replicas summed in FP32 by the CTA that arrives last (no
@@ -98,12 +98,15 @@ where `ex2.approx` overflows).  `y` is the deterministic package's bits only
 from the pipelined forwards: they are the deterministic package's forward
 programs with that gate, which does not flush to 0 where that package's gate
 does (`z` from about -87.34 down), and they give that package's bits
-elsewhere.  `dx` and `dz` are the same bits in every band but the fused and
-the repeatable ones; the deterministic package's backward need not give these
-bits, but in the repeatable band `dx` and `dz` are its bits (and in the fused
-band on `sm_100a`).  Outside the small-row, the fused and the repeatable
-bands `dw` is the exact sum of the FP32 chunk partials of the deterministic
-backward at commit 2e989556, rounded once in integer arithmetic.  In the
+elsewhere.  Each backward program repeats `dx` and `dz` bit for bit for the
+same inputs on the same device; the programs' `.f32x2` FMA chains for a
+row's sums differ by program and by architecture, so the last bits of `dx`
+and `dz` can differ between the backward bands.  The deterministic package's
+backward need not give these bits, but in the repeatable band `dx` and `dz`
+are its bits.  Outside the small-row, the fused and the repeatable bands
+`dw` is the exact sum of each chunk's FP32 partial (the chunks of rows of
+the deterministic backward at commit 2e989556), rounded once in integer
+arithmetic.  In the
 small-row bands `dw` is that program's own fixed-order FP32 sum: the same
 bits on every call, which need not be the deterministic package's.  In the
 fused band `dw` is that program's own FP32 sum of FP32 replicas, in an order
@@ -113,10 +116,10 @@ package's bits in this tree.  No program sums in FP64.
 | output | how it is computed | run to run |
 | --- | --- | --- |
 | `y` | `rstd` with `rsqrt.approx`, the sigmoid with `ex2.approx` and `rcp.approx` (the split gate), FP32 products, one rounding to BF16 | bit for bit |
-| `dx` | one row arithmetic in every backward program but the fused and the repeatable ones (the same bits in every other band); in those two bands the deterministic package's row arithmetic | bit for bit |
-| `dz` | one row arithmetic in every backward program but the fused and the repeatable ones (the same bits in every other band); in those two bands the deterministic package's row arithmetic | bit for bit |
-| `dw` (the static and the claimed backwards: an FP32 `dw` past its small-row band) | the FP32 chunk partials of the deterministic backward at 2e989556, summed exactly in 64-bit integer windows, the exact sum rounded once to FP32 in integer arithmetic (then to BF16 for a BF16 `dw`); a column with an infinite or NaN term has the class of the exact sum (`+inf`, `-inf` or `NaN`), also when the row count is not a multiple of the row block | bit for bit |
-| `dw` (the exact tiny backward's bands) | the FP32 terms of the deterministic backward at 2e989556, summed on chip in plain FP32 words in an order of its own, rounded once to the output dtype | bit for bit |
+| `dx` | each backward program's FP32 row arithmetic, its `.f32x2` FMA chains for a row's sums set per program and per architecture (the last bits can differ between bands); the fused and the repeatable band run the deterministic package's row arithmetic (the fused band on FMA chains of its own) | bit for bit |
+| `dz` | each backward program's FP32 row arithmetic, its `.f32x2` FMA chains for a row's sums set per program and per architecture (the last bits can differ between bands); the fused and the repeatable band run the deterministic package's row arithmetic (the fused band on FMA chains of its own) | bit for bit |
+| `dw` (the static and the claimed backwards: an FP32 `dw` past its small-row band) | each chunk's FP32 partial (the chunks of rows of the deterministic backward at 2e989556), summed exactly in 64-bit integer windows, the exact sum rounded once to FP32 in integer arithmetic (then to BF16 for a BF16 `dw`); a column with an infinite or NaN term has the class of the exact sum (`+inf`, `-inf` or `NaN`), also when the row count is not a multiple of the row block | bit for bit |
+| `dw` (the exact tiny backward's bands) | the program's FP32 weight-gradient terms, summed on chip in plain FP32 words in an order of its own, rounded once to the output dtype | bit for bit |
 | `dw` (BF16 in the short backward's band) | each CTA's FP32 partial of its 16-row blocks (the row-claims backward's row arithmetic); CTA `r` adds every CTA's partials of the columns `8r` .. `8r + 7` in rank order in FP32 and rounds the sum to BF16 | bit for bit |
 | `dw` (BF16 in the fused band) | each thread's FP32 runs of at most 16 rows added into plain FP32 words; each CTA adds its FP32 column sums into 8 FP32 replicas with FP32 atomic adds in an order that depends on scheduling; the CTA that arrives last sums the replicas in FP32 and rounds the sum to BF16 | its last bits may vary |
 | `dw` (BF16 in the repeatable band) | the deterministic package's backward in this tree: each thread's FP32 runs of at most 16 rows of a chunk added into plain FP32 words of the chunk, each CTA adding a column's FP32 word exactly into 64-bit fixed-point digits in the workspace; the CTA that arrives last rounds each column's exact sum once to FP32, then to BF16 | bit for bit (the rows and the SM count fix the chunks) |
@@ -187,8 +190,10 @@ rows the same way).
 SM count and, for the forward, whether `x` and `z` hold packed rows.  Each
 program's arithmetic is fixed; every forward program takes the deterministic
 forward's split gate.  The backward
-programs but the fused and the repeatable ones write `dx` and `dz` with one
-row arithmetic.
+programs' `.f32x2` FMA chains for a row's sums differ by program and by
+architecture, so `dx`'s and `dz`'s last bits can differ between the backward
+bands; each program repeats them bit for bit for the same inputs on the same
+device.
 The forward programs associate a row's sum of squares differently, on FP32
 FMA chains (the lanes of `.f32x2` FMA chains where a program runs two or
 four): the tiny and the short forward run four 2-term chains of 16 lanes
@@ -213,8 +218,8 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | `fwd_pipe` (`sm_100a`, `sm_103a`) | pipelined forward: the deterministic package's forward program (the same build and grid) with a gate that does not flush (`split_gate`): 128 threads, 8 lanes a row, one CTA per 16-row block below 8192 rows per SM, from there whole waves of 6 CTAs per SM, each CTA at most 2 blocks, a thread loading its row of the CTA's next block while it computes the current one, `x` and `z` loaded with the L2 `evict_first` policy | its forward bands |
 | `fwd_pipe_packed` (`sm_107a`) | the pipelined forward of packed rows (the deterministic package's packed-rows program on `sm_107a` with a gate that does not flush: the pipelined forward's schedule with four sum chains, `rsqrt.approx.ftz` and one 32-byte store a lane) | its band of `FORWARD_BANDS` (packed rows, fewer than `PACKED_ROWS`) |
 | `bwd_bf16_short` | short backward (a BF16 weight gradient; every architecture): one cluster of 16 CTAs of 256 threads, 16 lanes a row, CTA `r` running the 16-row blocks `r`, `r + 16`, ... with the row-claims backward's row arithmetic; CTA `r` adds every CTA's FP32 partials of the columns `8r` .. `8r + 7` in rank order in FP32 (a fixed order), no workspace | the rows of its band (at most 256) |
-| `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, the FP32 terms of the deterministic backward at 2e989556 summed on chip in plain FP32 words in an order of its own, no workspace | the rows of its band (at most 512) |
-| `bwd_bf16_fused` | fused backward (a BF16 weight gradient; every architecture): the deterministic package's fused backward's schedule and row arithmetic (the approximate gate and `rstd`, the next-block L2 prefetch up to the architecture's share of blocks a CTA): 256 threads, 16 lanes a row, 16-row blocks, at most 4 CTAs per SM, which claim the blocks in chunks when there are more blocks than CTAs (`dx` and `dz` the same bits at any grid; the deterministic package's on `sm_100a`); each thread's FP32 runs of at most 16 rows added into plain FP32 words, each CTA's FP32 column sums added into 8 FP32 replicas with FP32 atomic adds, the CTA that arrives last summing the replicas in FP32 and rounding the sum once | its backward band, up to 1000 rows per SM (`sm_107a`: past 64, up to 256 rows per SM) |
+| `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, its FP32 weight-gradient terms summed on chip in plain FP32 words in an order of its own, no workspace | the rows of its band (at most 512) |
+| `bwd_bf16_fused` | fused backward (a BF16 weight gradient; every architecture): the deterministic package's fused backward's schedule and row arithmetic (the approximate gate and `rstd`, the next-block L2 prefetch up to the architecture's share of blocks a CTA): 256 threads, 16 lanes a row, 16-row blocks, at most 4 CTAs per SM, which claim the blocks in chunks when there are more blocks than CTAs (`dx` and `dz` the same bits at any grid); each thread's FP32 runs of at most 16 rows added into plain FP32 words, each CTA's FP32 column sums added into 8 FP32 replicas with FP32 atomic adds, the CTA that arrives last summing the replicas in FP32 and rounding the sum once | its backward band, up to 1000 rows per SM (`sm_107a`: past 64, up to 256 rows per SM) |
 | `bwd_bf16_rep` | repeatable backward (a BF16 weight gradient; every architecture): the deterministic package's backward program (its build `{"math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads": 256}`) under this package's name: 256 threads, 16 lanes a row, 16-row blocks, at most 4 CTAs per SM claiming the blocks in chunks whose rows are fixed by the row count and the grid; each chunk's weight-gradient terms added exactly into fixed-point digits in the workspace, the CTA that arrives last rounding the sum once (the deterministic package's `dx`, `dz` and `dw` bits, the same for the rows and the SM count) | its backward bands, past 1000 rows per SM (`sm_107a`: past 512 rows, up to 64 rows per SM, and past 256 rows per SM) |
 | `bwd_bf16_rep_long` | the repeatable backward's long program (every architecture): the deterministic package's look-ahead program (its build `{"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads": 256}`) under this package's name: the repeatable backward in a loop that loads a block's rows while the previous block's row math runs, with its grid, block schedule, FP32 operations in the same order and workspace, so its bits | packed rows of the last repeatable band from `LONG_BACKWARD_ROWS_PER_SM` rows per SM (2560 on `sm_100a` and `sm_103a`, 1536 on `sm_107a`) |
 | `bwd_f32` (every architecture), `bwd_bf16` (`sm_107a`) | static backward: 128 threads, 8-row blocks, CTA `b` runs chunks `b`, `b + grid`, ... (the same bits at any grid); on `sm_100a` and `sm_103a` 4 copies of the weight-gradient windows and no prefetch, the CTA that arrives last reading each window by an atomic exchange with 0, on `sm_107a` 4 copies plus occupancy words (the last CTA reads only the windows some CTA added into) | its FP32 backward band (no BF16 band runs `bwd_bf16`; the call role `bwd_bf16` has no program on `sm_100a` and `sm_103a`) |
