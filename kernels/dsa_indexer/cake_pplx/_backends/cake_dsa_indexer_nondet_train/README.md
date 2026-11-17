@@ -434,7 +434,7 @@ before the record is frozen.
 
 The Cake exporter produces the kernel and launcher sources under `csrc/`, the
 registry `cake_jit.py` and `build.json`.  Every program is one of the
-deterministic package's BF16 scan programs or its plain split merge.  It is
+deterministic package's BF16 or FP8 scan programs or its plain split merge.  It is
 exported under this package's prefix as `cake_dsa_indexer_nondet_topk_<20 hex>`
 and keeps the twenty-hex identity of the deterministic program it comes from.
 Programs that differ only in a few constants share one kernel translation

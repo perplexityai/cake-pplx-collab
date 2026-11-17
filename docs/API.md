@@ -1000,7 +1000,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 **Caveats.**
 
 - The geometry is fixed at 32 indexer heads and head dim 128.
-- FP8 is an opt-in form of det only.
+- FP8 is an opt-in form in both modes.
 - Nondet output tensors vary between calls. Compare the per-row sets, not the tensors.
 - Operator tests skip on devices other than compute capability 10.0, 10.3 or 10.7.
 - Finite inputs are the normal domain. With NaN or inf, the output structure stays intact and the kernels do not hang, but the values are not otherwise specified.
