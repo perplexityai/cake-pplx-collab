@@ -7106,7 +7106,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                                 "clusterlaunchcontrol.try_cancel.async.shared::cta"
                                     ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                                     " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                                 :: "r"(smem + 512 + 0 * 16 + 0 * 16), "r"(schedule_arrived_addr + 0 * 8)
+#else
+                                :: "r"(smem + 768 + 0 * 16 + 0 * 16), "r"(schedule_arrived_addr + 0 * 8)
+#endif
                                 : "memory");
                         }
                         mbarrier_arrive_expect_tx(schedule_arrived_addr, 16);
@@ -19877,7 +19881,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                             "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                             "}\n"
                             : "=r"(_clc_ctaid_x_0), "=r"(_clc_ctaid_y_0), "=r"(_clc_ctaid_z_0), "=r"(_clc_valid_0)
+#if __CUDA_ARCH__ == 1070
                             : "r"(smem + 512 + 0 * 16 + 0 * 16)
+#else
+                            : "r"(smem + 768 + 0 * 16 + 0 * 16)
+#endif
                             : "memory");
                         int decoded_cluster = -1;
                         if (_clc_valid_0 != 0) {
@@ -20574,7 +20582,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 528 + 0 * 16 + 0 * 16), "r"(drain_arrived_0_addr + 0 * 8)
+#else
+                    :: "r"(smem + 784 + 0 * 16 + 0 * 16), "r"(drain_arrived_0_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_0_addr, 16);
@@ -20595,7 +20607,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x), "=r"(clc_ctaid_y), "=r"(clc_ctaid_z), "=r"(clc_valid)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 528 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 784 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20615,7 +20631,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 528 + 0 * 16 + 0 * 16), "r"(drain_arrived_0_addr + 0 * 8)
+#else
+                        :: "r"(smem + 784 + 0 * 16 + 0 * 16), "r"(drain_arrived_0_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_0_addr, 16);
@@ -20629,7 +20649,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 544 + 0 * 16 + 0 * 16), "r"(drain_arrived_1_addr + 0 * 8)
+#else
+                    :: "r"(smem + 800 + 0 * 16 + 0 * 16), "r"(drain_arrived_1_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_1_addr, 16);
@@ -20650,7 +20674,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_1), "=r"(clc_ctaid_y_1), "=r"(clc_ctaid_z_1), "=r"(clc_valid_1)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 544 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 800 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_1 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20670,7 +20698,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 544 + 0 * 16 + 0 * 16), "r"(drain_arrived_1_addr + 0 * 8)
+#else
+                        :: "r"(smem + 800 + 0 * 16 + 0 * 16), "r"(drain_arrived_1_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_1_addr, 16);
@@ -20684,7 +20716,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 560 + 0 * 16 + 0 * 16), "r"(drain_arrived_2_addr + 0 * 8)
+#else
+                    :: "r"(smem + 816 + 0 * 16 + 0 * 16), "r"(drain_arrived_2_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_2_addr, 16);
@@ -20705,7 +20741,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_2), "=r"(clc_ctaid_y_2), "=r"(clc_ctaid_z_2), "=r"(clc_valid_2)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 560 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 816 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_2 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20725,7 +20765,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 560 + 0 * 16 + 0 * 16), "r"(drain_arrived_2_addr + 0 * 8)
+#else
+                        :: "r"(smem + 816 + 0 * 16 + 0 * 16), "r"(drain_arrived_2_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_2_addr, 16);
@@ -20739,7 +20783,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 576 + 0 * 16 + 0 * 16), "r"(drain_arrived_3_addr + 0 * 8)
+#else
+                    :: "r"(smem + 832 + 0 * 16 + 0 * 16), "r"(drain_arrived_3_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_3_addr, 16);
@@ -20760,7 +20808,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_3), "=r"(clc_ctaid_y_3), "=r"(clc_ctaid_z_3), "=r"(clc_valid_3)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 576 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 832 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_3 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20780,7 +20832,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 576 + 0 * 16 + 0 * 16), "r"(drain_arrived_3_addr + 0 * 8)
+#else
+                        :: "r"(smem + 832 + 0 * 16 + 0 * 16), "r"(drain_arrived_3_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_3_addr, 16);
@@ -20794,7 +20850,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 592 + 0 * 16 + 0 * 16), "r"(drain_arrived_4_addr + 0 * 8)
+#else
+                    :: "r"(smem + 848 + 0 * 16 + 0 * 16), "r"(drain_arrived_4_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_4_addr, 16);
@@ -20815,7 +20875,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_4), "=r"(clc_ctaid_y_4), "=r"(clc_ctaid_z_4), "=r"(clc_valid_4)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 592 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 848 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_4 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20835,7 +20899,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 592 + 0 * 16 + 0 * 16), "r"(drain_arrived_4_addr + 0 * 8)
+#else
+                        :: "r"(smem + 848 + 0 * 16 + 0 * 16), "r"(drain_arrived_4_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_4_addr, 16);
@@ -20849,7 +20917,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 608 + 0 * 16 + 0 * 16), "r"(drain_arrived_5_addr + 0 * 8)
+#else
+                    :: "r"(smem + 864 + 0 * 16 + 0 * 16), "r"(drain_arrived_5_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_5_addr, 16);
@@ -20870,7 +20942,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_5), "=r"(clc_ctaid_y_5), "=r"(clc_ctaid_z_5), "=r"(clc_valid_5)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 608 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 864 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_5 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20890,7 +20966,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 608 + 0 * 16 + 0 * 16), "r"(drain_arrived_5_addr + 0 * 8)
+#else
+                        :: "r"(smem + 864 + 0 * 16 + 0 * 16), "r"(drain_arrived_5_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_5_addr, 16);
@@ -20904,7 +20984,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 624 + 0 * 16 + 0 * 16), "r"(drain_arrived_6_addr + 0 * 8)
+#else
+                    :: "r"(smem + 880 + 0 * 16 + 0 * 16), "r"(drain_arrived_6_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_6_addr, 16);
@@ -20925,7 +21009,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_6), "=r"(clc_ctaid_y_6), "=r"(clc_ctaid_z_6), "=r"(clc_valid_6)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 624 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 880 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_6 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -20945,7 +21033,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 624 + 0 * 16 + 0 * 16), "r"(drain_arrived_6_addr + 0 * 8)
+#else
+                        :: "r"(smem + 880 + 0 * 16 + 0 * 16), "r"(drain_arrived_6_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_6_addr, 16);
@@ -20959,7 +21051,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "clusterlaunchcontrol.try_cancel.async.shared::cta"
                         ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                         " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                     :: "r"(smem + 640 + 0 * 16 + 0 * 16), "r"(drain_arrived_7_addr + 0 * 8)
+#else
+                    :: "r"(smem + 896 + 0 * 16 + 0 * 16), "r"(drain_arrived_7_addr + 0 * 8)
+#endif
                     : "memory");
             }
             mbarrier_arrive_expect_tx(drain_arrived_7_addr, 16);
@@ -20980,7 +21076,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                     "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%0, %1, %2, _}, clc_r;\n\t"
                     "}\n"
                     : "=r"(clc_ctaid_x_7), "=r"(clc_ctaid_y_7), "=r"(clc_ctaid_z_7), "=r"(clc_valid_7)
+#if __CUDA_ARCH__ == 1070
                     : "r"(smem + 640 + 0 * 16 + 0 * 16)
+#else
+                    : "r"(smem + 896 + 0 * 16 + 0 * 16)
+#endif
                     : "memory");
                 if (clc_valid_7 != 0) {
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -21000,7 +21100,11 @@ kernel_cake_mok_backward_mxfp8(const __grid_constant__ CUtensorMap dy_s, const _
                         "clusterlaunchcontrol.try_cancel.async.shared::cta"
                             ".mbarrier::complete_tx::bytes.multicast::cluster::all.b128"
                             " [%0], [%1];"
+#if __CUDA_ARCH__ == 1070
                         :: "r"(smem + 640 + 0 * 16 + 0 * 16), "r"(drain_arrived_7_addr + 0 * 8)
+#else
+                        :: "r"(smem + 896 + 0 * 16 + 0 * 16), "r"(drain_arrived_7_addr + 0 * 8)
+#endif
                         : "memory");
                 }
                 mbarrier_arrive_expect_tx(drain_arrived_7_addr, 16);

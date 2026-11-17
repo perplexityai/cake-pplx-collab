@@ -259,30 +259,24 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
     const int sw_up_addr = smem + 132096;
     float* flat_view_0 = reinterpret_cast<float*>(smem_raw + 197632);
     const int flat_view_addr_0 = smem + 197632;
-    unsigned int* flat_view_1 = reinterpret_cast<unsigned int*>(smem_raw + 1024);
-    const int flat_view_addr_1 = smem + 1024;
-    unsigned int* flat_view_2 = reinterpret_cast<unsigned int*>(smem_raw + 66560);
-    const int flat_view_addr_2 = smem + 66560;
-    unsigned int* flat_view_3 = reinterpret_cast<unsigned int*>(smem_raw + 132096);
-    const int flat_view_addr_3 = smem + 132096;
     __nv_bfloat16* replay_gate = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int replay_gate_addr = smem + 1024;
     __nv_bfloat16* replay_up = reinterpret_cast<__nv_bfloat16*>(smem_raw + 99328);
     const int replay_up_addr = smem + 99328;
     __nv_bfloat16* replay_hidden = reinterpret_cast<__nv_bfloat16*>(smem_raw + 197632);
     const int replay_hidden_addr = smem + 197632;
-    __nv_bfloat16* flat_view_4 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
-    const int flat_view_addr_4 = smem + 1024;
-    unsigned int* flat_view_5 = reinterpret_cast<unsigned int*>(smem_raw + 1024);
-    const int flat_view_addr_5 = smem + 1024;
-    float* flat_view_6 = reinterpret_cast<float*>(smem_raw + 197632);
-    const int flat_view_addr_6 = smem + 197632;
-    int* flat_view_7 = reinterpret_cast<int*>(smem_raw + 199168);
-    const int flat_view_addr_7 = smem + 199168;
-    int* flat_view_8 = reinterpret_cast<int*>(smem_raw + 197632);
-    const int flat_view_addr_8 = smem + 197632;
-    float* flat_view_9 = reinterpret_cast<float*>(smem_raw + 199680);
-    const int flat_view_addr_9 = smem + 199680;
+    __nv_bfloat16* flat_view_1 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
+    const int flat_view_addr_1 = smem + 1024;
+    unsigned int* flat_view_2 = reinterpret_cast<unsigned int*>(smem_raw + 1024);
+    const int flat_view_addr_2 = smem + 1024;
+    float* flat_view_3 = reinterpret_cast<float*>(smem_raw + 197632);
+    const int flat_view_addr_3 = smem + 197632;
+    int* flat_view_4 = reinterpret_cast<int*>(smem_raw + 199168);
+    const int flat_view_addr_4 = smem + 199168;
+    int* flat_view_5 = reinterpret_cast<int*>(smem_raw + 197632);
+    const int flat_view_addr_5 = smem + 197632;
+    float* flat_view_6 = reinterpret_cast<float*>(smem_raw + 199680);
+    const int flat_view_addr_6 = smem + 199680;
 
     // Kernel setup ops
     int tokens = num_tokens[0];
@@ -496,8 +490,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
             if (rows_3 > tid) {
                 peer_1 = schedule_rank[macro_offset + first_row + tid];
                 peer_token = schedule_token[macro_offset + first_row + tid];
-                flat_view_7[tid] = peer_1;
-                flat_view_6[buffer * 128 + tid] = ((peer_1 >= 0) ? weights[first_row + tid] : 0.0f);
+                flat_view_4[tid] = peer_1;
+                flat_view_3[buffer * 128 + tid] = ((peer_1 >= 0) ? weights[first_row + tid] : 0.0f);
             }
             uint32_t cta_count = __syncthreads_count(peer_1 >= 0);
             if (tid == 0) {
@@ -506,18 +500,18 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
             if (cta_count < (unsigned int)rows_3) {
                 #pragma unroll 1
                 for (int pad = 0; pad < rows_3; pad++) {
-                    int pad_peer = flat_view_7[pad];
+                    int pad_peer = flat_view_4[pad];
                     if (pad_peer < 0) {
                         #pragma unroll 1
                         for (int vec = tid; vec < hidden / 8; vec += 256) {
-                            asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_5) + (buffer * 65536 + pad * hidden * 2 + vec * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
+                            asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_2) + (buffer * 65536 + pad * hidden * 2 + vec * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
                         }
                     }
                 }
             }
             __syncthreads();
             if (peer_1 >= 0) {
-                cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)((buffer * 32768 + tid * hidden) * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_1])) + (unsigned long long)((unsigned long long)(peer_token / topk) * (unsigned long long)hidden) * (unsigned long long)2), hidden * 2, range_arrived_addr + (buffer) * 8);
+                cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)((buffer * 32768 + tid * hidden) * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_1])) + (unsigned long long)((unsigned long long)(peer_token / topk) * (unsigned long long)hidden) * (unsigned long long)2), hidden * 2, range_arrived_addr + (buffer) * 8);
             }
         }
         #pragma unroll 1
@@ -531,9 +525,9 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
             __syncthreads();
             #pragma unroll 4
             for (int word = tid; word < rows_0 * (hidden / 2); word += 256) {
-                float weight = flat_view_6[buffer_1 * 128 + word / (hidden / 2)];
+                float weight = flat_view_3[buffer_1 * 128 + word / (hidden / 2)];
                 int index = buffer_1 * 16384 + word;
-                unsigned int pair = flat_view_5[index];
+                unsigned int pair = flat_view_2[index];
                 uint32_t _bf16x2_scale_pair_1;
                 {
                     uint32_t _bf16x2_pair_2 = pair;
@@ -547,7 +541,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                     asm volatile("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(_bf16x2_out_2) : "f"(_bf16x2_hi_2), "f"(_bf16x2_lo_2));
                     _bf16x2_scale_pair_1 = _bf16x2_out_2;
                 }
-                flat_view_5[index] = _bf16x2_scale_pair_1;
+                flat_view_2[index] = _bf16x2_scale_pair_1;
             }
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncthreads();
@@ -556,7 +550,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                     void* _cpbulk_dst_3 = reinterpret_cast<void*>(dy_routed_ptr + (unsigned long long)first_row_1 * (unsigned long long)hidden);
                     asm volatile(
                         "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
-                        :: "l"(_cpbulk_dst_3), "r"(flat_view_addr_4 + (unsigned int)(buffer_1 * 65536)), "r"((uint32_t)((unsigned int)(rows_0 * hidden * 2)))
+                        :: "l"(_cpbulk_dst_3), "r"(flat_view_addr_1 + (unsigned int)(buffer_1 * 65536)), "r"((uint32_t)((unsigned int)(rows_0 * hidden * 2)))
                         : "memory");
                 }
                 asm volatile("cp.async.bulk.commit_group;");
@@ -579,8 +573,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                 if (rows_4 > tid) {
                     peer_2 = schedule_rank[macro_offset + first_row_0 + tid];
                     peer_token_1 = schedule_token[macro_offset + first_row_0 + tid];
-                    flat_view_7[tid] = peer_2;
-                    flat_view_6[buffer_0 * 128 + tid] = ((peer_2 >= 0) ? weights[first_row_0 + tid] : 0.0f);
+                    flat_view_4[tid] = peer_2;
+                    flat_view_3[buffer_0 * 128 + tid] = ((peer_2 >= 0) ? weights[first_row_0 + tid] : 0.0f);
                 }
                 uint32_t cta_count_1 = __syncthreads_count(peer_2 >= 0);
                 if (tid == 0) {
@@ -589,18 +583,18 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                 if (cta_count_1 < (unsigned int)rows_4) {
                     #pragma unroll 1
                     for (int pad_1 = 0; pad_1 < rows_4; pad_1++) {
-                        int pad_peer_1 = flat_view_7[pad_1];
+                        int pad_peer_1 = flat_view_4[pad_1];
                         if (pad_peer_1 < 0) {
                             #pragma unroll 1
                             for (int vec_1 = tid; vec_1 < hidden / 8; vec_1 += 256) {
-                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_5) + (buffer_0 * 65536 + pad_1 * hidden * 2 + vec_1 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
+                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_2) + (buffer_0 * 65536 + pad_1 * hidden * 2 + vec_1 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
                             }
                         }
                     }
                 }
                 __syncthreads();
                 if (peer_2 >= 0) {
-                    cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)((buffer_0 * 32768 + tid * hidden) * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_2])) + (unsigned long long)((unsigned long long)(peer_token_1 / topk) * (unsigned long long)hidden) * (unsigned long long)2), hidden * 2, range_arrived_addr + (buffer_0) * 8);
+                    cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)((buffer_0 * 32768 + tid * hidden) * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_2])) + (unsigned long long)((unsigned long long)(peer_token_1 / topk) * (unsigned long long)hidden) * (unsigned long long)2), hidden * 2, range_arrived_addr + (buffer_0) * 8);
                 }
             }
         }
@@ -636,8 +630,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                 int first_row_2 = block_2 * 128 + unit_2 % block_units_2 * unit_rows_1;
                 int _min_5 = ((unit_rows_1) < (block_2 * 128 + 128 - first_row_2) ? (unit_rows_1) : (block_2 * 128 + 128 - first_row_2));
                 if (_min_5 > tid) {
-                    flat_view_8[slot * 128 + tid] = schedule_rank[macro_offset_3 + first_row_2 + tid];
-                    flat_view_8[384 + slot * 128 + tid] = schedule_token[macro_offset_3 + first_row_2 + tid];
+                    flat_view_5[slot * 128 + tid] = schedule_rank[macro_offset_3 + first_row_2 + tid];
+                    flat_view_5[384 + slot * 128 + tid] = schedule_token[macro_offset_3 + first_row_2 + tid];
                 }
             }
             if (tid == 0) {
@@ -661,7 +655,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                     }
                     asm volatile("fence.acquire.gpu;" ::: "memory");
                     mbarrier_arrive_expect_tx(rows_arrived_addr + (buffer_2) * 8, (unsigned int)(rows_5 * hidden * 2));
-                    cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)(buffer_2 * 32768 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(dx_routed_ptr) + (unsigned long long)((unsigned long long)first_row_3 * (unsigned long long)hidden) * (unsigned long long)2), rows_5 * hidden * 2, rows_arrived_addr + (buffer_2) * 8);
+                    cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)(buffer_2 * 32768 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(dx_routed_ptr) + (unsigned long long)((unsigned long long)first_row_3 * (unsigned long long)hidden) * (unsigned long long)2), rows_5 * hidden * 2, rows_arrived_addr + (buffer_2) * 8);
                 }
             }
             __syncthreads();
@@ -674,8 +668,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                 int _parity_rows_arrived = (int)((unsigned int)(combine_units + unit_4) / 3 % 2);
                 mbarrier_wait(rows_arrived_addr + (buffer_3) * 8, _parity_rows_arrived);
                 if (rows_1 > tid) {
-                    int peer_3 = flat_view_8[buffer_3 * 128 + tid];
-                    int token_1 = flat_view_8[384 + buffer_3 * 128 + tid];
+                    int peer_3 = flat_view_5[buffer_3 * 128 + tid];
+                    int token_1 = flat_view_5[384 + buffer_3 * 128 + tid];
                     if (peer_3 >= 0) {
                         {
                             float gradient = 0.0f;
@@ -690,14 +684,14 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                 if (tid == 0) {
                     #pragma unroll 1
                     for (int row_1 = 0; row_1 < rows_1; row_1++) {
-                        int row_peer = flat_view_8[buffer_3 * 128 + row_1];
-                        int row_token = flat_view_8[384 + buffer_3 * 128 + row_1];
+                        int row_peer = flat_view_5[buffer_3 * 128 + row_1];
+                        int row_token = flat_view_5[384 + buffer_3 * 128 + row_1];
                         if (row_peer >= 0) {
                             {
                                 void* _cpbulk_dst_6 = reinterpret_cast<void*>(reinterpret_cast<__nv_bfloat16*>(dx_peers[row_peer]) + (unsigned long long)row_token * (unsigned long long)hidden);
                                 asm volatile(
                                     "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
-                                    :: "l"(_cpbulk_dst_6), "r"(flat_view_addr_4 + (unsigned int)(buffer_3 * 65536) + (unsigned int)(row_1 * hidden * 2)), "r"((uint32_t)((unsigned int)(hidden * 2)))
+                                    :: "l"(_cpbulk_dst_6), "r"(flat_view_addr_1 + (unsigned int)(buffer_3 * 65536) + (unsigned int)(row_1 * hidden * 2)), "r"((uint32_t)((unsigned int)(hidden * 2)))
                                     : "memory");
                             }
                         }
@@ -722,7 +716,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                         }
                         asm volatile("fence.acquire.gpu;" ::: "memory");
                         mbarrier_arrive_expect_tx(rows_arrived_addr + (buffer_1_1) * 8, (unsigned int)(rows_6 * hidden * 2));
-                        cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)(buffer_1_1 * 32768 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(dx_routed_ptr) + (unsigned long long)((unsigned long long)first_row_1_1 * (unsigned long long)hidden) * (unsigned long long)2), rows_6 * hidden * 2, rows_arrived_addr + (buffer_1_1) * 8);
+                        cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)(buffer_1_1 * 32768 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(dx_routed_ptr) + (unsigned long long)((unsigned long long)first_row_1_1 * (unsigned long long)hidden) * (unsigned long long)2), rows_6 * hidden * 2, rows_arrived_addr + (buffer_1_1) * 8);
                     }
                 }
                 if (units_6 > unit_4 + 2) {
@@ -731,8 +725,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                     int first_row_2_1 = block_2_1 * 128 + (unit_4 + 2) % block_units_2 * unit_rows_1;
                     int _min_7 = ((unit_rows_1) < (block_2_1 * 128 + 128 - first_row_2_1) ? (unit_rows_1) : (block_2_1 * 128 + 128 - first_row_2_1));
                     if (_min_7 > tid) {
-                        flat_view_8[slot_1 * 128 + tid] = schedule_rank[macro_offset_3 + first_row_2_1 + tid];
-                        flat_view_8[384 + slot_1 * 128 + tid] = schedule_token[macro_offset_3 + first_row_2_1 + tid];
+                        flat_view_5[slot_1 * 128 + tid] = schedule_rank[macro_offset_3 + first_row_2_1 + tid];
+                        flat_view_5[384 + slot_1 * 128 + tid] = schedule_token[macro_offset_3 + first_row_2_1 + tid];
                     }
                 }
                 __syncthreads();
@@ -824,11 +818,11 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                         }
                         __syncthreads();
                         if (peer_5 >= 0) {
-                            cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)(tid * 512 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(x_peers[peer_5])) + (unsigned long long)((unsigned long long)(peer_token_2 / topk) * (unsigned long long)hidden + (unsigned long long)(col_block * 512)) * (unsigned long long)2), chunk_cols * 2, dispatch_arrived_addr);
+                            cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)(tid * 512 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(x_peers[peer_5])) + (unsigned long long)((unsigned long long)(peer_token_2 / topk) * (unsigned long long)hidden + (unsigned long long)(col_block * 512)) * (unsigned long long)2), chunk_cols * 2, dispatch_arrived_addr);
                         } else if (tid < 128) {
                             #pragma unroll
                             for (int vec_2 = 0; vec_2 < 64; vec_2++) {
-                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_4) + (tid * 1024 + vec_2 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
+                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_1) + (tid * 1024 + vec_2 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
                             }
                         }
                         int _parity_dispatch_arrived = (int)((unsigned int)dispatch_seq % 2);
@@ -840,7 +834,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                 void* _cpbulk_dst_8 = reinterpret_cast<void*>(x_routed_ptr + ((unsigned long long)(row_3 + tid) * (unsigned long long)hidden + (unsigned long long)(col_block * 512)));
                                 asm volatile(
                                     "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
-                                    :: "l"(_cpbulk_dst_8), "r"(flat_view_addr_4 + (unsigned int)(tid * 1024)), "r"((uint32_t)(chunk_bytes))
+                                    :: "l"(_cpbulk_dst_8), "r"(flat_view_addr_1 + (unsigned int)(tid * 1024)), "r"((uint32_t)(chunk_bytes))
                                     : "memory");
                             }
                             asm volatile("cp.async.bulk.commit_group;");
@@ -881,14 +875,14 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                         }
                         __syncthreads();
                         if (tid < 128) {
-                            flat_view_9[tid] = ((peer_6 >= 0) ? weights[row_4 + tid] : 0.0f);
+                            flat_view_6[tid] = ((peer_6 >= 0) ? weights[row_4 + tid] : 0.0f);
                         }
                         if (peer_6 >= 0) {
-                            cp_async_bulk_gmem2smem(flat_view_addr_4 + (unsigned int)(tid * 512 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_6])) + (unsigned long long)((unsigned long long)(peer_token_3 / topk) * (unsigned long long)hidden + (unsigned long long)(col_block_1 * 512)) * (unsigned long long)2), chunk_cols_1 * 2, dispatch_arrived_addr);
+                            cp_async_bulk_gmem2smem(flat_view_addr_1 + (unsigned int)(tid * 512 * 2), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(reinterpret_cast<__nv_bfloat16*>(dy_peers[peer_6])) + (unsigned long long)((unsigned long long)(peer_token_3 / topk) * (unsigned long long)hidden + (unsigned long long)(col_block_1 * 512)) * (unsigned long long)2), chunk_cols_1 * 2, dispatch_arrived_addr);
                         } else if (tid < 128) {
                             #pragma unroll
                             for (int vec_3 = 0; vec_3 < 64; vec_3++) {
-                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_4) + (tid * 1024 + vec_3 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
+                                asm volatile("st.v4.u32 [%0], {%1, %2, %3, %4};" :: "l"((uint64_t)((unsigned long long)(reinterpret_cast<uint8_t*>(flat_view_1) + (tid * 1024 + vec_3 * 16)))), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)), "r"(static_cast<uint32_t>((unsigned int)0)) : "memory");
                             }
                         }
                         int _parity_dispatch_arrived_1 = (int)((unsigned int)dispatch_seq % 2);
@@ -898,8 +892,8 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                         if (tid < chunk_cols_1 / 2) {
                             #pragma unroll 1
                             for (int scale_row = 0; scale_row < 128; scale_row++) {
-                                float weight_1 = flat_view_9[scale_row];
-                                unsigned int pair_1 = flat_view_5[scale_row * 256 + tid];
+                                float weight_1 = flat_view_6[scale_row];
+                                unsigned int pair_1 = flat_view_2[scale_row * 256 + tid];
                                 uint32_t _bf16x2_scale_pair_9;
                                 {
                                     uint32_t _bf16x2_pair_10 = pair_1;
@@ -913,7 +907,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                     asm volatile("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(_bf16x2_out_10) : "f"(_bf16x2_hi_10), "f"(_bf16x2_lo_10));
                                     _bf16x2_scale_pair_9 = _bf16x2_out_10;
                                 }
-                                flat_view_5[scale_row * 256 + tid] = _bf16x2_scale_pair_9;
+                                flat_view_2[scale_row * 256 + tid] = _bf16x2_scale_pair_9;
                             }
                         }
                         __syncthreads();
@@ -923,7 +917,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                 void* _cpbulk_dst_11 = reinterpret_cast<void*>(dy_routed_ptr + ((unsigned long long)(row_4 + tid) * (unsigned long long)hidden + (unsigned long long)(col_block_1 * 512)));
                                 asm volatile(
                                     "cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;"
-                                    :: "l"(_cpbulk_dst_11), "r"(flat_view_addr_4 + (unsigned int)(tid * 1024)), "r"((uint32_t)(chunk_bytes_1))
+                                    :: "l"(_cpbulk_dst_11), "r"(flat_view_addr_1 + (unsigned int)(tid * 1024)), "r"((uint32_t)(chunk_bytes_1))
                                     : "memory");
                             }
                             asm volatile("cp.async.bulk.commit_group;");
@@ -5778,34 +5772,38 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                 float weight_2 = weights[local_row_3];
                                 float inverse = ((weight_2 > 0.0f) ? 1.0f / weight_2 : 0.0f);
                                 float router_gradient = 0.0f;
+                                unsigned int gate_tile = sw_gate_addr + (unsigned int)(stage_6 * 32768);
+                                unsigned int up_tile = sw_up_addr + (unsigned int)(stage_6 * 32768);
+                                unsigned int dh_tile = sw_dh_addr + (unsigned int)(stage_6 * 32768);
+                                unsigned int row_offset = (unsigned int)(half_10 * 16384 + tile_row * 128);
+                                unsigned int row_swizzle = gate_tile + row_offset >> 7 << 4 & 112;
                                 #pragma unroll
                                 for (int group = 0; group < 16; group++) {
-                                    int tile_col_8 = half_10 * 64 + group * 4;
-                                    unsigned int address_34 = sw_gate_addr + (unsigned int)(stage_6 * 32768) + (unsigned int)((tile_col_8 / 64 * 128 * 64 + tile_row * 64 + tile_col_8 % 64) * 2);
-                                    unsigned int address_2_1 = sw_up_addr + (unsigned int)(stage_6 * 32768) + (unsigned int)((tile_col_8 / 64 * 128 * 64 + tile_row * 64 + tile_col_8 % 64) * 2);
-                                    unsigned int address_3_1 = sw_dh_addr + (unsigned int)(stage_6 * 32768) + (unsigned int)((tile_col_8 / 64 * 128 * 64 + tile_row * 64 + tile_col_8 % 64) * 2);
-                                    unsigned int smem_regs[2];
+                                    unsigned int column = row_offset | (unsigned int)(group * 8) ^ row_swizzle;
+                                    unsigned int address_34 = gate_tile + column;
+                                    unsigned int address_0 = up_tile + column;
+                                    unsigned int words[2];
                                     uint64_t _smem_raw_151;
-                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_151) : "r"(flat_view_addr_2 + ((address_34 ^ (address_34 & 1023) >> 7 << 4) - flat_view_addr_2) / 4 * 4) : "memory");
-                                    smem_regs[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_151)[0];
-                                    smem_regs[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_151)[1];
-                                    unsigned int smem_regs_0[2];
+                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_151) : "r"(address_34) : "memory");
+                                    words[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_151)[0];
+                                    words[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_151)[1];
+                                    unsigned int words_0[2];
                                     uint64_t _smem_raw_152;
-                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_152) : "r"(flat_view_addr_3 + ((address_2_1 ^ (address_2_1 & 1023) >> 7 << 4) - flat_view_addr_3) / 4 * 4) : "memory");
-                                    smem_regs_0[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_152)[0];
-                                    smem_regs_0[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_152)[1];
-                                    unsigned int smem_regs_1[2];
+                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_152) : "r"(address_0) : "memory");
+                                    words_0[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_152)[0];
+                                    words_0[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_152)[1];
+                                    unsigned int words_1[2];
                                     uint64_t _smem_raw_153;
-                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_153) : "r"(flat_view_addr_1 + ((address_3_1 ^ (address_3_1 & 1023) >> 7 << 4) - flat_view_addr_1) / 4 * 4) : "memory");
-                                    smem_regs_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_153)[0];
-                                    smem_regs_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_153)[1];
+                                    asm volatile("ld.shared.b64 %0, [%1];" : "=l"(_smem_raw_153) : "r"(dh_tile + column) : "memory");
+                                    words_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_153)[0];
+                                    words_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_153)[1];
                                     unsigned int dgate_packed[2];
                                     unsigned int dup_packed[2];
                                     #pragma unroll
                                     for (int pair_20 = 0; pair_20 < 2; pair_20++) {
-                                        float2 _cvt_f32_5 = cake_bf16x2_to_f32x2(__as_bf16x2(smem_regs[pair_20]));
-                                        float2 _cvt_f32_6 = cake_bf16x2_to_f32x2(__as_bf16x2(smem_regs_0[pair_20]));
-                                        float2 _cvt_f32_7 = cake_bf16x2_to_f32x2(__as_bf16x2(smem_regs_1[pair_20]));
+                                        float2 _cvt_f32_5 = make_float2(__uint_as_float(words[pair_20] << 16), __uint_as_float(words[pair_20] & 4294901760u));
+                                        float2 _cvt_f32_6 = make_float2(__uint_as_float(words_0[pair_20] << 16), __uint_as_float(words_0[pair_20] & 4294901760u));
+                                        float2 _cvt_f32_7 = make_float2(__uint_as_float(words_1[pair_20] << 16), __uint_as_float(words_1[pair_20] & 4294901760u));
                                         float _exp_154 = expf(-_cvt_f32_5.x);
                                         float sigmoid_x = 1.0f / (1.0f + _exp_154);
                                         float _exp_155 = expf(-_cvt_f32_5.y);
@@ -5818,12 +5816,15 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                         __nv_bfloat162 _bf16x2_1 = __float22bfloat162_rn(make_float2(silu_x * _cvt_f32_7.x, silu_y * _cvt_f32_7.y));
                                         dgate_packed[pair_20] = __as_u32(_bf16x2_0);
                                         dup_packed[pair_20] = __as_u32(_bf16x2_1);
-                                        float hidden_x = silu_x * _cvt_f32_6.x;
-                                        float hidden_y = silu_y * _cvt_f32_6.y;
-                                        router_gradient = router_gradient + (_cvt_f32_7.x * inverse * hidden_x + _cvt_f32_7.y * inverse * hidden_y);
+                                        float value_x = silu_x * _cvt_f32_6.x;
+                                        float value_y = silu_y * _cvt_f32_6.y;
+                                        float2 stored = cake_bf16x2_to_f32x2(__float22bfloat162_rn(make_float2(value_x, value_y)));
+                                        float hidden_x = ((tile_word_2 > 0) ? value_x : stored.x);
+                                        float hidden_y = ((tile_word_2 > 0) ? value_y : stored.y);
+                                        router_gradient = router_gradient + (_cvt_f32_7.x * hidden_x + _cvt_f32_7.y * hidden_y);
                                     }
-                                    asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(flat_view_addr_2 + ((address_34 ^ (address_34 & 1023) >> 7 << 4) - flat_view_addr_2)), "r"(dgate_packed[0]), "r"(dgate_packed[1]) : "memory");
-                                    asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(flat_view_addr_3 + ((address_2_1 ^ (address_2_1 & 1023) >> 7 << 4) - flat_view_addr_3)), "r"(dup_packed[0]), "r"(dup_packed[1]) : "memory");
+                                    asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(address_34), "r"(dgate_packed[0]), "r"(dgate_packed[1]) : "memory");
+                                    asm volatile("st.shared.v2.b32 [%0], {%1,%2};" :: "r"(address_0), "r"(dup_packed[0]), "r"(dup_packed[1]) : "memory");
                                 }
                                 if (half_10 != 0) {
                                     flat_view_0[stage_6 * 128 + tile_row] = router_gradient;
@@ -5831,7 +5832,7 @@ kernel_cake_mok_backward_fp32(const __grid_constant__ CUtensorMap dy_s, const __
                                 __syncthreads();
                                 if (half_10 == 0 && peer_7 >= 0) {
                                     router_gradient = router_gradient + flat_view_0[stage_6 * 128 + tile_row];
-                                    partials[local_row_3 * col_blocks_11 + col_24] = router_gradient;
+                                    partials[local_row_3 * col_blocks_11 + col_24] = router_gradient * inverse;
                                 }
                                 __syncthreads();
                                 if (tid == 0) {
