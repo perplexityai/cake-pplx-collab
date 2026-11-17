@@ -4276,7 +4276,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H256 bf16 weight: (64, 20480] backward time 0.804-1.231x the det pair's at 4 to 16384 rows over two to ten timing sessions per row count, above 1 only in one session at 5112 and 5124 rows (B200)
+    # sm_100a H256 bf16 weight: (64, 20480] the single kernel 195c4317 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_195c4317b51bb4ea1137": {
         "arches": [
             "sm_100a",
@@ -4309,7 +4309,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 2048,
         },
     },
-    # sm_100a H256 f32 weight: (64, 20480] backward time 0.762-1.052x the det pair's at 4 to 16384 rows over two to six timing sessions per row count, above 1 only in one session at 5112, 5120 and 5124 rows (B200)
+    # sm_100a H256 f32 weight: (64, 20480] the single kernel 8de01314 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_8de0131445eed6eeabb7": {
         "arches": [
             "sm_100a",
@@ -4342,7 +4342,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 2048,
         },
     },
-    # sm_100a H512 bf16 weight: (1280, 4096] benchmark ratio < 1 against the det pair in both sessions (B200); above T 4096 the deterministic package's det pairs run for dw accuracy: this kernel's 16-step FP32 dw windows put its worst dw error at up to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200 (rows of stride 576)
+    # sm_100a H512 bf16 weight: (1280, 4096] the single kernel d0bde38a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_d0bde38aa443d42a5f04": {
         "arches": [
             "sm_100a",
@@ -4375,7 +4375,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 8192,
         },
     },
-    # sm_100a H512 bf16 weight: (4096, 32768] the deterministic package's det pair of these rows (main kernel ad1a5a3c and fixed-order dw reduce 7097069b with that package's host plan), renamed into this package, for dw accuracy: the single kernel d0bde38a it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.15x to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 32768 on B200 (rows of stride 576; concentrated, saturated_hi and saturated_lo inputs); the det pair took 16.22, 16.38 and 16.54 us against the single's 15.14, 15.94 and 15.97 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H512 bf16 weight: (4096, 32768] the deterministic package's det pair of these rows (main kernel ad1a5a3c and fixed-order dw reduce 7097069b with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_ad1a5a3c5f88e3d10036__4096_32768": {
         "arches": [
             "sm_100a",
@@ -4407,7 +4407,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H512 bf16 weight: (32768, inf] the deterministic package's det pair of these rows (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package, for dw accuracy: the single kernel d0bde38a it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.90x the deterministic package's median FP64 error over 5 repeats at T 65536 on B200 (rows of stride 576, concentrated inputs)
+    # sm_100a H512 bf16 weight: (32768, inf] the deterministic package's det pair of these rows (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_8877322a3002e3a4fefd__32768_inf": {
         "arches": [
             "sm_100a",
@@ -4439,7 +4439,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H512 f32 weight: (960, inf] above T 960 for dw accuracy (over inputs 0-59 of each family the det pairs' worst dw error exceeds the FP32 eager reference's at T 1024 (0.0846 against 0.0703) and 1152 (0.0912 against 0.0832) on B200)
+    # sm_100a H512 f32 weight: (960, inf] the single kernel fd08c6f4 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_fd08c6f436eb6071fa22": {
         "arches": [
             "sm_100a",
@@ -4637,7 +4637,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (1024, 4096] the single kernel of its largest token counts for dw accuracy: the chunk-partials pair of (1024, 4096] exceeded the FP32 eager reference's dw error at T 3136 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.1063 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (49 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.02x to 1.23x the programs' it replaces at T 1025, 1152, 1280, 1408, 1536, 1792, 2048, 3136 and 4096 in two sessions (B200)
+    # sm_100a H1536 f32 weight: (1024, 4096] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_4096": {
         "arches": [
             "sm_100a",
@@ -4703,7 +4703,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 81920,
         },
     },
-    # sm_100a H2048 f32 weight: (336, 1024] the column-task kernel of its lowest window for dw accuracy: the chunk-partials pair of (336, 3072] exceeded the FP32 eager reference's dw error at T 1728 and 2773 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.0375 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (12 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.86x to 1.15x the programs' it replaces at T 337, 400, 480, 560, 640, 720, 800, 880, 960 and 1024 in two sessions (B200)
+    # sm_100a H2048 f32 weight: (336, 1024] the column-task kernel 17493054 (64 column tasks).
     "cake_rmsnorm_train_17493054fed5409b6df9__336_1024": {
         "arches": [
             "sm_100a",
@@ -5167,7 +5167,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 bf16 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 bf16 weight: (64, 336] the column-task kernel 64e6aa82 (64 column tasks).
     "cake_rmsnorm_train_64e6aa82bb2c6d4ea978__64_336": {
         "arches": [
             "sm_100a",
@@ -5235,7 +5235,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 f32 weight: (64, 336] the column-task kernel 17493054 (64 column tasks).
     "cake_rmsnorm_train_17493054fed5409b6df9__64_336": {
         "arches": [
             "sm_100a",
@@ -5303,7 +5303,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (64, 1152] backward time 0.925-1.020x the det pair's at T 256 and 1024 over four timing sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H4096 bf16 weight: (64, 1152] the column-task kernel 4822793e (128 column tasks).
     "cake_rmsnorm_train_4822793ea0c954c11af6__64_1152": {
         "arches": [
             "sm_100a",
@@ -5371,7 +5371,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (64, 1792] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H4096 f32 weight: (64, 1792] the column-task kernel 86160705 (128 column tasks).
     "cake_rmsnorm_train_8616070567821eaa3e35__64_1792": {
         "arches": [
             "sm_100a",
@@ -5439,7 +5439,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 bf16 weight: (64, 896] backward time 0.923-1.014x the det pair's at T 256 over eight timing sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H5120 bf16 weight: (64, 896] the column-task kernel 080e0a6c (80 column tasks).
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_896": {
         "arches": [
             "sm_100a",
@@ -5507,7 +5507,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (64, 1152] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 bf16 weight: (64, 1152] the column-task kernel 44508df7 (96 column tasks).
     "cake_rmsnorm_train_44508df7dab2ab688f85__64_1152": {
         "arches": [
             "sm_100a",
@@ -5575,7 +5575,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 f32 weight: (64, 1168] benchmark ratio < 1 against the det pair in both sessions (B200); the det pair runs above T 1168 (faster from T 1184 in every session, 1.05x at T 1408); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 f32 weight: (64, 1168] the column-task kernel b3e6531e (96 column tasks).
     "cake_rmsnorm_train_b3e6531e46667901ab91__64_1168": {
         "arches": [
             "sm_100a",
@@ -5643,7 +5643,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual bf16 weight: (64, 1408] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__64_1408": {
         "arches": [
             "sm_100a",
@@ -5711,7 +5711,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual f32 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual f32 weight: (64, 1408] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__64_1408": {
         "arches": [
             "sm_100a",
@@ -5811,7 +5811,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (3584, 36864] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H4096 f32 weight: (3584, 36864] the single kernel f7573bcb (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_f7573bcb748c0784f3ec": {
         "arches": [
             "sm_100a",
@@ -5844,7 +5844,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (1792, 3584] the single kernel of its largest token counts for dw accuracy: the chunk-partials pair of (1792, 3584] exceeded the FP32 eager reference's dw error at T 2569 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.1404 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows from 1856 to 3584 on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.96x to 1.05x the pair's at T 2048, 2569 and 3584 in two sessions (B200)
+    # sm_100a H4096 f32 weight: (1792, 3584] the single kernel f7573bcb (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_f7573bcb748c0784f3ec__1792_3584": {
         "arches": [
             "sm_100a",
@@ -5877,7 +5877,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_100a H2048 bf16 weight: (7168, 11264] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 bf16 weight: (7168, 11264] the single kernel 0fa4f255 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_0fa4f255caf709d09f66": {
         "arches": [
             "sm_100a",
@@ -5910,7 +5910,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 bf16 weight: (16384, 45056] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy: the single kernel 0fa4f255 it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.25x the deterministic package's median FP64 error over 5 repeats at T 32768 on B200 (concentrated inputs); up to T 58880, the deterministic package's own edge, since 0fa4f255 also exceeds 1.1x that package's median dw error at T 51968 on B200 (off the gate's rows), where the det pair takes 0.973x to 0.984x its backward time
+    # sm_100a H2048 bf16 weight: (16384, 45056] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_ceeef043ac64f37fc529__16384_58880": {
         "arches": [
             "sm_100a",
@@ -5942,7 +5942,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H2048 f32 weight: (15403, 45056] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 f32 weight: (15403, 45056] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_ba7dbf6a07744268705e": {
         "arches": [
             "sm_100a",
@@ -5975,7 +5975,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (45056, 58880] the single kernel of its window above, within 2 % of the det pair's backward time (the det pair of the window, the deterministic package's program, reaches 0.900 of the per-element budget, K form, worst of 120 inputs of each of three families on B200); this single kernel's worst dw element stays within 0.777 of the per-element budget and at or below the FP32 eager reference's at every 64th T of the window (worst of 120 inputs of each of three families in both rstd forms) on B200; backward time 0.98x to 1.01x the det pair's at T 45057, 51968 and 58880 (B200)
+    # sm_100a H2048 f32 weight: (45056, 58880] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_ba7dbf6a07744268705e__45056_58880": {
         "arches": [
             "sm_100a",
@@ -6207,7 +6207,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks), for speed: 0.80x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 17 to 32 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H6144 residual bf16 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__31_32": {
         "arches": [
             "sm_103a",
@@ -6275,7 +6275,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (48, 56] backward time 0.69x the det pair's at T 8 and 0.93x at T 56 (GB300); from T 56 to 304 the det pair runs (1.04-1.10x faster at T 57 to 64 and 280 to 304); T 1 to 48 runs the fixed-claim column-task form
+    # sm_103a H6144 residual bf16 weight: (48, 56] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__48_56": {
         "arches": [
             "sm_103a",
@@ -6309,7 +6309,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (304, 1920] backward time 0.88x the det pair's at T 312, 0.85x at T 512, 0.89x at T 1024 and 0.95x at T 1792 (GB300); level at T 1920, from where the det pair runs (1.04x faster at T 1984)
+    # sm_103a H6144 residual bf16 weight: (304, 1920] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__304_1920": {
         "arches": [
             "sm_103a",
@@ -6343,7 +6343,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (320, 1824] benchmark ratio < 1 against the det pair in both sessions (GB300; 0.95x at T 1824); the det pair runs above T 1824 (1.03x faster at T 1832 to 1856)
+    # sm_103a H6144 residual f32 weight: (320, 1824] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__320_1824": {
         "arches": [
             "sm_103a",
@@ -6511,7 +6511,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 122880,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (576, 3584] backward time 1.009-1.046x the det pair's at T 1024 in four timing sessions (R200, 212 SMs)
+    # sm_107a H6144 residual bf16 weight: (576, 3584] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__576_3584": {
         "arches": [
             "sm_107a",
@@ -6545,7 +6545,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (768, 3584] backward time 1.039-1.050x the det pair's at T 1024 in four timing sessions (R200, 212 SMs)
+    # sm_107a H6144 residual f32 weight: (768, 3584] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__768_3584": {
         "arches": [
             "sm_107a",
@@ -6986,7 +6986,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 bf16 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.72x to 0.82x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 65 to 214 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H1536 bf16 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80__64_214": {
         "arches": [
             "sm_103a",
@@ -7295,7 +7295,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_103a H4096 bf16 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks), for speed: 0.84x to 0.89x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 33 to 152 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H4096 bf16 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks).
     "cake_rmsnorm_train_12d53fe5b85b212fc800__32_152": {
         "arches": [
             "sm_103a",
@@ -7759,7 +7759,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_103a H4096 f32 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks), for speed: 0.84x to 0.88x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 33 to 152 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H4096 f32 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks).
     "cake_rmsnorm_train_27615d0e36c9f2fe0856__32_152": {
         "arches": [
             "sm_103a",
@@ -8201,7 +8201,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 131072,
         },
     },
-    # sm_107a H2048 f32 weight: (1024, 16384] the single kernel of (50176, inf) for dw accuracy: the pair of the window exceeded the FP32 eager reference's dw error at T 1280 (torch rstd), 1728 and 1984 on R200 with 212 SMs (the deterministic package runs the same pair there); its worst dw error stays at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges on R200, worst of 60 inputs of each of three families in both rstd forms
+    # sm_107a H2048 f32 weight: (1024, 16384] the single kernel e90d94fc (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_e90d94fcdd76f08fe027__1024_16384": {
         "arches": [
             "sm_107a",
@@ -8333,7 +8333,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 129024,
         },
     },
-    # sm_107a H512 f32 weight: (1024, 4096] for dw accuracy (the det pair's worst dw error exceeds the FP32 eager reference's at T 1088, 0.0896 against 0.0861 of the per-element budget, and at T 1664, 1920 and 2368 on R200 with 212 SMs; the det pair of (4096, 16384], run at these T, does too at T 1088 and 2048)
+    # sm_107a H512 f32 weight: (1024, 4096] the single kernel fd08c6f4 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_fd08c6f436eb6071fa22__1024_4096": {
         "arches": [
             "sm_107a",
@@ -8432,7 +8432,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 7e6a0b63, the FP32-weight twin of ceeef043, and dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy at the single kernel's speed: the single kernel ba7dbf6a it replaces keeps within 1.1x the deterministic package's median dw error at T 65536 on B200 on the median rule only (off the gate's rows), and the det pair took 0.994x its backward time there
+    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 7e6a0b63, the FP32-weight twin of ceeef043, and dw reduce d0960be9 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_7e6a0b631aea3edf51f9__58880_65536": {
         "arches": [
             "sm_100a",
@@ -8650,7 +8650,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 626aed74, the FP32-weight twin of 35a0b0ca, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which this package's previous version runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (its earlier version) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
+    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 626aed74, the FP32-weight twin of 35a0b0ca, and dw reduce fcbfa14d with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_626aed743358c27513f1__44032_65536": {
         "arches": [
             "sm_100a",
@@ -8934,7 +8934,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 16384,
         },
     },
-    # sm_103a H2048 f32 weight: (64, 171] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.69x to 0.77x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 67 to 171 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H2048 f32 weight: (64, 171] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_978741b43372951cb5b9__64_171": {
         "arches": [
             "sm_103a",
@@ -9063,7 +9063,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H1536 bf16 weight: (64, 384] the column-task form (16 columns per task): faster than the single kernel of (0, 14] and the det pair from 14 rows at every sampled T up to 384 on B200 in both sessions, level at 448 and slower from 512; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 14 on B200, 0.0048 against 0.0047 of the per-element budget); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H1536 bf16 weight: (64, 384] the column-task kernel dc478ac1 (96 column tasks).
     "cake_rmsnorm_train_dc478ac1195882aedee6__64_384": {
         "arches": [
             "sm_100a",
@@ -9199,7 +9199,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 f32 weight: (16, 256] the det-new column-task program 30ec8bb6 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.562x to 0.793x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
+    # sm_107a H4096 f32 weight: (16, 256] the column-task program 30ec8bb6 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_30ec8bb68cf4fe0c817b__16_256": {
         "arches": [
             "sm_107a",
@@ -9403,7 +9403,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 bf16 weight: (63, 171] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.69x to 0.86x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 64 to 171 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H2048 bf16 weight: (63, 171] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_ed36a8d998abba41f227__63_171": {
         "arches": [
             "sm_103a",
@@ -9437,7 +9437,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 bf16 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight; the BF16-weight single computes the same dw); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
+    # sm_103a H256 bf16 weight: (64, 1080] the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_a385ae1681a2c078344e__64_1080": {
         "arches": [
             "sm_103a",
@@ -9537,7 +9537,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.38x to 0.42x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 65 to 214 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H1536 f32 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_698c3d36d67408394ccf__64_214": {
         "arches": [
             "sm_103a",
@@ -9605,7 +9605,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 f32 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
+    # sm_103a H256 f32 weight: (64, 1080] the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_420788e663a2c3a810f6__64_1080": {
         "arches": [
             "sm_103a",
@@ -9773,7 +9773,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks), for speed: 0.81x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 17 to 32 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H6144 residual f32 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__31_32": {
         "arches": [
             "sm_103a",
@@ -9841,7 +9841,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 bf16 weight: (16, 320] the det-new column-task program 1207b056 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.660x to 0.941x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 35 of them inside this window)
+    # sm_107a H1536 bf16 weight: (16, 320] the column-task program 1207b056 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_1207b05663ed2b4de14b__16_320": {
         "arches": [
             "sm_107a",
@@ -9909,7 +9909,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 bf16 weight: (31, 256] the det-new column-task program 6720b4a1 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.648x to 0.928x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 58 of them inside this window)
+    # sm_107a H2048 bf16 weight: (31, 256] the column-task program 6720b4a1 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_6720b4a159be2b84b325__31_256": {
         "arches": [
             "sm_107a",
@@ -9943,7 +9943,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H256 bf16 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel a385ae16 and fixed-order dw reduce 312bbe08, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.806x to 0.952x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows its FP32-weight twin exceeds the dw budget (1.057 at 1271400 rows) and this pair computes the same dw, so the ND program stays there
+    # sm_107a H256 bf16 weight: (64, 786432] the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce 312bbe08), renamed into this package.
     "cake_rmsnorm_train_a385ae1681a2c078344e__64_786432": {
         "arches": [
             "sm_107a",
@@ -9998,7 +9998,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H256 f32 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel 420788e6 and fixed-order dw reduce 312bbe08, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.761x to 0.946x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows this pair exceeds the dw budget (1.057 at 1271400 rows), so the ND program stays there
+    # sm_107a H256 f32 weight: (64, 786432] the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce 312bbe08), renamed into this package.
     "cake_rmsnorm_train_420788e663a2c3a810f6__64_786432": {
         "arches": [
             "sm_107a",
@@ -10030,7 +10030,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H512 f32 weight: (16, 384] the det-new column-task program 8f29656c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.547x to 0.889x at the sampled T from 1 to 384, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 33 of them inside this window)
+    # sm_107a H512 f32 weight: (16, 384] the column-task program 8f29656c of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_8f29656c0018a749a588__16_384": {
         "arches": [
             "sm_107a",
@@ -10098,7 +10098,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 bf16 weight: (16, 256] the det-new column-task program c1de7e41 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.619x to 0.868x at the sampled T from 2 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 65 of them inside this window)
+    # sm_107a H4096 bf16 weight: (16, 256] the column-task program c1de7e41 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_c1de7e41da4550cca0bc__16_256": {
         "arches": [
             "sm_107a",
@@ -10132,7 +10132,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 f32 weight: (16, 320] the det-new column-task program 137ba532 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.607x to 0.919x at the sampled T from 2 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 36 of them inside this window)
+    # sm_107a H1536 f32 weight: (16, 320] the column-task program 137ba532 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_137ba5328176fb07b37d__16_320": {
         "arches": [
             "sm_107a",
@@ -10166,7 +10166,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 f32 weight: (16, 256] the det-new column-task program 23c90013 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.574x to 0.915x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
+    # sm_107a H2048 f32 weight: (16, 256] the column-task program 23c90013 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_23c900134dc889302136__16_256": {
         "arches": [
             "sm_107a",
@@ -10200,7 +10200,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (16, 1664] the det-new column-task program 5cca2d0f of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.650x to 0.945x at the sampled T from 2 to 1664, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 65 of them inside this window)
+    # sm_107a H6144 f32 weight: (16, 1664] the column-task program 5cca2d0f of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_5cca2d0fa4553f992406__16_1664": {
         "arches": [
             "sm_107a",
@@ -10234,7 +10234,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (16, 768] the det-new column-task program 3bbd4f84 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.630x to 0.973x at the sampled T from 1 to 768, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 53 of them inside this window)
+    # sm_107a H6144 residual f32 weight: (16, 768] the column-task program 3bbd4f84 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_3bbd4f848b4847bff893__16_768": {
         "arches": [
             "sm_107a",
@@ -10336,7 +10336,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (16, 960] the det-new column-task program 0dafdf09 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.639x to 0.967x at the sampled T from 16 to 960, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 37 of them inside this window)
+    # sm_107a H6144 bf16 weight: (16, 960] the column-task program 0dafdf09 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_0dafdf094615d080fcc9__16_960": {
         "arches": [
             "sm_107a",
@@ -10370,7 +10370,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (1151, 1152] the det-new column-task program 0dafdf09 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.916x at T 1152, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 1 of them inside this window)
+    # sm_107a H6144 bf16 weight: (1151, 1152] the column-task program 0dafdf09 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_0dafdf094615d080fcc9__1151_1152": {
         "arches": [
             "sm_107a",
@@ -10404,7 +10404,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (15, 320] the det-new column-task program ee1be07a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.600x to 0.938x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 20 of them inside this window)
+    # sm_107a H6144 residual bf16 weight: (15, 320] the column-task program ee1be07a of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_ee1be07a89a0482de45e__15_320": {
         "arches": [
             "sm_107a",
@@ -10438,7 +10438,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (447, 576] the det-new column-task program ee1be07a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.867x to 0.897x at the sampled T from 448 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 9 of them inside this window)
+    # sm_107a H6144 residual bf16 weight: (447, 576] the column-task program ee1be07a of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_ee1be07a89a0482de45e__447_576": {
         "arches": [
             "sm_107a",
@@ -10472,7 +10472,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H512 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.50x to 0.80x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 5 to 62 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H512 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_bdfd77893d8f9db3c9bb__16_64": {
         "arches": [
             "sm_103a",
@@ -10506,7 +10506,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H512 bf16 weight: (16, 576] the det-new column-task program 49af1e75 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.528x to 0.934x at the sampled T from 1 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 49 of them inside this window)
+    # sm_107a H512 bf16 weight: (16, 576] the column-task program 49af1e75 of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_49af1e75185ddd637b76__16_576": {
         "arches": [
             "sm_107a",
@@ -10741,7 +10741,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (31, 256] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.596x to 0.847x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 12 of them inside this window)
+    # sm_107a H5120 bf16 weight: (31, 256] the column-task program 080e0a6c of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__31_256": {
         "arches": [
             "sm_107a",
@@ -10775,7 +10775,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (511, 640] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.911x to 0.928x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
+    # sm_107a H5120 bf16 weight: (511, 640] the column-task program 080e0a6c of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__511_640": {
         "arches": [
             "sm_107a",
@@ -10809,7 +10809,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (895, 896] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.953x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
+    # sm_107a H5120 bf16 weight: (895, 896] the column-task program 080e0a6c of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__895_896": {
         "arches": [
             "sm_107a",
@@ -10843,7 +10843,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (15, 256] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.605x to 0.930x at the sampled T from 16 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 13 of them inside this window)
+    # sm_107a H5120 f32 weight: (15, 256] the column-task program 139d162a of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__15_256": {
         "arches": [
             "sm_107a",
@@ -10877,7 +10877,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (511, 640] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.900x to 0.915x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
+    # sm_107a H5120 f32 weight: (511, 640] the column-task program 139d162a of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__511_640": {
         "arches": [
             "sm_107a",
@@ -10911,7 +10911,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (895, 896] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.935x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
+    # sm_107a H5120 f32 weight: (895, 896] the column-task program 139d162a of the deterministic package, renamed into this package.
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896": {
         "arches": [
             "sm_107a",
@@ -10945,7 +10945,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H512 f32 weight: (16, 227] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.39x to 0.42x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 5 to 227 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H512 f32 weight: (16, 227] the deterministic package's column-task program of these token counts (32 column tasks).
     "cake_rmsnorm_train_2c60470d16e0a7fb6089__16_227": {
         "arches": [
             "sm_103a",
@@ -11495,7 +11495,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H2048 bf16 weight: (11264, 16384] the deterministic package's det pair of these rows (main kernel c73074cf and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package; from T 13608 for dw accuracy: the single kernel 0fa4f255 it replaces there sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.26x to 1.62x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on B200 (concentrated inputs); the det pair took 38.02, 40.38 and 40.32 us against the single's 36.48, 38.77 and 38.88 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H2048 bf16 weight: (11264, 16384] the deterministic package's det pair main kernel c73074cf with its fixed-order dw reduce.
     "cake_rmsnorm_train_c73074cf44f07fcf3bb6__11264_16384": {
         "arches": [
             "sm_100a",
@@ -12185,7 +12185,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H512 f32 weight: (227, 960] the det pair; from T 227 to 292, where it replaces a single kernel, for speed: 0.50x that kernel's backward time at the sampled T in two GB300 records; worst dw element 0.0575 of the budget at the sampled T from 228 to 292 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H512 f32 weight: (227, 960] the deterministic package's det pair main kernel 9f07cea1 with its fixed-order dw reduce.
     "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_960": {
         "arches": [
             "sm_103a",
@@ -12566,7 +12566,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H6144 bf16 weight: (4096, 42496] the deterministic package's det pair of these rows (main kernel b93bf060 and fixed-order dw reduce 5f5cdc51 with that package's host plan), renamed into this package; from T 5632 for dw accuracy: the single kernel 9433061d it replaces there sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.10x to 1.62x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16231 on B200 (concentrated and saturated_lo inputs); the det pair took 95.26, 102.08 and 102.69 us against the single's 93.22, 99.90 and 100.74 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H6144 bf16 weight: (4096, 42496] the deterministic package's det pair main kernel b93bf060 with its fixed-order dw reduce.
     "cake_rmsnorm_train_b93bf060d4d3defc8150__4096_42496": {
         "arches": [
             "sm_100a",
@@ -12860,7 +12860,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 f32 weight: (214, 1024] the det pair; from T 214 to 320, where it replaces a single kernel, for speed: 0.40x to 0.53x that kernel's backward time at the sampled T in two GB300 records; worst dw element 0.0596 of the budget at the sampled T from 215 to 320 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H1536 f32 weight: (214, 1024] the deterministic package's det pair main kernel baff9ecb with its fixed-order dw reduce.
     "cake_rmsnorm_train_baff9ecbafe7de1e6030__214_1024": {
         "arches": [
             "sm_103a",
@@ -13101,7 +13101,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 bf16 weight: (32768, 58496] the det pair up to T 58496: above it the pair breaches the per-element dw budget (worst dw element 1.0622 of the budget at T 58560 on GB300, FP32-weight route, torch rstd, 3 x 120 and 3 x 240 inputs; the BF16-weight route runs the same dw computation), so the window ends at the last every-64 T below that point
+    # sm_103a H2048 bf16 weight: (32768, 58496] the deterministic package's det pair main kernel 302f64db with its fixed-order dw reduce.
     "cake_rmsnorm_train_302f64db6abe79e5259e__32768_58496": {
         "arches": [
             "sm_103a",
@@ -13156,7 +13156,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H2048 bf16 weight: (58496, 61952] the deterministic package's program for these token counts for dw accuracy up to T 61952: worst dw element 0.9454 of the budget at the sampled T from 58497 to 61952 on GB300 (3 x 120 inputs per T, kernel and torch rstd); backward time 1.01 of the det pair's (GB300 record)
+    # sm_103a H2048 bf16 weight: (58496, 61952] the deterministic package's det pair main kernel 302f64db with its fixed-order dw reduce.
     "cake_rmsnorm_train_302f64db6abe79e5259e__58496_61952": {
         "arches": [
             "sm_103a",
@@ -13373,7 +13373,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 f32 weight: (32768, 58496] the det pair up to T 58496: above it the pair breaches the per-element dw budget (worst dw element 1.0622 of the budget at T 58560 on GB300, FP32-weight route, torch rstd, 3 x 120 and 3 x 240 inputs; the BF16-weight route runs the same dw computation), so the window ends at the last every-64 T below that point
+    # sm_103a H2048 f32 weight: (32768, 58496] the deterministic package's det pair main kernel e98cb156 with its fixed-order dw reduce.
     "cake_rmsnorm_train_e98cb156abfe1666c76f__32768_58496": {
         "arches": [
             "sm_103a",
@@ -13405,7 +13405,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 f32 weight: (58496, 61952] the deterministic package's program for these token counts for dw accuracy up to T 61952: worst dw element 0.9454 of the budget at the sampled T from 58497 to 61952 on GB300 (3 x 120 inputs per T, kernel and torch rstd); backward time 1.01 of the det pair's (GB300 record)
+    # sm_103a H2048 f32 weight: (58496, 61952] the deterministic package's det pair main kernel e98cb156 with its fixed-order dw reduce.
     "cake_rmsnorm_train_e98cb156abfe1666c76f__58496_61952": {
         "arches": [
             "sm_103a",
@@ -14659,7 +14659,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 64 its backward took 4.70 and 4.74 us against 6.00 and 5.98 us of the fixed-claim form it replaces and a forward and backward call 7.28 and 7.55 us against 8.40 and 8.64 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 64 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); at T 96, 128, 256, 448 and from 640 to 1024 a forward and backward call or a checkpointed step was slower than with the det pair of the window above in both runs (8.80 and 8.70 us against 8.62 and 8.66 us for a forward and backward call at T 96), so that pair runs above T 64; the edge 16 against the window below is not measured yet
+    # sm_103a H5120 bf16 weight: (16, 64] the column-task kernel 080e0a6c (80 column tasks).
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__16_64": {
         "arches": [
             "sm_103a",
@@ -14832,7 +14832,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 f32 weight: (16, 192] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 192 its backward took 6.94 and 6.88 us against 7.68 and 7.65 us of the det pair it replaces and a forward and backward call 9.71 and 9.76 us against 9.94 and 9.86 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 192 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.73x the det pair's at T 64 (GB300, kernel-tests harness); at T 256 and from 640 to 1024 a forward and backward call and a checkpointed step were slower than with the det pair of the window above in both runs (10.68 and 10.64 us against 10.45 and 10.14 us for a forward and backward call at T 256), so that pair runs above T 192; the edge 16 against the window below is not measured yet
+    # sm_103a H5120 f32 weight: (16, 192] the column-task kernel 139d162a (80 column tasks).
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__16_192": {
         "arches": [
             "sm_103a",
@@ -15005,7 +15005,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 bf16 weight: (16, 896] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 896 its backward took 13.97 us against 15.25 us of the det pair it replaces and a forward and backward call 19.58 us against 20.16 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call), and no sampled T from 24 to 896 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.75x the det pair's at T 64 (GB300, kernel-tests harness); at T 1024 its backward was still faster (14.94 us against 16.08 and 16.19 us in two runs) but a checkpointed step was slower in both runs (26.46 and 26.61 us against 25.95 and 25.87 us), so the det pair of the window above runs above T 896; the edge 16 against the window below is not measured yet
+    # sm_103a H6144 bf16 weight: (16, 896] the column-task kernel 44508df7 (96 column tasks).
     "cake_rmsnorm_train_44508df7dab2ab688f85__16_896": {
         "arches": [
             "sm_103a",
@@ -15224,7 +15224,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 f32 weight: (16, 1024] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 1024 its backward took 14.72 and 14.62 us against 16.10 and 16.19 us of the det pair it replaces and a forward and backward call 21.06 and 21.24 us against 21.63 and 21.26 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 1024 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); above T 1024 the det pair of the window above runs, faster from T 1536 in an earlier benchmark run without the L2 flush (18.43 us against 19.31 us of this program); the edge 16 against the window below is not measured yet
+    # sm_103a H6144 f32 weight: (16, 1024] the column-task kernel b3e6531e (96 column tasks).
     "cake_rmsnorm_train_b3e6531e46667901ab91__16_1024": {
         "arches": [
             "sm_103a",
@@ -15320,7 +15320,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H6144 residual bf16 weight: (56, 304] the deterministic package's column-task program of these token counts (96 column tasks; that package runs it from T 0 to 1216), in place of the det pair 0dcdc563 + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families)
+    # sm_103a H6144 residual bf16 weight: (56, 304] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__56_304": {
         "arches": [
             "sm_103a",
@@ -15354,7 +15354,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 71d36617 of the deterministic package's column-task program 864e84f3 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
+    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 71d36617 of the deterministic package's column-task program 864e84f3 of these token counts.
     "cake_rmsnorm_train_71d36617003ab7742a77__48_320": {
         "arches": [
             "sm_103a",
@@ -16982,7 +16982,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package, for dw accuracy: the row single kernel it replaces put its worst dw error at 1.12x to 1.59x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on R200 with 212 SMs (normal, concentrated and saturated_lo inputs); the plain det pair's worst dw element stays within 0.545 of the per-element budget up to T 19968 on R200 with 212 SMs and within 0.499 with 216 SMs (60 or more inputs of each of three families, kernel rstd; both weight dtypes compute the same dw); its dw error exceeds the FP32 eager reference's at T 13024, 17472, 17728 and 19520 and at T 18304 (torch rstd) on R200 with 212 SMs
+    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_468cc4d1b8128187b4b3__4096_19968": {
         "arches": [
             "sm_107a",
@@ -17201,7 +17201,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H6144 bf16 weight: (19456, 30720] the det pair program; its worst dw error stays at or below 0.57 of the budget at every sampled T from 19457 to 30721 (every 64 rows) on R200, worst of 60 inputs of each of three families in both rstd forms; a follow-up returns this window to the pair of (3, 30720], which stays within the per-element budget at 66 sampled T from 19457 to 30720 (worst 0.913 at T 29680, worst of 120 inputs of each of three families in both rstd forms, R200 with 212 SMs) and takes 0.97x to 0.99x this det pair's backward time
+    # sm_107a H6144 bf16 weight: (19456, 30720] the deterministic package's det pair main kernel 9cc51adf with its fixed-order dw reduce.
     "cake_rmsnorm_train_9cc51adfe9826056658b__19456_30720": {
         "arches": [
             "sm_107a",
@@ -17302,7 +17302,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H6144 f32 weight: (19456, 28672] the det pair program for dw accuracy: the pair of (20, 28672] exceeded the FP32 eager reference's dw error at 21 sampled T from 20416 rows on R200; its worst dw error stays within 0.631 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 19457 to 28673 (every 64 rows) on R200, worst of 60 inputs of each of three families in both rstd forms
+    # sm_107a H6144 f32 weight: (19456, 28672] the deterministic package's det pair main kernel bdfba721 with its fixed-order dw reduce.
     "cake_rmsnorm_train_bdfba721a43e0d093668__19456_28672": {
         "arches": [
             "sm_107a",
@@ -17496,7 +17496,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_780c64c6f2c4615bfbcf": {
         "arches": [
             "sm_100a",
@@ -17526,7 +17526,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 24 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_f2ccf7197a641c39acbf": {
         "arches": [
             "sm_100a",
@@ -17556,7 +17556,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 24 and 64 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_9fb6b410e91f9d92becf": {
         "arches": [
             "sm_100a",
@@ -17586,7 +17586,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_67cb56412bd46304b711": {
         "arches": [
             "sm_100a",
@@ -17616,7 +17616,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 24 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_aa745395d7542d8a8e3a": {
         "arches": [
             "sm_100a",
@@ -17646,7 +17646,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 24 and 64 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6a0114cb0b27a780a4c3": {
         "arches": [
             "sm_100a",
@@ -17676,7 +17676,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_64a299691c17079fe510": {
         "arches": [
             "sm_100a",
@@ -17706,7 +17706,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c167e0d26b363cf19e7b": {
         "arches": [
             "sm_100a",
@@ -17736,7 +17736,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_8c261dfc6e34351d7a11": {
         "arches": [
             "sm_100a",
@@ -17766,7 +17766,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_88e6252beaf7d056d555": {
         "arches": [
             "sm_100a",
@@ -17796,7 +17796,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 bf16 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H1536 bf16 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_db218c92c4c86b9da85a__0_2": {
         "arches": [
             "sm_100a",
@@ -17824,7 +17824,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H1536 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H1536 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4": {
         "arches": [
             "sm_103a",
@@ -17853,7 +17853,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (4, 5] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 5 are not measured yet
+    # sm_103a H1536 bf16 weight: (4, 5] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c2a523de1ff578621a88__4_5": {
         "arches": [
             "sm_103a",
@@ -17881,7 +17881,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H1536 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c2a523de1ff578621a88__4_16": {
         "arches": [
             "sm_107a",
@@ -17909,7 +17909,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H1536 f32 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_2": {
         "arches": [
             "sm_100a",
@@ -17937,7 +17937,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H1536 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H1536 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_4": {
         "arches": [
             "sm_103a",
@@ -17966,7 +17966,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (4, 6] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H1536 f32 weight: (4, 6] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_744aa77460c886f4f429__4_6": {
         "arches": [
             "sm_103a",
@@ -17994,7 +17994,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H1536 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_744aa77460c886f4f429__4_16": {
         "arches": [
             "sm_107a",
@@ -18022,7 +18022,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H2048 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H2048 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c5f62407b828a85f82ec": {
         "arches": [
             "sm_100a",
@@ -18052,7 +18052,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_100a H2048 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a951623c157d070e85ab__4_12": {
         "arches": [
             "sm_100a",
@@ -18080,7 +18080,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H2048 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H2048 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a951623c157d070e85ab__4_16": {
         "arches": [
             "sm_103a",
@@ -18109,7 +18109,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H2048 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H2048 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_0017ab41f68d8689ebc2": {
         "arches": [
             "sm_100a",
@@ -18139,7 +18139,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 14 are not measured yet
+    # sm_100a H2048 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_14": {
         "arches": [
             "sm_100a",
@@ -18167,7 +18167,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H2048 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H2048 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_16": {
         "arches": [
             "sm_103a",
@@ -18196,7 +18196,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H4096 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H4096 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_945a0afdb82ab47eb643": {
         "arches": [
             "sm_100a",
@@ -18226,7 +18226,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_100a H4096 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_41f44b4bc0b765350a50__4_12": {
         "arches": [
             "sm_100a",
@@ -18254,7 +18254,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H4096 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H4096 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_41f44b4bc0b765350a50__4_16": {
         "arches": [
             "sm_103a",
@@ -18283,7 +18283,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H4096 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H4096 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_f6bd1634a115bd281055": {
         "arches": [
             "sm_100a",
@@ -18313,7 +18313,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 14 are not measured yet
+    # sm_100a H4096 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_b378ba007691c582171e__4_14": {
         "arches": [
             "sm_100a",
@@ -18341,7 +18341,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H4096 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H4096 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_b378ba007691c582171e__4_16": {
         "arches": [
             "sm_103a",
@@ -18370,7 +18370,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H5120 bf16 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H5120 bf16 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_dbc680f356be4cd643de": {
         "arches": [
             "sm_100a",
@@ -18400,7 +18400,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (4, 12] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_107a H5120 bf16 weight: (4, 12] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_904b1ad45d6219b4f43c__4_12": {
         "arches": [
             "sm_107a",
@@ -18428,7 +18428,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H5120 f32 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H5120 f32 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_d47138228b123e55fe5d": {
         "arches": [
             "sm_100a",
@@ -18458,7 +18458,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H5120 f32 weight: (4, 5] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 5 are not measured yet
+    # sm_103a H5120 f32 weight: (4, 5] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_05396cd3a077d3772fdc__4_5": {
         "arches": [
             "sm_103a",
@@ -18486,7 +18486,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (4, 15] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 15 are not measured yet
+    # sm_107a H5120 f32 weight: (4, 15] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_05396cd3a077d3772fdc__4_15": {
         "arches": [
             "sm_107a",
@@ -18514,7 +18514,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_e37752b056dd4e4a0bee": {
         "arches": [
             "sm_100a",
@@ -18544,7 +18544,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H6144 bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_fdfb73350c1a926a4929__4_6": {
         "arches": [
             "sm_103a",
@@ -18572,7 +18572,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_fdfb73350c1a926a4929__4_16": {
         "arches": [
             "sm_107a",
@@ -18600,7 +18600,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_35b97e6e2bfa3e9f2ff9": {
         "arches": [
             "sm_100a",
@@ -18630,7 +18630,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 f32 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_103a H6144 f32 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_18b8b8054c7053942bcd__4_12": {
         "arches": [
             "sm_103a",
@@ -18658,7 +18658,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_18b8b8054c7053942bcd__4_16": {
         "arches": [
             "sm_107a",
@@ -18686,7 +18686,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (0, 2] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H6144 residual bf16 weight: (0, 2] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_deeb187630473818923d__0_2": {
         "arches": [
             "sm_100a",
@@ -18714,7 +18714,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H6144 residual bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H6144 residual bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_deeb187630473818923d__0_4": {
         "arches": [
             "sm_103a",
@@ -18743,7 +18743,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H6144 residual bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_6": {
         "arches": [
             "sm_103a",
@@ -18771,7 +18771,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (4, 15] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 15 are not measured yet
+    # sm_107a H6144 residual bf16 weight: (4, 15] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_15": {
         "arches": [
             "sm_107a",
@@ -18799,7 +18799,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 residual f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 residual f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a6b1a6e565dc98b49e1a": {
         "arches": [
             "sm_100a",
@@ -18829,7 +18829,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (4, 10] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 10 are not measured yet
+    # sm_103a H6144 residual f32 weight: (4, 10] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c29a8f856283578103dc__4_10": {
         "arches": [
             "sm_103a",
@@ -18857,7 +18857,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 residual f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c29a8f856283578103dc__4_16": {
         "arches": [
             "sm_107a",
