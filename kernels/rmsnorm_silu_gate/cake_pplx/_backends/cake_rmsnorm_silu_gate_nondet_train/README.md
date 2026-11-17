@@ -10,7 +10,11 @@ counterpart is `cake_pplx.cake_rmsnorm_silu_gate_det_train`, with the backend
 
 The public module is a stable API; this backend package is experimental (its
 own names carry no compatibility guarantee).  It ships programs for `sm_100a`
-(B200 / GB200), `sm_103a` (B300 / GB300) and `sm_107a` (R200).  The feature
+(B200 / GB200), `sm_103a` (B300 / GB300) and `sm_107a` (R200), one
+`-gencode=arch=compute_<arch>,code=sm_<arch>` build per program, minimum CUDA
+12.8 (12.9 for some libraries) / 12.9 / 13.5 (`min_cuda` in `build.json`; on an
+older toolkit `cake_build.jit_spec` raises and `cake_build.jit_specs` leaves
+the library out).  The feature
 does not take part in automatic backend selection, autotuning or trace-apply.
 Its libraries are JIT-built by the package's JIT shim from `build.json`.
 
