@@ -386,12 +386,14 @@ def _backward_selection_rows(
 ) -> int:
     """The row count a backward call of ``rows`` tokens selects its programs by.
 
-    The routes of ``cake_windows.ACCURACY_EDGES`` switch from plain to
-    compensated ``dw`` sums at an accuracy edge measured on devices with at
-    least ``cake_windows.ACCURACY_MIN_SMS[arch]`` SMs.  A device with fewer SMs
-    gives each CTA more rows to sum at the same token count, so there such a
-    route selects its programs as if the call had the edge plus one rows: its
-    compensated programs run at every token count.  The launch keeps ``rows``.
+    The routes of ``cake_windows.ACCURACY_EDGES`` switch to other ``dw``
+    programs at an accuracy edge measured on devices with at least
+    ``cake_windows.ACCURACY_MIN_SMS[arch]`` SMs.  A device with fewer SMs gives
+    each CTA more rows to sum at the same token count, so there such a route
+    selects its programs as if the call had the edge plus one rows: its
+    programs above the edge run at every token count.  This version lists no
+    route there, so every call selects its programs by ``rows``.  The launch
+    keeps ``rows``.
     """
 
     edge = _windows.ACCURACY_EDGES.get(arch, {}).get(
