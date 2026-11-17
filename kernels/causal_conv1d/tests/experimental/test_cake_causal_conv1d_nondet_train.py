@@ -39,7 +39,8 @@ partial-last-tile channel counts and at small and large ``S``: the backward laun
 grid, its outputs are judged against the naive tier, the workspace (the same size at every multiple) reads back zero
 after every launch, under CUDA Graph capture / replay and through the autograd entry (plain and checkpointed).
 
-The narrower channel tiles of ``TILE_OVERRIDES``: one row per architecture (``OVERRIDE_CASES``) launches the row's
+The narrower channel tiles of ``TILE_OVERRIDES``: each row of ``OVERRIDE_CASES`` (one per architecture, on sm_107a on
+both routes that plan by it) launches the row's
 tiles, on a caller-owned workspace of the public size and on the package's, with every output judged against the
 naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
@@ -125,19 +126,23 @@ REPEAT_CASES = (
     (4097, 1160, (1000, 0, 3, 3094)),
 )
 PRECISION_CASES = ((250340, 512, "perf"), (250340, 1280, "perf"))
-# One row of ``TILE_OVERRIDES`` per architecture (route, S, C): the backward runs its narrower channel tiles there.
+# Rows of ``TILE_OVERRIDES`` per architecture (route, S, C): the backward runs its narrower channel tiles there.  The
+# sm_107a ``bwd_dt`` row serves both routes that plan by it: ``bwd_dt_bf16_taps`` (BF16 taps, through
+# ``TILE_ROUTE``) and ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out).
 OVERRIDE_CASES = {
-    "sm_100a": ("bwd_bias_fp32g", 62585, 2048),
-    "sm_103a": ("bwd", 62585, 1536),
-    "sm_107a": ("bwd_dt", 62585, 768),
+    "sm_100a": (("bwd_bias_fp32g", 62585, 2048),),
+    "sm_103a": (("bwd", 62585, 1536),),
+    "sm_107a": (("bwd_dt_bf16_taps", 62585, 768), ("bwd_dt", 62585, 768)),
 }
 # The rows of ``NARROW_TILES`` (rendered with the table; empty for an architecture without rows) the narrow-tile
 # test launches, per architecture (route, S, C): each key's lowest, an inner and its highest channel count at the
-# key's smallest token count and one token above it (inside the delivered range; ``CASES`` stop at S = 4097).
+# key's smallest token count and one token above it (inside the delivered range; ``CASES`` stop at S = 4097), on the
+# key's route and on every route that plans by its rows (``TILE_ROUTE``).
 NARROW_CASES = {
     arch: tuple(
         (route, S, C)
-        for (route, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
+        for (base, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
+        for route in (base, *sorted(t for t, b in loader.TILE_ROUTE.items() if b == base))
         for C in sorted({int(c_lo), (int(c_lo) + int(c_hi)) // 16 * 8, int(c_hi)})
         for S in sorted({int(s_min), min(int(s_min) + 1, int(s_max))})
     )
@@ -172,24 +177,36 @@ GRID_MULT_CASES = (
     (65536, 1280, "perf"),
     (250340, 512, "perf"),
 )
+# The call settings that resolve to each backward route.  ``dweight_dtype`` is the dtype of the preallocated
+# ``dweight`` out a call of the route passes (``None``: none, the taps' dtype): ``bwd_dt`` is FP32 taps with a BF16
+# ``dweight`` out (:func:`_backward` with ``kind`` allocates a fresh one per call).
 ROUTE_SETTINGS = {
-    "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16"),
-    "bwd_dt": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16"),
-    "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16"),
-    "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32"),
-    "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32"),
+    "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=None),
+    "bwd_dt": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=BF16),
+    "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16", dweight_dtype=None),
+    "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32", dweight_dtype=None),
+    "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32", dweight_dtype=None),
+    "bwd_dt_bf16_taps": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None),
+    "bwd_bias_bf16_taps": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
 }
+# The backward routes the autograd entry reaches: it returns ``dweight`` in the taps' dtype, so ``bwd_dt`` (FP32 taps
+# with a BF16 ``dweight`` out) is a route of direct backward calls only.
+AUTOGRAD_KINDS = tuple(
+    kind for kind, settings in ROUTE_SETTINGS.items() if settings["dweight_dtype"] is None
+)
 FORWARD_OF = {
     "bwd": "fwd",
-    "bwd_dt": "fwd_dt",
+    "bwd_dt": "fwd",
     "bwd_bias": "fwd_bias",
     "bwd_fp32g": "fwd",
     "bwd_bias_fp32g": "fwd_bias",
+    "bwd_dt_bf16_taps": "fwd_dt",
+    "bwd_bias_bf16_taps": "fwd_bias",
 }
 # Every dtype combination a backward call takes: taps x bias (none, FP32, BF16) x SiLU' policy x the dweight /
 # dbias out dtypes (each FP32 or BF16, independently of its parameter).  Each resolves to one route: BF16 taps on
-# the fp32g and bias routes, and both mixed bwd_dt combinations (BF16 taps + FP32 dweight, FP32 taps + BF16
-# dweight), are among them.
+# the fp32g routes, BF16 taps under the "bf16" policy (bwd_dt_bf16_taps, bwd_bias_bf16_taps, with either dweight
+# dtype) and FP32 taps with a BF16 dweight (bwd_dt, and bwd_bias with a bias) are among them.
 DTYPE_COMBOS = tuple(
     (weight_dtype, bias_dtype, policy, dweight_dtype, dbias_dtype)
     for policy in ("bf16", "fp32")
@@ -268,7 +285,8 @@ def _combo_route(weight_dtype, bias_dtype, policy, dweight_dtype=None) -> str:
     return loader.backward_route(
         bias=bias_dtype is not None,
         fp32_grad=policy == "fp32",
-        bf16_taps_or_dweight=BF16 in (weight_dtype, dweight_dtype or weight_dtype),
+        bf16_taps=weight_dtype == BF16,
+        bf16_dweight=(dweight_dtype or weight_dtype) == BF16,
     )
 
 
@@ -393,9 +411,22 @@ def _forward(x, w, cu, **kwargs) -> torch.Tensor:
     return pkg.cake_causal_conv1d_nondet_train_forward(x, w, cu, **kwargs)
 
 
-def _backward(x, w, cu, dy, b=None, policy="bf16", **kwargs):
-    """``(dx, dweight, dbias_or_None)`` of one non-deterministic backward call."""
+def _backward(x, w, cu, dy, b=None, policy="bf16", *, kind=None, **kwargs):
+    """``(dx, dweight, dbias_or_None)`` of one non-deterministic backward call.  With ``kind`` (a backward route of
+    :data:`ROUTE_SETTINGS`) and no ``dweight`` out passed, the call writes a fresh NaN-filled ``dweight`` out of the
+    route's ``dweight_dtype`` when it names one (``bwd_dt``), and the call's arguments must resolve to ``kind``."""
 
+    if kind is not None:
+        dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"]
+        if kwargs.get("dweight") is None and dweight_dtype is not None:
+            kwargs["dweight"] = torch.full(
+                (w.shape[0], WIDTH), float("nan"), dtype=dweight_dtype, device=w.device
+            )
+        dweight = kwargs.get("dweight")
+        route = _combo_route(
+            w.dtype, None if b is None else b.dtype, policy, None if dweight is None else dweight.dtype
+        )
+        assert route == kind, f"the call resolves to route {route}, not {kind}"
     grads = pkg.cake_causal_conv1d_nondet_train_backward(
         x,
         w,
@@ -457,9 +488,20 @@ def _judge(
 
 
 def _route_judge(S: int, C: int, docs, kind: str, call, **kwargs) -> None:
-    """:func:`_judge` with the dtypes and the policy that resolve to backward route ``kind``."""
+    """:func:`_judge` with the taps / bias dtypes and the policy that resolve to backward route ``kind`` (``call``
+    passes ``kind=kind`` to :func:`_backward`, which writes the route's ``dweight`` out)."""
 
-    _judge(S, C, docs, call, **ROUTE_SETTINGS[kind], **kwargs)
+    settings = ROUTE_SETTINGS[kind]
+    _judge(
+        S,
+        C,
+        docs,
+        call,
+        weight_dtype=settings["weight_dtype"],
+        bias_dtype=settings["bias_dtype"],
+        policy=settings["policy"],
+        **kwargs,
+    )
 
 
 def _stream_workspace(device: torch.device) -> torch.Tensor | None:
@@ -526,6 +568,36 @@ def test_routes_match_reference(case, combo) -> None:
     )
 
 
+# BF16 taps without a bias (bwd_dt_bf16_taps) and with a BF16 bias (bwd_bias_bf16_taps) under the "bf16" policy, at
+# keys whose draws put dx past the naive tier when SiLU' is evaluated at the BF16-rounded preactivation (C 512 runs
+# other programs on sm_107a than on sm_100a / sm_103a; each architecture misses on some of these keys).
+BF16_TAPS_KEYS = (
+    ("bwd_dt_bf16_taps", None, 33),
+    ("bwd_bias_bf16_taps", BF16, 11),
+    ("bwd_bias_bf16_taps", BF16, 56),
+)
+
+
+@pytest.mark.parametrize(
+    "kind, bias_dtype, key",
+    BF16_TAPS_KEYS,
+    ids=[f"{kind}-b{_dtype_id(bias)}-key{key}" for kind, bias, key in BF16_TAPS_KEYS],
+)
+def test_bf16_taps_routes_match_reference(kind, bias_dtype, key) -> None:
+    """BF16 taps under the "bf16" policy at S = 1000, C = 512 ("perf" documents): ``y``, ``dx``, ``dweight`` and
+    ``dbias`` judged against the naive tier."""
+
+    _require_route(kind)
+
+    def call(x, w, cu, dy, b, policy):
+        y = _forward(x, w, cu, bias=b)
+        dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind)
+        return {"y": y, **_grads(dx, dw, db)}
+
+    _judge(1000, 512, "perf", call, weight_dtype=BF16, bias_dtype=bias_dtype, policy="bf16", key=key,
+           label=f"{kind} BF16 taps key {key}")
+
+
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
 @pytest.mark.parametrize("case", WIDE_CASES, ids=_case_id)
 def test_wide_channel_rows(case, kind) -> None:
@@ -534,7 +606,11 @@ def test_wide_channel_rows(case, kind) -> None:
 
     _require_route(kind)
     S, C, docs = case
-    _route_judge(S, C, docs, kind, _forward_backward, key=3, label=f"{kind} {case}")
+
+    def call(x, w, cu, dy, b, policy):
+        return _forward_backward(x, w, cu, dy, b, policy, kind=kind)
+
+    _route_judge(S, C, docs, kind, call, key=3, label=f"{kind} {case}")
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
@@ -570,7 +646,7 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
 
         def call(x, w, cu, dy, b, policy, workspace=workspace, selected=selected, label=label):
             seen.clear()
-            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
             assert seen == [selected], f"{label}: launched {seen}"
             assert int(torch.count_nonzero(workspace)) == 0, label
             return _grads(dx, dw, db)
@@ -599,7 +675,7 @@ def test_large_case_over_two_to_the_31_elements(kind) -> None:
 
     def call(x, w, cu, dy, b, policy):
         y = _forward(x, w, cu, bias=b)
-        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+        dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
         assert int(torch.count_nonzero(workspace)) == 0, label
         return {"y": y, **_grads(dx, dw, db)}
 
@@ -624,7 +700,7 @@ def test_repeated_launches_worst_case(case, kind, record_property) -> None:
     def call(x, w, cu, dy, b, policy):
         found = {"dx": [], "dweight": [], "dbias": []}
         for repeat in range(REPEATS):
-            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
             assert int(torch.count_nonzero(workspace)) == 0, (
                 f"the workspace is not zero after repeat {repeat}"
             )
@@ -643,55 +719,58 @@ def test_repeated_launches_worst_case(case, kind, record_property) -> None:
 
 @pytest.mark.parametrize("own_workspace", (True, False), ids=("own-ws", "pkg-ws"))
 def test_tile_override_row(own_workspace, monkeypatch, record_property) -> None:
-    """The architecture's ``OVERRIDE_CASES`` row of ``TILE_OVERRIDES`` launches the row's narrower channel tiles
+    """Every ``OVERRIDE_CASES`` row of the architecture's ``TILE_OVERRIDES`` launches the row's narrower channel tiles
     (``ct_vec``, ``threads // ct_vec`` sub-tiles, ``ceil(C / vec / ct_vec)`` tiles) on a caller-owned workspace of
     the public size, or the package's: ``dx``, ``dweight`` and ``dbias`` judged against the naive tier, the
     workspace zero after every call."""
 
     arch, device = _arch(), _device()
-    kind, S, C = OVERRIDE_CASES[arch]
-    _require_route(kind)
-    ct_vec = loader.tile_override(arch, kind, C, S)
-    assert ct_vec is not None, f"{arch} {kind} C={C} S={S} is no TILE_OVERRIDES row"
-    (name,) = loader.selected_modules(arch, kind, C=C, S=S)
-    geometry = loader.MODULES[name]["grid_rule"]["geometry"]
-    wanted = {
-        "ct_vec": ct_vec,
-        "n_sub": geometry["threads"] // ct_vec,
-        "n_ch_tiles": -(-(C // geometry["vec"]) // ct_vec),
-    }
-    assert wanted != dict(
-        zip(
-            ("ct_vec", "n_sub", "n_ch_tiles"),
-            loader.channel_split(C, geometry=geometry, role="bwd"),
-            strict=True,
-        )
-    ), "the row must differ from the default split"
+    rows = OVERRIDE_CASES[arch]
+    for kind, _, _ in rows:
+        _require_route(kind)
     seen = []
     launch = pkg.run_module
+    split_keys = ("ct_vec", "n_sub", "n_ch_tiles")
 
     def record_launch(name, values, *, device_index, grid=None):
-        seen.append((name, {key: int(values[key]) for key in wanted}))
+        seen.append((name, {key: int(values[key]) for key in split_keys}))
         return launch(name, values, device_index=device_index, grid=grid)
 
     monkeypatch.setattr(pkg, "run_module", record_launch)
-    label = f"{arch} {kind} S={S} C={C} ct_vec={ct_vec}"
-    workspace = (
-        pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
-        if own_workspace
-        else None
-    )
+    for kind, S, C in rows:
+        ct_vec = loader.tile_override(arch, kind, C, S)
+        assert ct_vec is not None, f"{arch} {kind} C={C} S={S} is no TILE_OVERRIDES row"
+        (name,) = loader.selected_modules(arch, kind, C=C, S=S)
+        geometry = loader.MODULES[name]["grid_rule"]["geometry"]
+        wanted = {
+            "ct_vec": ct_vec,
+            "n_sub": geometry["threads"] // ct_vec,
+            "n_ch_tiles": -(-(C // geometry["vec"]) // ct_vec),
+        }
+        assert wanted != dict(
+            zip(
+                split_keys,
+                loader.channel_split(C, geometry=geometry, role="bwd"),
+                strict=True,
+            )
+        ), "the row must differ from the default split"
+        label = f"{arch} {kind} S={S} C={C} ct_vec={ct_vec}"
+        workspace = (
+            pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+            if own_workspace
+            else None
+        )
 
-    def call(x, w, cu, dy, b, policy):
-        seen.clear()
-        dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
-        assert seen == [(name, wanted)], f"{label}: launched {seen}"
-        held = workspace if own_workspace else _stream_workspace(device)
-        assert held is not None and int(torch.count_nonzero(held)) == 0, label
-        return _grads(dx, dw, db)
+        def call(x, w, cu, dy, b, policy, kind=kind, name=name, wanted=wanted, label=label, workspace=workspace):
+            seen.clear()
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
+            assert seen == [(name, wanted)], f"{label}: launched {seen}"
+            held = workspace if own_workspace else _stream_workspace(device)
+            assert held is not None and int(torch.count_nonzero(held)) == 0, label
+            return _grads(dx, dw, db)
 
-    _route_judge(S, C, "perf", kind, call, key=9, label=label)
-    record_property("override_ct_vec", ct_vec)
+        _route_judge(S, C, "perf", kind, call, key=9, label=label)
+        record_property("override_ct_vec", ct_vec)
 
 
 @pytest.mark.parametrize("own_workspace", (True, False), ids=("own-ws", "pkg-ws"))
@@ -755,7 +834,7 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
 
         def call(x, w, cu, dy, b, policy, name=name, wanted=wanted, grid=grid, workspace=workspace, label=label):
             seen.clear()
-            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
             torch.cuda.synchronize(device)
             assert seen == [(name, wanted, grid)], f"{label}: launched {seen}"
             held = workspace if own_workspace else _stream_workspace(device)
@@ -815,7 +894,7 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
         def call(x, w, cu, dy, b, policy, tiles=tiles, expected=expected, cut=cut, untrimmed=untrimmed, label=label):
             pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
             launched.clear()
-            runs = [_backward(x, w, cu, dy, b, policy)]
+            runs = [_backward(x, w, cu, dy, b, policy, kind=kind)]
             torch.cuda.synchronize(device)
             assert launched == [(tiles, expected)], f"{label}: launched {launched}"
             held = _stream_workspace(device)
@@ -825,7 +904,7 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
                     m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
                     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
                     launched.clear()
-                    runs.append(_backward(x, w, cu, dy, b, policy))
+                    runs.append(_backward(x, w, cu, dy, b, policy, kind=kind))
                     torch.cuda.synchronize(device)
                 pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
                 assert launched == [(tiles, tuple(untrimmed))], f"{label}: {launched}"
@@ -864,7 +943,7 @@ def test_bwd_grid_mult_outputs_and_workspace(case, kind) -> None:
         for mult in pkg.BWD_GRID_MULTS:
             for own in (True, False):
                 kwargs = {"workspace": workspaces[mult]} if own else {}
-                run = _backward(x, w, cu, dy, b, policy, bwd_grid_mult=mult, **kwargs)
+                run = _backward(x, w, cu, dy, b, policy, kind=kind, bwd_grid_mult=mult, **kwargs)
                 label = f"{kind} S={S} C={C} bwd_grid_mult={mult} own={own}"
                 held = workspaces[mult] if own else _stream_workspace(device)
                 assert held is not None and int(torch.count_nonzero(held)) == 0, (
@@ -974,7 +1053,7 @@ def test_changed_shapes_reuse_one_zero_workspace(kind) -> None:
 
             def call(x, w, cu, dy, b, policy, own=own, label=label):
                 kwargs = {"workspace": workspace} if own else {}
-                run = _backward(x, w, cu, dy, b, policy, **kwargs)
+                run = _backward(x, w, cu, dy, b, policy, kind=kind, **kwargs)
                 held = workspace if own else _stream_workspace(device)
                 assert held is not None
                 assert int(torch.count_nonzero(held)) == 0, (
@@ -993,7 +1072,8 @@ def test_nan_poisoned_outputs_are_overwritten(kind) -> None:
 
         def call(x, w, cu, dy, b, policy, C=C):
             dx = torch.full_like(x, float("nan"))
-            dw = torch.full((C, WIDTH), float("nan"), dtype=w.dtype, device=device)
+            dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype
+            dw = torch.full((C, WIDTH), float("nan"), dtype=dweight_dtype, device=device)
             db = (
                 None
                 if b is None
@@ -1001,7 +1081,7 @@ def test_nan_poisoned_outputs_are_overwritten(kind) -> None:
             )
             y = torch.full_like(x, float("nan"))
             _forward(x, w, cu, bias=b, out=y)
-            got = _backward(x, w, cu, dy, b, policy, dx=dx, dweight=dw, dbias=db)
+            got = _backward(x, w, cu, dy, b, policy, kind=kind, dx=dx, dweight=dw, dbias=db)
             assert got[0] is dx and got[1] is dw and got[2] is db
             return {"y": y, **_grads(dx, dw, db)}
 
@@ -1119,13 +1199,14 @@ def _capture_and_replay(
     every replay.  Returns the replays."""
 
     device = _device()
-    settings = ROUTE_SETTINGS[kind]
     captured = []
     for S, C, docs in cases:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=key)
         y = torch.empty_like(x)
         dx = torch.empty_like(x)
-        dw = torch.empty(C, WIDTH, dtype=w.dtype, device=device)
+        dw = torch.empty(
+            C, WIDTH, dtype=ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype, device=device
+        )
         db = None if b is None else torch.empty(C, dtype=b.dtype, device=device)
         workspace = (
             pkg.cake_causal_conv1d_nondet_train_backward_workspace(
@@ -1156,6 +1237,7 @@ def _capture_and_replay(
                 dy,
                 b,
                 policy,
+                kind=kind,
                 workspace=ws,
                 dx=dx,
                 dweight=dw,
@@ -1192,12 +1274,12 @@ def _capture_and_replay(
                 assert int(torch.count_nonzero(workspace)) == 0
             return {"y": outs[0], **_grads(*outs[1:])}
 
-        _judge(
+        _route_judge(
             S,
             C,
             docs,
+            kind,
             replay,
-            **settings,
             key=key,
             label=f"replay {kind} S={S} C={C} bwd_grid_mult={bwd_grid_mult} own={own_workspace}",
         )
@@ -1364,7 +1446,7 @@ def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
             continue
         launched.clear()
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
-        _backward(x, w, cu, dy, b, policy)
+        _backward(x, w, cu, dy, b, policy, kind=kind)
         assert len(launched) == 1, f"{kind}: {len(launched)} launches"
         name, values, grid, acc_nonzero, work_nonzero = launched[0]
         assert name == loader.selected_modules(arch, kind, C=C, S=S)[0]
@@ -1426,7 +1508,7 @@ def test_bwd_grid_mult_launches_that_many_times_the_untrimmed_grid(
         for mult in pkg.BWD_GRID_MULTS:
             launched.clear()
             tiles.clear()
-            _backward(x, w, cu, dy, b, policy, bwd_grid_mult=mult)
+            _backward(x, w, cu, dy, b, policy, kind=kind, bwd_grid_mult=mult)
             expected = (
                 pkg._one_sm_trim(
                     record,
@@ -1493,7 +1575,7 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
 
         def call(x, w, cu, dy, b, policy, C=C, full=full, k=k, cut=cut):
             launched.clear()
-            runs = [_backward(x, w, cu, dy, b, policy)]
+            runs = [_backward(x, w, cu, dy, b, policy, kind=kind)]
             torch.cuda.synchronize(device)
             assert launched == [(full - k if cut else full, 1, 1)], (kind, C, launched)
             held = _stream_workspace(device)
@@ -1503,7 +1585,7 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
                     m.setattr(pkg, "_one_sm_trim", lambda record, n, grid, **kw: grid)
                     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
                     launched.clear()
-                    runs.append(_backward(x, w, cu, dy, b, policy))
+                    runs.append(_backward(x, w, cu, dy, b, policy, kind=kind))
                     torch.cuda.synchronize(device)
                 pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
                 assert launched == [(full, 1, 1)], (kind, C, launched)
@@ -1541,7 +1623,7 @@ def test_fp32g_accumulators_follow_the_rendered_rule(kind, C, monkeypatch) -> No
         seen.clear()
         with monkeypatch.context() as m:
             m.setattr(pkg, "run_module", record_launch)
-            dx, dw, db = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
         ((name, acc_dtype, acc_numel, n_ch_tiles),) = seen
         record = loader.MODULES[name]
         layout = loader.accumulator_layout(record, C, n_ch_tiles)
@@ -1729,10 +1811,11 @@ def test_gradient_accumulation() -> None:
     assert not failures, "\n".join(failures)
 
 
-@pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
+@pytest.mark.parametrize("kind", AUTOGRAD_KINDS)
 def test_bwd_grid_mult_through_autograd(kind) -> None:
     """The autograd entry carries ``bwd_grid_mult`` to its backward: at every multiple, plain and under
-    non-reentrant checkpointing, ``y`` and the gradients judged against the naive tier."""
+    non-reentrant checkpointing, ``y`` and the gradients judged against the naive tier, on every route the autograd
+    entry reaches."""
 
     from torch.utils.checkpoint import checkpoint
 

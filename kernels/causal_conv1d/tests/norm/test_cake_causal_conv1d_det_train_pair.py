@@ -354,11 +354,16 @@ def test_pair_refusals_before_any_launch(monkeypatch) -> None:
     assert pkg.DWEIGHT_SUMS == ("fp32", "fp32_pair")
     for bias in (False, True):
         for fp32_grad in (False, True):
-            for bf16 in (False, True):
-                route = loader.backward_route(bias=bias, fp32_grad=fp32_grad, bf16_taps_or_dweight=bf16)
-                assert route not in PAIR_KINDS
-    assert loader.backward_route(bias=False, fp32_grad=True, bf16_taps_or_dweight=False, pair=True) == "bwd_fp32g_pair"
-    assert loader.backward_route(bias=True, fp32_grad=True, bf16_taps_or_dweight=True, pair=True) == "bwd_bias_fp32g_pair"
+            for bf16_taps in (False, True):
+                for bf16_dweight in (False, True):
+                    route = loader.backward_route(
+                        bias=bias, fp32_grad=fp32_grad, bf16_taps=bf16_taps, bf16_dweight=bf16_dweight
+                    )
+                    assert route not in PAIR_KINDS
+    no_bf16 = {"bf16_taps": False, "bf16_dweight": False}
+    all_bf16 = {"bf16_taps": True, "bf16_dweight": True}
+    assert loader.backward_route(bias=False, fp32_grad=True, pair=True, **no_bf16) == "bwd_fp32g_pair"
+    assert loader.backward_route(bias=True, fp32_grad=True, pair=True, **all_bf16) == "bwd_bias_fp32g_pair"
 
 
 def test_pair_routes_ship_on_every_architecture() -> None:

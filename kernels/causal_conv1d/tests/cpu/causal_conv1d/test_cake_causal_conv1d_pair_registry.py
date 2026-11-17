@@ -142,15 +142,17 @@ def test_only_the_pair_opt_in_selects_a_pair_route(package: str) -> None:
     backend, loader = PACKAGES[package]
     for bias in (False, True):
         for fp32_grad in (False, True):
-            for bf16 in (False, True):
-                route = loader.backward_route(bias=bias, fp32_grad=fp32_grad, bf16_taps_or_dweight=bf16)
-                assert route not in PAIR_KINDS
-                if fp32_grad:
-                    paired = loader.backward_route(bias=bias, fp32_grad=True, bf16_taps_or_dweight=bf16, pair=True)
-                    assert paired == f"{route}_pair" and loader.PAIR_ROUTES[paired] == route
-                else:
-                    with pytest.raises(ValueError, match='needs silu_grad_preactivation="fp32"'):
-                        loader.backward_route(bias=bias, fp32_grad=False, bf16_taps_or_dweight=bf16, pair=True)
+            for bf16_taps in (False, True):
+                for bf16_dweight in (False, True):
+                    dtypes = {"bf16_taps": bf16_taps, "bf16_dweight": bf16_dweight}
+                    route = loader.backward_route(bias=bias, fp32_grad=fp32_grad, **dtypes)
+                    assert route not in PAIR_KINDS
+                    if fp32_grad:
+                        paired = loader.backward_route(bias=bias, fp32_grad=True, pair=True, **dtypes)
+                        assert paired == f"{route}_pair" and loader.PAIR_ROUTES[paired] == route
+                    else:
+                        with pytest.raises(ValueError, match='needs silu_grad_preactivation="fp32"'):
+                            loader.backward_route(bias=bias, fp32_grad=False, pair=True, **dtypes)
     assert backend._dweight_sum("fp32", "bf16") == "fp32"
     assert backend._dweight_sum("fp32_pair", "fp32") == "fp32_pair"
     with pytest.raises(ValueError, match='needs silu_grad_preactivation="fp32"'):

@@ -357,8 +357,12 @@ def test_pair_refusals_before_any_launch(monkeypatch) -> None:
     assert pkg.DWEIGHT_SUMS == ("fp32", "fp32_pair")
     for bias in (False, True):
         for fp32_grad in (False, True):
-            for bf16 in (False, True):
-                assert loader.backward_route(bias=bias, fp32_grad=fp32_grad, bf16_taps_or_dweight=bf16) not in PAIR_KINDS
+            for bf16_taps in (False, True):
+                for bf16_dweight in (False, True):
+                    route = loader.backward_route(
+                        bias=bias, fp32_grad=fp32_grad, bf16_taps=bf16_taps, bf16_dweight=bf16_dweight
+                    )
+                    assert route not in PAIR_KINDS
 
 
 def test_pair_routes_ship_on_every_architecture() -> None:

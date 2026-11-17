@@ -364,7 +364,9 @@ def cake_causal_conv1d_nondet_train_backward(
     dy : torch.Tensor
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation.
+        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
+        FP32 ``weight``, at the unrounded FP32 preactivation with a BF16
+        ``weight``.
         ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
         plain FP32 words by default (see ``dweight_sum``).
     workspace : torch.Tensor, optional
