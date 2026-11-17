@@ -116,6 +116,11 @@ Usage::
     dx, dweight = cake_causal_conv1d_nondet_train_backward(
         x, weight, cu_seqlens, dy, bwd_grid_mult=3
     )
+
+    # opt-in: dweight / dbias accumulated as FP32 (hi, lo) pairs (FP32 SiLU' only)
+    dx, dweight = cake_causal_conv1d_nondet_train_backward(
+        x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32", dweight_sum="fp32_pair"
+    )
 """
 
 from __future__ import annotations
@@ -133,6 +138,7 @@ from ._cake_pplx_api_causal_conv1d import cake_api
 _FROM_BACKEND = (
     "ARCHES",
     "BWD_GRID_MULTS",
+    "DWEIGHT_SUMS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "CakeCausalConv1dNondetFunction",
 )
@@ -342,6 +348,7 @@ def cake_causal_conv1d_nondet_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward (one launch, unordered
     ``dweight`` / ``dbias`` reductions).
@@ -359,7 +366,7 @@ def cake_causal_conv1d_nondet_train_backward(
     silu_grad_preactivation : {"bf16", "fp32"}
         ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation.
         ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
-        plain FP32 words.
+        plain FP32 words by default (see ``dweight_sum``).
     workspace : torch.Tensor, optional
         Caller-owned buffer from :func:`cake_causal_conv1d_nondet_train_backward_workspace`.
     dx, dweight, dbias : torch.Tensor, optional
@@ -375,6 +382,15 @@ def cake_causal_conv1d_nondet_train_backward(
         starts late trails by a shorter stream).  ``dx`` is bitwise the
         default's; more CTAs add into the same accumulators (same plain FP32
         sums, same workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
+        another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``.  ``"fp32"`` (default): one
+        plain FP32 word per sum.  ``"fp32_pair"`` (opt-in): an FP32 (hi, lo)
+        pair per sum -- the CTA's fold Kahan-compensated and every accumulator
+        word a pair that keeps each add's rounding error, rounded once to the
+        output dtype; FP32 operations only, the same ``dx`` and the same
+        workspace (the CTAs' order still varies run to run).  Only with
+        ``silu_grad_preactivation="fp32"``; ``ValueError`` otherwise and for
         another value.
 
     Returns
@@ -396,6 +412,7 @@ def cake_causal_conv1d_nondet_train_backward(
         dweight=dweight,
         dbias=dbias,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -408,6 +425,7 @@ def cake_causal_conv1d_nondet(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU, non-deterministic backward.
 
@@ -431,6 +449,11 @@ def cake_causal_conv1d_nondet(
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_nondet_train_backward`); checked at the forward
         call, used by the backward.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_nondet_train_backward`); checked at the
+        forward call, used by the backward.
 
     Returns
     -------
@@ -447,6 +470,7 @@ def cake_causal_conv1d_nondet(
         bias,
         silu_grad_preactivation=silu_grad_preactivation,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -463,6 +487,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "ARCHES",  # noqa: F822 - resolved by __getattr__
     "BWD_GRID_MULTS",  # noqa: F822 - resolved by __getattr__
+    "DWEIGHT_SUMS",  # noqa: F822 - resolved by __getattr__
     "SUPPORTED_COMPUTE_CAPABILITIES",  # noqa: F822 - resolved by __getattr__
     "CakeCausalConv1dNondetFunction",  # noqa: F822 - resolved by __getattr__
     "cake_causal_conv1d_nondet",

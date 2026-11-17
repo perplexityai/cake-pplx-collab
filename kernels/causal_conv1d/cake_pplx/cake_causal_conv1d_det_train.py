@@ -101,6 +101,11 @@ Usage::
         x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32"
     )
 
+    # opt-in: dweight / dbias summed as FP32 (hi, lo) pairs (FP32 SiLU' only)
+    dx, dweight = cake_causal_conv1d_det_train_backward(
+        x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32", dweight_sum="fp32_pair"
+    )
+
     # autograd (saves x, weight, bias and cu_seqlens only)
     y = cake_causal_conv1d_det(x, weight, cu_seqlens, bias)
 
@@ -148,6 +153,7 @@ from ._cake_pplx_api_causal_conv1d import cake_api
 if TYPE_CHECKING:
     from ._backends.cake_causal_conv1d_det_train import (
         ARCHES,
+        DWEIGHT_SUMS,
         SUPPORTED_COMPUTE_CAPABILITIES,
         CakeCausalConv1dDetFunction,
         cake_causal_conv1d_det_train_backward_workspace,
@@ -165,6 +171,7 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS = frozenset(
     {
         "ARCHES",
+        "DWEIGHT_SUMS",
         "SUPPORTED_COMPUTE_CAPABILITIES",
         "CakeCausalConv1dDetFunction",
         "cake_causal_conv1d_det_train_backward_workspace",
@@ -266,6 +273,7 @@ def cake_causal_conv1d_det_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward.
 
@@ -300,8 +308,8 @@ def cake_causal_conv1d_det_train_backward(
         boundary flash-linear-attention's backward uses; ``dweight`` within
         about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
         the unrounded FP32 preactivation (a slower program).  Both sum
-        ``dweight`` / ``dbias`` in plain FP32 words.  ``dx`` is within one BF16
-        ulp of exact under both.
+        ``dweight`` / ``dbias`` in plain FP32 words by default (see
+        ``dweight_sum``).  ``dx`` is within one BF16 ulp of exact under both.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_causal_conv1d_det_train_backward_workspace` (the per-CTA FP32
@@ -327,6 +335,15 @@ def cake_causal_conv1d_det_train_backward(
         :func:`cake_causal_conv1d_det_train_backward_workspace` with the same (or a
         larger) ``bwd_grid_mult``.  ``TypeError`` for a non-int, ``ValueError``
         for another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``.  ``"fp32"`` (default): one
+        plain FP32 word per sum.  ``"fp32_pair"`` (opt-in): an FP32 (hi, lo)
+        pair per sum -- the main program's fold Kahan-compensated and the
+        partial rows summed as hi/lo pairs in the same fixed order, rounded
+        once to the output dtype; FP32 operations only, the same ``dx`` and the
+        same workspace, bitwise reproducible run to run (its bits differ from
+        the default's).  Only with ``silu_grad_preactivation="fp32"``;
+        ``ValueError`` otherwise and for another value.
 
     Returns
     -------
@@ -351,6 +368,7 @@ def cake_causal_conv1d_det_train_backward(
         dweight=dweight,
         dbias=dbias,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -363,6 +381,7 @@ def cake_causal_conv1d_det(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU.
 
@@ -383,6 +402,10 @@ def cake_causal_conv1d_det(
     bwd_grid_mult : {1, 2, 3, 4}
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_det_train_backward`).
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_det_train_backward`).
 
     Returns
     -------
@@ -401,11 +424,13 @@ def cake_causal_conv1d_det(
         bias,
         silu_grad_preactivation=silu_grad_preactivation,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
 __all__ = [
     "ARCHES",
+    "DWEIGHT_SUMS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "CakeCausalConv1dDetFunction",
     "cake_causal_conv1d_det",

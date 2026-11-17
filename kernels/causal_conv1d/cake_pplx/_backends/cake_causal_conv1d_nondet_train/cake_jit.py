@@ -54,6 +54,16 @@ on the CTAs' timing: ``dweight`` / ``dbias`` are not bitwise reproducible run
 to run (the only relaxed property); they accumulate in plain FP32 words,
 as the det reduction does.
 
+The opt-in pair routes ``bwd_fp32g_pair`` / ``bwd_bias_fp32g_pair``
+(:data:`PAIR_ROUTES`, selected only by ``dweight_sum="fp32_pair"``) are the
+FP32 hi/lo pair forms of the two ``_fp32g`` routes: the CTA's fold is
+Kahan-compensated and every accumulator word is an FP32 (hi, lo) pair (the
+CTA's add into hi and its exact rounding error, TwoSum, into lo: FP32
+operations only), merged and rounded once by the tile's last CTA.  They
+select by the ``_fp32g`` routes' thresholds and plan their launches by those
+routes' rules (:func:`record_route`); their accumulators are four pair copies
+(``slots`` 8), within the public workspace.
+
 The backward workspace (:func:`accumulator_layout`) is one ``uint8`` buffer:
 ``acc`` (``slots x taps x C`` FP32 words: ``slots`` copies of the ``[C, 4]``
 taps, then ``[C]`` bias on the bias routes) at offset 0 and the uint32
@@ -2087,6 +2097,362 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``bwd_fp32g_pair`` (opt-in; the route's fallback, sm_100a / sm_103a): the ``bwd_fp32g`` fallback
+    # ``cake_causal_conv1d_train_e3ff1615646de68a1aab`` built with ``fold_kahan=True, acc_pairs=True``.
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_9181be685ac105263751": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_9181be685ac105263751",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_9181be685ac105263751",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_9181be685ac105263751",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_fp32g_pair`` (opt-in; the route's fallback, sm_107a): the sm_107a ``bwd_fp32g`` fallback
+    # ``cake_causal_conv1d_train_c5abee01ba7440dd50b8`` built with ``fold_kahan=True, acc_pairs=True``.
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_4685f66f3b7ef380e22a": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_4685f66f3b7ef380e22a",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_4685f66f3b7ef380e22a",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_4685f66f3b7ef380e22a",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_fp32g_pair`` (opt-in; the route's fallback, sm_100a / sm_103a): the ``bwd_bias_fp32g``
+    # fallback ``cake_causal_conv1d_train_8433ef0894e75c192d4b`` built with ``fold_kahan=True, acc_pairs=True``.
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_b42a8b7cf83f2b508d99": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_b42a8b7cf83f2b508d99",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_b42a8b7cf83f2b508d99",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_b42a8b7cf83f2b508d99",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_fp32g_pair`` (opt-in; the route's fallback, sm_107a): the sm_107a ``bwd_bias_fp32g``
+    # fallback ``cake_causal_conv1d_train_286b95d7960d16de0849`` built with ``fold_kahan=True, acc_pairs=True``.
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_1212581b2f85eebc7d7f": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_1212581b2f85eebc7d7f",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_1212581b2f85eebc7d7f",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_1212581b2f85eebc7d7f",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
     # Route ``bwd_dt``: the single-launch build of the det program
     # ``cake_causal_conv1d_det_train_2675cc1cb4efc0937378`` (the same build keywords, body and grid; selected
     # from C = 512 on sm_100a, 512 on sm_103a, 1024 on sm_107a).  Every per-thread and per-CTA FP32 step and
@@ -2668,6 +3034,212 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``bwd_fp32g_pair`` (opt-in; the channel-ruled program): ``cake_causal_conv1d_train_41fcd5b4c3749107aba7``
+    # built with ``fold_kahan=True, acc_pairs=True``, selected where the ``bwd_fp32g`` route runs that program or
+    # its sm_107a channel band (from C = 1024 on sm_107a).
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_6857ed58b2a273da419c": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_6857ed58b2a273da419c",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_6857ed58b2a273da419c",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_6857ed58b2a273da419c",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_fp32g_pair`` (opt-in; the channel-ruled program):
+    # ``cake_causal_conv1d_train_7dd30c23ccab6ab97182`` built with ``fold_kahan=True, acc_pairs=True``, selected
+    # where the ``bwd_bias_fp32g`` route runs that program.
+    # The CTA's two-level fold is Kahan-compensated (``fold_kahan``) and each accumulator word is an FP32
+    # (hi, lo) pair (``acc_pairs``): a CTA adds its value into hi by an ``atomicAdd`` that returns the hi it
+    # added to, and that add's exact rounding error (TwoSum, FP32 operations only) into lo, so hi + lo is the
+    # exact sum of the rows up to lo's own rounding, whatever the order of the CTAs.  Four pair copies of
+    # ``acc`` (``slots`` 8: eight FP32 words per sum); the tile's last CTA merges the copies' pairs in copy
+    # order, rounds each sum once into ``dw`` (and ``db``) and zeroes them.  ``dx`` is the twin's.  The
+    # exporter fills the derived leaves (shared memory included).
+    "cake_causal_conv1d_train_7c3318fb3f7e750cb63b": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 8,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
     # Route ``bwd``: the single-launch build of the det program
     # ``cake_causal_conv1d_det_train_8f872e5b653a26ab365d`` (the same build keywords, body and grid; selected
     # from C = 264 on sm_100a and sm_103a: the single-tile channel counts 264 <= C < 512, whose channel vectors
@@ -2765,7 +3337,9 @@ MODULES: dict[str, dict[str, Any]] = {
     },
 }
 
-# architecture -> route -> the records the route may launch (fallback first).
+# architecture -> route -> the records the route may launch (fallback first); the
+# opt-in pair routes (``_pair``, :data:`PAIR_ROUTES`) list the pair builds of their
+# twin route's programs.
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
         "bwd": [
@@ -2781,6 +3355,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_8433ef0894e75c192d4b",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
+        "bwd_bias_fp32g_pair": [
+            "cake_causal_conv1d_train_b42a8b7cf83f2b508d99",
+            "cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        ],
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
@@ -2788,6 +3366,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_fp32g": [
             "cake_causal_conv1d_train_e3ff1615646de68a1aab",
             "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
+        ],
+        "bwd_fp32g_pair": [
+            "cake_causal_conv1d_train_9181be685ac105263751",
+            "cake_causal_conv1d_train_6857ed58b2a273da419c",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2814,6 +3396,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_8433ef0894e75c192d4b",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
+        "bwd_bias_fp32g_pair": [
+            "cake_causal_conv1d_train_b42a8b7cf83f2b508d99",
+            "cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        ],
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
@@ -2821,6 +3407,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_fp32g": [
             "cake_causal_conv1d_train_e3ff1615646de68a1aab",
             "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
+        ],
+        "bwd_fp32g_pair": [
+            "cake_causal_conv1d_train_9181be685ac105263751",
+            "cake_causal_conv1d_train_6857ed58b2a273da419c",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2850,6 +3440,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_286b95d7960d16de0849",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
+        "bwd_bias_fp32g_pair": [
+            "cake_causal_conv1d_train_1212581b2f85eebc7d7f",
+            "cake_causal_conv1d_train_7c3318fb3f7e750cb63b",
+        ],
         "bwd_dt": [
             "cake_causal_conv1d_train_d7f458b69c0249f63c37",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
@@ -2858,6 +3452,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
             "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
             "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
+        ],
+        "bwd_fp32g_pair": [
+            "cake_causal_conv1d_train_4685f66f3b7ef380e22a",
+            "cake_causal_conv1d_train_6857ed58b2a273da419c",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2893,8 +3491,10 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # preactivation); ``_dt`` routes take BF16 taps and / or store a BF16 gradient
 # (the ``flags`` scalar says which), ``_bias`` routes add the per-channel bias
 # and its gradient, ``_fp32g`` routes evaluate SiLU' at the unrounded FP32
-# preactivation for the weight gradient.  :func:`forward_route` and
-# :func:`backward_route` are the host's map from a call's arguments to a route.
+# preactivation for the weight gradient.  The ``_pair`` routes are the opt-in
+# FP32 hi/lo pair forms of the two ``_fp32g`` routes (:data:`PAIR_ROUTES`).
+# :func:`forward_route` and :func:`backward_route` are the host's map from a
+# call's arguments to a route.
 KINDS = (
     "fwd",
     "fwd_dt",
@@ -2904,7 +3504,24 @@ KINDS = (
     "bwd_bias",
     "bwd_fp32g",
     "bwd_bias_fp32g",
+    "bwd_fp32g_pair",
+    "bwd_bias_fp32g_pair",
 )
+# The opt-in pair routes and the route each pairs (its twin): a call selects
+# one only with ``dweight_sum="fp32_pair"`` (:func:`backward_route`), never by
+# default.  A pair route's programs are its twin's programs built with
+# ``fold_kahan`` and ``acc_pairs`` (each sum an FP32 (hi, lo) pair, rounded
+# once); ``dx`` is the twin's.  A pair route selects its program by the twin
+# route's thresholds and plans its launch (channel tiles, grid) by the twin
+# route's rule (:func:`record_route`).
+PAIR_ROUTES: dict[str, str] = {
+    "bwd_fp32g_pair": "bwd_fp32g",
+    "bwd_bias_fp32g_pair": "bwd_bias_fp32g",
+}
+# The ``dweight`` / ``dbias`` sum forms a backward call may ask for
+# (``dweight_sum``): ``"fp32"`` (the default) is one plain FP32 word per sum,
+# ``"fp32_pair"`` an FP32 (hi, lo) pair per sum (the pair routes).
+DWEIGHT_SUMS = ("fp32", "fp32_pair")
 # The routes every exported architecture ships: the base forward and backward.
 # The other routes are optional per architecture; a call that needs one the
 # architecture lacks is refused with a ``ValueError`` naming the route.
@@ -3033,21 +3650,33 @@ def forward_route(*, bias: bool, bf16_taps: bool) -> str:
     return "fwd_dt" if bf16_taps else "fwd"
 
 
-def backward_route(*, bias: bool, fp32_grad: bool, bf16_taps_or_dweight: bool) -> str:
+def backward_route(
+    *, bias: bool, fp32_grad: bool, bf16_taps_or_dweight: bool, pair: bool = False
+) -> str:
     """The backward route of a call.
 
     ``bias`` selects ``bwd_bias`` / ``bwd_bias_fp32g`` (by ``fp32_grad``, the
     ``silu_grad_preactivation="fp32"`` policy); without a bias ``fp32_grad``
     selects ``bwd_fp32g``; else BF16 taps or a BF16 ``dweight`` out tensor
     select ``bwd_dt``; else the default ``bwd``.  Every route but ``bwd``
-    reads the tap / gradient dtypes from ``flags``.
+    reads the tap / gradient dtypes from ``flags``.  ``pair`` (the
+    ``dweight_sum="fp32_pair"`` opt-in) selects the ``_fp32g`` route's pair
+    route (:data:`PAIR_ROUTES`); only the ``_fp32g`` routes have one, so
+    ``pair`` without ``fp32_grad`` is a ``ValueError`` (never another route).
     """
 
+    if pair and not fp32_grad:
+        raise ValueError(
+            'dweight_sum="fp32_pair" needs silu_grad_preactivation="fp32": only '
+            "the FP32-SiLU' routes have an FP32 (hi, lo) pair form"
+        )
     if bias:
-        return "bwd_bias_fp32g" if fp32_grad else "bwd_bias"
-    if fp32_grad:
-        return "bwd_fp32g"
-    return "bwd_dt" if bf16_taps_or_dweight else "bwd"
+        route = "bwd_bias_fp32g" if fp32_grad else "bwd_bias"
+    elif fp32_grad:
+        route = "bwd_fp32g"
+    else:
+        route = "bwd_dt" if bf16_taps_or_dweight else "bwd"
+    return f"{route}_pair" if pair else route
 
 
 def route_modules(arch: str, kind: str) -> tuple[str, ...]:
@@ -3837,26 +4466,39 @@ def row_may_trim(
 
     if factor != 1 or not C % 32:
         return False
-    library = record["library"]
-    routes = ROUTES[arch]
+    route = _plan_route(record, arch)
     if (
         co_resident == TILE_ALIGNED_GRID[arch]
         and S >= TILE_ALIGNED_MIN_S
-        and any(library in routes.get(kind, ()) for kind in TILE_ALIGNED_ROUTES)
+        and route in TILE_ALIGNED_ROUTES
     ):
         return True
-    return any(
-        grid == co_resident and bound[0] <= S
-        for (grid, _, _), bound in TILE_ALIGNED_CLASSES[arch].items()
-    ) and any(
-        library in routes.get(kind, ()) for kind in TILE_ALIGNED_CLASS_ROUTES[arch]
+    return (
+        any(
+            grid == co_resident and bound[0] <= S
+            for (grid, _, _), bound in TILE_ALIGNED_CLASSES[arch].items()
+        )
+        and route in TILE_ALIGNED_CLASS_ROUTES[arch]
     )
 
 
-def record_route(record: dict[str, Any], arch: str) -> str:
-    """The route of ``ROUTES[arch]`` that lists ``record`` (``ValueError`` if none)."""
+def _plan_route(record: dict[str, Any], arch: str) -> str | None:
+    """:func:`record_route` of ``record``, or ``None`` for a record no route of ``ROUTES[arch]`` lists (a KCP
+    program: never trimmed)."""
 
-    return _library_route(record["library"], arch)
+    try:
+        return record_route(record, arch)
+    except ValueError:
+        return None
+
+
+def record_route(record: dict[str, Any], arch: str) -> str:
+    """The route whose host plan ``record`` follows: the route of ``ROUTES[arch]`` that lists it, or, for a record
+    of a pair route, the route it pairs (:data:`PAIR_ROUTES`: the same channel tiles and grid) (``ValueError`` if
+    no route lists it)."""
+
+    route = _library_route(record["library"], arch)
+    return PAIR_ROUTES.get(route, route)
 
 
 @functools.cache
@@ -4372,6 +5014,7 @@ __all__ = [
     "ARCH_BY_CAPABILITY",
     "CHANNEL_MULTIPLE",
     "COUNTER_DTYPES",
+    "DWEIGHT_SUMS",
     "FLAG_B_BF16",
     "FLAG_DB_BF16",
     "FLAG_DW_BF16",
@@ -4382,6 +5025,7 @@ __all__ = [
     "LOGICAL_SCALARS",
     "LOGICAL_TENSORS",
     "MODULES",
+    "PAIR_ROUTES",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
