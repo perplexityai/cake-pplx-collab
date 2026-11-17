@@ -253,7 +253,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (4, 64, "cake_rmsnorm_train_cb6539573725ac861f94"),
             (64, 1792, "cake_rmsnorm_train_139d162a8bb29d1b2d35"),
             (1792, 6144, "cake_rmsnorm_train_de8f6091077dc7ac5947"),
-            (6144, 56256, "cake_rmsnorm_train_40227b2a2b2122628d58"),
+            (6144, 56256, "cake_rmsnorm_train_9479b1298a1b19d4d996"),
             (56256, 131072, "cake_rmsnorm_train_13bd0c5f56e37867eb26"),
             (131072, None, "cake_rmsnorm_train_de8f6091077dc7ac5947"),
         ),
@@ -518,7 +518,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (256, 1024, "cake_rmsnorm_train_16545056022785f2a7d8"),
             (1024, 4096, "cake_rmsnorm_train_78c26a53e83c9803bcbf"),
             (4096, 48640, "cake_rmsnorm_train_626aed743358c27513f1"),
-            (48640, 65536, "cake_rmsnorm_train_78c26a53e83c9803bcbf"),
+            (48640, 65536, "cake_rmsnorm_train_cb164a27c0157ed0712d"),
             (65536, 262144, "cake_rmsnorm_train_bd22da7e2d4914167050"),
             (262144, None, "cake_rmsnorm_train_36790f79b8845172d188"),
         ),
@@ -1006,8 +1006,8 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (4, "unmeasured"),
             (64, "same"),
             (1792, "same"),
-            (6144, "same"),
-            (56256, "same"),
+            (6144, "unmeasured"),
+            (56256, "unmeasured"),
             (131072, "same"),
         ),
         "bwd_h6144": (
@@ -1619,7 +1619,7 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
             (4, 64, 100),
             (64, 1792, None),
             (1792, 6144, 132),
-            (6144, 56256, None),
+            (6144, 56256, 100),
             (56256, 131072, 132),
             (131072, None, 132),
         ),
@@ -2055,8 +2055,7 @@ above: on sm_100a up to T 14 on ``bwd_w32_h2048`` and ``bwd_w32_h4096``, up to T
 differ from the single kernel's by rounding) and ``dw`` in FP32 in a fixed order: the
 same bits on every launch of a token count.  Where the notes below name token counts at
 or below those tops, they describe the windows above them.  The single kernel computes
-``dx`` row by row (bitwise reproducible, within one BF16 ulp of ``max(|dx|, rms(dx))``
-of the deterministic backward's ``dx``, not always bitwise equal to it) and adds the
+``dx`` row by row (bitwise reproducible) and adds the
 ``dw`` sums of its CTAs into FP32 column sums (FP32 adds) in a scheduling-dependent
 order: its ``dw`` is not bitwise reproducible, even for a fixed ``T``.  The top window
 of ``bwd_h256`` on sm_100a and sm_107a, on sm_103a of ``bwd_h1536``, ``bwd_h2048``,
@@ -2111,126 +2110,99 @@ single kernel above.  On sm_103a ``bwd_h256`` (both weight dtypes) every window 
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
 the main kernel that package runs from 2048 to 5120 rows, and from 97280 to 99840 rows,
-where it is the main kernel that package runs from 99840 to 720896 rows (the pair below
-99840 rows exceeds 0.85 of the ``dw`` budget above 97280 rows); their fixed-order dw
-reduce is that package's, except from 5120 to 12288 and from 720896 to 1572864 rows,
-where it is the dw reduce that package ran there earlier.  On ``bwd_h256`` (both weight
-dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a also
-runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.  The
-single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T 960
-to 32768 the det pair the deterministic package runs from T 4096, for ``dw`` accuracy.
-On sm_100a ``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880,
-``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144``
-from T 5632 to 42496 run the det pair the deterministic package runs there, and
-``bwd_h2048`` from T 58880 to 65536 the flush single kernel of its window above, for
-``dw`` accuracy: they replace single kernels whose FP32 ``dw`` sums over windows of 16
-steps put their worst ``dw`` error at 1.10x to 2.30x the deterministic package's median
-FP64 error over 5 repeats at T 14928 to 65536 on B200 (BF16 weight).  On sm_100a
-``bwd_h1536`` from T 36352 (the deterministic package's own edge) to 78784 and
-``bwd_h4096`` from T 44032 to 65536 run the det pair the deterministic package runs
-there, for ``dw`` accuracy: the single kernels this package's previous version runs
-there exceed 1.1x the ``dw`` error of the deterministic package's program in its earlier
-version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took 1.012x to
-1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time.  On sm_100a
-``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the deterministic
-package runs there, for ``dw`` accuracy: the single kernel this package's previous
-version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at T
-45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
-sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs FP32-weight det pairs of the
-deterministic package, split at T 48640.  On sm_107a ``bwd_h4096`` from T 24064 to 24576
-and ``bwd_w32_h5120`` from T 4096 to 32767 run the det pair the deterministic package
-runs there, for ``dw`` accuracy: the programs they replace (the det pair of the window
-below, a row single kernel and an earlier det pair over 16-step blocks) put their worst
-``dw`` error at 1.12x to 2.00x the deterministic package's median FP64 error over 5
-repeats at T 14928 to 32768 on R200 with 212 SMs.  From T 4096 to 19968 that det pair's
-``dw`` error exceeds the FP32 eager reduction's at some sampled ``T``, within the ``dw``
-budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536 runs the FP32-weight twin of
-the det pair of ``bwd_h4096`` from T 24064 as well, for ``dw`` accuracy: the single
-kernels this package's previous version runs on both routes there put their worst ``dw``
-error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32 weight) that package's
-median FP64 error over 5 repeats at T 40960 to 65536 on R200 (3 seeds), and on R200 the
-det pair took 0.84x to 0.86x the time of that FP32-weight single kernel at T 24576 to
-65536.  The deterministic package now cuts that pair at T 50176.  On sm_107a
-``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
-to 65536 run the det pair that package runs there (its four-row block form).  On sm_107a
-``bwd_h2048`` from T 50688 to 65536 runs the det pair the deterministic package runs
-there (its eight-row block form), for speed.  For ``dw`` accuracy, on sm_100a
-``bwd_w32_h1536`` from T 1024 to 4096 runs the single kernel of its window from T 32768
-to 75776, ``bwd_w32_h2048`` from T 1024 to 4096 and ``bwd_w32_h4096`` from T 1792 to
-3584 the single kernel of their top window, ``bwd_w32_h2048`` from T 336 to 1024 the
-column-task kernel of its window from T 64 to 336 (its CTAs first sum whole columns of
-``dw`` over every row) and ``bwd_w32_h5120`` from T 1792 to 6144 the single kernel of
-its top window; on sm_107a ``bwd_w32_h6144`` from T 19456 to 28672 runs the det pair the
-deterministic package runs above T 19456, ``bwd_w32_h2048`` from T 1024 to 16384 the
-single kernel of its largest token counts, and ``bwd_w32_h1536`` from T 1024 to 16384
-and ``bwd_w32_h6144`` from T 2304 to 19456 the single kernel of their top window; each
-replaces a pair whose ``dw`` error exceeds the FP32 eager reduction's at some sampled
-``T`` of that pair's window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880 runs the
-single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T 45056 to
-58880 the single kernel of its neighbouring windows, within 2 % of the det pair's time
-(worst ``dw`` element over both weight dtypes: 0.969 of the budget for the det pair,
-0.800 for the single kernel; every 64th ``T``, 120 inputs per family).  On sm_107a
-``bwd_h6144`` from T 19456 to 30720 runs, for now, the det pair the deterministic
-package runs there; the pair of its window below stays within the ``dw`` budget there
-and takes 0.97x to 0.99x the det pair's time.  On sm_100a ``bwd_h512`` and
-``bwd_w32_h512`` up to T 227 run the deterministic package's column-task program of that
-window, which is faster there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up
-to T 227, ``bwd_h1536`` and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63
-and ``bwd_w32_h2048`` from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to
-152 and T 32 of ``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the
-deterministic package's column-task programs of those token counts, and ``bwd_w32_h512``
-from T 227 to 292 and ``bwd_w32_h1536`` from T 214 to 320 the det pair of the window
-above, which are faster there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
+where it is the main kernel that package runs from 99840 to 720896 rows; their
+fixed-order dw reduce is that package's, except from 5120 to 12288 and from 720896 to
+1572864 rows, where it is another of that package's dw reduces.  On ``bwd_h256`` (both
+weight dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a
+also runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.
+The single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T
+960 to 32768 the det pair the deterministic package runs from T 4096.  On sm_100a
+``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880, ``bwd_w32_h2048`` from T
+58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144`` from T 5632 to 42496 run the
+det pair the deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536
+the flush single kernel of its window above.  On sm_100a ``bwd_h1536`` from T 36352 (the
+deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run
+the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
+65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
+from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
+48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
+runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+from T 4096
+to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
+from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
+(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
+``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
+from T 50688 to 65536 runs the det pair the deterministic package runs there (its
+eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
+the single kernel of its window from T 32768 to 75776, ``bwd_w32_h2048`` from T 1024 to
+4096 and ``bwd_w32_h4096`` from T 1792 to 3584 the single kernel of their top window,
+``bwd_w32_h2048`` from T 336 to 1024 the column-task kernel of its window from T 64 to
+336 (its CTAs first sum whole columns of ``dw`` over every row) and ``bwd_w32_h5120``
+from T 1792 to 6144 the single kernel of its top window; on sm_107a ``bwd_w32_h6144``
+from T 19456 to 28672 runs the det pair the deterministic package runs above T 19456,
+``bwd_w32_h2048`` from T 1024 to 16384 the single kernel of its largest token counts,
+and ``bwd_w32_h1536`` from T 1024 to 16384 and ``bwd_w32_h6144`` from T 2304 to 19456
+the single kernel of their top window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880
+runs the single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T
+45056 to 58880 the single kernel of its neighbouring windows, within 2 % of the det
+pair's time.  On sm_107a ``bwd_h6144`` from T 19456 to 30720 runs the det pair the
+deterministic package runs there.  On sm_100a ``bwd_h512`` and ``bwd_w32_h512`` up to T
+227 run the deterministic package's column-task program of that window, which is faster
+there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up to T 227, ``bwd_h1536``
+and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63 and ``bwd_w32_h2048``
+from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to 152 and T 32 of
+``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the deterministic package's
+column-task programs of those token counts, and ``bwd_w32_h512`` from T 227 to 292 and
+``bwd_w32_h1536`` from T 214 to 320 the det pair of the window above, which are faster
+there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
 ``bwd_w32_residual_h6144`` from T 48 to 320 run the deterministic package's column-task
 program of those token counts (and its FP32-weight twin), which that package runs from T
-0 to 1216, instead of the whole-SM det pair this package ran there before: on GB300 it
-took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and
-10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference
-(relative L2 or worst element, the larger over six input families).  On sm_103a
-``bwd_h5120`` from T 17 to 64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T
-17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's
-column-task program of the route in its ticket form (the form whose ``dx`` and ``dw``
-the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of 0.73x to
-0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
-sampled T up to those token counts had a backward call, a forward and backward call or a
-checkpointed step (two forward calls and a backward call) slower than with the programs
-it replaces beyond the run-to-run band in all its runs.  Above them the det pair of the
-window above runs: at T 96 on ``bwd_h5120``, T 256 on ``bwd_w32_h5120`` and T 1024 on
-``bwd_h6144`` (and at some larger sampled T) a forward and backward call or a
-checkpointed step with the ticket form was slower in both runs, though its backward call
-alone was faster there.  On sm_107a ``bwd_h512`` up to T 576, ``bwd_w32_h512`` up to T
-384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536`` from T 1 to 320, ``bwd_h2048``
-from T 31 and ``bwd_w32_h2048`` up to T 256, ``bwd_h4096`` from T 1 and
-``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to 256, from T 511 to 640 and T
-896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640 and T 896, ``bwd_h6144`` from
-T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to 1664, ``bwd_residual_h6144`` from
-T 15 to 320 and from T 447 to 576 and ``bwd_w32_residual_h6144`` up to T 768 run the
-deterministic package's column-task programs of those token counts, which took 0.53x to
-0.97x the time of the programs they replace at every sampled T in two R200 records with
-212 SMs (the slower record per T) and were also faster there in a VR200 screen.  On
-sm_107a ``bwd_h256`` and ``bwd_w32_h256`` up to 786432 rows run the deterministic
-package's det pair of those rows, which took 0.76x to 0.95x the time of the program it
-replaces at every sampled row count in two R200 records with 212 SMs and was also faster
-in a VR200 screen; above 786432 rows that pair's worst ``dw`` element exceeds the budget
-at some sampled row counts, and the single kernel of the top window runs there.  On 9
-backward routes the lowest window, from T 1 up to a token count from 1 to 31, runs a
-single kernel for ``dw`` accuracy: there, over 60 inputs of each of three families, the
-det pair's median ``dw`` error, or on the FP32-weight and ``bwd_h5120`` routes its worst
-``dw`` error, exceeds the FP32 eager reduction's at some sampled ``T`` (measured on
-GB300 and R200 with 212 SMs).  On ``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``,
-``bwd_h5120``, ``bwd_h6144`` and ``bwd_residual_h6144`` (and their FP32-weight routes)
-the window above the one-cluster windows, from T 17 up to T 64 (on sm_103a up to T 63 on
-``bwd_h2048``, up to T 32 on ``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on
-``bwd_residual_h6144`` and ``bwd_w32_residual_h6144``, except T 32 of those two, and not
-on ``bwd_h5120``, ``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a
-only on ``bwd_h2048`` and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the
-column-task kernel: each CTA takes its rows and its column tasks by its index instead of
-by claim tickets, so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise
-those of the ticket form.  The ``dw`` budget these notes and the window comments of
-``cake_jit`` measure against is the per-element bound atol = rtol = 1e-4 of the FP64
-reference; the tests hold ``dw`` to the error of ``torch.nn.functional.rms_norm`` run in
-FP32 on the same inputs, in the L2 norm and in the max norm.
+0 to 1216: on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the
+whole-SM det pair took 7.65, 10.24 and 10.53 us.  On sm_103a ``bwd_h5120`` from T 17 to
+64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T 17 to 896 and
+``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's column-task program
+of the route in its ticket form (the form whose ``dx`` and ``dw`` the fixed-claim form
+reproduces bit for bit): on GB300 (benchmark, CUDA-graph span, L2 flushed before every
+call; one or two runs per T) no sampled T up to those token counts had a backward call,
+a forward and backward call or a checkpointed step (two forward calls and a backward
+call) slower than with the programs it replaces beyond the run-to-run band in all its
+runs.  Above them the det pair of the window above runs: at T 96 on ``bwd_h5120``, T 256
+on ``bwd_w32_h5120`` and T 1024 on ``bwd_h6144`` (and at some larger sampled T) a
+forward and backward call or a checkpointed step with the ticket form was slower in both
+runs, though its backward call alone was faster there.  On sm_107a ``bwd_h512`` up to T
+576, ``bwd_w32_h512`` up to T 384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536``
+from T 1 to 320, ``bwd_h2048`` from T 31 and ``bwd_w32_h2048`` up to T 256,
+``bwd_h4096`` from T 1 and ``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to
+256, from T 511 to 640 and T 896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640
+and T 896, ``bwd_h6144`` from T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to
+1664, ``bwd_residual_h6144`` from T 15 to 320 and from T 447 to 576 and
+``bwd_w32_residual_h6144`` up to T 768 run the deterministic package's column-task
+programs of those token counts, which took 0.53x to 0.97x the time of the programs they
+replace at every sampled T in two R200 records with 212 SMs (the slower record per T)
+and were also faster there in a VR200 screen.  On sm_107a ``bwd_h256`` and
+``bwd_w32_h256`` up to 786432 rows run the deterministic package's det pair of those
+rows, which took 0.76x to 0.95x the time of the program it replaces at every sampled row
+count in two R200 records with 212 SMs and was also faster in a VR200 screen; above
+786432 rows the single kernel of the top window runs.  On 9 backward routes the lowest
+window, from T 1 up to a token count from 1 to 31, runs a single kernel.  On
+``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``, ``bwd_h5120``, ``bwd_h6144`` and
+``bwd_residual_h6144`` (and their FP32-weight routes) the window above the one-cluster
+windows, from T 17 up to T 64 (on sm_103a up to T 63 on ``bwd_h2048``, up to T 32 on
+``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on ``bwd_residual_h6144`` and
+``bwd_w32_residual_h6144``, except T 32 of those two, and not on ``bwd_h5120``,
+``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a only on ``bwd_h2048``
+and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the column-task kernel:
+each CTA takes its rows and its column tasks by its index instead of by claim tickets,
+so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise those of the ticket
+form.  Every program sums in plain FP32 words, except the FP32-pair det pairs above,
+which add each block of rows into an FP32 pair (a sum and its compensation word).  The
+tests hold no tolerance: they judge every floating output by its error against an FP64
+reference beside the error of the naive PyTorch implementation (the same ops in BF16 on
+the same BF16 inputs), over 32 independent random inputs of each case: in the L2 norm
+and in the max norm the median and the largest error at most 1.005 times the naive's,
+and 0 where the naive's is 0.
 """
 
 FORWARD_SECTION = """
@@ -2262,8 +2234,7 @@ above: on sm_100a up to T 14 on ``bwd_w32_h2048`` and ``bwd_w32_h4096``, up to T
 differ from the single kernel's by rounding) and ``dw`` in FP32 in a fixed order: the
 same bits on every launch of a token count.  Where the notes below name token counts at
 or below those tops, they describe the windows above them.  The single kernel computes
-``dx`` row by row (bitwise reproducible, within one BF16 ulp of ``max(|dx|, rms(dx))``
-of the deterministic backward's ``dx``, not always bitwise equal to it) and adds the
+``dx`` row by row (bitwise reproducible) and adds the
 ``dw`` sums of its CTAs into FP32 column sums (FP32 adds) in a scheduling-dependent
 order: its ``dw`` is not bitwise reproducible, even for a fixed ``T``.  The top window
 of ``bwd_h256`` on sm_100a and sm_107a, on sm_103a of ``bwd_h1536``, ``bwd_h2048``,
@@ -2318,126 +2289,99 @@ single kernel above.  On sm_103a ``bwd_h256`` (both weight dtypes) every window 
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
 the main kernel that package runs from 2048 to 5120 rows, and from 97280 to 99840 rows,
-where it is the main kernel that package runs from 99840 to 720896 rows (the pair below
-99840 rows exceeds 0.85 of the ``dw`` budget above 97280 rows); their fixed-order dw
-reduce is that package's, except from 5120 to 12288 and from 720896 to 1572864 rows,
-where it is the dw reduce that package ran there earlier.  On ``bwd_h256`` (both weight
-dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a also
-runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.  The
-single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T 960
-to 32768 the det pair the deterministic package runs from T 4096, for ``dw`` accuracy.
-On sm_100a ``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880,
-``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144``
-from T 5632 to 42496 run the det pair the deterministic package runs there, and
-``bwd_h2048`` from T 58880 to 65536 the flush single kernel of its window above, for
-``dw`` accuracy: they replace single kernels whose FP32 ``dw`` sums over windows of 16
-steps put their worst ``dw`` error at 1.10x to 2.30x the deterministic package's median
-FP64 error over 5 repeats at T 14928 to 65536 on B200 (BF16 weight).  On sm_100a
-``bwd_h1536`` from T 36352 (the deterministic package's own edge) to 78784 and
-``bwd_h4096`` from T 44032 to 65536 run the det pair the deterministic package runs
-there, for ``dw`` accuracy: the single kernels this package's previous version runs
-there exceed 1.1x the ``dw`` error of the deterministic package's program in its earlier
-version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took 1.012x to
-1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time.  On sm_100a
-``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the deterministic
-package runs there, for ``dw`` accuracy: the single kernel this package's previous
-version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at T
-45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
-sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs FP32-weight det pairs of the
-deterministic package, split at T 48640.  On sm_107a ``bwd_h4096`` from T 24064 to 24576
-and ``bwd_w32_h5120`` from T 4096 to 32767 run the det pair the deterministic package
-runs there, for ``dw`` accuracy: the programs they replace (the det pair of the window
-below, a row single kernel and an earlier det pair over 16-step blocks) put their worst
-``dw`` error at 1.12x to 2.00x the deterministic package's median FP64 error over 5
-repeats at T 14928 to 32768 on R200 with 212 SMs.  From T 4096 to 19968 that det pair's
-``dw`` error exceeds the FP32 eager reduction's at some sampled ``T``, within the ``dw``
-budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536 runs the FP32-weight twin of
-the det pair of ``bwd_h4096`` from T 24064 as well, for ``dw`` accuracy: the single
-kernels this package's previous version runs on both routes there put their worst ``dw``
-error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32 weight) that package's
-median FP64 error over 5 repeats at T 40960 to 65536 on R200 (3 seeds), and on R200 the
-det pair took 0.84x to 0.86x the time of that FP32-weight single kernel at T 24576 to
-65536.  The deterministic package now cuts that pair at T 50176.  On sm_107a
-``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
-to 65536 run the det pair that package runs there (its four-row block form).  On sm_107a
-``bwd_h2048`` from T 50688 to 65536 runs the det pair the deterministic package runs
-there (its eight-row block form), for speed.  For ``dw`` accuracy, on sm_100a
-``bwd_w32_h1536`` from T 1024 to 4096 runs the single kernel of its window from T 32768
-to 75776, ``bwd_w32_h2048`` from T 1024 to 4096 and ``bwd_w32_h4096`` from T 1792 to
-3584 the single kernel of their top window, ``bwd_w32_h2048`` from T 336 to 1024 the
-column-task kernel of its window from T 64 to 336 (its CTAs first sum whole columns of
-``dw`` over every row) and ``bwd_w32_h5120`` from T 1792 to 6144 the single kernel of
-its top window; on sm_107a ``bwd_w32_h6144`` from T 19456 to 28672 runs the det pair the
-deterministic package runs above T 19456, ``bwd_w32_h2048`` from T 1024 to 16384 the
-single kernel of its largest token counts, and ``bwd_w32_h1536`` from T 1024 to 16384
-and ``bwd_w32_h6144`` from T 2304 to 19456 the single kernel of their top window; each
-replaces a pair whose ``dw`` error exceeds the FP32 eager reduction's at some sampled
-``T`` of that pair's window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880 runs the
-single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T 45056 to
-58880 the single kernel of its neighbouring windows, within 2 % of the det pair's time
-(worst ``dw`` element over both weight dtypes: 0.969 of the budget for the det pair,
-0.800 for the single kernel; every 64th ``T``, 120 inputs per family).  On sm_107a
-``bwd_h6144`` from T 19456 to 30720 runs, for now, the det pair the deterministic
-package runs there; the pair of its window below stays within the ``dw`` budget there
-and takes 0.97x to 0.99x the det pair's time.  On sm_100a ``bwd_h512`` and
-``bwd_w32_h512`` up to T 227 run the deterministic package's column-task program of that
-window, which is faster there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up
-to T 227, ``bwd_h1536`` and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63
-and ``bwd_w32_h2048`` from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to
-152 and T 32 of ``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the
-deterministic package's column-task programs of those token counts, and ``bwd_w32_h512``
-from T 227 to 292 and ``bwd_w32_h1536`` from T 214 to 320 the det pair of the window
-above, which are faster there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
+where it is the main kernel that package runs from 99840 to 720896 rows; their
+fixed-order dw reduce is that package's, except from 5120 to 12288 and from 720896 to
+1572864 rows, where it is another of that package's dw reduces.  On ``bwd_h256`` (both
+weight dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a
+also runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.
+The single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T
+960 to 32768 the det pair the deterministic package runs from T 4096.  On sm_100a
+``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880, ``bwd_w32_h2048`` from T
+58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144`` from T 5632 to 42496 run the
+det pair the deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536
+the flush single kernel of its window above.  On sm_100a ``bwd_h1536`` from T 36352 (the
+deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run
+the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
+65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
+from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
+48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
+runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+from T 4096
+to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
+from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
+(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
+``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
+from T 50688 to 65536 runs the det pair the deterministic package runs there (its
+eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
+the single kernel of its window from T 32768 to 75776, ``bwd_w32_h2048`` from T 1024 to
+4096 and ``bwd_w32_h4096`` from T 1792 to 3584 the single kernel of their top window,
+``bwd_w32_h2048`` from T 336 to 1024 the column-task kernel of its window from T 64 to
+336 (its CTAs first sum whole columns of ``dw`` over every row) and ``bwd_w32_h5120``
+from T 1792 to 6144 the single kernel of its top window; on sm_107a ``bwd_w32_h6144``
+from T 19456 to 28672 runs the det pair the deterministic package runs above T 19456,
+``bwd_w32_h2048`` from T 1024 to 16384 the single kernel of its largest token counts,
+and ``bwd_w32_h1536`` from T 1024 to 16384 and ``bwd_w32_h6144`` from T 2304 to 19456
+the single kernel of their top window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880
+runs the single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T
+45056 to 58880 the single kernel of its neighbouring windows, within 2 % of the det
+pair's time.  On sm_107a ``bwd_h6144`` from T 19456 to 30720 runs the det pair the
+deterministic package runs there.  On sm_100a ``bwd_h512`` and ``bwd_w32_h512`` up to T
+227 run the deterministic package's column-task program of that window, which is faster
+there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up to T 227, ``bwd_h1536``
+and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63 and ``bwd_w32_h2048``
+from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to 152 and T 32 of
+``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the deterministic package's
+column-task programs of those token counts, and ``bwd_w32_h512`` from T 227 to 292 and
+``bwd_w32_h1536`` from T 214 to 320 the det pair of the window above, which are faster
+there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
 ``bwd_w32_residual_h6144`` from T 48 to 320 run the deterministic package's column-task
 program of those token counts (and its FP32-weight twin), which that package runs from T
-0 to 1216, instead of the whole-SM det pair this package ran there before: on GB300 it
-took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and
-10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference
-(relative L2 or worst element, the larger over six input families).  On sm_103a
-``bwd_h5120`` from T 17 to 64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T
-17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's
-column-task program of the route in its ticket form (the form whose ``dx`` and ``dw``
-the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of 0.73x to
-0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
-sampled T up to those token counts had a backward call, a forward and backward call or a
-checkpointed step (two forward calls and a backward call) slower than with the programs
-it replaces beyond the run-to-run band in all its runs.  Above them the det pair of the
-window above runs: at T 96 on ``bwd_h5120``, T 256 on ``bwd_w32_h5120`` and T 1024 on
-``bwd_h6144`` (and at some larger sampled T) a forward and backward call or a
-checkpointed step with the ticket form was slower in both runs, though its backward call
-alone was faster there.  On sm_107a ``bwd_h512`` up to T 576, ``bwd_w32_h512`` up to T
-384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536`` from T 1 to 320, ``bwd_h2048``
-from T 31 and ``bwd_w32_h2048`` up to T 256, ``bwd_h4096`` from T 1 and
-``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to 256, from T 511 to 640 and T
-896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640 and T 896, ``bwd_h6144`` from
-T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to 1664, ``bwd_residual_h6144`` from
-T 15 to 320 and from T 447 to 576 and ``bwd_w32_residual_h6144`` up to T 768 run the
-deterministic package's column-task programs of those token counts, which took 0.53x to
-0.97x the time of the programs they replace at every sampled T in two R200 records with
-212 SMs (the slower record per T) and were also faster there in a VR200 screen.  On
-sm_107a ``bwd_h256`` and ``bwd_w32_h256`` up to 786432 rows run the deterministic
-package's det pair of those rows, which took 0.76x to 0.95x the time of the program it
-replaces at every sampled row count in two R200 records with 212 SMs and was also faster
-in a VR200 screen; above 786432 rows that pair's worst ``dw`` element exceeds the budget
-at some sampled row counts, and the single kernel of the top window runs there.  On 9
-backward routes the lowest window, from T 1 up to a token count from 1 to 31, runs a
-single kernel for ``dw`` accuracy: there, over 60 inputs of each of three families, the
-det pair's median ``dw`` error, or on the FP32-weight and ``bwd_h5120`` routes its worst
-``dw`` error, exceeds the FP32 eager reduction's at some sampled ``T`` (measured on
-GB300 and R200 with 212 SMs).  On ``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``,
-``bwd_h5120``, ``bwd_h6144`` and ``bwd_residual_h6144`` (and their FP32-weight routes)
-the window above the one-cluster windows, from T 17 up to T 64 (on sm_103a up to T 63 on
-``bwd_h2048``, up to T 32 on ``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on
-``bwd_residual_h6144`` and ``bwd_w32_residual_h6144``, except T 32 of those two, and not
-on ``bwd_h5120``, ``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a
-only on ``bwd_h2048`` and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the
-column-task kernel: each CTA takes its rows and its column tasks by its index instead of
-by claim tickets, so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise
-those of the ticket form.  The ``dw`` budget these notes and the window comments of
-``cake_jit`` measure against is the per-element bound atol = rtol = 1e-4 of the FP64
-reference; the tests hold ``dw`` to the error of ``torch.nn.functional.rms_norm`` run in
-FP32 on the same inputs, in the L2 norm and in the max norm.
+0 to 1216: on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the
+whole-SM det pair took 7.65, 10.24 and 10.53 us.  On sm_103a ``bwd_h5120`` from T 17 to
+64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T 17 to 896 and
+``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's column-task program
+of the route in its ticket form (the form whose ``dx`` and ``dw`` the fixed-claim form
+reproduces bit for bit): on GB300 (benchmark, CUDA-graph span, L2 flushed before every
+call; one or two runs per T) no sampled T up to those token counts had a backward call,
+a forward and backward call or a checkpointed step (two forward calls and a backward
+call) slower than with the programs it replaces beyond the run-to-run band in all its
+runs.  Above them the det pair of the window above runs: at T 96 on ``bwd_h5120``, T 256
+on ``bwd_w32_h5120`` and T 1024 on ``bwd_h6144`` (and at some larger sampled T) a
+forward and backward call or a checkpointed step with the ticket form was slower in both
+runs, though its backward call alone was faster there.  On sm_107a ``bwd_h512`` up to T
+576, ``bwd_w32_h512`` up to T 384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536``
+from T 1 to 320, ``bwd_h2048`` from T 31 and ``bwd_w32_h2048`` up to T 256,
+``bwd_h4096`` from T 1 and ``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to
+256, from T 511 to 640 and T 896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640
+and T 896, ``bwd_h6144`` from T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to
+1664, ``bwd_residual_h6144`` from T 15 to 320 and from T 447 to 576 and
+``bwd_w32_residual_h6144`` up to T 768 run the deterministic package's column-task
+programs of those token counts, which took 0.53x to 0.97x the time of the programs they
+replace at every sampled T in two R200 records with 212 SMs (the slower record per T)
+and were also faster there in a VR200 screen.  On sm_107a ``bwd_h256`` and
+``bwd_w32_h256`` up to 786432 rows run the deterministic package's det pair of those
+rows, which took 0.76x to 0.95x the time of the program it replaces at every sampled row
+count in two R200 records with 212 SMs and was also faster in a VR200 screen; above
+786432 rows the single kernel of the top window runs.  On 9 backward routes the lowest
+window, from T 1 up to a token count from 1 to 31, runs a single kernel.  On
+``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``, ``bwd_h5120``, ``bwd_h6144`` and
+``bwd_residual_h6144`` (and their FP32-weight routes) the window above the one-cluster
+windows, from T 17 up to T 64 (on sm_103a up to T 63 on ``bwd_h2048``, up to T 32 on
+``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on ``bwd_residual_h6144`` and
+``bwd_w32_residual_h6144``, except T 32 of those two, and not on ``bwd_h5120``,
+``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a only on ``bwd_h2048``
+and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the column-task kernel:
+each CTA takes its rows and its column tasks by its index instead of by claim tickets,
+so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise those of the ticket
+form.  Every program sums in plain FP32 words, except the FP32-pair det pairs above,
+which add each block of rows into an FP32 pair (a sum and its compensation word).  The
+tests hold no tolerance: they judge every floating output by its error against an FP64
+reference beside the error of the naive PyTorch implementation (the same ops in BF16 on
+the same BF16 inputs), over 32 independent random inputs of each case: in the L2 norm
+and in the max norm the median and the largest error at most 1.005 times the naive's,
+and 0 where the naive's is 0.
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
@@ -2555,8 +2499,7 @@ above: on sm_100a up to T 14 on ``bwd_w32_h2048`` and ``bwd_w32_h4096``, up to T
 differ from the single kernel's by rounding) and ``dw`` in FP32 in a fixed order: the
 same bits on every launch of a token count.  Where the notes below name token counts at
 or below those tops, they describe the windows above them.  The single kernel computes
-``dx`` row by row (bitwise reproducible, within one BF16 ulp of ``max(|dx|, rms(dx))``
-of the deterministic backward's ``dx``, not always bitwise equal to it) and adds the
+``dx`` row by row (bitwise reproducible) and adds the
 ``dw`` sums of its CTAs into FP32 column sums (FP32 adds) in a scheduling-dependent
 order: its ``dw`` is not bitwise reproducible, even for a fixed ``T``.  The top window
 of ``bwd_h256`` on sm_100a and sm_107a, on sm_103a of ``bwd_h1536``, ``bwd_h2048``,
@@ -2611,126 +2554,99 @@ single kernel above.  On sm_103a ``bwd_h256`` (both weight dtypes) every window 
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
 the main kernel that package runs from 2048 to 5120 rows, and from 97280 to 99840 rows,
-where it is the main kernel that package runs from 99840 to 720896 rows (the pair below
-99840 rows exceeds 0.85 of the ``dw`` budget above 97280 rows); their fixed-order dw
-reduce is that package's, except from 5120 to 12288 and from 720896 to 1572864 rows,
-where it is the dw reduce that package ran there earlier.  On ``bwd_h256`` (both weight
-dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a also
-runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.  The
-single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T 960
-to 32768 the det pair the deterministic package runs from T 4096, for ``dw`` accuracy.
-On sm_100a ``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880,
-``bwd_w32_h2048`` from T 58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144``
-from T 5632 to 42496 run the det pair the deterministic package runs there, and
-``bwd_h2048`` from T 58880 to 65536 the flush single kernel of its window above, for
-``dw`` accuracy: they replace single kernels whose FP32 ``dw`` sums over windows of 16
-steps put their worst ``dw`` error at 1.10x to 2.30x the deterministic package's median
-FP64 error over 5 repeats at T 14928 to 65536 on B200 (BF16 weight).  On sm_100a
-``bwd_h1536`` from T 36352 (the deterministic package's own edge) to 78784 and
-``bwd_h4096`` from T 44032 to 65536 run the det pair the deterministic package runs
-there, for ``dw`` accuracy: the single kernels this package's previous version runs
-there exceed 1.1x the ``dw`` error of the deterministic package's program in its earlier
-version (1.10x to 1.56x on ``bwd_h1536``), and on B200 the det pair took 1.012x to
-1.051x (``bwd_h1536``) and 0.940x to 0.997x (``bwd_h4096``) their time.  On sm_100a
-``bwd_w32_h4096`` from T 44032 to 65536 runs the FP32-weight det pair the deterministic
-package runs there, for ``dw`` accuracy: the single kernel this package's previous
-version runs there put its worst ``dw`` element at 1.54x to 2.01x that package's at T
-45056, 49152 and 65536 on B200, and the det pair took 0.978x to 0.997x its time.  On
-sm_103a ``bwd_w32_h4096`` from T 4096 to 65536 runs FP32-weight det pairs of the
-deterministic package, split at T 48640.  On sm_107a ``bwd_h4096`` from T 24064 to 24576
-and ``bwd_w32_h5120`` from T 4096 to 32767 run the det pair the deterministic package
-runs there, for ``dw`` accuracy: the programs they replace (the det pair of the window
-below, a row single kernel and an earlier det pair over 16-step blocks) put their worst
-``dw`` error at 1.12x to 2.00x the deterministic package's median FP64 error over 5
-repeats at T 14928 to 32768 on R200 with 212 SMs.  From T 4096 to 19968 that det pair's
-``dw`` error exceeds the FP32 eager reduction's at some sampled ``T``, within the ``dw``
-budget.  On sm_107a ``bwd_w32_h4096`` from T 24064 to 65536 runs the FP32-weight twin of
-the det pair of ``bwd_h4096`` from T 24064 as well, for ``dw`` accuracy: the single
-kernels this package's previous version runs on both routes there put their worst ``dw``
-error at 1.13x to 1.41x (BF16 weight) and 1.24x to 1.55x (FP32 weight) that package's
-median FP64 error over 5 repeats at T 40960 to 65536 on R200 (3 seeds), and on R200 the
-det pair took 0.84x to 0.86x the time of that FP32-weight single kernel at T 24576 to
-65536.  The deterministic package now cuts that pair at T 50176.  On sm_107a
-``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
-to 65536 run the det pair that package runs there (its four-row block form).  On sm_107a
-``bwd_h2048`` from T 50688 to 65536 runs the det pair the deterministic package runs
-there (its eight-row block form), for speed.  For ``dw`` accuracy, on sm_100a
-``bwd_w32_h1536`` from T 1024 to 4096 runs the single kernel of its window from T 32768
-to 75776, ``bwd_w32_h2048`` from T 1024 to 4096 and ``bwd_w32_h4096`` from T 1792 to
-3584 the single kernel of their top window, ``bwd_w32_h2048`` from T 336 to 1024 the
-column-task kernel of its window from T 64 to 336 (its CTAs first sum whole columns of
-``dw`` over every row) and ``bwd_w32_h5120`` from T 1792 to 6144 the single kernel of
-its top window; on sm_107a ``bwd_w32_h6144`` from T 19456 to 28672 runs the det pair the
-deterministic package runs above T 19456, ``bwd_w32_h2048`` from T 1024 to 16384 the
-single kernel of its largest token counts, and ``bwd_w32_h1536`` from T 1024 to 16384
-and ``bwd_w32_h6144`` from T 2304 to 19456 the single kernel of their top window; each
-replaces a pair whose ``dw`` error exceeds the FP32 eager reduction's at some sampled
-``T`` of that pair's window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880 runs the
-single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T 45056 to
-58880 the single kernel of its neighbouring windows, within 2 % of the det pair's time
-(worst ``dw`` element over both weight dtypes: 0.969 of the budget for the det pair,
-0.800 for the single kernel; every 64th ``T``, 120 inputs per family).  On sm_107a
-``bwd_h6144`` from T 19456 to 30720 runs, for now, the det pair the deterministic
-package runs there; the pair of its window below stays within the ``dw`` budget there
-and takes 0.97x to 0.99x the det pair's time.  On sm_100a ``bwd_h512`` and
-``bwd_w32_h512`` up to T 227 run the deterministic package's column-task program of that
-window, which is faster there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up
-to T 227, ``bwd_h1536`` and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63
-and ``bwd_w32_h2048`` from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to
-152 and T 32 of ``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the
-deterministic package's column-task programs of those token counts, and ``bwd_w32_h512``
-from T 227 to 292 and ``bwd_w32_h1536`` from T 214 to 320 the det pair of the window
-above, which are faster there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
+where it is the main kernel that package runs from 99840 to 720896 rows; their
+fixed-order dw reduce is that package's, except from 5120 to 12288 and from 720896 to
+1572864 rows, where it is another of that package's dw reduces.  On ``bwd_h256`` (both
+weight dtypes) the det pair the deterministic package runs above 80896 rows on sm_100a
+also runs from 92160 to 524288 rows on sm_100a, and with FP32 weight up to 864240 rows.
+The single kernel of the top window runs above.  On sm_103a ``bwd_w32_h512`` runs from T
+960 to 32768 the det pair the deterministic package runs from T 4096.  On sm_100a
+``bwd_h512`` above T 4096, ``bwd_h2048`` from T 13608 to 58880, ``bwd_w32_h2048`` from T
+58880 to 65536 (the FP32-weight det pair) and ``bwd_h6144`` from T 5632 to 42496 run the
+det pair the deterministic package runs there, and ``bwd_h2048`` from T 58880 to 65536
+the flush single kernel of its window above.  On sm_100a ``bwd_h1536`` from T 36352 (the
+deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 65536 run
+the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
+65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
+from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
+48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
+runs to T 50688.  On sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
+from T 4096
+to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
+from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
+(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
+``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
+from T 50688 to 65536 runs the det pair the deterministic package runs there (its
+eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
+the single kernel of its window from T 32768 to 75776, ``bwd_w32_h2048`` from T 1024 to
+4096 and ``bwd_w32_h4096`` from T 1792 to 3584 the single kernel of their top window,
+``bwd_w32_h2048`` from T 336 to 1024 the column-task kernel of its window from T 64 to
+336 (its CTAs first sum whole columns of ``dw`` over every row) and ``bwd_w32_h5120``
+from T 1792 to 6144 the single kernel of its top window; on sm_107a ``bwd_w32_h6144``
+from T 19456 to 28672 runs the det pair the deterministic package runs above T 19456,
+``bwd_w32_h2048`` from T 1024 to 16384 the single kernel of its largest token counts,
+and ``bwd_w32_h1536`` from T 1024 to 16384 and ``bwd_w32_h6144`` from T 2304 to 19456
+the single kernel of their top window.  On sm_100a ``bwd_h2048`` from T 45056 to 58880
+runs the single kernel of its window from T 7168 to 11264 and ``bwd_w32_h2048`` from T
+45056 to 58880 the single kernel of its neighbouring windows, within 2 % of the det
+pair's time.  On sm_107a ``bwd_h6144`` from T 19456 to 30720 runs the det pair the
+deterministic package runs there.  On sm_100a ``bwd_h512`` and ``bwd_w32_h512`` up to T
+227 run the deterministic package's column-task program of that window, which is faster
+there.  On sm_103a ``bwd_h512`` up to T 64, ``bwd_w32_h512`` up to T 227, ``bwd_h1536``
+and ``bwd_w32_h1536`` from T 64 to 214, ``bwd_h2048`` from T 63 and ``bwd_w32_h2048``
+from T 64 to 171, ``bwd_h4096`` and ``bwd_w32_h4096`` from T 32 to 152 and T 32 of
+``bwd_residual_h6144`` and ``bwd_w32_residual_h6144`` run the deterministic package's
+column-task programs of those token counts, and ``bwd_w32_h512`` from T 227 to 292 and
+``bwd_w32_h1536`` from T 214 to 320 the det pair of the window above, which are faster
+there.  On sm_103a ``bwd_residual_h6144`` from T 56 to 304 and
 ``bwd_w32_residual_h6144`` from T 48 to 320 run the deterministic package's column-task
 program of those token counts (and its FP32-weight twin), which that package runs from T
-0 to 1216, instead of the whole-SM det pair this package ran there before: on GB300 it
-took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and
-10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference
-(relative L2 or worst element, the larger over six input families).  On sm_103a
-``bwd_h5120`` from T 17 to 64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T
-17 to 896 and ``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's
-column-task program of the route in its ticket form (the form whose ``dx`` and ``dw``
-the fixed-claim form reproduces bit for bit), with an FP64 ``dw`` error of 0.73x to
-0.75x the det pair's at T 64 on ``bwd_h6144`` and ``bwd_w32_h5120``: on GB300
-(benchmark, CUDA-graph span, L2 flushed before every call; one or two runs per T) no
-sampled T up to those token counts had a backward call, a forward and backward call or a
-checkpointed step (two forward calls and a backward call) slower than with the programs
-it replaces beyond the run-to-run band in all its runs.  Above them the det pair of the
-window above runs: at T 96 on ``bwd_h5120``, T 256 on ``bwd_w32_h5120`` and T 1024 on
-``bwd_h6144`` (and at some larger sampled T) a forward and backward call or a
-checkpointed step with the ticket form was slower in both runs, though its backward call
-alone was faster there.  On sm_107a ``bwd_h512`` up to T 576, ``bwd_w32_h512`` up to T
-384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536`` from T 1 to 320, ``bwd_h2048``
-from T 31 and ``bwd_w32_h2048`` up to T 256, ``bwd_h4096`` from T 1 and
-``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to 256, from T 511 to 640 and T
-896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640 and T 896, ``bwd_h6144`` from
-T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to 1664, ``bwd_residual_h6144`` from
-T 15 to 320 and from T 447 to 576 and ``bwd_w32_residual_h6144`` up to T 768 run the
-deterministic package's column-task programs of those token counts, which took 0.53x to
-0.97x the time of the programs they replace at every sampled T in two R200 records with
-212 SMs (the slower record per T) and were also faster there in a VR200 screen.  On
-sm_107a ``bwd_h256`` and ``bwd_w32_h256`` up to 786432 rows run the deterministic
-package's det pair of those rows, which took 0.76x to 0.95x the time of the program it
-replaces at every sampled row count in two R200 records with 212 SMs and was also faster
-in a VR200 screen; above 786432 rows that pair's worst ``dw`` element exceeds the budget
-at some sampled row counts, and the single kernel of the top window runs there.  On 9
-backward routes the lowest window, from T 1 up to a token count from 1 to 31, runs a
-single kernel for ``dw`` accuracy: there, over 60 inputs of each of three families, the
-det pair's median ``dw`` error, or on the FP32-weight and ``bwd_h5120`` routes its worst
-``dw`` error, exceeds the FP32 eager reduction's at some sampled ``T`` (measured on
-GB300 and R200 with 212 SMs).  On ``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``,
-``bwd_h5120``, ``bwd_h6144`` and ``bwd_residual_h6144`` (and their FP32-weight routes)
-the window above the one-cluster windows, from T 17 up to T 64 (on sm_103a up to T 63 on
-``bwd_h2048``, up to T 32 on ``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on
-``bwd_residual_h6144`` and ``bwd_w32_residual_h6144``, except T 32 of those two, and not
-on ``bwd_h5120``, ``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a
-only on ``bwd_h2048`` and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the
-column-task kernel: each CTA takes its rows and its column tasks by its index instead of
-by claim tickets, so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise
-those of the ticket form.  The ``dw`` budget these notes and the window comments of
-``cake_jit`` measure against is the per-element bound atol = rtol = 1e-4 of the FP64
-reference; the tests hold ``dw`` to the error of ``torch.nn.functional.rms_norm`` run in
-FP32 on the same inputs, in the L2 norm and in the max norm.
+0 to 1216: on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the
+whole-SM det pair took 7.65, 10.24 and 10.53 us.  On sm_103a ``bwd_h5120`` from T 17 to
+64, ``bwd_w32_h5120`` from T 17 to 192, ``bwd_h6144`` from T 17 to 896 and
+``bwd_w32_h6144`` from T 17 to 1024 run the deterministic package's column-task program
+of the route in its ticket form (the form whose ``dx`` and ``dw`` the fixed-claim form
+reproduces bit for bit): on GB300 (benchmark, CUDA-graph span, L2 flushed before every
+call; one or two runs per T) no sampled T up to those token counts had a backward call,
+a forward and backward call or a checkpointed step (two forward calls and a backward
+call) slower than with the programs it replaces beyond the run-to-run band in all its
+runs.  Above them the det pair of the window above runs: at T 96 on ``bwd_h5120``, T 256
+on ``bwd_w32_h5120`` and T 1024 on ``bwd_h6144`` (and at some larger sampled T) a
+forward and backward call or a checkpointed step with the ticket form was slower in both
+runs, though its backward call alone was faster there.  On sm_107a ``bwd_h512`` up to T
+576, ``bwd_w32_h512`` up to T 384, ``bwd_h1536`` from T 15 to 320, ``bwd_w32_h1536``
+from T 1 to 320, ``bwd_h2048`` from T 31 and ``bwd_w32_h2048`` up to T 256,
+``bwd_h4096`` from T 1 and ``bwd_w32_h4096`` up to T 256, ``bwd_h5120`` from T 31 to
+256, from T 511 to 640 and T 896, ``bwd_w32_h5120`` from T 15 to 256, from T 511 to 640
+and T 896, ``bwd_h6144`` from T 15 to 960 and T 1152, ``bwd_w32_h6144`` from T 1 to
+1664, ``bwd_residual_h6144`` from T 15 to 320 and from T 447 to 576 and
+``bwd_w32_residual_h6144`` up to T 768 run the deterministic package's column-task
+programs of those token counts, which took 0.53x to 0.97x the time of the programs they
+replace at every sampled T in two R200 records with 212 SMs (the slower record per T)
+and were also faster there in a VR200 screen.  On sm_107a ``bwd_h256`` and
+``bwd_w32_h256`` up to 786432 rows run the deterministic package's det pair of those
+rows, which took 0.76x to 0.95x the time of the program it replaces at every sampled row
+count in two R200 records with 212 SMs and was also faster in a VR200 screen; above
+786432 rows the single kernel of the top window runs.  On 9 backward routes the lowest
+window, from T 1 up to a token count from 1 to 31, runs a single kernel.  On
+``bwd_h1536``, ``bwd_h2048``, ``bwd_h4096``, ``bwd_h5120``, ``bwd_h6144`` and
+``bwd_residual_h6144`` (and their FP32-weight routes) the window above the one-cluster
+windows, from T 17 up to T 64 (on sm_103a up to T 63 on ``bwd_h2048``, up to T 32 on
+``bwd_h4096`` and ``bwd_w32_h4096``, up to T 48 on ``bwd_residual_h6144`` and
+``bwd_w32_residual_h6144``, except T 32 of those two, and not on ``bwd_h5120``,
+``bwd_w32_h5120``, ``bwd_h6144`` and ``bwd_w32_h6144``; on sm_107a only on ``bwd_h2048``
+and ``bwd_h5120``, up to T 31), runs the fixed-claim form of the column-task kernel:
+each CTA takes its rows and its column tasks by its index instead of by claim tickets,
+so no CTA waits for another, and its ``dx`` and ``dw`` are bitwise those of the ticket
+form.  Every program sums in plain FP32 words, except the FP32-pair det pairs above,
+which add each block of rows into an FP32 pair (a sum and its compensation word).  The
+tests hold no tolerance: they judge every floating output by its error against an FP64
+reference beside the error of the naive PyTorch implementation (the same ops in BF16 on
+the same BF16 inputs), over 32 independent random inputs of each case: in the L2 norm
+and in the max norm the median and the largest error at most 1.005 times the naive's,
+and 0 where the naive's is 0.
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
@@ -2767,7 +2683,7 @@ route not listed is unmeasured.
 * ``sm_100a`` ``bwd_w32_h256``: (0, 4] >= 100, (4, 24] >= 100, (24, 64] >= 100, (64, 20480] -, (20480, 92160] -, (92160, 864240] -, (864240, inf) -
 * ``sm_100a`` ``bwd_w32_h4096``: (0, 4] >= 100, (4, 14] >= 100, (14, 64] -, (64, 1792] -, (1792, 3584] -, (3584, 36864] -, (36864, 44032] >= 132, (44032, 65536] >= 100, (65536, 131072] -, (131072, inf) -
 * ``sm_100a`` ``bwd_w32_h512``: (0, 4] >= 100, (4, 16] >= 100, (16, 227] -, (227, 292] -, (292, 960] -, (960, inf) -
-* ``sm_100a`` ``bwd_w32_h5120``: (0, 4] >= 100, (4, 64] >= 100, (64, 1792] -, (1792, 6144] >= 132, (6144, 56256] -, (56256, 131072] >= 132, (131072, inf) >= 132
+* ``sm_100a`` ``bwd_w32_h5120``: (0, 4] >= 100, (4, 64] >= 100, (64, 1792] -, (1792, 6144] >= 132, (6144, 56256] >= 100, (56256, 131072] >= 132, (131072, inf) >= 132
 * ``sm_100a`` ``bwd_w32_h6144``: (0, 4] >= 100, (4, 64] -, (64, 1168] >= 132, (1168, 3584] >= 132, (3584, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_100a`` ``bwd_w32_residual_h6144``: (0, 4] >= 100, (4, 64] -, (64, 1408] >= 100, (1408, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_103a`` ``bwd_h1536``: (0, 4] >= 100, (4, 5] >= 100, (5, 64] -, (64, 214] -, (214, 1024] >= 132, (1024, 4096] >= 100, (4096, 14928] >= 132, (14928, 15566] >= 100, (15566, 46592] >= 100, (46592, 53184] -, (53184, 76352] >= 100, (76352, 131072] -, (131072, inf) -
@@ -2866,7 +2782,7 @@ Beside those, leave some SMs free of the resident kernel.
   (64, 896] 080e0a6c = (896, 6144] b482c84d (det pair) =
   (6144, 56256] b482c84d (det pair) = (56256, 131072] 670f4caf = (131072, inf) 2f05000c
 * ``sm_100a`` ``bwd_w32_h5120``: (0, 4] d4713822 (one cluster) ? (4, 64] cb653957 =
-  (64, 1792] 139d162a = (1792, 6144] de8f6091 = (6144, 56256] 40227b2a (det pair) =
+  (64, 1792] 139d162a = (1792, 6144] de8f6091 ? (6144, 56256] 9479b129 (det pair) ?
   (56256, 131072] 13bd0c5f = (131072, inf) de8f6091
 * ``sm_100a`` ``bwd_h6144``: (0, 4] e37752b0 (one cluster) ? (4, 64] e6475d8f =
   (64, 1152] 44508df7 = (1152, 4096] 5c804aed (det pair) =
@@ -2927,7 +2843,7 @@ Beside those, leave some SMs free of the resident kernel.
   (4, 16] b378ba00 (one cluster) ? (16, 32] 8274f36f = (32, 152] 27615d0e =
   (152, 256] 3fd77c8c (det pair) = (256, 1024] 16545056 (det pair) =
   (1024, 4096] 78c26a53 (det pair) = (4096, 48640] 626aed74 (det pair) ?
-  (48640, 65536] 78c26a53 (det pair) ? (65536, 262144] bd22da7e = (262144, inf) 36790f79
+  (48640, 65536] cb164a27 (det pair) ? (65536, 262144] bd22da7e = (262144, inf) 36790f79
 * ``sm_103a`` ``bwd_h5120``: (0, 4] dbc680f3 (one cluster) ? (4, 16] 29bcbde1 ?
   (16, 64] 080e0a6c ? (64, 1024] 2fc4932f (det pair) ? (1024, 5120] 2fc4932f (det pair)
   = (5120, 61952] 2fc4932f (det pair) = (61952, 393216] e21acade =
