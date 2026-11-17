@@ -41,7 +41,9 @@ from . import cake_build
 # every backward (``BACKWARD_STAGES``): no stage is selected by a tensor value
 # or by the device's SM count.  A backward of P > 1 key-range passes (the
 # record's ``key_pass_policy``, or the caller's ``key_passes``) runs the
-# ``KEY_PASS_STAGES`` P times in place of ``bwd_main``.  What each library compiles -- translation
+# program's ``KEY_PASS_STAGES_OF`` P times in place of its main stage.  Two
+# records may name one library (the compaction of the key-range passes serves
+# both programs); their launch dicts then agree.  What each library compiles -- translation
 # units, nvcc flags, digests -- is recorded in ``build.json`` only; the
 # positional argument order of every stage lives in the generated
 # ``cake_launch`` module.  The records are populated by the generated-program
@@ -282,7 +284,13 @@ MODULES: dict[str, dict[str, Any]] = {
     # dimensions, no rope operands, one combined dK + dV gradient per key row.
     # ``index_prep`` (the fused index preparation: per-document rows to global
     # key rows, optionally compacted) runs ahead of ``nope_fwd`` on the packed
-    # routes and serves the RoPE program's packed entry too.
+    # routes and serves the RoPE program's packed entry too.  The key-range
+    # passes run the RoPE program's compaction library (``nope_bwd_compact``)
+    # and the NoPE pass build of the main kernel (``nope_bwd_main_pass``).  The
+    # key-range-pass policy is the non-deterministic package's NoPE record
+    # values (``key_bytes`` 2048; ``dq_partial_bytes_per_token`` = 64 heads x
+    # 512 x 4 B of FP32 dQ partial per token; ``max_passes`` 1: the policy
+    # never plans a second pass, and ``key_passes`` forces the pass form).
     "cake_dsa_h64_det_nope_train": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "stages": [
@@ -296,6 +304,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_redo_prep",
             "nope_bwd_redo",
             "nope_bwd_fold",
+            "nope_bwd_compact",
+            "nope_bwd_main_pass",
             "nope_bwd_bound_pack27",
             "nope_bwd_grid_pack27",
             "nope_bwd_redo_prep_fold",
@@ -304,6 +314,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_bound_pack27_pipe",
             "nope_fwd_scan",
         ],
+        # The key-range-pass policy: the non-deterministic package's NoPE record
+        # values (``cake_backend.KeyPassPolicy``).
+        "key_pass_policy": {
+            "l2_budget_bytes": 104857600,
+            "key_bytes": 2048,
+            "workspace_budget_bytes": 671088640,
+            "token_chunk_multiple": 128,
+            "max_passes": 1,
+            "dq_partial_bytes_per_token": 131072,
+        },
         "index_prep": {
             "library": "cake_dsa_h64_det_nope_train_db791110b21a91be1388",
             "ffi_entry": "run",
@@ -415,6 +435,28 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": False,
             },
         },
+        "nope_bwd_compact": {
+            "library": "cake_dsa_h64_det_train_19c560118a407f5473fe",
+            "ffi_entry": "run",
+            "launch": {
+                "block": [128, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 0,
+                "use_pdl": False,
+            },
+        },
+        "nope_bwd_main_pass": {
+            "library": "cake_dsa_h64_det_nope_train_987774aae8c0c668e8ea",
+            "ffi_entry": "run",
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 217344,
+                "use_pdl": False,
+            },
+        },
         "nope_bwd_bound_pack27": {
             "library": "cake_dsa_h64_det_nope_train_a75be993b6f056087d05",
             "ffi_entry": "run",
@@ -523,7 +565,7 @@ STAGES = FORWARD_STAGES + BACKWARD_STAGES
 # The key-range passes of the RoPE program: a backward that splits every token's keys into ``P > 1`` key ranges
 # runs, per pass and in place of ``bwd_main``, the compaction of the token's keys in the range (``bwd_compact``)
 # and the pass build of the main stage (``bwd_main_pass``; its dQ goes through an FP32 partial between passes).
-# The redo stays one launch.  The NoPE program has no pass stages.
+# The redo stays one launch.  The NoPE program's pass stages are their ``nope_`` forms (``KEY_PASS_STAGES_OF``).
 KEY_PASS_STAGES = ("bwd_compact", "bwd_main_pass")
 # The pack27 builds of the row bound and its grid decode (a 27-bit pair count with 10-bit packed terms): a backward of
 # ``2 ** 26 <= num_queries * topk < 2 ** 27`` pair slots runs them in place of ``bwd_bound`` / ``bwd_grid`` (whose
@@ -543,6 +585,10 @@ STAGE_PREFIX = {PROGRAM: "", NOPE_PROGRAM: "nope_"}
 NOPE_STAGES = tuple(f"{STAGE_PREFIX[NOPE_PROGRAM]}{stage}" for stage in STAGES)
 NOPE_FORWARD_STAGES = NOPE_STAGES[:1]
 NOPE_BACKWARD_STAGES = NOPE_STAGES[1:]
+NOPE_KEY_PASS_STAGES = tuple(
+    f"{STAGE_PREFIX[NOPE_PROGRAM]}{stage}" for stage in KEY_PASS_STAGES
+)
+KEY_PASS_STAGES_OF = {PROGRAM: KEY_PASS_STAGES, NOPE_PROGRAM: NOPE_KEY_PASS_STAGES}
 NOPE_PACK27_STAGES = tuple(
     f"{STAGE_PREFIX[NOPE_PROGRAM]}{stage}" for stage in PACK27_STAGES.values()
 )
@@ -576,7 +622,10 @@ _NOPE_ALTERNATES = (
 SCAN_STAGES = {"fwd": "fwd_scan", "nope_fwd": "nope_fwd_scan"}
 STAGES_OF = {
     PROGRAM: STAGES + KEY_PASS_STAGES + _ROPE_ALTERNATES + (SCAN_STAGES["fwd"],),
-    NOPE_PROGRAM: NOPE_STAGES + _NOPE_ALTERNATES + (SCAN_STAGES["nope_fwd"],),
+    NOPE_PROGRAM: NOPE_STAGES
+    + NOPE_KEY_PASS_STAGES
+    + _NOPE_ALTERNATES
+    + (SCAN_STAGES["nope_fwd"],),
 }
 BACKWARD_STAGES_OF = {PROGRAM: BACKWARD_STAGES, NOPE_PROGRAM: NOPE_BACKWARD_STAGES}
 
