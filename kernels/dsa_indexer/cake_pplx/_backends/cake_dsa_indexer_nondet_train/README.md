@@ -144,9 +144,7 @@ Products, accumulation and score arithmetic are FP32.  There is no BF16
 intermediate rounding and no fast-math (IEEE round-to-nearest, no
 flush-to-zero).  The scan programs are the deterministic package's BF16 scan
 programs.  Every program
-evaluates the score in one fixed sequence.  The score of a pair therefore
-depends only on `(q[t], k[j], w[t], softmax_scale)`, not on which program,
-CTA, tile or warp evaluates it:
+evaluates the score in this sequence:
 
 1. **Dot product**: one tensor-core MMA of a fixed shape (128 keys x (queries
    of the unit x 32 heads) x K = 16).  It accumulates the 128 products of a
@@ -174,8 +172,7 @@ an equal-score tie goes to the larger key id.  The written score keeps the
 computed bits and is never canonicalized.  The tests hold the signed-zero
 cases to the exact selection of
 `tests/experimental/test_helpers/cake_dsa_indexer_reference.py` after each row
-is canonicalized, and check that every zero score is `+0.0` (see "Tests and
-benchmark").
+is canonicalized (see "Tests and benchmark").
 
 ## FP8 form
 

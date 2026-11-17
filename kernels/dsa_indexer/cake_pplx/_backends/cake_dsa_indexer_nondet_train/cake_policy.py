@@ -59,8 +59,8 @@ small-``top_k`` call keeps the smaller buffers (half the workspace at
 
 Nothing here reads device memory: the segment boundaries stay on the device
 and the dispatch sees only host-known integers.  The chosen program never
-changes the selected set -- every form selects the same ids with the same score
-bits per row; only the order of a row's entries can differ -- so a wrong
+changes the selected set -- every form selects the same ids per row; only the
+order of a row's entries can differ -- so a wrong
 choice costs time, not correctness.
 
 The opt-in FP8 input form (float8_e4m3fn ``q`` / ``k``) has its own scan
@@ -767,7 +767,7 @@ class DispatchPolicy:
         ``cand_cap_floor``.  The larger floor pays for itself on large-``top_k`` calls only (their units fill the buffer
         early; the floor spares compactions and keeps 64-127-tile units off the sampled path); below the rule's ``top_k``
         the smaller floor halves the candidate buffers -- 57 MiB instead of 114 MiB for a ``top_k = 512`` call (the
-        ratio-4 pooled selection) on a 152-SM grid with six queries per unit -- selecting the same ids and score bits.
+        ratio-4 pooled selection) on a 152-SM grid with six queries per unit -- selecting the same ids.
         Unsampled calls (``sample_tiles_max=0``) read ``cand_cap_floor_unsampled``.  The shipped ``sm_100a`` record sets
         the rule; ``sm_103a`` (whose pooled rows measured slower with the smaller buffers) and ``sm_107a`` set none."""
         rule = self.cand_cap_floor_rule
@@ -1199,7 +1199,7 @@ class DispatchPolicy:
     ) -> bool:
         """Whether a one-segment call reaches ``lsf_single_rule`` (at least its mean unit tiles; never where the record
         leaves the rule None).  On one segment the :lsf copy walks the units of the plain program in the same order and
-        returns the same rows; on the FP8 sm_103a wide program it measures faster from 64 mean unit tiles on and slower
+        selects the same ids; on the FP8 sm_103a wide program it measures faster from 64 mean unit tiles on and slower
         below, so ``select_fp8_program`` runs it on a one-segment wide call only within the rule."""
         rule = self.lsf_single_rule
         return (
@@ -1415,7 +1415,7 @@ def select_program(
     """The host dispatch of one call, in the kernel launcher's own order.
 
     The keyword knobs change the internal partition and scheduling only
-    (every admissible value selects the same ids and score bits per row; the
+    (every admissible value selects the same ids per row; the
     order of a row's entries may differ); ``None`` takes
     the policy's default (``sample_shift_permille``: ``sample_shift_for`` of
     the call's ``top_k``).  ``far_sample`` (``0`` or ``1``) is the far-sample

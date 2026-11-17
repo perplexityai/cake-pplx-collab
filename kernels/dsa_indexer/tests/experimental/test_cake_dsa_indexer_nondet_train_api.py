@@ -67,7 +67,7 @@ def _require_program():
 
 
 def _run(inputs: ref.IndexerInputs, **extra):
-    """The backend call whose per-row sets the public entry point must reproduce bit for bit."""
+    """The backend call that the public entry point wraps."""
     out = cake_backend.cake_dsa_indexer_nondet_train_topk(
         inputs.q,
         inputs.k,

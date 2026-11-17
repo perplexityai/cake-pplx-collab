@@ -41,8 +41,7 @@ Contract
 * Score ``s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] *
   k[j, d])`` with FP32 products, accumulation and score arithmetic (no BF16
   intermediate rounding).  The FP32 reduction scheme of the generated program
-  is documented in the package README and is fixed: the score bits do not
-  depend on the internal query / key partition.
+  is documented in the package README.
 * Visibility: key ``j`` is visible to the query at segment-local position ``u``
   iff ``0 <= j < Lk`` and ``j < floor((offset + u + 1) / ratio)``; ``offset`` is
   ``q_causal_offsets[s]`` when supplied, else ``Lk - Lq`` for ``ratio == 1`` and
