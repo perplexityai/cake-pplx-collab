@@ -6699,7 +6699,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H256 f32 weight: (92160, 864240] the dw reduce of the det pair c4c89f0d of that window (the BF16-weight route keeps b4b63d5b__92160_524288)
+    # sm_100a H256 f32 weight: (92160, 864240] the dw reduce of the det pair 420788e6 of that window (the BF16-weight route keeps affa1b95__92160_524288)
     "cake_rmsnorm_train_affa1b95f68bab8c411b__92160_864240": {
         "arches": [
             "sm_100a",
@@ -8432,7 +8432,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 25068ede, the FP32-weight twin of 0cb817d1, and dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy at the single kernel's speed: the single kernel ba7dbf6a it replaces keeps within 1.1x the deterministic package's median dw error at T 65536 on B200 on the median rule only (off the gate's rows), and the det pair took 0.994x its backward time there
+    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 7e6a0b63, the FP32-weight twin of ceeef043, and dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy at the single kernel's speed: the single kernel ba7dbf6a it replaces keeps within 1.1x the deterministic package's median dw error at T 65536 on B200 on the median rule only (off the gate's rows), and the det pair took 0.994x its backward time there
     "cake_rmsnorm_train_7e6a0b631aea3edf51f9__58880_65536": {
         "arches": [
             "sm_100a",
@@ -8650,7 +8650,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 5ef5f1f1, the FP32-weight twin of 7122dbcd, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which this package's previous version runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (its earlier version) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
+    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 626aed74, the FP32-weight twin of 35a0b0ca, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which this package's previous version runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (its earlier version) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
     "cake_rmsnorm_train_626aed743358c27513f1__44032_65536": {
         "arches": [
             "sm_100a",
@@ -9199,7 +9199,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 f32 weight: (16, 256] the det-new column-task program 440bd6f2 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.562x to 0.793x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
+    # sm_107a H4096 f32 weight: (16, 256] the det-new column-task program 30ec8bb6 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.562x to 0.793x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
     "cake_rmsnorm_train_30ec8bb68cf4fe0c817b__16_256": {
         "arches": [
             "sm_107a",
@@ -9437,7 +9437,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 bf16 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel 083ea823 and fixed-order dw reduce b4b63d5b with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight; the BF16-weight single computes the same dw); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
+    # sm_103a H256 bf16 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight; the BF16-weight single computes the same dw); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
     "cake_rmsnorm_train_a385ae1681a2c078344e__64_1080": {
         "arches": [
             "sm_103a",
@@ -9605,7 +9605,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 f32 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel c4c89f0d and fixed-order dw reduce b4b63d5b with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
+    # sm_103a H256 f32 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
     "cake_rmsnorm_train_420788e663a2c3a810f6__64_1080": {
         "arches": [
             "sm_103a",
@@ -9841,7 +9841,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 bf16 weight: (16, 320] the det-new column-task program 9e71ed0d of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.660x to 0.941x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 35 of them inside this window)
+    # sm_107a H1536 bf16 weight: (16, 320] the det-new column-task program 1207b056 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.660x to 0.941x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 35 of them inside this window)
     "cake_rmsnorm_train_1207b05663ed2b4de14b__16_320": {
         "arches": [
             "sm_107a",
@@ -9909,7 +9909,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 bf16 weight: (31, 256] the det-new column-task program 32eb12e2 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.648x to 0.928x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 58 of them inside this window)
+    # sm_107a H2048 bf16 weight: (31, 256] the det-new column-task program 6720b4a1 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.648x to 0.928x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 58 of them inside this window)
     "cake_rmsnorm_train_6720b4a159be2b84b325__31_256": {
         "arches": [
             "sm_107a",
@@ -9943,7 +9943,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H256 bf16 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel 083ea823 and fixed-order dw reduce b4b63d5b, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.806x to 0.952x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows its FP32-weight twin exceeds the dw budget (1.057 at 1271400 rows) and this pair computes the same dw, so the ND program stays there
+    # sm_107a H256 bf16 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel a385ae16 and fixed-order dw reduce 312bbe08, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.806x to 0.952x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows its FP32-weight twin exceeds the dw budget (1.057 at 1271400 rows) and this pair computes the same dw, so the ND program stays there
     "cake_rmsnorm_train_a385ae1681a2c078344e__64_786432": {
         "arches": [
             "sm_107a",
@@ -9998,7 +9998,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H256 f32 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel c4c89f0d and fixed-order dw reduce b4b63d5b, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.761x to 0.946x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows this pair exceeds the dw budget (1.057 at 1271400 rows), so the ND program stays there
+    # sm_107a H256 f32 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel 420788e6 and fixed-order dw reduce 312bbe08, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.761x to 0.946x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows this pair exceeds the dw budget (1.057 at 1271400 rows), so the ND program stays there
     "cake_rmsnorm_train_420788e663a2c3a810f6__64_786432": {
         "arches": [
             "sm_107a",
@@ -10030,7 +10030,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H512 f32 weight: (16, 384] the det-new column-task program 685b53bf of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.547x to 0.889x at the sampled T from 1 to 384, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 33 of them inside this window)
+    # sm_107a H512 f32 weight: (16, 384] the det-new column-task program 8f29656c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.547x to 0.889x at the sampled T from 1 to 384, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 33 of them inside this window)
     "cake_rmsnorm_train_8f29656c0018a749a588__16_384": {
         "arches": [
             "sm_107a",
@@ -10098,7 +10098,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 bf16 weight: (16, 256] the det-new column-task program 44511fa0 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.619x to 0.868x at the sampled T from 2 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 65 of them inside this window)
+    # sm_107a H4096 bf16 weight: (16, 256] the det-new column-task program c1de7e41 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.619x to 0.868x at the sampled T from 2 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 65 of them inside this window)
     "cake_rmsnorm_train_c1de7e41da4550cca0bc__16_256": {
         "arches": [
             "sm_107a",
@@ -10132,7 +10132,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 f32 weight: (16, 320] the det-new column-task program db8d986d of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.607x to 0.919x at the sampled T from 2 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 36 of them inside this window)
+    # sm_107a H1536 f32 weight: (16, 320] the det-new column-task program 137ba532 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.607x to 0.919x at the sampled T from 2 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 36 of them inside this window)
     "cake_rmsnorm_train_137ba5328176fb07b37d__16_320": {
         "arches": [
             "sm_107a",
@@ -10166,7 +10166,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 f32 weight: (16, 256] the det-new column-task program 22944704 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.574x to 0.915x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
+    # sm_107a H2048 f32 weight: (16, 256] the det-new column-task program 23c90013 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.574x to 0.915x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
     "cake_rmsnorm_train_23c900134dc889302136__16_256": {
         "arches": [
             "sm_107a",
@@ -10200,7 +10200,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (16, 1664] the det-new column-task program a501b31f of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.650x to 0.945x at the sampled T from 2 to 1664, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 65 of them inside this window)
+    # sm_107a H6144 f32 weight: (16, 1664] the det-new column-task program 5cca2d0f of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.650x to 0.945x at the sampled T from 2 to 1664, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 65 of them inside this window)
     "cake_rmsnorm_train_5cca2d0fa4553f992406__16_1664": {
         "arches": [
             "sm_107a",
@@ -10234,7 +10234,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (16, 768] the det-new column-task program a1c12b0e of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.630x to 0.973x at the sampled T from 1 to 768, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 53 of them inside this window)
+    # sm_107a H6144 residual f32 weight: (16, 768] the det-new column-task program 3bbd4f84 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.630x to 0.973x at the sampled T from 1 to 768, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 53 of them inside this window)
     "cake_rmsnorm_train_3bbd4f848b4847bff893__16_768": {
         "arches": [
             "sm_107a",
@@ -10336,7 +10336,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (16, 960] the det-new column-task program 57d45549 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.639x to 0.967x at the sampled T from 16 to 960, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 37 of them inside this window)
+    # sm_107a H6144 bf16 weight: (16, 960] the det-new column-task program 0dafdf09 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.639x to 0.967x at the sampled T from 16 to 960, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 37 of them inside this window)
     "cake_rmsnorm_train_0dafdf094615d080fcc9__16_960": {
         "arches": [
             "sm_107a",
@@ -10370,7 +10370,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (1151, 1152] the det-new column-task program 57d45549 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.916x at T 1152, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 1 of them inside this window)
+    # sm_107a H6144 bf16 weight: (1151, 1152] the det-new column-task program 0dafdf09 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.916x at T 1152, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 1 of them inside this window)
     "cake_rmsnorm_train_0dafdf094615d080fcc9__1151_1152": {
         "arches": [
             "sm_107a",
@@ -10404,7 +10404,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (15, 320] the det-new column-task program c15868b8 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.600x to 0.938x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 20 of them inside this window)
+    # sm_107a H6144 residual bf16 weight: (15, 320] the det-new column-task program ee1be07a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.600x to 0.938x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 20 of them inside this window)
     "cake_rmsnorm_train_ee1be07a89a0482de45e__15_320": {
         "arches": [
             "sm_107a",
@@ -10438,7 +10438,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (447, 576] the det-new column-task program c15868b8 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.867x to 0.897x at the sampled T from 448 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 9 of them inside this window)
+    # sm_107a H6144 residual bf16 weight: (447, 576] the det-new column-task program ee1be07a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.867x to 0.897x at the sampled T from 448 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 9 of them inside this window)
     "cake_rmsnorm_train_ee1be07a89a0482de45e__447_576": {
         "arches": [
             "sm_107a",
@@ -10506,7 +10506,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H512 bf16 weight: (16, 576] the det-new column-task program bcd8d6a9 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.528x to 0.934x at the sampled T from 1 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 49 of them inside this window)
+    # sm_107a H512 bf16 weight: (16, 576] the det-new column-task program 49af1e75 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.528x to 0.934x at the sampled T from 1 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 49 of them inside this window)
     "cake_rmsnorm_train_49af1e75185ddd637b76__16_576": {
         "arches": [
             "sm_107a",
@@ -10741,7 +10741,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (31, 256] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.596x to 0.847x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 12 of them inside this window)
+    # sm_107a H5120 bf16 weight: (31, 256] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.596x to 0.847x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 12 of them inside this window)
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__31_256": {
         "arches": [
             "sm_107a",
@@ -10775,7 +10775,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (511, 640] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.911x to 0.928x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
+    # sm_107a H5120 bf16 weight: (511, 640] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.911x to 0.928x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__511_640": {
         "arches": [
             "sm_107a",
@@ -10809,7 +10809,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (895, 896] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.953x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
+    # sm_107a H5120 bf16 weight: (895, 896] the det-new column-task program 080e0a6c of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.953x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__895_896": {
         "arches": [
             "sm_107a",
@@ -10843,7 +10843,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (15, 256] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.605x to 0.930x at the sampled T from 16 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 13 of them inside this window)
+    # sm_107a H5120 f32 weight: (15, 256] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.605x to 0.930x at the sampled T from 16 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 13 of them inside this window)
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__15_256": {
         "arches": [
             "sm_107a",
@@ -10877,7 +10877,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (511, 640] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.900x to 0.915x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
+    # sm_107a H5120 f32 weight: (511, 640] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.900x to 0.915x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__511_640": {
         "arches": [
             "sm_107a",
@@ -10911,7 +10911,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (895, 896] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.935x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
+    # sm_107a H5120 f32 weight: (895, 896] the det-new column-task program 139d162a of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.935x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896": {
         "arches": [
             "sm_107a",
@@ -15354,7 +15354,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 570eec50 of the deterministic package's column-task program 07135550 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
+    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 71d36617 of the deterministic package's column-task program 864e84f3 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
     "cake_rmsnorm_train_71d36617003ab7742a77__48_320": {
         "arches": [
             "sm_103a",
@@ -16982,7 +16982,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package, for dw accuracy: the row single kernel dd795e84 it replaces put its worst dw error at 1.12x to 1.59x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on R200 with 212 SMs (normal, concentrated and saturated_lo inputs); the plain det pair's worst dw element stays within 0.545 of the per-element budget up to T 19968 on R200 with 212 SMs and within 0.499 with 216 SMs (60 or more inputs of each of three families, kernel rstd; both weight dtypes compute the same dw); its dw error exceeds the FP32 eager reference's at T 13024, 17472, 17728 and 19520 and at T 18304 (torch rstd) on R200 with 212 SMs
+    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package, for dw accuracy: the row single kernel it replaces put its worst dw error at 1.12x to 1.59x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on R200 with 212 SMs (normal, concentrated and saturated_lo inputs); the plain det pair's worst dw element stays within 0.545 of the per-element budget up to T 19968 on R200 with 212 SMs and within 0.499 with 216 SMs (60 or more inputs of each of three families, kernel rstd; both weight dtypes compute the same dw); its dw error exceeds the FP32 eager reference's at T 13024, 17472, 17728 and 19520 and at T 18304 (torch rstd) on R200 with 212 SMs
     "cake_rmsnorm_train_468cc4d1b8128187b4b3__4096_19968": {
         "arches": [
             "sm_107a",

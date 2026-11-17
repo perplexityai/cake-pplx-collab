@@ -6286,7 +6286,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # A window of the re-cut FP32-weight route of sm_103a, between 0 and 1 rows: 11820fe4, the FP32-weight twin of ff0156d5.
+    # A window of the re-cut FP32-weight route of sm_103a, between 0 and 1 rows: 27615d0e, the FP32-weight twin of 12d53fe5.
     "cake_rmsnorm_det_train_27615d0e36c9f2fe0856__ov103_0_1": {
         "arches": [
             "sm_103a",
@@ -6320,7 +6320,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # A window of the re-cut FP32-weight route of sm_103a, between 1 and 512 rows: f03fb1c6, the FP32-weight twin of 10f7bdf2.
+    # A window of the re-cut FP32-weight route of sm_103a, between 1 and 512 rows: ff7de8d3, the FP32-weight twin of 5efbf78a.
     "cake_rmsnorm_det_train_ff7de8d3e4dcd036ea9a__ov103_1_512": {
         "arches": [
             "sm_103a",
@@ -11805,7 +11805,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # A window of the re-cut FP32-weight route of sm_103a, between 0 and 1 rows: 017091c7, the FP32-weight twin of 38b1c6bc.
+    # A window of the re-cut FP32-weight route of sm_103a, between 0 and 1 rows: b3e6531e, the FP32-weight twin of 44508df7.
     "cake_rmsnorm_det_train_b3e6531e46667901ab91__ov103_0_1": {
         "arches": [
             "sm_103a",
@@ -11839,7 +11839,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # A window of the re-cut FP32-weight route of sm_103a, between 1 and 256 rows: f9c641ac, the FP32-weight twin of 5d6088e6.
+    # A window of the re-cut FP32-weight route of sm_103a, between 1 and 256 rows: 8a280a7e, the FP32-weight twin of f2271417.
     "cake_rmsnorm_det_train_8a280a7ecafed4b9e9f5__ov103_1_256": {
         "arches": [
             "sm_103a",
@@ -17824,7 +17824,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # A window of the re-cut FP32-weight route of sm_100a, between 0 and 1 rows: 9560032b, the FP32-weight twin of baa071a2.
+    # A window of the re-cut FP32-weight route of sm_100a, between 0 and 1 rows: 747d86f3, the FP32-weight twin of dd3a3573.
     "cake_rmsnorm_det_train_747d86f34cb58479c7ca__ov100_0_1": {
         "arches": [
             "sm_100a",
