@@ -88,12 +88,16 @@ def test_unequal_sources(record_property, part):
 _MXFP8_FEATURE_GAPS = tuple(
     (f"{case}:d_scores", gaps.MXFP8_D_SCORES) for case in ("mxfp8", "mxfp8-fp32-wgrad", "mxfp8-clamped-recompute")
 )
-#: The known-gap outputs of the training features per world: the MXFP8 score gradient, and at EP1 the routed down
-#: projection's BF16 dW of the clamped cases (their experts cross macrobatch boundaries).
+#: The known-gap outputs of the training features per world: the MXFP8 score gradient, and at EP1 (1031 tokens, 768-row
+#: macrobatches: experts cross a macrobatch boundary) the BF16 routed dW that misses the tier, the down projection
+#: of the clamped cases and all three projections of the plain recompute case.
 FEATURE_GAPS = {
     1: (
         *_MXFP8_FEATURE_GAPS,
         ("bf16-clamped:dw_routed_down", gaps.BF16_STRADDLE_DW),
+        ("bf16-recompute:dw_routed_gate", gaps.BF16_STRADDLE_DW),
+        ("bf16-recompute:dw_routed_up", gaps.BF16_STRADDLE_DW),
+        ("bf16-recompute:dw_routed_down", gaps.BF16_STRADDLE_DW),
         ("bf16-clamped-recompute:dw_routed_down", gaps.BF16_STRADDLE_DW),
     ),
     4: _MXFP8_FEATURE_GAPS,

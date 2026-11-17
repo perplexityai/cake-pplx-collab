@@ -28,7 +28,8 @@ as their dequantized values against the oracle's value before quantization; ``x`
 exact against the recipe.  The kernel-shaped alternatives of :data:`tests.experimental._mok_naive.ALTERNATIVE` are
 measured on the same draws and reported (``ALT`` lines), never judged.  The known accuracy gaps
 (:mod:`tests.experimental._mok_gaps`) are judged in items of their own under a strict expected-failure marker: the
-MXFP8 score gradient of every MXFP8 case.
+MXFP8 score gradient of every MXFP8 case, and the routed weight gradients of the two BF16 cases whose routed experts
+cross a macrobatch boundary (:data:`STRADDLE_CASES`).
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -238,10 +239,35 @@ def _bf16(record_property, part="outputs", known=(), **kwargs):
     _check(record_property, part, gaps.judged(("bf16", *sorted(kwargs.items())), lambda: _bf16_case(**kwargs)), known)
 
 
-@pytest.mark.parametrize("empty", [False, True], ids=["routed", "empty-experts"])
-@pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
-def test_fused_training_accuracy(record_property, geometry, empty):
-    _bf16(record_property, geometry=geometry, empty=empty)
+#: The fused BF16 cases ``(geometry, empty)`` whose routed experts cross a macrobatch boundary (the empty-experts
+#: layout puts all routed rows on few experts: with 768-row macrobatches their rows span two macrobatches), and their
+#: known-gap outputs, the routed weight gradients (BF16 weight gradients).
+STRADDLE_CASES = (((256, 256, 768), True), ((512, 512, 768), True))
+STRADDLE_GAPS = tuple((name, gaps.BF16_STRADDLE_DW) for name in ("dw_routed_gate", "dw_routed_up", "dw_routed_down"))
+
+
+def _fused_cases():
+    """``(geometry, empty, part)`` parameters: one item per case; a case of :data:`STRADDLE_CASES` gets its main
+    item, then one item per known-gap output under its marker."""
+    cases = []
+    for geometry in GEOMETRIES:
+        for empty in (False, True):
+            case = "h{}-i{}-m{}-{}".format(*geometry, "empty-experts" if empty else "routed")
+            if (geometry, empty) not in STRADDLE_CASES:
+                cases.append(pytest.param(geometry, empty, gaps.OUTPUTS, id=case))
+                continue
+            cases.append(pytest.param(geometry, empty, gaps.OUTPUTS, id=f"{case}-{gaps.OUTPUTS}"))
+            cases += [
+                pytest.param(geometry, empty, name, marks=mark, id=f"{case}-{gaps.item_id(name)}")
+                for name, mark in STRADDLE_GAPS
+            ]
+    return cases
+
+
+@pytest.mark.parametrize("geometry,empty,part", _fused_cases())
+def test_fused_training_accuracy(record_property, geometry, empty, part):
+    known = [name for name, _ in STRADDLE_GAPS] if (geometry, empty) in STRADDLE_CASES else []
+    _bf16(record_property, part, known, geometry=geometry, empty=empty)
 
 
 def test_fused_training_clamped_swiglu_accuracy(record_property):
