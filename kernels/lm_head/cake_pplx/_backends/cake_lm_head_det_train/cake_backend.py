@@ -37,7 +37,13 @@ Contract
   masked and normalized); ``d_t = -w_t * ratio_t`` when ``ratio_t <= 2`` and
   ``0`` when ``ratio_t > 2``.  ``dz[t, v] = d_t * (1[v = y_t] - softmax(z_t)_v)``;
   ignored rows: zero loss, zero gradient, ``logp = 0``.  ``dX = dz @ W``,
-  ``dW = dz^T @ X`` chunk by chunk.
+  ``dW = dz^T @ X`` chunk by chunk.  ``dX`` also folds each row's FP32 label
+  residual ``r_t = s_t - f32(bf16(s_t))`` (``s_t`` the label column's FP32
+  gradient, ``bf16(s_t)`` the value ``dz`` holds; 0 on ignored rows, labels at
+  or beyond ``V`` and a non-finite ``bf16(s_t)``): the row-gradient producers
+  store it into ``rlab`` and the slab sum, the last FP32 write of every chunk's
+  dX rows, adds ``r_t * W[y_t]`` with one ``fma`` per element
+  (:func:`_with_rlab_zero`, :func:`_dx_keys`).
 * Entry (a) ``cake_lm_head_det_train_loss``: the forward produces ``dX_acc`` (FP32
   ``[T, H]``) and ``dW_acc`` (FP32 ``[V, H]``) directly per chunk (three GEMMs,
   no logits recomputation); the backward applies the incoming scalar

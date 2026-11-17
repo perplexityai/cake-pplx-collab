@@ -61,7 +61,13 @@ Contract
   masked and normalized); ``d_t = -w_t * ratio_t`` when ``ratio_t <= 2`` and
   ``0`` when ``ratio_t > 2``.  ``dz[t, v] = d_t * (1[v = y_t] - softmax(z_t)_v)``;
   ignored rows: zero loss, zero gradient, ``logp = 0``.  ``dX = dz @ W``,
-  ``dW = dz^T @ X`` chunk by chunk.
+  ``dW = dz^T @ X`` chunk by chunk.  ``dX`` also folds each row's FP32 label
+  residual ``r_t = s_t - f32(bf16(s_t))`` (``s_t`` the label column's FP32
+  gradient, ``bf16(s_t)`` the value ``dz`` holds; 0 on ignored rows, labels at
+  or beyond ``V`` and a non-finite ``bf16(s_t)``): the row-gradient producers
+  store it into ``rlab`` and the slab sum, the last FP32 write of every chunk's
+  dX rows, adds ``r_t * W[y_t]`` with one ``fma`` per element
+  (:func:`_with_rlab_zero`, :func:`_dx_keys`).
 * Entry (a) ``cake_lm_head_nondet_train_loss``: the forward produces ``dX_acc`` (FP32
   ``[T, H]``) and ``dW_acc`` (FP32 ``[V, H]``) directly per chunk (three GEMMs,
   no logits recomputation); the backward applies the incoming scalar
@@ -112,7 +118,7 @@ Contract
   sum is the only writer of those rows and never reads them, so no call fills or zeroes ``dX_acc``.  Each element is
   summed in one fixed order (a design note, no run-to-run promise; its bits need not equal the deterministic
   package's).  A chunk of one slice keeps the deterministic package's plain-store ``gemm_dx`` forms, so its ``dX``
-  rows come from that package's programs in its order.  The slice rule is selectable programmatically
+  rows come from that package's programs in its order; its slab sum is the label residual fold alone.  The slice rule is selectable programmatically
   (:func:`set_dx_slice_policy`: ``"det"``, the deterministic package's slice counts, the default; ``"measured"``,
   the measured form-aware rule; :func:`set_dx_red_min_rows`: one slice below a chunk size, default 0).
 * Fused dX finalize (``dx_finalize``, default on): a compacted call's dX output boundary writes the

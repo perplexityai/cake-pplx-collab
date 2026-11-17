@@ -37,8 +37,8 @@ takes a `deterministic` keyword, and passing one is Python's own `TypeError`.
 | log-probability backward of 2 to 4 chunks (see the exception below) | the chunk loop | vocabulary-major by default: no FP32 `[V, H]` weight-gradient accumulator, `dX` / `dW` summed in one fixed order, no run-to-run bit promise (see "Vocabulary-major log-probability backward") |
 | log-probability rows with `dlogp == 0` | in the chunk loop | ordered last; the backward's GEMMs skip their work (see "Zero-gradient rows of the log-probability backward") |
 | `dW` | chunk order, bitwise run to run | chunk order (the same programs); no run-to-run promise; the vocabulary-major log-probability backward forms each block in one GEMM (see "Vocabulary-major log-probability backward"); a one-pass cross-entropy call writes `dW` once from its kept logits, not the deterministic package's bits |
-| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does |
-| precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each | the same |
+| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does; the slab sum then folds the rows' FP32 label residuals (the fold alone after one slice) |
+| precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each; `dX` also folds each row's FP32 label residual (what the BF16 `dz` store dropped from the label column's FP32 gradient), so `dX`, `ForwardResult.dx_acc` and the `dx_cast=False` accumulator round differently from version 0.2.1 | the same |
 | under `torch.use_deterministic_algorithms(True)` | runs, never alerts | raises PyTorch's alert before a K-sliced dX launch (below); with `warn_only=True` it warns and runs this package; nothing falls back to the deterministic package |
 
 ## Public entry points (`cake_pplx/cake_lm_head_nondet_train.py`)
@@ -625,6 +625,12 @@ rule, no switch), which keeps no such buffer:
   GEMM takes the chunk rule's tile, ring and split for the call's rows; on
   sm_100a, whose long-chunk ring has no split-tail form, a launch that would
   run that ring with a short last wave runs the table ring with the split.
+* The label residuals start at 0 and each block's dz arm stores those of the
+  rows whose label lies in the block (the shifted label of every other block
+  lies outside it).  After the last block, a call that forms `dX` launches
+  the slab sum `dx_slab_sum` once over every row as the fold alone
+  (`n_slabs = 0`), with the unshifted labels and the full head: the same
+  fold as the chunk loop's, after the last block's add.
 * The forward, `logp` and `lse` do not change.  `dX` and `dW` are summed in
   one fixed order (no unordered reduction; no run-to-run bit promise); they
   round differently from the chunk loop (other summation groupings under the
@@ -697,7 +703,9 @@ modules with the same configurations under this package's prefix.  The one
 stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
 
 * A chunk the slice rule leaves at one K slice stores its `dX_acc` rows
-  directly (the same arithmetic as the deterministic package).
+  directly (the same arithmetic as the deterministic package), and the slab
+  sum `dx_slab_sum` follows it as the fold alone (`n_slabs = 0`: it reads the
+  stored rows and folds their FP32 label residuals).
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
@@ -707,7 +715,14 @@ stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   each element in slice order (`((s_0 + s_1) + ...)`, IEEE round-to-nearest
   without flushing subnormals) and stores the sum into the chunk's `dX_acc`
   rows.  It never reads those rows and is their only writer, so no call
-  fills or zeroes `dX_acc`.  Each element is summed in one order (no
+  fills or zeroes `dX_acc`.  It then folds the rows' FP32 label residuals,
+  `fma(rlab[t], f32(W[y_t, h]), sum)` on each row whose label lies in
+  `[0, V)` and whose residual is nonzero, as the deterministic `slab_sum`
+  does.  Its operands: `dx`, the flat slab `ws`, `ws_slab`, `num_vecs`,
+  `n_slabs`, `row_vecs`, the rows' `labels` / `rlab`, the head `W`, `V` and
+  the fold switch `lr` (0 on the support path, whose rows hold no label
+  residual; `cake_backend.dx_slab_sum_operands`), then `CNT` for the counted
+  form.  Each element is summed in one order (no
   run-to-run bit promise); its bits may differ from the deterministic
   package's by the rounding of that sum.  The counted form stores the sum
   into the rows of the row-tile pairs the counted GEMM ran and `-0.0` into

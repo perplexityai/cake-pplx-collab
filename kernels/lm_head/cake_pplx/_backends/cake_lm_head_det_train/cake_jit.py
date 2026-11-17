@@ -2263,6 +2263,10 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          writes the finished loss.
 # ``row_grad``             dz_c = d_t * (1[v = y_t] - exp(z - lse_t)) in bf16,
 #                          in place over ``z_c``; ignored rows become zero.
+#                          It also stores the label column's FP32 residual
+#                          s - fp32(bf16(s)) into ``rlab[row0 + r]`` (0 where
+#                          the label is ignored or >= V), as do the ``dz``
+#                          arms of the logits GEMM.
 # ``gemm_dx``              dX_acc[rows] = fp32(dz_c @ W).
 # ``gemm_dx_s``            the same GEMM as ``k_slices`` (2 .. 4, a launch scalar)
 #                          K-slice work items per output tile (slice 0 writes
@@ -2367,10 +2371,13 @@ STAGES = (
 # launch scalars of these kernels (``cake_backend.gemm_scalars``), so one
 # record per architecture serves every admissible geometry.  A record
 # registers the base stages plus the forms its architecture's rules can
-# reach.  ``slab_sum`` (the fixed-order slab reduction of a K-sliced dX GEMM)
-# and ``scale_cast_scatter_bf16`` (the one-pass scale, cast and scatter of a
-# compacted ``dX``) are the fused dX finalize's kernels
-# (``cake_backend.DX_FINALIZE_STAGES``); row kernels, geometry-generic.
+# reach.  ``slab_sum`` (the fixed-order slab reduction of a K-sliced dX GEMM,
+# then the fold fma(rlab, fp32(W[y]), sum) of each row's FP32 label residual;
+# the fold alone, ``n_slabs = 0``, after a one-slice GEMM or the host's adds:
+# it runs on every chunk that computes dX) and ``scale_cast_scatter_bf16``
+# (the one-pass scale, cast and scatter of a compacted ``dX``) are the fused
+# dX finalize's kernels (``cake_backend.DX_FINALIZE_STAGES``); row kernels,
+# geometry-generic.
 # ``gather_rows_bf16`` (chunk 0's row gather of the hidden valid-row count path,
 # ``cake_backend.HIDDEN_COUNT_STAGE``) is a row kernel too.
 BASE_STAGES = (

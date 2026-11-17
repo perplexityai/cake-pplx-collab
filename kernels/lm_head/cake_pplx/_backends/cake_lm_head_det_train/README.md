@@ -76,6 +76,22 @@ keyword.
   below for a backward of a budget form -- `memory_mode="budget"`, or a
   default call whose automatic form is a budget form -- that frees the
   graph).
+* FP32 label residual: the row-gradient producers (`row_grad` and the
+  log-probability `dz` arm of the logits GEMM) also store each row's
+  `r_t = s_t - f32(bf16(s_t))`, `s_t` the FP32 gradient of the label column
+  and `bf16(s_t)` the value `dz` holds there (0 where `bf16(s_t)` is not
+  finite), into an FP32 `[T]` buffer `rlab` (outside the workspace; zeroed
+  once per call that computes `dX`, so an ignored row, a label at or beyond
+  `V` and a row the zero-gradient skip leaves out hold 0).  Every chunk's `dX`
+  rows end with the `slab_sum` kernel, which folds it:
+  `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
+  (after the slab adds of a K-sliced GEMM), one rounding of the exact
+  product.  `dX_acc` is then `dz @ W + r * W[y]` in FP32, and the output cast
+  is unchanged (one rounding).  The `dX` bits differ from version 0.2.1 (each
+  version is bitwise the same run to run): `ForwardResult.dx_acc` and the
+  `dx_cast=False` accumulator hold the folded FP32 value.  `dW` keeps the
+  BF16 `dz` and its bits.  The call holds `rlab` beside `lse` (4 bytes a row
+  of the chunk loop).
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every
@@ -235,7 +251,10 @@ keyword.
   the single flat cast.  The same FP32 operations in the same order: `dX` is
   bitwise the previous path's, and `dx_finalize=False` restores that path.  The prepared runner
   keeps its compact `dx_out` contract (`runner.scatter` restores `[T, H]`) and
-  gains the kernel slab reduction only.
+  gains the kernel slab reduction only.  Either way every chunk's `dX` rows
+  end with `slab_sum`, which folds their FP32 label residuals (above): with
+  `dx_finalize=False` (after the host `add_` chain of a sliced GEMM) and after
+  a one-slice GEMM it runs as the fold alone (`n_slabs = 0`).
 * dW side stream (`dw_stream`, keyword: `None` / `"auto"` (default) = calls of
   three or more chunks, `True` = every multi-chunk call, `False` = never;
   `cake_backend.dw_stream_mode` normalises the value): each chunk's
@@ -288,8 +307,9 @@ keyword.
   rows -- in place of the logits, so the logits store and the `row_grad`
   launch disappear; the forward's logits GEMM `gemm_logits_lbl` writes the row
   statistics and the logit at the (clamped) label column alone, the one
-  element `row_finalize` reads.  The same arithmetic per element, so `lse`,
-  `logp`, `dX` and `dW` are bitwise the previous path's.  A record that does
+  element `row_finalize` reads.  The same arithmetic per element (the label
+  column's FP32 gradient and its residual `r` included), so `lse`, `logp`,
+  `dX` and `dW` are bitwise the previous path's.  A record that does
   not register an arm keeps the previous stages; the hidden valid-row count's
   chunk 0 keeps its device-count GEMM (`gemm_logits_mcnt` /
   `gemm_logits_nostats_mcnt` + `row_grad`).
@@ -383,7 +403,9 @@ keyword.
   the FP32 product `0 * g` of the upstream scalar `g` cast once, as for a
   launched call: `-0` for a negative `g`, NaN for a non-finite one).
   `cake_backend.memory_report` reports the peak temporary bytes separately
-  from the weights, the outputs and the FP32 accumulators.
+  from the weights, the outputs and the FP32 accumulators; its temporaries
+  include the FP32 label residuals `rlab` (4 bytes a row of the chunk loop) of
+  a call that runs a row-gradient producer.
 * Opt-in forms (`cake_backend_opt_in.py`): a call that passes `memory_mode`
   or `num_valid_rows` (below) runs the planner, binding, forward, backward and
   autograd functions of `cake_backend_opt_in.py`, which reuse the kernels,
@@ -962,7 +984,9 @@ it handles these rows on the device, without a host synchronization:
   values that nothing reads: the fused dX finalize (`scale_cast_scatter_bf16`)
   addresses the accumulator through the partition's live-row scan only and
   writes exact `+0` on every other row.  The skip therefore requires the
-  fused dX finalize whenever the call forms `dX`.
+  fused dX finalize whenever the call forms `dX`.  A row the counted dz arm
+  does not run stores no label residual: the call's zero fill leaves it 0,
+  and the slab sum folds nothing into its `dX_acc` row.
 * Memory: the call holds the partition's int64 row order (8 bytes per valid
   row), int32 live-row scan (4 bytes per row of `T`) and per-chunk counts
   until the dX output boundary, and its FP32 reordered `lse` (4 bytes per
@@ -1122,7 +1146,11 @@ gather and logits GEMM ran before the count was known, see
 * `loss_reduce`: one CTA sums the chunk's loss terms in a fixed order into
   the loss accumulator; the last chunk writes the finished loss.
 * `row_grad`: `dz_c = d_t * (1[v = y_t] - exp(z - lse_t))` in BF16, in place
-  over `z_c`; ignored rows become zero.
+  over `z_c`; ignored rows become zero.  It also stores each row's FP32 label
+  residual `rlab[row0 + r] = s - f32(bf16(s))` of the label column's FP32
+  gradient `s` (0 where `bf16(s)` is not finite; nothing on an ignored row or
+  a label at or beyond `V`, which keep the call's zero fill); the `dz` arms of
+  the logits GEMM store the same values.
 * `gemm_dx`: `dX_acc[rows] = fp32(dz_c @ W)`.  A record also registers
   `gemm_dx_s`, the same GEMM as `k_slices` (2 .. 4, a launch scalar) K-slice
   work items per output tile (the persistent grid fills its last wave): slice
@@ -1149,7 +1177,13 @@ gather and logits GEMM ran before the count was known, see
 * `slab_sum`: after a K-sliced `gemm_dx_s`, `dX_acc[rows] += slab_0 + ...
   + slab_{k-2}` in one launch, one RN add per element per slab in ascending
   slab order (the fused dX finalize; `dx_reduce`, the host's `add_` chain,
-  when it is off).
+  when it is off), then the fold of the rows' label residuals,
+  `dX_acc[t, h] = fma(rlab[t], f32(W[y_t, h]), dX_acc[t, h])` on each row
+  whose label lies in `[0, V)` and whose residual is nonzero (`W` contiguous,
+  its row read in `row_vecs` 8-element vectors; `lr = 0` turns the fold off).
+  Every chunk of a call that computes `dX` runs it as the last FP32 write of
+  its rows; after a one-slice GEMM or the host's adds it is the fold alone
+  (`n_slabs = 0`, `ws` unread).
 * `scale_cast_scatter_bf16`: the dX output boundary of a compacted call with
   the fused dX finalize -- `out[r] = bf16(g * acc[scan[r] - 1])` when
   `row_index[scan[r] - 1] == r`, exact zeros otherwise, one CTA per output row
