@@ -86,8 +86,7 @@ def cake_dsa_indexer_det_train_topk(
     where ``w`` carries every other scale (``softmax_scale`` must be ``None``).
     The e4m3 products are exact and accumulate in FP32 on the tensor cores:
     four K = 32 steps on SM100 / SM103, in the order of DeepGEMM's
-    ``fp8_mqa_logits`` (bit-identical logits), and two K = 64 steps on SM107,
-    whose logits can differ from DeepGEMM's in the last bits.  Every FP8
+    ``fp8_mqa_logits``, and two K = 64 steps on SM107.  Every FP8
     program of one architecture gives the same ids and score bits; selection,
     visibility and outputs follow the BF16 form.
 
@@ -158,8 +157,7 @@ def cake_dsa_indexer_det_train_topk(
         unique; unused tail slots hold ``-1``.
     scores : Optional[torch.Tensor]
         ``None`` with ``return_scores=False``; else FP32 ``[T, top_k]`` scores
-        aligned with ``indices`` (a selected ``-0.0`` stays ``-0.0``); tail
-        slots hold ``-inf``.
+        aligned with ``indices``; tail slots hold ``-inf``.
 
     Identical inputs give identical ids and score bits; the result does not
     depend on the internal query / key partition or on the program the host

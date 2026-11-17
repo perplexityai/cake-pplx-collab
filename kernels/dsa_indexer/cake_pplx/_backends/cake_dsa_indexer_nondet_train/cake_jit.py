@@ -22,12 +22,13 @@ from typing import Any
 from . import cake_build
 
 # Registry of the generated Cake DSA indexer programs of the non-deterministic
-# package: the BF16 scan programs and the plain split merge of the deterministic
-# package, each under this package's prefix ``cake_dsa_indexer_nondet_topk``
-# with the same twenty-hex identity -- but the sm_107a l6 and CTA-pair l6 keys,
-# whose deterministic programs keep the static unit enumeration, name their
-# ticket twins (the same builds drawing every work unit from their
-# ``TicketWord`` block, each a program of its own).  No program orders a row: the scan writes
+# package: the scan programs of both input forms (BF16, and FP8 with per-key
+# scales) and the plain split merge of the deterministic package, each under
+# this package's prefix ``cake_dsa_indexer_nondet_topk`` with the same
+# twenty-hex identity -- but the sm_107a l6 and CTA-pair l6 BF16 keys, whose
+# deterministic programs keep the static unit enumeration, name their ticket
+# twins (the same builds drawing every work unit from their ``TicketWord``
+# block, each a program of its own).  No program orders a row: the scan writes
 # the selected entries of an unsplit row and its tail padding straight into the
 # outputs, the plain merge those of a split row, so the registry carries no
 # finalize (ascending-id sort) and no rank-fused merge program.  The kernel and
@@ -53,7 +54,8 @@ from . import cake_build
 # program once with its role, its architecture-free ``library`` stem and its
 # architectures, ``PROGRAM_KEYS`` the program of every host dispatch key per
 # architecture (see ``cake_policy``), ``POLICY`` the per-architecture host
-# dispatch record and ``NUMERICS`` the documented numerics of the programs.
+# dispatch record, ``POLICY_FP8`` the fields of that record the FP8 input form
+# replaces and ``NUMERICS`` the documented numerics of the programs.
 # The launch geometry of a program (block, cluster, dynamic shared memory) is
 # fixed in its host binding.  A scan binding takes ``zero_region`` (slot kind
 # ``zero``) right before the grid: a byte range of the workspace it zeroes on
@@ -61,9 +63,9 @@ from . import cake_build
 # Every scan program takes ``TicketWord`` (a 16-byte block) right before it; a
 # program's record lists in ``ticket_arg_arches`` the architectures on which it
 # draws its work units from that block instead of the workspace's ticket tail.
-# Every scan program takes ``K_scale`` (the deterministic package's per-key FP32
-# scales of its FP8 form) right before ``TicketWord``; the BF16 programs of this
-# package never read it.
+# Every scan program takes ``K_scale`` (per-key FP32 scales) right before
+# ``TicketWord``; the FP8 programs (keys tagged ``:fp8``) read it, the BF16
+# programs never do.
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 STAGES: list[str] = ["scan", "merge"]
 ABI: str = "dsa_indexer_v5"
@@ -113,8 +115,9 @@ ARG_PLANS: dict[str, list[list[str]]] = {
 }
 # The architectures whose scan programs draw every work unit from a ticket word
 # (``cake_policy.TICKET_TAIL_BYTES``): every scan program on every architecture
-# but the physical kinds of the ``static_scan_kinds`` of ``POLICY[arch]``,
-# which keep the static enumeration.  A program whose record lists the
+# but the physical kinds of the ``static_scan_kinds`` of its input form
+# (``POLICY[arch]`` for BF16, ``POLICY_FP8[arch]`` for FP8), which keep the
+# static enumeration.  A program whose record lists the
 # architecture in ``ticket_arg_arches`` draws from its ``TicketWord`` block
 # (``cake_backend`` gives a prepared runner one of its own, zeroed once); every
 # other drawing program draws from the workspace's ticket tail.  Every completed
@@ -124,10 +127,32 @@ ARG_PLANS: dict[str, list[list[str]]] = {
 # the scan's ``zero_region``, which the scan binding zeroes before every launch.
 TICKET_TAIL_ARCHES: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 PROGRAMS: dict[str, dict[str, Any]] = {
+    "cake_dsa_indexer_nondet_topk_034b49542f7f9a407d0e": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_034b49542f7f9a407d0e",
+        "arches": ["sm_100a"],
+    },
     "cake_dsa_indexer_nondet_topk_04db38446d526901fed3": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_04db38446d526901fed3",
         "arches": ["sm_100a", "sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_0633d0c5c9ad00d26f4d": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_0633d0c5c9ad00d26f4d",
+        "arches": ["sm_107a"],
+        "ticket_arg_arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_070d919ecf1cb5a20275": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_070d919ecf1cb5a20275",
+        "arches": ["sm_107a"],
+        "ticket_arg_arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_074bab39c7585acbdab3": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_074bab39c7585acbdab3",
+        "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_091795a85161d6e55248": {
         "role": "scan",
@@ -140,23 +165,27 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
-    "cake_dsa_indexer_nondet_topk_7182498450255eae7083": {
-        "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_7182498450255eae7083",
-        "arches": ["sm_107a"],
-        "ticket_arg_arches": ["sm_107a"],
-    },
     "cake_dsa_indexer_nondet_topk_1b6af9940d486a0832d9": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_1b6af9940d486a0832d9",
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
+    "cake_dsa_indexer_nondet_topk_21f2b0061d472f9494c4": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_21f2b0061d472f9494c4",
+        "arches": ["sm_103a"],
+    },
     "cake_dsa_indexer_nondet_topk_23a4ebeaa3ba23c23c80": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_23a4ebeaa3ba23c23c80",
         "arches": ["sm_103a", "sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_2d639f804c39107023ba": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_2d639f804c39107023ba",
+        "arches": ["sm_107a"],
     },
     "cake_dsa_indexer_nondet_topk_2de9f2d0467668d46463": {
         "role": "scan",
@@ -174,11 +203,10 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_31ea61c2c7a160221f01",
         "arches": ["sm_100a", "sm_103a"],
     },
-    "cake_dsa_indexer_nondet_topk_47acefcdee217bade960": {
+    "cake_dsa_indexer_nondet_topk_3ba4bff7756ad9176268": {
         "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_47acefcdee217bade960",
-        "arches": ["sm_107a"],
-        "ticket_arg_arches": ["sm_107a"],
+        "library": "cake_dsa_indexer_nondet_topk_3ba4bff7756ad9176268",
+        "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_3bd43d833b5d53e81dbe": {
         "role": "scan",
@@ -191,20 +219,35 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_3c6dc460295ddf3c44de",
         "arches": ["sm_100a", "sm_103a"],
     },
-    "cake_dsa_indexer_nondet_topk_d188e52d69dea931ebd1": {
-        "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_d188e52d69dea931ebd1",
-        "arches": ["sm_107a"],
-        "ticket_arg_arches": ["sm_107a"],
-    },
     "cake_dsa_indexer_nondet_topk_401fb46fc3a69d791fdd": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_401fb46fc3a69d791fdd",
         "arches": ["sm_100a", "sm_103a"],
     },
+    "cake_dsa_indexer_nondet_topk_4088d4e22e0d6d733fef": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_4088d4e22e0d6d733fef",
+        "arches": ["sm_100a"],
+    },
+    "cake_dsa_indexer_nondet_topk_47acefcdee217bade960": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_47acefcdee217bade960",
+        "arches": ["sm_107a"],
+        "ticket_arg_arches": ["sm_107a"],
+    },
     "cake_dsa_indexer_nondet_topk_48e51726170f87b759f8": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_48e51726170f87b759f8",
+        "arches": ["sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_4fe9fa13b895edcb24e3": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_4fe9fa13b895edcb24e3",
+        "arches": ["sm_100a"],
+    },
+    "cake_dsa_indexer_nondet_topk_503938c0119dc4ce1520": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_503938c0119dc4ce1520",
         "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_506cb2b2c57f0a514cde": {
@@ -218,16 +261,41 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_521027e8563a9664acef",
         "arches": ["sm_100a", "sm_103a"],
     },
+    "cake_dsa_indexer_nondet_topk_526027b3b42a3dc9a141": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_526027b3b42a3dc9a141",
+        "arches": ["sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_56d38f01a465c2faa6cf": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_56d38f01a465c2faa6cf",
+        "arches": ["sm_103a"],
+    },
     "cake_dsa_indexer_nondet_topk_59068059bffe0b4c085d": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_59068059bffe0b4c085d",
         "arches": ["sm_100a"],
+    },
+    "cake_dsa_indexer_nondet_topk_5988fd3c547350964be7": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_5988fd3c547350964be7",
+        "arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_5aa495dca1b0d310978b": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_5aa495dca1b0d310978b",
+        "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_5c6e55c74de033e5f7af": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_5c6e55c74de033e5f7af",
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_604cbe41f1a2fe5b6974": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_604cbe41f1a2fe5b6974",
+        "arches": ["sm_100a"],
     },
     "cake_dsa_indexer_nondet_topk_607b85385dc2e298c030": {
         "role": "scan",
@@ -243,6 +311,17 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_629db978ba455dd1e92b",
         "arches": ["sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_6b45fb65871a9150ff10": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_6b45fb65871a9150ff10",
+        "arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_7182498450255eae7083": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_7182498450255eae7083",
+        "arches": ["sm_107a"],
+        "ticket_arg_arches": ["sm_107a"],
     },
     "cake_dsa_indexer_nondet_topk_72ce45872a80b0b4efb0": {
         "role": "scan",
@@ -271,16 +350,21 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_7ae0067e70a4ac94a716",
         "arches": ["sm_100a"],
     },
+    "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef",
+        "arches": ["sm_100a", "sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_7f646da645feb8b17d42": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_7f646da645feb8b17d42",
+        "arches": ["sm_100a"],
+    },
     "cake_dsa_indexer_nondet_topk_802e619829994de2fab4": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_802e619829994de2fab4",
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
-    },
-    "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef": {
-        "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef",
-        "arches": ["sm_100a", "sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_808a62a6315ae38034c6": {
         "role": "scan",
@@ -290,12 +374,6 @@ PROGRAMS: dict[str, dict[str, Any]] = {
     "cake_dsa_indexer_nondet_topk_81ccb257c7338a468c3b": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_81ccb257c7338a468c3b",
-        "arches": ["sm_107a"],
-        "ticket_arg_arches": ["sm_107a"],
-    },
-    "cake_dsa_indexer_nondet_topk_0633d0c5c9ad00d26f4d": {
-        "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_0633d0c5c9ad00d26f4d",
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
@@ -314,6 +392,16 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_90c88df0fd82d4908fca",
         "arches": ["sm_100a", "sm_103a"],
     },
+    "cake_dsa_indexer_nondet_topk_9247bed3f608806ad0ae": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_9247bed3f608806ad0ae",
+        "arches": ["sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_925f0237326fb52b0f94": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_925f0237326fb52b0f94",
+        "arches": ["sm_100a"],
+    },
     "cake_dsa_indexer_nondet_topk_93373e506f0537a0ed67": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_93373e506f0537a0ed67",
@@ -331,6 +419,11 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
+    "cake_dsa_indexer_nondet_topk_9c022a61cbf93fdcc4d3": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_9c022a61cbf93fdcc4d3",
+        "arches": ["sm_100a"],
+    },
     "cake_dsa_indexer_nondet_topk_9c823649b35909199596": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_9c823649b35909199596",
@@ -343,11 +436,10 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
-    "cake_dsa_indexer_nondet_topk_070d919ecf1cb5a20275": {
+    "cake_dsa_indexer_nondet_topk_a489d4f851f4d3e1057c": {
         "role": "scan",
-        "library": "cake_dsa_indexer_nondet_topk_070d919ecf1cb5a20275",
-        "arches": ["sm_107a"],
-        "ticket_arg_arches": ["sm_107a"],
+        "library": "cake_dsa_indexer_nondet_topk_a489d4f851f4d3e1057c",
+        "arches": ["sm_100a"],
     },
     "cake_dsa_indexer_nondet_topk_a528b54ef347f796744b": {
         "role": "scan",
@@ -362,6 +454,11 @@ PROGRAMS: dict[str, dict[str, Any]] = {
     "cake_dsa_indexer_nondet_topk_a5b550455fe37bc49e1a": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_a5b550455fe37bc49e1a",
+        "arches": ["sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_a5bdd83845c599e93bf2": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_a5bdd83845c599e93bf2",
         "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_a64563a936f84ea4d9f5": {
@@ -388,10 +485,20 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
+    "cake_dsa_indexer_nondet_topk_b63cdb649a4d5e7fdefd": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_b63cdb649a4d5e7fdefd",
+        "arches": ["sm_103a"],
+    },
     "cake_dsa_indexer_nondet_topk_b8440d1d1d54917a47d7": {
         "role": "merge",
         "library": "cake_dsa_indexer_nondet_topk_b8440d1d1d54917a47d7",
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
+    },
+    "cake_dsa_indexer_nondet_topk_bacae64bc8920dd8578b": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_bacae64bc8920dd8578b",
+        "arches": ["sm_107a"],
     },
     "cake_dsa_indexer_nondet_topk_c1e4796dfe29082d8e2a": {
         "role": "scan",
@@ -399,10 +506,31 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "arches": ["sm_107a"],
         "ticket_arg_arches": ["sm_107a"],
     },
+    "cake_dsa_indexer_nondet_topk_c2a7046ddd07c57f04fe": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_c2a7046ddd07c57f04fe",
+        "arches": ["sm_100a"],
+    },
+    "cake_dsa_indexer_nondet_topk_c401fe6c01bd4f9f95c8": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_c401fe6c01bd4f9f95c8",
+        "arches": ["sm_100a"],
+    },
+    "cake_dsa_indexer_nondet_topk_cce9be1b9b9709cd3d05": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_cce9be1b9b9709cd3d05",
+        "arches": ["sm_103a"],
+    },
     "cake_dsa_indexer_nondet_topk_d121d20b4ff827b4b6d2": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_d121d20b4ff827b4b6d2",
         "arches": ["sm_100a", "sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_d188e52d69dea931ebd1": {
+        "role": "scan",
+        "library": "cake_dsa_indexer_nondet_topk_d188e52d69dea931ebd1",
+        "arches": ["sm_107a"],
+        "ticket_arg_arches": ["sm_107a"],
     },
     "cake_dsa_indexer_nondet_topk_d31cb7cabf2871acafa3": {
         "role": "scan",
@@ -468,10 +596,14 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_401fb46fc3a69d791fdd",
         "scan:l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_f59c7d519b4a998a5cf9",
         "scan:l6:u1:s0:f1": "cake_dsa_indexer_nondet_topk_d121d20b4ff827b4b6d2",
+        "scan:l6:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_925f0237326fb52b0f94",
+        "scan:l6:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_c2a7046ddd07c57f04fe",
         "scan:l6:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_ec8a5e9e791c7fee7261",
         "scan:narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_93373e506f0537a0ed67",
         "scan:narrow:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_59068059bffe0b4c085d",
         "scan:narrow:u1:s0:f1": "cake_dsa_indexer_nondet_topk_616b9e7f58f356a9e146",
+        "scan:narrow:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_c401fe6c01bd4f9f95c8",
+        "scan:narrow:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_034b49542f7f9a407d0e",
         "scan:narrow:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_7ae0067e70a4ac94a716",
         "scan:pair_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_90c88df0fd82d4908fca",
         "scan:pair_l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_31ea61c2c7a160221f01",
@@ -479,8 +611,12 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:pair_l6:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_04db38446d526901fed3",
         "scan:split_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_fbcc24125a5af183d1dc",
         "scan:split_l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_fa34d3de9230fb3465d6",
+        "scan:split_l6:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_9c022a61cbf93fdcc4d3",
+        "scan:split_l6:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_604cbe41f1a2fe5b6974",
         "scan:split_narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_521027e8563a9664acef",
         "scan:split_narrow:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_a52da988b9bb26fb3609",
+        "scan:split_narrow:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_4fe9fa13b895edcb24e3",
+        "scan:split_narrow:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_7f646da645feb8b17d42",
         "scan:wide:u1:s0:f0": "cake_dsa_indexer_nondet_topk_fad73cb8b09709a23920",
         "scan:wide:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef",
         "scan:wide:u1:s0:f1": "cake_dsa_indexer_nondet_topk_e13c66d0acb361a94a1b",
@@ -488,6 +624,8 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:wide:u2:s0:f0": "cake_dsa_indexer_nondet_topk_3c6dc460295ddf3c44de",
         "scan:wide:u2:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_091795a85161d6e55248",
         "scan:wide:u2:s0:f1": "cake_dsa_indexer_nondet_topk_808a62a6315ae38034c6",
+        "scan:wide:u2:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_4088d4e22e0d6d733fef",
+        "scan:wide:u2:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_a489d4f851f4d3e1057c",
         "scan:wide:u2:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_dcddd514cbc366dca9f3",
     },
     "sm_103a": {
@@ -495,10 +633,14 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_401fb46fc3a69d791fdd",
         "scan:l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_f59c7d519b4a998a5cf9",
         "scan:l6:u1:s0:f1": "cake_dsa_indexer_nondet_topk_d121d20b4ff827b4b6d2",
+        "scan:l6:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_b63cdb649a4d5e7fdefd",
+        "scan:l6:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_3ba4bff7756ad9176268",
         "scan:l6:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_ec8a5e9e791c7fee7261",
         "scan:narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_23a4ebeaa3ba23c23c80",
         "scan:narrow:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_7891f3dffb0e0717f725",
         "scan:narrow:u1:s0:f1": "cake_dsa_indexer_nondet_topk_af8d290aa9010d180ed0",
+        "scan:narrow:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_56d38f01a465c2faa6cf",
+        "scan:narrow:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_5aa495dca1b0d310978b",
         "scan:narrow:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_629db978ba455dd1e92b",
         "scan:pair_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_90c88df0fd82d4908fca",
         "scan:pair_l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_31ea61c2c7a160221f01",
@@ -506,8 +648,12 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:pair_l6:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_04db38446d526901fed3",
         "scan:split_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_fbcc24125a5af183d1dc",
         "scan:split_l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_fa34d3de9230fb3465d6",
+        "scan:split_l6:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_21f2b0061d472f9494c4",
+        "scan:split_l6:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_a5bdd83845c599e93bf2",
         "scan:split_narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_521027e8563a9664acef",
         "scan:split_narrow:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_a52da988b9bb26fb3609",
+        "scan:split_narrow:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_cce9be1b9b9709cd3d05",
+        "scan:split_narrow:u1:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_526027b3b42a3dc9a141",
         "scan:wide:u1:s0:f0": "cake_dsa_indexer_nondet_topk_fad73cb8b09709a23920",
         "scan:wide:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_7da1e774f9cae35774ef",
         "scan:wide:u1:s0:f1": "cake_dsa_indexer_nondet_topk_e13c66d0acb361a94a1b",
@@ -515,6 +661,8 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:wide:u2:s0:f0": "cake_dsa_indexer_nondet_topk_3c6dc460295ddf3c44de",
         "scan:wide:u2:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_091795a85161d6e55248",
         "scan:wide:u2:s0:f1": "cake_dsa_indexer_nondet_topk_808a62a6315ae38034c6",
+        "scan:wide:u2:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_074bab39c7585acbdab3",
+        "scan:wide:u2:s0:f1:fp8:lsf": "cake_dsa_indexer_nondet_topk_503938c0119dc4ce1520",
         "scan:wide:u2:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_dcddd514cbc366dca9f3",
         "scan:wide_desc:u1:s0:f0": "cake_dsa_indexer_nondet_topk_48e51726170f87b759f8",
         "scan:wide_desc:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_d31cb7cabf2871acafa3",
@@ -530,12 +678,15 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_d188e52d69dea931ebd1",
         "scan:l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_b37a3ff7b23dd88b939b",
         "scan:l6:u1:s0:f1": "cake_dsa_indexer_nondet_topk_7182498450255eae7083",
+        "scan:l6:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_bacae64bc8920dd8578b",
         "scan:l6:u1:s0:f1:lsf": "cake_dsa_indexer_nondet_topk_c1e4796dfe29082d8e2a",
         "scan:l6:u1:s1:f1": "cake_dsa_indexer_nondet_topk_47acefcdee217bade960",
+        "scan:l6:u1:s1:f1:fp8": "cake_dsa_indexer_nondet_topk_9247bed3f608806ad0ae",
         "scan:narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_23a4ebeaa3ba23c23c80",
         "scan:narrow:u1:s0:f1": "cake_dsa_indexer_nondet_topk_af8d290aa9010d180ed0",
         "scan:narrow:u1:s1:f1": "cake_dsa_indexer_nondet_topk_506cb2b2c57f0a514cde",
         "scan:narrow:u2:s0:f0": "cake_dsa_indexer_nondet_topk_2de9f2d0467668d46463",
+        "scan:narrow:u2:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_2d639f804c39107023ba",
         "scan:pair_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_802e619829994de2fab4",
         "scan:pair_l6:u1:s0:f1": "cake_dsa_indexer_nondet_topk_070d919ecf1cb5a20275",
         "scan:pair_l6:u1:s1:f1": "cake_dsa_indexer_nondet_topk_0633d0c5c9ad00d26f4d",
@@ -547,6 +698,7 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:pair_wide:u2:s0:f0": "cake_dsa_indexer_nondet_topk_3bd43d833b5d53e81dbe",
         "scan:pair_wide:u2:s0:f1": "cake_dsa_indexer_nondet_topk_9c823649b35909199596",
         "scan:split_narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_9cc421366d6079aa6ca8",
+        "scan:split_narrow:u1:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_5988fd3c547350964be7",
         "scan:split_wide:u1:s0:f0": "cake_dsa_indexer_nondet_topk_763009af2c0de13ffc29",
         "scan:split_wide:u2:s0:f0": "cake_dsa_indexer_nondet_topk_81ccb257c7338a468c3b",
         "scan:wide:u1:s0:f0": "cake_dsa_indexer_nondet_topk_5c6e55c74de033e5f7af",
@@ -554,6 +706,7 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan:wide:u1:s1:f0": "cake_dsa_indexer_nondet_topk_99af5257f5e28006f79e",
         "scan:wide:u1:s1:f1": "cake_dsa_indexer_nondet_topk_e7860bf225417a2a3b51",
         "scan:wide:u2:s0:f0": "cake_dsa_indexer_nondet_topk_afa89b4033e466d158b1",
+        "scan:wide:u2:s0:f1:fp8": "cake_dsa_indexer_nondet_topk_6b45fb65871a9150ff10",
     },
 }
 POLICY: dict[str, dict[str, Any]] = {
@@ -592,6 +745,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "wide_pair_snake_only": False,
         "snake_default": False,
         "snake_rule": None,
+        "snake_cap_rule": None,
         "snake_packed_rule": None,
         "snake_l6_fallback_waves": None,
         "tile_unroll_default": 1,
@@ -609,6 +763,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [8, 500],
         "sample_long_rule": None,
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
@@ -651,6 +806,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "wide_pair_snake_only": False,
         "snake_default": False,
         "snake_rule": None,
+        "snake_cap_rule": None,
         "snake_packed_rule": None,
         "snake_l6_fallback_waves": None,
         "tile_unroll_default": 1,
@@ -668,6 +824,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [8, 500],
         "sample_long_rule": None,
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
@@ -715,6 +872,7 @@ POLICY: dict[str, dict[str, Any]] = {
             128.0,
             0.5,
         ],
+        "snake_cap_rule": None,
         "snake_packed_rule": [["l6"], 48.0, None, 7],
         "snake_l6_fallback_waves": 310,
         "tile_unroll_default": 1,
@@ -743,12 +901,114 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [32, 500],
         "sample_long_rule": [["l6"], 500],
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
         "check_period_knob_max": 64,
         "check_period_cap_divisor": 512,
         "check_period_kind_overrides": {},
+    },
+}
+# The FP8 input form's dispatch record of an architecture is its ``POLICY``
+# record with these fields replaced (``cake_policy.fp8_policy_record``); each
+# names its own ``static_scan_kinds``: on sm_107a every FP8 scan program keeps
+# the static unit enumeration.  sm_107a keeps no split-fit rule until the FP8
+# split programs are measured under one.  On sm_100a and sm_103a the FP8 wide
+# program decides by waves of the persistent grid (wide_wave_rule): it takes a
+# call from the narrow unit when the narrow units need at least 1.7 times its
+# waves, and from the three-warpgroup unit when those need at least 1.3
+# (sm_100a) or 1.15 (sm_103a) times its waves over at least 84 mean unit tiles
+# (sm_100a).  On sm_103a that minimum is 64 mean unit tiles for one document of
+# at least 14 wide waves, 3.5 more per wide wave below that but on one document
+# at most 8 / (W - 1) ** 2, from two wide waves on at most the larger of that
+# and 55 (60 from 8 wide waves on), while the three-warpgroup unit needs
+# W >= 1.26 times its waves (8 on one wide wave, 55 at W = 1.5, 60 at 10 wide
+# waves and W = 1.4, 72 at W = 4 / 3), at least 112 for packed
+# documents and 40 / (W - 1) while the three-warpgroup unit needs W < 1.26 times
+# its waves (160 at W = 1.25, 240 at W = 7 / 6), on packed documents then also 9
+# / (W - 1) ** 2 (225 at W = 1.2, 324 at W = 7 / 6), and grows as (top_k / 2048)
+# ** 1.1 above top_k 2048 (137 and 240 at top_k 4096); below it the
+# three-warpgroup unit measured faster.  On sm_107a a call the snake rule marks
+# runs the snake copy of the FP8 l6 program only as one document within 40 waves
+# of the persistent grid (snake_cap_rule): packed documents and longer calls are
+# faster in the plain order.  On sm_103a a one-document call of the FP8 wide
+# unit runs its :lsf copy from 64 mean unit tiles on (lsf_single_rule): the same
+# units in the same order, measured faster there and slower on shorter units.
+# No FP8 call walks its key tiles in descending order (desc_walk_kinds None):
+# the descending-walk programs are BF16 programs.  Each FP8 record leaves the
+# BF16 snake rules of packed calls and of the l6 fallback off
+# (snake_packed_rule, snake_l6_fallback_waves), so the FP8 plans keep their
+# own measured rules.  Each FP8 record names every split field itself, so the
+# FP8 split counts stay as measured (no split-resident rule) whatever the BF16
+# split rule becomes.  The sm_107a FP8 record keeps no sampling class or
+# long-unit rule (sample_class_rule, sample_long_rule): the BF16 record's
+# sampling rules were measured on the BF16 ticket programs.  Nor does it run a
+# longest-first copy (lsf_programs False): its FP8 programs keep the static unit
+# enumeration, which draws no tickets to order, while the BF16 record runs the
+# :lsf copies of its l6 ticket programs.
+POLICY_FP8: dict[str, dict[str, Any]] = {
+    "sm_100a": {
+        "static_scan_kinds": [],
+        "wide_wave_rule": [1.7, 1.3, 84.0],
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": None,
+        "split_wave_scope": None,
+        "split_fit_rule": [4096],
+        "split_resident_rule": None,
+        "split_units": ["l6", "narrow"],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
+    },
+    "sm_103a": {
+        "static_scan_kinds": [],
+        "wide_wave_rule": [
+            1.7,
+            1.15,
+            64.0,
+            2048,
+            1.1,
+            112.0,
+            3.5,
+            14,
+            1.26,
+            40.0,
+            9.0,
+            8.0,
+            55.0,
+            8,
+            60.0,
+        ],
+        "lsf_single_rule": [64.0],
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": None,
+        "split_wave_scope": None,
+        "split_fit_rule": [4096],
+        "split_resident_rule": None,
+        "split_units": ["l6", "narrow"],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
+    },
+    "sm_107a": {
+        "static_scan_kinds": ["l6", "narrow", "split_narrow", "wide"],
+        "sample_class_rule": None,
+        "sample_long_rule": None,
+        "lsf_programs": False,
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": [1000, 0.12],
+        "split_wave_scope": [["narrow"], 1, True],
+        "split_fit_rule": None,
+        "split_resident_rule": None,
+        "split_units": ["narrow", "wide"],
+        "snake_cap_rule": [1, 40],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
     },
 }
 

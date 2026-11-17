@@ -78,6 +78,12 @@ RENAMED = (
     ),
 )
 AUTOGRAD_FUNCTIONS = tuple(new for _, new in RENAMED if new.endswith("Function"))
+# The explicit (non-autograd) step entries; the backend functions they call keep their own names.
+STEP_ENTRIES = tuple(
+    f"cake_dsa_sparse_attention_nondet_train_{form}{step}"
+    for form in ("", "nope_", "nope_varlen_")
+    for step in ("forward", "backward")
+)
 OLD_NAMES = tuple(old for old, _ in RENAMED)
 
 
@@ -138,6 +144,7 @@ def test_public_names_carry_the_mode_word() -> None:
     for name, _ in _public(module):
         assert MODE_WORD in _words(name), (name, _words(name))
     assert {new for _, new in RENAMED} <= set(module.__all__)
+    assert set(STEP_ENTRIES) <= set(module.__all__)
 
 
 def test_no_public_callable_takes_a_mode_keyword() -> None:
@@ -153,7 +160,7 @@ def test_no_public_callable_takes_a_mode_keyword() -> None:
         found += _members(f"{BACKEND}.{new}", getattr(backend, new))
     for name in AUTOGRAD_FUNCTIONS:
         assert {"forward", "backward"} <= set(vars(getattr(backend, name))), name
-    assert len(found) >= 4 + 4 + 2 * len(AUTOGRAD_FUNCTIONS), found
+    assert len(found) >= 4 + len(STEP_ENTRIES) + 4 + 2 * len(AUTOGRAD_FUNCTIONS), found
     for name, fn in found:
         signature = inspect.signature(fn)
         assert "deterministic" not in signature.parameters, name

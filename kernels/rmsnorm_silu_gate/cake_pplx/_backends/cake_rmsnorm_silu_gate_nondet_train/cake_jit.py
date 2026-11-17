@@ -32,21 +32,25 @@ A role is one kernel of a call: ``fwd`` (the forward: ``rstd`` from
 ``rsqrt.approx`` and the SiLU gate from ``ex2.approx`` and ``rcp.approx``,
 every row's arithmetic fixed, so ``y`` is the same bits on every call) and
 ``bwd_bf16`` / ``bwd_f32`` (the backward: ``dx``, ``dz`` and the weight
-gradient in one kernel; ``dx`` and ``dz`` are one row arithmetic in every
-backward program but the fused one (the deterministic package's fused
-backward's row arithmetic, with its approximate gate and ``rstd``, and the
-repeatable one, that program itself), all within one BF16 ulp of FP64 plus
-1/64 ulp of the tensor's largest finite magnitude; the chunked programs sum
-the FP32
-partial of each chunk of rows exactly, as integers, into a weight gradient
-rounded to FP32 from the FP64 value of the exact sum, then to BF16 for a
-BF16 one, so every output is the same bits at any grid and in any order of
-the CTAs; the repeatable program of a BF16 weight gradient, the
-deterministic package's fused backward, adds each chunk's weight-gradient
-terms exactly into fixed-point digits, so every output is the same bits
+gradient in one kernel; each backward program repeats ``dx`` and ``dz`` bit
+for bit for the same inputs on the same device, and the programs'
+``.f32x2`` FMA chains for a row's sums differ by program and by
+architecture, so the last bits of ``dx`` and ``dz`` can differ between
+programs (the fused one runs the deterministic package's fused backward's
+row arithmetic, with its approximate gate and ``rstd``, and the repeatable
+one is that program itself); the tests hold every floating output to the
+PyTorch BF16 naive implementation of the same operation; the chunked
+programs sum the FP32 partial of each chunk of rows exactly, as integers,
+into a weight gradient rounded once to FP32 from the exact sum in integer
+arithmetic, then to BF16 for a BF16 one, so every output is the same bits
+at any grid and in any order of the CTAs; the repeatable program of a BF16
+weight gradient, the deterministic package's fused backward, adds each
+thread's FP32 runs of rows into plain FP32 words and each CTA's FP32
+column words exactly into fixed-point digits, so every output is the same bits
 for the rows and the SM count; the fused and the row-claims
-programs of a BF16 weight gradient add FP32 runs of rows to FP64
-accumulators with atomics, so only their weight gradient may vary in its
+programs of a BF16 weight gradient add each CTA's FP32 column sums, one
+plain FP32 word a column, into FP32 replicas with FP32 atomic adds, which the
+CTA that arrives last sums, so only their weight gradient may vary in its
 last bits from run to run).
 ``ROUTES[arch][role]`` names the one module a role runs on an architecture;
 a module may be delivered for more architectures than route it (every
@@ -100,9 +104,13 @@ SM (``fwd_pipe`` on sm_100a and sm_103a; on sm_107a ``fwd_pipe_packed``, for
 packed rows, with four sum chains, ``rsqrt.approx.ftz``, ``w`` loaded behind
 the first block's loads and one 32-byte store per lane).  Each program's
 arithmetic is fixed; the programs associate a row's sum of squares differently
-(the tiny and the short forward: 8-term FMA chains of 16 lanes folded by XOR
-shuffles 1, 2, 4, 8; the sm_107a pipelined forward: four 4-term chains of 8
-lanes added in pairs, then folded by 1, 2, 4; the others: 16-term chains of 8
+(the tiny and the short forward: four 2-term FMA chains of 16 lanes added in
+pairs, then folded by XOR shuffles 1, 2, 4, 8; the mid forward, the
+extra-long forward but on sm_100a and the sm_107a pipelined forward: four
+4-term chains of 8 lanes added in pairs, then folded by 1, 2, 4; the plain
+forward and the pipelined forward on sm_100a and sm_103a: two 8-term chains
+of 8 lanes (the even and the odd elements) added, then folded by 1, 2, 4; the
+long forward, and the extra-long forward on sm_100a: 16-term chains of 8
 lanes folded by 1, 2, 4), so ``y``'s bits can differ between the programs, and
 so between the bands of one architecture, while each program gives the same
 bits for the same inputs on the same device.
@@ -121,42 +129,48 @@ backward adds its windows to 4 copies with an occupancy word per copy
 (``sparse``) and runs one wave at most, and the claimed backward warms
 the block two ahead.  The row-claims backwards of a BF16 weight gradient,
 on sm_100a and sm_103a (256 threads, 16-row blocks, the CTAs past one wave
-claiming blocks from the claim counter), add each thread's FP32 run of rows
-to 4 FP64 accumulator copies with atomics (``_rc``) or keep the runs and
-the CTA's column sums as FP32 two-sum pairs and add them once as FP64
-(``_rc_mid``, 5 CTAs per SM, thread 0 warming the next block of packed rows
-in L2), the CTA that arrives last rounding the sum once.  A small-row
+claiming blocks from the claim counter; ``_rc_mid``: 5 CTAs per SM, thread
+0 warming the next block of packed rows in L2), add each thread's FP32
+runs of rows into FP32 words and add the CTA's FP32 column sums into 4
+FP32 replicas in ``dw_sums`` with FP32
+atomic adds; the CTA that arrives last sums the replicas in FP32 (no FP64).
+A small-row
 backward (whose BF16 band a call with ``compute_grad_weight=False`` also
 takes) is one thread-block cluster of 16 CTAs that sums the weight gradient
 on chip in a fixed order and rounds it once, with no workspace: the exact
 tiny backward (``<role>_t512``: 4 teams of the 128-thread CTA of the
 deterministic backward at ``2e989556`` a CTA, up to 512 rows; the
-weight gradient that pair's bits) and, for a BF16 weight gradient, the short
+weight gradient its FP32 terms summed in plain FP32 words in an order of
+its own) and, for a BF16 weight gradient, the short
 backward (``bwd_bf16_short``: 256-thread CTAs with the row-claims backward's
 row arithmetic, each CTA finishing 8 columns from every CTA's FP32 partials
-in rank order in FP64, up to 256 rows).  The fused backward of a BF16
+in rank order in FP32, up to 256 rows).  The fused backward of a BF16
 weight gradient on every architecture (``bwd_bf16_fused``, build
-``{"math": "ax", "min_blocks": 4, "prefetch_share": None, "slots": 4}``)
+``{"math": "ax", "min_blocks": 4, "prefetch_share": None, "slots": 8}``)
 runs the deterministic package's fused backward's schedule and row
 arithmetic: 256-thread CTAs, 16 lanes a row, 16-row blocks, at most 4 CTAs
 per SM (with more blocks than CTAs the CTAs claim the blocks in chunks of a
 halving table), the next block warmed in L2 up to the architecture's share
-of blocks a CTA, the approximate gate and ``rstd``, so ``dx`` and ``dz``
-are that program's bits (within the same bound as every backward's).  Its
+of blocks a CTA, the approximate gate and ``rstd``; a row's sums run on FMA
+chains of its own, set per architecture, so the last bits of ``dx`` and
+``dz`` may differ from that program's.  Its
 weight gradient is the row-claims backward's kind: each thread's FP32 runs
-of at most 16 rows folded into FP32 two-sum pairs, a CTA's column sums
-added to 4 FP64 accumulator copies with atomics and the CTA that arrives
-last rounding their sum once, so its last bits may vary from run to run.
-Its kernel parameters, grid rule and workspace are the row-claims
-backward's.  The repeatable backward of a BF16 weight gradient on every
+of at most 16 rows added into FP32 words, a CTA's FP32 column sums
+added into 8 FP32 replicas in ``dw_sums`` and the
+CTA that arrives last summing the replicas in FP32, so its last bits may
+vary from run to run.
+Its kernel parameters, grid rule and workspace buffers are the row-claims
+backward's (with 8 replicas, not 4).  The repeatable backward of a BF16
+weight gradient on every
 architecture (``bwd_bf16_rep``) is a build of the deterministic package's
 fused backward kernel file under this package's name (its build
 ``{"math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share":
 None, "threads": 256}``), the same schedule and row arithmetic as the
-fused backward's (so ``dx`` and ``dz`` are the fused backward's bits), each
-chunk's weight-gradient terms added exactly into fixed-point digits and the
-sum rounded once by the CTA that arrives last, so its ``dw`` is the
-deterministic package's bits too, the same for the rows and the SM count.
+fused backward's, each thread's FP32 runs of rows added into plain FP32
+words, each CTA's FP32 column words added exactly into fixed-point digits
+and the sum rounded once by the CTA that arrives last,
+so its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits, the
+same for the rows and the SM count.
 Its long program (``bwd_bf16_rep_long``, every architecture; build
 ``{"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16",
 "prefetch_share": None, "threads": 256}``) is the same build in the
@@ -166,10 +180,11 @@ outputs are the repeatable backward's bits at every row count and grid.  It
 runs in the repeatable backward's place on packed rows (``dy``, ``x`` and
 ``z`` with head stride 128 and token stride ``H * 128``) from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM, where it is faster.
-A BF16 weight gradient runs the fused backward only where its varying
-weight gradient makes the checkpointed training step (2 x forward +
-backward) at least 3 % faster than the repeatable backward's, and the
-repeatable backward past that.
+A BF16 weight gradient runs the fused backward only where the
+band-selection measurement found its varying weight gradient making the
+checkpointed training step (2 x forward + backward) about 3 % or more
+faster than with the repeatable backward (near a band's edges the gain can
+be smaller), and the repeatable backward past that.
 ``BACKWARD_BANDS`` gives each backward its rows on each architecture.
 
 Grids (:func:`launch_grid`): the forward and the short forward launch one
@@ -207,8 +222,10 @@ integer windows of the exact sum (``slots`` copies of 7 windows of 128
 columns, 4 or 5 slots; with ``sparse`` the last copy holds the occupancy
 words), ``dw_spec``, 128 FP32 class words for infinite and NaN partials,
 and ``dw_done``, two 32-bit words (the arrival ticket and the claim counter);
-that of a row-claims or a fused backward is ``dw_sums``, its 4 x 128 FP64
-accumulators, and ``dw_done`` (4104 bytes); that of the repeatable
+that of a row-claims or a fused backward is ``dw_sums``, its FP32
+replicas (one FP32 sum for each of 128 columns, 4 replicas for a
+row-claims backward, 8 for the fused one), and ``dw_done`` (2056 and 4104
+bytes); that of the repeatable
 backward and its long program is ``acc``, its fixed-point digits (2304
 u64), ``flags``, a 32-bit flag word a column, and ``done``, the arrival
 ticket and the claim counter (18952 bytes).  All of it is zero when a
@@ -967,14 +984,16 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The row-claims backward into a BF16 weight gradient: 256 threads, 16
     # lanes per row (16-row blocks), at most 4 CTAs per SM that claim the
-    # blocks from the claim counter past one wave, each thread's FP32 run of
-    # rows added to 4 FP64 accumulator copies with atomics and the CTA that
-    # arrives last rounding their sum once, so the weight gradient's last bits
-    # may vary from run to run (dx and dz do not); BACKWARD_BANDS gives it its
-    # rows (build {"fold": "f64", "lanes": 16, "math": "x2", "out": "bf16",
-    # "prefetch": "rows", "rows_per_thread": 1, "slots": 4, "threads": 256,
-    # "width": 128}).
-    "cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45": {
+    # blocks from the claim counter past one wave, each thread's FP32 runs of
+    # rows added into FP32 words, the CTA's FP32 column sums added into 4
+    # FP32 replicas in dw_sums with FP32 atomic adds
+    # and the CTA that arrives last summing the replicas in FP32 (no FP64), so
+    # the weight gradient's last bits may vary from run to run (dx and dz do
+    # not);
+    # BACKWARD_BANDS gives it its rows (build {"lanes": 16, "math": "x2",
+    # "out": "bf16", "prefetch": "rows", "rows_per_thread": 1, "slots": 4,
+    # "threads": 256, "width": 128}).
+    "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -1010,16 +1029,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "row_claims",
             "rows_per_cta": 16,
         },
-        "kernel": "cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45",
-        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45",
+        "kernel": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 20736,
+            "dynamic_smem_bytes": 12544,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45",
+        "library": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
         "logical": {
             "accumulate": "accumulate",
             "dw": "dw",
@@ -1051,14 +1070,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # The row-claims mid backward into a BF16 weight gradient on sm_100a and
     # sm_103a: the row-claims backward with 5 CTAs per SM, thread 0 warming the
     # next block of packed dy, x and z in L2 with one bulk prefetch per tensor,
-    # each thread's folded FP32 runs and the CTA's column sums kept as FP32
-    # two-sum pairs converted once to FP64 for the atomic add (a column whose
-    # pair sum is not finite takes the sum alone), so the weight gradient's
+    # the weight gradient the row-claims backward's 4 FP32 replicas, so its
     # last bits may vary from run to run; BACKWARD_BANDS gives it its rows
-    # (build {"fold": "ff", "lanes": 16, "math": "x2", "out": "bf16",
-    # "prefetch": "bulk", "rows_per_thread": 1, "slots": 4, "threads": 256,
-    # "width": 128}).
-    "cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7": {
+    # (build {"lanes": 16, "math": "x2", "out": "bf16", "prefetch": "bulk",
+    # "rows_per_thread": 1, "slots": 4, "threads": 256, "width": 128}).
+    "cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -1094,16 +1110,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "row_claims",
             "rows_per_cta": 16,
         },
-        "kernel": "cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7",
-        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7",
+        "kernel": "cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 20736,
+            "dynamic_smem_bytes": 12544,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7",
+        "library": "cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d",
         "logical": {
             "accumulate": "accumulate",
             "dw": "dw",
@@ -1137,7 +1153,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # r + 16, ...), the row-claims backward's row arithmetic (16 lanes per row,
     # the gate on packed FP32 pairs), CTA r of the cluster finishing the
     # weight-gradient columns 8r to 8r + 7 from every CTA's FP32 partials in
-    # rank order in FP64 (a fixed order: the same bits on every call), no
+    # rank order in FP32 (a fixed order: the same bits on every
+    # call), no
     # workspace (build {"cluster": 16, "out": "bf16", "threads": 256}), up to
     # its max_rows; BACKWARD_BANDS gives it its rows.
     "cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024": {
@@ -1211,8 +1228,10 @@ MODULES: dict[str, dict[str, Any]] = {
     # compute_grad_weight=False):
     # one cluster of 16 CTAs of 4 teams of the 128-thread CTA of the
     # deterministic backward at 2e989556 (team q of CTA r runs the 8-row
-    # block r + 16q), the weight gradient that pair's bits, CTA r summing
-    # the columns 8r to 8r + 7 in the pair's reduce order in FP64, no
+    # block r + 16q), each term and partial of the weight gradient one FP32
+    # word, CTA r summing the columns 8r to 8r + 7 in plain FP32 in an order
+    # of its own (the same bits on every call, not the deterministic
+    # backward's), no
     # workspace (build {"out": "bf16", "teams": 4}), up to 512 rows;
     # BACKWARD_BANDS gives it its rows.
     "cake_rmsnorm_silu_gate_train_f6a3420d9aaa20a99e8d": {
@@ -1636,8 +1655,10 @@ MODULES: dict[str, dict[str, Any]] = {
     # The exact small-row backward into a FP32 weight gradient:
     # one cluster of 16 CTAs of 4 teams of the 128-thread CTA of the
     # deterministic backward at 2e989556 (team q of CTA r runs the 8-row
-    # block r + 16q), the weight gradient that pair's bits, CTA r summing
-    # the columns 8r to 8r + 7 in the pair's reduce order in FP64, no
+    # block r + 16q), each term and partial of the weight gradient one FP32
+    # word, CTA r summing the columns 8r to 8r + 7 in plain FP32 in an order
+    # of its own (the same bits on every call, not the deterministic
+    # backward's), no
     # workspace (build {"out": "f32", "teams": 4}), up to 512 rows;
     # BACKWARD_BANDS gives it its rows.
     "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015": {
@@ -1710,14 +1731,16 @@ MODULES: dict[str, dict[str, Any]] = {
     # The fused backward into a BF16 weight gradient: 256 threads, 16 lanes
     # per row (16-row blocks), at most 4 CTAs per SM claiming the blocks in
     # chunks of the deterministic package's fused backward, its approximate
-    # gate and rstd (dx and dz are that program's bits), each thread's FP32
-    # runs of rows added to 4 FP64 accumulator copies with atomics and the CTA
-    # that arrives last rounding their sum once, so the weight gradient's last
-    # bits may vary from run to run; the row-claims backward's kernel
-    # parameters, grid rule and workspace; BACKWARD_BANDS gives it its rows
-    # (build {"math": "ax", "min_blocks": 4, "prefetch_share": None, "slots":
-    # 4}).
-    "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379": {
+    # gate and rstd (dx and dz are that program's bits on sm_100a; elsewhere
+    # a row's sums take other FMA chains), each thread's FP32
+    # runs of rows added into FP32 words, the CTA's FP32 column sums added
+    # into 8 FP32 replicas in dw_sums with FP32
+    # atomic adds, summed in FP32 by the CTA that arrives last (no FP64), so
+    # the weight gradient's last bits may vary from run to run; the row-claims
+    # backward's kernel parameters, grid rule and workspace buffers;
+    # BACKWARD_BANDS gives it its rows (build {"math": "ax", "min_blocks": 4,
+    # "prefetch_share": None, "slots": 8}).
+    "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -1754,16 +1777,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "row_claims",
             "rows_per_cta": 16,
         },
-        "kernel": "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
-        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
+        "kernel": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 20736,
+            "dynamic_smem_bytes": 12544,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
+        "library": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "logical": {
             "accumulate": "accumulate",
             "dw": "dw",
@@ -1789,7 +1812,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_bf16_fused",
         "workspace": {
             "dw_done": 2,
-            "dw_sums": 512,
+            "dw_sums": 1024,
         },
     },
     # The repeatable backward into a BF16 weight gradient: the deterministic
@@ -1843,7 +1866,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
@@ -1930,7 +1953,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
@@ -1976,11 +1999,11 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_tiny": "cake_rmsnorm_silu_gate_train_242b29d118997473fc3e",
         "fwd_pipe": "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99",
         "bwd_bf16_mid": "cake_rmsnorm_silu_gate_train_2a3bbf332a501a11ca31",
-        "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45",
-        "bwd_bf16_rc_mid": "cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7",
+        "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
+        "bwd_bf16_rc_mid": "cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d",
         "bwd_bf16_short": "cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024",
         "bwd_bf16_t512": "cake_rmsnorm_silu_gate_train_f6a3420d9aaa20a99e8d",
-        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
+        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "bwd_bf16_rep": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_rep_long": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
         "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
@@ -1995,10 +2018,10 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_tiny": "cake_rmsnorm_silu_gate_train_242b29d118997473fc3e",
         "fwd_pipe": "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99",
         "bwd_bf16_mid": "cake_rmsnorm_silu_gate_train_2a3bbf332a501a11ca31",
-        "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45",
-        "bwd_bf16_rc_mid": "cake_rmsnorm_silu_gate_train_f14663d91454a0e833f7",
+        "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
+        "bwd_bf16_rc_mid": "cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d",
         "bwd_bf16_short": "cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024",
-        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
+        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "bwd_bf16_rep": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_rep_long": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
         "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
@@ -2016,7 +2039,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_mid": "cake_rmsnorm_silu_gate_train_51408d05160a7056aad8",
         "bwd_bf16_short": "cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024",
         "bwd_bf16_t512": "cake_rmsnorm_silu_gate_train_f6a3420d9aaa20a99e8d",
-        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_1d4b7311041b9046e379",
+        "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "bwd_bf16_rep": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_rep_long": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
         "bwd_f32": "cake_rmsnorm_silu_gate_train_a8cfbb391df971a9cb59",
@@ -2045,15 +2068,14 @@ ROUTES: dict[str, dict[str, str]] = {
 # it is about 10 % faster alone than the extra-long forward and makes the
 # step at most about 3.5 % slower.  The tiny forward ends where beside a
 # kernel holding 16 SMs it still ends no later than the deterministic
-# package's forward: 38 rows per SM on sm_100a and 36 on sm_103a (past 38,
-# beside 16 CTAs of 1024 threads with the max-shared carveout, it can end up
-# to 2 microseconds later, and sm_103a keeps two rows per SM of margin; on
-# sm_100a the pipelined forward, which is that forward, runs from there up
-# to 85 rows per SM), and 65 on sm_107a.  Host plan only: a new cut needs no
-# new program.
+# package's forward: 36 rows per SM on sm_100a and sm_103a (on sm_100a,
+# from 37 rows per SM beside 16 CTAs of 1024 threads with the max-shared
+# carveout, it can end about 2 microseconds later, and the pipelined forward,
+# which is that forward, runs from there up to 85 rows per SM), and 65 on
+# sm_107a.  Host plan only: a new cut needs no new program.
 FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
-        (38, "fwd_tiny"),
+        (36, "fwd_tiny"),
         (85, "fwd_pipe"),
         (160, "fwd_mid"),
         (400, "fwd_long"),
@@ -2136,11 +2158,12 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # deterministic package's exact weight-gradient sum): the fused backward's
 # weight gradient may vary in its last bits from run to run (and so may the
 # row-claims backwards', ``_rc``, ``_rc_mid``, which no band runs), so it
-# runs only where it makes the checkpointed training step at least 3 %
-# faster than the repeatable backward does; every other band repeats its
-# bits.  On sm_100a and sm_103a the fused backward runs up to 1000 rows per
+# runs only where the band-selection measurement found the checkpointed
+# training step about 3 % or more faster than with the repeatable backward
+# (near a band's edges the gain can be smaller); every other band repeats
+# its bits.  On sm_100a and sm_103a the fused backward runs up to 1000 rows per
 # SM and the repeatable backward past it.  On sm_107a the fused backward
-# saves at least 3 % of the step only past 64 and up to 256 rows per SM (both
+# saved about 3 % or more of the step only past 64 and up to 256 rows per SM (both
 # cuts on the repeatable backward's waves of 64 rows per SM), so the
 # repeatable backward runs up to ``SM107A_BF16_REP_LAST`` rows per SM, the
 # fused backward up to ``SM107A_BF16_FUSED_LAST`` and the repeatable backward
@@ -2246,8 +2269,9 @@ GRID_KINDS = (
     "cluster",
 )
 # The backward's workspace buffers in their order in one workspace, each with
-# the bytes of one element: the u64 windows, the FP64 column sums (a backward
-# whose record names ``dw_sums``: the row-claims and the fused backwards), the
+# the bytes of one element: the u64 windows, the FP32 replicas (a
+# backward whose record names ``dw_sums``: the row-claims and the fused
+# backwards), the
 # FP32 class words and the u32 arrival ticket and claim counter; for the
 # repeatable backward (the deterministic package's fused backward program)
 # its u64 fixed-point digits, its u32 flag word a column and its u32 arrival
@@ -2255,7 +2279,7 @@ GRID_KINDS = (
 # record counts, in this order.
 WORKSPACE_BUFFERS: tuple[tuple[str, int], ...] = (
     ("dw_win", 8),
-    ("dw_sums", 8),
+    ("dw_sums", 4),
     ("dw_spec", 4),
     ("dw_done", 4),
     ("acc", 8),

@@ -97,7 +97,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
     if (row < num_rows) {
 #endif
         int exps[2];
-        long long bbase = (long long)row * (long long)bound_stride;
+        long long bbase = (long long)row * (long long)(dkv_stride >> 1);
         unsigned long long pairs = bound[bbase + (long long)part_stride * 2ll];
         unsigned long long b0 = bound[bbase];
         int blen0 = 0;
@@ -283,9 +283,9 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
             }
             if (lane_1 < 16) {
 #if __CUDA_ARCH__ == 1070
-                long long rbase_0 = (long long)zrow_0 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_0 = (long long)zrow_0 * (long long)dkv_stride + (long long)dkr_col0;
 #else
-                long long rbase = (long long)row * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase = (long long)row * (long long)dkv_stride + (long long)dkr_col0;
 #endif
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
@@ -321,7 +321,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_1 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_1 = (long long)zrow_1 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_1 = (long long)zrow_1 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_1 + (long long)(lane_1 * 4)) = _iv4;
@@ -351,7 +351,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_2 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_2 = (long long)zrow_2 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_2 = (long long)zrow_2 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_2 + (long long)(lane_1 * 4)) = _iv4;
@@ -381,7 +381,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_3 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_3 = (long long)zrow_3 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_3 = (long long)zrow_3 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_3 + (long long)(lane_1 * 4)) = _iv4;
@@ -411,7 +411,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_4 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_4 = (long long)zrow_4 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_4 = (long long)zrow_4 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_4 + (long long)(lane_1 * 4)) = _iv4;
@@ -441,7 +441,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_5 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_5 = (long long)zrow_5 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_5 = (long long)zrow_5 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_5 + (long long)(lane_1 * 4)) = _iv4;
@@ -471,7 +471,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_6 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_6 = (long long)zrow_6 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_6 = (long long)zrow_6 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_6 + (long long)(lane_1 * 4)) = _iv4;
@@ -501,7 +501,7 @@ kernel_cake_dsa_h64_det_train_3dd5b7143dd684e308ea(unsigned long long* bound, un
                 *reinterpret_cast<int4*>(dkv_acc + lbase_7 + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase_7 = (long long)zrow_7 * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase_7 = (long long)zrow_7 * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase_7 + (long long)(lane_1 * 4)) = _iv4;
