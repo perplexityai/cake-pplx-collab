@@ -18,11 +18,14 @@ Shared fixtures of the MoK suites and the terminal summary of the accuracy verdi
 The summary prints one ``TIER`` line per judged output (:func:`tests.cake_naive.summarize_tiers`), then one ``ALT`` line
 per output measured against a kernel-shaped alternative of the naive implementation
 (:data:`tests.experimental._mok_naive.ALTERNATIVE`), then one ``GAP`` line per known-gap output that missed the tier:
-its item, the architecture, its error ratio and its cap there (:func:`tests.experimental._mok_gaps.check`).  The
-alternatives are reported, never judged.
+its item, the architecture, and as JSON its ratios per norm it does not meet (median, largest; full precision), its
+caps there and what it misses beyond them (:func:`tests.experimental._mok_gaps.check`).  The alternatives are
+reported, never judged.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import torch
@@ -62,11 +65,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
                 if key == "naive_alternative":
                     lines.append("ALT " + tier_line(report.nodeid, verdict).removeprefix("TIER "))
                 elif key == "known_gap":
-                    cap = verdict["cap"]
-                    gap_lines.append(
-                        f"GAP {report.nodeid} {verdict['item']} {verdict['arch']} ratio={verdict['ratio']:.9g} "
-                        f"cap={'none' if cap is None else f'{cap:.4f}'}"
-                    )
+                    record = {k: verdict[k] for k in ("ratios", "caps", "beyond")}
+                    gap_lines.append(f"GAP {report.nodeid} {verdict['item']} {verdict['arch']} {json.dumps(record)}")
     if lines:
         terminalreporter.section("training accuracy: kernel-shaped alternatives of the naive tier (reported only)")
         for line in lines:

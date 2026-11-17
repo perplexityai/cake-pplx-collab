@@ -100,10 +100,11 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
   `x`'s E4M3 codes and scales are exact against the recipe.
 
 Known gaps are judged in test items of their own. On each architecture where the output misses the rule, the item
-carries a strict expected-failure marker with a cap: the largest error ratio measured there (kernel error / naive
-error, median or largest over the inputs, in the norms it misses), rounded up to 4 decimals. A ratio above the cap
-fails the item, and so does a miss on an architecture without a cap. A fix makes the item pass, and the strict marker
-then fails the item until the marker is removed. On the other architectures the item is judged like any output.
+carries a strict expected-failure marker with caps, one for each norm the miss is accepted in: the largest ratio
+measured there of the kernel's median and largest error over the naive implementation's, rounded up to 4 decimals. A
+ratio above a cap fails the item, and so does a miss in a norm without a cap or on an architecture without caps. A fix
+makes the item pass, and the strict marker then fails the item until the marker is removed. On the other
+architectures the item is judged like any output.
 Every other output of the same case stays judged in the case's main item. Ratios are kernel error / naive error,
 median / largest over the inputs:
 

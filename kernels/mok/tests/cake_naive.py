@@ -341,8 +341,9 @@ class TierJudge:
         where the tier's error is 0 and the output's is not (``zero``), per
         norm the draws counted (``counted``), per norm judged by its wins
         (``by_draw``) the draws within :data:`NEAR_TIE` of the tier (``wins``)
-        and the wins that meet it (``needed``), and the norms left undecided
-        without stage 2 (``undecided``)."""
+        and the wins that meet it (``needed``), the norms left undecided
+        without stage 2 (``undecided``), and per norm whether it meets the tier
+        (``met``: None for a norm left undecided)."""
         found = {}
         (tier,) = TIERS
         for name in dict.fromkeys(name for name, _ in self.errors):
@@ -384,6 +385,7 @@ class TierJudge:
                 "needed": needed,
                 "by_draw": PAIRED_NORMS,
                 "undecided": undecided,
+                "met": met,
             }
         return found
 

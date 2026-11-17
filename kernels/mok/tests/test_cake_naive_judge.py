@@ -231,16 +231,20 @@ def test_judge_case_without_an_undecided_output_makes_32_draws():
     assert calls == list(range(32)) and judge.draws == 32 and failures == []
 
 
-def test_the_miss_ratio_reads_the_norms_the_output_misses():
+def test_the_miss_ratios_read_the_norms_the_output_does_not_meet():
     judge = cn.TierJudge()
     _fill(judge, "max_only", 5)
     _fill(judge, "both", 0, l2=(0.6, 0.5))
     _fill(judge, "zero", 32)
     _record(judge, "zero", 3, zero=True)
     verdicts = judge.verdicts()
-    assert gaps.miss_ratio(verdicts["max_only"]) == pytest.approx(1.25)
-    assert gaps.miss_ratio(verdicts["both"]) == pytest.approx(1.25)
-    assert gaps.miss_ratio(verdicts["zero"]) == math.inf
+    assert verdicts["max_only"]["met"] == {"l2": True, "max": False}
+    assert gaps.miss_ratios(verdicts["max_only"]) == {"max": [1.25, 1.25]}
+    assert gaps.miss_ratios(verdicts["both"]) == {"l2": [pytest.approx(1.2), pytest.approx(1.2)], "max": [1.25, 1.25]}
+    assert gaps.miss_ratios(verdicts["zero"]) == {}
+    assert gaps.beyond_caps(verdicts["zero"], {"max": 1.3}) == ["tier bf16: error 0 on draws [3], ours not"]
+    assert gaps.beyond_caps(verdicts["max_only"], {"max": 1.25}) == []
+    assert gaps.beyond_caps(verdicts["both"], {"max": 1.25}) == ["l2: misses the tier, and the known gap has no cap in it"]
     assert gaps.cap_of(1.25) == 1.25
     assert gaps.cap_of(1.07201) == 1.0721
     assert gaps.cap_of(1.0) == cn.NEAR_TIE
@@ -249,7 +253,8 @@ def test_the_miss_ratio_reads_the_norms_the_output_misses():
 
 
 def _gap_item(monkeypatch, caps, part="out"):
-    """Judge known-gap item ``part`` of a case whose output misses at ratio 1.25 (5 wins of 32), under ``caps``."""
+    """Judge known-gap item ``part`` of a case whose output misses the max norm at ratio 1.25 (5 wins of 32), under
+    ``caps`` (``{arch: {norm: cap}}``) on an sm_103a GPU."""
     judge = cn.TierJudge()
     _fill(judge, "out", 5)
     _fill(judge, "fine", 32)
@@ -267,24 +272,66 @@ def _gap_item(monkeypatch, caps, part="out"):
     return recorded
 
 
-def test_a_known_gap_within_its_cap_is_the_expected_miss(monkeypatch):
+def test_a_known_gap_within_its_caps_is_the_expected_miss(monkeypatch):
     with pytest.raises(AssertionError, match="out: misses the naive tier"):
-        _gap_item(monkeypatch, {"sm_103a": 1.25})
+        _gap_item(monkeypatch, {"sm_103a": {"max": 1.25}, "sm_100a": {"l2": 1.1}})
 
 
-@pytest.mark.parametrize("caps", [{"sm_103a": 1.2499}, {"sm_100a": 1.3}, None])
-def test_a_known_gap_beyond_its_cap_or_without_one_fails(monkeypatch, caps):
-    with pytest.raises(gaps.GapCapError, match="out: misses the naive tier on sm_103a with error ratio 1.25"):
+@pytest.mark.parametrize(
+    "caps,why",
+    [
+        ({"sm_103a": {"max": 1.2499}}, "max median ours x1.25 the tier's, above the cap x1.2499"),
+        ({"sm_103a": {"l2": 1.3}}, "max: misses the tier, and the known gap has no cap in it"),
+        ({"sm_100a": {"max": 1.3}}, "no caps on this architecture"),
+        (None, "no caps on this architecture"),
+    ],
+)
+def test_a_known_gap_beyond_its_caps_or_without_them_fails(monkeypatch, caps, why):
+    with pytest.raises(gaps.GapCapError, match="out: misses the naive tier on sm_103a beyond its known gap: ") as info:
         _gap_item(monkeypatch, caps)
+    assert why in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "caps",
+    [{}, {"max": 1.25001}, {"max": 1.0}, {"max": math.inf}, {"max": 2}, {"l3": 1.1}],
+    ids=["empty", "five-decimals", "below-near-tie", "inf", "int", "unknown-norm"],
+)
+def test_a_cap_of_another_form_is_refused(monkeypatch, caps):
+    monkeypatch.setattr(gaps, "CAPS", {"test_x[a-out]": {"sm_103a": caps}})
+    with pytest.raises(ValueError, match="test_x\\[a-out\\]: caps sm_103a"):
+        gaps.bf16_straddle_dw("test_x[a-out]")
+    monkeypatch.setattr(gaps, "CAPS", {"test_x[a-out]": {"sm_999a": {"max": 1.1}}})
+    with pytest.raises(ValueError):
+        gaps.bf16_straddle_dw("test_x[a-out]")
 
 
 def test_the_main_item_leaves_the_known_gap_to_its_own_item(monkeypatch):
-    recorded = _gap_item(monkeypatch, {"sm_103a": 1.25}, part=gaps.OUTPUTS)
+    recorded = _gap_item(monkeypatch, {"sm_103a": {"max": 1.25}}, part=gaps.OUTPUTS)
     assert [verdict["output"] for key, verdict in recorded] == ["fine"]
 
 
+def test_a_known_gap_item_records_its_ratios_and_caps(monkeypatch):
+    judge = cn.TierJudge()
+    _fill(judge, "out", 5)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_m.py::test_x[case-out] (call)")
+    monkeypatch.setattr(gaps, "CAPS", {"test_x[case-out]": {"sm_103a": {"max": 1.25}}})
+    monkeypatch.setattr(gaps, "arch", lambda: "sm_103a")
+    seen = []
+    with pytest.raises(AssertionError):
+        gaps.check(lambda k, v: seen.append((k, v)), "out", list(judge.verdicts().values()), judge.failures(), ["out"])
+    assert [key for key, _ in seen] == ["naive_tier", "known_gap"]
+    assert seen[1][1] == {
+        "item": "test_x[case-out]",
+        "arch": "sm_103a",
+        "caps": {"max": 1.25},
+        "ratios": {"max": [1.25, 1.25]},
+        "beyond": [],
+    }
+
+
 def test_a_marker_is_active_on_the_architectures_its_caps_list(monkeypatch):
-    monkeypatch.setattr(gaps, "CAPS", {"test_x[a-out]": {"sm_100a": 1.1, "sm_107a": 1.2}})
+    monkeypatch.setattr(gaps, "CAPS", {"test_x[a-out]": {"sm_100a": {"max": 1.1}, "sm_107a": {"l2": 1.2, "max": 1.3}}})
     gaps.arch.cache_clear()
     monkeypatch.setattr(gaps.torch.cuda, "is_available", lambda: True)
     try:
@@ -294,6 +341,6 @@ def test_a_marker_is_active_on_the_architectures_its_caps_list(monkeypatch):
             mark = gaps.bf16_straddle_dw("test_x[a-out]").mark
             assert mark.args == (active,) and mark.kwargs["strict"] and mark.kwargs["raises"] is AssertionError
             assert mark.kwargs["reason"].startswith("known gap on sm_100a, sm_107a: ")
-            assert "sm_100a 1.1000, sm_107a 1.2000" in mark.kwargs["reason"]
+            assert "sm_100a max 1.1000; sm_107a l2 1.2000, max 1.3000" in mark.kwargs["reason"]
     finally:
         gaps.arch.cache_clear()
