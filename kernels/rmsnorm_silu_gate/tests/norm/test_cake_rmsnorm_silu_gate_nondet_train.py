@@ -4383,3 +4383,327 @@ def test_deterministic_workspace_is_refused_naming_both_modes():
             "(cake_rmsnorm_silu_gate_nondet_train_backward_workspace(rows, device), "
             "or cake_rmsnorm_silu_gate_nondet_train_reset_workspace(workspace))"
         )
+
+
+# The libraries (a module record built for one architecture, ``build.json``'s
+# ``<library>_<arch>``) that no band of their architecture selects: no
+# ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` or ``BACKWARD_BANDS`` band names
+# their role, they are no long role of ``LONG_BACKWARD_ROWS_PER_SM`` and no
+# role whose bands end without a ``None`` band falls back to them, so no call of
+# the public API runs them and the band tests skip them.  ``(module role,
+# architecture)``: the long forward on sm_103a and sm_107a (routed on sm_100a
+# only), the static backward of a BF16 weight gradient on sm_107a, the
+# row-claims backwards on sm_100a and sm_103a and the claimed backward of a
+# BF16 weight gradient on every architecture.
+UNBANDED_LIBRARIES = {
+    ("fwd_long", "sm_103a"),
+    ("fwd_long", "sm_107a"),
+    ("bwd_bf16", "sm_107a"),
+    ("bwd_bf16_rc", "sm_100a"),
+    ("bwd_bf16_rc", "sm_103a"),
+    ("bwd_bf16_rc_mid", "sm_100a"),
+    ("bwd_bf16_rc_mid", "sm_103a"),
+    ("bwd_bf16_mid", "sm_100a"),
+    ("bwd_bf16_mid", "sm_103a"),
+    ("bwd_bf16_mid", "sm_107a"),
+}
+# The rows per SM of a mid and of a large call of each module role of
+# ``UNBANDED_LIBRARIES``, inside the module's intended range: the long
+# forward's sm_100a band (past 160 rows per SM up to 400); the sm_107a static
+# backward up to 64 rows per SM (one row block a CTA of its grid of 8 CTAs per
+# SM); the row-claims backwards past one wave of their CTAs (64 and 80 rows per
+# SM) up to the end of the band of a BF16 weight gradient that may vary on
+# sm_100a and sm_103a (1000 rows per SM); the claimed backward past the static
+# backward's 4 row blocks a CTA (256 rows per SM), with no end.  A forced
+# route runs every call of the role's kind on the module, so these cases run
+# each library whatever the bands; each case runs on every architecture the
+# module is built for (also one where a band selects it).
+FORCED_ROWS_PER_SM = {
+    "fwd_long": {"mid": 280, "large": 400},
+    "bwd_bf16": {"mid": 32, "large": 64},
+    "bwd_bf16_rc": {"mid": 128, "large": 1000},
+    "bwd_bf16_rc_mid": {"mid": 128, "large": 1000},
+    "bwd_bf16_mid": {"mid": 512, "large": 4096},
+}
+FORCED_SIZES = ("mid", "large")
+FORCED_BACKWARD_ROLES = ("bwd_bf16", "bwd_bf16_rc", "bwd_bf16_rc_mid", "bwd_bf16_mid")
+
+
+def _unbanded_libraries() -> set[tuple[str, str]]:
+    """``(module role, architecture)`` of every module record built for an
+    architecture whose bands never select it: not the route of a role of its
+    ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` or ``BACKWARD_BANDS`` bands,
+    of a long role of ``LONG_BACKWARD_ROWS_PER_SM``, or of a backward role
+    whose bands end without a ``None`` band (:func:`module_for_rows` falls
+    back to its own module)."""
+    found = set()
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        roles = {
+            band
+            for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
+            for _, band in table[arch]
+        }
+        for role, bands in loader.BACKWARD_BANDS[arch].items():
+            roles |= {band for _, band in bands}
+            if all(last is not None for last, _ in bands):
+                roles.add(role)
+        roles |= {
+            band + loader.LONG
+            for band in loader.LONG_BACKWARD_ROWS_PER_SM.get(arch, {})
+        }
+        selected = {routes[role] for role in roles}
+        for name, record in loader.MODULES.items():
+            if arch in record["arches"] and name not in selected:
+                found.add((record["role"], arch))
+    return found
+
+
+def _forced_module(role: str) -> str:
+    """The module record of ``role`` built for this device's architecture;
+    the test skips where none is."""
+    arch = loader.device_arch(torch.cuda.current_device())
+    names = [
+        name
+        for name, record in loader.MODULES.items()
+        if record["role"] == role and arch in record["arches"]
+    ]
+    if not names:
+        built = sorted(
+            {
+                a
+                for record in loader.MODULES.values()
+                if record["role"] == role
+                for a in record["arches"]
+            }
+        )
+        pytest.skip(
+            f"the {role} module has no build for {arch} (built for {', '.join(built)})"
+        )
+    assert len(names) == 1, (role, arch, names)
+    return names[0]
+
+
+def _force_route(monkeypatch: pytest.MonkeyPatch, role: str, name: str) -> None:
+    """Route every call of ``role``'s kind on this device's architecture to
+    module ``name``: ``ROUTES[arch][role]`` names it, and the forward's
+    ``FORWARD_BANDS`` and ``STRIDED_FORWARD_BANDS`` (a forward role) or the
+    BF16 weight gradient's ``BACKWARD_BANDS`` (a backward role; also the
+    bands of ``compute_grad_weight=False``) are the one band ``(None,
+    role)``.  Copies of the tables, restored by ``monkeypatch``."""
+    arch = loader.device_arch(torch.cuda.current_device())
+    routes = {a: dict(by_role) for a, by_role in loader.ROUTES.items()}
+    assert routes[arch].get(role, name) == name, (arch, role, routes[arch][role])
+    routes[arch][role] = name
+    monkeypatch.setattr(loader, "ROUTES", routes)
+    if role.startswith("fwd"):
+        for table in ("FORWARD_BANDS", "STRIDED_FORWARD_BANDS"):
+            bands = dict(getattr(loader, table))
+            bands[arch] = ((None, role),)
+            monkeypatch.setattr(loader, table, bands)
+    else:
+        bands = {a: dict(by_role) for a, by_role in loader.BACKWARD_BANDS.items()}
+        bands[arch]["bwd_bf16"] = ((None, role),)
+        monkeypatch.setattr(loader, "BACKWARD_BANDS", bands)
+
+
+def _forced_shape(role: str, size: str) -> tuple[int, int]:
+    """``(T, 48)``: the most tokens of 48 heads (at least 2) within
+    ``FORCED_ROWS_PER_SM[role][size]`` rows per SM on this device."""
+    sm_count = loader.device_sm_count(torch.cuda.current_device())
+    return max(2, FORCED_ROWS_PER_SM[role][size] * sm_count // 48), 48
+
+
+def _gate_columns(t: torch.Tensor) -> torch.Tensor:
+    """``t`` (``[T, H, 128]``) as the gate columns of a wider projection, read
+    in place: the same values with token stride ``2 * H * 128 + 16``."""
+    T, H, _ = t.shape
+    wide = torch.empty(T, 2 * H * D + 16, dtype=t.dtype, device=t.device)
+    view = wide[:, H * D : 2 * H * D].view(T, H, D)
+    view.copy_(t)
+    return view
+
+
+def test_forced_routes_cover_every_library_no_band_selects():
+    """The libraries no band selects are ``UNBANDED_LIBRARIES``, each one a
+    ``build.json`` library, and the forced-route tests cover each one's role
+    (``FORCED_ROWS_PER_SM``); every unbanded backward writes a BF16 weight
+    gradient (a ``bwd_bf16`` role), so an FP32 weight gradient, which takes
+    the ``bwd_f32`` bands, never runs it."""
+    found = _unbanded_libraries()
+    assert found == UNBANDED_LIBRARIES, sorted(found ^ UNBANDED_LIBRARIES)
+    assert {role for role, _ in found} == set(FORCED_ROWS_PER_SM)
+    assert set(FORCED_BACKWARD_ROLES) == set(FORCED_ROWS_PER_SM) - {"fwd_long"}
+    libraries = cake_build.libraries_by_name()
+    for role, arch in sorted(found):
+        names = [
+            name
+            for name, record in loader.MODULES.items()
+            if record["role"] == role and arch in record["arches"]
+        ]
+        assert len(names) == 1, (role, arch, names)
+        assert loader.library_name(names[0], arch) in libraries, (role, arch)
+        assert role == "fwd_long" or role.startswith("bwd_bf16"), role
+
+
+@pytest.mark.parametrize("size", FORCED_SIZES)
+def test_long_forward_runs_through_a_forced_route(
+    size, launches, monkeypatch, record_property
+):
+    """The long forward (``fwd_long``, which no band selects on sm_103a and
+    sm_107a) on a forced route (:func:`_force_route`; skipped where it has no
+    build) for ``FORCED_ROWS_PER_SM`` rows: ``y`` of packed rows and of ``z``
+    as the gate columns of a wider projection (other layouts' bands) the
+    same bits, the same bits on every launch (the first draw's ``REPEATS``),
+    and judged against the naive implementation over the draws of
+    ``judge``."""
+    role = "fwd_long"
+    name = _forced_module(role)
+    T, H = _forced_shape(role, size)
+    rows = T * H
+    _force_route(monkeypatch, role, name)
+    assert _forward_module(rows) == name
+    assert _forward_module(rows, packed=False) == name
+
+    def run(j, s):
+        x, z, w, _ = make(T, H, seed=s)
+        zp = _gate_columns(z)
+        first = None
+        for i in range(REPEATS if j == 0 else 1):
+            y = forward(x, z, w, EPS)
+            assert y.dtype == torch.bfloat16 and y.shape == x.shape
+            assert torch.equal(forward(x, zp, w, EPS), y), f"projection y, launch {i}"
+            if first is None:
+                first = y
+            else:
+                assert torch.equal(y, first), f"y: launch {i} vs the first launch"
+        return silu_draw(x, z, w, None, EPS, [{"y": first}], {"y": "y"})
+
+    judge(record_property, run, seed=101)
+    assert launches == [name] * (2 * _launch_count()), launches
+
+
+@pytest.mark.parametrize("size", FORCED_SIZES)
+@pytest.mark.parametrize("role", FORCED_BACKWARD_ROLES)
+def test_backward_libraries_no_band_selects_run_through_a_forced_route(
+    role, size, launches, monkeypatch, record_property
+):
+    """A backward module that no band selects (``UNBANDED_LIBRARIES``) on a
+    forced route (:func:`_force_route`; skipped where it has no build) for
+    ``FORCED_ROWS_PER_SM`` rows.  Each is a build of a BF16 weight gradient
+    (an FP32 one takes the ``bwd_f32`` bands, another program): ``dx``,
+    ``dz``, the BF16 weight gradient and the weight gradient accumulated onto
+    0.25 judged against the naive implementation over the draws of
+    ``judge``, ``dx`` and ``dz`` (and the weight gradient where the module
+    repeats it, :func:`_varies`) the same bits on every launch
+    (``check_all``), the stream's workspace zero after them.  On a caller
+    workspace, over the same draws of ``judge`` (two launches on the first
+    draw, one on the others) and on a launch with ``dy`` and ``z`` as the
+    gate columns of a wider projection: the BF16 weight gradient, the one
+    accumulated onto 0.25 and the projection's judged against the naive
+    implementation (every launch's: the judge keeps the larger error),
+    ``dx`` and ``dz`` the bits of the draw's first launch (on the first draw
+    ``check_all``'s judged ones), and so is the weight gradient, alone and
+    accumulated, where the module repeats it (:func:`assert_dw_repeats`).
+    ``compute_grad_weight=False`` returns ``None``, leaves ``grad_weight`` as
+    it is and gives the same ``dx`` and ``dz``; the workspace is zero after
+    every call."""
+    name = _forced_module(role)
+    T, H = _forced_shape(role, size)
+    rows = T * H
+    _force_route(monkeypatch, role, name)
+    assert _backward_module(rows) == name
+    assert _backward_module(rows, packed=False) == name
+    assert _backward_module(rows, torch.float32) != name
+    varies = _varies(name)
+    what = f"{role} ({name}) at {rows} rows"
+    (x, z, w, dy), (_, dx, dz, dw) = check_all(
+        record_property, lambda s: make(T, H, seed=s), seed=100
+    )
+    fwd = _forward_module(rows)
+    assert launches == [fwd, name, name] * _launch_count(), launches
+    key = (
+        torch.cuda.current_device(),
+        torch.cuda.current_stream().cuda_stream,
+        name,
+    )
+    views = pkg._STREAM_WORKSPACES[key]
+    # (through bytes: uint64 tensors take few operations)
+    assert not any(bool(view.view(torch.uint8).any()) for view in views.values()), what
+    launches.clear()
+    ws = workspace_for(rows, x.device)
+
+    def bf16(fill=None):
+        if fill is None:
+            return torch.empty(D, dtype=torch.bfloat16, device=x.device)
+        return torch.full((D,), fill, dtype=torch.bfloat16, device=x.device)
+
+    # The weight gradients of the caller-workspace and projection launches,
+    # judged like check_all's: a row-claims module's may vary from launch to
+    # launch, and a repeated wrong sum has the same bits every time, so bits
+    # alone do not check them.
+    kinds = {
+        "caller-workspace dw": "dw",
+        "caller-workspace accumulated dw": "dw",
+        "projection dw": "dw",
+    }
+    starts = {
+        "caller-workspace accumulated dw": torch.full((D,), 0.25, dtype=torch.bfloat16)
+    }
+
+    def run(j, s):
+        x, z, w, dy = make(T, H, seed=s)
+        # Draw 0's inputs are check_all's first draw's (the same seed).
+        want = (dx, dz, dw) if j == 0 else None
+        accumulated = None
+        launched = []
+        for i in range(2 if j == 0 else 1):
+            at = f"{what}: draw {j}, launch {i}"
+            gx, gz, gw = backward(dy, x, z, w, EPS, grad_weight=bf16(), workspace=ws)
+            assert not bool(ws.any()), at
+            if want is None:
+                want = (gx, gz, gw)
+            assert torch.equal(gx, want[0]) and torch.equal(gz, want[1]), at
+            assert_dw_repeats(gw, want[2], varies=varies, what=f"dw {at}")
+            main = bf16(0.25)
+            backward(
+                dy,
+                x,
+                z,
+                w,
+                EPS,
+                grad_weight=main,
+                accumulate_grad_weight=True,
+                workspace=ws,
+            )
+            assert not bool(ws.any()), f"accumulating {at}"
+            if accumulated is None:
+                accumulated = main
+            else:
+                assert_dw_repeats(
+                    main, accumulated, varies=varies, what=f"accumulated dw {at}"
+                )
+            launched.append(
+                {"caller-workspace dw": gw, "caller-workspace accumulated dw": main}
+            )
+        at = f"{what}: draw {j}, projection"
+        dyp, zp = _gate_columns(dy), _gate_columns(z)
+        gx, gz, gw = backward(dyp, x, zp, w, EPS, grad_weight=bf16(), workspace=ws)
+        assert not bool(ws.any()), at
+        assert torch.equal(gx, want[0]) and torch.equal(gz, want[1]), at
+        assert_dw_repeats(gw, want[2], varies=varies, what=f"dw {at}")
+        launched.append({"projection dw": gw})
+        return silu_draw(x, z, w, dy, EPS, launched, kinds, starts=starts)
+
+    judge(record_property, run, seed=100)
+    main = bf16(3.0)
+    gx, gz, gw = backward(
+        dy, x, z, w, EPS, grad_weight=main, compute_grad_weight=False, workspace=ws
+    )
+    assert gw is None, what
+    assert torch.equal(gx, dx) and torch.equal(gz, dz), what
+    assert torch.equal(main, torch.full_like(main, 3.0)), what
+    assert not bool(ws.any()), f"{what}: compute_grad_weight=False"
+    # Per caller-workspace launch a backward and an accumulating one, a
+    # projection backward a draw, and the compute_grad_weight=False call.
+    assert launches == [name] * (2 * _launch_count(2) + DRAWS + 1), launches
