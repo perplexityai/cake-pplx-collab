@@ -16,13 +16,13 @@ limitations under the License.
 Benchmark of the Cake SiLU-gated RMSNorm training kernels
 (``RMSNorm(x) * w * SiLU(z)`` over ``[T, H, 128]``) of the non-deterministic
 package (``cake_pplx.cake_rmsnorm_silu_gate_nondet_train``: a forward with
-approximate FP32 intrinsics, and one backward kernel whose CTAs add the
-weight-gradient partials exactly as 64-bit integer windows, the last CTA
-rounding the sum once, or, for a BF16 weight gradient in its fused band, run
-the deterministic package's fused backward's schedule and row arithmetic and
-add FP32 runs of rows into FP32 words and the CTAs' FP32 column sums into
-FP32 replicas with FP32 atomic adds, and past that band run its copy of the
-deterministic package's backward) beside the deterministic package
+approximate FP32 intrinsics, and one backward kernel: past its one-cluster
+bands, for a BF16 weight gradient in its fused band, the deterministic
+package's fused backward's schedule and row arithmetic adding FP32 runs of
+rows into FP32 words and the CTAs' FP32 column sums into FP32 replicas with
+FP32 atomic adds, and past that band, and for an FP32 weight gradient past
+512 rows, its copy of the deterministic package's backward) beside the
+deterministic package
 (``cake_pplx.cake_rmsnorm_silu_gate_det_train``: its one-kernel backward with
 FP32 chunk words added exactly in fixed point), each called through its own
 public entry points.
@@ -55,9 +55,10 @@ fused backward up to 256 and the repeatable backward past it.  From 2560 rows
 per SM on SM100 and SM103 and 1536 on SM107 packed rows run the repeatable
 backward's long program (its copy of the deterministic package's look-ahead
 program, the same bits; ``cake_jit.LONG_BACKWARD_ROWS_PER_SM``).
-An FP32 weight gradient runs the exact tiny backward up to 512 rows, the
-static backward up to 256 rows per SM on SM100 and SM103 (64 on SM107) and the
-claimed backward past that.  At ``--heads 48`` the default token counts reach
+An FP32 weight gradient runs the exact tiny backward up to 512 rows and the
+repeatable backward of an FP32 weight gradient (its copy of the
+deterministic package's FP32 backward) past that, and its long program on
+packed rows from the same cuts.  At ``--heads 48`` the default token counts reach
 every forward kernel of packed rows but the extra-long one (401 to 520 rows
 per SM, 1234 to 1603 tokens) and every BF16 backward kernel that a band of a
 148-SM B200 runs (2048 tokens: the pipelined forward).

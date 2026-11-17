@@ -28,7 +28,8 @@ Every output of the package repeats bit for bit, except a BF16 weight
 gradient of the fused backward (``bwd_bf16_fused``, a band of
 ``BACKWARD_BANDS`` past the small-row bands on every architecture, on sm_107a
 between two repeatable bands; an FP32 weight gradient runs no fused
-backward) and of the row-claims backwards (``bwd_bf16_rc``,
+backward, and past its small-row band the repeatable backward,
+``bwd_f32_rep``) and of the row-claims backwards (``bwd_bf16_rc``,
 ``bwd_bf16_rc_mid``, where a band runs them), whose CTAs claim 16-row blocks
 at run time and add the FP32 sums of their rows into FP32 replicas with FP32
 atomic adds (grid kind ``row_claims``), so its last bits may vary from run to
@@ -83,13 +84,15 @@ checks:
   the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows)
   and ``STRIDED_FORWARD_BANDS`` bands (other layouts) and the backward at
   the first and the last rows of each ``BACKWARD_BANDS`` band of this device
-  (the small-row backwards, one cluster each, the fused backward, the static
-  backwards, the row-claims backwards and the claimed backward), each call
-  launching ``module_for_rows``' module, and where a chunked backward's
-  chunks grow by a block; so are strided inputs (``dy``, ``x`` and ``z`` not
-  of one packed row stride) in the bands of the row-claims, the claimed and
-  the fused backwards (``LAYOUT_BAND_CASES``), launching the strides of their
-  layout; finite gate inputs at and past the packed gate's range (around
+  (the small-row backwards, one cluster each, the fused backward and the
+  repeatable backward of either weight gradient), each call launching
+  ``module_for_rows``' module (no band runs a chunked backward, the static
+  or the claimed one, so no case checks where its chunks grow by a block);
+  so are strided inputs (``dy``, ``x`` and ``z`` not of one packed row
+  stride) in the bands of the fused and the repeatable backwards, the
+  repeatable ones of either weight gradient (``LAYOUT_BAND_CASES``; its
+  row-claims and claimed cases skip: no band runs them), launching the
+  strides of their layout; finite gate inputs at and past the packed gate's range (around
   FP32 ``expf``'s overflow and in the gate's tail too), in the forward and
   the backward, are judged, and with infinite and ``NaN`` gates beside them
   and infinite upstream gradients (in the last row too, with one row, half a
@@ -953,19 +956,34 @@ def test_backward_with_no_rows_refuses_the_deterministic_workspace(
 @requires_device
 @pytest.mark.parametrize(
     "band",
-    [None, "bwd_bf16_fused", "bwd_bf16_rep", "bwd_bf16_rep_long"],
-    ids=["1031x48", "bwd_bf16_fused", "bwd_bf16_rep", "bwd_bf16_rep_long"],
+    [
+        None,
+        "bwd_bf16_fused",
+        "bwd_bf16_rep",
+        "bwd_bf16_rep_long",
+        "bwd_f32_rep",
+        "bwd_f32_rep_long",
+    ],
+    ids=[
+        "1031x48",
+        "bwd_bf16_fused",
+        "bwd_bf16_rep",
+        "bwd_bf16_rep_long",
+        "bwd_f32_rep",
+        "bwd_f32_rep_long",
+    ],
 )
 def test_accumulation_meets_the_naive_tier(
     band, determinism_setting, record_property
 ) -> None:
     """Two microbatches of ``T x H`` rows (1031 tokens of 48 heads; for
-    ``band`` the fewest whole tokens of 48 heads in that BF16 band, the
-    fused, the repeatable or the long role's packed rows,
-    ``suite._band_shape``, on every architecture; an FP32 weight gradient
-    runs its own band there) accumulated into an FP32 and a BF16 buffer
-    starting at 0.25: the same starting buffer gives the same bits (a BF16
-    buffer where its band repeats a BF16 ``dw``).  Autograd accumulation into
+    ``band`` the fewest whole tokens of 48 heads in that band, of a BF16
+    weight gradient the fused, the repeatable or the long role's packed
+    rows, of an FP32 one the repeatable or the long role's packed rows,
+    ``suite._band_shape``, on every architecture; the weight gradient of the
+    other dtype runs its own band there) accumulated into an FP32 and a BF16
+    buffer starting at 0.25: the same starting buffer gives the same bits (a
+    BF16 buffer where its band repeats a BF16 ``dw``).  Autograd accumulation into
     ``.grad`` over two microbatches gives the sum of the two nodes' weight
     gradients (recorded by a hook), each the functional backward's bits
     where its band repeats them (``suite.assert_dw_repeats``), and twice the
@@ -1059,8 +1077,9 @@ def test_compute_grad_weight_false_meets_the_naive_tier(
     of 48 heads and, for ``band``, at the fewest whole tokens of 48 heads in
     that BF16 band, the fused, the repeatable or the long role's packed rows
     (``suite._band_shape``; a call without the weight gradient takes the
-    BF16 bands; every architecture); on the inputs of every draw of
-    ``judge`` they are judged against the naive implementation."""
+    BF16 bands, so no band of an FP32 weight gradient is a case; every
+    architecture); on the inputs of every draw of ``judge`` they are judged
+    against the naive implementation."""
     shape = (257, 48) if band is None else suite._band_shape(band)
     if shape is None:
         pytest.skip(f"this device routes no {band} band")
@@ -1845,9 +1864,9 @@ def test_forward_gate_edges_keep_the_fp64_classes(
 # backward), 288 rows (the exact tiny backward of a BF16
 # weight gradient on sm_100a and sm_107a, the fused backward on sm_103a),
 # then 1008, 6192, 49488, 49536 and 245808 rows in the bands past them (the
-# fused, the static and the claimed backwards, as the architecture's
-# ``BACKWARD_BANDS`` and the SM count place them: every one of them in the
-# fused band of a BF16 weight gradient).
+# fused or the repeatable backward of a BF16 weight gradient, the repeatable
+# backward of an FP32 one, as the architecture's ``BACKWARD_BANDS`` and the
+# SM count place them).
 GATE_EDGE_BACKWARD_COLUMNS = 96
 GATE_EDGE_BACKWARD_CASES = [
     pytest.param(1, 48, id="1x48"),
@@ -2064,7 +2083,8 @@ def _band_id(band: str, nth: int) -> str:
 # (grid kind ``chunks``) ``chunks`` is the program's last rows of chunks of
 # ``k`` blocks, ``rows_per_block * chunk_limit * k`` for the fewest ``k`` in
 # its band, and ``chunks+1`` its first rows of ``k + 1`` blocks, where its
-# band holds them.
+# band holds them (no band runs a chunked backward on any architecture, so
+# no such edge is a case).
 BACKWARD_BAND_EDGES = [
     pytest.param(band, nth, edge, id=f"{_band_id(band, nth)}-{edge}")
     for band, nth in BACKWARD_BAND_NTHS
@@ -2090,10 +2110,10 @@ def test_backward_band_edges_meet_the_naive_tier(
 ) -> None:
     """At the first and the last rows of each ``BACKWARD_BANDS`` band on this
     device's SM count (:func:`_band_modules`: the small-row backwards, the
-    fused backward, the static backwards, the row-claims backwards and the
-    claimed backward, each where the architecture routes it) and where a
-    chunked program's chunks
-    grow by a block (``backward_chunks``): ``module_for_rows`` runs the
+    fused backward, the row-claims backwards and the repeatable backward of
+    either weight gradient, each where the architecture routes it) and where
+    a chunked program's chunks grow by a block (``backward_chunks``; no band
+    runs a chunked program, so no such case): ``module_for_rows`` runs the
     band's program from its first to its last rows only, and
     ``_check_backward`` holds on flat [rows, 128] inputs into the band's
     weight-gradient dtype (each draw's)."""
@@ -2198,7 +2218,8 @@ def test_backward_shapes_meet_the_naive_tier(
 
 
 # The backend suite's ``BULK_BAND_CASES`` (strided and packed inputs in the
-# bands of the row-claims, the claimed and the fused backwards) and the same
+# bands of the row-claims, the claimed, the fused and the repeatable
+# backwards, the repeatable ones of either weight gradient) and the same
 # layouts in the fused band (``bwd_bf16_fused``, every architecture) where the
 # suite does not list it; a case of a band this device does not route skips.
 FUSED_BANDS = ("bwd_bf16_fused",)
@@ -2224,7 +2245,7 @@ def test_layouts_in_the_row_claims_and_claimed_backward_bands_meet_the_naive_tie
     record_property,
 ) -> None:
     """``LAYOUT_BAND_CASES`` (strided and packed inputs in the bands of the
-    row-claims, the claimed and the fused backwards,
+    row-claims, the claimed, the fused and the repeatable backwards,
     ``suite._bulk_band_shape``): ``module_for_rows`` runs the band's program,
     the launch passes the strides of the layout, which pass the kernels'
     packed-rows test (``_packed``: ``dy``, ``x`` and ``z`` of one packed row
@@ -2575,7 +2596,8 @@ def test_kernel_view_strides(shape, strides, want) -> None:
 # per tensor where the rows are packed, else each thread its own row), whose
 # bits must not depend on the layout either; so do the repeatable backward
 # and its long role (which runs the packed layouts only; a layout whose rows
-# do not follow one another runs the repeatable backward, the same bits).
+# do not follow one another runs the repeatable backward, the same bits),
+# of either weight gradient.
 # The one-head inputs take one row past the start of each one's band
 # (``_start_rows``); a module that no band of this device runs (a forward
 # module: no ``STRIDED_FORWARD_BANDS`` band) skips.
@@ -2584,10 +2606,11 @@ ONE_HEAD_ROUTES = [
     pytest.param("fwd", "fwd_xlong", id="fwd_xlong"),
     pytest.param("bwd_bf16", "bwd_bf16_rc_mid", id="bwd_bf16_rc_mid"),
     pytest.param("bwd_bf16", "bwd_bf16_mid", id="bwd_bf16_claimed"),
-    pytest.param("bwd_f32", "bwd_f32_mid", id="bwd_f32_claimed"),
     pytest.param("bwd_bf16", "bwd_bf16_fused", id="bwd_bf16_fused"),
     pytest.param("bwd_bf16", "bwd_bf16_rep", id="bwd_bf16_rep"),
     pytest.param("bwd_bf16", "bwd_bf16_rep_long", id="bwd_bf16_rep_long"),
+    pytest.param("bwd_f32", "bwd_f32_rep", id="bwd_f32_rep"),
+    pytest.param("bwd_f32", "bwd_f32_rep_long", id="bwd_f32_rep_long"),
 ]
 
 
@@ -2598,7 +2621,8 @@ def test_one_head_inputs_give_the_same_bits_for_every_layout(
 ) -> None:
     """One row past the start of the mid and the extra-long forward (their
     strided bands) and of the row-claims mid, the claimed, the fused and the
-    repeatable backwards and the long role's packed rows: a one-head input of
+    repeatable backwards (of either weight gradient) and the long roles'
+    packed rows: a one-head input of
     every layout (``ONE_HEAD_LAYOUTS``) launches ``module_for_rows``' module
     (the module of its layout's packing) with head stride 128, passes the
     packed-rows test exactly when its rows follow one another (or the host

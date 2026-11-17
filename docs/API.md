@@ -161,7 +161,7 @@ Other public names:
 
 `y`, `dx`, `dz` and an FP32 weight gradient repeat bit for bit.
 
-A BF16 weight gradient (or `compute_grad_weight=False`) in the **fused band** adds each CTA's FP32 column sums into FP32 replicas with FP32 atomic adds, so its last bits may vary between runs. The fused band is past 512 rows on SM100 and past 256 rows on SM103, up to 1000 rows per SM; on SM107 it is past 64 rows per SM, up to 256 rows per SM. Only that backward alerts under deterministic algorithms. The other bands (one-cluster, chunked, static/claimed and repeatable) are bitwise repeatable. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py).
+A BF16 weight gradient (or `compute_grad_weight=False`) in the **fused band** adds each CTA's FP32 column sums into FP32 replicas with FP32 atomic adds, so its last bits may vary between runs. The fused band is past 512 rows on SM100 and past 256 rows on SM103, up to 1000 rows per SM; on SM107 it is past 64 rows per SM, up to 256 rows per SM. Only that backward alerts under deterministic algorithms. The other bands (one-cluster and repeatable) are bitwise repeatable; in a repeatable band (a BF16 `dw` past the fused band, on SM107 also before it; an FP32 `dw` past 512 rows) `dw` is the same bits for the same rows and SM count. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
