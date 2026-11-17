@@ -183,7 +183,7 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
     int cta_rank;
     asm volatile("mov.b32 %0, %%cluster_ctarank;" : "=r"(cta_rank));
 
-    // Kernel setup ops
+    // Prologue
     __nv_bfloat16* smem_a = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int smem_a_addr = smem + 1024;
     __nv_bfloat16* smem_b = reinterpret_cast<__nv_bfloat16*>(smem_raw + 17408);
@@ -192,10 +192,11 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
     const int work_response_addr = smem + 230400;
     float* slab_smem = reinterpret_cast<float*>(smem_raw + 1024);
     const int slab_smem_addr = smem + 1024;
+
+    // Kernel setup ops
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
-    // Mbarrier init (7 pipeline groups, 0 ordered-sequence groups, 36 barriers)
-    // Mbarriers at smem_raw[0..288)
+    // Mbarrier init (36 barriers at smem_raw[0..288))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -267,10 +268,8 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
     asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
     asm volatile("griddepcontrol.wait;" ::: "memory");
 
-    const int taddr = tmem_addr_storage[0];
-
-    // Kernel post-init ops
-    const int tmem_accum = taddr;
+    const unsigned int taddr = tmem_addr_storage[0];
+    const unsigned int tmem_accum = taddr;
 
     // ---- Role: load ----
     if (warp == 0) {
@@ -709,9 +708,9 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
                                     __syncwarp();
                                     asm volatile("tcgen05.fence::after_thread_sync;");
                                     if (lane == 0) {
-                                        unsigned long long off_w = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 3072 + (unsigned long long)((col0 - slice_col0) * 32);
+                                        unsigned long long off_w = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 3072ull + (unsigned long long)((col0 - slice_col0) * 32);
                                         mbarrier_arrive_expect_tx(slab_bar_addr + (warp_id_in_role) * 8, (unsigned int)nb);
-                                        cp_async_bulk_gmem2smem(slab_smem_addr + (unsigned int)(sb_slot * 3072 * 4), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(ws) + ((unsigned long long)off_w * (unsigned long long)4)), nb / 4 * 4, slab_bar_addr + (warp_id_in_role) * 8);
+                                        cp_async_bulk_gmem2smem(slab_smem_addr + (unsigned int)(sb_slot * 3072 * 4), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(ws) + (unsigned long long)off_w * (unsigned long long)4), nb / 4 * 4, slab_bar_addr + (warp_id_in_role) * 8);
                                     }
                                 }
                                 if (nb > 0) {
@@ -771,7 +770,7 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
                             }
                         } else {
                             int slice_id = cta_rank * 8 + (warp - 2);
-                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 3072 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 3072ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0 = off;
                             int nvalid_1 = N - (off_n_1 + col0);
                             if (nvalid_1 >= 96) {
@@ -844,7 +843,7 @@ kernel_cake_dense_projection_det_gemm_fdb106e6e73897521cbb(const __grid_constant
                             }
                         } else {
                             int slice_id_1 = cta_rank * 8 + (warp - 2);
-                            unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 3072 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 3072ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0_1 = off_1;
                             int nvalid_3 = N - (off_n_1 + col0);
                             if (nvalid_3 >= 96) {

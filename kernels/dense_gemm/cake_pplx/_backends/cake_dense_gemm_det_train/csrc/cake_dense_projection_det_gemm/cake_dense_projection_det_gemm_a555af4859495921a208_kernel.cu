@@ -747,7 +747,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                                     __syncwarp();
                                     asm volatile("tcgen05.fence::after_thread_sync;");
                                     if (lane == 0) {
-                                        unsigned long long off_w = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 8192 + (unsigned long long)((col0 - slice_col0) * 32);
+                                        unsigned long long off_w = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32);
                                         mbarrier_arrive_expect_tx(slab_bar_addr + (warp_id_in_role) * 8, (unsigned int)nb);
                                         cp_async_bulk_gmem2smem(slab_smem_addr + (unsigned int)(sb_slot * 4096 * 4), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(ws) + (unsigned long long)off_w * (unsigned long long)4), nb / 4 * 4, slab_bar_addr + (warp_id_in_role) * 8);
                                     }
@@ -807,7 +807,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                         if (part_4 == 0) {
                             unsigned long long row_base = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                             if (global_row < M) {
-                                int mis32 = (int)((unsigned long long)(out + row_base) & 31);
+                                int mis32 = (int)((unsigned long long)(out + row_base) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk = 0; n_chunk < 8; n_chunk++) {
                                     int col = n_chunk * 16;
@@ -939,7 +939,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                             }
                         } else {
                             int slice_id = cta_rank * 8 + (warp - 2);
-                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0 = off;
                             int nvalid_1 = N - (off_n_1 + col0);
                             if (nvalid_1 >= 128) {
@@ -1003,7 +1003,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                             }
                         } else {
                             int slice_id_1 = cta_rank * 8 + (warp - 2);
-                            unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0_1 = off_1;
                             int nvalid_3 = N - (off_n_1 + col0);
                             if (nvalid_3 >= 128) {
@@ -1094,7 +1094,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                                     __syncwarp();
                                     asm volatile("tcgen05.fence::after_thread_sync;");
                                     if (lane == 0) {
-                                        unsigned long long off_w_1 = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32);
+                                        unsigned long long off_w_1 = (unsigned long long)(slab * 16 + cta_rank * 8 + (warp - 2)) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32);
                                         mbarrier_arrive_expect_tx(slab_bar_addr + (warp_id_in_role) * 8, (unsigned int)nb_1);
                                         cp_async_bulk_gmem2smem(slab_smem_addr + (unsigned int)(sb_slot * 4096 * 4), reinterpret_cast<const void*>(reinterpret_cast<const uint8_t*>(ws) + (unsigned long long)off_w_1 * (unsigned long long)4), nb_1 / 4 * 4, slab_bar_addr + (warp_id_in_role) * 8);
                                     }
@@ -1160,7 +1160,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                         if (part_4 == 0) {
                             unsigned long long row_base_1 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + (col0 + 128));
                             if (global_row < M) {
-                                int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31);
+                                int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk_1 = 0; n_chunk_1 < 8; n_chunk_1++) {
                                     int col_1 = n_chunk_1 * 16;
@@ -1292,7 +1292,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                             }
                         } else {
                             int slice_id_2 = cta_rank * 8 + (warp - 2);
-                            unsigned long long off_2 = (unsigned long long)(slab * 16 + slice_id_2) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off_2 = (unsigned long long)(slab * 16 + slice_id_2) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0_2 = off_2;
                             int nvalid_5 = N - (off_n_1 + (col0 + 128));
                             if (nvalid_5 >= 128) {
@@ -1365,7 +1365,7 @@ kernel_cake_dense_projection_det_gemm_a555af4859495921a208(const __grid_constant
                             }
                         } else {
                             int slice_id_3 = cta_rank * 8 + (warp - 2);
-                            unsigned long long off_3 = (unsigned long long)(slab * 16 + slice_id_3) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off_3 = (unsigned long long)(slab * 16 + slice_id_3) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0_3 = off_3;
                             int nvalid_7 = N - (off_n_1 + (col0 + 128));
                             if (nvalid_7 >= 128) {

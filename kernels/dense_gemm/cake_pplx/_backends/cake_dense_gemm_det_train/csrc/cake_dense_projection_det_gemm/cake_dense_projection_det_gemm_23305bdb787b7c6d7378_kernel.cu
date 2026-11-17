@@ -188,7 +188,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
     int cta_rank;
     asm volatile("mov.b32 %0, %%cluster_ctarank;" : "=r"(cta_rank));
 
-    // Kernel setup ops
+    // Prologue
     __nv_bfloat16* smem_a = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int smem_a_addr = smem + 1024;
     __nv_bfloat16* smem_a1 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 17408);
@@ -199,10 +199,11 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
     const int smem_a_ld_addr = smem + 1024;
     unsigned int* work_response = reinterpret_cast<unsigned int*>(smem_raw + 226304);
     const int work_response_addr = smem + 226304;
+
+    // Kernel setup ops
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
-    // Mbarrier init (7 pipeline groups, 0 ordered-sequence groups, 21 barriers)
-    // Mbarriers at smem_raw[0..168)
+    // Mbarrier init (21 barriers at smem_raw[0..168))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -259,10 +260,8 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
     asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
     asm volatile("griddepcontrol.wait;" ::: "memory");
 
-    const int taddr = tmem_addr_storage[0];
-
-    // Kernel post-init ops
-    const int tmem_accum = taddr;
+    const unsigned int taddr = tmem_addr_storage[0];
+    const unsigned int tmem_accum = taddr;
 
     // ---- Role: load ----
     if (warp == 0) {
@@ -693,7 +692,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                     if (part_4 == 0) {
                         unsigned long long row_base = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                         if (global_row < M) {
-                            int mis32 = (int)((unsigned long long)(out + row_base) & 31);
+                            int mis32 = (int)((unsigned long long)(out + row_base) & 31ull);
                             #pragma unroll
                             for (int n_chunk = 0; n_chunk < 5; n_chunk++) {
                                 int col = n_chunk * 16;
@@ -825,7 +824,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                         }
                     } else {
                         int slice_id = cta_rank * 8 + (warp - 2);
-                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 5120 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 5120ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0 = off;
                         int nvalid = N - (off_n_1 + col0);
                         if (nvalid >= 80) {
@@ -871,7 +870,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                     if (part_4 == 0) {
                         unsigned long long row_base_1 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0 + 80);
                         if (global_row < M) {
-                            int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31);
+                            int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31ull);
                             #pragma unroll
                             for (int n_chunk_1 = 0; n_chunk_1 < 5; n_chunk_1++) {
                                 int col_1 = n_chunk_1 * 16;
@@ -1003,7 +1002,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                         }
                     } else {
                         int slice_id_1 = cta_rank * 8 + (warp - 2);
-                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 5120 + (unsigned long long)((col0 + 80 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 5120ull + (unsigned long long)((col0 + 80 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0_1 = off_1;
                         int nvalid_1 = N - (off_n_1 + col0 + 80);
                         if (nvalid_1 >= 80) {
@@ -1055,7 +1054,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                             #pragma unroll 1
                             for (int sidx = 0; sidx < nparts; sidx++) {
                                 int slice_id_2 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 5120 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 5120ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_2 = off_2;
                                 if (nvalid_2 >= 80) {
                                     #pragma unroll
@@ -1098,7 +1097,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                             }
                             unsigned long long row_base_2 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                             if (global_row < M) {
-                                int mis32_2 = (int)((unsigned long long)(out + row_base_2) & 31);
+                                int mis32_2 = (int)((unsigned long long)(out + row_base_2) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk_2 = 0; n_chunk_2 < 5; n_chunk_2++) {
                                     int col_2 = n_chunk_2 * 16;
@@ -1236,7 +1235,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                             #pragma unroll 1
                             for (int sidx_1 = 0; sidx_1 < nparts; sidx_1++) {
                                 int slice_id_3 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 5120 + (unsigned long long)((col0 + 80 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 5120ull + (unsigned long long)((col0 + 80 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_3 = off_3;
                                 if (nvalid_0 >= 80) {
                                     #pragma unroll
@@ -1279,7 +1278,7 @@ kernel_cake_dense_projection_det_gemm_23305bdb787b7c6d7378(const __grid_constant
                             }
                             unsigned long long row_base_0 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0 + 80);
                             if (global_row < M) {
-                                int mis32_3 = (int)((unsigned long long)(out + row_base_0) & 31);
+                                int mis32_3 = (int)((unsigned long long)(out + row_base_0) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk_3 = 0; n_chunk_3 < 5; n_chunk_3++) {
                                     int col_3 = n_chunk_3 * 16;
