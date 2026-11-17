@@ -11796,7 +11796,8 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
     SM count), and one token past the last window, ``cake_dense_gemm_nondet_train_router_dgrad`` runs the program the
     planner gives and returns ``out`` -- inside a window the SIMT program of its tile (the prepared launch's program),
     whose output meets the naive BF16 tier against FP64 over 32 draws, two calls into a NaN-poisoned ``out`` on the
-    first; outside, a prepared launch that is not this package's program (the deterministic program)."""
+    first; outside, a prepared launch that is not this package's program (the deterministic program), whose output
+    meets the same tier the same way."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     rules, holds = cake_backend.router_rules(arch, sm_count)
@@ -11824,20 +11825,6 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
             prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(
                 G, W, torch.empty(T, hidden, device=device)
             )
-            if tile is None:
-                for _ in range(2):
-                    out = torch.full((T, hidden), float("nan"), device=device)
-                    assert (
-                        cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
-                            G, W, out
-                        )
-                        is out
-                    )
-                    torch.cuda.synchronize()
-                assert not isinstance(prepared, atomic), (hidden, T)
-                continue
-            assert isinstance(prepared, atomic), (hidden, T)
-            assert tuple(prepared.plan.simt) == tile, (hidden, T)
             name = f"dgrad hidden={hidden} T={T}"
 
             def draw(s, T=T, hidden=hidden):
@@ -11858,6 +11845,20 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
             def product(v, dtype, name=name):
                 return {name: v.G.to(dtype) @ v.W.to(dtype)}
 
+            if tile is None:
+                assert not isinstance(prepared, atomic), (hidden, T)
+                judge_gemm(
+                    record_property,
+                    seed=SEED + 143 + T,
+                    draw=draw,
+                    launch=launch,
+                    product=product,
+                    launches=2,
+                    poison=lambda v: (v.out,),
+                )
+                continue
+            assert isinstance(prepared, atomic), (hidden, T)
+            assert tuple(prepared.plan.simt) == tile, (hidden, T)
             v = judge_gemm(
                 record_property,
                 seed=SEED + 143 + T,

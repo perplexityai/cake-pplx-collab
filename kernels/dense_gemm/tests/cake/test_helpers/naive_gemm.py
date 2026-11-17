@@ -28,7 +28,9 @@ The case supplies three callables:
 - ``launch(inputs)`` runs the kernel once and returns its outputs by name, each in the orientation ``product`` gives
   it (``out.t()`` for a transposed store, a view without the padding of a padded output).
 - ``product(inputs, dtype)`` returns the same names: the GEMM of each output on the operands converted to ``dtype``.
-  float64 gives the oracle and bfloat16 the naive tier, so one formula serves both.
+  float64 gives the oracle and bfloat16 the naive tier, so one formula serves both.  It is called on the draw's
+  inputs before the draw's first launch, so it reads only operands that the launches do not write; a chain of
+  GEMMs is the product of the whole chain on the draw's inputs, not of a kernel's intermediate output.
 
 ``launches`` launches the kernel that many times on the first draw (an output is written into NaN again before each
 launch after the first when ``poison`` is given); the judge keeps the largest error of a draw's launches.
