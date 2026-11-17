@@ -2006,6 +2006,19 @@ def test_low_level_entries_reject_host_tensors(device) -> None:
         cake_chain.build_chunk_meta_from_cu_seqlens(cu, 164, scan_plans=plans)
 
 
+def test_a_refused_host_call_pools_no_buffer_for_the_device(device) -> None:
+    # the forward entries on host operands are refused at their first launch; a call of the same shapes on the device
+    # then runs: the refused calls pooled no host buffer under the device's key, which a host tensor's index shares
+    for call in _entry_calls().values():
+        with pytest.raises(Exception):  # noqa: PT011 - the entry's operand refusal
+            call()
+    q, v = (torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16, device=device) for h in (1, 2))
+    g, beta = torch.zeros(1, 64, 2, device=device), torch.zeros(1, 64, 2, device=device)
+    o, _ = cake_gdn_nondet(q, q, v, g, beta)
+    torch.cuda.synchronize()
+    assert bool(torch.isfinite(o).all())
+
+
 def test_each_caller_stream_forks_its_own_side_stream(device) -> None:
     index = cake_chain._device_index(device)
     a, b = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)

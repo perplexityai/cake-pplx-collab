@@ -3469,6 +3469,10 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
     keeps (:func:`cake_plan.tape_state`; ``None`` for the rest, u always), and none when ``tape`` is ``False`` (a call
     that records no backward); the backward rebuilds what the tape lacks.  The prep forward's tape carries all four."""
     options = options or ChainOptions()
+    if not q.is_cuda:
+        # a host q reaches the first launch's operand checks, which refuse it; the buffers taken before them would
+        # stay pooled, as host tensors, under the current device's key (_tensor_index), so such a call pools none
+        options = replace(options, host_cache=False)
     num_heads, key_dim = q.shape[-2], q.shape[-1]
     num_v_heads, value_dim = v.shape[-2], v.shape[-1]
     if key_dim != HEAD_DIM or value_dim != HEAD_DIM:

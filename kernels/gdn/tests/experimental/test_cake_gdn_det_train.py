@@ -3149,6 +3149,20 @@ def test_low_level_entries_reject_host_tensors(device) -> None:
         cake_chain.build_chunk_meta_from_cu_seqlens(cu, 164, scan_plans=plans)
 
 
+def test_a_refused_host_call_pools_no_buffer_for_the_device(device) -> None:
+    # the forward on host operands is refused at its first launch; a call of the same shapes on the device then runs:
+    # the refused call pooled no host buffer under the device's key, which a host tensor's index shares
+    q, v = (torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16) for h in (1, 2))
+    g, beta = torch.zeros(1, 64, 2), torch.zeros(1, 64, 2)
+    with pytest.raises(ValueError, match="must be a CUDA tensor"):
+        cake_chain.CakeGDNDetFunction.apply(q, q, v, g, beta, 1.0, None, False, None, None, True,
+                                            cake_chain.make_options())  # fmt: skip
+    q, v, g, beta = (x.to(device) for x in (q, v, g, beta))
+    o, _ = cake_gdn_det(q, q, v, g, beta)
+    torch.cuda.synchronize()
+    assert bool(torch.isfinite(o).all())
+
+
 def test_each_caller_stream_forks_its_own_side_stream(device) -> None:
     index = cake_chain._device_index(device)
     a, b = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
