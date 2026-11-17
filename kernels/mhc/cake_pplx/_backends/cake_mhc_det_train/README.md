@@ -158,7 +158,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 | `__init__.py` | Entry points, autograd functions, host launch plans |
 | `cake_jit.py` | Host rules: module registry, routes per architecture and hidden size, token-count bands. The host plan is hand-maintained; the exporter rewrites the derived record fields. |
 | `cake_build.py` | Library loader. Serves `aot/<name>.so` when a builder compiled it from the manifest. Otherwise JIT-builds through the package's JIT shim (`_cake_pplx_jit.py`) from the same sources and flags. Written by the exporter; do not edit. |
-| `build.json` | Manifest, schema `cake-build/1`. One entry per library and architecture (`<library>_<arch>`) with package-relative sources, nvcc flags (`-gencode` for `sm_100a` / `sm_103a` / `sm_107a`), toolkit-conditional flags and SHA-256 digests. Requires CUDA toolkit >= 12.8 for SM100, >= 12.9 for SM103 and >= 13.4 for SM107, and `apache-tvm-ffi >= 0.1.11, < 0.2`. |
+| `build.json` | Manifest, schema `cake-build/1`. One entry per library and architecture (`<library>_<arch>`) with package-relative sources, nvcc flags (`-gencode` for `sm_100a` / `sm_103a` / `sm_107a`), toolkit-conditional flags and SHA-256 digests. Requires CUDA toolkit >= 12.8 for SM100, >= 12.9 for SM103 and >= 13.5 for SM107, and `apache-tvm-ffi >= 0.1.11, < 0.2`. |
 | `csrc/` | Generated CUDA: `<library>_kernel.cu` and `<library>_binding.cu` per library, plus the package-local `cake_ffi_checks.h`. Not hand-edited. |
 | `aot/` | Optional prebuilt libraries and the `build_info.json` sidecar. Not tracked. |
 
