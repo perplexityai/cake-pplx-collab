@@ -203,6 +203,9 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_l2l(__nv_bfloat16* __restrict__ X, __nv
     for (int e = 0; e < 2; e++) {
         acc[e] = 0.0f;
     }
+    int fb2 = (warp_0 * 32 + lane_1) * 2;
+    fold[fb2] = 0.0f;
+    fold[fb2 + 1] = 0.0f;
     long long wcol = (long long)warp_0 * 512ll;
     unsigned int lane32 = (unsigned int)(lane_1 * 32);
     int st__1_0 = warp_0 * 2;
@@ -5194,21 +5197,23 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_l2l(__nv_bfloat16* __restrict__ X, __nv
         float p2 = ((lane_1 < 24) ? cvt_f32_1 : 0.0f);
         float p3 = ((lane_1 < 24) ? cvt_f32_2 : 0.0f);
         long long drow = tok64 * 96ll + lane64;
-        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p1)), "r"((unsigned int)(tok < t1)) : "memory");
-        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow + 32ll])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p2)), "r"((unsigned int)(tok < t1)) : "memory");
-        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow + 64ll])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p3)), "r"((unsigned int)(tok < t1)) : "memory");
         long long trow = tok64 * 24ll;
+        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow + 64ll])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p3)), "r"((unsigned int)(tok < t1)) : "memory");
+        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow + 32ll])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p2)), "r"((unsigned int)(tok < t1)) : "memory");
+        asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.b16 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&dzp[drow])), "h"(__bfloat16_as_ushort((__nv_bfloat16)p1)), "r"((unsigned int)(tok < t1)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow])), "f"(r), "r"((unsigned int)(tok < t1 && lane_1 == 0)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + 1ll])), "f"(c_t), "r"((unsigned int)(tok < t1 && lane_1 == 0)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + 2ll + lane64])), "f"(_add_1), "r"((unsigned int)(tok < t1 && lane_1 < 4)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(c_37), "r"((unsigned int)(tok < t1 && (lane_1 >= 8 && lane_1 < 24))) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(0.0f), "r"((unsigned int)(tok < t1 && (lane_1 >= 24 && lane_1 < 26))) : "memory");
-        float _add_2;
-        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_2) : "f"(acc[0]), "f"(da_0));
-        acc[0] = ((tok < t1) ? _add_2 : acc[0]);
-        float _add_4;
-        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_4) : "f"(acc[1]), "f"(daz));
-        acc[1] = ((tok < t1) ? _add_4 : acc[1]);
+        float sv_0 = fold[fb2];
+        float _add_765;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_765) : "f"(sv_0), "f"(da_0));
+        fold[fb2] = ((tok < t1) ? _add_765 : sv_0);
+        float sv_1 = fold[fb2 + 1];
+        float _add_766;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_766) : "f"(sv_1), "f"(daz));
+        fold[fb2 + 1] = ((tok < t1) ? _add_766 : sv_1);
         gi[0] = gi[0] + 1;
         ring_grp += 1;
     }
@@ -5216,9 +5221,6 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_l2l(__nv_bfloat16* __restrict__ X, __nv
         mbarrier_wait(ring_bar_addr + (st__1_0) * 8, 0);
         mbarrier_wait(ring_bar_addr + (st__1_1) * 8, 0);
     }
-    int fbase = (warp_0 * 32 + lane_1) * 2;
-    fold[fbase] = acc[0];
-    fold[fbase + 1] = acc[1];
     __syncthreads();
     if (warp_0 == 0) {
         long long prow = (long long)bid * 32ll;
@@ -5230,12 +5232,12 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_l2l(__nv_bfloat16* __restrict__ X, __nv
         #pragma unroll
         for (int w = 0; w < 8; w++) {
             int src = (w * 32 + lane_1) * 2;
-            float _add_765;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_765) : "f"(o[0]), "f"(fold[src]));
-            o[0] = _add_765;
-            float _add_766;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_766) : "f"(o[1]), "f"(fold[src + 1]));
-            o[1] = _add_766;
+            float _add_767;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_767) : "f"(o[0]), "f"(fold[src]));
+            o[0] = _add_767;
+            float _add_768;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_768) : "f"(o[1]), "f"(fold[src + 1]));
+            o[1] = _add_768;
         }
         gsum[lane_1] = o[1];
         __syncwarp();
@@ -5249,9 +5251,9 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_l2l(__nv_bfloat16* __restrict__ X, __nv
             ga[0] = 0.0f;
             #pragma unroll 1
             for (int mrow = glo; mrow < ghi; mrow++) {
-                float _add_767;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_767) : "f"(ga[0]), "f"(gsum[mrow]));
-                ga[0] = _add_767;
+                float _add_769;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_769) : "f"(ga[0]), "f"(gsum[mrow]));
+                ga[0] = _add_769;
             }
             *(reinterpret_cast<float*>(param_partial + (prow + 24ll + lane64)) + (0)) = ga[0];
         }
