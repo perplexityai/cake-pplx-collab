@@ -15,18 +15,15 @@ limitations under the License.
 
 Host plan and loader glue of the Cake four-stream mHC training kernels with
 the fused-reduction backward (hidden sizes 4096, 5120 and 7168, 4 streams;
-SM100 / SM103, and SM107 at hidden 4096): the column-slab pass folds ``dfn``,
+SM100 / SM103 / SM107): the column-slab pass folds ``dfn``,
 ``dscale`` and ``dbase`` itself, so no final reduction kernel runs.
 
 This registry is a self-contained copy of the deterministic package's registry
-(``cake_pplx._backends.cake_mhc_det_train.cake_jit``) at this package's
-(architecture, hidden size) pairs, 4096 on every architecture and 5120 and 7168
-on sm_100a and sm_103a: every record, route, host rule and table below is that
-registry's under the ``cake_mhc_train_`` prefix, except what the backward's
-``bwd_finish`` route changes.  The deterministic package also serves 5120 and
-7168 on sm_107a, which this package does not: a copied record keeps only the
-architectures that serve its hidden size here, a deterministic record of those
-sizes on sm_107a alone has no copy, and sm_107a has no route of them.
+(``cake_pplx._backends.cake_mhc_det_train.cake_jit``) at its (architecture,
+hidden size) pairs, 4096, 5120 and 7168 on every architecture: every record,
+route, host rule and table below is that registry's under the
+``cake_mhc_train_`` prefix, except what the backward's ``bwd_finish`` route
+changes and the opt-in two-word programs (below).
 The deterministic column-slab records (``bwd_slab``) and final-reduction records
 (``bwd_reduce``) are absent with their selection tables and their PDL edge
 (``K7->K8``), and four programs of this package take their place:
@@ -89,17 +86,22 @@ FP64 is another draw than the deterministic package's; at hidden 4096 it
 exceeded 1.1x of it on GB300 and R200.  Every call runs the one-size chunks of
 :func:`k7_chunks`.
 
-At hidden 5120 and 7168 (sm_100a, sm_103a) the atomic fn split and the dynamic
-column slab have records per size under the deterministic suffix ``__h<H>``
-(the fn split one, the dynamic column slab one per unit order:
-``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>``,
-``cake_mhc_train_bwd_slab_fold__dynr__h<H>``,
-``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>``).  The
+At hidden 5120 and 7168 the atomic fn split and the dynamic column slab have
+records per size under the deterministic suffix ``__h<H>``: the fn split
+``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>`` (sm_100a, sm_103a) and
+``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` (sm_107a: the
+128-thread split of the size, launched as ``_dep`` -- every CTA waits for the
+token-owner pass as its last instruction; no ``_dep1`` form of these sizes is
+built), the column slab ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` (every
+architecture) and ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (sm_100a,
+sm_103a; no slab-order form of these sizes is built for sm_107a).  The
 column slab runs ``dynr`` in the ``"chunk"`` band of
 ``BWD_SLAB_ORDER`` and ``dynr_os`` in the ``"slab"`` band above it (on the
 152-SM board at 7168 in the bands of its cell of ``BWD_SLAB_ORDER_OVERRIDES``:
 ``"slab"`` also on 47 of the 48 token-count segments in 33793..63091 whose
-column-slab chunk count is at least 19; 34817..35264 keeps ``"chunk"``).
+column-slab chunk count is at least 19; 34817..35264 keeps ``"chunk"``); on
+sm_107a ``BWD_SLAB_ORDER`` names ``"chunk"`` at every token count of these
+sizes, so ``dynr__h<H>`` runs alone.
 
 So ``bwd_finish`` is the deterministic token-owner pass (with its group-row
 forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``), the fn split and the column
@@ -197,11 +199,11 @@ record's ``grid_per_sm``.
 
 Every record names its hidden size (``hidden``, one of :data:`HIDDEN_SIZES`).
 The hidden sizes 5120 and 7168 are the deterministic package's (libraries
-``__h<H>`` on the routes ``<kind>_h5120`` / ``<kind>_h7168``), copied on sm_100a
-and sm_103a (this package serves sm_107a at 4096 only) under the same rule as
-hidden 4096: the deterministic ``__h<H>`` records but the backward fn split, the
-column slab and the reduction, and a ``bwd_finish`` of the deterministic token-owner
-records, the atomic fn split ``__h<H>`` and the column slab ``dynr__h<H>`` and
+``__h<H>`` on the routes ``<kind>_h5120`` / ``<kind>_h7168``), copied on every
+architecture under the same rule as hidden 4096: the deterministic ``__h<H>``
+records but the backward fn split, the column slab and the reduction, and a
+``bwd_finish`` of the deterministic token-owner records, the atomic fn split
+``__h<H>`` and the column slab ``dynr__h<H>`` and (sm_100a, sm_103a)
 ``dynr_os__h<H>``.
 Every rule takes the hidden size as its last argument and reads its tables
 through ``_tab`` as the deterministic registry's do (``H_TABLES`` spells every
@@ -8361,11 +8363,91 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__lp2_w8_adj_qe",
             "cake_mhc_train_fwd_coef__rt64",
         ],
+        "bwd_finish_h5120": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_l2l__h5120",
+            "cake_mhc_train_bwd_token__rt64__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr__h5120",
+        ],
+        "bwd_prepare_h5120": [
+            "cake_mhc_train_bwd_prepare__t160__h5120",
+        ],
+        "fwd_finish_h5120": [
+            "cake_mhc_train_fwd_finish__w1__h5120",
+        ],
+        "fwd_prepare_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+            "cake_mhc_train_fwd_collapse__h5120",
+        ],
+        "fwd_recompute_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+        ],
+        "bwd_finish_h7168": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168",
+            "cake_mhc_train_bwd_token__dot_ao8_l2l__h7168",
+            "cake_mhc_train_bwd_token__rt64__h7168",
+            "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
+            "cake_mhc_train_bwd_slab_fold__dynr__h7168",
+        ],
+        "bwd_prepare_h7168": [
+            "cake_mhc_train_bwd_prepare__t224__h7168",
+        ],
+        "fwd_finish_h7168": [
+            "cake_mhc_train_fwd_finish__w1__h7168",
+        ],
+        "fwd_prepare_h7168": [
+            "cake_mhc_train_fn_split__h7168",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h7168",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h7168",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h7168",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h7168",
+            "cake_mhc_train_fwd_coef__g2_el__h7168",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h7168",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+            "cake_mhc_train_fwd_coef__rt64__h7168",
+            "cake_mhc_train_fwd_collapse__h7168",
+        ],
+        "fwd_recompute_h7168": [
+            "cake_mhc_train_fn_split__h7168",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h7168",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h7168",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h7168",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h7168",
+            "cake_mhc_train_fwd_coef__g2_el__h7168",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h7168",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+            "cake_mhc_train_fwd_coef__rt64__h7168",
+        ],
     },
 }
 # Every hidden size the registry holds records for.  An architecture serves a
 # size when all five routes of that size exist (``supported_hidden_sizes``):
-# sm_100a and sm_103a serve all three, sm_107a serves 4096.
+# every architecture serves all three.
 HIDDEN_SIZES: tuple[int, ...] = (4096, 5120, 7168)
 
 # One verified build per architecture: B200 (``sm_100a``), B300 (``sm_103a``)
@@ -8978,7 +9060,7 @@ BWD_SLAB_LPT = {"sm_100a": None, "sm_103a": None, "sm_107a": None}
 # BWD_SLAB_LPT_HIDDEN: BWD_SLAB_LPT per hidden size other than 4096 -- the same screen over the size's H / 64 slabs and
 # its k7_chunks chunks, calibrated per (architecture, hidden size); a size it does not list is a ValueError, never the
 # H 4096 value. None at every architecture, as BWD_SLAB_LPT (the column slab runs the deterministic one-size chunks);
-# sm_103a and sm_107a had no calibration of these sizes (sm_107a routes hidden 4096 only), and sm_100a's former one,
+# sm_103a and sm_107a had no calibration of these sizes (sm_107a routed hidden 4096 only then), and sm_100a's former one,
 # by the package-level A/B of BWD_SLAB_LPT on 148 SMs over 80 token counts in 1024..65536
 # (the ones that fire at keep 0.995, 8 replay groups): H 5120 (1.0, 0.99) fires at 28 of them, backward -188.5 us and
 # checkpointed step -113.4 us in sum, none slower in a 16-group rerun (20656 reads +0.1 / -0.1 us); keep 0.995 fires at
@@ -9015,7 +9097,8 @@ BWD_SLAB_LPT_HIDDEN = {
 # from 1877 and slower at none, -853..-935 us in sum per run; its slab arm also ran a banded two-size calibration, which
 # picks another geometry at 9 counts, where the slab order under the chunk arm's (0.5, 0.97) reads faster in both runs
 # as well. The 208- and 216-SM boards are not measured, so they keep the chunk order; the 212-SM board's slab order from
-# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. sm_107a routes no column slab of 5120 / 7168.
+# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. At 5120 / 7168 sm_107a has only the chunk-order record dynr__h<H> (no slab
+# order is measured or built there), so its cell is "chunk".
 # sm_100a (GB200, 152 SMs): at 4096 from 2048 (95 counts) no count is slower in both of 2 runs and only 2670 in one
 # (backward +0.6 us), backward / checkpointed step -1381..-1820 us in sum per run; below it no count is faster in either
 # run (backward +1.7..+1.8 us, checkpointed step -0.4..-0.9 us in sum). At 5120 the slab order is faster at 96 of the

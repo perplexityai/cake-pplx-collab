@@ -49,7 +49,7 @@ The cases above run at ``H = 4096``;
 ``test_counts_match_fp64_at_every_hidden_size`` and
 ``test_paths_match_fp64_at_every_hidden_size`` repeat the numerics and the
 paths at the counts 1, 7, 20 and 64 at hidden 5120 and 7168 where the device's
-architecture routes them (SM100 / SM103; SM107 routes 4096 only).
+architecture routes them (SM100 / SM103 / SM107).
 """
 
 from __future__ import annotations

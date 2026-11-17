@@ -15,7 +15,7 @@ limitations under the License.
 
 Backend suite of the Cake four-stream mHC training package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096, 5120 and
-7168 on SM100 / SM103, 4096 on SM107; 4 streams).
+7168 on SM100 / SM103 / SM107; 4 streams).
 
 The package is standalone: its forward, statistics replay, residual mixing
 and backward prepare run its own copies of the deterministic programs, and
@@ -1684,7 +1684,8 @@ def test_argument_validation() -> None:
     ``SINKHORN_ITERS_MAX`` a ``NotImplementedError``) and ``accumulate=True`` without its buffers; the workspace must
     be a 1-D, 256-byte aligned ``uint8`` CUDA tensor of this package's size (a non-tensor a ``TypeError``).
     An operand or output of another hidden size than ``X``, and a call whose hidden size the package does not list
-    (6144) or the architecture does not route (5120 and 7168 on sm_107a), is a ``ValueError``.  ``B`` is optional:
+    (6144) or the architecture does not route (none of the three sizes on the architectures of record), is a
+    ``ValueError``.  ``B`` is optional:
     ``None`` gives the same bits of every output, ``dfn`` included.  ``finish`` takes
     only this package's handles (any other object, a deterministic package's handle included, is a ``TypeError``
     naming the deterministic finish); a ``deterministic`` keyword is a ``TypeError`` too."""

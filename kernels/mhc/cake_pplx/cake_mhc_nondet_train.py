@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake four-stream mHC training forward / backward, ``nondet`` mode
-(4 streams; hidden 4096 on SM100 / SM103 / SM107, and 5120 / 7168 on SM100 /
-SM103; another hidden size raises ``ValueError``): every entry point runs the
+(4 streams; hidden 4096, 5120 and 7168 on SM100 / SM103 / SM107; another
+hidden size raises ``ValueError``): every entry point runs the
 package ``cake_pplx._backends.cake_mhc_nondet_train``, imported on
 the first call or attribute access (importing this module imports no
 backend).  The function, the tensor contracts and the autograd wiring are
@@ -148,8 +148,8 @@ def is_cake_mhc_nondet_train_supported(
         Device to query; a device that is not CUDA, or whose architecture is not
         SM100 / SM103 / SM107, gives ``False``.
     hidden : int, optional
-        Hidden size to query: 4096, 5120 or 7168 on SM100 / SM103, 4096 on
-        SM107.  ``None`` (default) queries the architecture only.
+        Hidden size to query: 4096, 5120 or 7168 on SM100 / SM103 / SM107.
+        ``None`` (default) queries the architecture only.
 
     Returns
     -------
@@ -180,8 +180,8 @@ def cake_mhc_nondet_train_forward_workspace_bytes(
         CUDA device of the calls.
     hidden : int
         Hidden size ``H`` of the calls the buffer serves (``X.shape[2]``;
-        default ``4096``): 4096, 5120 or 7168 on SM100 / SM103, 4096 on SM107
-        (any other value raises ``ValueError``).
+        default ``4096``): 4096, 5120 or 7168 on SM100 / SM103 / SM107 (any
+        other value raises ``ValueError``).
 
     Returns
     -------
@@ -304,7 +304,7 @@ def cake_mhc_nondet_train_forward_prepare(
     ----------
     X : torch.Tensor
         BF16 ``[T, 4, H]`` contiguous residual streams; ``H = X.shape[2]`` is
-        4096, 5120 or 7168 on SM100 / SM103 and 4096 on SM107.
+        4096, 5120 or 7168 on SM100 / SM103 / SM107.
     fn, scale, base : torch.Tensor
         FP32 ``[24, 4H]`` mapping matrix, ``[3]`` group scales and ``[24]``
         logit offsets.

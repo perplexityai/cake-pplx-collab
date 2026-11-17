@@ -46,7 +46,7 @@ with another call or with the deterministic package.  This module checks:
   ``TypeError`` of ``cake_mhc_nondet_train_finish`` for any other handle
   (naming the deterministic finish);
 * on a device, at every hidden size the device's architecture routes (4096,
-  5120 and 7168 on SM100 / SM103, 4096 on SM107): the module, the
+  5120 and 7168 on SM100 / SM103 / SM107): the module, the
   deterministic package's launches refused, gives the backend's workspace sizes
   and judged results (the forward entry points, the backward, the autograd
   functions);
@@ -58,9 +58,8 @@ with another call or with the deterministic package.  This module checks:
   backward workspace (smaller than this package's layout) is refused; a
   deterministic prepare handle is refused by ``cake_mhc_nondet_train_finish``
   (the deterministic finish then gives the deterministic package's bits, run
-  to run); on sm_100a / sm_103a a hidden size runs exactly where the
-  deterministic package runs it; on sm_107a this package runs hidden 4096
-  only.
+  to run); on every architecture a hidden size runs exactly where the
+  deterministic package runs it.
 
 Training with this package composed with the model's deterministic head
 (``cake_pplx.cake_mhc_head_det_train``, family ``mhc_head``) is checked in
@@ -1042,33 +1041,17 @@ def test_nondeterministic_workspace_helpers_reject_other_hidden_sizes() -> None:
 @requires_device
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES[1:], ids=lambda h: f"H{h}")
 def test_hidden_sizes_follow_the_device(hidden: int, record_property) -> None:
-    """On sm_100a / sm_103a this package takes a hidden size exactly where the deterministic package does: 5120 and
-    7168 size their workspaces (the forward one the deterministic package's, the backward one larger than its, both
-    other than the H 4096 sizes) and the entry points run on them (``backward_finish``'s outputs judged against the
-    naive BF16 tier over 32 inputs).  On sm_107a this package takes hidden 4096 only,
-    while the deterministic package also takes 5120 and 7168: this package's workspace helpers and entry points
-    refuse them with ``ValueError``."""
+    """On every architecture (sm_100a, sm_103a and sm_107a) this package takes a hidden size exactly where the
+    deterministic package does: 5120 and 7168 size their workspaces (the forward one the deterministic package's, the
+    backward one larger than its, both other than the H 4096 sizes) and the entry points run on them
+    (``backward_finish``'s outputs judged against the naive BF16 tier over 32 inputs)."""
     dev = _device()
     exported = facade.is_cake_mhc_nondet_train_supported(dev, hidden)
-    assert exported == (hidden in _hidden_sizes()) == (_arch() != "sm_107a")
+    assert exported and hidden in _hidden_sizes(), (_arch(), hidden)
     assert backend.is_cake_mhc_nondet_train_supported(dev, hidden) == exported
-    if exported:
-        assert det_facade.is_cake_mhc_det_train_supported(dev, hidden)
+    assert det_facade.is_cake_mhc_det_train_supported(dev, hidden)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        if not exported:
-            for name in _WORKSPACE_HELPERS:
-                for module in (facade, backend):
-                    with pytest.raises(ValueError):
-                        getattr(module, name)(300, dev, hidden=hidden)
-            X = torch.zeros(7, 4, hidden, dtype=BF16, device=dev)
-            fn = torch.zeros(24, 4 * hidden, device=dev)
-            scale = torch.ones(3, device=dev)
-            base = torch.zeros(24, device=dev)
-            for module in (facade, backend):
-                with pytest.raises(ValueError):
-                    module.cake_mhc_nondet_train_forward_prepare(X, fn, scale, base)
-            return
         for kind in ("forward", "backward"):
             nbytes = getattr(facade, f"cake_mhc_nondet_train_{kind}_workspace_bytes")
             reference_nbytes = getattr(
