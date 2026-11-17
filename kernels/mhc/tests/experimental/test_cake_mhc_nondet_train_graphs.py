@@ -212,7 +212,7 @@ def _leaves(i: dict) -> list:
     ]
 
 
-def _layer(W: torch.Tensor, wsf, wsb, save_stats: bool):
+def _layer(W: torch.Tensor, wsf, wsb, save_stats: bool, **mode):
     def layer(X, fn, scale, base):
         U, handle = pkg.cake_mhc_nondet_train_prepare(
             X,
@@ -222,25 +222,26 @@ def _layer(W: torch.Tensor, wsf, wsb, save_stats: bool):
             save_stats=save_stats,
             workspace=wsf,
             backward_workspace=wsb,
+            **mode,
         )
         return pkg.cake_mhc_nondet_train_finish(X, U @ W, handle)
 
     return layer
 
 
-def _direct_step(i: dict, wsf, wsb):
+def _direct_step(i: dict, wsf, wsb, **mode):
     """One iteration through the direct entry points -> (the step, its leaves (none), its static inputs)."""
     X, fn, scale, base, W, dY = (i[k] for k in _STATIC)
 
     def step() -> dict:
         U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
-            X, fn, scale, base, workspace=wsf
+            X, fn, scale, base, workspace=wsf, **mode
         )
         B = U @ W
         Y = pkg.cake_mhc_nondet_train_forward_finish(X, B, stats)
         dB, gstats = pkg.cake_mhc_nondet_train_backward_prepare(dY, B, X, stats)
         dX, dfn, dscale, dbase = pkg.cake_mhc_nondet_train_backward_finish(
-            X, dY, dB @ W.t(), B, fn, scale, base, stats, gstats, workspace=wsb,
+            X, dY, dB @ W.t(), B, fn, scale, base, stats, gstats, workspace=wsb, **mode,
         )  # fmt: skip
         return {
             "U": U,
@@ -257,10 +258,10 @@ def _direct_step(i: dict, wsf, wsb):
     return step, (), {k: i[k] for k in _STATIC}
 
 
-def _autograd_step(i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool):
+def _autograd_step(i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool, **mode):
     """One iteration through the autograd entry points (inside a checkpoint with ``ckpt``) -> (the step, its leaves,
     its static inputs: the leaves, ``W`` and the FP32 copy of ``dY`` the loss reads)."""
-    layer = _layer(i["W"], wsf, wsb, save_stats)
+    layer = _layer(i["W"], wsf, wsb, save_stats, **mode)
     leaves = _leaves(i)
     dY = i["dY"].float()
 
@@ -548,3 +549,46 @@ def test_cuda_graph_capture_and_replay(
         return [launch], expected, naive
 
     judge_draws(case, record_property, seed=SEED + 610)
+
+
+# The opt-in two-word accumulation (``accumulation="fp32x2"``, hidden 4096 only): the same captures, every output and
+# gradient of each replay judged against the naive tier of the layer iteration.
+TWO_WORD = {"accumulation": "fp32x2"}
+
+
+def _two_word_hidden() -> int:
+    arch = _arch()
+    sizes = tuple(loader.supported_hidden_sizes(arch)) if arch else ()
+    if loader.ACC_WORDS_HIDDEN not in sizes:
+        pytest.skip(f"hidden {loader.ACC_WORDS_HIDDEN} has no exported route on {arch}")
+    return loader.ACC_WORDS_HIDDEN
+
+
+@pytest.mark.parametrize("T", (1, 129, 2049, 16263))
+@pytest.mark.parametrize("caller_owned", (False, True))
+def test_two_word_direct_entry_points_capture(
+    T: int, caller_owned: bool, record_property
+) -> None:
+    hidden = _two_word_hidden()
+    i = _inputs(T, seed=7346 + T, hidden=hidden)
+    wsf, wsb = _workspaces(T, caller_owned, hidden)
+    what = f"two-word direct T={T} caller_owned={caller_owned}"
+    _judge_captured(
+        lambda: _direct_step(i, wsf, wsb, **TWO_WORD), T, hidden, wsb, what, record_property, seed=7346 + T
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("T", (129, 2049))
+@pytest.mark.parametrize("save_stats", (True, False))
+@pytest.mark.parametrize("ckpt", (False, True))
+def test_two_word_autograd_iteration_capture(
+    T: int, save_stats: bool, ckpt: bool, record_property
+) -> None:
+    hidden = _two_word_hidden()
+    i = _inputs(T, seed=7446 + T, hidden=hidden)
+    wsf, wsb = _workspaces(T, True, hidden)
+    what = f"two-word autograd ckpt={ckpt} save_stats={save_stats} T={T}"
+    _judge_captured(
+        lambda: _autograd_step(i, wsf, wsb, save_stats=save_stats, ckpt=ckpt, **TWO_WORD), T, hidden, wsb, what,
+        record_property, seed=7446 + T,
+    )  # fmt: skip

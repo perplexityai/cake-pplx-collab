@@ -372,8 +372,13 @@ def _coefficients(z, scale, base, hc_eps: float = HC_EPS, iters: int = SINKHORN_
 
 
 def _constants(i: dict) -> dict:
-    """The launch constants of a case: the epsilons and the Sinkhorn count it carries (default: the model's)."""
-    return {k: i[k] for k in ("rms_eps", "hc_eps", "sinkhorn_iters") if k in i}
+    """The launch constants of a case: the epsilons, the Sinkhorn count and the accumulation mode it carries (default:
+    the model's, one FP32 word)."""
+    return {
+        k: i[k]
+        for k in ("rms_eps", "hc_eps", "sinkhorn_iters", "accumulation")
+        if k in i
+    }
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2107,3 +2112,213 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert "--use_fast_math" not in entry["nvcc_flags"]
             assert "--prec-div=true" in entry["nvcc_flags"]
     assert referenced == set(libraries)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The opt-in two-word accumulation (``accumulation="fp32x2"``): hidden 4096 and the Sinkhorn count of record only.
+# The mapping pass, the token-owner pass and the column slab with its folds run their two-word programs
+# (``loader.ACC_WORDS_PROGRAMS``); the rest of the route and every workspace are those of the default mode.  No bit
+# is promised: every output is judged against the naive BF16 tier.
+
+TWO_WORD = "fp32x2"
+
+
+def _two_word_hidden() -> int:
+    return _require_hidden(loader.ACC_WORDS_HIDDEN)
+
+
+@pytest.mark.parametrize("T", (1, 257, 2049, 4097, 16263))
+def test_two_word_backward_matches_fp64(T: int, record_property) -> None:
+    """``accumulation="fp32x2"``: every output (the forward entry points and REPEATS backward launches on the default
+    and on a poisoned caller workspace) judged against the naive BF16 tier over 32 inputs; the caller workspace's zero
+    prefix is zero after every launch."""
+    hidden = _two_word_hidden()
+    _judge_nd(
+        lambda s: {**_make_inputs(T, hidden=hidden, seed=s), "accumulation": TWO_WORD},
+        record_property, seed=SEED + 701, prefix="fp32x2 ",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("T", (7, 2049))
+@pytest.mark.parametrize("save_stats", (True, False))
+@pytest.mark.parametrize("checkpointed", (False, True))
+def test_two_word_autograd_matches_fp64(
+    T: int, save_stats: bool, checkpointed: bool, record_property
+) -> None:
+    """``cake_mhc_nondet_train_prepare(..., accumulation="fp32x2")`` / ``cake_mhc_nondet_train_finish`` around the
+    residual branch, plain or inside a non-reentrant checkpoint: ``U``, ``Y``, ``dB`` and the gradients judged against
+    the naive BF16 tier over 32 inputs."""
+    hidden = _two_word_hidden()
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        record: dict = {}
+        connection = _connection(
+            _nd_prepare, _nd_finish, _branch("residual", i), save_stats=save_stats, record=record,
+            accumulation=TWO_WORD,
+        )  # fmt: skip
+        leaves = _leaves(i)
+        if checkpointed:
+            Y = checkpoint(connection, *leaves, use_reentrant=False)
+        else:
+            Y = connection(*leaves)
+        (Y.float() * i["dY"].float()).sum().backward()
+        c = {"leaves": leaves, "U": record["U"], "B": record["B"], "Y": Y}
+        outputs, expected, naive = _connection_case(i, c)
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 731, prefix="fp32x2 ")
+
+
+@pytest.mark.parametrize("T", (129, 2049, 4097))
+def test_two_word_checkpoint_replay(T: int, record_property) -> None:
+    """The two-word connection with the statistics saved and replayed in the backward (``save_stats=False``), and
+    the two-word statistics replay ``forward_stats``: over 32 inputs, ``U``, ``Y``, ``dB`` and the gradients of each
+    connection and the replayed statistics judged against the naive BF16 tier."""
+    hidden = _two_word_hidden()
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        outputs, expected, naive = {}, {}, {}
+        for save_stats in (True, False):
+            leaves = _leaves(i)
+            U, handle = _nd_prepare(
+                *leaves, save_stats=save_stats, accumulation=TWO_WORD
+            )
+            U.retain_grad()
+            B = (U.float() + i["B"].float()).to(BF16)
+            Y = _nd_finish(leaves[0], B, handle)
+            (Y.float() * i["dY"].float()).sum().backward()
+            c = {"leaves": leaves, "U": U, "B": B, "Y": Y}
+            for d, part in zip(
+                (outputs, expected, naive), _connection_case(i, c), strict=True
+            ):
+                d.update({f"save_stats={save_stats} {k}": v for k, v in part.items()})
+        replay = stats_outputs(
+            forward_stats(i["X"], i["fn"], i["scale"], i["base"], accumulation=TWO_WORD)
+        )
+        e, n = expected_and_naive(i, replay)
+        for d, part in zip((outputs, expected, naive), (replay, e, n), strict=True):
+            d.update({f"replay {k}": v for k, v in part.items()})
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 711, prefix="fp32x2 ")
+
+
+@pytest.mark.parametrize("T", (129, 16263))
+def test_two_word_workspaces_are_the_default_ones(T: int) -> None:
+    """The two-word mode runs in workspaces of exactly ``*_workspace_bytes(T)`` (the default mode's sizes): nothing
+    is written past them (guard bytes after each buffer keep their value), the backward workspace's zero prefix is
+    zero after the launch, and every output is finite."""
+    hidden = _two_word_hidden()
+    guard = 4096
+    i = {**_make_inputs(T, hidden=hidden, seed=SEED + 717), "accumulation": TWO_WORD}
+    sizes = {
+        "fwd": pkg.cake_mhc_nondet_train_forward_workspace_bytes(
+            T, _device(), hidden=hidden
+        ),
+        "bwd": pkg.cake_mhc_nondet_train_backward_workspace_bytes(
+            T, _device(), hidden=hidden
+        ),
+    }
+    buffers = {
+        k: torch.zeros(n + guard, dtype=torch.uint8, device=_device())
+        for k, n in sizes.items()
+    }
+    for k, n in sizes.items():
+        buffers[k][n:].fill_(0xA5)
+    fwd = _forward_all(i, workspace=buffers["fwd"][: sizes["fwd"]])
+    out = _nd_backward(i, fwd, workspace=buffers["bwd"][: sizes["bwd"]])
+    torch.cuda.synchronize()
+    for k, n in sizes.items():
+        tail = buffers[k][n:]
+        assert torch.equal(tail, torch.full_like(tail, 0xA5)), (
+            f"the two-word mode wrote past the {k} workspace"
+        )
+    _assert_zero_prefix(buffers["bwd"][: sizes["bwd"]], f"two-word T={T}")
+    for k, v in {**fwd, **out}.items():
+        assert torch.isfinite(v.float()).all(), k
+
+
+def test_two_word_launches_the_two_word_programs(monkeypatch) -> None:
+    """With fresh plan caches, a default backward and then a two-word backward at the same token count: the two-word
+    call loads exactly its selection (``selected_modules(..., accumulation="fp32x2")``, in launch order; the plan cache
+    is keyed by the mode), whose records of the two-word roles are the programs of ``ACC_WORDS_PROGRAMS`` (the
+    group-row form where ``bwd_group_rows`` holds) and whose other records are the default selection's; the two-word
+    forward loads the two-word mapping pass."""
+    hidden = _two_word_hidden()
+    monkeypatch.setattr(pkg, "_PLANS", {})
+    monkeypatch.setattr(pkg, "_FAST_ROUTES", {})
+    loaded: list[str] = []
+    load = loader.load
+
+    def recording_load(name: str, arch: str):
+        loaded.append(name)
+        return load(name, arch)
+
+    monkeypatch.setattr(loader, "load", recording_load)
+    arch, sm = _arch(), _sm_count()
+    for T in (2049, 16263):
+        i = _make_inputs(T, hidden=hidden, seed=SEED + 719)
+        prep = _forward(i)
+        _nd_backward(i, prep)
+        default = loader.selected_modules(
+            arch, hidden, "bwd_finish", rows=T, sm_count=sm
+        )
+        two = loader.selected_modules(
+            arch, hidden, "bwd_finish", rows=T, sm_count=sm, accumulation=TWO_WORD
+        )
+        rows = loader.bwd_group_rows(T, sm, arch, hidden)
+        assert len(two) == len(default), (default, two)
+        for one, pair in zip(default, two, strict=True):
+            role = loader.MODULES[one]["role"]
+            if role in loader.ACC_WORDS_ROLES:
+                key = (
+                    f"{role}/rows"
+                    if rows and f"{role}/rows" in loader.ACC_WORDS_PROGRAMS
+                    else role
+                )
+                assert pair == loader.ACC_WORDS_PROGRAMS[key][arch], (T, role, pair)
+                assert pair not in default and arch in loader.MODULES[pair]["arches"], (
+                    T,
+                    pair,
+                )
+            else:
+                assert pair == one, (T, one, pair)
+        pi = {**i, "accumulation": TWO_WORD}
+        start = len(loaded)
+        pprep = _forward(pi)
+        assert loader.ACC_WORDS_PROGRAMS["fwd_map"][arch] in loaded[start:], loaded[
+            start:
+        ]
+        start = len(loaded)
+        out = _nd_backward(pi, pprep)
+        assert loaded[start:] == list(two), (T, loaded[start:], two)
+        assert all(torch.isfinite(v).all() for v in out.values())
+
+
+def test_two_word_mode_is_refused_where_it_has_no_program() -> None:
+    """``accumulation="fp32x2"`` at another hidden size or Sinkhorn count is a ``NotImplementedError`` on every entry
+    point that takes the mode; a value other than ``"fp32"`` / ``"fp32x2"`` is a ``ValueError``."""
+    for hidden in _hidden_sizes():
+        i = _make_inputs(8, hidden=hidden, seed=SEED + 723)
+        args = (i["X"], i["fn"], i["scale"], i["base"])
+        prep = _forward(i)
+        bad = [{"accumulation": TWO_WORD}] if hidden != loader.ACC_WORDS_HIDDEN else []
+        bad.append({"accumulation": TWO_WORD, "sinkhorn_iters": 7})
+        for kwargs in bad:
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                forward_prepare(*args, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                forward_stats(*args, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                _nd_backward(i, prep, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                _nd_prepare(*args, **kwargs)
+        for value in ("fp64", "FP32X2", "fp32x4", None, 2):
+            with pytest.raises(ValueError, match="accumulation"):
+                forward_prepare(*args, accumulation=value)
+            with pytest.raises(ValueError, match="accumulation"):
+                _nd_backward(i, prep, accumulation=value)
+            with pytest.raises(ValueError, match="accumulation"):
+                _nd_prepare(*args, accumulation=value)
