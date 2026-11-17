@@ -64,6 +64,7 @@ import statistics
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -192,47 +193,15 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
     t2 = time.time()
     for mode in args.modes:
         for phase in args.phases:
-            prepared: dict[str, dict] = {}
-            for label, worker in workers.items():
-                local = [result["arms"][n]["local"] for n in runnable if owner[n] == label]
-                reply = worker.call("prepare", mode=mode, phases=[phase], arms=local)
-                for key, value in reply["prepared"].items():
-                    name, _ = key.split("/")
-                    full = f"{label}_{name}" if worker.role == "cake" else name
-                    prepared[full] = value
-            timed = [n for n in runnable if n in prepared and "error" not in prepared[n]]
-            cell: dict = {
-                "skipped": {n: prepared[n]["error"] for n in runnable if n in prepared and "error" in prepared[n]},
-                "arms": {},
-                "group_orders": [],
-            }
-            for n in timed:
-                if "spin_ms" in prepared[n]:
-                    cell["arms"].setdefault(n, {})["spin_ms"] = prepared[n]["spin_ms"]
-            iters: dict[str, int] = {}
-            groups: dict[str, list[float]] = {n: [] for n in timed}
-            late: dict[str, int] = {n: 0 for n in timed}
-            for g in range(args.groups):
-                order = group_order(timed, g)
-                cell["group_orders"].append(order)
-                for n in order:
-                    worker = workers[owner[n]]
-                    local = result["arms"][n]["local"]
-                    if n not in iters:
-                        probe = worker.call("time", arm=local, phase=phase, mode=mode, iters=3)
-                        est = max(_median(probe["ms"]), 1e-3)
-                        iters[n] = int(min(MAX_ITERS, max(MIN_ITERS, TARGET_MS / est)))
-                    reply = worker.call("time", arm=local, phase=phase, mode=mode, iters=iters[n])
-                    groups[n].append(_median(reply["ms"]) * 1e3)
-                    late[n] += reply["late"]
-                    cell["method"] = reply["method"]
-            for n in timed:
-                values = groups[n]
-                cell["arms"].setdefault(n, {}).update(
-                    us=_median(values), us_range=[min(values), max(values)], groups_us=values,
-                    iters=iters[n], late=late[n],
-                )  # fmt: skip
+            cell: dict = {"skipped": {}, "arms": {}, "group_orders": []}
             result["timing"][f"{phase}/{mode}"] = cell
+            try:
+                time_cell(cell, phase, mode, runnable, owner, result, args, workers)
+            except Exception as exc:  # noqa: BLE001 -- keep the other cells; a dead worker ends the row
+                cell["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+                traceback.print_exc()
+                if any(w.proc.poll() is not None for w in workers.values()):
+                    raise
             if mode == "graph":
                 for worker in workers.values():
                     worker.call("drop_graphs")
@@ -240,6 +209,51 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
     for worker in workers.values():
         worker.call("free")
     return result
+
+
+def time_cell(cell, phase, mode, runnable, owner, result, args, workers) -> None:
+    """Time every runnable arm of a row in one phase and mode, in ``--groups`` paired groups (module docstring)."""
+
+    prepared: dict[str, dict] = {}
+    for label, worker in workers.items():
+        local = [result["arms"][n]["local"] for n in runnable if owner[n] == label]
+        if not local:
+            continue
+        reply = worker.call("prepare", mode=mode, phases=[phase], arms=local)
+        for key, value in reply["prepared"].items():
+            name, _ = key.split("/")
+            full = f"{label}_{name}" if worker.role == "cake" else name
+            prepared[full] = value
+    timed = [n for n in runnable if n in prepared and "error" not in prepared[n]]
+    cell["skipped"] = {n: prepared[n]["error"] for n in runnable if n in prepared and "error" in prepared[n]}
+    if not timed:
+        cell["error"] = "no arm could be timed in this phase and mode"
+        return
+    for n in timed:
+        if "spin_ms" in prepared[n]:
+            cell["arms"].setdefault(n, {})["spin_ms"] = prepared[n]["spin_ms"]
+    iters: dict[str, int] = {}
+    groups: dict[str, list[float]] = {n: [] for n in timed}
+    late: dict[str, int] = {n: 0 for n in timed}
+    for g in range(args.groups):
+        order = group_order(timed, g)
+        cell["group_orders"].append(order)
+        for n in order:
+            worker = workers[owner[n]]
+            local = result["arms"][n]["local"]
+            if n not in iters:
+                probe = worker.call("time", arm=local, phase=phase, mode=mode, iters=3)
+                est = max(_median(probe["ms"]), 1e-3)
+                iters[n] = int(min(MAX_ITERS, max(MIN_ITERS, TARGET_MS / est)))
+            reply = worker.call("time", arm=local, phase=phase, mode=mode, iters=iters[n])
+            groups[n].append(_median(reply["ms"]) * 1e3)
+            late[n] += reply["late"]
+            cell["method"] = reply["method"]
+    for n in timed:
+        values = groups[n]
+        cell["arms"].setdefault(n, {}).update(
+            us=_median(values), us_range=[min(values), max(values)], groups_us=values, iters=iters[n], late=late[n]
+        )
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -397,6 +411,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             "cuda": first["cuda"],
             "gpu_timer": first["gpu_timer"],
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "environment": {k: os.environ.get(k) for k in (
+                "CUDA_HOME", "TRITON_PTXAS_PATH", "TRITON_PTXAS_BLACKWELL_PATH", "CAKE_PPLX_CACHE_DIR")},
             "host": os.uname().nodename,
             "route": {"weight_dtype": args.weight_dtype, "bias": args.bias,
                       "silu_grad_preactivation": args.silu_grad_preactivation},
@@ -417,6 +433,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             try:
                 result = bench_row(S, C, args, workers, arms_of)
             except Exception as exc:  # noqa: BLE001 -- keep the other rows; a dead worker ends the run
+                traceback.print_exc()
                 result = {"S": S, "C": C, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
                 if any(w.proc.poll() is not None for w in workers.values()):
                     if out:

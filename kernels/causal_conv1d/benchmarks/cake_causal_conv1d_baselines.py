@@ -198,6 +198,7 @@ class Calls(dict):
 
     leaves: list[torch.Tensor]
     dys: list[torch.Tensor]
+    layer: Callable[..., tuple]
 
 
 def autograd_calls(
@@ -243,6 +244,7 @@ def autograd_calls(
     calls = Calls(fwd=fwd, record=record, bwd=bwd, step=step, ckpt=ckpt)
     calls.leaves = list(leaves)
     calls.dys = list(dys)
+    calls.layer = layer
     return calls
 
 

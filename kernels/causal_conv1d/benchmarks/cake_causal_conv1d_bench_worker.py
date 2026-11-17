@@ -216,7 +216,9 @@ class Worker:
         return {"arms": {name: _jsonable(arm["entry"]) for name, arm in row["arms"].items()}}
 
     def prepare(self, req: dict) -> dict:
-        """Per requested ``(arm, phase)``: the eager spin, or the CUDA graph (``mode == "graph"``)."""
+        """Per requested ``(arm, phase)``: the eager spin, or the CUDA graph (``mode == "graph"``).  A graph is
+        captured from a second call table of the arm on fresh leaves whose every call runs on the capture stream (its
+        forward and backward, so the backward's kernels and the leaves' gradient accumulation are on that stream)."""
 
         row, mode, out = self.row, req["mode"], {}
         for name in req["arms"]:
@@ -224,6 +226,20 @@ class Worker:
             if arm is None or arm.get("calls") is None:
                 continue
             calls, env = arm["calls"], arm["entry"].get("env", {})
+            if mode == "graph" and "graph_calls" not in arm:
+                try:
+                    self.side.wait_stream(torch.cuda.current_stream(self.device))
+                    with torch.cuda.stream(self.side), baselines.environment(env):
+                        fresh = [leaf.detach().clone().requires_grad_(True) for leaf in calls.leaves]
+                        gcalls = baselines.autograd_calls(calls.layer, fresh, calls.dys)
+                        gcalls["record"]()
+                        for phase in PHASES:
+                            gcalls[phase]()
+                    torch.cuda.synchronize(self.device)
+                    arm["graph_calls"] = gcalls
+                except Exception as exc:  # noqa: BLE001 -- recorded: no graph mode for this arm
+                    torch.cuda.synchronize(self.device)
+                    arm["graph_calls"] = f"{type(exc).__name__}: {str(exc)[:300]}"
             for phase in req["phases"]:
                 key = f"{name}/{phase}"
                 try:
@@ -231,20 +247,18 @@ class Worker:
                         if mode == "eager":
                             row["spins"][key] = self.timer.spin_ms(calls[phase])
                             out[key] = {"spin_ms": row["spins"][key]}
-                        else:
-                            if phase == "bwd":
-                                # The forward runs on the capture stream, so its backward's kernels are captured.
-                                self.side.wait_stream(torch.cuda.current_stream(self.device))
-                                with torch.cuda.stream(self.side):
-                                    calls["record"]()
-                            row["graphs"][key] = timer_lib.capture_graph(calls[phase], self.side)
-                            out[key] = {"graph": True}
+                            continue
+                        gcalls = arm["graph_calls"]
+                        if isinstance(gcalls, str):
+                            raise RuntimeError(f"no call table on the capture stream: {gcalls}")
+                        if phase == "bwd":
+                            with torch.cuda.stream(self.side):
+                                gcalls["record"]()
+                        row["graphs"][key] = timer_lib.capture_graph(gcalls[phase], self.side)
+                        out[key] = {"graph": True}
                 except Exception as exc:  # noqa: BLE001 -- recorded: this arm and phase have no such mode
                     torch.cuda.synchronize(self.device)
                     out[key] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-                    if mode == "graph" and phase == "bwd":
-                        with baselines.environment(env):
-                            calls["record"]()
         torch.cuda.synchronize(self.device)
         return {"prepared": out}
 
@@ -263,6 +277,8 @@ class Worker:
     def drop_graphs(self, _req: dict) -> dict:
         if self.row is not None:
             self.row["graphs"].clear()
+            for arm in self.row["arms"].values():
+                arm.pop("graph_calls", None)
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         return {}
