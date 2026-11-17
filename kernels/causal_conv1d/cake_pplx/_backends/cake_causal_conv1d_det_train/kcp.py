@@ -39,7 +39,7 @@ logical tensor names are ``cake_jit.LOGICAL_TENSORS`` plus ``hist``,
 ``hist_row_off``, ``dpre_tail``, ``tail_row_off``, ``dpre_head``,
 ``head_row_off`` (``x_map`` / ``dy_map`` map to ``x`` / ``dy``); the scalars are
 ``cake_jit.PLAN_SCALARS`` (the KCP programs take no ``flags``).  The KCP path
-keeps the package's pre-round-6 contract: FP32 taps only (``_weight``'s default
+keeps the package's earlier contract: FP32 taps only (``_weight``'s default
 dtype set), no bias, and the legacy channel tile rule ``cake_jit.plan(...,
 legacy=True)`` (``ct_vec = min(C / 8, 128)``; its kernels pick the grouped path
 from ``ct_vec`` on the device and were validated and measured under that rule),

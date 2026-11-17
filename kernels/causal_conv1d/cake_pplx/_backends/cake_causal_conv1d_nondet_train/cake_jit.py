@@ -925,7 +925,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``cake_causal_conv1d_det_train_8665d0756b8240ecb4d0`` (built with ``fast=True, sched="dynamic",
     # chunk_stages=2, pair_math=True``; the same kernel under this package's prefix, so ``y`` is bitwise the det
     # program's); selected from C = 256 and S = 65536 on sm_107a, and its channel band's copy from C = 2048 at every
-    # S (round 35).  ``work`` holds the int32 token-chunk counters (two per channel tile), zero before the first
+    # S.  ``work`` holds the int32 token-chunk counters (two per channel tile), zero before the first
     # launch and left zero by every launch.
     "cake_causal_conv1d_train_8665d0756b8240ecb4d0": {
         "arches": [
@@ -1001,7 +1001,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``cake_causal_conv1d_det_train_176ebb3e14f7ad9c94dc`` (built with ``dtype_flags=True, fast=True,
     # sched="dynamic", chunk_stages=2, pair_math=True``; the same kernel under this package's prefix, so ``y`` is
     # bitwise the det program's); selected from C = 512 and S = 65536 on sm_107a, and its channel band's copy from C
-    # = 2048 at every S (round 35).  ``work`` holds the int32 token-chunk counters (two per channel tile), zero
+    # = 2048 at every S.  ``work`` holds the int32 token-chunk counters (two per channel tile), zero
     # before the first launch and left zero by every launch.
     "cake_causal_conv1d_train_176ebb3e14f7ad9c94dc": {
         "arches": [
@@ -1079,7 +1079,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``cake_causal_conv1d_det_train_d829c95e1d610bc14b23`` (built with ``bias=True, dtype_flags=True, fast=True,
     # sched="dynamic", chunk_stages=2, pair_math=True``; the same kernel under this package's prefix, so ``y`` is
     # bitwise the det program's); selected from C = 1024 and S = 65536 on sm_107a, and its channel band's copy from
-    # C = 2048 at every S (round 35).  ``work`` holds the int32 token-chunk counters (two per channel tile), zero
+    # C = 2048 at every S.  ``work`` holds the int32 token-chunk counters (two per channel tile), zero
     # before the first launch and left zero by every launch.
     "cake_causal_conv1d_train_d829c95e1d610bc14b23": {
         "arches": [
@@ -1155,7 +1155,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # This package's copy of the det forward channel-band program (round 35): the forward
+    # This package's copy of the det forward channel-band program: the forward
     # with fast, sched dynamic, chunk_stages 2, pair_math, c_band 2048
     # (4 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
     # routed record of a higher threshold admits C; below every threshold the
@@ -1227,7 +1227,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # This package's copy of the det forward channel-band program (round 35): the forward
+    # This package's copy of the det forward channel-band program: the forward
     # with dtype_flags, fast, sched dynamic, chunk_stages 2, pair_math, c_band
     # 2048
     # (4 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
@@ -1302,7 +1302,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # This package's copy of the det forward channel-band program (round 35): the forward
+    # This package's copy of the det forward channel-band program: the forward
     # with bias, dtype_flags, fast, sched dynamic, chunk_stages 2, pair_math,
     # c_band 2048
     # (4 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
@@ -2927,7 +2927,8 @@ GRID_KINDS = ("co_resident", "occupancy")
 # channel threshold.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
-# six round-6 routes): the host derives it from the tap tensor, the ACTUAL
+# six other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``, ``bwd_fp32g``
+# and ``bwd_bias_fp32g``): the host derives it from the tap tensor, the ACTUAL
 # ``dweight`` out tensor, the bias tensor and the ACTUAL ``dbias`` out tensor;
 # the kernel reads it once in its prologue (load form) and once in its epilogue
 # (store form).  The default routes' programs take no ``flags``.
@@ -3337,7 +3338,7 @@ def channel_split(
     3, 5); both run 1920 as (128, 1, 2).  The per element arithmetic does not
     depend on the tiling, so ``y`` and ``dx`` are bitwise the legacy plan's
     (``dweight``'s CTA rows follow the tiling).  ``legacy=True`` is the
-    rule the package shipped before round 6, ``ct_vec = min(cv, threads)``,
+    rule an earlier revision shipped, ``ct_vec = min(cv, threads)``,
     for either role; the KCP path keeps it (its kernels pick the grouped path
     from ``ct_vec`` on the device and are measured under this rule).  Each
     role's rule is kept in sync with its copies (the kernel generator of

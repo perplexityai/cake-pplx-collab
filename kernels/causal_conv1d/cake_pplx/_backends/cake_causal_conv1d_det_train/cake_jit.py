@@ -54,7 +54,7 @@ recompiles anything; building every library of the architecture
 capture.
 
 A forward call is one ordinary launch of the program its route selects, a
-dynamic token-chunk forward (round 9): the co-resident CTAs of a channel tile
+dynamic token-chunk forward: the co-resident CTAs of a channel tile
 take the tile's token chunks in order from a device counter, so the CTAs that
 finish first take the tail instead of an equal share fixed at launch.  Each
 forward route ships the program of one eight-token stage per sub-tile and
@@ -78,8 +78,9 @@ program (``record["reduce"]``), launched programmatically dependent on it
 (``launch.use_pdl``: its binding sets the programmatic-stream-serialization
 attribute, and the kernel waits for the main grid before its first load), sums
 the rows per channel in a fixed order and stores ``dw`` (and ``db``) in the
-dtypes ``flags`` names.  Until round 6 the backward was one cooperative launch
-whose grid-wide barrier preceded the same reduction in-kernel.  A cooperative
+dtypes ``flags`` names.  An earlier revision ran the backward as one
+cooperative launch whose grid-wide barrier preceded the same reduction
+in-kernel.  A cooperative
 grid cannot start while any kernel is resident on another stream -- NCCL
 collectives are, for most of a training backward --
 whereas an ordinary launch whose CTAs find no free slot runs them in a later
@@ -176,7 +177,7 @@ from . import cake_build
 # ``launch.use_pdl``, ``arg_plan`` and ``logical``) are rewritten by the
 # exporter from the rendered program; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
-    # Route ``fwd`` (round 9): the forward's dynamic token-chunk program with the
+    # Route ``fwd``: the forward's dynamic token-chunk program with the
     # f32x2 pair math and the branch-free in-document stage, built with ``fast=True,
     # sched="dynamic", chunk_stages=1, pair_math=True``.  The CTAs of a channel tile
     # take chunks of ``n_sub x 8`` tokens from a device counter instead of equal
@@ -800,7 +801,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 4,
         },
     },
-    # Route ``fwd_dt`` (round 9): the dynamic token-chunk forward with
+    # Route ``fwd_dt``: the dynamic token-chunk forward with
     # ``dtype_flags`` (the ``flags`` scalar selects the tap load form: bit 0 set
     # reads BF16 taps), built with ``dtype_flags=True, fast=True,
     # sched="dynamic", chunk_stages=1, pair_math=True``; ``work`` as the ``fwd``
@@ -874,7 +875,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # Route ``fwd_bias`` (round 9): the dynamic token-chunk forward with a
+    # Route ``fwd_bias``: the dynamic token-chunk forward with a
     # per-channel bias ``b`` added after the four taps (FLA's order) and
     # ``dtype_flags`` (bit 0: BF16 taps, bit 2: BF16 bias), built with ``bias=True,
     # dtype_flags=True, fast=True, sched="dynamic", chunk_stages=1,
@@ -950,14 +951,14 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # Route ``fwd`` on sm_107a from C = 256 (round 9): the dynamic token-chunk
+    # Route ``fwd`` on sm_107a from C = 256: the dynamic token-chunk
     # forward of two eight-token stages per sub-tile and chunk, built with
     # ``fast=True, sched="dynamic", chunk_stages=2, pair_math=True``.  On R200 the
     # one-stage program loses to the shipped forward from C = 2048 (one sub-tile
     # per CTA over several channel tiles) and wins at C = 128, where two stages
     # lose; this program runs from the smallest measured C where it beats the
     # one-stage program.  Below S = 65536 the one-stage program is faster up to
-    # C = 2048 (round 35): this record runs from S = 65536, and its channel
+    # C = 2048: this record runs from S = 65536, and its channel
     # band's copy from C = 2048 at every S.  ``work`` as the ``fwd`` record's.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
@@ -1032,10 +1033,10 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # Route ``fwd_dt`` on sm_107a from C = 512 (round 9): the two-stage dynamic
+    # Route ``fwd_dt`` on sm_107a from C = 512: the two-stage dynamic
     # token-chunk forward with ``dtype_flags``, built with ``dtype_flags=True,
     # fast=True, sched="dynamic", chunk_stages=2, pair_math=True``; from S =
-    # 65536, and its channel band's copy from C = 2048 at every S (round 35);
+    # 65536, and its channel band's copy from C = 2048 at every S;
     # ``work`` as the ``fwd`` record's.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
@@ -1112,11 +1113,11 @@ MODULES: dict[str, dict[str, Any]] = {
             "words_per_tile": 2,
         },
     },
-    # Route ``fwd_bias`` on sm_107a from C = 1024 (round 9): the two-stage dynamic
+    # Route ``fwd_bias`` on sm_107a from C = 1024: the two-stage dynamic
     # token-chunk forward with the per-channel bias, built with ``bias=True,
     # dtype_flags=True, fast=True, sched="dynamic", chunk_stages=2,
     # pair_math=True``; from S = 65536, and its channel band's copy from C =
-    # 2048 at every S (round 35); ``work`` as the ``fwd`` record's.
+    # 2048 at every S; ``work`` as the ``fwd`` record's.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -3116,7 +3117,8 @@ MODULES: dict[str, dict[str, Any]] = {
 
 # Architecture -> route -> the records a call of the route selects from (the
 # fallback first).  The default routes ``fwd`` / ``bwd`` are the shipped
-# programs; the six round-6 routes each hold their hand-written fallback
+# programs; the six other routes (``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
+# ``bwd_fp32g``, ``bwd_bias_fp32g``) each hold their hand-written fallback
 # (above) and, once rendered, the routed programs the exporter scaffolds from
 # it; the forward routes' sm_107a two-stage programs are hand-written records.
 ROUTES: dict[str, dict[str, list[str]]] = {
@@ -3292,7 +3294,8 @@ GRID_MULT_CHOICES: tuple[int, ...] = (1, 2, 3, 4)
 # never carries one.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
-# six round-6 routes): the host derives it from the tap tensor, the ACTUAL
+# six other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``, ``bwd_fp32g``
+# and ``bwd_bias_fp32g``): the host derives it from the tap tensor, the ACTUAL
 # ``dweight`` out tensor, the bias tensor and the ACTUAL ``dbias`` out tensor;
 # the kernel reads it once in its prologue (load form) and once in its epilogue
 # (store form).  The default routes' programs take no ``flags``.
@@ -3840,7 +3843,7 @@ def channel_split(
     depend on the tiling, so ``y`` and ``dx`` are bitwise the legacy plan's;
     ``dweight``'s fixed summation order follows the tiling, so its bits differ
     from the legacy plan's (both are reproducible).  ``legacy=True`` is the
-    rule the package shipped before round 6, ``ct_vec = min(cv, threads)``,
+    rule an earlier revision shipped, ``ct_vec = min(cv, threads)``,
     for either role; the KCP path keeps it (its kernels pick the grouped path
     from ``ct_vec`` on the device and are measured under this rule).  Each
     role's rule is kept in sync with its copies (the kernel generator of

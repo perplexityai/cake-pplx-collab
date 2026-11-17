@@ -68,7 +68,7 @@ def cake_causal_conv1d_det_kcp(
     The first tokens of a fragment that continues a document read the history rows of the preceding fragment
     (exchanged through the context's halo collective) instead of zeros, so the result equals the single-rank
     :func:`cake_pplx.cake_causal_conv1d_det_train.cake_causal_conv1d_det` of the whole batch on this rank's tokens.  The KCP path takes FP32 taps and no
-    bias (the package's pre-round-6 contract).
+    bias (the package's earlier contract).
 
     Parameters
     ----------
