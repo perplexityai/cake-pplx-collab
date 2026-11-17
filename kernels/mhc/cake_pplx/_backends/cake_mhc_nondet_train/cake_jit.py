@@ -10212,6 +10212,105 @@ SELECT_RULE_KINDS = (
 # The roles whose compiled programs unroll the Sinkhorn chain for the count of
 # record: a call at another count needs the role's run-time-count record.
 RUN_TIME_ITERS_ROLES = ("fwd_coef", "bwd_token")
+# ----------------------------------------------------------------------------
+# Opt-in two-word accumulation
+#
+# Every kernel of record keeps each of its sums in one plain FP32 word (``accumulation="fp32"``, the default).  The
+# opt-in mode ``accumulation="fp32x2"`` runs, in place of the one-word programs a call selects for a role of
+# ``ACC_WORDS_ROLES``, one two-word program per architecture, role and parameter-row layout
+# (``ACC_WORDS_PROGRAMS``; the key ``"<role>/rows"`` where the token owner writes the group rows of
+# :func:`bwd_group_rows`): each sum of that kernel is kept as a pair of FP32 words, the running sum and its rounding
+# error (Kahan-compensated promotions in the mapping pass and the column slab, compensated partials and folds in the
+# token owner, TwoSum pairs in the column slab's parameter and ``dfn`` folds), and stored as one FP32 word.  It is a
+# compensated FP32 sum, not FP64.  The buffers between the kernels keep their one-word layouts, so the workspaces
+# and the host plan are the same, and the column slab's folds still add their words in arrival order (the mode has
+# no bit constraint, like the default).  The other passes (the fn split, the coefficients, the collapse, the
+# residual mixing, the backward prepare) run their one-word programs in both modes: no two-word form of them is
+# built.  The two-word programs are built at hidden ``ACC_WORDS_HIDDEN`` and for the Sinkhorn count of record only:
+# another hidden size or count is a ``NotImplementedError`` (:func:`check_accumulation`).  A two-word program runs at
+# every token count of its role (the token-count bands of the one-word programs do not apply); the mode exists for
+# accuracy experiments and its speed is not part of the record.  The two-word fold's record names the program key
+# ``dynr_pair``, which :func:`bwd_slab_atomic_program` never returns: only this mode selects it.
+ACCUMULATIONS = ("fp32", "fp32x2")
+ACCUMULATION = "fp32"
+ACC_WORDS_HIDDEN = 4096
+ACC_WORDS_ROLES = ("fwd_map", "bwd_token", "bwd_slab")
+ACC_WORDS_PROGRAMS: dict[str, dict[str, str]] = {
+    "fwd_map": {
+        "sm_100a": "cake_mhc_train_fwd_map__pair",
+        "sm_103a": "cake_mhc_train_fwd_map__pair",
+        "sm_107a": "cake_mhc_train_fwd_map__pair",
+    },
+    "bwd_token": {
+        "sm_100a": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "sm_103a": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "sm_107a": "cake_mhc_train_bwd_token__dot_ao8_l2l_pair",
+    },
+    "bwd_token/rows": {
+        "sm_100a": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+        "sm_103a": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+    },
+    "bwd_slab": {
+        "sm_100a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "sm_103a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "sm_107a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+    },
+}
+
+
+def check_accumulation(
+    accumulation: Any,
+    hidden: Optional[int] = None,
+    sinkhorn_iters: Optional[int] = None,
+) -> str:
+    """``accumulation`` when it is one of :data:`ACCUMULATIONS` (else ``ValueError``); for ``"fp32x2"`` a
+    ``hidden`` other than :data:`ACC_WORDS_HIDDEN` or a ``sinkhorn_iters`` other than :data:`SINKHORN_ITERS`
+    (each checked when given) is a ``NotImplementedError``: no two-word program is built for them."""
+
+    if type(accumulation) is not str or accumulation not in ACCUMULATIONS:
+        raise ValueError(
+            f"accumulation must be one of {ACCUMULATIONS}, got {accumulation!r}"
+        )
+    if accumulation != ACCUMULATION:
+        if hidden is not None and int(hidden) != ACC_WORDS_HIDDEN:
+            raise NotImplementedError(
+                f"accumulation={accumulation!r} runs hidden {ACC_WORDS_HIDDEN} only (the two-word programs are "
+                f"built for that size alone); got hidden {hidden}"
+            )
+        if sinkhorn_iters is not None and int(sinkhorn_iters) != SINKHORN_ITERS:
+            raise NotImplementedError(
+                f"accumulation={accumulation!r} runs sinkhorn_iters={SINKHORN_ITERS} only (the two-word programs "
+                f"have no run-time-count form); got sinkhorn_iters={sinkhorn_iters}"
+            )
+    return accumulation
+
+
+def two_word_modules(
+    names: Sequence[str], arch: str, hidden: int, *, rows: int, sm_count: int
+) -> tuple[str, ...]:
+    """``names`` (a selection of one call) with each record of a role of :data:`ACC_WORDS_ROLES` replaced by the
+    two-word program of its architecture, role and parameter-row layout (:data:`ACC_WORDS_PROGRAMS`; the group-row
+    form where :func:`bwd_group_rows` holds for ``rows`` tokens); every other record is kept.  A role whose table has
+    no program of ``arch`` is a ``NotImplementedError``."""
+
+    check_accumulation("fp32x2", hidden)
+    group_rows = bwd_group_rows(int(rows), int(sm_count), arch, int(hidden))
+    out = []
+    for name in names:
+        role = MODULES[name]["role"]
+        if role not in ACC_WORDS_ROLES:
+            out.append(name)
+            continue
+        key = f"{role}/rows" if group_rows and f"{role}/rows" in ACC_WORDS_PROGRAMS else role
+        program = ACC_WORDS_PROGRAMS[key].get(arch)
+        if program is None:
+            raise NotImplementedError(
+                f"accumulation='fp32x2' has no two-word {key!r} program on {arch!r}"
+            )
+        out.append(program)
+    return tuple(out)
+
+
 # The host rules a ``program`` selection rule may name (the record's program key must equal the rule's value).
 PROGRAM_RULES = (
     "fwd_map_program",
@@ -10278,6 +10377,7 @@ def selected_modules(
     rows: int,
     sm_count: int,
     sinkhorn_iters: int = SINKHORN_ITERS,
+    accumulation: str = ACCUMULATION,
 ) -> tuple[str, ...]:
     """Ordered module names one public call launches on ``arch`` for ``rows`` tokens
     on a device of ``sm_count`` SMs.
@@ -10324,9 +10424,13 @@ def selected_modules(
     column-slab program (``BWD_SLAB_LPT``, ``BWD_SLAB_LPT_HIDDEN``,
     ``BWD_SLAB_ORDER``, ``BWD_SLAB_LPT_OVERRIDES``,
     ``BWD_SLAB_ORDER_OVERRIDES``) has no record on the route is a
-    ``ValueError``, never a backward without the column slab.
+    ``ValueError``, never a backward without the column slab.  With
+    ``accumulation="fp32x2"`` (:func:`check_accumulation`) the records of the
+    roles of :data:`ACC_WORDS_ROLES` are then replaced by their two-word
+    programs (:func:`two_word_modules`).
     """
 
+    check_accumulation(accumulation, hidden, sinkhorn_iters)
     rows, sinkhorn_iters = int(rows), int(sinkhorn_iters)
     route = route_modules(arch, hidden, kind)
     # At a count other than the count of record, the run-time-count record of a role replaces the role's
@@ -10381,6 +10485,8 @@ def selected_modules(
             f"the {route_key(hidden, kind)!r} route on {arch!r} selects {len(slabs)} column-slab records for "
             f"{rows} rows on {sm_count} SMs ({slabs}): the column-slab program of the call needs exactly one"
         )
+    if accumulation != ACCUMULATION:
+        names = two_word_modules(names, arch, hidden, rows=rows, sm_count=sm_count)
     return names
 
 
@@ -10885,6 +10991,13 @@ __all__ = [
     "K3_TILING",
     "K6_CTAS_PER_SM",
     "RUN_TIME_ITERS_ROLES",
+    "ACCUMULATIONS",
+    "ACCUMULATION",
+    "ACC_WORDS_HIDDEN",
+    "ACC_WORDS_ROLES",
+    "ACC_WORDS_PROGRAMS",
+    "check_accumulation",
+    "two_word_modules",
     "arch_for_capability",
     "bwd_slab_atomic_program",
     "bwd_slab_order",
