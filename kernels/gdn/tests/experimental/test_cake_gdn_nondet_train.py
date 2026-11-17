@@ -4622,7 +4622,7 @@ def test_packed_row_of_a_non_leaf_with_other_consumers(
 
         twice = (
             {"row": 2 * (row_of(ref) + weight.double()), "dg": 2 * ref["dg"], "dbeta": 2 * ref["dbeta"]},
-            {"row": 2 * (row_of(naive) + weight.to(torch.bfloat16)).float(), "dg": 2 * naive["dg"],
+            {"row": 2 * (row_of(naive) + weight.to(torch.bfloat16)), "dg": 2 * naive["dg"],
              "dbeta": 2 * naive["dbeta"]},
         )  # fmt: skip
         return _judged(runs, twice, names)
