@@ -5910,7 +5910,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 bf16 weight: (16384, 45056] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package.
+    # sm_100a H2048 bf16 weight: (16384, 58880] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_ceeef043ac64f37fc529__16384_58880": {
         "arches": [
             "sm_100a",
