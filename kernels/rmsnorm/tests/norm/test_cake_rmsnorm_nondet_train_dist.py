@@ -131,8 +131,8 @@ CASES = list(_cases())
 def _worker(rank: int, port: int, out_dir: Path) -> int:
     import torch.distributed as dist
 
-    from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
     from tests.cake.test_helpers.cake_package import cake_package
+    from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -241,7 +241,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         generator = torch.Generator(device=device).manual_seed(
             ref.draw_seed(base, draw)
         )
-        kw = dict(dtype=torch.float32, device=device, generator=generator)
+        kw = {"dtype": torch.float32, "device": device, "generator": generator}
         x = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
         u = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
         g = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
@@ -319,7 +319,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                         dist.barrier(group=cpu)
                         if rank == measuring:
                             ms, comm, result = timed(
-                                call, comm=lambda: issue(collective, *small)
+                                call, comm=functools.partial(issue, collective, *small)
                             )
                             busy.append(ms)
                             comm_ms.append(comm)
@@ -332,7 +332,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 else:
                     dist.barrier(group=cpu)
 
-                    def traffic():
+                    def traffic(collective=collective, big=big):
                         for _ in range(TRAFFIC_ITERS):
                             issue(collective, *big)
 
