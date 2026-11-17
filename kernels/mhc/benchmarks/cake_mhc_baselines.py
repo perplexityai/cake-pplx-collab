@@ -714,9 +714,10 @@ class TileKernels(Arm):
                 cap = tuple(torch.cuda.get_device_capability(device))
                 if cap not in DEEPGEMM_CAPABILITIES:
                     # The device assertion would leave the CUDA context unusable for every other arm of the process.
-                    return False, (f"DeepGEMM {dist_version('deep_gemm') or dist_version('deep-gemm')} has no working "
-                                   f"kernel for sm_{cap[0]}{cap[1]}a (device assertion: TMA descriptor prefetch "
-                                   "without CUTE_ARCH_TMA_SM90_ENABLED)")
+                    dg = dist_version("deep_gemm") or dist_version("deep-gemm")
+                    return False, (f"DeepGEMM has no sm_{cap[0]}{cap[1]}a support"
+                                   + (f" (DeepGEMM {dg}: device assertion, TMA descriptor prefetch without "
+                                      "CUTE_ARCH_TMA_SM90_ENABLED)" if dg else " (not installed on this stack)"))
                 import deep_gemm
 
                 note += f", deep-gemm {getattr(deep_gemm, '__version__', '?')}"

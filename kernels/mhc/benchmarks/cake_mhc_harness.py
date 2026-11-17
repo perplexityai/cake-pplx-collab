@@ -632,6 +632,7 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
         ok, note = arm.available(device, hidden)
         rec = row["arms"][arm.name] = {"available": ok, "note": note}
         if not ok:
+            print(f"H={hidden} T={tokens} {arm.name}: unsupported: {note}", flush=True)
             continue
         try:
             rec["prepare"] = arm.prepare_shape(i, timer)
@@ -874,6 +875,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                                                                                  "meets_contract": False}
                 else:
                     record["judge"].setdefault(str(hidden), {})[arm.name] = {"unavailable": note}
+                    print(f"judge H={hidden} {arm.name}: unsupported: {note}", flush=True)
             verdicts = base.judge_arms(candidates, hidden, device=device, judge=judge, draws=args.judge_draws,
                                        tokens=args.judge_tokens, seed=args.seed, iters=args.sinkhorn_iters)
             record["judge"].setdefault(str(hidden), {}).update(verdicts)
