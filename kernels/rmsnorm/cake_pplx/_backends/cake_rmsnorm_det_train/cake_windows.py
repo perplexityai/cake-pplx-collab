@@ -32,130 +32,130 @@ from __future__ import annotations
 PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] = {
     "sm_100a": {
         "bwd_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_273b578bec562eee3879"),
-            (1, 768, "cake_rmsnorm_det_train_8d4ec25545d36490cdeb"),
+            (0, 1, "cake_rmsnorm_det_train_f6233ff84d0b93fe45db"),
+            (1, 768, "cake_rmsnorm_det_train_4176a24f8ee981dd2bb2"),
             (768, 1024, "cake_rmsnorm_det_train_7dc29629ff21625607f8"),
             (1024, 4096, "cake_rmsnorm_det_train_c1a9efdf06c3087b4efe"),
             (4096, 32768, "cake_rmsnorm_det_train_21c8bb55c8d672b63952"),
             (32768, 36352, "cake_rmsnorm_det_train_b457c4d134e44476dc6f"),
-            (36352, None, "cake_rmsnorm_det_train_b5bdabba0b80fb8afcc5"),
+            (36352, None, "cake_rmsnorm_det_train_b457c4d134e44476dc6f"),
         ),
         "bwd_w32_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_bdb11d00f96428c898c7"),
-            (1, 768, "cake_rmsnorm_det_train_4b4079f72c8e93f716d9"),
+            (0, 1, "cake_rmsnorm_det_train_5b177296918aca760fa2"),
+            (1, 768, "cake_rmsnorm_det_train_06bbfeb2e313d41451fa"),
             (768, 1024, "cake_rmsnorm_det_train_baff9ecbafe7de1e6030"),
             (1024, 4096, "cake_rmsnorm_det_train_17d9cdfd157ba4b86c2b"),
             (4096, 32768, "cake_rmsnorm_det_train_4bf450b6af0314ed03be"),
             (32768, 36352, "cake_rmsnorm_det_train_8777b1c8538527c9aaf7"),
-            (36352, None, "cake_rmsnorm_det_train_25cae5062df01a2da92f"),
+            (36352, None, "cake_rmsnorm_det_train_8777b1c8538527c9aaf7"),
         ),
         "bwd_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_61a2d9fcb0cf1bc9c36c"),
-            (1, 768, "cake_rmsnorm_det_train_39d33412ac8ec6b17a35"),
+            (0, 1, "cake_rmsnorm_det_train_b13b0c73ece62938899a"),
+            (1, 768, "cake_rmsnorm_det_train_923e668c53f60f0b256b"),
             (768, 1024, "cake_rmsnorm_det_train_cc26e316ae40d683a118"),
             (1024, 2047, "cake_rmsnorm_det_train_c73074cf44f07fcf3bb6"),
             (2047, 22528, "cake_rmsnorm_det_train_cc26e316ae40d683a118"),
             (22528, 58880, "cake_rmsnorm_det_train_ceeef043ac64f37fc529"),
-            (58880, None, "cake_rmsnorm_det_train_2fe43a951c2d72c1ffd5"),
+            (58880, None, "cake_rmsnorm_det_train_ceeef043ac64f37fc529"),
         ),
         "bwd_w32_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_5f20b731afe2c0b0619b"),
-            (1, 768, "cake_rmsnorm_det_train_12875cc887603ca86fce"),
+            (0, 1, "cake_rmsnorm_det_train_d22b3e8ce96e49997448"),
+            (1, 768, "cake_rmsnorm_det_train_9030dbeb948761ec2258"),
             (768, 1024, "cake_rmsnorm_det_train_07f9f2fbea7163639c27"),
             (1024, 16384, "cake_rmsnorm_det_train_b187e5989302def22b2d"),
             (16384, 58880, "cake_rmsnorm_det_train_7e6a0b631aea3edf51f9"),
-            (58880, None, "cake_rmsnorm_det_train_e6347c71a6831e3c615b"),
+            (58880, None, "cake_rmsnorm_det_train_7e6a0b631aea3edf51f9"),
         ),
         "bwd_h256": (
-            (0, 87, "cake_rmsnorm_det_train_c0ca220c25fd472a5128"),
+            (0, 87, "cake_rmsnorm_det_train_6959ea32516c82acae98"),
             (87, 2048, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
             (2048, 5120, "cake_rmsnorm_det_train_af005462cd6a301f31c4"),
             (5120, 12288, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
             (12288, 40960, "cake_rmsnorm_det_train_af005462cd6a301f31c4"),
             (40960, 80896, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
-            (80896, 1572864, "cake_rmsnorm_det_train_083ea823c691e0631ad3"),
-            (1572864, None, "cake_rmsnorm_det_train_c18297d75c0d424978fd"),
+            (80896, 1572864, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
+            (1572864, None, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
         ),
         "bwd_w32_h256": (
-            (0, 87, "cake_rmsnorm_det_train_e5eaf0fd38e702d0c68a"),
+            (0, 87, "cake_rmsnorm_det_train_c484e2676d7b535ff396"),
             (87, 2048, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
             (2048, 5120, "cake_rmsnorm_det_train_b7d9577ff884de98ea06"),
             (5120, 12288, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
             (12288, 40960, "cake_rmsnorm_det_train_b7d9577ff884de98ea06"),
             (40960, 80896, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
-            (80896, 1572864, "cake_rmsnorm_det_train_c4c89f0d04b7b3a38d0b"),
-            (1572864, None, "cake_rmsnorm_det_train_f788ef57163552825d27"),
+            (80896, 1572864, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
+            (1572864, None, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
         ),
         "bwd_h4096": (
-            (0, 203, "cake_rmsnorm_det_train_bbc80180faee6bad6da3"),
+            (0, 203, "cake_rmsnorm_det_train_4822793ea0c954c11af6"),
             (203, 256, "cake_rmsnorm_det_train_3e644ea19b7d14e61ab9"),
             (256, 1024, "cake_rmsnorm_det_train_59270fb249dcba1ff679"),
             (1024, 22528, "cake_rmsnorm_det_train_5572b2671862fe670ef4"),
             (22528, 32768, "cake_rmsnorm_det_train_5abcdc29d54ac214bd4a"),
             (32768, 44032, "cake_rmsnorm_det_train_35a0b0ca6b2060313255"),
-            (44032, None, "cake_rmsnorm_det_train_7122dbcd697b3fbe1ee0"),
+            (44032, None, "cake_rmsnorm_det_train_35a0b0ca6b2060313255"),
         ),
         "bwd_w32_h4096": (
-            (0, 203, "cake_rmsnorm_det_train_0af20ef9ee6868c5569d"),
+            (0, 203, "cake_rmsnorm_det_train_8616070567821eaa3e35"),
             (203, 256, "cake_rmsnorm_det_train_20c64c610d22c6db4c05"),
             (256, 1024, "cake_rmsnorm_det_train_c9f55c0ae4b198c859d1"),
             (1024, 22528, "cake_rmsnorm_det_train_47a01388444960da7aae"),
             (22528, 32768, "cake_rmsnorm_det_train_a8eb754739a1589de3ec"),
             (32768, 44032, "cake_rmsnorm_det_train_626aed743358c27513f1"),
-            (44032, None, "cake_rmsnorm_det_train_5ef5f1f13ed8f2b994c4"),
+            (44032, None, "cake_rmsnorm_det_train_626aed743358c27513f1"),
         ),
         "bwd_h512": (
-            (0, 1, "cake_rmsnorm_det_train_43d6b60bffc7acab55f8"),
-            (1, 227, "cake_rmsnorm_det_train_5f3e3fccaea795d0a806"),
+            (0, 1, "cake_rmsnorm_det_train_f283bf47d2e3a49bc43c"),
+            (1, 227, "cake_rmsnorm_det_train_931757c844a9d257c08b"),
             (227, 1024, "cake_rmsnorm_det_train_09601d42628de24f6f87"),
             (1024, 4096, "cake_rmsnorm_det_train_123db0b2f7fb38cfab03"),
             (4096, 32768, "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036"),
             (32768, None, "cake_rmsnorm_det_train_8877322a3002e3a4fefd"),
         ),
         "bwd_w32_h512": (
-            (0, 1, "cake_rmsnorm_det_train_e97e46f27f9139442b55"),
-            (1, 227, "cake_rmsnorm_det_train_942503b80a21f22cd392"),
+            (0, 1, "cake_rmsnorm_det_train_78bf5eb3ee33f8dc220a"),
+            (1, 227, "cake_rmsnorm_det_train_404c8f54ab3129877350"),
             (227, 1024, "cake_rmsnorm_det_train_9f07cea1d13b923ed91e"),
             (1024, 4096, "cake_rmsnorm_det_train_632ca6ff01848a71f9f2"),
             (4096, 32768, "cake_rmsnorm_det_train_1f628cf4fd17b4ea9441"),
             (32768, None, "cake_rmsnorm_det_train_659bfc53e5372850ae2e"),
         ),
         "bwd_h5120": (
-            (0, 1, "cake_rmsnorm_det_train_6a1cfc92df862d3000e7"),
-            (1, 256, "cake_rmsnorm_det_train_baa071a215cdf8b946bf"),
+            (0, 1, "cake_rmsnorm_det_train_080e0a6c3b18e9bad790"),
+            (1, 256, "cake_rmsnorm_det_train_dd3a35731e2e1665dd71"),
             (256, 6144, "cake_rmsnorm_det_train_b482c84dbffcd75a4a4c"),
-            (6144, 50688, "cake_rmsnorm_det_train_c145ef195d7aeb04f242"),
-            (50688, None, "cake_rmsnorm_det_train_c145ef195d7aeb04f242"),
+            (6144, 50688, "cake_rmsnorm_det_train_b482c84dbffcd75a4a4c"),
+            (50688, None, "cake_rmsnorm_det_train_b482c84dbffcd75a4a4c"),
         ),
         "bwd_w32_h5120": (
-            (0, 1, "cake_rmsnorm_det_train_9560032be3774471322b"),
-            (1, 256, "cake_rmsnorm_det_train_9560032be3774471322b"),
+            (0, 1, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
+            (1, 256, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
             (256, 6144, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
-            (6144, 50688, "cake_rmsnorm_det_train_9479b1298a1b19d4d996"),
-            (50688, None, "cake_rmsnorm_det_train_9479b1298a1b19d4d996"),
+            (6144, 50688, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
+            (50688, None, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
         ),
         "bwd_h6144": (
-            (0, 384, "cake_rmsnorm_det_train_7100a5f169836fd246e6"),
+            (0, 384, "cake_rmsnorm_det_train_f2271417b1a596d0540f"),
             (384, 767, "cake_rmsnorm_det_train_5c804aed7ad14b99e1d0"),
             (767, 4096, "cake_rmsnorm_det_train_61421bc72e57d14d8a32"),
             (4096, 42496, "cake_rmsnorm_det_train_b93bf060d4d3defc8150"),
-            (42496, None, "cake_rmsnorm_det_train_c440e57b9cd55c3e22e9"),
+            (42496, None, "cake_rmsnorm_det_train_b93bf060d4d3defc8150"),
         ),
         "bwd_w32_h6144": (
-            (0, 384, "cake_rmsnorm_det_train_76a09fc04aced9f40868"),
+            (0, 384, "cake_rmsnorm_det_train_8a280a7ecafed4b9e9f5"),
             (384, 4096, "cake_rmsnorm_det_train_41b80b6af97974feb181"),
             (4096, 42496, "cake_rmsnorm_det_train_62beb52fa50cc8624c9f"),
-            (42496, None, "cake_rmsnorm_det_train_0ae6eb51bc0b61084cff"),
+            (42496, None, "cake_rmsnorm_det_train_62beb52fa50cc8624c9f"),
         ),
         "bwd_residual_h6144": (
-            (0, 1152, "cake_rmsnorm_det_train_d2749326f8c9b856bb01"),
+            (0, 1152, "cake_rmsnorm_det_train_864e84f3d874f850c091"),
             (1152, 42496, "cake_rmsnorm_det_train_c1a3be946e94e94233af"),
-            (42496, None, "cake_rmsnorm_det_train_84385468c8e8ef19f3dc"),
+            (42496, None, "cake_rmsnorm_det_train_c1a3be946e94e94233af"),
         ),
         "bwd_w32_residual_h6144": (
-            (0, 1152, "cake_rmsnorm_det_train_c8bc10e76c624f5f4534"),
+            (0, 1152, "cake_rmsnorm_det_train_71d36617003ab7742a77"),
             (1152, 42496, "cake_rmsnorm_det_train_ab0e20feefa296ffff3c"),
-            (42496, None, "cake_rmsnorm_det_train_486424b132fa3256e8ef"),
+            (42496, None, "cake_rmsnorm_det_train_ab0e20feefa296ffff3c"),
         ),
         "fwd_h1536": (
             (0, 1536, "cake_rmsnorm_det_train_1ea88523077fc340e55f"),
@@ -266,139 +266,139 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
     },
     "sm_103a": {
         "bwd_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_0eaab6475ecda03ee034"),
-            (1, 31, "cake_rmsnorm_det_train_ad547a3cd25e6cd640a3"),
-            (31, 214, "cake_rmsnorm_det_train_53285b9598170177d3e0"),
+            (0, 1, "cake_rmsnorm_det_train_e254714a110f4d45ea02"),
+            (1, 31, "cake_rmsnorm_det_train_4aef8d1ff2c1c2af7b80"),
+            (31, 214, "cake_rmsnorm_det_train_4aef8d1ff2c1c2af7b80"),
             (214, 1024, "cake_rmsnorm_det_train_7dc29629ff21625607f8"),
             (1024, 4096, "cake_rmsnorm_det_train_c1a9efdf06c3087b4efe"),
             (4096, 14928, "cake_rmsnorm_det_train_1df7db17277d363b5168"),
             (14928, 15566, "cake_rmsnorm_det_train_4df08ce51fb01ba1193f"),
             (15566, 40448, "cake_rmsnorm_det_train_f522f5b8d4343d96ca04"),
-            (40448, None, "cake_rmsnorm_det_train_cbeae168d70edd196417"),
+            (40448, None, "cake_rmsnorm_det_train_9cd3c766db4b70ed7213"),
         ),
         "bwd_w32_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_5f6f9f3c32410cc1575a"),
-            (1, 31, "cake_rmsnorm_det_train_775d9130f3ce2d46f118"),
-            (31, 214, "cake_rmsnorm_det_train_5c5be9a6aeac20fd2776"),
+            (0, 1, "cake_rmsnorm_det_train_9f139a52a93ccc69c3d1"),
+            (1, 31, "cake_rmsnorm_det_train_698c3d36d67408394ccf"),
+            (31, 214, "cake_rmsnorm_det_train_698c3d36d67408394ccf"),
             (214, 1024, "cake_rmsnorm_det_train_baff9ecbafe7de1e6030"),
             (1024, 4096, "cake_rmsnorm_det_train_17d9cdfd157ba4b86c2b"),
             (4096, 14928, "cake_rmsnorm_det_train_a99e2b380514c4d86d60"),
             (14928, 15566, "cake_rmsnorm_det_train_7a72e97bd6cb4dc0efc2"),
             (15566, 40448, "cake_rmsnorm_det_train_109f19bb177c8f20cadc"),
-            (40448, None, "cake_rmsnorm_det_train_ca6211f3ea2ce8c86a05"),
+            (40448, None, "cake_rmsnorm_det_train_51f46ff164b142ec8888"),
         ),
         "bwd_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_56635d2cf6f4e9a9f44a"),
-            (1, 2, "cake_rmsnorm_det_train_ce65889518ffd6340c59"),
-            (2, 171, "cake_rmsnorm_det_train_2b4c0f5b0e9c312fa43e"),
+            (0, 1, "cake_rmsnorm_det_train_a1c71cc355c7e9988ab2"),
+            (1, 2, "cake_rmsnorm_det_train_ed36a8d998abba41f227"),
+            (2, 171, "cake_rmsnorm_det_train_ed36a8d998abba41f227"),
             (171, 1024, "cake_rmsnorm_det_train_caf6978ed0a17fbf65b9"),
             (1024, 16384, "cake_rmsnorm_det_train_cc26e316ae40d683a118"),
             (16384, 32768, "cake_rmsnorm_det_train_caf6978ed0a17fbf65b9"),
             (32768, 55296, "cake_rmsnorm_det_train_302f64db6abe79e5259e"),
-            (55296, None, "cake_rmsnorm_det_train_018f0cd723106f709f11"),
+            (55296, None, "cake_rmsnorm_det_train_302f64db6abe79e5259e"),
         ),
         "bwd_w32_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_02f98bf9651f7200d064"),
-            (1, 2, "cake_rmsnorm_det_train_28c46db39116f7f718a0"),
-            (2, 171, "cake_rmsnorm_det_train_2e9171b7753650cda515"),
+            (0, 1, "cake_rmsnorm_det_train_ab6b18375f52dcec73f7"),
+            (1, 2, "cake_rmsnorm_det_train_978741b43372951cb5b9"),
+            (2, 171, "cake_rmsnorm_det_train_978741b43372951cb5b9"),
             (171, 1024, "cake_rmsnorm_det_train_07f9f2fbea7163639c27"),
             (1024, 16384, "cake_rmsnorm_det_train_c83c314c6dcf28ad7369"),
             (16384, 32768, "cake_rmsnorm_det_train_07f9f2fbea7163639c27"),
             (32768, 55296, "cake_rmsnorm_det_train_e98cb156abfe1666c76f"),
-            (55296, None, "cake_rmsnorm_det_train_ca8ca4674a3dbd89ad16"),
+            (55296, None, "cake_rmsnorm_det_train_e98cb156abfe1666c76f"),
         ),
         "bwd_h256": (
-            (0, 1680, "cake_rmsnorm_det_train_083ea823c691e0631ad3"),
+            (0, 1680, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
             (1680, 2048, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
             (2048, 5120, "cake_rmsnorm_det_train_af005462cd6a301f31c4"),
             (5120, 12288, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
             (12288, 40960, "cake_rmsnorm_det_train_af005462cd6a301f31c4"),
             (40960, 99840, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
-            (99840, 720896, "cake_rmsnorm_det_train_083ea823c691e0631ad3"),
-            (720896, 1572864, "cake_rmsnorm_det_train_0291949ba535c646c3a8"),
-            (1572864, None, "cake_rmsnorm_det_train_c18297d75c0d424978fd"),
+            (99840, 720896, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
+            (720896, 1572864, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
+            (1572864, None, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
         ),
         "bwd_w32_h256": (
-            (0, 1680, "cake_rmsnorm_det_train_c4c89f0d04b7b3a38d0b"),
+            (0, 1680, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
             (1680, 2048, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
             (2048, 5120, "cake_rmsnorm_det_train_b7d9577ff884de98ea06"),
             (5120, 12288, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
             (12288, 40960, "cake_rmsnorm_det_train_b7d9577ff884de98ea06"),
             (40960, 99840, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
-            (99840, 720896, "cake_rmsnorm_det_train_c4c89f0d04b7b3a38d0b"),
-            (720896, 1572864, "cake_rmsnorm_det_train_89505762fa1cbf33cb8f"),
-            (1572864, None, "cake_rmsnorm_det_train_f788ef57163552825d27"),
+            (99840, 720896, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
+            (720896, 1572864, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
+            (1572864, None, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
         ),
         "bwd_h4096": (
-            (0, 512, "cake_rmsnorm_det_train_10f7bdf21790269a977c"),
+            (0, 512, "cake_rmsnorm_det_train_5efbf78a48136634a5b3"),
             (512, 1024, "cake_rmsnorm_det_train_ad2bb26ea5916baef963"),
             (1024, 24576, "cake_rmsnorm_det_train_5572b2671862fe670ef4"),
             (24576, 32768, "cake_rmsnorm_det_train_5abcdc29d54ac214bd4a"),
             (32768, 48640, "cake_rmsnorm_det_train_35a0b0ca6b2060313255"),
-            (48640, 51200, "cake_rmsnorm_det_train_850eec3aff01f019a392"),
-            (51200, None, "cake_rmsnorm_det_train_e813cc307923546f0064"),
+            (48640, 51200, "cake_rmsnorm_det_train_24643edc7e1143da24e0"),
+            (51200, None, "cake_rmsnorm_det_train_24643edc7e1143da24e0"),
         ),
         "bwd_w32_h4096": (
-            (0, 1, "cake_rmsnorm_det_train_11820fe48711775d5685"),
-            (1, 512, "cake_rmsnorm_det_train_f03fb1c6ef9e54f54240"),
+            (0, 1, "cake_rmsnorm_det_train_27615d0e36c9f2fe0856"),
+            (1, 512, "cake_rmsnorm_det_train_ff7de8d3e4dcd036ea9a"),
             (512, 1024, "cake_rmsnorm_det_train_16545056022785f2a7d8"),
             (1024, 24576, "cake_rmsnorm_det_train_47a01388444960da7aae"),
             (24576, 32768, "cake_rmsnorm_det_train_a8eb754739a1589de3ec"),
             (32768, 48640, "cake_rmsnorm_det_train_626aed743358c27513f1"),
-            (48640, 51200, "cake_rmsnorm_det_train_cb164a27c0157ed0712d"),
-            (51200, None, "cake_rmsnorm_det_train_cc019a164f0e91c4b583"),
+            (48640, 51200, "cake_rmsnorm_det_train_78c26a53e83c9803bcbf"),
+            (51200, None, "cake_rmsnorm_det_train_78c26a53e83c9803bcbf"),
         ),
         "bwd_h512": (
-            (0, 1, "cake_rmsnorm_det_train_9dc76b2260f10acc2926"),
-            (1, 4, "cake_rmsnorm_det_train_117a66e423695c124202"),
-            (4, 227, "cake_rmsnorm_det_train_877751ba915bbc261064"),
+            (0, 1, "cake_rmsnorm_det_train_f283bf47d2e3a49bc43c"),
+            (1, 4, "cake_rmsnorm_det_train_bdfd77893d8f9db3c9bb"),
+            (4, 227, "cake_rmsnorm_det_train_bdfd77893d8f9db3c9bb"),
             (227, 1024, "cake_rmsnorm_det_train_09601d42628de24f6f87"),
             (1024, 4096, "cake_rmsnorm_det_train_8e7f4d811e55a351a22e"),
             (4096, 32768, "cake_rmsnorm_det_train_274b0055aace183f2367"),
             (32768, None, "cake_rmsnorm_det_train_cfaae3cec98f8501832b"),
         ),
         "bwd_w32_h512": (
-            (0, 1, "cake_rmsnorm_det_train_2633b05c48af196c8bbe"),
-            (1, 4, "cake_rmsnorm_det_train_df3b2da5a4185e19ebbf"),
-            (4, 227, "cake_rmsnorm_det_train_81d9adbf31a26a4ebc02"),
+            (0, 1, "cake_rmsnorm_det_train_78bf5eb3ee33f8dc220a"),
+            (1, 4, "cake_rmsnorm_det_train_2c60470d16e0a7fb6089"),
+            (4, 227, "cake_rmsnorm_det_train_2c60470d16e0a7fb6089"),
             (227, 1024, "cake_rmsnorm_det_train_9f07cea1d13b923ed91e"),
             (1024, 4096, "cake_rmsnorm_det_train_dfcbd32cdb8108643fba"),
             (4096, 32768, "cake_rmsnorm_det_train_56ee8e66479625fd078a"),
             (32768, None, "cake_rmsnorm_det_train_a546f410ec8cf03ef20d"),
         ),
         "bwd_h5120": (
-            (0, 64, "cake_rmsnorm_det_train_e73ed9335334417fb063"),
+            (0, 64, "cake_rmsnorm_det_train_dd3a35731e2e1665dd71"),
             (64, 5120, "cake_rmsnorm_det_train_2fc4932fbde0bc848b32"),
-            (5120, None, "cake_rmsnorm_det_train_7ffb443a63a92ab6b0e0"),
+            (5120, None, "cake_rmsnorm_det_train_2fc4932fbde0bc848b32"),
         ),
         "bwd_w32_h5120": (
-            (0, 64, "cake_rmsnorm_det_train_33b1b76e986f135bb2f5"),
+            (0, 64, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
             (64, 5120, "cake_rmsnorm_det_train_79811a76205d7d7dd197"),
-            (5120, None, "cake_rmsnorm_det_train_f9f7d4cd75ef91cc8374"),
+            (5120, None, "cake_rmsnorm_det_train_79811a76205d7d7dd197"),
         ),
         "bwd_h6144": (
-            (0, 256, "cake_rmsnorm_det_train_5d6088e6e1bf16d6c29c"),
+            (0, 256, "cake_rmsnorm_det_train_f2271417b1a596d0540f"),
             (256, 767, "cake_rmsnorm_det_train_5c804aed7ad14b99e1d0"),
             (767, 4096, "cake_rmsnorm_det_train_61421bc72e57d14d8a32"),
             (4096, 48640, "cake_rmsnorm_det_train_322574af704b51aef0bb"),
-            (48640, None, "cake_rmsnorm_det_train_289dc9ab6377fbf87332"),
+            (48640, None, "cake_rmsnorm_det_train_322574af704b51aef0bb"),
         ),
         "bwd_w32_h6144": (
-            (0, 1, "cake_rmsnorm_det_train_017091c7827bdc8c95d5"),
-            (1, 256, "cake_rmsnorm_det_train_f9c641ac48eaa4a50908"),
+            (0, 1, "cake_rmsnorm_det_train_b3e6531e46667901ab91"),
+            (1, 256, "cake_rmsnorm_det_train_8a280a7ecafed4b9e9f5"),
             (256, 4096, "cake_rmsnorm_det_train_41b80b6af97974feb181"),
             (4096, 48640, "cake_rmsnorm_det_train_9a8c0396edd85d4d545e"),
-            (48640, None, "cake_rmsnorm_det_train_aa46aa07d86900ad832f"),
+            (48640, None, "cake_rmsnorm_det_train_9a8c0396edd85d4d545e"),
         ),
         "bwd_residual_h6144": (
-            (0, 1216, "cake_rmsnorm_det_train_07135550fae8b07bb82c"),
+            (0, 1216, "cake_rmsnorm_det_train_864e84f3d874f850c091"),
             (1216, 48640, "cake_rmsnorm_det_train_04ebec87cbee3f0ce093"),
-            (48640, None, "cake_rmsnorm_det_train_21b5e791889c85c956e3"),
+            (48640, None, "cake_rmsnorm_det_train_04ebec87cbee3f0ce093"),
         ),
         "bwd_w32_residual_h6144": (
-            (0, 1216, "cake_rmsnorm_det_train_570eec506ed94f36f062"),
+            (0, 1216, "cake_rmsnorm_det_train_71d36617003ab7742a77"),
             (1216, 48640, "cake_rmsnorm_det_train_47890c9ae28e3e4b6759"),
-            (48640, None, "cake_rmsnorm_det_train_83043d3ae46d9d20c42c"),
+            (48640, None, "cake_rmsnorm_det_train_47890c9ae28e3e4b6759"),
         ),
         "fwd_h1536": (
             (0, 1, "cake_rmsnorm_det_train_1ea88523077fc340e55f"),
@@ -510,116 +510,116 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
     },
     "sm_107a": {
         "bwd_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_33551729d38fdc94cde7"),
-            (1, 576, "cake_rmsnorm_det_train_9e71ed0d9ad7a7739002"),
+            (0, 1, "cake_rmsnorm_det_train_c3b1b46a2c6d1f9b3724"),
+            (1, 576, "cake_rmsnorm_det_train_1207b05663ed2b4de14b"),
             (576, 1024, "cake_rmsnorm_det_train_7dc29629ff21625607f8"),
             (1024, 16384, "cake_rmsnorm_det_train_6a428da2227972ae18ae"),
             (16384, 45056, "cake_rmsnorm_det_train_56d26996239835327501"),
-            (45056, None, "cake_rmsnorm_det_train_e694b0a25ea01d1f6cdc"),
+            (45056, None, "cake_rmsnorm_det_train_411e270c0575d26a77f4"),
         ),
         "bwd_w32_h1536": (
-            (0, 1, "cake_rmsnorm_det_train_d259a22ec493a07e5e02"),
-            (1, 576, "cake_rmsnorm_det_train_db8d986d719b909621d0"),
+            (0, 1, "cake_rmsnorm_det_train_45057834f9e0e017b6ef"),
+            (1, 576, "cake_rmsnorm_det_train_137ba5328176fb07b37d"),
             (576, 1024, "cake_rmsnorm_det_train_baff9ecbafe7de1e6030"),
             (1024, 16384, "cake_rmsnorm_det_train_e63beae98c236ce26335"),
             (16384, 45056, "cake_rmsnorm_det_train_de8e07d4cb312b06dbc4"),
-            (45056, None, "cake_rmsnorm_det_train_0f0b782f1e538caad3ce"),
+            (45056, None, "cake_rmsnorm_det_train_64ffe19b041f5bfa34fb"),
         ),
         "bwd_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_bc9d86b3b63d513a1aac"),
-            (1, 256, "cake_rmsnorm_det_train_32eb12e27be1360b890d"),
+            (0, 1, "cake_rmsnorm_det_train_92def3f97ddcec9165f0"),
+            (1, 256, "cake_rmsnorm_det_train_6720b4a159be2b84b325"),
             (256, 1024, "cake_rmsnorm_det_train_845cdcd8145ada631461"),
             (1024, 16384, "cake_rmsnorm_det_train_81c3d8ab0a482e3af043"),
             (16384, 50688, "cake_rmsnorm_det_train_845cdcd8145ada631461"),
-            (50688, None, "cake_rmsnorm_det_train_694decfb79ba96468f62"),
+            (50688, None, "cake_rmsnorm_det_train_21ee6fc93139c5e0cd41"),
         ),
         "bwd_w32_h2048": (
-            (0, 1, "cake_rmsnorm_det_train_0ff8a6d52d561fb5a952"),
-            (1, 256, "cake_rmsnorm_det_train_22944704b77a80a04834"),
+            (0, 1, "cake_rmsnorm_det_train_5e3034bbb4032d8b7ad9"),
+            (1, 256, "cake_rmsnorm_det_train_23c900134dc889302136"),
             (256, 1024, "cake_rmsnorm_det_train_838a9a4054731f7942af"),
             (1024, 16384, "cake_rmsnorm_det_train_9e5ec75a15ac2bff0e4b"),
             (16384, 50688, "cake_rmsnorm_det_train_838a9a4054731f7942af"),
-            (50688, None, "cake_rmsnorm_det_train_723710a92b1ff8356f66"),
+            (50688, None, "cake_rmsnorm_det_train_3f270477a248188afe2a"),
         ),
         "bwd_h256": (
-            (0, 1572864, "cake_rmsnorm_det_train_083ea823c691e0631ad3"),
-            (1572864, None, "cake_rmsnorm_det_train_c18297d75c0d424978fd"),
+            (0, 1572864, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
+            (1572864, None, "cake_rmsnorm_det_train_a385ae1681a2c078344e"),
         ),
         "bwd_w32_h256": (
-            (0, 1572864, "cake_rmsnorm_det_train_c4c89f0d04b7b3a38d0b"),
-            (1572864, None, "cake_rmsnorm_det_train_f788ef57163552825d27"),
+            (0, 1572864, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
+            (1572864, None, "cake_rmsnorm_det_train_420788e663a2c3a810f6"),
         ),
         "bwd_h4096": (
-            (0, 256, "cake_rmsnorm_det_train_44511fa02465a6d7283d"),
+            (0, 256, "cake_rmsnorm_det_train_c1de7e41da4550cca0bc"),
             (256, 1024, "cake_rmsnorm_det_train_a647fccc3d9fa9134733"),
             (1024, 4096, "cake_rmsnorm_det_train_d41a514f5210e9adc39f"),
             (4096, 24064, "cake_rmsnorm_det_train_ee4a9053bb25b8d49fcf"),
-            (24064, 50176, "cake_rmsnorm_det_train_99a01f2a850874718c3f"),
-            (50176, None, "cake_rmsnorm_det_train_9daa9bc7c5a75816e3b6"),
+            (24064, 50176, "cake_rmsnorm_det_train_e9e21bbe4fa478075868"),
+            (50176, None, "cake_rmsnorm_det_train_e9e21bbe4fa478075868"),
         ),
         "bwd_w32_h4096": (
-            (0, 256, "cake_rmsnorm_det_train_440bd6f2a114414ea9db"),
+            (0, 256, "cake_rmsnorm_det_train_30ec8bb68cf4fe0c817b"),
             (256, 1024, "cake_rmsnorm_det_train_dc439f8335327e482025"),
             (1024, 4096, "cake_rmsnorm_det_train_b08633208e60b8ce94fd"),
             (4096, 24064, "cake_rmsnorm_det_train_0f1859b9fe9e47668a1c"),
-            (24064, 50176, "cake_rmsnorm_det_train_fa3d4fc5dbd76348b31a"),
-            (50176, None, "cake_rmsnorm_det_train_42aa82e30162448ef08c"),
+            (24064, 50176, "cake_rmsnorm_det_train_0ff440daa6f9f304e544"),
+            (50176, None, "cake_rmsnorm_det_train_0ff440daa6f9f304e544"),
         ),
         "bwd_h512": (
-            (0, 1, "cake_rmsnorm_det_train_9dc76b2260f10acc2926"),
-            (1, 768, "cake_rmsnorm_det_train_3c06f3e2f267255a1989"),
+            (0, 1, "cake_rmsnorm_det_train_f283bf47d2e3a49bc43c"),
+            (1, 768, "cake_rmsnorm_det_train_b143f616f21eeeaa021d"),
             (768, 1024, "cake_rmsnorm_det_train_3feed5026e1156d2fba2"),
             (1024, 4096, "cake_rmsnorm_det_train_3feed5026e1156d2fba2"),
             (4096, 16384, "cake_rmsnorm_det_train_dfaf378aa8ad93e68bbd"),
             (16384, None, "cake_rmsnorm_det_train_eb141cc9e0a93c6f0ce3"),
         ),
         "bwd_w32_h512": (
-            (0, 1, "cake_rmsnorm_det_train_2633b05c48af196c8bbe"),
-            (1, 768, "cake_rmsnorm_det_train_f8786d8e382af9b8d02e"),
+            (0, 1, "cake_rmsnorm_det_train_78bf5eb3ee33f8dc220a"),
+            (1, 768, "cake_rmsnorm_det_train_740c03baae3da1ceb102"),
             (768, 1024, "cake_rmsnorm_det_train_b841d64bbcaefff5ce7b"),
             (1024, 4096, "cake_rmsnorm_det_train_b841d64bbcaefff5ce7b"),
             (4096, 16384, "cake_rmsnorm_det_train_383f709cd5c4fadd9436"),
             (16384, None, "cake_rmsnorm_det_train_03efa681eb38f59b00c2"),
         ),
         "bwd_h5120": (
-            (0, 1, "cake_rmsnorm_det_train_505283a5225ac45bc095"),
-            (1, 256, "cake_rmsnorm_det_train_e73ed9335334417fb063"),
-            (256, 1280, "cake_rmsnorm_det_train_505283a5225ac45bc095"),
+            (0, 1, "cake_rmsnorm_det_train_080e0a6c3b18e9bad790"),
+            (1, 256, "cake_rmsnorm_det_train_dd3a35731e2e1665dd71"),
+            (256, 1280, "cake_rmsnorm_det_train_080e0a6c3b18e9bad790"),
             (1280, 4096, "cake_rmsnorm_det_train_838c077df3a6d35d55b7"),
             (4096, 19968, "cake_rmsnorm_det_train_6816fb80e97380f1bcbc"),
             (19968, None, "cake_rmsnorm_det_train_47da668e7e96652f840b"),
         ),
         "bwd_w32_h5120": (
-            (0, 1, "cake_rmsnorm_det_train_3a7bd162c370762719b3"),
-            (1, 256, "cake_rmsnorm_det_train_33b1b76e986f135bb2f5"),
-            (256, 1280, "cake_rmsnorm_det_train_3a7bd162c370762719b3"),
+            (0, 1, "cake_rmsnorm_det_train_139d162a8bb29d1b2d35"),
+            (1, 256, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
+            (256, 1280, "cake_rmsnorm_det_train_139d162a8bb29d1b2d35"),
             (1280, 4096, "cake_rmsnorm_det_train_cd612de56c0985bb4caa"),
             (4096, 19968, "cake_rmsnorm_det_train_468cc4d1b8128187b4b3"),
             (19968, None, "cake_rmsnorm_det_train_de0cf457cd240f9c6422"),
         ),
         "bwd_h6144": (
-            (0, 1, "cake_rmsnorm_det_train_57d45549f8ed34e34e65"),
-            (1, 256, "cake_rmsnorm_det_train_dab76189611ec3bb733b"),
-            (256, 1664, "cake_rmsnorm_det_train_57d45549f8ed34e34e65"),
+            (0, 1, "cake_rmsnorm_det_train_0dafdf094615d080fcc9"),
+            (1, 256, "cake_rmsnorm_det_train_dffe53d5aae62879b794"),
+            (256, 1664, "cake_rmsnorm_det_train_0dafdf094615d080fcc9"),
             (1664, 19456, "cake_rmsnorm_det_train_5d292172df772adb17ae"),
-            (19456, None, "cake_rmsnorm_det_train_19e18371f9243bd1a91a"),
+            (19456, None, "cake_rmsnorm_det_train_9cc51adfe9826056658b"),
         ),
         "bwd_w32_h6144": (
-            (0, 1, "cake_rmsnorm_det_train_a501b31feb94fa326722"),
-            (1, 256, "cake_rmsnorm_det_train_6faede3656da9fc0409b"),
-            (256, 1664, "cake_rmsnorm_det_train_a501b31feb94fa326722"),
+            (0, 1, "cake_rmsnorm_det_train_5cca2d0fa4553f992406"),
+            (1, 256, "cake_rmsnorm_det_train_276474ee04bad8d3d764"),
+            (256, 1664, "cake_rmsnorm_det_train_5cca2d0fa4553f992406"),
             (1664, 19456, "cake_rmsnorm_det_train_7d2f6707bfa3d2cd60bb"),
-            (19456, None, "cake_rmsnorm_det_train_b83f8b3d546630a60675"),
+            (19456, None, "cake_rmsnorm_det_train_bdfba721a43e0d093668"),
         ),
         "bwd_residual_h6144": (
-            (0, 368, "cake_rmsnorm_det_train_c15868b87bfb2c21645e"),
+            (0, 368, "cake_rmsnorm_det_train_ee1be07a89a0482de45e"),
             (368, 19456, "cake_rmsnorm_det_train_36cad444bc992ccc732d"),
-            (19456, None, "cake_rmsnorm_det_train_b73a6086490dd9e1855c"),
+            (19456, None, "cake_rmsnorm_det_train_2f1499999535c6983213"),
         ),
         "bwd_w32_residual_h6144": (
-            (0, 368, "cake_rmsnorm_det_train_a1c12b0ee6454391a37f"),
+            (0, 368, "cake_rmsnorm_det_train_3bbd4f848b4847bff893"),
             (368, 19456, "cake_rmsnorm_det_train_b9d848cdbcfaeea0325c"),
-            (19456, None, "cake_rmsnorm_det_train_f5703907295a466b7cf7"),
+            (19456, None, "cake_rmsnorm_det_train_56d25337feb636c80b9a"),
         ),
         "fwd_h1536": (
             (0, 2048, "cake_rmsnorm_det_train_1ea88523077fc340e55f"),
@@ -1193,56 +1193,7 @@ EDGE_CLASSES = ["same", "ulp", "dx", "unmeasured"]
 # a device with fewer SMs a backward call of such a route selects its programs as if ``T`` were
 # the edge plus one (its launch keeps ``T``).
 ACCURACY_MIN_SMS: dict[str, int] = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
-ACCURACY_EDGES: dict[str, dict[str, int]] = {
-    "sm_100a": {
-        "bwd_h1536": 36352,
-        "bwd_w32_h1536": 36352,
-        "bwd_h2048": 58880,
-        "bwd_w32_h2048": 58880,
-        "bwd_h256": 80896,
-        "bwd_w32_h256": 80896,
-        "bwd_h4096": 44032,
-        "bwd_w32_h4096": 44032,
-        "bwd_h5120": 6144,
-        "bwd_w32_h5120": 6144,
-        "bwd_h6144": 42496,
-        "bwd_w32_h6144": 42496,
-        "bwd_residual_h6144": 42496,
-        "bwd_w32_residual_h6144": 42496,
-    },
-    "sm_103a": {
-        "bwd_h1536": 40448,
-        "bwd_w32_h1536": 40448,
-        "bwd_h2048": 55296,
-        "bwd_w32_h2048": 55296,
-        "bwd_h256": 99840,
-        "bwd_w32_h256": 99840,
-        "bwd_h4096": 48640,
-        "bwd_w32_h4096": 48640,
-        "bwd_h5120": 5120,
-        "bwd_w32_h5120": 5120,
-        "bwd_h6144": 48640,
-        "bwd_w32_h6144": 48640,
-        "bwd_residual_h6144": 48640,
-        "bwd_w32_residual_h6144": 48640,
-    },
-    "sm_107a": {
-        "bwd_h1536": 45056,
-        "bwd_w32_h1536": 45056,
-        "bwd_h2048": 50688,
-        "bwd_w32_h2048": 50688,
-        "bwd_h256": 0,
-        "bwd_w32_h256": 0,
-        "bwd_h4096": 24064,
-        "bwd_w32_h4096": 24064,
-        "bwd_h5120": 19968,
-        "bwd_w32_h5120": 19968,
-        "bwd_h6144": 19456,
-        "bwd_w32_h6144": 19456,
-        "bwd_residual_h6144": 19456,
-        "bwd_w32_residual_h6144": 19456,
-    },
-}
+ACCURACY_EDGES: dict[str, dict[str, int]] = {}
 
 NOTES = """
 Each route -- one architecture, hidden size and direction -- ships several programs of
@@ -1279,15 +1230,12 @@ one architecture with different SM counts (B200 with 148 and GB200 with 152 SMs,
 boards with 212 and 216 SMs) cut different chunk tables and can give different ``dw``
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
-each column of ``dw`` over every row in a fixed order (exact products and TwoSum, one
-FP32 rounding), so there ``dw`` does not depend on the SM count.  Every backward route
-but H = 512 and the sm_107a residual H = 6144 switches from plain to compensated ``dw``
-sums at an accuracy edge (``ACCURACY_EDGES``) measured on B200 (148 SMs), GB300
-(152 SMs) and R200 (212 SMs; the H = 5120 and H = 256 edges also on 216 SMs).  A device
-with fewer SMs than ``ACCURACY_MIN_SMS`` gives each CTA more rows to sum at the same
-``T``; there these routes select their programs as if ``T`` were the edge plus one, so
-their compensated programs run at every ``T``. Measured on B200 (sm_100a), GB300
-(sm_103a) and R200 (sm_107a).
+each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
+depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
+partial row, then the fixed-order fold of the rows.  No program is compensated, so the
+backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
+whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 """
 
 FORWARD_SECTION = """
@@ -1327,15 +1275,12 @@ one architecture with different SM counts (B200 with 148 and GB200 with 152 SMs,
 boards with 212 and 216 SMs) cut different chunk tables and can give different ``dw``
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
-each column of ``dw`` over every row in a fixed order (exact products and TwoSum, one
-FP32 rounding), so there ``dw`` does not depend on the SM count.  Every backward route
-but H = 512 and the sm_107a residual H = 6144 switches from plain to compensated ``dw``
-sums at an accuracy edge (``ACCURACY_EDGES``) measured on B200 (148 SMs), GB300
-(152 SMs) and R200 (212 SMs; the H = 5120 and H = 256 edges also on 216 SMs).  A device
-with fewer SMs than ``ACCURACY_MIN_SMS`` gives each CTA more rows to sum at the same
-``T``; there these routes select their programs as if ``T`` were the edge plus one, so
-their compensated programs run at every ``T``. Measured on B200 (sm_100a), GB300
-(sm_103a) and R200 (sm_107a).
+each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
+depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
+partial row, then the fixed-order fold of the rows.  No program is compensated, so the
+backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
+whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
@@ -1456,15 +1401,12 @@ one architecture with different SM counts (B200 with 148 and GB200 with 152 SMs,
 boards with 212 and 216 SMs) cut different chunk tables and can give different ``dw``
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
-each column of ``dw`` over every row in a fixed order (exact products and TwoSum, one
-FP32 rounding), so there ``dw`` does not depend on the SM count.  Every backward route
-but H = 512 and the sm_107a residual H = 6144 switches from plain to compensated ``dw``
-sums at an accuracy edge (``ACCURACY_EDGES``) measured on B200 (148 SMs), GB300
-(152 SMs) and R200 (212 SMs; the H = 5120 and H = 256 edges also on 216 SMs).  A device
-with fewer SMs than ``ACCURACY_MIN_SMS`` gives each CTA more rows to sum at the same
-``T``; there these routes select their programs as if ``T`` were the edge plus one, so
-their compensated programs run at every ``T``. Measured on B200 (sm_100a), GB300
-(sm_103a) and R200 (sm_107a).
+each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
+depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
+partial row, then the fixed-order fold of the rows.  No program is compensated, so the
+backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
+whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
@@ -1479,79 +1421,76 @@ same programs over the same windows, with the same outcome at every edge, and ar
 listed; a route re-cut for the FP32 weight (another twin in a window) is listed with
 its own windows.
 
-* ``sm_100a`` ``bwd_h1536``: (0, 1] 273b578b ? (1, 768] 8d4ec255 ? (768, 1024] 7dc29629
+* ``sm_100a`` ``bwd_h1536``: (0, 1] f6233ff8 ? (1, 768] 4176a24f ? (768, 1024] 7dc29629
   = (1024, 4096] c1a9efdf = (4096, 32768] 21c8bb55 = (32768, 36352] b457c4d1 =
-  (36352, inf) b5bdabba
-* ``sm_100a`` ``bwd_h2048``: (0, 1] 61a2d9fc ? (1, 768] 39d33412 ? (768, 1024] cc26e316
+  (36352, inf) b457c4d1
+* ``sm_100a`` ``bwd_h2048``: (0, 1] b13b0c73 ? (1, 768] 923e668c ? (768, 1024] cc26e316
   ? (1024, 2047] c73074cf ? (2047, 22528] cc26e316 ? (22528, 58880] ceeef043 ?
-  (58880, inf) 2fe43a95
-* ``sm_100a`` ``bwd_w32_h2048``: (0, 1] 5f20b731 ? (1, 768] 12875cc8 ?
+  (58880, inf) ceeef043
+* ``sm_100a`` ``bwd_w32_h2048``: (0, 1] d22b3e8c ? (1, 768] 9030dbeb ?
   (768, 1024] 07f9f2fb ? (1024, 16384] b187e598 = (16384, 58880] 7e6a0b63 ?
-  (58880, inf) e6347c71
-* ``sm_100a`` ``bwd_h256``: (0, 87] c0ca220c ? (87, 2048] a385ae16 =
+  (58880, inf) 7e6a0b63
+* ``sm_100a`` ``bwd_h256``: (0, 87] 6959ea32 ? (87, 2048] a385ae16 =
   (2048, 5120] af005462 = (5120, 12288] a385ae16 = (12288, 40960] af005462 =
-  (40960, 80896] a385ae16 = (80896, 1572864] 083ea823 = (1572864, inf) c18297d7
-* ``sm_100a`` ``bwd_h4096``: (0, 203] bbc80180 ? (203, 256] 3e644ea1 =
+  (40960, 80896] a385ae16 = (80896, 1572864] a385ae16 = (1572864, inf) a385ae16
+* ``sm_100a`` ``bwd_h4096``: (0, 203] 4822793e ? (203, 256] 3e644ea1 =
   (256, 1024] 59270fb2 ? (1024, 22528] 5572b267 ? (22528, 32768] 5abcdc29 ?
-  (32768, 44032] 35a0b0ca = (44032, inf) 7122dbcd
-* ``sm_100a`` ``bwd_h512``: (0, 1] 43d6b60b ? (1, 227] 5f3e3fcc ? (227, 1024] 09601d42 ~
+  (32768, 44032] 35a0b0ca = (44032, inf) 35a0b0ca
+* ``sm_100a`` ``bwd_h512``: (0, 1] f283bf47 ? (1, 227] 931757c8 ? (227, 1024] 09601d42 ~
   (1024, 4096] 123db0b2 = (4096, 32768] ad1a5a3c = (32768, inf) 8877322a
-* ``sm_100a`` ``bwd_h5120``: (0, 1] 6a1cfc92 ? (1, 256] baa071a2 ? (256, 6144] b482c84d
-  = (6144, 50688] c145ef19 = (50688, inf) c145ef19
-* ``sm_100a`` ``bwd_w32_h5120``: (0, 1] 9560032b ? (1, 256] 9560032b ?
-  (256, 6144] 40227b2a ? (6144, 50688] 9479b129 ? (50688, inf) 9479b129
-* ``sm_100a`` ``bwd_h6144``: (0, 384] 7100a5f1 ? (384, 767] 5c804aed ?
-  (767, 4096] 61421bc7 ? (4096, 42496] b93bf060 = (42496, inf) c440e57b
-* ``sm_100a`` ``bwd_w32_h6144``: (0, 384] 76a09fc0 ? (384, 4096] 41b80b6a =
-  (4096, 42496] 62beb52f = (42496, inf) 0ae6eb51
-* ``sm_100a`` ``bwd_residual_h6144``: (0, 1152] d2749326 ? (1152, 42496] c1a3be94 ?
-  (42496, inf) 84385468
-* ``sm_103a`` ``bwd_h1536``: (0, 1] 0eaab647 ? (1, 31] ad547a3c ? (31, 214] 53285b95 ?
+* ``sm_100a`` ``bwd_h5120``: (0, 1] 080e0a6c ? (1, 256] dd3a3573 ? (256, 6144] b482c84d
+  = (6144, 50688] b482c84d = (50688, inf) b482c84d
+* ``sm_100a`` ``bwd_w32_h5120``: (0, 1] 747d86f3 ? (1, 256] 747d86f3 ?
+  (256, 6144] 40227b2a ? (6144, 50688] 40227b2a ? (50688, inf) 40227b2a
+* ``sm_100a`` ``bwd_h6144``: (0, 384] f2271417 ? (384, 767] 5c804aed ?
+  (767, 4096] 61421bc7 ? (4096, 42496] b93bf060 = (42496, inf) b93bf060
+* ``sm_100a`` ``bwd_w32_h6144``: (0, 384] 8a280a7e ? (384, 4096] 41b80b6a =
+  (4096, 42496] 62beb52f = (42496, inf) 62beb52f
+* ``sm_100a`` ``bwd_residual_h6144``: (0, 1152] 864e84f3 ? (1152, 42496] c1a3be94 ?
+  (42496, inf) c1a3be94
+* ``sm_103a`` ``bwd_h1536``: (0, 1] e254714a ? (1, 31] 4aef8d1f ? (31, 214] 4aef8d1f ?
   (214, 1024] 7dc29629 = (1024, 4096] c1a9efdf = (4096, 14928] 1df7db17 =
-  (14928, 15566] 4df08ce5 = (15566, 40448] f522f5b8 = (40448, inf) cbeae168
-* ``sm_103a`` ``bwd_w32_h1536``: (0, 1] 5f6f9f3c ? (1, 31] 775d9130 ? (31, 214] 5c5be9a6
-  ? (214, 1024] baff9ecb = (1024, 4096] 17d9cdfd = (4096, 14928] a99e2b38 =
-  (14928, 15566] 7a72e97b = (15566, 40448] 109f19bb = (40448, inf) ca6211f3
-* ``sm_103a`` ``bwd_h2048``: (0, 1] 56635d2c ? (1, 2] ce658895 ? (2, 171] 2b4c0f5b ?
+  (14928, 15566] 4df08ce5 = (15566, 40448] f522f5b8 = (40448, inf) 9cd3c766
+* ``sm_103a`` ``bwd_h2048``: (0, 1] a1c71cc3 ? (1, 2] ed36a8d9 ? (2, 171] ed36a8d9 ?
   (171, 1024] caf6978e ? (1024, 16384] cc26e316 ? (16384, 32768] caf6978e =
-  (32768, 55296] 302f64db = (55296, inf) 018f0cd7
-* ``sm_103a`` ``bwd_h256``: (0, 1680] 083ea823 ? (1680, 2048] a385ae16 =
+  (32768, 55296] 302f64db = (55296, inf) 302f64db
+* ``sm_103a`` ``bwd_h256``: (0, 1680] a385ae16 ? (1680, 2048] a385ae16 =
   (2048, 5120] af005462 = (5120, 12288] a385ae16 = (12288, 40960] af005462 =
-  (40960, 99840] a385ae16 = (99840, 720896] 083ea823 = (720896, 1572864] 0291949b =
-  (1572864, inf) c18297d7
-* ``sm_103a`` ``bwd_h4096``: (0, 512] 10f7bdf2 ? (512, 1024] ad2bb26e ?
+  (40960, 99840] a385ae16 = (99840, 720896] a385ae16 = (720896, 1572864] a385ae16 =
+  (1572864, inf) a385ae16
+* ``sm_103a`` ``bwd_h4096``: (0, 512] 5efbf78a ? (512, 1024] ad2bb26e ?
   (1024, 24576] 5572b267 ? (24576, 32768] 5abcdc29 ? (32768, 48640] 35a0b0ca =
-  (48640, 51200] 850eec3a = (51200, inf) e813cc30
-* ``sm_103a`` ``bwd_w32_h4096``: (0, 1] 11820fe4 ? (1, 512] f03fb1c6 ?
+  (48640, 51200] 24643edc = (51200, inf) 24643edc
+* ``sm_103a`` ``bwd_w32_h4096``: (0, 1] 27615d0e ? (1, 512] ff7de8d3 ?
   (512, 1024] 16545056 ? (1024, 24576] 47a01388 ? (24576, 32768] a8eb7547 ?
-  (32768, 48640] 626aed74 ? (48640, 51200] cb164a27 ? (51200, inf) cc019a16
-* ``sm_103a`` ``bwd_h512``: (0, 1] 9dc76b22 ? (1, 4] 117a66e4 ? (4, 227] 877751ba ?
+  (32768, 48640] 626aed74 ? (48640, 51200] 78c26a53 ? (51200, inf) 78c26a53
+* ``sm_103a`` ``bwd_h512``: (0, 1] f283bf47 ? (1, 4] bdfd7789 ? (4, 227] bdfd7789 ?
   (227, 1024] 09601d42 ? (1024, 4096] 8e7f4d81 = (4096, 32768] 274b0055 =
   (32768, inf) cfaae3ce
-* ``sm_103a`` ``bwd_h5120``: (0, 64] e73ed933 ? (64, 5120] 2fc4932f =
-  (5120, inf) 7ffb443a
-* ``sm_103a`` ``bwd_h6144``: (0, 256] 5d6088e6 ? (256, 767] 5c804aed ?
-  (767, 4096] 61421bc7 ? (4096, 48640] 322574af = (48640, inf) 289dc9ab
-* ``sm_103a`` ``bwd_w32_h6144``: (0, 1] 017091c7 ? (1, 256] f9c641ac ?
-  (256, 4096] 41b80b6a = (4096, 48640] 9a8c0396 = (48640, inf) aa46aa07
-* ``sm_103a`` ``bwd_residual_h6144``: (0, 1216] 07135550 ? (1216, 48640] 04ebec87 ?
-  (48640, inf) 21b5e791
-* ``sm_107a`` ``bwd_h1536``: (0, 1] 33551729 ? (1, 576] 9e71ed0d ? (576, 1024] 7dc29629
-  = (1024, 16384] 6a428da2 = (16384, 45056] 56d26996 = (45056, inf) e694b0a2
-* ``sm_107a`` ``bwd_h2048``: (0, 1] bc9d86b3 ? (1, 256] 32eb12e2 ? (256, 1024] 845cdcd8
-  ~ (1024, 16384] 81c3d8ab = (16384, 50688] 845cdcd8 = (50688, inf) 694decfb
-* ``sm_107a`` ``bwd_h256``: (0, 1572864] 083ea823 = (1572864, inf) c18297d7
-* ``sm_107a`` ``bwd_h4096``: (0, 256] 44511fa0 ? (256, 1024] a647fccc =
-  (1024, 4096] d41a514f = (4096, 24064] ee4a9053 = (24064, 50176] 99a01f2a =
-  (50176, inf) 9daa9bc7
-* ``sm_107a`` ``bwd_h512``: (0, 1] 9dc76b22 ? (1, 768] 3c06f3e2 ? (768, 1024] 3feed502 =
+* ``sm_103a`` ``bwd_h5120``: (0, 64] dd3a3573 ? (64, 5120] 2fc4932f =
+  (5120, inf) 2fc4932f
+* ``sm_103a`` ``bwd_h6144``: (0, 256] f2271417 ? (256, 767] 5c804aed ?
+  (767, 4096] 61421bc7 ? (4096, 48640] 322574af = (48640, inf) 322574af
+* ``sm_103a`` ``bwd_w32_h6144``: (0, 1] b3e6531e ? (1, 256] 8a280a7e ?
+  (256, 4096] 41b80b6a = (4096, 48640] 9a8c0396 = (48640, inf) 9a8c0396
+* ``sm_103a`` ``bwd_residual_h6144``: (0, 1216] 864e84f3 ? (1216, 48640] 04ebec87 ?
+  (48640, inf) 04ebec87
+* ``sm_107a`` ``bwd_h1536``: (0, 1] c3b1b46a ? (1, 576] 1207b056 ? (576, 1024] 7dc29629
+  = (1024, 16384] 6a428da2 = (16384, 45056] 56d26996 = (45056, inf) 411e270c
+* ``sm_107a`` ``bwd_h2048``: (0, 1] 92def3f9 ? (1, 256] 6720b4a1 ? (256, 1024] 845cdcd8
+  ~ (1024, 16384] 81c3d8ab = (16384, 50688] 845cdcd8 = (50688, inf) 21ee6fc9
+* ``sm_107a`` ``bwd_h256``: (0, 1572864] a385ae16 = (1572864, inf) a385ae16
+* ``sm_107a`` ``bwd_h4096``: (0, 256] c1de7e41 ? (256, 1024] a647fccc =
+  (1024, 4096] d41a514f = (4096, 24064] ee4a9053 = (24064, 50176] e9e21bbe =
+  (50176, inf) e9e21bbe
+* ``sm_107a`` ``bwd_h512``: (0, 1] f283bf47 ? (1, 768] b143f616 ? (768, 1024] 3feed502 =
   (1024, 4096] 3feed502 = (4096, 16384] dfaf378a ? (16384, inf) eb141cc9
-* ``sm_107a`` ``bwd_h5120``: (0, 1] 505283a5 ? (1, 256] e73ed933 ? (256, 1280] 505283a5
+* ``sm_107a`` ``bwd_h5120``: (0, 1] 080e0a6c ? (1, 256] dd3a3573 ? (256, 1280] 080e0a6c
   ? (1280, 4096] 838c077d ? (4096, 19968] 6816fb80 ? (19968, inf) 47da668e
-* ``sm_107a`` ``bwd_h6144``: (0, 1] 57d45549 ? (1, 256] dab76189 ? (256, 1664] 57d45549
-  ? (1664, 19456] 5d292172 = (19456, inf) 19e18371
-* ``sm_107a`` ``bwd_residual_h6144``: (0, 368] c15868b8 ? (368, 19456] 36cad444 ?
-  (19456, inf) b73a6086
+* ``sm_107a`` ``bwd_h6144``: (0, 1] 0dafdf09 ? (1, 256] dffe53d5 ? (256, 1664] 0dafdf09
+  ? (1664, 19456] 5d292172 = (19456, inf) 9cc51adf
+* ``sm_107a`` ``bwd_residual_h6144``: (0, 368] ee1be07a ? (368, 19456] 36cad444 ?
+  (19456, inf) 2f149999
 """
 
 SECTIONS: dict[str, str] = {"fwd": FORWARD_SECTION, "bwd": BACKWARD_SECTION}
