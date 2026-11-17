@@ -228,9 +228,13 @@ rank.  Bits across CP layouts or SM counts are not guaranteed.
 | `y` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; this revision's `y` is also bitwise the single-rank `y` of the same documents (the forward runs the single-rank forward's instructions with history rows), a property of this revision, not a guarantee |
 | `hist` (history pool, the saved set's tensor) | yes | bitwise equal | copies of `x_local` rows of other fragments |
 | halo adjoints (`dpre` rows sent, `dpre_tail` received) | yes | bitwise equal | written by the head program, which is the same in both forms |
-| `dx` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; not bitwise the single-rank `dx`, which differentiates the BF16-rounded preactivation (within `1e-2 + 1e-2 abs(dx_single)` of it) |
-| `dweight` (rank-local FP32 partial) | yes, within one form | bits differ | a fixed-order sum of the rank's partial rows; the two forms sum different partial rows.  The sum of the ranks' partials is within `5e-2 + 1e-4 abs(dw)` of an FP64 oracle |
+| `dx` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; not bitwise the single-rank `dx`, which differentiates the BF16-rounded preactivation |
+| `dweight` (rank-local FP32 partial) | yes, within one form | bits differ | a fixed-order sum of the rank's partial rows in plain FP32 words; the two forms sum different partial rows |
 | checkpoint replay | yes | | with a recompute handle `y` and the saved set `(x_local, weight, hist)` are bitwise those of the exchanging recompute, and the gradients bitwise those of the saved-set path (no checkpoint) |
+
+The package tests judge the L2 and max error of `y`, `dx` and `dweight` against
+an FP64 oracle of the unpartitioned documents, relative to a PyTorch BF16
+implementation of the same operation, over 32 random draws.
 
 The package issues no reduction collective for `dweight`: each rank returns
 its partial, and the sum over the ranks is the framework's (for example the

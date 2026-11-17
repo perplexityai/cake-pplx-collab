@@ -52,14 +52,12 @@ equal to the no-CP ``y`` of the same documents.  The backward takes the SiLU
 derivative on the FP32 preactivation (the issue's requirement), whereas the
 shipped zero-history backward differentiates the BF16-rounded preactivation,
 so ``dx`` is not the no-CP ``dx`` bit for bit: the two differ by that
-rounding's effect on ``dpre`` plus one BF16 output rounding.  Measured on
-GB300 (sm_103a) over the single-GPU test rows (``S x C`` up to 12000 x 8192,
-random BF16 inputs, FP32 taps of scale 0.5): max ``|dx - dx_noCP|`` 0.03125
-(one BF16 ulp at magnitude 4-8), 0 elements beyond ``1e-2 + 1e-2 |dx_noCP|``,
-and the same maximum between the two policies' FP32 oracles with no kernel
-involved; each kernel stays within one BF16 ulp of its own oracle.  ``dweight``
+rounding's effect on ``dpre`` plus one BF16 output rounding.  ``dweight``
 is the rank's fixed-order FP32 partial, summed in plain FP32 words; it is
-reproducible across launches, not bitwise the no-CP partial.
+reproducible across launches, not bitwise the no-CP partial.  The package
+tests judge the L2 and max error of ``y``, ``dx`` and ``dweight`` against an
+FP64 oracle of the unpartitioned documents, relative to a PyTorch BF16
+implementation of the same operation, over 32 random draws.
 
 Shipped host path (this revision;
 ``HOST_TRIM_DEFAULT = 1``): the context-derived host work of the eager halo
