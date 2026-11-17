@@ -49,22 +49,6 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
-
-__device__ __forceinline__ unsigned int __as_u32(float v) {
-    unsigned int u;
-    asm("mov.b32 %0, %1;" : "=r"(u) : "f"(v));
-    return u;
-}
-__device__ __forceinline__ unsigned int __as_u32(__nv_bfloat162 v) {
-    return *reinterpret_cast<const unsigned int*>(&v);
-}
-__device__ __forceinline__ unsigned int __as_u32(unsigned int v) { return v; }
-__device__ __forceinline__ unsigned int __as_u32(int v) {
-    unsigned int u;
-    asm("mov.b32 %0, %1;" : "=r"(u) : "r"(v));
-    return u;
-}
-
 extern "C" {
 
 __global__ __launch_bounds__(256) void
@@ -89,14 +73,8 @@ kernel_cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl_dpl(float* __restrict_
     const int cta_rank = 0;
 
     // Prologue
-    unsigned int* sstage_u = reinterpret_cast<unsigned int*>(smem_raw + 0);
-    const int sstage_u_addr = smem + 0;
-    float* sstage_f = reinterpret_cast<float*>(smem_raw + 0);
-    const int sstage_f_addr = smem + 0;
-    double* sparts = reinterpret_cast<double*>(smem_raw + 2048);
-    const int sparts_addr = smem + 2048;
-    int* scr = reinterpret_cast<int*>(smem_raw + 4096);
-    const int scr_addr = smem + 4096;
+    float* sh = reinterpret_cast<float*>(smem_raw + 0);
+    const int sh_addr = smem + 0;
 
     // === Task calls (declaration order) ===
     asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -106,10 +84,9 @@ kernel_cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl_dpl(float* __restrict_
     if (b < 384) {
         long long e0 = (long long)(b * 256 + tid_0) * 4ll;
         float out[4];
-        double a[4];
         #pragma unroll
         for (int k = 0; k < 4; k++) {
-            a[k] = 0.0;
+            out[k] = 0.0f;
         }
         #pragma unroll 2
         for (int p = 0; p < n_parts; p++) {
@@ -128,41 +105,40 @@ kernel_cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl_dpl(float* __restrict_
             }
             #pragma unroll
             for (int k_1 = 0; k_1 < 4; k_1++) {
-                a[k_1] = a[k_1] + (double)vec_load[k_1];
+                float _add_1;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_1) : "f"(out[k_1]), "f"(vec_load[k_1]));
+                out[k_1] = _add_1;
             }
         }
         if (accumulate != 0) {
-            float _vec_load_1[4];
+            float _vec_load_2[4];
             {
                 float4 _v4 = *reinterpret_cast<const float4*>(dfn + e0 + 0);
-                _vec_load_1[0 + 0] = _v4.x;
-                _vec_load_1[0 + 1] = _v4.y;
-                _vec_load_1[0 + 2] = _v4.z;
-                _vec_load_1[0 + 3] = _v4.w;
+                _vec_load_2[0 + 0] = _v4.x;
+                _vec_load_2[0 + 1] = _v4.y;
+                _vec_load_2[0 + 2] = _v4.z;
+                _vec_load_2[0 + 3] = _v4.w;
             }
             #pragma unroll
             for (int k_2 = 0; k_2 < 4; k_2++) {
-                a[k_2] = a[k_2] + (double)_vec_load_1[k_2];
+                float _add_3;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_3) : "f"(out[k_2]), "f"(_vec_load_2[k_2]));
+                out[k_2] = _add_3;
             }
-        }
-        #pragma unroll
-        for (int k_3 = 0; k_3 < 4; k_3++) {
-            out[k_3] = (float)a[k_3];
         }
         {
             float4 _v4 = make_float4(out[0 + 0], out[0 + 1], out[0 + 2], out[0 + 3]);
             *reinterpret_cast<float4*>((dfn + e0) + 0) = _v4;
         }
     } else {
+        int n_tiles = (n_chunks + 511) / 512;
         int col = b - 384;
         long long col64 = (long long)col;
         long long scol64 = col64 - 24ll;
-        double tot[1];
-        float res[1];
-        tot[0] = 0.0;
-        int n_tiles = (n_chunks + 511) / 512;
         int lane_1 = tid_0 & 31;
         int wrp = tid_0 >> 5;
+        float ph[1];
+        ph[0] = 0.0f;
         #pragma unroll 1
         for (int ti = 0; ti < n_tiles; ti++) {
             int c0 = ti * 512;
@@ -170,101 +146,61 @@ kernel_cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl_dpl(float* __restrict_
             int rows = ((rem < 512) ? rem : 512);
             int last = rows - 1;
             long long c064 = (long long)c0;
-            int emax = -4096;
-            int negl = -4096;
-            int bad = 0;
-            double part = 0.0;
             #pragma unroll
-            for (int k_4 = 0; k_4 < 2; k_4++) {
-                int row = k_4 * 256 + tid_0;
+            for (int k_3 = 0; k_3 < 2; k_3++) {
+                int row = k_3 * 256 + tid_0;
                 int inb = (int)(row < rows);
                 int rowc = ((inb != 0) ? row : last);
-                long long src = (c064 + (long long)rowc) * 32ll + col64;
-                float xv = param_partial[src];
-                unsigned int cbl = __as_u32(xv);
-                unsigned int cb = ((inb != 0) ? cbl : 0);
-                if (inb != 0) {
-                    sstage_u[row] = cb;
-                }
-                int ce = (int)(cb >> 23 & 255);
-                int cvalid = (int)((cb & 2147483647) != 0);
-                unsigned int csig = cb & 8388607 | ((ce != 0) ? 8388608 : 0);
-                int _find_first_set_2 = __ffs(csig);
-                int cl = ((ce != 0) ? ce : 1) - 150 + (_find_first_set_2 - 1);
-                int _max_3 = ((emax) > (((cvalid != 0) ? ce - 127 : -4096)) ? (emax) : (((cvalid != 0) ? ce - 127 : -4096)));
-                emax = _max_3;
-                int _max_4 = ((negl) > (((cvalid != 0) ? -cl : -4096)) ? (negl) : (((cvalid != 0) ? -cl : -4096)));
-                negl = _max_4;
-                int _max_5 = ((bad) > ((int)(cvalid != 0 && ce == 255)) ? (bad) : ((int)(cvalid != 0 && ce == 255)));
-                bad = _max_5;
-                part = part + (double)__uint_as_float(cb);
+                float xv = param_partial[(c064 + (long long)rowc) * 32ll + col64];
+                float _add_4;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_4) : "f"(ph[0]), "f"(((inb != 0) ? xv : 0.0f)));
+                ph[0] = _add_4;
             }
-            int _warp_redux_6;
-            asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_6) : "r"(emax));
-            emax = _warp_redux_6;
-            int _warp_redux_7;
-            asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_7) : "r"(negl));
-            negl = _warp_redux_7;
-            int _warp_redux_8;
-            asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_8) : "r"(bad));
-            bad = _warp_redux_8;
-            if (lane_1 == 0) {
-                scr[wrp * 4] = emax;
-                scr[wrp * 4 + 1] = negl;
-                scr[wrp * 4 + 2] = bad;
-            }
-            double _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, part, 16);
-            part = part + _shfl_xor_sync_9;
-            double _shfl_xor_sync_10 = __shfl_xor_sync(0xFFFFFFFF, part, 8);
-            part = part + _shfl_xor_sync_10;
-            double _shfl_xor_sync_11 = __shfl_xor_sync(0xFFFFFFFF, part, 4);
-            part = part + _shfl_xor_sync_11;
-            double _shfl_xor_sync_12 = __shfl_xor_sync(0xFFFFFFFF, part, 2);
-            part = part + _shfl_xor_sync_12;
-            double _shfl_xor_sync_13 = __shfl_xor_sync(0xFFFFFFFF, part, 1);
-            part = part + _shfl_xor_sync_13;
-            if (lane_1 == 0) {
-                sparts[wrp] = part;
-            }
-            __syncthreads();
-            int gmax = -4096;
-            int gneg = -4096;
-            int gbad = 0;
+        }
+        float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, ph[0], 16);
+        float _add_5;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_5) : "f"(ph[0]), "f"(_shfl_xor_sync_6));
+        ph[0] = _add_5;
+        float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, ph[0], 8);
+        float _add_7;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_7) : "f"(ph[0]), "f"(_shfl_xor_sync_8));
+        ph[0] = _add_7;
+        float _shfl_xor_sync_10 = __shfl_xor_sync(0xFFFFFFFF, ph[0], 4);
+        float _add_9;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_9) : "f"(ph[0]), "f"(_shfl_xor_sync_10));
+        ph[0] = _add_9;
+        float _shfl_xor_sync_12 = __shfl_xor_sync(0xFFFFFFFF, ph[0], 2);
+        float _add_11;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_11) : "f"(ph[0]), "f"(_shfl_xor_sync_12));
+        ph[0] = _add_11;
+        float _shfl_xor_sync_14 = __shfl_xor_sync(0xFFFFFFFF, ph[0], 1);
+        float _add_13;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_13) : "f"(ph[0]), "f"(_shfl_xor_sync_14));
+        ph[0] = _add_13;
+        if (lane_1 == 0) {
+            sh[wrp] = ph[0];
+        }
+        __syncthreads();
+        if (tid_0 == 0) {
+            float res[1];
+            res[0] = 0.0f;
             #pragma unroll
             for (int w = 0; w < 8; w++) {
-                int _max_14 = ((gmax) > (scr[w * 4]) ? (gmax) : (scr[w * 4]));
-                gmax = _max_14;
-                int _max_15 = ((gneg) > (scr[w * 4 + 1]) ? (gneg) : (scr[w * 4 + 1]));
-                gneg = _max_15;
-                int _max_16 = ((gbad) > (scr[w * 4 + 2]) ? (gbad) : (scr[w * 4 + 2]));
-                gbad = _max_16;
+                float _add_15;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_15) : "f"(res[0]), "f"(sh[w]));
+                res[0] = _add_15;
             }
-            int ok = (int)(gbad == 0 && gmax + gneg <= 43 && n_tiles == 1);
-            if (tid_0 == 0) {
-                if (ok != 0) {
-                    #pragma unroll
-                    for (int w_1 = 0; w_1 < 8; w_1++) {
-                        tot[0] = tot[0] + sparts[w_1];
-                    }
-                } else {
-                    #pragma unroll 8
-                    for (int rloc = 0; rloc < rows; rloc++) {
-                        float xf = sstage_f[rloc];
-                        tot[0] = tot[0] + (double)xf;
-                    }
-                }
-            }
-            __syncthreads();
-        }
-        if (tid_0 == 0) {
             if (accumulate != 0) {
                 if (col < 24) {
-                    tot[0] = tot[0] + (double)dbase[col64];
+                    float _add_16;
+                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_16) : "f"(res[0]), "f"(dbase[col64]));
+                    res[0] = _add_16;
                 } else {
-                    tot[0] = tot[0] + (double)dscale[scol64];
+                    float _add_17;
+                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_17) : "f"(res[0]), "f"(dscale[scol64]));
+                    res[0] = _add_17;
                 }
             }
-            res[0] = (float)tot[0];
             if (col < 24) {
                 *(reinterpret_cast<float*>(dbase + col64) + (0)) = res[0];
             } else {
