@@ -70,7 +70,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head, moe_grouped_gemm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |

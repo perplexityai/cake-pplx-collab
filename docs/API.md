@@ -1383,7 +1383,7 @@ Other public names:
 
 ### `cake_pplx.cake_moe_grouped_gemm_nondet_train`
 
-Nondet by name, but every shipped launch has a fixed order. Every output repeats bit for bit for the same inputs, shapes, device SM count and configuration, and nothing alerts. `Y` and `dX` are bitwise det. `dW` is bitwise det wherever the 256 k tile runs or the 512 tile has no split tail. A split tail uses a different tail plan and group order, so it can differ from det within the error budgets. An alert path exists only for an order-varying `unordered_tail` plan on architectures in `unordered_tail_archs`, and that set is empty. Source: [`kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_nondet_train.py`](../kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_nondet_train.py).
+Nondet by name, but every shipped launch has a fixed order. Every output repeats bit for bit for the same inputs, shapes, device SM count and configuration, and nothing alerts. `Y` and `dX` are bitwise det. `dW` is bitwise det wherever the 256 k tile runs or the 512 tile has no split tail. A split tail uses a different tail plan and group order, so it can differ from det's bits. The tests judge every output against a naive BF16 implementation, with the FP64 product of the BF16 operands as the oracle. An alert path exists only for an order-varying `unordered_tail` plan on architectures in `unordered_tail_archs`, and that set is empty. Source: [`kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_nondet_train.py`](../kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -1437,7 +1437,7 @@ dw32 = facade.cake_moe_grouped_gemm_det_train_wgrad(g, x.detach(), offs, out_dty
 - `fuse_wgrad_accumulation` is also not supported with split backward-weight schedules. A reentrant checkpoint gives a detached `w` without `main_grad` (`ValueError`). Every backward adds again.
 - A prepared accumulate launch is not idempotent: each `launch()` and each graph replay adds again. Keep the launch alive while a captured graph may replay it. Do not run one composed launch on two streams at once.
 - The composed accumulate scratch takes `E*N*K` elements (`4*E*N*K` bytes for fp32).
-- A nondet `dW` with a split 512 tail may differ from det bits (within budget), but it repeats for the same SM count and configuration.
+- A nondet `dW` with a split 512 tail may differ from det bits, but it repeats for the same SM count and configuration.
 
 ---
 
