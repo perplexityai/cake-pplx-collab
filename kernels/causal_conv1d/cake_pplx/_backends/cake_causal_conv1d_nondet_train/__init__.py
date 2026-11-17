@@ -1229,7 +1229,8 @@ def cake_causal_conv1d_nondet_train_backward(
     kind = backward_route(
         bias=b is not None,
         fp32_grad=policy == "fp32",
-        bf16_taps_or_dweight=torch.bfloat16 in (w.dtype, dw_out.dtype),
+        bf16_taps=w.dtype == torch.bfloat16,
+        bf16_dweight=dw_out.dtype == torch.bfloat16,
     )
     device_index = _device_index(device)
     names, record, scalars, grid, per_tiles = _call_plan(

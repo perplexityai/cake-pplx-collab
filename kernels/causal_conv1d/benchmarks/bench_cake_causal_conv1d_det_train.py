@@ -35,7 +35,8 @@ span of their kernels' GPU time.
 
 The route of a run is chosen on the command line and applied to every
 comparator: ``--weight-dtype bfloat16`` (BF16 taps and a BF16 ``dweight``: the
-``fwd_dt`` / ``bwd_dt`` programs; FLA and eager take the BF16 taps as given),
+``fwd_dt`` / ``bwd_dt_bf16_taps`` programs, ``bwd_bias_bf16_taps`` with a bias;
+FLA and eager take the BF16 taps as given),
 ``--bias float32|bfloat16`` (the ``*_bias`` programs; FLA's conv takes the bias,
 eager adds it after the taps) and ``--silu-grad-preactivation fp32`` (the
 ``*_fp32g`` programs; FLA has no such option, so its row is its default
@@ -139,7 +140,9 @@ class Mode:
         return loader.backward_route(
             bias=self.bias_dtype is not None,
             fp32_grad=self.silu_grad_preactivation == "fp32",
-            bf16_taps_or_dweight=self.weight_dtype == torch.bfloat16,
+            # dweight defaults to the taps' dtype
+            bf16_taps=self.weight_dtype == torch.bfloat16,
+            bf16_dweight=self.weight_dtype == torch.bfloat16,
         )
 
     def describe(self) -> dict:

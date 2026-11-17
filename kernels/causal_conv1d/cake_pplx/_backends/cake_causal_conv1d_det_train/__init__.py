@@ -784,7 +784,7 @@ def cake_causal_conv1d_det_train_backward(
     the empty ``dx`` and zero gradients without launching.
 
     The call's arguments select the route (``cake_jit.backward_route``:
-    ``bias``, the policy, BF16 among ``weight`` / ``dweight``), and within a
+    ``bias``, the policy, the ``weight`` and ``dweight`` dtypes), and within a
     route the channel count selects the program through the registry's
     host-side rule (``cake_jit.selected_modules``; the data is never read), so a
     given ``(S, C, device)`` and route always run the same program.  The
@@ -851,7 +851,8 @@ def cake_causal_conv1d_det_train_backward(
     kind = backward_route(
         bias=b is not None,
         fp32_grad=policy == "fp32",
-        bf16_taps_or_dweight=torch.bfloat16 in (w.dtype, dw_out.dtype),
+        bf16_taps=w.dtype == torch.bfloat16,
+        bf16_dweight=dw_out.dtype == torch.bfloat16,
     )
     # Within the route the program is a pure function of the architecture and C
     # (S never enters): its own grid sizes the partial rows this call writes

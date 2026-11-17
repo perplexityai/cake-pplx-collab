@@ -162,7 +162,9 @@ class Route:
         return loader.backward_route(
             bias=self.bias_dtype is not None,
             fp32_grad=self.silu_grad_preactivation == "fp32",
-            bf16_taps_or_dweight=self.weight_dtype == torch.bfloat16,
+            # dweight defaults to the taps' dtype
+            bf16_taps=self.weight_dtype == torch.bfloat16,
+            bf16_dweight=self.weight_dtype == torch.bfloat16,
         )
 
     def describe(self) -> dict:

@@ -33,7 +33,8 @@ deterministic package (``cake_pplx.cake_causal_conv1d_det_train``):
 the forward routes ``fwd`` / ``fwd_dt`` / ``fwd_bias`` run this package's
 copies of the det forward programs (no cross-CTA reduction, so ``y`` is the
 det program's bits), and the backward routes ``bwd`` / ``bwd_dt`` /
-``bwd_bias`` / ``bwd_fp32g`` / ``bwd_bias_fp32g`` select, by the same channel
+``bwd_bias`` / ``bwd_fp32g`` / ``bwd_bias_fp32g`` / ``bwd_dt_bf16_taps`` /
+``bwd_bias_bf16_taps`` select, by the same channel
 (and token) thresholds, single-launch builds of the det backward bodies.  A
 backward call is ONE ordinary launch: every per-thread and per-CTA FP32 step
 and ``dx`` are the det program's, and only the cross-CTA reduction of
@@ -2763,6 +2764,628 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``bwd_dt_bf16_taps``: the ``bwd_dt`` record ``cake_causal_conv1d_train_32c5625f33586925f154`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_7035e23df8c9bf3c11e8": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 3,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 50176,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_dt_bf16_taps``: the ``bwd_dt`` record ``cake_causal_conv1d_train_d7f458b69c0249f63c37`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_ff7637fef45fa62da9d5``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_d3273135fc61ea150378": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_d3273135fc61ea150378",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_d3273135fc61ea150378",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 50176,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_d3273135fc61ea150378",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_dt_bf16_taps``: the ``bwd_dt`` record ``cake_causal_conv1d_train_012b6319a0cc717911b9`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_e5c5595c9beb345803b0``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_092af77575f0fdbf3615": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_092af77575f0fdbf3615",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_092af77575f0fdbf3615",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 82944,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_092af77575f0fdbf3615",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_bf16_taps``: the ``bwd_bias`` record ``cake_causal_conv1d_train_befc06774f6fee7c36ce`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_d8ce3d764c386135943a``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_93f7280de3dcb9ad7f49": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 54272,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_bf16_taps``: the ``bwd_bias`` record ``cake_causal_conv1d_train_17d30c46fe34f0266e26`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_4bf88567b50bfe45e241``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_6a8201512a0992310513": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_6a8201512a0992310513",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_6a8201512a0992310513",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 54272,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_6a8201512a0992310513",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+        },
+        "role": "bwd",
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_bf16_taps``: the ``bwd_bias`` record ``cake_causal_conv1d_train_383cb5839559d5b0e72b`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
+    # ``cake_causal_conv1d_det_train_03799186845e6a7d8296``; the same body, plan, grid, workspace and selection
+    # rule.
+    "cake_causal_conv1d_train_92aeee41bc2e2d394937": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_92aeee41bc2e2d394937",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 87040,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1032,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd_bias_bf16_taps``: the ``bwd_bias`` record ``cake_causal_conv1d_train_fdd0d538db009e587335`` with
+    # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), sm_107a's channel-band program (from C =
+    # 1024); the same body, plan, grid, workspace and selection rule.
+    "cake_causal_conv1d_train_4c8b21939791ace6e830": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["buffer", "db"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_4c8b21939791ace6e830",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_4c8b21939791ace6e830",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 87040,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_4c8b21939791ace6e830",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "db": "db",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 5,
+            "work": "uint32",
+        },
+    },
 }
 
 # architecture -> route -> the records the route may launch (fallback first).
@@ -2777,6 +3400,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_befc06774f6fee7c36ce",
             "cake_causal_conv1d_train_383cb5839559d5b0e72b",
         ],
+        "bwd_bias_bf16_taps": [
+            "cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
+            "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+        ],
         "bwd_bias_fp32g": [
             "cake_causal_conv1d_train_8433ef0894e75c192d4b",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
@@ -2784,6 +3411,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
+        ],
+        "bwd_dt_bf16_taps": [
+            "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+            "cake_causal_conv1d_train_092af77575f0fdbf3615",
         ],
         "bwd_fp32g": [
             "cake_causal_conv1d_train_e3ff1615646de68a1aab",
@@ -2810,6 +3441,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_befc06774f6fee7c36ce",
             "cake_causal_conv1d_train_383cb5839559d5b0e72b",
         ],
+        "bwd_bias_bf16_taps": [
+            "cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
+            "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+        ],
         "bwd_bias_fp32g": [
             "cake_causal_conv1d_train_8433ef0894e75c192d4b",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
@@ -2817,6 +3452,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
+        ],
+        "bwd_dt_bf16_taps": [
+            "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+            "cake_causal_conv1d_train_092af77575f0fdbf3615",
         ],
         "bwd_fp32g": [
             "cake_causal_conv1d_train_e3ff1615646de68a1aab",
@@ -2846,6 +3485,11 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_383cb5839559d5b0e72b",
             "cake_causal_conv1d_train_fdd0d538db009e587335",
         ],
+        "bwd_bias_bf16_taps": [
+            "cake_causal_conv1d_train_6a8201512a0992310513",
+            "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+            "cake_causal_conv1d_train_4c8b21939791ace6e830",
+        ],
         "bwd_bias_fp32g": [
             "cake_causal_conv1d_train_286b95d7960d16de0849",
             "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
@@ -2853,6 +3497,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_dt": [
             "cake_causal_conv1d_train_d7f458b69c0249f63c37",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
+        ],
+        "bwd_dt_bf16_taps": [
+            "cake_causal_conv1d_train_d3273135fc61ea150378",
+            "cake_causal_conv1d_train_092af77575f0fdbf3615",
         ],
         "bwd_fp32g": [
             "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
@@ -2893,8 +3541,12 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # preactivation); ``_dt`` routes take BF16 taps and / or store a BF16 gradient
 # (the ``flags`` scalar says which), ``_bias`` routes add the per-channel bias
 # and its gradient, ``_fp32g`` routes evaluate SiLU' at the unrounded FP32
-# preactivation for the weight gradient.  :func:`forward_route` and
-# :func:`backward_route` are the host's map from a call's arguments to a route.
+# preactivation for the weight gradient, and the ``_bf16_taps`` routes run the
+# ``bwd_dt`` / ``bwd_bias`` programs with SiLU' at the unrounded FP32
+# preactivation: a backward call with BF16 taps takes them under the
+# ``"bf16"`` policy (with FP32 taps it keeps ``bwd_dt`` / ``bwd_bias``).
+# :func:`forward_route` and :func:`backward_route` are the host's map from a
+# call's arguments to a route.
 KINDS = (
     "fwd",
     "fwd_dt",
@@ -2904,6 +3556,8 @@ KINDS = (
     "bwd_bias",
     "bwd_fp32g",
     "bwd_bias_fp32g",
+    "bwd_dt_bf16_taps",
+    "bwd_bias_bf16_taps",
 )
 # The routes every exported architecture ships: the base forward and backward.
 # The other routes are optional per architecture; a call that needs one the
@@ -2927,8 +3581,9 @@ GRID_KINDS = ("co_resident", "occupancy")
 # channel threshold.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
-# six other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``, ``bwd_fp32g``
-# and ``bwd_bias_fp32g``): the host derives it from the tap tensor, the ACTUAL
+# eight other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
+# ``bwd_fp32g``, ``bwd_bias_fp32g``, ``bwd_dt_bf16_taps`` and
+# ``bwd_bias_bf16_taps``): the host derives it from the tap tensor, the ACTUAL
 # ``dweight`` out tensor, the bias tensor and the ACTUAL ``dbias`` out tensor;
 # the kernel reads it once in its prologue (load form) and once in its epilogue
 # (store form).  The default routes' programs take no ``flags``.
@@ -3033,21 +3688,31 @@ def forward_route(*, bias: bool, bf16_taps: bool) -> str:
     return "fwd_dt" if bf16_taps else "fwd"
 
 
-def backward_route(*, bias: bool, fp32_grad: bool, bf16_taps_or_dweight: bool) -> str:
+def backward_route(
+    *, bias: bool, fp32_grad: bool, bf16_taps: bool, bf16_dweight: bool
+) -> str:
     """The backward route of a call.
 
-    ``bias`` selects ``bwd_bias`` / ``bwd_bias_fp32g`` (by ``fp32_grad``, the
-    ``silu_grad_preactivation="fp32"`` policy); without a bias ``fp32_grad``
-    selects ``bwd_fp32g``; else BF16 taps or a BF16 ``dweight`` out tensor
-    select ``bwd_dt``; else the default ``bwd``.  Every route but ``bwd``
-    reads the tap / gradient dtypes from ``flags``.
+    ``bias`` selects ``bwd_bias_fp32g`` under ``fp32_grad`` (the
+    ``silu_grad_preactivation="fp32"`` policy), else ``bwd_bias_bf16_taps``
+    with BF16 taps and ``bwd_bias`` with FP32 taps; without a bias
+    ``fp32_grad`` selects ``bwd_fp32g``; else BF16 taps select
+    ``bwd_dt_bf16_taps``, FP32 taps with a BF16 ``dweight`` out tensor
+    ``bwd_dt``, and FP32 taps and ``dweight`` the default ``bwd``.  The
+    ``_bf16_taps`` routes run the ``bwd_dt`` / ``bwd_bias`` programs with
+    SiLU' at the unrounded FP32 preactivation.  Every route but ``bwd`` reads
+    the tap / gradient dtypes from ``flags``.
     """
 
     if bias:
-        return "bwd_bias_fp32g" if fp32_grad else "bwd_bias"
+        if fp32_grad:
+            return "bwd_bias_fp32g"
+        return "bwd_bias_bf16_taps" if bf16_taps else "bwd_bias"
     if fp32_grad:
         return "bwd_fp32g"
-    return "bwd_dt" if bf16_taps_or_dweight else "bwd"
+    if bf16_taps:
+        return "bwd_dt_bf16_taps"
+    return "bwd_dt" if bf16_dweight else "bwd"
 
 
 def route_modules(arch: str, kind: str) -> tuple[str, ...]:
@@ -3493,12 +4158,22 @@ TILE_OVERRIDES: dict[str, dict[tuple[str, int], tuple[int, int, int]]] = {
 }
 
 
+# The route whose rows of :data:`TILE_OVERRIDES` and :data:`NARROW_TILES` a
+# backward route plans by: the ``_bf16_taps`` routes run the ``bwd_dt`` /
+# ``bwd_bias`` bodies (with SiLU' at the unrounded FP32 preactivation) and plan
+# their tiles as those routes do; every other route plans by its own rows.
+TILE_ROUTE: dict[str, str] = {
+    "bwd_dt_bf16_taps": "bwd_dt",
+    "bwd_bias_bf16_taps": "bwd_bias",
+}
+
+
 def tile_override(arch: str, route: str, C: int, S: int) -> int | None:
     """The ``ct_vec`` of :data:`TILE_OVERRIDES` for a backward call of ``route``
     on ``arch`` with ``C`` channels and ``S`` tokens (``S_min <= S <= S_max``,
     both bounds included), else ``None`` (:func:`channel_split` plans it)."""
 
-    entry = TILE_OVERRIDES.get(arch, {}).get((route, int(C)))
+    entry = TILE_OVERRIDES.get(arch, {}).get((TILE_ROUTE.get(route, route), int(C)))
     if entry is None:
         return None
     ct_vec, s_min, s_max = entry
@@ -3520,7 +4195,7 @@ def override_tiles(arch: str, route: str, C: int, geometry: dict[str, int]) -> i
     C)`` under ``geometry`` (0 without a row), whatever ``S``: the workspace
     bound of the row's launches."""
 
-    entry = TILE_OVERRIDES.get(arch, {}).get((route, int(C)))
+    entry = TILE_OVERRIDES.get(arch, {}).get((TILE_ROUTE.get(route, route), int(C)))
     if entry is None:
         return 0
     return _override_split(int(entry[0]), C, geometry)[2]
@@ -3566,6 +4241,7 @@ def narrow_tile_range(arch: str, route: str, C: int) -> tuple[int, int] | None:
     plans)."""
 
     C = int(C)
+    route = TILE_ROUTE.get(route, route)
     if C % CHANNEL_MULTIPLE or (route, C) in TILE_OVERRIDES.get(arch, {}):
         return None
     for (name, c_lo, c_hi), (s_min, s_max) in NARROW_TILES.get(arch, {}).items():
@@ -3731,7 +4407,7 @@ TILE_ALIGNED_CLASSES: dict[str, dict[tuple[int, int, int], tuple[int, int]]] = {
     "sm_107a": {},
 }
 TILE_ALIGNED_CLASS_ROUTES: dict[str, tuple[str, ...]] = {
-    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
+    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
     "sm_103a": (),
     "sm_107a": (),
 }
@@ -3984,7 +4660,7 @@ def plan_row(
     override = None
     if role == "bwd":
         route = record_route(record, arch)
-        entry = TILE_OVERRIDES.get(arch, {}).get((route, C))
+        entry = TILE_OVERRIDES.get(arch, {}).get((TILE_ROUTE.get(route, route), C))
         if entry is not None:
             ct_vec, s_min, s_max = (int(value) for value in entry)
             override = (s_min, s_max, _override_split(ct_vec, C, geometry))
