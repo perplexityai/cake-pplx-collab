@@ -117,7 +117,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 - **Concurrent work.** Work on other streams does not change the bits. Runs with a side load gave the same bits as runs without one.
 - **Checkpoint replay.** `save_stats=False`, or `torch.utils.checkpoint` around the connection, gives gradients that match the backward from saved statistics bit for bit.
 - **Mechanism.** `dfn`, `dscale` and `dbase` are reduced from per-block partials in a fixed order. Atomic operations appear only on integer work tickets; no value is accumulated atomically. Some kernels claim work units dynamically, but each unit's result and its place in every reduction do not depend on which CTA ran it.
-- **Not guaranteed.** Bits may differ between devices with different SM counts and between package versions, because the work split and reduction order may change. Accuracy is held to the test error budgets (see [Numerics](#numerics)), not to equality with earlier versions.
+- **Not guaranteed.** Bits may differ between devices with different SM counts and between package versions, because the work split and reduction order may change. Accuracy is held to the tests' naive-tier judge (see [Numerics](#numerics)), not to equality with earlier versions.
 - **Evidence.** The measurement used SM100, SM103 and SM107 boards. Each configuration ran 5 times, and every output was compared by SHA-256. It covered every supported hidden size and several token counts, each under three conditions: an idle device, a 16-CTA side load on another stream, and a side load that held every SM.
 
 ## Checkpointing and memory
@@ -149,7 +149,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 - `dB` is the BF16 rounding of the complete FP32 sum over the streams, with one rounding.
 - The coefficients, their gradients and the parameter reductions are all FP32. Every reduction sums in one plain FP32 word in a fixed order, with no FP64 arithmetic and no compensation word.
 - The sigmoid tails keep their gradients where the FP32 forward sigmoid rounds to 1.
-- The tests in `tests/mhc/test_cake_mhc_det_train*.py` validate `Y`, `U`, `dX`, `dB`, `dfn`, `dscale` and `dbase` against an FP64 reference. They check activation errors and parameter-gradient errors separately. Coverage includes cancellation, saturated sigmoid tails, empty, small, large and irregular `T`, checkpoint replay, and repeated gradient accumulation.
+- The tests in `tests/mhc/test_cake_mhc_det_train*.py` judge every floating output (`U`, `Y`, `dB`, `dX`, the statistics in `stats` and `grad_stats`, `dfn`, `dscale` and `dbase`) against an FP64 reference. Over 32 random inputs of each case, the output's error in the L2 and max norms is at most 1.005 times the error of a naive PyTorch BF16 evaluation of the same function on the same inputs, in the median and the maximum, and zero wherever that error is zero. Coverage includes cancellation, saturated sigmoid tails, large logits, empty, small, large and irregular `T`, checkpoint replay, and repeated gradient accumulation. The outputs are also checked bit for bit from run to run.
 
 ## Layout of this package
 
