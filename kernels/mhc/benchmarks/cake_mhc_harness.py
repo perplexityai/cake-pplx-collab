@@ -36,6 +36,10 @@ Operations (``--ops``):
 ``--sinkhorn-iters`` sets the Sinkhorn count of every arm and of the references (default 20; the packages run any
 other count on their run-time-count programs).
 
+``cake_det_fp32x2`` / ``cake_nondet_fp32x2`` run the packages' opt-in ``accumulation="fp32x2"`` (a compensated pair
+of FP32 words in the mapping, token-owner, column-slab and reduction passes; hidden 4096 and the default Sinkhorn count
+only): beside the default arm of the same package, their ratio is the cost of the two-word mode.
+
 Every Cake call gets caller-owned outputs and workspaces from the package's own factories.  ``--aa`` adds a second
 instance of each Cake arm (``<arm>~aa``, its own buffers), timed like any other arm: its ratio to the first instance
 is the noise band of the row.
@@ -111,6 +115,12 @@ T_H4096 = (1024, 4096, 8192, 14928, 15288, 15566, 15590, 16114, 16132, 16164, 16
 T_WIDE = (1024, 4096, 14928, 15288, 16263, 32768, 65536)
 DEFAULT_SHAPES = tuple((4096, T) for T in T_H4096) + tuple((H, T) for H in (5120, 7168) for T in T_WIDE)
 CAKE_MODES = ("det", "nondet")
+# The packages' accumulation modes: "fp32" (default: one plain FP32 word per sum) and the opt-in "fp32x2" (a
+# compensated pair of FP32 words in the mapping, token-owner, column-slab and reduction passes), hidden 4096 only.
+CAKE_ACCUMULATIONS = ("fp32", "fp32x2")
+PAIR_HIDDEN = 4096
+CAKE_ARMS = {"cake_det": ("det", "fp32"), "cake_nondet": ("nondet", "fp32"),
+             "cake_det_fp32x2": ("det", "fp32x2"), "cake_nondet_fp32x2": ("nondet", "fp32x2")}
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -288,11 +298,14 @@ class CakeArm(base.Arm):
 
     cake = True
 
-    def __init__(self, mode: str, label: Optional[str] = None) -> None:
+    def __init__(self, mode: str, label: Optional[str] = None, accumulation: str = "fp32") -> None:
         if mode not in CAKE_MODES:
             raise ValueError(mode)
+        if accumulation not in CAKE_ACCUMULATIONS:
+            raise ValueError(accumulation)
         self.mode = mode
-        self.name = label or f"cake_{mode}"
+        self.accumulation = accumulation
+        self.name = label or (f"cake_{mode}" if accumulation == "fp32" else f"cake_{mode}_{accumulation}")
         self.library = f"cake_pplx.cake_mhc_{mode}_train"
         self.deterministic = mode == "det"
         self.determinism = (
@@ -307,7 +320,11 @@ class CakeArm(base.Arm):
     def available(self, device, hidden):
         supported = getattr(self.mod, f"is_cake_mhc_{self.mode}_train_supported")
         ok = bool(supported(device, hidden))
-        return ok, "" if ok else f"the package exports no route for hidden {hidden} on this device"
+        if not ok:
+            return False, f"the package exports no route for hidden {hidden} on this device"
+        if self.accumulation != "fp32" and hidden != PAIR_HIDDEN:
+            return False, f"accumulation={self.accumulation!r} serves hidden {PAIR_HIDDEN} only"
+        return True, ""
 
     def backend_dir(self) -> Path:
         backend = importlib.import_module(f"cake_pplx._backends.cake_mhc_{self.mode}_train")
@@ -322,6 +339,7 @@ class CakeArm(base.Arm):
             "backend": str(d),
             "build_json_sha256": _sha256(d / "build.json"),
             "cake_jit_sha256": _sha256(d / "cake_jit.py"),
+            "accumulation": self.accumulation,
         }
         try:
             out["generator"] = json.loads((d / "build.json").read_text()).get("generator")
@@ -373,6 +391,8 @@ class CakeArm(base.Arm):
         bp, bf = self.f("backward_prepare"), self.f("backward_finish")
         # The default count is not passed: the call is the package's default call.
         kw = {} if i["iters"] == base.SINKHORN_ITERS else {"sinkhorn_iters": i["iters"]}
+        if self.accumulation != "fp32":  # the opt-in two-word mode (the default call passes no mode)
+            kw["accumulation"] = self.accumulation
 
         def forward(stats) -> None:
             fp(X, fn, scale, bse, out=b["U"], stats_out=stats, workspace=b["fws"], **kw)
@@ -752,7 +772,8 @@ def parse_shapes(args) -> list:
 def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--arms", default=default_arms,
-                   help="comma-separated arms: cake_det, cake_nondet and " + ", ".join(base.NON_CAKE_ARMS))
+                   help="comma-separated arms: cake_det, cake_nondet, their opt-in two-word modes cake_det_fp32x2 / "
+                   "cake_nondet_fp32x2 (hidden 4096) and " + ", ".join(base.NON_CAKE_ARMS))
     p.add_argument("--aa", action="store_true", help="add a second instance of each Cake arm (the noise band)")
     p.add_argument("--shapes", nargs="*", default=None, help="HxT items, e.g. 4096x1024,7168x65536")
     p.add_argument("--hidden", type=int, nargs="*", default=None)
@@ -789,12 +810,12 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
 def make_arms(names: list, args) -> list:
     arms: list = []
     for name in names:
-        if name in ("cake_det", "cake_nondet"):
-            mode = name.split("_", 1)[1]
-            arms.append(CakeArm(mode))
+        if name in CAKE_ARMS:
+            mode, accumulation = CAKE_ARMS[name]
+            arms.append(CakeArm(mode, accumulation=accumulation))
             if args.aa:
-                arms.append(CakeArm(mode, f"{name}~aa"))
-    others = [n for n in names if n not in ("cake_det", "cake_nondet")]
+                arms.append(CakeArm(mode, f"{name}~aa", accumulation=accumulation))
+    others = [n for n in names if n not in CAKE_ARMS]
     arms.extend(base.non_cake_arms(others, compile_trials=args.compile_trials, tk_splits=args.tk_splits))
     return arms
 
