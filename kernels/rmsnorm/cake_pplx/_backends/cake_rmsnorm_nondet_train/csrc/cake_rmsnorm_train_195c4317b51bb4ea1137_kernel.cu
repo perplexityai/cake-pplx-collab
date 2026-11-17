@@ -54,7 +54,7 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 extern "C" {
 
 __global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, double* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     // Grid-dependency payloads: written while the kernel runs, read with coherent loads only.
     asm volatile("" : "+l"(partial));
@@ -83,7 +83,7 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
     const int flags_addr = smem + 0;
     float* dots = reinterpret_cast<float*>(smem_raw + 32);
     const int dots_addr = smem + 32;
-    double* sums = reinterpret_cast<double*>(smem_raw + 96);
+    float* sums = reinterpret_cast<float*>(smem_raw + 96);
     const int sums_addr = smem + 96;
     float* dwbuf = reinterpret_cast<float*>(smem_raw + 96);
     const int dwbuf_addr = smem + 96;
@@ -111,7 +111,6 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
         }
     }
     float acc[8];
-    float comp[1];
     acc[0] = 0.0f;
     acc[1] = 0.0f;
     acc[2] = 0.0f;
@@ -122,14 +121,14 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
     acc[7] = 0.0f;
     int c = 0;
     int first_c = 0;
-    sums[rg * 256 + tir] = 0.0;
-    sums[rg * 256 + 32 + tir] = 0.0;
-    sums[rg * 256 + 64 + tir] = 0.0;
-    sums[rg * 256 + 96 + tir] = 0.0;
-    sums[rg * 256 + 128 + tir] = 0.0;
-    sums[rg * 256 + 160 + tir] = 0.0;
-    sums[rg * 256 + 192 + tir] = 0.0;
-    sums[rg * 256 + 224 + tir] = 0.0;
+    sums[rg * 256 + tir] = 0.0f;
+    sums[rg * 256 + 32 + tir] = 0.0f;
+    sums[rg * 256 + 64 + tir] = 0.0f;
+    sums[rg * 256 + 96 + tir] = 0.0f;
+    sums[rg * 256 + 128 + tir] = 0.0f;
+    sums[rg * 256 + 160 + tir] = 0.0f;
+    sums[rg * 256 + 192 + tir] = 0.0f;
+    sums[rg * 256 + 224 + tir] = 0.0f;
     unsigned int gw[8];
     unsigned int xw[8];
     unsigned int hw[1];
@@ -440,21 +439,21 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
             }
             window = window + 1;
             if (window == 8) {
-                sums[rg * 256 + tir] = sums[rg * 256 + tir] + (double)acc[0];
+                sums[rg * 256 + tir] = sums[rg * 256 + tir] + acc[0];
                 acc[0] = 0.0f;
-                sums[rg * 256 + 32 + tir] = sums[rg * 256 + 32 + tir] + (double)acc[1];
+                sums[rg * 256 + 32 + tir] = sums[rg * 256 + 32 + tir] + acc[1];
                 acc[1] = 0.0f;
-                sums[rg * 256 + 64 + tir] = sums[rg * 256 + 64 + tir] + (double)acc[2];
+                sums[rg * 256 + 64 + tir] = sums[rg * 256 + 64 + tir] + acc[2];
                 acc[2] = 0.0f;
-                sums[rg * 256 + 96 + tir] = sums[rg * 256 + 96 + tir] + (double)acc[3];
+                sums[rg * 256 + 96 + tir] = sums[rg * 256 + 96 + tir] + acc[3];
                 acc[3] = 0.0f;
-                sums[rg * 256 + 128 + tir] = sums[rg * 256 + 128 + tir] + (double)acc[4];
+                sums[rg * 256 + 128 + tir] = sums[rg * 256 + 128 + tir] + acc[4];
                 acc[4] = 0.0f;
-                sums[rg * 256 + 160 + tir] = sums[rg * 256 + 160 + tir] + (double)acc[5];
+                sums[rg * 256 + 160 + tir] = sums[rg * 256 + 160 + tir] + acc[5];
                 acc[5] = 0.0f;
-                sums[rg * 256 + 192 + tir] = sums[rg * 256 + 192 + tir] + (double)acc[6];
+                sums[rg * 256 + 192 + tir] = sums[rg * 256 + 192 + tir] + acc[6];
                 acc[6] = 0.0f;
-                sums[rg * 256 + 224 + tir] = sums[rg * 256 + 224 + tir] + (double)acc[7];
+                sums[rg * 256 + 224 + tir] = sums[rg * 256 + 224 + tir] + acc[7];
                 acc[7] = 0.0f;
                 window = 0;
             }
@@ -465,61 +464,73 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
         __syncthreads();
         c = flags[claim_it & 1];
     }
-    sums[rg * 256 + tir] = sums[rg * 256 + tir] + (double)acc[0];
+    sums[rg * 256 + tir] = sums[rg * 256 + tir] + acc[0];
     acc[0] = 0.0f;
-    sums[rg * 256 + 32 + tir] = sums[rg * 256 + 32 + tir] + (double)acc[1];
+    sums[rg * 256 + 32 + tir] = sums[rg * 256 + 32 + tir] + acc[1];
     acc[1] = 0.0f;
-    sums[rg * 256 + 64 + tir] = sums[rg * 256 + 64 + tir] + (double)acc[2];
+    sums[rg * 256 + 64 + tir] = sums[rg * 256 + 64 + tir] + acc[2];
     acc[2] = 0.0f;
-    sums[rg * 256 + 96 + tir] = sums[rg * 256 + 96 + tir] + (double)acc[3];
+    sums[rg * 256 + 96 + tir] = sums[rg * 256 + 96 + tir] + acc[3];
     acc[3] = 0.0f;
-    sums[rg * 256 + 128 + tir] = sums[rg * 256 + 128 + tir] + (double)acc[4];
+    sums[rg * 256 + 128 + tir] = sums[rg * 256 + 128 + tir] + acc[4];
     acc[4] = 0.0f;
-    sums[rg * 256 + 160 + tir] = sums[rg * 256 + 160 + tir] + (double)acc[5];
+    sums[rg * 256 + 160 + tir] = sums[rg * 256 + 160 + tir] + acc[5];
     acc[5] = 0.0f;
-    sums[rg * 256 + 192 + tir] = sums[rg * 256 + 192 + tir] + (double)acc[6];
+    sums[rg * 256 + 192 + tir] = sums[rg * 256 + 192 + tir] + acc[6];
     acc[6] = 0.0f;
-    sums[rg * 256 + 224 + tir] = sums[rg * 256 + 224 + tir] + (double)acc[7];
+    sums[rg * 256 + 224 + tir] = sums[rg * 256 + 224 + tir] + acc[7];
     acc[7] = 0.0f;
+    int _min_22 = (((int)num_bids) < (n_chunks) ? ((int)num_bids) : (n_chunks));
+    int nrep = ((_min_22) < (2) ? (_min_22) : (2));
     __syncthreads();
     int at_0 = tid;
-    sums[at_0] = sums[at_0] + sums[256 + at_0];
-    sums[at_0] = sums[at_0] + sums[512 + at_0];
-    sums[at_0] = sums[at_0] + sums[768 + at_0];
-    sums[at_0] = sums[at_0] + sums[1024 + at_0];
-    sums[at_0] = sums[at_0] + sums[1280 + at_0];
-    sums[at_0] = sums[at_0] + sums[1536 + at_0];
-    sums[at_0] = sums[at_0] + sums[1792 + at_0];
+    float rv_0[8];
+    rv_0[0] = sums[at_0];
+    rv_0[1] = sums[256 + at_0];
+    rv_0[2] = sums[512 + at_0];
+    rv_0[3] = sums[768 + at_0];
+    rv_0[4] = sums[1024 + at_0];
+    rv_0[5] = sums[1280 + at_0];
+    rv_0[6] = sums[1536 + at_0];
+    rv_0[7] = sums[1792 + at_0];
+    rv_0[0] = rv_0[0] + rv_0[1];
+    rv_0[2] = rv_0[2] + rv_0[3];
+    rv_0[4] = rv_0[4] + rv_0[5];
+    rv_0[6] = rv_0[6] + rv_0[7];
+    rv_0[0] = rv_0[0] + rv_0[2];
+    rv_0[4] = rv_0[4] + rv_0[6];
+    rv_0[0] = rv_0[0] + rv_0[4];
+    sums[at_0] = rv_0[0];
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     __syncthreads();
     if (tid == 0) {
         if (first_c < n_chunks) {
             {
-                void* _cpred_dst_22 = reinterpret_cast<void*>(partial + (long long)((int)bid % 2 * 256));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_23 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 256));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_22), "r"(sums_addr + 0), "r"((uint32_t)(512))
+                    :: "l"(_cpred_dst_23), "r"(sums_addr + 0), "r"((uint32_t)(256))
                     : "memory");
             }
             {
-                void* _cpred_dst_23 = reinterpret_cast<void*>(partial + (long long)((int)bid % 2 * 256 + 64));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_24 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 256 + 64));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_23), "r"(sums_addr + 512), "r"((uint32_t)(512))
+                    :: "l"(_cpred_dst_24), "r"(sums_addr + 256), "r"((uint32_t)(256))
                     : "memory");
             }
             {
-                void* _cpred_dst_24 = reinterpret_cast<void*>(partial + (long long)((int)bid % 2 * 256 + 128));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_25 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 256 + 128));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_24), "r"(sums_addr + 1024), "r"((uint32_t)(512))
+                    :: "l"(_cpred_dst_25), "r"(sums_addr + 512), "r"((uint32_t)(256))
                     : "memory");
             }
             {
-                void* _cpred_dst_25 = reinterpret_cast<void*>(partial + (long long)((int)bid % 2 * 256 + 192));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_26 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 256 + 192));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_25), "r"(sums_addr + 1536), "r"((uint32_t)(512))
+                    :: "l"(_cpred_dst_26), "r"(sums_addr + 768), "r"((uint32_t)(256))
                     : "memory");
             }
             asm volatile("cp.async.bulk.commit_group;");
@@ -541,25 +552,34 @@ kernel_cake_rmsnorm_train_195c4317b51bb4ea1137(__nv_bfloat16* __restrict__ g, __
     }
     __syncthreads();
     if (flags[2] != 0) {
-        double buf[4];
-        {
-            uint64_t _scalar_bits_26;
-            asm volatile("ld.global.cg.b64 %0, [%1];"
-                : "=l"(_scalar_bits_26) : "l"((const void*)(partial + (tid))) : "memory");
-            buf[0] = __longlong_as_double(_scalar_bits_26);
+        float buf[4];
+        buf[0] = 0.0f;
+        if (0 < nrep) {
+            {
+                uint32_t _scalar_bits_27;
+                asm volatile("ld.global.cg.b32 %0, [%1];"
+                    : "=r"(_scalar_bits_27) : "l"((const void*)(partial + (tid))) : "memory");
+                buf[0] = __uint_as_float(_scalar_bits_27);
+            }
         }
-        {
-            uint64_t _scalar_bits_27;
-            asm volatile("ld.global.cg.b64 %0, [%1];"
-                : "=l"(_scalar_bits_27) : "l"((const void*)(partial + (256 + tid))) : "memory");
-            buf[1] = __longlong_as_double(_scalar_bits_27);
+        buf[1] = 0.0f;
+        if (1 < nrep) {
+            {
+                uint32_t _scalar_bits_28;
+                asm volatile("ld.global.cg.b32 %0, [%1];"
+                    : "=r"(_scalar_bits_28) : "l"((const void*)(partial + (256 + tid))) : "memory");
+                buf[1] = __uint_as_float(_scalar_bits_28);
+            }
         }
-        double tot_0 = buf[0];
-        tot_0 = tot_0 + buf[1];
+        buf[0] = buf[0] + buf[1];
         int at_w_0 = tid;
-        dwbuf[(at_w_0 / 32 / 8 * 32 + at_w_0 % 32) * 8 + at_w_0 / 32 % 8] = (float)tot_0;
-        *reinterpret_cast<unsigned long long*>(partial + (at_w_0)) = (unsigned long long)((unsigned long long)(0.0));
-        *reinterpret_cast<unsigned long long*>(partial + (256 + at_w_0)) = (unsigned long long)((unsigned long long)(0.0));
+        dwbuf[(at_w_0 / 32 / 8 * 32 + at_w_0 % 32) * 8 + at_w_0 / 32 % 8] = buf[0];
+        if (0 < nrep) {
+            *(reinterpret_cast<float*>(partial) + (at_w_0)) = 0.0f;
+        }
+        if (1 < nrep) {
+            *(reinterpret_cast<float*>(partial) + (256 + at_w_0)) = 0.0f;
+        }
         __syncthreads();
         int col_0 = tid * 4;
         if (col_0 < 256) {

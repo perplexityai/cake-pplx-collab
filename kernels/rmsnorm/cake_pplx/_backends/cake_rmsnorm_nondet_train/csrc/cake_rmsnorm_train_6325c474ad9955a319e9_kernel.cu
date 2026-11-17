@@ -153,10 +153,17 @@ kernel_cake_rmsnorm_train_6325c474ad9955a319e9(__nv_bfloat16* __restrict__ x, __
                     float _bf16x2_add_f32_0[2];
                     asm volatile(
                         "{\n\t"
+#if __CUDA_ARCH__ == 1070
+                        ".reg .b64 c, d;\n\t"
+                        "mov.b64 c, {%3, %4};\n\t"
+                        "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+                        "mov.b64 {%0, %1}, d;\n\t"
+#else
                         ".reg .b16 lo, hi;\n\t"
                         "mov.b32 {lo, hi}, %2;\n\t"
                         "add.rn.f32.bf16 %0, lo, %3;\n\t"
                         "add.rn.f32.bf16 %1, hi, %4;\n\t"
+#endif
                         "}\n"
                         : "=&f"(_bf16x2_add_f32_0[0]), "=&f"(_bf16x2_add_f32_0[1]) : "r"(x_words[v_1 * 4 + k]), "f"(_f32x2_bf16x2_add_rhs_2.x), "f"(_f32x2_bf16x2_add_rhs_2.y));
                     __nv_bfloat162 _bf16x2_0 = __float22bfloat162_rn(make_float2(_bf16x2_add_f32_0[0], _bf16x2_add_f32_0[1]));
