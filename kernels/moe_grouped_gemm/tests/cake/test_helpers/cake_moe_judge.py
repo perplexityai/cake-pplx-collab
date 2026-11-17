@@ -24,10 +24,20 @@ is no tolerance.
 Draw ``j`` of a case of seed ``seed`` draws its inputs from :func:`cake_naive.draw_seed`
 ``(seed, j)``; draw 0 is the case's own inputs.  :func:`judge_draws` runs draws 1, 2, ...
 and draw 0 last, so the buffers and prepared launches a test refills hold the case's own
-inputs and outputs when it returns, and the test's later checks (bits against another
-route, rest states) run on them.  An output's contract (shape; finite where the oracle is
-finite, its inf or a NaN where the oracle holds one) is checked on every draw; an exact
-output (an empty group's zeros, a counter) is compared exactly with :meth:`Draw.exact`.
+inputs and outputs when the draws end.  An output's contract (shape; finite where the
+oracle is finite, its inf or a NaN where the oracle holds one) is checked on every draw;
+an exact output (an empty group's zeros, a counter) is compared exactly with
+:meth:`Draw.exact`.
+
+The test's later checks (bits against another route, rest states, refusals) are its
+``then``: :func:`judge_draws` runs them after the draws, on the case's own inputs and
+outputs, and before it raises, so every check of a test runs whatever the verdicts.  Any
+failure other than a miss of the naive tier (a contract, an exact output, an output not
+judged on every draw, two draws with the same oracle values, a failure of ``then``) raises
+a plain :class:`AssertionError` that lists every failure, the misses too.
+:class:`NaiveTierMiss` is raised only when misses of the naive tier are the only failures:
+the one failure a known gap's xfail covers (``tests/known_gaps.py``).  A test that judges
+in a loop collects the misses (``misses``) and raises them last with :func:`raise_misses`.
 
 The float64 oracle runs on the device; GB300 multiplies float64 at about 1.1 TFLOPS.
 Where an op's whole oracle takes more than :data:`FULL_ORACLE_MACS` multiply-adds (the
@@ -42,12 +52,14 @@ contract (shape, finite where the oracle is finite).
 
 from __future__ import annotations
 
+import dataclasses
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
+import pytest
 import torch
 
-from .cake_naive import DRAWS, TIERS, TierJudge, contract, draw_seed
+from .cake_naive import DRAWS, NEAR_TIE, TIERS, TierJudge, contract, draw_seed
 
 #: The output names of the ops, as the TIER lines print them.
 OUTPUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
@@ -58,6 +70,9 @@ FULL_ORACLE_MACS = int(os.environ.get("CAKE_PPLX_MOE_FULL_ORACLE_MACS", 1 << 37)
 SAMPLE_STRIDE = 64
 #: How far the sampled row moves from one block of SAMPLE_STRIDE rows to the next.
 SAMPLE_SKEW = 37
+#: The text of an output's miss of the naive tier in a failure message
+#: (``TierJudge.failures``).
+MISS = "misses the naive tier"
 
 
 def bounds(sizes: Sequence[int]) -> list[tuple[int, int]]:
@@ -263,28 +278,120 @@ class Draw:
             self.failures.append(f"draw {self.index}: {message}")
 
 
+@dataclasses.dataclass(frozen=True)
+class Missed:
+    """An output that missed the naive tier (a verdict of ``TierJudge.verdicts`` whose
+    tier is None): per norm of ``cake_naive.NORMS``, its median and its largest error over
+    the tier's (``ratios``; None where the tier's error is 0 or not finite) and whether it
+    meets the tier in that norm (``met``), and the draws where the tier's error was 0 and
+    the output's was not (``zero``)."""
+
+    output: str
+    ratios: Mapping[str, tuple[float, float] | None]
+    met: Mapping[str, bool]
+    zero: tuple[int, ...]
+
+    @classmethod
+    def of(cls, verdict: Mapping) -> Missed:
+        """The miss of ``verdict``, by the rule of ``TierJudge.verdicts``."""
+        (tier,) = TIERS
+        ratios, met = {}, {}
+        for norm, errors in verdict["norms"].items():
+            ours, bound = errors["ours"], errors[tier]
+            met[norm] = (
+                bound is not None
+                and ours[0] <= NEAR_TIE * bound[0]
+                and ours[1] <= NEAR_TIE * bound[1]
+            )
+            ratios[norm] = (
+                (ours[0] / bound[0], ours[1] / bound[1])
+                if bound is not None and bound[0] > 0 and bound[1] > 0
+                else None
+            )
+        return cls(verdict["output"], ratios, met, tuple(verdict["zero"][tier]))
+
+
+class NaiveTierMiss(AssertionError):
+    """Misses of the naive tier that are the only failures of a test's judgment: the
+    message lists them (``TierJudge.failures``), ``missed`` holds a :class:`Missed` per
+    output.  Every other failure is a plain :class:`AssertionError`."""
+
+    def __init__(self, message: str, missed: Sequence[Missed] = ()) -> None:
+        super().__init__(message)
+        self.missed = tuple(missed)
+
+
 def judge_draws(
     record_property: Callable[[str, object], None] | None,
     draw: Callable[[Draw], None],
     *,
     seed: int,
     draws: int = DRAWS,
+    then: Callable[[], None] | None = None,
+    misses: list[NaiveTierMiss] | None = None,
 ) -> TierJudge:
-    """Judge the outputs ``draw`` reports over ``draws`` independent inputs and fail on any
-    miss or broken contract.
+    """Judge the outputs ``draw`` reports over ``draws`` independent inputs, run the
+    test's later checks ``then``, and fail on any miss or other failure.
 
     ``draw(d)`` makes the inputs of draw ``d.index`` from the seed ``d.seed``
     (``draw_seed(seed, d.index)``), launches, and reports each output with
     :meth:`Draw.output`, :meth:`Draw.op` or :meth:`Draw.exact`.  Draws ``1 .. draws - 1``
     run first and draw 0, the case's own inputs, last.  The verdicts are recorded with
     ``record_property`` (``TierJudge.record``) for the suite's TIER lines.  Returns the
-    judge."""
+    judge.
+
+    ``then()`` runs after the draws and before anything is raised: the test's later
+    checks, whatever the verdicts.  A failure of ``then``, of an output's contract, of an
+    exact output, an output not judged on every draw or two draws with the same oracle
+    values raises a plain :class:`AssertionError` listing every failure, the misses of
+    the naive tier too.  When those misses are the only failures, :class:`NaiveTierMiss`
+    is raised (a skip in ``then``, whose checks do not apply on this device, does not
+    hide them).  A test that judges in a loop passes ``misses`` (a list) instead of
+    ``then``: such a :class:`NaiveTierMiss` is appended to it, not raised, and the test
+    raises the collected misses last with :func:`raise_misses`."""
+    if then is not None and misses is not None:
+        raise TypeError("judge_draws takes then or misses, not both")
     judge = TierJudge(draws)
     failures: list[str] = []
     for index in [*range(1, draws), 0]:
         draw(Draw(judge, index, draw_seed(seed, index), failures))
     if record_property is not None:
         judge.record(record_property)
-    failures += judge.failures()
-    assert not failures, "\n".join(failures)
+    missed = [Missed.of(v) for v in judge.verdicts().values() if v["tier"] is None]
+    heads = tuple(f"{m.output}: {MISS} over " for m in missed)
+    lines = judge.failures()
+    found = [line for line in lines if line.startswith(heads)]
+    failures += [line for line in lines if not line.startswith(heads)]
+    cause = None
+    if then is not None:
+        try:
+            then()
+        except NaiveTierMiss as error:  # a judgment that ``then`` ran
+            missed += error.missed
+            found.append(str(error))
+        except pytest.skip.Exception:
+            if not failures and not missed:
+                raise
+        except Exception as error:
+            if not failures and not missed:
+                raise
+            failures.append(f"then: {type(error).__name__}: {error}")
+            cause = error
+    if failures:
+        raise AssertionError("\n".join(failures + found)) from cause
+    if missed:
+        miss = NaiveTierMiss("\n".join(found), missed)
+        if misses is None:
+            raise miss
+        misses.append(miss)
     return judge
+
+
+def raise_misses(misses: Sequence[NaiveTierMiss]) -> None:
+    """Raise the misses that ``judge_draws(..., misses=misses)`` collected as one
+    :class:`NaiveTierMiss`: the last statement of a test that judges in a loop."""
+    if misses:
+        raise NaiveTierMiss(
+            "\n".join(str(miss) for miss in misses),
+            [missed for miss in misses for missed in miss.missed],
+        )
