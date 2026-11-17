@@ -1138,8 +1138,13 @@ def test_changing_eps_in_one_process_does_not_rebuild(
 ) -> None:
     """A different epsilon is a launch argument of the already compiled programs: no module is rebuilt or reloaded
     when the epsilons change between calls, and ``dX`` and ``dfn`` at each value are judged against the naive BF16
-    tier over 32 inputs (the oracle and the tier at that value)."""
+    tier over 32 inputs (the oracle and the tier at that value).  The calls of the epsilons run at 255 tokens, whose
+    route may select records of other token-count bands than 64 tokens' (at hidden 7168 on sm_100a / sm_103a with
+    152 SMs the column slab ``xrsg_p160__h7168``): one call at 255 tokens with the default epsilons loads them first,
+    so the count compares calls that differ in their epsilons alone, whatever the earlier tests of the process
+    loaded."""
     _judge_case(64, hidden=hidden, record_property=record_property, prefix="T=64 ")
+    _run(_make_inputs(255, hidden=hidden, seed=SEED + 3))
     loaded_before = loader.load.cache_info().misses
     for rms_eps, hc_eps in _EPS_CASES + ((RMS_EPS, HC_EPS),):
         _judge_case(
