@@ -196,9 +196,9 @@ def judge(
     fp32_wgrad=False,
     macro=768,
 ):
-    """Judge the iteration's outputs of the whole group over :data:`tests.cake_naive.DRAWS` draws of random inputs
-    (every rank runs the same judge on gathered values).  Returns the verdicts, the alternatives' verdicts and the
-    failures."""
+    """Judge the iteration's outputs of the whole group over :data:`tests.cake_naive.DRAWS` draws of random inputs,
+    and over stage 2's where an output asks for them (every rank runs the same judge on gathered values, so every rank
+    takes the same draws).  Returns the verdicts, the alternatives' verdicts and the failures."""
     experts = len(counts) * local_experts
     device = iteration.x.device
     alt = TierJudge()
@@ -236,7 +236,7 @@ def judge(
         alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r["alt_d_scores"]})
         return outputs, oracle
 
-    verdict, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed)
+    verdict, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed, reported=(alt,))
     return list(verdict.verdicts().values()), list(alt.verdicts().values()), failures
 
 

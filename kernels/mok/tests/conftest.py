@@ -17,7 +17,9 @@ Shared fixtures of the MoK suites and the terminal summary of the accuracy verdi
 
 The summary prints one ``TIER`` line per judged output (:func:`tests.cake_naive.summarize_tiers`), then one ``ALT`` line
 per output measured against a kernel-shaped alternative of the naive implementation
-(:data:`tests.experimental._mok_naive.ALTERNATIVE`).  The alternatives are reported, never judged.
+(:data:`tests.experimental._mok_naive.ALTERNATIVE`), then one ``GAP`` line per known-gap output that missed the tier:
+its item, the architecture, its error ratio and its cap there (:func:`tests.experimental._mok_gaps.check`).  The
+alternatives are reported, never judged.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def cuda_matmul_flags():
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     summarize_tiers(terminalreporter)
-    lines = []
+    lines, gap_lines = [], []
     for reports in terminalreporter.stats.values():
         for report in reports:
             if getattr(report, "when", None) != "call":
@@ -59,7 +61,17 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             for key, verdict in getattr(report, "user_properties", ()):
                 if key == "naive_alternative":
                     lines.append("ALT " + tier_line(report.nodeid, verdict).removeprefix("TIER "))
+                elif key == "known_gap":
+                    cap = verdict["cap"]
+                    gap_lines.append(
+                        f"GAP {report.nodeid} {verdict['item']} {verdict['arch']} ratio={verdict['ratio']:.9g} "
+                        f"cap={'none' if cap is None else f'{cap:.4f}'}"
+                    )
     if lines:
         terminalreporter.section("training accuracy: kernel-shaped alternatives of the naive tier (reported only)")
         for line in lines:
+            terminalreporter.write_line(line)
+    if gap_lines:
+        terminalreporter.section("training accuracy: known gaps, error ratio in the norms they miss, and caps")
+        for line in gap_lines:
             terminalreporter.write_line(line)

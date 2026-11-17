@@ -93,14 +93,19 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
   scores). With MXFP8 routed experts the routed GEMMs read `x` and the weights through the MXFP8 recipe.
 - Naive implementation: the standard PyTorch BF16 layer (autograd ops in BF16, one cuBLAS GEMM per expert and weight
   gradient, `d_scores = (dY * y_route).sum(-1)`); MXFP8 adds only the recipe's quantization points.
-- Rule: over 32 random inputs per case, the kernel's error against the oracle, in the L2 and in the max norm, has a
-  median and a largest value at most 1.005 times the naive implementation's, and is 0 wherever the naive error is 0.
+- Rule: over 32 random inputs per case, the kernel's error against the oracle in the L2 norm has a median and a
+  largest value at most 1.005 times the naive implementation's. In the max norm, the kernel's error is at most 1.005
+  times the naive error on at least 16 of the 32 inputs; 11 or fewer fail, and with 12 to 15 the case runs 96 more
+  inputs and the max norm passes with at least 56 of the 128. The error is 0 wherever the naive error is 0.
   `x`'s E4M3 codes and scales are exact against the recipe.
 
-Known gaps are judged in test items of their own under a strict expected-failure marker that states the measured
-ratios. A fix makes such an item pass, and the strict marker then fails the item until the marker is removed. Every
-other output of the same case stays judged in the case's main item. Ratios are kernel error / naive error, median /
-largest over the inputs:
+Known gaps are judged in test items of their own. On each architecture where the output misses the rule, the item
+carries a strict expected-failure marker with a cap: the largest error ratio measured there (kernel error / naive
+error, median or largest over the inputs, in the norms it misses), rounded up to 4 decimals. A ratio above the cap
+fails the item, and so does a miss on an architecture without a cap. A fix makes the item pass, and the strict marker
+then fails the item until the marker is removed. On the other architectures the item is judged like any output.
+Every other output of the same case stays judged in the case's main item. Ratios are kernel error / naive error,
+median / largest over the inputs:
 
 | Outputs | Items | `sm_100a`, `sm_103a` (GB200, GB300) | `sm_107a` (VR200) |
 |---|---|---|---|

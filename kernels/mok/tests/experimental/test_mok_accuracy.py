@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Accuracy of the single-GPU MoK kernels: every floating output against the float64 oracle, beside the naive PyTorch
-BF16 implementation, over :data:`tests.cake_naive.DRAWS` random inputs per case (:func:`tests.cake_naive.judge_case`).
+BF16 implementation, over :data:`tests.cake_naive.DRAWS` random inputs per case, and over stage 2's 128 where an output's
+max-norm wins leave it undecided (:func:`tests.cake_naive.judge_case`).
 
 The oracle and the naive implementation are defined in :mod:`tests.experimental._mok_naive`.  The cases are the fused
 BF16 training cases (three geometries, ring replay with several macrobatches, empty experts, clamped SwiGLU, FP32
@@ -27,9 +28,9 @@ gradient.  E4M3 values the MXFP8 kernels store (the saved gate, up and activatio
 as their dequantized values against the oracle's value before quantization; ``x``'s E4M3 codes and UE8M0 scales are
 exact against the recipe.  The kernel-shaped alternatives of :data:`tests.experimental._mok_naive.ALTERNATIVE` are
 measured on the same draws and reported (``ALT`` lines), never judged.  The known accuracy gaps
-(:mod:`tests.experimental._mok_gaps`) are judged in items of their own under a strict expected-failure marker: the
-MXFP8 score gradient of every MXFP8 case, and the routed weight gradients of the two BF16 cases whose routed experts
-cross a macrobatch boundary (:data:`STRADDLE_CASES`).
+(:mod:`tests.experimental._mok_gaps`) are judged in items of their own, under a strict expected-failure marker on the
+architectures where they miss the tier: the MXFP8 score gradient of every MXFP8 case, and routed weight gradients of
+the two BF16 cases whose routed experts cross a macrobatch boundary (:data:`STRADDLE_GAPS`).
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -230,7 +231,7 @@ def _bf16_case(
         alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r_naive["alt_d_scores"].view(tokens, topk)})
         return outputs, oracle
 
-    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden)
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden, reported=(alt,))
     return judge, alt, failures
 
 
@@ -241,33 +242,35 @@ def _bf16(record_property, part="outputs", known=(), **kwargs):
 
 #: The fused BF16 cases ``(geometry, empty)`` whose routed experts cross a macrobatch boundary (the empty-experts
 #: layout puts all routed rows on few experts: with 768-row macrobatches their rows span two macrobatches), and their
-#: known-gap outputs, the routed weight gradients (BF16 weight gradients).
-STRADDLE_CASES = (((256, 256, 768), True), ((512, 512, 768), True))
-STRADDLE_GAPS = tuple((name, gaps.BF16_STRADDLE_DW) for name in ("dw_routed_gate", "dw_routed_up", "dw_routed_down"))
+#: outputs judged in items of their own: the routed weight gradients (BF16 weight gradients) that miss the tier on at
+#: least one architecture (:data:`tests.experimental._mok_gaps.CAPS`), each marked where it does.
+STRADDLE_GAPS = {
+    ((256, 256, 768), True): ("dw_routed_gate", "dw_routed_up", "dw_routed_down"),
+    ((512, 512, 768), True): ("dw_routed_gate", "dw_routed_up", "dw_routed_down"),
+}
 
 
 def _fused_cases():
-    """``(geometry, empty, part)`` parameters: one item per case; a case of :data:`STRADDLE_CASES` gets its main
+    """``(geometry, empty, part)`` parameters: one item per case; a case of :data:`STRADDLE_GAPS` gets its main
     item, then one item per known-gap output under its marker."""
     cases = []
     for geometry in GEOMETRIES:
         for empty in (False, True):
             case = "h{}-i{}-m{}-{}".format(*geometry, "empty-experts" if empty else "routed")
-            if (geometry, empty) not in STRADDLE_CASES:
+            if (geometry, empty) not in STRADDLE_GAPS:
                 cases.append(pytest.param(geometry, empty, gaps.OUTPUTS, id=case))
                 continue
-            cases.append(pytest.param(geometry, empty, gaps.OUTPUTS, id=f"{case}-{gaps.OUTPUTS}"))
+            known = [(name, gaps.bf16_straddle_dw) for name in STRADDLE_GAPS[(geometry, empty)]]
             cases += [
-                pytest.param(geometry, empty, name, marks=mark, id=f"{case}-{gaps.item_id(name)}")
-                for name, mark in STRADDLE_GAPS
+                pytest.param(geometry, empty, *p.values, marks=p.marks, id=p.id)
+                for p in gaps.parts("test_fused_training_accuracy", known, case)
             ]
     return cases
 
 
 @pytest.mark.parametrize("geometry,empty,part", _fused_cases())
 def test_fused_training_accuracy(record_property, geometry, empty, part):
-    known = [name for name, _ in STRADDLE_GAPS] if (geometry, empty) in STRADDLE_CASES else []
-    _bf16(record_property, part, known, geometry=geometry, empty=empty)
+    _bf16(record_property, part, STRADDLE_GAPS.get((geometry, empty), ()), geometry=geometry, empty=empty)
 
 
 def test_fused_training_clamped_swiglu_accuracy(record_property):
@@ -409,39 +412,47 @@ def _mxfp8_case(
         lambda j, tier: naive_values.pop(j),
         seed=seed + hidden + intermediate + macro,
         exact=frozenset({"x_codes", "x_scales"}),
+        reported=(alt,),
     )
     return judge, alt, failures
 
 
 #: The known-gap outputs of every MXFP8 case.
-MXFP8_GAPS = (("d_scores", gaps.MXFP8_D_SCORES),)
-MXFP8_PARTS = pytest.mark.parametrize("part", gaps.parts(MXFP8_GAPS))
+MXFP8_GAPS = ("d_scores",)
+
+
+def _mxfp8_parts(function):
+    """The ``part`` parameter of MXFP8 test ``function``: the main item, then the score gradient under its marker."""
+    mark = gaps.mxfp8_d_scores_of(function)
+    return pytest.mark.parametrize(
+        "part", [gaps.OUTPUTS, *(pytest.param(name, marks=mark, id=gaps.item_id(name)) for name in MXFP8_GAPS)]
+    )
 
 
 def _mxfp8(record_property, part, **kwargs):
     require_gpu()
     run = gaps.judged(("mxfp8", *sorted(kwargs.items())), lambda: _mxfp8_case(**kwargs))
-    _check(record_property, part, run, [name for name, _ in MXFP8_GAPS])
+    _check(record_property, part, run, MXFP8_GAPS)
 
 
 LIMITS = pytest.mark.parametrize("swiglu_limit", [None, 0.75], ids=["plain", "clamped"])
 
 
-@MXFP8_PARTS
+@_mxfp8_parts("test_mxfp8_training_accuracy")
 @LIMITS
 @pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
 def test_mxfp8_training_accuracy(record_property, swiglu_limit, geometry, part):
     _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry)
 
 
-@MXFP8_PARTS
+@_mxfp8_parts("test_mxfp8_training_fp32_wgrad_accuracy")
 @LIMITS
 @pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
 def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geometry, part):
     _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True)
 
 
-@MXFP8_PARTS
+@_mxfp8_parts("test_mxfp8_training_local_experts_accuracy")
 @pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
 def test_mxfp8_training_local_experts_accuracy(record_property, experts, part):
     """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""

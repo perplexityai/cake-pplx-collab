@@ -58,13 +58,14 @@ def _record(results, record_property, part=gaps.OUTPUTS, known=()):
     gaps.check(record_property, part, verdicts, failures, known)
 
 
-def _cases(world_gaps):
-    """``(world, part)`` parameters: per world the main item, then each known-gap output under its marker."""
-    cases = []
-    for world, known in world_gaps.items():
-        cases.append(pytest.param(world, gaps.OUTPUTS, id=f"ep{world}-{gaps.OUTPUTS}"))
-        cases += [pytest.param(world, name, marks=mark, id=f"ep{world}-{gaps.item_id(name)}") for name, mark in known]
-    return cases
+def _cases(function, world_gaps):
+    """``(world, part)`` parameters of test ``function``: per world the main item, then each known-gap output under its
+    marker."""
+    return [
+        pytest.param(world, *p.values, marks=p.marks, id=p.id)
+        for world, known in world_gaps.items()
+        for p in gaps.parts(function, known, f"ep{world}")
+    ]
 
 
 @pytest.mark.parametrize("world", [1, 4], ids=["ep1", "ep4"])
@@ -75,18 +76,18 @@ def test_training_graph(record_property, world):
 #: The known-gap outputs of the unequal-source cases: the 0 / 513 / 769 / 8193 case's experts cross macrobatch
 #: boundaries (BF16 routed dW).
 UNEQUAL_GAPS = tuple(
-    (f"counts-0-513-769-8193:{name}", gaps.BF16_STRADDLE_DW)
+    (f"counts-0-513-769-8193:{name}", gaps.bf16_straddle_dw)
     for name in ("dw_routed_gate", "dw_routed_up", "dw_routed_down")
 )
 
 
-@pytest.mark.parametrize("part", gaps.parts(UNEQUAL_GAPS))
+@pytest.mark.parametrize("part", gaps.parts("test_unequal_sources", UNEQUAL_GAPS))
 def test_unequal_sources(record_property, part):
     _record(_run(4, workers.unequal_sources), record_property, part, [name for name, _ in UNEQUAL_GAPS])
 
 
 _MXFP8_FEATURE_GAPS = tuple(
-    (f"{case}:d_scores", gaps.MXFP8_D_SCORES) for case in ("mxfp8", "mxfp8-fp32-wgrad", "mxfp8-clamped-recompute")
+    (f"{case}:d_scores", gaps.mxfp8_d_scores) for case in ("mxfp8", "mxfp8-fp32-wgrad", "mxfp8-clamped-recompute")
 )
 #: The known-gap outputs of the training features per world: the MXFP8 score gradient, and at EP1 (1031 tokens, 768-row
 #: macrobatches: experts cross a macrobatch boundary) the BF16 routed dW that misses the tier, the down projection
@@ -94,17 +95,17 @@ _MXFP8_FEATURE_GAPS = tuple(
 FEATURE_GAPS = {
     1: (
         *_MXFP8_FEATURE_GAPS,
-        ("bf16-clamped:dw_routed_down", gaps.BF16_STRADDLE_DW),
-        ("bf16-recompute:dw_routed_gate", gaps.BF16_STRADDLE_DW),
-        ("bf16-recompute:dw_routed_up", gaps.BF16_STRADDLE_DW),
-        ("bf16-recompute:dw_routed_down", gaps.BF16_STRADDLE_DW),
-        ("bf16-clamped-recompute:dw_routed_down", gaps.BF16_STRADDLE_DW),
+        ("bf16-clamped:dw_routed_down", gaps.bf16_straddle_dw),
+        ("bf16-recompute:dw_routed_gate", gaps.bf16_straddle_dw),
+        ("bf16-recompute:dw_routed_up", gaps.bf16_straddle_dw),
+        ("bf16-recompute:dw_routed_down", gaps.bf16_straddle_dw),
+        ("bf16-clamped-recompute:dw_routed_down", gaps.bf16_straddle_dw),
     ),
     4: _MXFP8_FEATURE_GAPS,
 }
 
 
-@pytest.mark.parametrize("world,part", _cases(FEATURE_GAPS))
+@pytest.mark.parametrize("world,part", _cases("test_training_features", FEATURE_GAPS))
 def test_training_features(record_property, world, part):
     results = _run(world, workers.training_features)
     if part == gaps.OUTPUTS:
