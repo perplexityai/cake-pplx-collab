@@ -49,6 +49,27 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
+__device__ __forceinline__ float2 add_f32x2_noftz(float2 a, float2 b) {
+    float2 r;
+    asm("add.rn.f32x2 %0, %1, %2;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(unsigned long long*)&a), "l"(*(unsigned long long*)&b));
+    return r;
+}
+
+
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
+
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(256) __cluster_dims__(8,1,1) void
@@ -91,11 +112,10 @@ kernel_cake_dense_projection_gemm_c8633003630e8311a4b3(float* __restrict__ X, fl
     int j = lane % 16;
     int ge = tid / 16 % 4;
     int gt = tid / 16 / 4;
-    float acc[32];
-    float comp[1];
+    float2 acc[16];
     #pragma unroll
-    for (int o = 0; o < 32; o++) {
-        acc[o] = 0.0f;
+    for (int o = 0; o < 16; o++) {
+        acc[o] = make_float2(0.0f, 0.0f);
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (0 < chunks) {
@@ -158,189 +178,177 @@ kernel_cake_dense_projection_gemm_c8633003630e8311a4b3(float* __restrict__ X, fl
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&xv[5])) : "r"(cur + (unsigned int)(((16 + gt + 20) * 144 + col_0) * 4)));
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&xv[6])) : "r"(cur + (unsigned int)(((16 + gt + 24) * 144 + col_0) * 4)));
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&xv[7])) : "r"(cur + (unsigned int)(((16 + gt + 28) * 144 + col_0) * 4)));
-            acc[0] = __fmaf_rn(xv[0], wv[0], acc[0]);
-            acc[1] = __fmaf_rn(xv[1], wv[0], acc[1]);
-            acc[2] = __fmaf_rn(xv[2], wv[0], acc[2]);
-            acc[3] = __fmaf_rn(xv[3], wv[0], acc[3]);
-            acc[4] = __fmaf_rn(xv[4], wv[0], acc[4]);
-            acc[5] = __fmaf_rn(xv[5], wv[0], acc[5]);
-            acc[6] = __fmaf_rn(xv[6], wv[0], acc[6]);
-            acc[7] = __fmaf_rn(xv[7], wv[0], acc[7]);
-            acc[8] = __fmaf_rn(xv[0], wv[1], acc[8]);
-            acc[9] = __fmaf_rn(xv[1], wv[1], acc[9]);
-            acc[10] = __fmaf_rn(xv[2], wv[1], acc[10]);
-            acc[11] = __fmaf_rn(xv[3], wv[1], acc[11]);
-            acc[12] = __fmaf_rn(xv[4], wv[1], acc[12]);
-            acc[13] = __fmaf_rn(xv[5], wv[1], acc[13]);
-            acc[14] = __fmaf_rn(xv[6], wv[1], acc[14]);
-            acc[15] = __fmaf_rn(xv[7], wv[1], acc[15]);
-            acc[16] = __fmaf_rn(xv[0], wv[2], acc[16]);
-            acc[17] = __fmaf_rn(xv[1], wv[2], acc[17]);
-            acc[18] = __fmaf_rn(xv[2], wv[2], acc[18]);
-            acc[19] = __fmaf_rn(xv[3], wv[2], acc[19]);
-            acc[20] = __fmaf_rn(xv[4], wv[2], acc[20]);
-            acc[21] = __fmaf_rn(xv[5], wv[2], acc[21]);
-            acc[22] = __fmaf_rn(xv[6], wv[2], acc[22]);
-            acc[23] = __fmaf_rn(xv[7], wv[2], acc[23]);
-            acc[24] = __fmaf_rn(xv[0], wv[3], acc[24]);
-            acc[25] = __fmaf_rn(xv[1], wv[3], acc[25]);
-            acc[26] = __fmaf_rn(xv[2], wv[3], acc[26]);
-            acc[27] = __fmaf_rn(xv[3], wv[3], acc[27]);
-            acc[28] = __fmaf_rn(xv[4], wv[3], acc[28]);
-            acc[29] = __fmaf_rn(xv[5], wv[3], acc[29]);
-            acc[30] = __fmaf_rn(xv[6], wv[3], acc[30]);
-            acc[31] = __fmaf_rn(xv[7], wv[3], acc[31]);
+            acc[0] = fma_f32x2_rn_noftz(make_float2(xv[0], xv[1]), make_float2(wv[0], wv[0]), acc[0]);
+            acc[1] = fma_f32x2_rn_noftz(make_float2(xv[2], xv[3]), make_float2(wv[0], wv[0]), acc[1]);
+            acc[2] = fma_f32x2_rn_noftz(make_float2(xv[4], xv[5]), make_float2(wv[0], wv[0]), acc[2]);
+            acc[3] = fma_f32x2_rn_noftz(make_float2(xv[6], xv[7]), make_float2(wv[0], wv[0]), acc[3]);
+            acc[4] = fma_f32x2_rn_noftz(make_float2(xv[0], xv[1]), make_float2(wv[1], wv[1]), acc[4]);
+            acc[5] = fma_f32x2_rn_noftz(make_float2(xv[2], xv[3]), make_float2(wv[1], wv[1]), acc[5]);
+            acc[6] = fma_f32x2_rn_noftz(make_float2(xv[4], xv[5]), make_float2(wv[1], wv[1]), acc[6]);
+            acc[7] = fma_f32x2_rn_noftz(make_float2(xv[6], xv[7]), make_float2(wv[1], wv[1]), acc[7]);
+            acc[8] = fma_f32x2_rn_noftz(make_float2(xv[0], xv[1]), make_float2(wv[2], wv[2]), acc[8]);
+            acc[9] = fma_f32x2_rn_noftz(make_float2(xv[2], xv[3]), make_float2(wv[2], wv[2]), acc[9]);
+            acc[10] = fma_f32x2_rn_noftz(make_float2(xv[4], xv[5]), make_float2(wv[2], wv[2]), acc[10]);
+            acc[11] = fma_f32x2_rn_noftz(make_float2(xv[6], xv[7]), make_float2(wv[2], wv[2]), acc[11]);
+            acc[12] = fma_f32x2_rn_noftz(make_float2(xv[0], xv[1]), make_float2(wv[3], wv[3]), acc[12]);
+            acc[13] = fma_f32x2_rn_noftz(make_float2(xv[2], xv[3]), make_float2(wv[3], wv[3]), acc[13]);
+            acc[14] = fma_f32x2_rn_noftz(make_float2(xv[4], xv[5]), make_float2(wv[3], wv[3]), acc[14]);
+            acc[15] = fma_f32x2_rn_noftz(make_float2(xv[6], xv[7]), make_float2(wv[3], wv[3]), acc[15]);
         }
         __syncthreads();
     }
     asm volatile("cp.async.wait_group 0;");
     #pragma unroll
-    for (int o_0 = 0; o_0 < 32; o_0++) {
-        float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, acc[o_0], 1);
-        acc[o_0] = acc[o_0] + _shfl_xor_sync_2;
+    for (int o_0 = 0; o_0 < 16; o_0++) {
+        float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, acc[o_0].x, 1);
+        float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, acc[o_0].y, 1);
+        acc[o_0] = add_f32x2_noftz(acc[o_0], make_float2(_shfl_xor_sync_2, _shfl_xor_sync_3));
     }
     #pragma unroll
-    for (int o_1 = 0; o_1 < 32; o_1++) {
-        float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, acc[o_1], 2);
-        acc[o_1] = acc[o_1] + _shfl_xor_sync_3;
+    for (int o_1 = 0; o_1 < 16; o_1++) {
+        float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, acc[o_1].x, 2);
+        float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, acc[o_1].y, 2);
+        acc[o_1] = add_f32x2_noftz(acc[o_1], make_float2(_shfl_xor_sync_4, _shfl_xor_sync_5));
     }
     #pragma unroll
-    for (int o_2 = 0; o_2 < 32; o_2++) {
-        float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, acc[o_2], 4);
-        acc[o_2] = acc[o_2] + _shfl_xor_sync_4;
+    for (int o_2 = 0; o_2 < 16; o_2++) {
+        float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, acc[o_2].x, 4);
+        float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, acc[o_2].y, 4);
+        acc[o_2] = add_f32x2_noftz(acc[o_2], make_float2(_shfl_xor_sync_6, _shfl_xor_sync_7));
     }
     #pragma unroll
-    for (int o_3 = 0; o_3 < 32; o_3++) {
-        float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, acc[o_3], 8);
-        acc[o_3] = acc[o_3] + _shfl_xor_sync_5;
+    for (int o_3 = 0; o_3 < 16; o_3++) {
+        float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, acc[o_3].x, 8);
+        float _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, acc[o_3].y, 8);
+        acc[o_3] = add_f32x2_noftz(acc[o_3], make_float2(_shfl_xor_sync_8, _shfl_xor_sync_9));
     }
     if (j == 0) {
         int red_o_0 = ge * 32 + gt;
-        smem_1[red_o_0] = acc[0];
+        smem_1[red_o_0] = acc[0].x;
     }
     if (j == 1) {
         int red_o_1 = ge * 32 + gt + 4;
-        smem_1[red_o_1] = acc[1];
+        smem_1[red_o_1] = acc[0].y;
     }
     if (j == 2) {
         int red_o_2 = ge * 32 + gt + 8;
-        smem_1[red_o_2] = acc[2];
+        smem_1[red_o_2] = acc[1].x;
     }
     if (j == 3) {
         int red_o_3 = ge * 32 + gt + 12;
-        smem_1[red_o_3] = acc[3];
+        smem_1[red_o_3] = acc[1].y;
     }
     if (j == 4) {
         int red_o_4 = ge * 32 + gt + 16;
-        smem_1[red_o_4] = acc[4];
+        smem_1[red_o_4] = acc[2].x;
     }
     if (j == 5) {
         int red_o_5 = ge * 32 + gt + 20;
-        smem_1[red_o_5] = acc[5];
+        smem_1[red_o_5] = acc[2].y;
     }
     if (j == 6) {
         int red_o_6 = ge * 32 + gt + 24;
-        smem_1[red_o_6] = acc[6];
+        smem_1[red_o_6] = acc[3].x;
     }
     if (j == 7) {
         int red_o_7 = ge * 32 + gt + 28;
-        smem_1[red_o_7] = acc[7];
+        smem_1[red_o_7] = acc[3].y;
     }
     if (j == 8) {
         int red_o_8 = (ge + 4) * 32 + gt;
-        smem_1[red_o_8] = acc[8];
+        smem_1[red_o_8] = acc[4].x;
     }
     if (j == 9) {
         int red_o_9 = (ge + 4) * 32 + gt + 4;
-        smem_1[red_o_9] = acc[9];
+        smem_1[red_o_9] = acc[4].y;
     }
     if (j == 10) {
         int red_o_10 = (ge + 4) * 32 + gt + 8;
-        smem_1[red_o_10] = acc[10];
+        smem_1[red_o_10] = acc[5].x;
     }
     if (j == 11) {
         int red_o_11 = (ge + 4) * 32 + gt + 12;
-        smem_1[red_o_11] = acc[11];
+        smem_1[red_o_11] = acc[5].y;
     }
     if (j == 12) {
         int red_o_12 = (ge + 4) * 32 + gt + 16;
-        smem_1[red_o_12] = acc[12];
+        smem_1[red_o_12] = acc[6].x;
     }
     if (j == 13) {
         int red_o_13 = (ge + 4) * 32 + gt + 20;
-        smem_1[red_o_13] = acc[13];
+        smem_1[red_o_13] = acc[6].y;
     }
     if (j == 14) {
         int red_o_14 = (ge + 4) * 32 + gt + 24;
-        smem_1[red_o_14] = acc[14];
+        smem_1[red_o_14] = acc[7].x;
     }
     if (j == 15) {
         int red_o_15 = (ge + 4) * 32 + gt + 28;
-        smem_1[red_o_15] = acc[15];
+        smem_1[red_o_15] = acc[7].y;
     }
     if (j == 0) {
         int red_o_16 = (ge + 8) * 32 + gt;
-        smem_1[red_o_16] = acc[16];
+        smem_1[red_o_16] = acc[8].x;
     }
     if (j == 1) {
         int red_o_17 = (ge + 8) * 32 + gt + 4;
-        smem_1[red_o_17] = acc[17];
+        smem_1[red_o_17] = acc[8].y;
     }
     if (j == 2) {
         int red_o_18 = (ge + 8) * 32 + gt + 8;
-        smem_1[red_o_18] = acc[18];
+        smem_1[red_o_18] = acc[9].x;
     }
     if (j == 3) {
         int red_o_19 = (ge + 8) * 32 + gt + 12;
-        smem_1[red_o_19] = acc[19];
+        smem_1[red_o_19] = acc[9].y;
     }
     if (j == 4) {
         int red_o_20 = (ge + 8) * 32 + gt + 16;
-        smem_1[red_o_20] = acc[20];
+        smem_1[red_o_20] = acc[10].x;
     }
     if (j == 5) {
         int red_o_21 = (ge + 8) * 32 + gt + 20;
-        smem_1[red_o_21] = acc[21];
+        smem_1[red_o_21] = acc[10].y;
     }
     if (j == 6) {
         int red_o_22 = (ge + 8) * 32 + gt + 24;
-        smem_1[red_o_22] = acc[22];
+        smem_1[red_o_22] = acc[11].x;
     }
     if (j == 7) {
         int red_o_23 = (ge + 8) * 32 + gt + 28;
-        smem_1[red_o_23] = acc[23];
+        smem_1[red_o_23] = acc[11].y;
     }
     if (j == 8) {
         int red_o_24 = (ge + 12) * 32 + gt;
-        smem_1[red_o_24] = acc[24];
+        smem_1[red_o_24] = acc[12].x;
     }
     if (j == 9) {
         int red_o_25 = (ge + 12) * 32 + gt + 4;
-        smem_1[red_o_25] = acc[25];
+        smem_1[red_o_25] = acc[12].y;
     }
     if (j == 10) {
         int red_o_26 = (ge + 12) * 32 + gt + 8;
-        smem_1[red_o_26] = acc[26];
+        smem_1[red_o_26] = acc[13].x;
     }
     if (j == 11) {
         int red_o_27 = (ge + 12) * 32 + gt + 12;
-        smem_1[red_o_27] = acc[27];
+        smem_1[red_o_27] = acc[13].y;
     }
     if (j == 12) {
         int red_o_28 = (ge + 12) * 32 + gt + 16;
-        smem_1[red_o_28] = acc[28];
+        smem_1[red_o_28] = acc[14].x;
     }
     if (j == 13) {
         int red_o_29 = (ge + 12) * 32 + gt + 20;
-        smem_1[red_o_29] = acc[29];
+        smem_1[red_o_29] = acc[14].y;
     }
     if (j == 14) {
         int red_o_30 = (ge + 12) * 32 + gt + 24;
-        smem_1[red_o_30] = acc[30];
+        smem_1[red_o_30] = acc[15].x;
     }
     if (j == 15) {
         int red_o_31 = (ge + 12) * 32 + gt + 28;
-        smem_1[red_o_31] = acc[31];
+        smem_1[red_o_31] = acc[15].y;
     }
     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
@@ -351,46 +359,46 @@ kernel_cake_dense_projection_gemm_c8633003630e8311a4b3(float* __restrict__ X, fl
         int el_0 = rank * 2 + idx_0 % 2;
         int tl_0 = idx_0 / 2;
         unsigned int red_byte_0 = (unsigned int)((el_0 * 32 + tl_0) * 4);
-        uint32_t _cluster_mapa_6;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_6) : "r"(smem_addr + red_byte_0), "r"(0));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[0])) : "r"(_cluster_mapa_6));
-        uint32_t _cluster_mapa_7;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_7) : "r"(smem_addr + red_byte_0), "r"(1));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[1])) : "r"(_cluster_mapa_7));
-        uint32_t _cluster_mapa_8;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_8) : "r"(smem_addr + red_byte_0), "r"(2));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[2])) : "r"(_cluster_mapa_8));
-        uint32_t _cluster_mapa_9;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_9) : "r"(smem_addr + red_byte_0), "r"(3));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[3])) : "r"(_cluster_mapa_9));
         uint32_t _cluster_mapa_10;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_10) : "r"(smem_addr + red_byte_0), "r"(4));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[4])) : "r"(_cluster_mapa_10));
+            : "=r"(_cluster_mapa_10) : "r"(smem_addr + red_byte_0), "r"(0));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[0])) : "r"(_cluster_mapa_10));
         uint32_t _cluster_mapa_11;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_11) : "r"(smem_addr + red_byte_0), "r"(5));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[5])) : "r"(_cluster_mapa_11));
+            : "=r"(_cluster_mapa_11) : "r"(smem_addr + red_byte_0), "r"(1));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[1])) : "r"(_cluster_mapa_11));
         uint32_t _cluster_mapa_12;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_12) : "r"(smem_addr + red_byte_0), "r"(6));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[6])) : "r"(_cluster_mapa_12));
+            : "=r"(_cluster_mapa_12) : "r"(smem_addr + red_byte_0), "r"(2));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[2])) : "r"(_cluster_mapa_12));
         uint32_t _cluster_mapa_13;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_13) : "r"(smem_addr + red_byte_0), "r"(7));
-        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[7])) : "r"(_cluster_mapa_13));
+            : "=r"(_cluster_mapa_13) : "r"(smem_addr + red_byte_0), "r"(3));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[3])) : "r"(_cluster_mapa_13));
+        uint32_t _cluster_mapa_14;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_14) : "r"(smem_addr + red_byte_0), "r"(4));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[4])) : "r"(_cluster_mapa_14));
+        uint32_t _cluster_mapa_15;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_15) : "r"(smem_addr + red_byte_0), "r"(5));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[5])) : "r"(_cluster_mapa_15));
+        uint32_t _cluster_mapa_16;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_16) : "r"(smem_addr + red_byte_0), "r"(6));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[6])) : "r"(_cluster_mapa_16));
+        uint32_t _cluster_mapa_17;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_17) : "r"(smem_addr + red_byte_0), "r"(7));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[7])) : "r"(_cluster_mapa_17));
         res[0] = peer[0];
         res[0] = res[0] + peer[1];
         res[0] = res[0] + peer[2];

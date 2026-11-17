@@ -771,7 +771,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                     if (part_4 == 0) {
                         unsigned long long row_base = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                         if (global_row < M) {
-                            int mis32 = (int)((unsigned long long)(out + row_base) & 31);
+                            int mis32 = (int)((unsigned long long)(out + row_base) & 31ull);
                             #pragma unroll
                             for (int n_chunk = 0; n_chunk < 8; n_chunk++) {
                                 int col = n_chunk * 16;
@@ -903,7 +903,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                         }
                     } else {
                         int slice_id = cta_rank * 8 + (warp - 2);
-                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0 = off;
                         int nvalid = N - (off_n_1 + col0);
                         if (nvalid >= 128) {
@@ -953,7 +953,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                     if (part_4 == 0) {
                         unsigned long long row_base_1 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row2 * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                         if (global_row2 < M) {
-                            int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31);
+                            int mis32_1 = (int)((unsigned long long)(out + row_base_1) & 31ull);
                             #pragma unroll
                             for (int n_chunk_1 = 0; n_chunk_1 < 8; n_chunk_1++) {
                                 int col_1 = n_chunk_1 * 16;
@@ -1085,7 +1085,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                         }
                     } else {
                         int slice_id_1 = cta_rank * 8 + (warp - 2);
-                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0_1 = off_1;
                         int nvalid_1 = N - (off_n_1 + col0);
                         if (nvalid_1 >= 128) {
@@ -1136,7 +1136,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                             #pragma unroll 1
                             for (int sidx = 0; sidx < nparts; sidx++) {
                                 int slice_id_2 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_2 = off_2;
                                 if (nvalid_2 >= 128) {
                                     #pragma unroll
@@ -1179,7 +1179,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                             }
                             unsigned long long row_base_2 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                             if (global_row < M) {
-                                int mis32_2 = (int)((unsigned long long)(out + row_base_2) & 31);
+                                int mis32_2 = (int)((unsigned long long)(out + row_base_2) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk_2 = 0; n_chunk_2 < 8; n_chunk_2++) {
                                     int col_2 = n_chunk_2 * 16;
@@ -1317,7 +1317,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                             #pragma unroll 1
                             for (int sidx_1 = 0; sidx_1 < nparts; sidx_1++) {
                                 int slice_id_3 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_3 = off_3;
                                 if (nvalid_0 >= 128) {
                                     #pragma unroll
@@ -1360,7 +1360,7 @@ kernel_cake_dense_projection_det_gemm_7d5117a6a82a7cb618a5(const __grid_constant
                             }
                             unsigned long long row_base_0 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row2 * (unsigned long long)ldo + (unsigned long long)(off_n_1 + col0);
                             if (global_row2 < M) {
-                                int mis32_3 = (int)((unsigned long long)(out + row_base_0) & 31);
+                                int mis32_3 = (int)((unsigned long long)(out + row_base_0) & 31ull);
                                 #pragma unroll
                                 for (int n_chunk_3 = 0; n_chunk_3 < 8; n_chunk_3++) {
                                     int col_3 = n_chunk_3 * 16;

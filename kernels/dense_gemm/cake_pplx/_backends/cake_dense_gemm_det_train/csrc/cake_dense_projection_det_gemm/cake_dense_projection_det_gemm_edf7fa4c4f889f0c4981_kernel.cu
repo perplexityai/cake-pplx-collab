@@ -147,7 +147,7 @@ __device__ __forceinline__ void tma_4d_gmem2smem(
 
 __device__ __forceinline__ uint32_t make_warp_uniform(uint32_t val) {
     uint32_t result;
-    asm volatile("shfl.sync.idx.b32 %0, %1, 0, 0x1f, 0xffffffff;"
+    asm volatile("shfl.sync.idx.b32 %0, %1, 0, 0x1f, 0xFFFFFFFF;"
         : "=r"(result) : "r"(val));
     return result;
 }
@@ -180,19 +180,20 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
 
     const int cta_rank = 0;
 
-    // Kernel setup ops
+    // Prologue
     __nv_bfloat16* smem_w = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int smem_w_addr = smem + 1024;
     __nv_bfloat16* smem_a = reinterpret_cast<__nv_bfloat16*>(smem_raw + 132096);
     const int smem_a_addr = smem + 132096;
     unsigned int* staging = reinterpret_cast<unsigned int*>(smem_raw + 197632);
     const int staging_addr = smem + 197632;
+
+    // Kernel setup ops
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     if (warp == 0) { asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)((&W))) : "memory"); }
     if (warp == 1) { asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)((&A))) : "memory"); }
 
-    // Mbarrier init (3 pipeline groups, 0 ordered-sequence groups, 17 barriers)
-    // Mbarriers at smem_raw[0..136)
+    // Mbarrier init (17 barriers at smem_raw[0..136))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -238,10 +239,8 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
         asm volatile("barrier.sync.aligned %0, %1;" :: "r"(1), "r"(160) : "memory");
         asm volatile("tcgen05.fence::after_thread_sync;");
     }
-    const int taddr = (warp == 2 || warp == 4 || warp == 5 || warp == 6 || warp == 7) ? tmem_addr_storage[0] : 0;
-
-    // Kernel post-init ops
-    const int tmem_accum = taddr;
+    const unsigned int taddr = (warp == 2 || warp == 4 || warp == 5 || warp == 6 || warp == 7) ? tmem_addr_storage[0] : 0;
+    const unsigned int tmem_accum = taddr;
 
     // ---- Role: dma_w ----
     if (warp == 0) {
@@ -758,7 +757,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row * (long long)ldo + (long long)n_col) * 2)))[0] = reinterpret_cast<int4*>(words)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row * (long long)ldo + (long long)n_col) * 2ll))[0] = reinterpret_cast<int4*>(words)[0];
             }
             int c_0 = epi_tid + 128;
             int t_row_0 = c_0 / 16;
@@ -769,7 +768,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_0 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_0 * (long long)ldo + (long long)n_col_0) * 2)))[0] = reinterpret_cast<int4*>(words_1)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_0 * (long long)ldo + (long long)n_col_0) * 2ll))[0] = reinterpret_cast<int4*>(words_1)[0];
             }
             int c_1 = epi_tid + 256;
             int t_row_1 = c_1 / 16;
@@ -780,7 +779,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_2[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_2[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_2[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_2[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_1 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_1 * (long long)ldo + (long long)n_col_1) * 2)))[0] = reinterpret_cast<int4*>(words_2)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_1 * (long long)ldo + (long long)n_col_1) * 2ll))[0] = reinterpret_cast<int4*>(words_2)[0];
             }
             int c_2 = epi_tid + 384;
             int t_row_2 = c_2 / 16;
@@ -791,7 +790,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_2 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_2 * (long long)ldo + (long long)n_col_2) * 2)))[0] = reinterpret_cast<int4*>(words_3)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_2 * (long long)ldo + (long long)n_col_2) * 2ll))[0] = reinterpret_cast<int4*>(words_3)[0];
             }
             int c_3 = epi_tid + 512;
             int t_row_3 = c_3 / 16;
@@ -802,7 +801,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_4[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_4[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_4[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_4[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_3 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_3 * (long long)ldo + (long long)n_col_3) * 2)))[0] = reinterpret_cast<int4*>(words_4)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_3 * (long long)ldo + (long long)n_col_3) * 2ll))[0] = reinterpret_cast<int4*>(words_4)[0];
             }
             int c_4 = epi_tid + 640;
             int t_row_4 = c_4 / 16;
@@ -813,7 +812,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_5[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_5[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_5[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_5[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_4 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_4 * (long long)ldo + (long long)n_col_4) * 2)))[0] = reinterpret_cast<int4*>(words_5)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_4 * (long long)ldo + (long long)n_col_4) * 2ll))[0] = reinterpret_cast<int4*>(words_5)[0];
             }
             int c_5 = epi_tid + 768;
             int t_row_5 = c_5 / 16;
@@ -824,7 +823,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_6[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_6[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_6[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_6[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_5 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_5 * (long long)ldo + (long long)n_col_5) * 2)))[0] = reinterpret_cast<int4*>(words_6)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_5 * (long long)ldo + (long long)n_col_5) * 2ll))[0] = reinterpret_cast<int4*>(words_6)[0];
             }
             int c_6 = epi_tid + 896;
             int t_row_6 = c_6 / 16;
@@ -835,7 +834,7 @@ kernel_cake_dense_projection_det_gemm_edf7fa4c4f889f0c4981(const __grid_constant
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words_7[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_7[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_7[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_7[(0) + 3]))
                     : "r"(staging_addr + (unsigned int)(c_6 * 16)));
-                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + (((long long)b_idx_e * (long long)out_l + (long long)m_row_6 * (long long)ldo + (long long)n_col_6) * 2)))[0] = reinterpret_cast<int4*>(words_7)[0];
+                reinterpret_cast<int4*>(reinterpret_cast<unsigned int*>(out + ((long long)b_idx_e * (long long)out_l + (long long)m_row_6 * (long long)ldo + (long long)n_col_6) * 2ll))[0] = reinterpret_cast<int4*>(words_7)[0];
             }
         }
     }

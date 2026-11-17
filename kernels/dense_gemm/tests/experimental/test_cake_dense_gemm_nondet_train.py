@@ -3808,10 +3808,10 @@ ROUTER_BY_SM_PARTS = {
     ("sm_107a", 212),
 }
 # the SIMT windows of 148-SM sm_100a / sm_103a parts (the same on both): the plain 64 x 64 tile in two slices at hidden
-# 5120 and 6144, at hidden 4096 the compensated 64 x 64 tile in the Dot2 form at one token and the plain 128 x 64 tile
-# from 2 to 224 tokens
+# 5120 and 6144, at hidden 4096 the plain 64 x 64 tile in two slices at one token and the plain 128 x 64 tile from 2 to
+# 224 tokens
 _WGRAD_WINDOWS_148 = {
-    4096: ((1, 1, "simt_n64m64s2dot2"), (2, 224, "simt_n128m64s2")),
+    4096: ((1, 1, "simt_n64m64s2"), (2, 224, "simt_n128m64s2")),
     5120: ((1, 256, "simt_n64m64s2"),),
     6144: ((1, 256, "simt_n64m64s2"),),
 }
@@ -4249,10 +4249,10 @@ def _plan_router_row(layout, arch, sm_count, hidden, T, experts=256):
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a"])
 def test_router_148_sm_simt_windows_plan_their_registered_programs(arch):
     """On a 148-SM part each SIMT window of its table (:data:`ROUTER_WGRAD_WINDOWS_BY_SM`, :data:`ROUTER_DGRAD_WINDOWS`)
-    plans, at its first, middle and last token count, the program of its tile (plain, or compensated with its form),
-    which this checkout registers for ``arch``.  The token counts between two windows of a row and one token past a
-    row's last window take no SIMT program (the deterministic program; the ``"det_s<n>"`` windows of the weight
-    gradient: ``test_router_det_split_windows``)."""
+    plans, at its first, middle and last token count, the program of its tile (a plain program in every window of
+    these tables), which this checkout registers for ``arch``.  The token counts between two windows of a row and one
+    token past a row's last window take no SIMT program (the deterministic program; the ``"det_s<n>"`` windows of the
+    weight gradient: ``test_router_det_split_windows``)."""
     windows_seen = planned = 0
     for hidden in (4096, 5120, 6144):
         simt_wgrad = tuple(
@@ -4438,17 +4438,15 @@ def test_router_per_sm_count_tables_decide_only_their_own_sm_count(monkeypatch):
 def test_router_simt_specs_name_their_tiles_and_templates():
     """A SIMT window spec ``"simt_n<tile_n>m<tile_m>s<slices>"`` names its tile and the template of its program on
     a weight-gradient row (``router_fp32_gemm_simt_n<tile_n>m<tile_m>s<slices>``) and on an input-gradient row
-    (``router_fp32_dgrad_simt_m<tile_m>n<tile_n>s<slices>``); a compensated one ``"simt_n<tile_n>m<tile_m>s<slices>
-    <form>"`` (``g<group>`` or ``dot2``) names the tile with its form and the compensated program
-    (``router_fp32_gemm_simt_kahan_...g<group>``, without the suffix for ``g1``;
-    ``router_fp32_gemm_simt_kahan_dot2_...``; ``router_fp32_dgrad_simt_kahan_...g<group>``); every other spec is none,
-    the Dot2 form is the weight gradient's only, and the forward has no SIMT program."""
+    (``router_fp32_dgrad_simt_m<tile_m>n<tile_n>s<slices>``); one with a form ``"simt_n<tile_n>m<tile_m>s<slices>
+    g<group>"`` names the tile with its form and the ``kahan`` program (``router_fp32_gemm_simt_kahan_...g<group>``,
+    without the suffix for ``g1``; ``router_fp32_dgrad_simt_kahan_...g<group>``); every other spec is none (the specs
+    and the form of the retired Dot2 program among them), and the forward has no SIMT program."""
     assert cake_backend.router_simt_tile("simt_n64m64s4") == (64, 64, 4)
     assert cake_backend.router_simt_tile("simt_n128m64s2") == (128, 64, 2)
     assert cake_backend.router_simt_tile("simt_n64m64s2g4") == (64, 64, 2, "g4")
     assert cake_backend.router_simt_tile("simt_n128m64s2g4") == (128, 64, 2, "g4")
     assert cake_backend.router_simt_tile("simt_n64m64s2g1") == (64, 64, 2, "g1")
-    assert cake_backend.router_simt_tile("simt_n64m64s2dot2") == (64, 64, 2, "dot2")
     assert cake_backend.router_simt_tile("simt_n64m32s4g4") == (64, 32, 4, "g4")
     for spec in (
         None,
@@ -4464,12 +4462,13 @@ def test_router_simt_specs_name_their_tiles_and_templates():
         "simt_n64m64g4",
         "simt_n64m64s2dot",
         "simt_n64m64s2dot3",
+        # the retired Dot2 program's form: no spec with it parses
         "simt_n64m64s2g4dot2",
+        "simt_n64m64s2dot2",
     ):
         assert cake_backend.router_simt_tile(spec) is None, spec
-    # the templates of the compensated forms
+    # the templates of the g<group> forms (the kahan programs)
     for spec, layout, template in (
-        ("simt_n64m64s2dot2", "nn_t", "router_fp32_gemm_simt_kahan_dot2_n64m64s2"),
         ("simt_n64m64s2g1", "nn_t", "router_fp32_gemm_simt_kahan_n64m64s2"),
         ("simt_n64m64s2g4", "nn_t", "router_fp32_gemm_simt_kahan_n64m64s2g4"),
         ("simt_n128m64s2g4", "nn_t", "router_fp32_gemm_simt_kahan_n128m64s2g4"),
@@ -4481,13 +4480,12 @@ def test_router_simt_specs_name_their_tiles_and_templates():
         assert template.startswith(prefix), spec
     with pytest.raises(ValueError, match="not a SIMT tile"):
         cake_backend.router_simt_template((64, 64, 2, "g4", 1))
-    for form in (4, "g0", "g", "dot", "x4"):
+    # "dot2": the form of the retired Dot2 program
+    for form in (4, "g0", "g", "dot", "dot2", "x4"):
         with pytest.raises(ValueError, match="not a SIMT tile"):
             cake_backend.router_simt_template((64, 64, 2, form))
     with pytest.raises(ValueError, match="no SIMT program"):
         cake_backend.router_simt_template((64, 64, 2, "g4"), "kk")
-    with pytest.raises(ValueError, match="the Dot2 form is the weight gradient's"):
-        cake_backend.router_simt_template((64, 32, 4, "dot2"), "kn")
     assert (
         cake_backend.router_simt_template((128, 64, 2))
         == "router_fp32_gemm_simt_n128m64s2"
@@ -11151,12 +11149,10 @@ def test_gpu_router_tmem_head_tail_program_in_its_windows(hidden, T):
     assert torch.equal(stores[ts], stores[c3]) and torch.equal(stores[ts], det_out)
 
 
-#: The SIMT programs' tiles ``(tile_n, tile_m, slices)``, compensated ``(tile_n, tile_m, slices, form)``, a test
-#: forces (each runs where this checkout registers it).
+#: The SIMT programs' tiles ``(tile_n, tile_m, slices)`` a test forces (each runs where this checkout registers it).
 SIMT_TILES = (
     (64, 64, 2),
     (128, 64, 2),
-    (64, 64, 2, "dot2"),
 )
 
 
@@ -11561,8 +11557,8 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges():
 
 def _device_simt_windows(arch, sm_count, layout) -> list:
     """The shipped SIMT windows of the 148-SM tables of this test (:data:`ROUTER_WGRAD_WINDOWS_BY_SM`,
-    :data:`ROUTER_DGRAD_WINDOWS`; plain and compensated) that hold on a part of ``arch`` with ``sm_count`` SMs,
-    ``[(hidden, first, last, spec), ...]`` for the layout class ``layout`` (256 experts)."""
+    :data:`ROUTER_DGRAD_WINDOWS`; plain, or ``kahan`` with a form) that hold on a part of ``arch`` with ``sm_count``
+    SMs, ``[(hidden, first, last, spec), ...]`` for the layout class ``layout`` (256 experts)."""
     if sm_count != 148:
         return []
     rows = []
@@ -11699,7 +11695,8 @@ def test_gpu_router_shipped_simt_windows_keep_the_fp64_rule(monkeypatch, op):
     bound of a sum of ``K`` FP32 products in any order (``gamma_K`` times the sum of the products' magnitudes).  The
     ratio to the error of the plan the row takes without its SIMT windows (the deterministic program) is printed, not
     checked.  One token past a window takes another plan.  On every other part no token count of these windows runs
-    a compensated SIMT program (a 152-SM or 212-SM part may run the plain SIMT program of its own window there)."""
+    a ``kahan`` SIMT program, one of a spec with a form (a 152-SM or 212-SM part may run the plain SIMT program of its
+    own window there)."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     layout = "nn_t" if op == "wgrad" else "kn"

@@ -92,7 +92,6 @@ kernel_cake_dense_projection_gemm_2f07a521e0f7ebd21021(float* __restrict__ X, fl
     int ge = tid / 16 % 2;
     int gt = tid / 16 / 2;
     float acc[64];
-    float comp[1];
     #pragma unroll
     for (int o = 0; o < 64; o++) {
         acc[o] = 0.0f;

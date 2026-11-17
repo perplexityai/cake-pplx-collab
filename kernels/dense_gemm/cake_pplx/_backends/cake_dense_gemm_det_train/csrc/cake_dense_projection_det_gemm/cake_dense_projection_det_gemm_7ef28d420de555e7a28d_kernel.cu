@@ -185,7 +185,7 @@ kernel_cake_dense_projection_det_gemm_7ef28d420de555e7a28d(const __grid_constant
     int cta_rank;
     asm volatile("mov.b32 %0, %%cluster_ctarank;" : "=r"(cta_rank));
 
-    // Kernel setup ops
+    // Prologue
     __nv_bfloat16* smem_a = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int smem_a_addr = smem + 1024;
     __nv_bfloat16* smem_a_h = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
@@ -196,10 +196,11 @@ kernel_cake_dense_projection_det_gemm_7ef28d420de555e7a28d(const __grid_constant
     const int smem_out_addr = smem + 164864;
     unsigned int* work_response = reinterpret_cast<unsigned int*>(smem_raw + 230400);
     const int work_response_addr = smem + 230400;
+
+    // Kernel setup ops
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
-    // Mbarrier init (7 pipeline groups, 0 ordered-sequence groups, 23 barriers)
-    // Mbarriers at smem_raw[0..184)
+    // Mbarrier init (23 barriers at smem_raw[0..184))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -258,11 +259,9 @@ kernel_cake_dense_projection_det_gemm_7ef28d420de555e7a28d(const __grid_constant
         asm volatile("barrier.sync.aligned %0, %1;" :: "r"(1), "r"(288) : "memory");
         asm volatile("tcgen05.fence::after_thread_sync;");
     }
-    const int taddr = (warp >= 1 && warp <= 9) ? tmem_addr_storage[0] : 0;
+    const unsigned int taddr = (warp >= 1 && warp <= 9) ? tmem_addr_storage[0] : 0;
     asm volatile("griddepcontrol.wait;" ::: "memory");
-
-    // Kernel post-init ops
-    const int tmem_accum = taddr;
+    const unsigned int tmem_accum = taddr;
 
     // ---- Role: load ----
     if (warp == 0) {
@@ -799,7 +798,7 @@ kernel_cake_dense_projection_det_gemm_7ef28d420de555e7a28d(const __grid_constant
                             }
                         } else {
                             int slice_id = cta_rank * 8 + (warp - 2);
-                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 4096 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 4096ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                             unsigned long long off_0 = off;
                             int nvalid = N - (off_n_1 + col0);
                             if (nvalid >= 128) {

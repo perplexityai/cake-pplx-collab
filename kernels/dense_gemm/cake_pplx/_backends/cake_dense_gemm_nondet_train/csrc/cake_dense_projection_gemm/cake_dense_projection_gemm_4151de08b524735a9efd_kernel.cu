@@ -1712,6 +1712,7 @@ kernel_cake_dense_projection_gemm_4151de08b524735a9efd(const __grid_constant__ C
                         uint32_t _prmt_35;
                         asm("prmt.b32 %0, %1, %2, 0x7632;" : "=r"(_prmt_35) : "r"(__as_u32(s0_14)), "r"(__as_u32(s1_14)));
                         pl[7] = _prmt_35;
+                        __syncwarp();
                         if (elect_sync()) {
                             mbarrier_arrive(raw_empty_addr + (r_stage) * 8);
                         }
