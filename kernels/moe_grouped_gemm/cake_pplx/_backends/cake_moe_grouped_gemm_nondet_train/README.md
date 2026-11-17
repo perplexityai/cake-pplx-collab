@@ -91,19 +91,19 @@ the 512-wide k tile does not split its tail. Every whole tile is reduced by
 one CTA pair over the group's rows in a fixed order, and a split tail tile
 sums its units in slot order. The bits of the 512-wide k tile's `dW` depend
 on the SM count and on `tail_splits`. They can differ from the deterministic
-package's bits, whose tail plan and group order differ, within that package's
-error budgets. bf16 operands, fp32 accumulation, one round-to-nearest
-rounding to bf16 (or the fp32 store), the layouts, the offsets contract (no
-host synchronisation, no caller padding), the exact zeros of empty groups in
-overwrite mode and the deterministic package's error budgets are unchanged.
+package's bits, whose tail plan and group order differ. bf16 operands, fp32
+accumulation, one round-to-nearest rounding to bf16 (or the fp32 store), the
+layouts, the offsets contract (no host synchronisation, no caller padding) and
+the exact zeros of empty groups in overwrite mode are unchanged; the tests
+judge every output against a naive BF16 implementation (see
+[Accuracy](#accuracy)).
 The descriptor-ring and short-group fixes for groups shorter than one k-step
 live in the shared kernel body and host plan. The kernels use no cooperative launch, and the autograd
 entry saves only the tensors that backward reads; the latency under resident
 kernels and the shared-memory carveout wait are not
 addressed by this package. The slot sum of a split tail tile uses fp32 adds
 without flush to zero, as the deterministic tail reduce does. Whether the
-tensor-core fp32 accumulation keeps subnormal values is not yet measured
-(see [Accuracy](#accuracy)).
+tensor-core fp32 accumulation keeps subnormal values is not measured.
 
 This is a local operator: on a context-parallel rank it runs on that rank's
 local rows; it adds no collective and no KCP form, and a parameter gradient's
@@ -438,86 +438,30 @@ name loads.
 ## Accuracy
 
 Every output repeats bit for bit for the same inputs, shapes, device SM count
-and configuration. The reference package is the deterministic package
-(`cake_pplx._backends.cake_moe_grouped_gemm_det_train`).
-rel-L2 is the relative L2 error `||out - ref|| / ||ref||`; worst / max |ref|
-is the largest element error divided by the largest reference magnitude.
+and configuration.
 
-### Tolerances
+Accuracy has no tolerance. The tests judge every floating output against a
+naive BF16 implementation (`tests/cake/test_helpers/cake_naive.py`, the family
+adapter `tests/cake/test_helpers/cake_moe_judge.py`): torch's matmul of the
+same BF16 operands per group, rounded once to BF16 (widened exactly for an fp32
+output). The oracle is the float64 product of the BF16 operands of each group
+(an empty group gives 0); an accumulated `out` has the oracle `out0 + n dW`,
+where `out0` is the start value and `n` the number of accumulating launches,
+and the naive tier adds its product to `out0` as stored and rounds once. Over
+32 independent random inputs per case, the output's error against the oracle
+in the L2 and in the max norm (absolute, over the finite oracle elements) must
+have a median and a largest value at most 1.005 times the naive tier's, and
+the error must be 0 on every input where the tier's is 0. Where an op's whole
+oracle exceeds 2^37 multiply-adds (the MoE projection rows of the benchmark),
+the judge takes sampled rows with all their columns: the first and last row of
+every group (of `N` for `dW`) and one row in every 64; the whole output still
+has to be finite where the oracle is. The pytest summary prints one `TIER`
+line per judged output with both errors.
 
-The tests and the accuracy measurement hold the outputs to these tolerances:
-
-- G1, error against FP64: for each output, rel-L2 against an FP64 reference
-  is at most 1.1 times the reference package's median error over 5 repeats,
-  and worst / max |ref| is at most 1.5 times the reference
-  package's median. The worst element of a split weight-gradient tile
-  depends on which tiles take the split tail; the reference package's own
-  worst / max |ref| varies by about 1.2x from seed to seed. The table below
-  reports both.
-- G2, bf16 outputs (`Y`, `dX`, bf16 `dW`): every element is within
-  `1e-2 + 1e-2 |ref|` of the fp64 reference
-  (`test_cake_moe_grouped_gemm_nondet_train.py`,
-  `test_cake_moe_grouped_gemm_nondet_train_reproducibility.py`).
-- G3, fp32 `dW`: rel-L2 is at most `1e-4` against the fp64 reference (the
-  same two files). The one-group E1 rows of 112,576 and 136,064 rows are the
-  exception: there the in-tree deterministic package's own fp32 `dW` has
-  rel-L2 `1.17e-4` / `1.41e-4` on GB300, so rel-L2 and worst / max |ref| are
-  each at most 1.1 times that package's error at the same inputs
-  (`test_e1_fp32_wgrad_error_within_det` in the reproducibility test).
-- G4, repeats: the backend suite checks the first launch against the fp64
-  reference and requires every repeat (the output refilled, the split-tail
-  slots filled with garbage bytes) to give its bits. The reproducibility test
-  also requires every repeat to be bitwise the first, and the weight gradient
-  to stay within the deterministic budget of the deterministic package's
-  output.
-- G5, accumulation (`test_cake_moe_grouped_gemm_nondet_train_acc.py`): every
-  element of a bf16 `out` is within `1e-2 + 1e-2 (|out0| + n |dW|)` of the
-  fp64 reference, where `out0` is the start value and `n` the number of
-  accumulating launches. An fp32 `out` has rel-L2 at most `1e-4`.
-- G6, no lost or doubled tile update (the same file): in every 128 x 128
-  block of an fp32 `out`, `|(out - out0) - dW|` is at most
-  `2^-6 max |dW| + 1e-6`.
-- G7, exact results (the backend suite and the accumulate test): empty groups
-  give zeros in overwrite mode and stay untouched on the fused route; padding
-  is never written; fused tiles are bitwise `out0.add_(dW32)`; a subnormal
-  value of `out0` is kept.
-
-### Error against FP64 per output
-
-Each row gives the largest error of this package's output against an FP64
-reference over 40 shapes: the `gate_up` and `down` projections with 1, 4, 8,
-16 and 32 experts and 112,576, 131,072 and 136,064 rows, balanced loads, and
-skewed and one-empty loads at 4 experts. Next to it is the reference
-package's error at the same inputs (median of 5 repeats). For the accumulated
-outputs the reference adds its own `dW` with `out.add_`. The maximum is taken
-over four GPUs: B200 (148 SMs), GB200 and GB300 (152 SMs) and VR200 NVL72
-(212 SMs), with CUDA 13.4.
-
-| id | output | run to run | rel-L2 | reference rel-L2 | worst / max \|ref\| | reference worst / max \|ref\| |
-| --- | --- | --- | --- | --- | --- | --- |
-| O1 | `Y` bf16 (forward) | repeats bit for bit | 1.66e-03 | 1.66e-03 | 3.58e-03 | 3.58e-03 |
-| O2 | `dX` bf16 (data gradient) | repeats bit for bit | 1.66e-03 | 1.66e-03 | 3.24e-03 | 3.24e-03 |
-| O3 | `dW` bf16 (weight gradient) | repeats bit for bit | 1.67e-03 | 1.67e-03 | 3.64e-03 | 3.64e-03 |
-| O4 | `dW` fp32 (weight gradient) | repeats bit for bit | 1.58e-04 | 1.58e-04 | 1.81e-04 | 1.81e-04 |
-| O5 | fp32 `out += dW`, fused, 1 / 4 launches | repeats bit for bit | 1.58e-04 / 1.58e-04 | 1.58e-04 / 1.58e-04 | 1.81e-04 / 1.81e-04 | 1.81e-04 / 1.81e-04 |
-| O6 | bf16 `out += dW`, composed, 1 / 4 launches | repeats bit for bit | 1.92e-03 / 1.74e-03 | 1.92e-03 / 1.74e-03 | 3.68e-03 / 3.63e-03 | 3.68e-03 / 3.63e-03 |
-| O7 | autograd `y` / `x.grad` / `w.grad` | repeats bit for bit | 1.66e-03 / 1.66e-03 / 1.67e-03 | 1.66e-03 / 1.66e-03 / 1.67e-03 | 3.58e-03 / 3.24e-03 / 3.64e-03 | 3.58e-03 / 3.24e-03 / 3.64e-03 |
-| O8 | `w.main_grad` fp32 (`fuse_wgrad_accumulation=True`) | repeats bit for bit | 1.58e-04 | 1.58e-04 (O5's reference) | 1.81e-04 | 1.81e-04 (O5's reference) |
-| O9 | gradients of a checkpointed step, early stop on / off | repeats bit for bit | 1.67e-03 / 1.67e-03 | 1.67e-03 / 1.67e-03 | 3.64e-03 / 3.64e-03 | 3.64e-03 / 3.64e-03 |
-
-Over every case of the accuracy suite (the 40 shapes, short and edge shapes
-and adversarial inputs: 240 cases, 384 on B200), the largest ratio to the
-reference is 1.0178 (B200), 1.0572 (GB200, GB300) and 1.0502 (VR200) for
-rel-L2, and 1.0499, 1.0085, 1.0085 and 1.0110 for worst / max |ref|. With
-four more input seeds of 44 to 59 cases per GPU, worst / max |ref| reaches
-1.2564 (GB200 and GB300, `down`, 32 experts, 136,064 rows) at a rel-L2 ratio
-of 1.0032. Every row passes G1.
-
-Subnormal values: the adversarial cases scale the inputs so that the products
-straddle the smallest normal fp32 (2^-126). Every output passes G1 on every
-GPU (1,152 output rows per GPU, 1,728 on B200), and 992 to 1,328 of them are
-bitwise equal to the reference package's output. The slot sum of a split tail
-tile and the fused add into `out` use fp32 adds without flush to zero.
+Exact checks beside the judge: every repeat (the output refilled, the
+split-tail slots filled with garbage bytes) gives the first launch's bits;
+empty groups give zeros in overwrite mode and stay untouched on the fused
+route; padding is never written; fused tiles are bitwise `out0.add_(dW32)`.
 
 ## Tests and benchmark
 
@@ -527,9 +471,8 @@ python benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py --help
 ```
 
 `test_cake_moe_grouped_gemm_nondet_train.py` (the backend suite, through
-`tests.cake.test_helpers.cake_package("cake_moe_grouped_gemm_nondet_train")`) checks every
-op, output dtype and stage form against a per-group fp64 reference (worst case
-over repeats), empty groups, the short-group race shape relaunched and on concurrent
+`tests.cake.test_helpers.cake_package("cake_moe_grouped_gemm_nondet_train")`) judges every
+op, output dtype and stage form against the naive BF16 tier (above), empty groups, the short-group race shape relaunched and on concurrent
 streams, CUDA graph replay with changed offsets, checkpointing, gradient
 accumulation, changed shapes with reused and garbage-filled scratch, and the
 tail tickets at rest. `test_cake_moe_grouped_gemm_nondet_train_api.py` covers the
@@ -542,10 +485,12 @@ order-varying launch (on the CPU).
 `test_cake_moe_grouped_gemm_nondet_train_names.py` (CPU) checks the names: every
 public name carries `nondet`, no callable takes a `deterministic` argument, and
 every removed path and name fails at import.
-`test_cake_moe_grouped_gemm_nondet_train_reproducibility.py` checks that `fwd` /
-`dgrad` give the deterministic package's bits (also through the module). It
-also checks that every weight gradient repeats bit for bit across launches and
-stays within the deterministic budget of the deterministic package's output.
+`test_cake_moe_grouped_gemm_nondet_train_reproducibility.py` checks, over the
+benchmark rows, the queue walk's rows and the edge cases, that the module gives
+this package's bits, that every output repeats bit for bit across launches
+(outputs prefilled with zero and `0x5A` bytes, split-tail slots poisoned), and
+judges every output against the naive BF16 tier. On the CPU it checks that the
+routes and host plan constants mirror the deterministic package's.
 `test_cake_moe_grouped_gemm_nondet_train_determinism.py` checks that every
 output repeats bit for bit: repeated launches into outputs prefilled with
 `0x00` and `0x5A` bytes, digests from fresh processes, fused and composed
@@ -554,8 +499,8 @@ activation checkpointing, CUDA graph replay, and two CUDA streams.
 `test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy under another
 top-level name. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
 `_acc` stages against the shipped set and their twins, the plans, the routes
-and the checks on the CPU; the fused and composed results against the fp64
-reference and the bitwise oracles (also on every benchmark row as planned),
+and the checks on the CPU; the fused and composed results against the naive
+BF16 tier and the bitwise oracles (also on every benchmark row as planned),
 empty groups, padding, short groups, streams, graph replay, allocations and
 the version counter on a GPU; and the autograd flag. The benchmark's `acc`
 (checkpointed micro-step), `bwd_acc` (its backward) and `wgrad_acc` (one

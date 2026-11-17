@@ -56,25 +56,27 @@ fresh process. No output depends on which cluster computed which tile.
 | `out += dW`, fused (`accumulate=True`, fp32 `out`) | fp32 | the fp32 `dW` above, then one fp32 add per element of `out` | yes; the same bits as the composed route |
 | `out += dW`, composed (`accumulate=True`) | bf16, fp32 | the `dW` above in `out`'s dtype, then `out.add_` | yes |
 
-Error against an fp64 reference, measured by
+Accuracy has no tolerance. The tests judge every floating output against a naive
+BF16 implementation (`tests/cake/test_helpers/cake_naive.py`, the family adapter
+`tests/cake/test_helpers/cake_moe_judge.py`): torch's matmul of the same BF16
+operands per group, rounded once to BF16 (widened exactly for an fp32 output).
+The oracle is the float64 product of the BF16 operands of each group (an empty
+group gives 0); an accumulated `out` has the oracle `out0 + n dW`. Over 32
+independent random inputs per case, the output's error against the oracle in
+the L2 and in the max norm (absolute, over the finite oracle elements) must
+have a median and a largest value at most 1.005 times the naive tier's, and the
+error must be 0 on every input where the tier's is 0. Where an op's whole
+oracle exceeds 2^37 multiply-adds (the MoE projection rows), the judge takes
+sampled rows with all their columns: the first and last row of every group (of
+`N` for `dW`) and one row in every 64; the whole output still has to be finite
+where the oracle is. The pytest summary prints one `TIER` line per judged
+output with both errors.
 `test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output`
-over a sample of every group (the first and last 16 rows by 512 columns of `Y`
-and `dX`, a 64 x 256 block of each `dW[e]`) of the E4 (112576 balanced and
+judges a sample of every group (the first and last 16 rows by 512 columns of
+`Y` and `dX`, a 64 x 256 block of each `dW[e]`) of the E4 (112576 balanced and
 136064 skewed rows), E8, E32 and E32-with-hot-groups rows (131072 rows), on both
-projections (gate/up `N` 4096, `K` 6144; down `N` 6144, `K` 2048). The budgets
-are the package's test budgets: bf16 every element within `1e-2 + 1e-2 |ref|`,
-fp32 relative L2 at most `1e-4`. The table gives the range over those rows.
-The R200 column comes from a 212-SM board, except the fused row (216 SMs).
+projections (gate/up `N` 4096, `K` 6144; down `N` 6144, `K` 2048).
 On each board the fused route gives the composed route's bits.
-
-| output | budget | GB300 (`sm_103a`): relative L2; max abs | B200 (`sm_100a`): relative L2; max abs | R200 (`sm_107a`): relative L2; max abs |
-| --- | --- | --- | --- | --- |
-| `Y` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.651e-3 to 1.664e-3; 2.441e-4 | 1.649e-3 to 1.665e-3; 2.443e-4 | 1.649e-3 to 1.665e-3; 2.439e-4 |
-| `dX` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.650e-3 to 1.666e-3; 2.543e-2 | 1.643e-3 to 1.659e-3; 2.830e-2 | 1.645e-3 to 1.668e-3; 1.566e-2 |
-| `dW` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.639e-3 to 1.665e-3; 6.233e-2 | 1.653e-3 to 1.666e-3; 6.330e-2 | 1.649e-3 to 1.670e-3; 6.322e-2 |
-| `dW` fp32 | rel L2 `1e-4` | 4.406e-6 to 7.548e-5; 1.898e-3 | 4.396e-6 to 7.553e-5; 1.829e-3 | 4.404e-6 to 7.568e-5; 1.801e-3 |
-| `out += dW` fp32, composed | rel L2 `1e-4` | 2.782e-6 to 6.716e-5; 2.191e-3 | 2.783e-6 to 6.720e-5; 2.254e-3 | 2.790e-6 to 6.712e-5; 1.883e-3 |
-| `out += dW` fp32, fused | rel L2 `1e-4` | 2.782e-6 to 6.716e-5; 2.191e-3 | 2.783e-6 to 6.720e-5; 2.254e-3 | 2.782e-6 to 6.707e-5; 2.135e-3 (216 SMs) |
 
 ## Mode rules
 
@@ -220,8 +222,9 @@ Numerical contract:
   in a fixed order (the split tail by the ordered tail reduce) and added once.
   `torch.use_deterministic_algorithms(True)` changes nothing (no alert, no
   warning).
-- Accuracy: the deterministic `dW`'s error budget plus one rounding in
-  `out`'s dtype.
+- Accuracy: the deterministic `dW` plus one rounding in `out`'s dtype; the
+  tests judge `out` against `out0 + n dW` in float64 beside the naive BF16
+  tier (above).
 - An empty group adds exact zeros, with the semantics of `out.add_`: its values
   are kept, `-0.0` becomes `+0.0` and a signaling NaN is quieted. `sum_m == 0`
   launches nothing and leaves `out` unchanged.
@@ -588,8 +591,8 @@ python benchmarks/bench_cake_moe_grouped_gemm_det_train.py --help
 ```
 
 `test_cake_moe_grouped_gemm_det_train.py` (the backend suite, which imports the package
-through `tests.cake.test_helpers.cake_package`) compares against a per-group fp64
-reference (including an empty group, a one-row group, padded outputs,
+through `tests.cake.test_helpers.cake_package`) judges every output against the
+naive BF16 tier (above; including an empty group, a one-row group, padded outputs,
 determinism and the fp32 output) and skips when no supported device or no
 registered program is present. `test_cake_moe_grouped_gemm_det_train_api.py` covers the
 entry points of `cake_pplx.cake_moe_grouped_gemm_det_train` (stable APIs with the
@@ -618,12 +621,13 @@ Megatron contract with CPU stand-ins for the preparations; on a GPU every
 weight-gradient form with and without a split tail, fp32 and bf16, bitwise
 against `out0.add_(dW)` and run to run, the fused route bitwise against the
 composed one (split tails, the planned walk with empty groups last, the wave
-halves, the k256 tail, `-0.0` and subnormals, 32 groups), CUDA graph replays,
-streams, layouts, and the autograd flag with the generated programs.
+halves, the k256 tail, `-0.0`, 32 groups), each judged against the naive BF16
+tier, CUDA graph replays, streams, layouts, and the autograd flag with the
+generated programs.
 `test_cake_moe_grouped_gemm_det_train_acceptance.py` repeats every output of
 the reproducibility table five times into a zeroed and five times into a
 filled output under concurrent copy streams, over changing offsets, and
-measures the errors of the accuracy table. The accumulation is timed by the accumulation rows of
+judges the outputs of the accuracy sample above against the naive BF16 tier. The accumulation is timed by the accumulation rows of
 `benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py` (arm `det_mgX`, beside the
 deterministic baselines `det_acc` and `det_mgB` and the non-deterministic arms).
 The benchmark `benchmarks/bench_cake_moe_grouped_gemm_det_train.py` times the prepared
