@@ -1,4 +1,4 @@
-# Cake non-deterministic dense multi-head attention backward (head dim 64 / 128, SM100 / SM103)
+# Cake non-deterministic dense multi-head attention backward (head dim 64 / 128, SM100 / SM103 / SM107)
 
 Backend of `cake_pplx.cake_fmha_nondet_train`: the first-order backward of
 dense multi-head attention, `(dq, dk, dv)` from BF16 `q [B, Sq, H, D]`,
@@ -11,8 +11,8 @@ no synchronization.
 
 The facade `cake_pplx.cake_fmha_nondet_train` is a stable API; this backend
 package is experimental (no compatibility guarantee for its internal names).
-SM100 (B200 / GB200) and SM103 (B300 / GB300) are the supported
-architectures; another device, SM107 (R200) included, raises `RuntimeError`.
+SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
+supported architectures; another device raises `RuntimeError`.
 Its libraries are loaded prebuilt from `aot/` when a builder compiled them
 and JIT-built from the sources and flags `build.json` records otherwise.
 The package reads no environment variable.
@@ -36,19 +36,20 @@ dq, dk, dv = cake_fmha_nondet_train_backward(
 
 ## Variants and architectures
 
-| Head dim | Mask | `sm_100a` | `sm_103a` | Records (pre / main / post) |
-|---|---|---|---|---|
-| 128 | none | yes | yes | `bwd_pre` / `bwd_main` / `bwd_post` |
-| 128 | causal | yes | yes | `bwd_pre` / `bwd_main_causal` / `bwd_post` |
-| 64 | none | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64` / `bwd_post_hd64` |
-| 64 | causal | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64_causal` / `bwd_post_hd64` |
+| Head dim | Mask | `sm_100a` | `sm_103a` | `sm_107a` | Records (pre / main / post) |
+|---|---|---|---|---|---|
+| 128 | none | yes | yes | yes | `bwd_pre` / `bwd_main` / `bwd_post` |
+| 128 | causal | yes | yes | yes | `bwd_pre` / `bwd_main_causal` / `bwd_post` |
+| 64 | none | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64` / `bwd_post_hd64` |
+| 64 | causal | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64_causal` / `bwd_post_hd64` |
 
 Every variant takes any head count `H >= 1` (the same `H` for `q` and
 `k` / `v`) and query and key lengths that are positive multiples of 128.
 Without the mask `Sq` and `Skv` are independent; the causal mask needs
 `Sq == Skv`.  The `build.json` minimum CUDA toolkit is 12.8 for every
-`sm_100a` library and 12.9 for every `sm_103a` library; an older local
-toolkit raises `RuntimeError` when the library is built.
+`sm_100a` library, 12.9 for every `sm_103a` library and 13.5 for every
+`sm_107a` library; an older local toolkit raises `RuntimeError` when the
+library is built.
 
 ## Kernels
 
@@ -96,4 +97,4 @@ with `B == 0` returns empty gradients and does not alert.
 - Every operand must be contiguous; the BF16 operands must start on a 16-byte
   boundary and `lse` on a 4-byte boundary.  A violation is a `ValueError`
   before any launch.
-- No build for SM107 (R200) or any other architecture.
+- No build for any architecture other than SM100, SM103 and SM107.

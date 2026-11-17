@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Loader, checks and launches of the Cake dense multi-head attention backward
-(head dimension 64 or 128, non-causal or causal; SM100 / SM103).
+(head dimension 64 or 128, non-causal or causal; SM100 / SM103 / SM107).
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
 one record per program (its ``library`` stem; the ``build.json`` entries are
@@ -81,9 +81,9 @@ __all__ = [
     "specs_for_arch",
 ]
 
-# One verified build per architecture: B200 / GB200 (``sm_100a``) and B300 /
-# GB300 (``sm_103a``), each compiled with its exact ``-gencode`` flag set.  No
-# other architecture has a build.
+# One verified build per architecture: B200 / GB200 (``sm_100a``), B300 /
+# GB300 (``sm_103a``) and R200 (``sm_107a``), each compiled with its exact
+# ``-gencode`` flag set.  No other architecture has a build.
 ARCHES: tuple[str, ...] = tuple(cake_jit.ARCHES)
 ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = dict(cake_jit.ARCH_BY_CAPABILITY)
 HEAD_DIMS: tuple[int, ...] = tuple(cake_jit.HEAD_DIMS)

@@ -20,19 +20,19 @@ causal=False) -> (dq, dk, dv)``.
 Without a device: the entry is a stable API (no ``ExperimentalWarning``) and the module's only public name, importing
 the module imports no backend, the module reads no environment variable, every keyword of the entry is the backend's
 keyword of the same name, the entry documents its behaviour under ``torch.use_deterministic_algorithms``, a
-``deterministic`` keyword is a ``TypeError`` before any work, and operands on the CPU are a ``ValueError``.
+``deterministic`` keyword is a ``TypeError`` before any work, operands on the CPU are a ``ValueError``, and a device
+of capability (10, 7) maps to ``sm_107a``, for which ``build.json`` lists every record's library.
 
-On SM100 / SM103: the entry's ``dq``, ``dk`` and ``dv`` for every variant (head dimension 64 or 128, causal or not)
-meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 independent draws), with the default and
-a given ``softmax_scale``, and with operands off a 256-byte boundary (16-byte aligned; ``lse`` 4-byte aligned); every
-documented ``ValueError`` (dtype, device, layout, rank, shapes, head dimension, lengths, head count, causal lengths,
-grid and index limits, a non-finite scale, a base not 16-byte aligned); under ``torch.use_deterministic_algorithms``
-the alert (a ``RuntimeError``; with ``warn_only=True`` one ``UserWarning``, then the results meet the tier); an empty
-batch returns empty gradients and alerts nothing; the launches run on the current stream without synchronizing; a
-device outside the exported architectures is a ``RuntimeError``; with two devices, operands on the device that is not
-current give results there that meet the tier, and operands on two devices are a ``ValueError``.  The package
-promises no bits: no test compares two runs bit for bit.
-"""
+On SM100 / SM103 / SM107: the entry's ``dq``, ``dk`` and ``dv`` for every variant (head dimension 64 or 128, causal or
+not) meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 independent draws), with the default
+and a given ``softmax_scale``, and with operands off a 256-byte boundary (16-byte aligned; ``lse`` 4-byte aligned);
+every documented ``ValueError`` (dtype, device, layout, rank, shapes, head dimension, lengths, head count, causal
+lengths, grid and index limits, a non-finite scale, a base not 16-byte aligned); under
+``torch.use_deterministic_algorithms`` the alert (a ``RuntimeError``; with ``warn_only=True`` one ``UserWarning``,
+then the results meet the tier); an empty batch returns empty gradients and alerts nothing; the launches run on the
+current stream without synchronizing; a device outside the exported architectures is a ``RuntimeError``; with two
+devices, operands on the device that is not current give results there that meet the tier, and operands on two devices
+are a ``ValueError``.  The package promises no bits: no test compares two runs bit for bit. """
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ import ast
 import contextlib
 import functools
 import inspect
+import json
 import math
 import subprocess
 import sys
@@ -110,8 +111,8 @@ def _strided(t: torch.Tensor) -> torch.Tensor:
 
 
 def _device_or_skip() -> torch.device:
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) not in ((10, 0), (10, 3)):
-        pytest.skip("the Cake dense attention backward ships for SM100 / SM103")
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) not in ((10, 0), (10, 3), (10, 7)):
+        pytest.skip("the Cake dense attention backward ships for SM100 / SM103 / SM107")
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     if not (Path(cake_jit.__file__).parent / "build.json").is_file():
@@ -205,7 +206,7 @@ def test_cpu_operands_are_refused() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: judged results
+# On SM100 / SM103 / SM107: judged results
 
 
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
@@ -256,7 +257,7 @@ def test_operands_off_a_256_byte_boundary_match_the_reference(D, record_property
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: refused calls
+# On SM100 / SM103 / SM107: refused calls
 
 
 def _set(name, make):
@@ -386,7 +387,7 @@ def test_sizes_past_the_kernels_limits_are_a_value_error(sizes) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: torch.use_deterministic_algorithms, empty batches, streams and devices
+# On SM100 / SM103 / SM107: torch.use_deterministic_algorithms, empty batches, streams and devices
 
 
 def test_deterministic_mode_raises_the_alert() -> None:
@@ -460,19 +461,43 @@ def test_runs_on_the_current_stream_without_synchronizing() -> None:
 
 
 def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
-    """A device of capability (10, 7) (no delivered build) is a ``RuntimeError`` naming the delivered architectures."""
+    """A device of capability (11, 0) (no delivered build) is a ``RuntimeError`` naming the delivered architectures."""
     device = _device_or_skip()
     x = make_inputs(Case(1, 2, 128), 128, causal=False, seed=3, device=device)
+    device_arch = _backend().device_arch
+    clear = getattr(device_arch, "cache_clear", lambda: None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (11, 0))
+    clear()
+    try:
+        with pytest.raises(RuntimeError, match="sm_100a.*sm_103a.*sm_107a"):
+            api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+    finally:
+        monkeypatch.undo()
+        clear()
+
+
+def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
+    """A device of capability (10, 7) is the delivered ``sm_107a`` target: the backend maps it to ``sm_107a``, and
+    ``build.json`` holds an ``sm_107a`` library for every record (nothing is built or launched here)."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
+    path = Path(cake_jit.__file__).parent / "build.json"
+    if not path.is_file():
+        pytest.skip("the package has no build.json yet (not exported)")
     device_arch = _backend().device_arch
     clear = getattr(device_arch, "cache_clear", lambda: None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 7))
     clear()
     try:
-        with pytest.raises(RuntimeError, match="sm_103a"):
-            api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+        assert device_arch(0) == "sm_107a"
     finally:
         monkeypatch.undo()
         clear()
+    entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
+    assert sorted(entry["name"] for entry in entries) == sorted(
+        f"{rec['library']}_sm_107a" for rec in cake_jit.MODULES.values()
+    )
+    assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 
 def test_operands_on_another_device(record_property) -> None:
@@ -482,7 +507,7 @@ def test_operands_on_another_device(record_property) -> None:
     if torch.cuda.device_count() < 2:
         pytest.skip("needs a second CUDA device")
     other = torch.device("cuda:1")
-    if torch.cuda.get_device_capability(other) not in ((10, 0), (10, 3)):
+    if torch.cuda.get_device_capability(other) not in ((10, 0), (10, 3), (10, 7)):
         pytest.skip("the second device is not an exported architecture")
     previous = torch.cuda.current_device()
     torch.cuda.set_device(0)

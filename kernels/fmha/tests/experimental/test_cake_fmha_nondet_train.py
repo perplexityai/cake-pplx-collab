@@ -15,25 +15,24 @@ limitations under the License.
 
 Backend suite of the Cake non-deterministic (``nondet``) dense multi-head attention backward package
 (``cake_pplx._backends.cake_fmha_nondet_train``, the backend of ``cake_pplx.cake_fmha_nondet_train``): head dimension
-64 or 128, any head count, query and key lengths multiples of 128, causal (top-left, ``Sq == Skv``) or not, on SM100
-and SM103.  The package promises no bits: the main stage adds the FP32 dQ tiles of every key block of a head in
+64 or 128, any head count, query and key lengths multiples of 128, causal (top-left, ``Sq == Skv``) or not, on SM100,
+SM103 and SM107.  The package promises no bits: the main stage adds the FP32 dQ tiles of every key block of a head in
 arrival order, so no test compares two runs bit for bit.
 
 Without a device: the registry (the three stages in launch order, one program per record, every record delivered for
-both architectures and for no other, the launch facts), the routing table ``RECORD_OF`` (the preprocess,
+the three architectures and for no other, the launch facts), the routing table ``RECORD_OF`` (the preprocess,
 main-stage and postprocess record of each head dimension and causal flag, every record used), the launch grids, the
 stage launchers' keywords, the build manifest (every record's library, the recorded source digests), the standalone
 loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
 
-On SM100 / SM103, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error against
-an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest, beside the
-error of the same math in BF16), every output buffer filled with NaN before the launch so every element must be
-written: the preprocess (``dPsum``, ``LSE_log2``, the cleared ``dQ_accum``) at both head dimensions; the main stage
-on its own inputs (the FP32 ``LSE_log2`` and ``dPsum``, a zeroed ``dQ_accum``) for every variant, judged on
+On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
+against an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest,
+beside the error of the same math in BF16), every output buffer filled with NaN before the launch so every element
+must be written: the preprocess (``dPsum``, ``LSE_log2``, the cleared ``dQ_accum``) at both head dimensions; the main
+stage on its own inputs (the FP32 ``LSE_log2`` and ``dPsum``, a zeroed ``dQ_accum``) for every variant, judged on
 ``dQ_accum``, ``dK`` and ``dV``; the postprocess (``dq`` in the input layout) at both head dimensions.  The public
 backward, which composes the three stages, judged for every variant at four heads (the source tests' cases), one head
-and five heads; each variant launched through the three records ``RECORD_OF`` names for it, its inputs left
-unchanged.
+and five heads; each variant launched through the three records ``RECORD_OF`` names for it, its inputs left unchanged.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -76,10 +75,10 @@ cake_jit = cake_package("cake.cake_fmha_nondet_train", "cake_jit")
 
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
-ARCHES = ("sm_100a", "sm_103a")
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 STAGES = ("bwd_pre", "bwd_main", "bwd_post")
 HEAD_DIMS = (128, 64)
-# (head dimension, causal) of every variant; each is delivered for both architectures.
+# (head dimension, causal) of every variant; each is delivered for the three architectures.
 VARIANTS = ((128, False), (128, True), (64, False), (64, True))
 VARIANT_IDS = ["d128", "d128_causal", "d64", "d64_causal"]
 # Threads per CTA of each stage's kernel (8, 16 and 4 warps).
@@ -155,7 +154,7 @@ def test_registry_records_are_well_formed() -> None:
     for name, rec in cake_jit.MODULES.items():
         assert rec["stage"] in STAGES, name
         assert name == rec["stage"] or name.startswith(rec["stage"] + "_"), name
-        # Every variant is delivered for both architectures.
+        # Every variant is delivered for the three architectures.
         assert tuple(rec["arches"]) == ARCHES, (name, rec["arches"])
         assert rec["ffi_entry"] == "run", name
         assert re.fullmatch(re.escape(prefix) + "[0-9a-f]{20}", rec["library"]), (name, rec["library"])
@@ -191,7 +190,7 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
     for name, rec in cake_jit.MODULES.items():
         for arch in ARCHES:
             assert cake_backend.library_name(name, arch) == f"{rec['library']}_{arch}"
-        for arch in ("sm_107a", "sm_90a", "sm_120a"):
+        for arch in ("sm_110a", "sm_90a", "sm_120a"):
             with pytest.raises(RuntimeError):
                 cake_backend.library_name(name, arch)
 
@@ -358,7 +357,7 @@ def test_the_package_reads_no_environment_variable() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: every record loads
+# On SM100 / SM103 / SM107: every record loads
 
 
 def test_the_records_of_every_variant_load(device) -> None:

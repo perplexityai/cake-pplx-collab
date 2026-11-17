@@ -22,7 +22,7 @@ carries the mode (``nondet``) as a token right after the op, and no entry point 
 The rules shared by every family are checked with ``tests.cake.test_helpers.cake_mode_names``; the checks here are this
 family's own.  The package raises PyTorch's deterministic-algorithms alert (the API suite checks it on a device).
 Build identities (program and library stems ``cake_fmha_train_<hex>``, kernel symbols, csrc file names) keep their
-names.  The package serves capabilities (10, 0) and (10, 3) only: capability (10, 7) has no build.
+names.  The package serves capabilities (10, 0), (10, 3) and (10, 7) only.
 """
 
 import importlib
@@ -68,8 +68,8 @@ INTERNAL = (
     "arch_for_capability",
     "library_name",
 )
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 
 
 def _backend(module_name=None):
@@ -191,24 +191,32 @@ def test_the_package_follows_torch_deterministic_mode():
     assert "use_deterministic_algorithms" in getattr(public, ENTRY).__doc__
 
 
-def test_capabilities_map_to_the_two_architectures(monkeypatch):
-    """Capabilities (10, 0) and (10, 3) map to ``sm_100a`` and ``sm_103a``; (10, 7) and every other capability map to
-    no target, and a device of capability (10, 7) is a ``RuntimeError`` naming the delivered architectures."""
+def test_capabilities_map_to_the_three_architectures(monkeypatch):
+    """Capabilities (10, 0), (10, 3) and (10, 7) map to ``sm_100a``, ``sm_103a`` and ``sm_107a``; every other
+    capability maps to no target.  A device of capability (10, 7) is served as ``sm_107a``, and a device of another
+    capability is a ``RuntimeError`` naming the delivered architectures."""
     jit, backend = _backend("cake_jit"), _backend("cake_backend")
     assert tuple(jit.ARCHES) == ARCHES and tuple(backend.ARCHES) == ARCHES
     assert dict(jit.ARCH_BY_CAPABILITY) == ARCH_BY_CAPABILITY
     assert dict(backend.ARCH_BY_CAPABILITY) == ARCH_BY_CAPABILITY
     for capability, arch in ARCH_BY_CAPABILITY.items():
         assert backend.arch_for_capability(capability) == arch
-    for capability in ((10, 7), (10, 1), (9, 0), (11, 0), (12, 0), (12, 1)):
+    for capability in ((10, 1), (9, 0), (11, 0), (12, 0), (12, 1)):
         assert backend.arch_for_capability(capability) is None, capability
     for rec in jit.MODULES.values():
-        assert "sm_107a" not in rec["arches"]
+        assert tuple(rec["arches"]) == ARCHES
     clear = getattr(backend.device_arch, "cache_clear", lambda: None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 7))
     clear()
     try:
-        with pytest.raises(RuntimeError, match="sm_103a"):
+        assert backend.device_arch(0) == "sm_107a"
+    finally:
+        monkeypatch.undo()
+        clear()
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (11, 0))
+    clear()
+    try:
+        with pytest.raises(RuntimeError, match="sm_100a.*sm_103a.*sm_107a"):
             backend.device_arch(0)
     finally:
         monkeypatch.undo()
@@ -217,7 +225,7 @@ def test_capabilities_map_to_the_two_architectures(monkeypatch):
 
 def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; every library stem is a ``cake_fmha_train`` program built
-    for ``sm_100a`` and ``sm_103a``, and the registry's library names are the stems of ``build.json``."""
+    for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the registry's library names are the stems of ``build.json``."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_fmha_train"
@@ -228,7 +236,7 @@ def test_package_identity_and_build_identity():
     assert manifest["package"] == BACKEND
     names = {entry["name"] for entry in manifest["libraries"]}
     assert names == {f"{rec['library']}_{arch}" for rec in jit.MODULES.values() for arch in rec["arches"]}
-    assert all(re.fullmatch(r"cake_fmha_train_[0-9a-f]{20}_sm_10[03]a", name) for name in names), sorted(names)
+    assert all(re.fullmatch(r"cake_fmha_train_[0-9a-f]{20}_sm_10[037]a", name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
     assert len(stems) == len(jit.MODULES) and len(names) == len(stems) * len(ARCHES)

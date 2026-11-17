@@ -1,7 +1,7 @@
 # cake-pplx-fmha
 
 Cake `fmha` training kernels: the backward of dense multi-head attention, head dimension 64 or 128, non-causal or
-causal, on `sm_100a` and `sm_103a`. Public module:
+causal, on `sm_100a`, `sm_103a` and `sm_107a`. Public module:
 
 - `cake_pplx.cake_fmha_nondet_train`
 

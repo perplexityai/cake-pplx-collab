@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake non-deterministic dense multi-head attention backward for training, head
-dimension 64 or 128, non-causal or causal (SM100 / SM103).
+dimension 64 or 128, non-causal or causal (SM100 / SM103 / SM107).
 
 Entry: :func:`cake_fmha_nondet_train_backward`, the backward step without
 autograd: ``(dq, dk, dv)`` from ``q``, ``k``, ``v``, the forward's ``out`` and
@@ -123,9 +123,9 @@ def cake_fmha_nondet_train_backward(
         128; ``causal`` with ``Sq != Skv``; ``B`` or ``H`` above 65535; ``B * H * max(Sq, Skv) * D >= 2**31``; a
         non-finite ``softmax_scale``.
     RuntimeError
-        A device other than SM100 (``sm_100a``) or SM103 (``sm_103a``); a local CUDA toolkit older than the
-        library's ``build.json`` minimum when it is built; under ``torch.use_deterministic_algorithms(True)``, the
-        alert below.
+        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``); a local CUDA toolkit
+        older than the library's ``build.json`` minimum when it is built; under
+        ``torch.use_deterministic_algorithms(True)``, the alert below.
 
     Notes
     -----
