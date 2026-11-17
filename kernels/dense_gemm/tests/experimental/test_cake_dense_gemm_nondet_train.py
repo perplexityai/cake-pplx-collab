@@ -12324,15 +12324,50 @@ def test_gpu_planned_rows_run_the_programs_of_their_verdicts(record_property):
         pytest.skip(f"no verdict of {arch} applies on {sm_count} SMs")
 
 
-def test_gpu_k1_sm_count_overrides_run_their_programs():
+def _n3_bf16_draw(outs, **operands):
+    """``draw(s)`` of :func:`judge_gemm` for K1 calls on the BF16 ``operands`` (by name; the prepared launches and the
+    convenience bindings of the test hold them): standard normal values of a generator seeded ``s``, rounded to BF16,
+    written into each operand in place in the order given, and NaN into the outputs ``outs`` (name -> tensor).  The
+    inputs carry the operands by name and ``outs``."""
+
+    def draw(s):
+        g = torch.Generator(device=next(iter(operands.values())).device).manual_seed(s)
+        for t in operands.values():
+            t.copy_(_bf16(t.shape, t.device, g))
+        nan_fill(outs.values())
+        return SimpleNamespace(outs=outs, **operands)
+
+    return draw
+
+
+def _n3_k1_wgrad_product(v, dtype):
+    """``product(v, dtype)`` of :func:`judge_gemm` for K1 weight-gradient outputs ``v.outs``: ``G.T @ X`` on the
+    operands converted to ``dtype``, for every output."""
+    return dict.fromkeys(v.outs, v.G.to(dtype).t() @ v.X.to(dtype))
+
+
+def _n3_launch(*calls):
+    """``launch(v)`` of :func:`judge_gemm`: each of ``calls`` (no argument) in turn, then the outputs ``v.outs`` by
+    name."""
+
+    def launch(v):
+        for call in calls:
+            call()
+        torch.cuda.synchronize()
+        return v.outs
+
+    return launch
+
+
+def test_gpu_k1_sm_count_overrides_run_their_programs(record_property):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_SPLIT_OVERRIDES_BY_SM` (``sm_107a``: 216 SMs): every overridden row prepares and runs the override's
     program at the first and the last token count of :data:`K1_SPLIT_RULES_BY_SM_TOKENS` and one token below the last,
     outside the part's ranges of :data:`K1_CHAIN_RANGES_BY_SM`, which come first, and its token counts of
     :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` (``4096 -> 1024`` FP32 at 16383 tokens: the 192-wide row-major-store program
-    at one split), meets the deterministic package's FP64 budget and, where both run one split, gives the bits
-    of the row's :data:`K1_SPLIT_RULES` program (256-wide transposed tiles) on the same inputs.  A part of any other SM
-    count skips."""
+    at one split), and its output meets the naive BF16 tier against FP64 (:func:`judge_gemm`); where both run one
+    split, the row's :data:`K1_SPLIT_RULES` program (256-wide transposed tiles, another template) runs on the same
+    inputs and meets the tier too.  A part of any other SM count skips."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     table = cake_backend.K1_SPLIT_OVERRIDES_BY_SM.get((arch, sm_count), {})
@@ -12370,14 +12405,23 @@ def test_gpu_k1_sm_count_overrides_run_their_programs():
             assert prepared.template == cake_backend.atomic_k1_template(block_n, f32)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
-            _k1_check(out, G.double().t() @ X.double(), f"{M} {N} {dt} {T}")
+            what = f"{M} {N} {dt} {T}"
+            outs, launches = {what: out}, [prepared.launch]
             if rule is not None and rule[1] == 1 and splits == 1:
                 same = torch.full_like(out, float("nan"))
                 recorded = _k1_prepare(G, X, same, arch, 1, rule[0])
                 assert recorded.template != prepared.template
                 _assert_ran(recorded.launch, recorded.module_name)
                 torch.cuda.synchronize()
-                assert torch.equal(out, same), (key, T)
+                outs[f"{what} rule program"] = same
+                launches.append(recorded.launch)
+            judge_gemm(
+                record_property,
+                seed=SEED + 93,
+                draw=_n3_bf16_draw(outs, G=G, X=X),
+                launch=_n3_launch(*launches),
+                product=_n3_k1_wgrad_product,
+            )
             ran += 1
     print(
         f"K1_OVERRIDES {arch} sm_count={sm_count}: {ran} launches ran the override programs"
@@ -12385,13 +12429,18 @@ def test_gpu_k1_sm_count_overrides_run_their_programs():
     assert ran
 
 
-def test_gpu_k1_forward_rows_run_their_plan():
+def _n3_k1_forward_product(v, dtype):
+    """``product(v, dtype)`` of :func:`judge_gemm` for K1 forward outputs ``v.outs``: ``X @ W.T`` on the operands
+    converted to ``dtype``, for every output."""
+    return dict.fromkeys(v.outs, v.X.to(dtype) @ v.W.to(dtype).t())
+
+
+def test_gpu_k1_forward_rows_run_their_plan(record_property):
     """On a part of exactly the SM count of a table of :data:`K1_FORWARD_RULES_BY_SM` (152-SM ``sm_100a`` /
     ``sm_103a``): the forward of every row binds the program the deterministic planner
-    gives the row with the table's knobs (the single-CTA program), meets the deterministic package's BF16 budget
-    against FP64, repeats bit for bit through the bound launch, and the deterministic package's forward meets the
-    budget too.  A
-    part of any other SM count skips."""
+    gives the row with the table's knobs (the single-CTA program), and its output and the deterministic package's
+    forward on the same inputs meet the naive BF16 tier against FP64 (:func:`judge_gemm`) on every call through the
+    bound launch.  A part of any other SM count skips."""
     device = _det_device_or_skip()
     facts = det_backend.device_facts(device)
     rows = {
@@ -12407,7 +12456,6 @@ def test_gpu_k1_forward_rows_run_their_plan():
     ran = 0
     for (K, N, T), knobs in sorted(rows.items()):
         X, W = _bf16((T, K), device, g), _bf16((N, K), device, g)
-        ref = X.double() @ W.double().t()
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
         out = torch.full((T, N), float("nan"), device=device, dtype=torch.bfloat16)
         assert (
@@ -12421,15 +12469,34 @@ def test_gpu_k1_forward_rows_run_their_plan():
         )
         assert entry.plan == want and entry.k1 is not None, (K, N, T)
         assert entry.plan.template.endswith("_kk_n128_c1"), (K, N, T)
-        _k1_check(out, ref, f"forward {K} {N} {T}")
-        again = torch.full_like(out, float("nan"))
-        cake_backend.cake_dense_gemm_nondet_train_projection_forward(X, W, again)
-        torch.cuda.synchronize()
-        assert torch.equal(out, again), (K, N, T)
         det_out = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_forward(X, W, det_out)
-        torch.cuda.synchronize()
-        _k1_check(det_out, ref, f"deterministic forward {K} {N} {T}")
+        judge_gemm(
+            record_property,
+            seed=SEED + 160,
+            draw=_n3_bf16_draw(
+                {
+                    f"forward {K} {N} {T}": out,
+                    f"deterministic forward {K} {N} {T}": det_out,
+                },
+                X=X,
+                W=W,
+            ),
+            launch=_n3_launch(
+                functools.partial(
+                    cake_backend.cake_dense_gemm_nondet_train_projection_forward,
+                    X,
+                    W,
+                    out,
+                ),
+                functools.partial(
+                    det_backend.cake_dense_gemm_det_train_projection_forward,
+                    X,
+                    W,
+                    det_out,
+                ),
+            ),
+            product=_n3_k1_forward_product,
+        )
         ran += 1
     print(
         f"K1_FORWARD_ROWS {facts.arch} sm_count={facts.sm_count}: {ran} rows ran their plan"
@@ -12437,13 +12504,16 @@ def test_gpu_k1_forward_rows_run_their_plan():
     assert ran
 
 
-def test_gpu_k1_sm_count_overrides_through_the_convenience_binding():
+def test_gpu_k1_sm_count_overrides_through_the_convenience_binding(
+    record_property,
+):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_SPLIT_OVERRIDES_BY_SM` (``sm_107a``: 216 SMs): the convenience path of every overridden row binds the
     override's program (its :data:`_K1_ATOMIC_CACHE` entry) at the first and the last token count of
     :data:`K1_SPLIT_RULES_BY_SM_TOKENS` and one token below the last, outside the part's ranges of
-    :data:`K1_CHAIN_RANGES_BY_SM` and its token counts of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS`, and gives the bits of
-    the prepared launch, the tickets zero after.  A part of any other SM count skips."""
+    :data:`K1_CHAIN_RANGES_BY_SM` and its token counts of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS`; its output and the
+    prepared launch's on the same inputs meet the naive BF16 tier against FP64 (:func:`judge_gemm`), the tickets zero
+    after.  A part of any other SM count skips."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     table = cake_backend.K1_SPLIT_OVERRIDES_BY_SM.get((arch, sm_count), {})
@@ -12466,15 +12536,16 @@ def test_gpu_k1_sm_count_overrides_through_the_convenience_binding():
                 continue
             G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
             out_dtype = torch.float32 if f32 else torch.bfloat16
-            want = torch.full((N, M), float("nan"), device=device, dtype=out_dtype)
+            prepared_out = torch.full(
+                (N, M), float("nan"), device=device, dtype=out_dtype
+            )
             prepared = (
                 cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
-                    G, X, want
+                    G, X, prepared_out
                 )
             )
-            prepared.launch()
             cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-            out = torch.full_like(want, float("nan"))
+            out = torch.full_like(prepared_out, float("nan"))
             assert (
                 cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
                 is out
@@ -12485,10 +12556,26 @@ def test_gpu_k1_sm_count_overrides_through_the_convenience_binding():
             ]
             assert entry.k1 is not None, (key, T)
             assert (entry.plan.block_n, entry.plan.splits) == plan, (key, T)
-            if splits <= 2:  # at most two partials per element: bitwise reproducible
-                assert torch.equal(out, want), (key, T)
-            else:
-                _k1_check(out, G.double().t() @ X.double(), f"{M} {N} {dt} {T}")
+            what = f"{M} {N} {dt} {T}"
+            judge_gemm(
+                record_property,
+                seed=SEED + 94,
+                draw=_n3_bf16_draw(
+                    {f"{what} prepared": prepared_out, f"{what} convenience": out},
+                    G=G,
+                    X=X,
+                ),
+                launch=_n3_launch(
+                    prepared.launch,
+                    functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                        G,
+                        X,
+                        out,
+                    ),
+                ),
+                product=_n3_k1_wgrad_product,
+            )
             assert _arena_tickets_zero()
             ran += 1
     assert ran
@@ -12602,36 +12689,24 @@ def _k1_with_chain_ranges(arch, sm_count, key, T, want):
     return (want, 1) if one is None else ((one, 1), 1)
 
 
-#: Edge token counts of the GPU edge test at which the deterministic program itself misses the BF16 budget for some
-#: seed (measured, 10 seeds), so the budget does not choose the route there: ``(arch, sm_count, key, T) -> T'``.  The
-#: edge asserts the route only, and the accuracy rule runs at ``T'``, the nearest measured token count of the same
-#: range at which the deterministic program met the budget on every seed on the measured parts (``None``: none).
-K1_P1_EDGES = {
-    ("sm_100a", 148, ("sm_100a", 1, 4096, 64, "bf16"), 65535): 41985,
-    ("sm_103a", 148, ("sm_103a", 1, 4096, 32, "bf16"), 65535): 45057,
-    ("sm_103a", 148, ("sm_103a", 1, 5120, 48, "bf16"), 49152): None,
-    ("sm_103a", 148, ("sm_103a", 1, 5120, 64, "bf16"), 47104): 45057,
-    ("sm_103a", 148, ("sm_103a", 1, 5120, 64, "bf16"), 49153): None,
-    ("sm_103a", 148, ("sm_103a", 1, 5120, 128, "bf16"), 65537): None,
-}
-
-
-def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(no_k1_dsm, monkeypatch):
+def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(
+    record_property, no_k1_dsm, monkeypatch
+):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_SPLIT_RULES_BY_SM_TOKEN_RANGES`, :data:`K1_SPLIT_RANGE_OVERRIDES_BY_SM` or
     :data:`K1_TWO_SPLIT_RANGES_BY_SM` (``sm_107a``: 212 SMs; ``sm_100a`` / ``sm_103a``: 152 SMs): at the first and the
     last token count of every range of a row, and one token past the first token count of a two-split range (an odd
     number of K blocks), the prepared launch runs the program of the part's table in :data:`K1_SPLIT_RULES_BY_SM` (of
-    the range, for an override or two-split range) and meets the K1 accuracy rule (:func:`_k1_check`); one token outside
-    a range (and outside the window) the row runs the deterministic program, with the deterministic package's bits.  On
-    a part of exactly the SM count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` (148-SM ``sm_100a`` /
-    ``sm_103a`` parts) the reverse: the deterministic program with its bits at both ends of a range, the row's program
-    one token outside it.  An edge inside a range of :data:`K1_CHAIN_RANGES_BY_SM` for the part runs that range's
-    program of several chains instead (:func:`_k1_with_chain_ranges`), under the same FP64 rule, and an edge inside a
-    range of :data:`K1_ONE_SPLIT_RANGES_BY_SM` that range's one-split program, under the same rule.  At an edge of
-    ``K1_P1_EDGES`` the deterministic program itself misses the BF16 budget for some seed: the edge asserts the route
-    only, and the FP64 rule runs at the entry's token count of the same range instead (none: no check).  The cluster
-    ranges of :data:`K1_DSM_RANGES_BY_SM`, which come before these tables, are taken out
+    the range, for an override or two-split range) and its output meets the naive BF16 tier against FP64
+    (:func:`judge_gemm`); one token outside a range (and outside the window) the row takes the deterministic program's
+    route (the planner gives no plan, and the prepared launch is not this package's split-K launch).  On a part of
+    exactly the SM count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` (148-SM ``sm_100a`` / ``sm_103a``
+    parts) the reverse: the deterministic program's route at both ends of a range, the row's program one token outside
+    it.  An edge inside a range of :data:`K1_CHAIN_RANGES_BY_SM` for the part runs that range's program of several
+    chains instead (:func:`_k1_with_chain_ranges`), judged the same way, and an edge inside a range of
+    :data:`K1_ONE_SPLIT_RANGES_BY_SM` that range's one-split program, judged the same way.  The outputs of the
+    deterministic program's route are judged by ``test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding``
+    on the same edges.  The cluster ranges of :data:`K1_DSM_RANGES_BY_SM`, which come before these tables, are taken out
     (``test_gpu_k1_dsm_ranges_run_at_their_edges`` holds them), and so are the ranges of
     :data:`K1_PARITY_RANGES_BY_SM` (``test_k1_parity_ranges_bind_per_token_count`` holds them).  A part of any other SM
     count skips."""
@@ -12667,34 +12742,18 @@ def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(no_k1_dsm, monkeypatch)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
             ran += 1
-            at = K1_P1_EDGES.get((arch, sm_count, key, T), T)
-            if at is None:
-                continue
-            if at != T:
-                G, X = _bf16((at, N), device, g), _bf16((at, M), device, g)
-                out = torch.full((N, M), float("nan"), device=device, dtype=out_dtype)
-                prepared = (
-                    cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
-                        G, X, out
-                    )
-                )
-                assert isinstance(
-                    prepared, cake_backend.CakeDenseGemmNondetProjectionLaunch
-                ), (key, at)
-                assert (prepared.plan.block_n, prepared.plan.splits) == plan, (key, at)
-                _assert_ran(prepared.launch, prepared.module_name)
-                torch.cuda.synchronize()
-            _k1_check(out, G.double().t() @ X.double(), f"{M} {N} {dt} {at}")
+            judge_gemm(
+                record_property,
+                seed=SEED + 95,
+                draw=_n3_bf16_draw({f"{M} {N} {dt} {T}": out}, G=G, X=X),
+                launch=_n3_launch(prepared.launch),
+                product=_n3_k1_wgrad_product,
+            )
         else:
             assert plan is None, (key, T)
             assert not isinstance(
                 prepared, cake_backend.CakeDenseGemmNondetProjectionLaunch
             ), (key, T)
-            prepared.launch()
-            want = torch.full_like(out, float("nan"))
-            det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, want)
-            torch.cuda.synchronize()
-            assert torch.equal(out, want), (key, T)
     print(
         f"K1_TOKEN_RANGES {arch} sm_count={sm_count}: {ran} launches ran this package's programs at range edges"
     )
@@ -12702,20 +12761,21 @@ def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(no_k1_dsm, monkeypatch)
 
 
 def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
-    no_k1_dsm, monkeypatch
+    record_property, no_k1_dsm, monkeypatch
 ):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_SPLIT_RULES_BY_SM_TOKEN_RANGES`, :data:`K1_SPLIT_RANGE_OVERRIDES_BY_SM` or
     :data:`K1_TWO_SPLIT_RANGES_BY_SM` (``sm_107a``: 212 SMs; ``sm_100a`` / ``sm_103a``: 152 SMs): the
     convenience path binds the part's program
     (the range's, for an override or two-split range) at the first and the last token count of every range of a row
-    (its :data:`_K1_ATOMIC_CACHE` entry) and gives the bits of the prepared launch where at most two partials meet (the
-    FP64 budget otherwise), the tickets zero after; one token outside a range, and one token past the first token count
-    of a two-split range, it binds the deterministic package's plan.  On a part of exactly the SM count of a table
-    of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` the reverse.  An edge inside a range of :data:`K1_CHAIN_RANGES_BY_SM`
-    for the part binds that range's program of several chains instead (one split: the bits of the prepared launch).  The
-    cluster ranges of :data:`K1_DSM_RANGES_BY_SM` and the ranges of :data:`K1_PARITY_RANGES_BY_SM` are taken out, as
-    in ``test_gpu_k1_sm_count_token_ranges_run_at_their_edges``.  A part of any other SM count skips."""
+    (its :data:`_K1_ATOMIC_CACHE` entry), the tickets zero after; one token outside a range, and one token past the
+    first token count of a two-split range, it binds the deterministic package's plan.  On a part of exactly the SM
+    count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` the reverse.  An edge inside a range of
+    :data:`K1_CHAIN_RANGES_BY_SM` for the part binds that range's program of several chains instead.  At every edge
+    the convenience path's output and the prepared launch's on the same inputs meet the naive BF16 tier against FP64
+    (:func:`judge_gemm`).  The cluster ranges of :data:`K1_DSM_RANGES_BY_SM` and the ranges of
+    :data:`K1_PARITY_RANGES_BY_SM` are taken out, as in ``test_gpu_k1_sm_count_token_ranges_run_at_their_edges``.  A
+    part of any other SM count skips."""
     monkeypatch.setattr(cake_backend, "K1_PARITY_RANGES_BY_SM", {})
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
@@ -12731,13 +12791,12 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
         want_plan, chains = _k1_with_chain_ranges(arch, sm_count, key, T, want_plan)
         G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
         out_dtype = torch.float32 if f32 else torch.bfloat16
-        want = torch.full((N, M), float("nan"), device=device, dtype=out_dtype)
+        prepared_out = torch.full((N, M), float("nan"), device=device, dtype=out_dtype)
         prepared = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
-            G, X, want
+            G, X, prepared_out
         )
-        prepared.launch()
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full_like(want, float("nan"))
+        out = torch.full_like(prepared_out, float("nan"))
         assert (
             cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out) is out
         )
@@ -12748,26 +12807,49 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
             assert plan == want_plan, (key, T)
             assert (entry.plan.block_n, entry.plan.splits) == plan, (key, T)
             assert entry.plan.chains == chains, (key, T)
-            if plan[1] <= 2:  # at most two partials per element: bitwise reproducible
-                assert torch.equal(out, want), (key, T)
-            else:
-                _k1_check(out, G.double().t() @ X.double(), f"{M} {N} {dt} {T}")
-            assert _arena_tickets_zero()
-            ran += 1
         else:
             assert entry.plan is None and entry.det_plan is not None, (key, T)
-            assert torch.equal(out, want), (key, T)
+        what = f"{M} {N} {dt} {T}"
+        judge_gemm(
+            record_property,
+            seed=SEED + 96,
+            draw=_n3_bf16_draw(
+                {f"{what} prepared": prepared_out, f"{what} convenience": out},
+                G=G,
+                X=X,
+            ),
+            launch=_n3_launch(
+                prepared.launch,
+                functools.partial(
+                    cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                    G,
+                    X,
+                    out,
+                ),
+            ),
+            product=_n3_k1_wgrad_product,
+        )
+        if want_plan is not None:
+            assert _arena_tickets_zero()
+            ran += 1
     assert ran
 
 
-def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
+def _n3_outs(v):
+    """``poison(v)`` of :func:`judge_gemm`: the outputs ``v.outs``."""
+    return v.outs.values()
+
+
+def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(
+    record_property, no_k1_dsm
+):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_ONE_SPLIT_RANGES_BY_SM` (152-SM ``sm_100a`` / ``sm_103a`` parts): at the first and the last token count
     of every range of a row and at 1025 tokens (an odd number of 64-token K blocks) the prepared launch runs the range's
-    one-split program (one chain; by kernel name) and its output meets the deterministic package's budget against FP64
-    in each of ``RERUNS`` launches into a NaN-poisoned ``out``; the convenience path binds the same program and its
-    output meets that budget too.  One token below and one above a range the row takes the route the planner gives it
-    without the range (another program or the deterministic program), within the same budget.  The cluster ranges of
+    one-split program (one chain; by kernel name) and the convenience path binds the same program; both outputs meet
+    the naive BF16 tier against FP64 (:func:`judge_gemm`), on the first draw in each of ``1 + RERUNS`` launches into
+    NaN-poisoned outputs.  One token below and one above a range the row takes the route the planner gives it without
+    the range (another program or the deterministic program), and its output meets the same tier.  The cluster ranges of
     :data:`K1_DSM_RANGES_BY_SM`, which come before the one-split ranges and hold some of these token counts on
     ``sm_100a``, are taken out (``test_gpu_k1_dsm_ranges_run_at_their_edges`` holds them).  A part of any other
     SM count skips."""
@@ -12786,7 +12868,6 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
             for T in sorted({lo - 1, lo, 1025, hi, hi + 1}):
                 what = f"{M} {N} {dt} {T}"
                 G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
-                ref = G.double().t() @ X.double()
                 out = torch.full((N, M), float("nan"), device=device, dtype=out_dtype)
                 plan = cake_backend.k1_plan(
                     arch=arch, L=L, M=M, N=N, K=T, out_f32=f32, sm_count=sm_count
@@ -12804,9 +12885,13 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
                     assert atomic == (plan is not None), what
                     if atomic:
                         assert (prepared.plan.block_n, prepared.plan.splits) == plan
-                    prepared.launch()
-                    torch.cuda.synchronize()
-                    _k1_check(out, ref, what)
+                    judge_gemm(
+                        record_property,
+                        seed=SEED + 97,
+                        draw=_n3_bf16_draw({what: out}, G=G, X=X),
+                        launch=_n3_launch(prepared.launch),
+                        product=_n3_k1_wgrad_product,
+                    )
                     continue
                 assert plan == (block_n, 1), what
                 assert isinstance(
@@ -12819,12 +12904,6 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
                 ), what
                 _assert_ran(prepared.launch, prepared.module_name)
                 torch.cuda.synchronize()
-                _k1_check(out, ref, what)
-                for i in range(RERUNS):
-                    out.fill_(float("nan"))
-                    prepared.launch()
-                    torch.cuda.synchronize()
-                    _k1_check(out, ref, f"{what} run {i}")
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
                 conv = torch.full_like(out, float("nan"))
                 assert (
@@ -12837,7 +12916,25 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
                 (entry,) = list(cake_backend._K1_ATOMIC_CACHE.values())
                 assert entry.k1 is not None and entry.plan is not None, what
                 assert (entry.plan.block_n, entry.plan.splits) == plan, what
-                _k1_check(conv, ref, f"{what} convenience")
+                judge_gemm(
+                    record_property,
+                    seed=SEED + 97,
+                    draw=_n3_bf16_draw(
+                        {what: out, f"{what} convenience": conv}, G=G, X=X
+                    ),
+                    launch=_n3_launch(
+                        prepared.launch,
+                        functools.partial(
+                            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                            G,
+                            X,
+                            conv,
+                        ),
+                    ),
+                    product=_n3_k1_wgrad_product,
+                    launches=1 + RERUNS,
+                    poison=_n3_outs,
+                )
                 ran += 1
     print(
         f"K1_ONE_SPLIT_RANGES {arch} sm_count={sm_count}: {ran} token counts ran the one-split program"
@@ -12845,19 +12942,17 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(no_k1_dsm):
     assert ran
 
 
-def test_gpu_k1_dsm_ranges_run_at_their_edges():
+def test_gpu_k1_dsm_ranges_run_at_their_edges(record_property):
     """Unforced (no split count), on a part of exactly the SM count of a table of
     :data:`K1_DSM_RANGES_BY_SM` (148-SM and 152-SM ``sm_100a``, 152-SM ``sm_103a`` parts): at the first and the last
-    token count of every range of a row the prepared launch runs the range's cluster program (by kernel name) and its
-    output meets the deterministic package's FP32 budget against FP64 (:func:`_k1_check`: relative Frobenius error at
-    most 5e-5, max error at most 1e-3 times the largest reference element) with the same bits in each of ``RERUNS``
-    launches into a NaN-poisoned ``out``; the convenience path binds the same program, with no arena, and its output
-    has those bits too.  One token below a
-    row's first range, one above its last and next to a gap between two of its ranges the row takes the route the
-    planner gives it without the table (another program or the deterministic program), within the same budget; an
-    edge with an odd number of 64-token K blocks inside a range of :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM` runs that
-    table's program within the same budget: a cluster program of the table's tile and split count (by kernel name),
-    or no cluster program.  A part of any other SM count or architecture skips."""
+    token count of every range of a row the prepared launch runs the range's cluster program (by kernel name) and the
+    convenience path binds the same program, with no arena; both outputs meet the naive BF16 tier against FP64
+    (:func:`judge_gemm`), on the first draw in each of ``1 + RERUNS`` launches into NaN-poisoned outputs.  One token
+    below a row's first range, one above its last and next to a gap between two of its ranges the row takes the route
+    the planner gives it without the table (another program or the deterministic program), and its output meets the
+    same tier; an edge with an odd number of 64-token K blocks inside a range of :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`
+    runs that table's program, and its output meets the same tier: a cluster program of the table's tile and split
+    count (by kernel name), or no cluster program.  A part of any other SM count or architecture skips."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     rows = cake_backend.K1_DSM_RANGES_BY_SM.get((arch, sm_count), {})
@@ -12878,7 +12973,6 @@ def test_gpu_k1_dsm_ranges_run_at_their_edges():
             what = f"{M} {N} {dt} {T}"
             held = [v for lo, hi, v in ranges if lo <= T <= hi]
             G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
-            ref = G.double().t() @ X.double()
             out = torch.full((N, M), float("nan"), device=device, dtype=torch.float32)
             dsm = cake_backend.k1_dsm_plan(
                 arch=arch, L=L, M=M, N=N, K=T, out_f32=True, sm_count=sm_count
@@ -12905,10 +12999,14 @@ def test_gpu_k1_dsm_ranges_run_at_their_edges():
                     assert (prepared.plan.block_n, prepared.plan.splits) == odd, what
                     assert prepared.template == cake_backend.dsm_k1_template(*odd), what
                     _assert_ran(prepared.launch, prepared.module_name)
-                else:
-                    prepared.launch()
-                torch.cuda.synchronize()
-                _k1_check(out, ref, what)
+                    torch.cuda.synchronize()
+                judge_gemm(
+                    record_property,
+                    seed=SEED + 98,
+                    draw=_n3_bf16_draw({what: out}, G=G, X=X),
+                    launch=_n3_launch(prepared.launch),
+                    product=_n3_k1_wgrad_product,
+                )
                 continue
             assert dsm == held[0], what
             assert atomic and prepared.plan.dsm, what
@@ -12916,14 +13014,6 @@ def test_gpu_k1_dsm_ranges_run_at_their_edges():
             assert prepared.template == cake_backend.dsm_k1_template(*dsm), what
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
-            _k1_check(out, ref, what)
-            first = out.clone()
-            for i in range(RERUNS):
-                out.fill_(float("nan"))
-                prepared.launch()
-                torch.cuda.synchronize()
-                _k1_check(out, ref, f"{what} run {i}")
-                assert torch.equal(out, first), f"{what} run {i}: other bits"
             cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
             conv = torch.full_like(out, float("nan"))
             assert (
@@ -12935,8 +13025,23 @@ def test_gpu_k1_dsm_ranges_run_at_their_edges():
             assert entry.k1 is not None and entry.plan is not None, what
             assert entry.plan.dsm and entry.arena is None, what
             assert (entry.plan.block_n, entry.plan.splits) == dsm, what
-            _k1_check(conv, ref, f"{what} convenience")
-            assert torch.equal(conv, first), f"{what} convenience: other bits"
+            judge_gemm(
+                record_property,
+                seed=SEED + 98,
+                draw=_n3_bf16_draw({what: out, f"{what} convenience": conv}, G=G, X=X),
+                launch=_n3_launch(
+                    prepared.launch,
+                    functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                        G,
+                        X,
+                        conv,
+                    ),
+                ),
+                product=_n3_k1_wgrad_product,
+                launches=1 + RERUNS,
+                poison=_n3_outs,
+            )
             ran += 1
     print(
         f"K1_DSM_RANGES {arch} sm_count={sm_count}: {ran} token counts ran the cluster program"
@@ -12944,14 +13049,47 @@ def test_gpu_k1_dsm_ranges_run_at_their_edges():
     assert ran
 
 
-def test_gpu_router_token_windows_run_at_their_edges():
+def _n3_router_draw(X, W, G, outs):
+    """``draw(s)`` of :func:`judge_gemm` for router calls on ``X[T, hidden]``, ``W[256, hidden]`` and ``G[T, 256]``
+    (the prepared launches and the convenience bindings of the test hold them): :func:`_router_inputs` of seed ``s``
+    written into them in place, and NaN into the outputs ``outs`` (name -> tensor).  The inputs carry the operands and
+    ``outs``."""
+
+    def draw(s):
+        T, hidden = X.shape
+        for t, value in zip(
+            (X, W, G), _router_inputs(T, X.device, s, K=hidden), strict=True
+        ):
+            t.copy_(value)
+        nan_fill(outs.values())
+        return SimpleNamespace(X=X, W=W, G=G, outs=outs)
+
+    return draw
+
+
+def _n3_router_product(ops):
+    """``product(v, dtype)`` of :func:`judge_gemm` for router outputs: ``ops`` maps each output's name to its GEMM
+    (``fwd``: ``X @ W.T``, ``dgrad``: ``G @ W``, ``wgrad``: ``G.T @ X``), on the operands converted to ``dtype`` (the
+    FP32 operands rounded to BF16 for the naive tier)."""
+
+    def product(v, dtype):
+        X, W, G = v.X.to(dtype), v.W.to(dtype), v.G.to(dtype)
+        gemms = {"fwd": (X, W.t()), "dgrad": (G, W), "wgrad": (G.t(), X)}
+        done = {op: gemms[op][0] @ gemms[op][1] for op in set(ops.values())}
+        return {name: done[op] for name, op in ops.items()}
+
+    return product
+
+
+def test_gpu_router_token_windows_run_at_their_edges(record_property):
     """Unforced (no split count): at the first and the last token count of every token window
     of a router weight-gradient row of this architecture (the smallest measured count, 64, for a window other than
     SIMT that starts at one token; a SIMT window runs from its first token count) the prepared launch runs the
     program the planner gives -- the SIMT program of a SIMT window and
     the partition of a head/tail window on the measured SM count, a "waves" window's partition where
-    :func:`cake_backend.router_waves` gives one and no SIMT window holds the token count -- and meets the gate; one
-    token outside every window, or on another SM count, it runs the deterministic launch."""
+    :func:`cake_backend.router_waves` gives one and no SIMT window holds the token count -- and its output meets the
+    naive BF16 tier against FP64 (:func:`judge_gemm`); one token outside every window, or on another SM count, it
+    runs the deterministic launch."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     rules, measured = cake_backend.router_rules(arch, sm_count)
@@ -13009,46 +13147,89 @@ def test_gpu_router_token_windows_run_at_their_edges():
                     assert got == part, (hidden, T)
                 _assert_ran(prepared.launch, prepared.module_name)
                 torch.cuda.synchronize()
-                assert _rel_fro(out, A.double() @ B.double()) <= ROUTER_REL_FRO_MAX
+                what = f"wgrad {hidden} {T}"
+                judge_gemm(
+                    record_property,
+                    seed=SEED + 92,
+                    draw=_n3_router_draw(X, W, G, {what: out}),
+                    launch=_n3_launch(prepared.launch),
+                    product=_n3_router_product({what: "wgrad"}),
+                )
                 ran += 1
     print(f"ROUTER_WINDOW_EDGES {arch} sm_count={sm_count}: {ran} launches ran")
     if not ran:
         pytest.skip(f"no router token window of {arch} applies on {sm_count} SMs")
 
 
-def test_gpu_router_rows_without_a_verdict_run_the_deterministic_program_unplanned():
+def test_gpu_router_rows_without_a_verdict_run_the_deterministic_program_unplanned(
+    record_property,
+):
     """Without a split count on a router row without a verdict (the forward; the weight
-    gradient at a token count outside every window): the deterministic program's bits (its default split counts),
-    through this package's binding of it (``_K2_SPLITK_CACHE``); this package plans nothing for the call."""
+    gradient at a token count outside every window): the deterministic program (its default split counts), through
+    this package's binding of it (``_K2_SPLITK_CACHE``); this package plans nothing for the call.  The forward, the
+    weight gradient and the generic call of the forward's operands meet the naive BF16 tier against FP64
+    (:func:`judge_gemm`)."""
     device, arch = _atomic_device_or_skip()
+
+    def launch(v):
+        h = v.X.shape[1]
+        A, B, out = _router_case("fwd", v.X, v.W, v.G)
+        outs = {
+            f"forward {h}": cake_backend.cake_dense_gemm_nondet_train_router_forward(
+                v.X, v.W
+            ),
+            f"wgrad {h}": cake_backend.cake_dense_gemm_nondet_train_router_wgrad(
+                v.G, v.X
+            ),
+        }
+        assert cake_backend.cake_dense_gemm_nondet_train_router(A, B, out) is out
+        outs[f"generic {h}"] = out
+        torch.cuda.synchronize()
+        return outs
+
     for hidden in (4096, 5120, 6144):
         X, W, G = _router_inputs(8000, device, SEED + 23, K=hidden)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        fwd = cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
-        wgrad = cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X)
+        cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
+        cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X)
         assert not cake_backend._K2_ATOMIC_CACHE
         assert len(cake_backend._K2_SPLITK_CACHE) == 2
-        assert torch.equal(
-            fwd, det_backend.cake_dense_gemm_det_train_router_forward(X, W)
+        judge_gemm(
+            record_property,
+            seed=SEED + 23,
+            draw=_n3_router_draw(X, W, G, {}),
+            launch=launch,
+            product=_n3_router_product(
+                {
+                    f"forward {hidden}": "fwd",
+                    f"wgrad {hidden}": "wgrad",
+                    f"generic {hidden}": "fwd",
+                }
+            ),
         )
-        assert torch.equal(
-            wgrad, det_backend.cake_dense_gemm_det_train_router_wgrad(G, X)
-        )
-        A, B, out = _router_case("fwd", X, W, G)
-        assert cake_backend.cake_dense_gemm_nondet_train_router(A, B, out) is out
-        assert torch.equal(out, fwd) and not cake_backend._K2_ATOMIC_CACHE
+        assert not cake_backend._K2_ATOMIC_CACHE
 
 
-def test_gpu_router_split_rule_rows_run_the_deterministic_count():
+def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property):
     """A weight-gradient row of the deterministic package's ``ROUTER_SPLIT_RULES`` for this device, at the first and
     the last token count of its window where this package has neither a partition nor a SIMT window: the
     deterministic program at that package's count (its ``router_splits``), or at the count of this package's
     ``"det_s<n>"`` window where one holds (:func:`router_det_splits`), through this package's binding
-    (``_K2_SPLITK_CACHE``; no plan in ``_K2_ATOMIC_CACHE``), with the deterministic program's bits at that count on
-    repeated calls -- the partials reduced by this package's partial sum where it serves the count, else by
-    ``torch.sum``."""
+    (``_K2_SPLITK_CACHE``; no plan in ``_K2_ATOMIC_CACHE``) -- the partials reduced by this package's partial sum
+    where it serves the count, else by ``torch.sum`` -- and its output meets the naive BF16 tier against FP64
+    (:func:`judge_gemm`), on the first draw in each of two calls into a NaN-filled ``out``."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
+
+    def launch(v):
+        ((name, out),) = v.outs.items()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_router_wgrad(v.G, v.X, out)
+            is out
+        ), name
+        torch.cuda.synchronize()
+        return v.outs
+
     ran = 0
     for (rule_arch, sms, layout, hidden), windows in sorted(
         det_backend.ROUTER_SPLIT_RULES.items()
@@ -13063,22 +13244,20 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count():
                     or cake_backend.router_simt("nn_t", **kw) is not None
                 ):
                     continue  # this package's program
-                X, _, G = _router_inputs(T, device, SEED + 120, K=hidden)
+                X, W, G = _router_inputs(T, device, SEED + 120, K=hidden)
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
                 own_n = cake_backend.router_det_splits("nn_t", **kw) or splits
-                want = det_backend.cake_dense_gemm_det_train_router_wgrad(
-                    G, X, splits=own_n
-                )
                 out = torch.empty(256, hidden, device=device)
-                for _ in range(2):
-                    out.fill_(float("nan"))
-                    assert (
-                        cake_backend.cake_dense_gemm_nondet_train_router_wgrad(
-                            G, X, out
-                        )
-                        is out
-                    )
-                    assert torch.equal(out, want), (hidden, T)
+                what = f"wgrad {hidden} {T}"
+                judge_gemm(
+                    record_property,
+                    seed=SEED + 120,
+                    draw=_n3_router_draw(X, W, G, {what: out}),
+                    launch=launch,
+                    product=_n3_router_product({what: "wgrad"}),
+                    launches=2,
+                    poison=_n3_outs,
+                )
                 (entry,) = cake_backend._K2_SPLITK_CACHE.values()
                 assert entry.plan.splits == own_n, (hidden, T)
                 served = own_n in cake_backend.PARTIALS_SUM_SPLITS
@@ -13093,12 +13272,17 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count():
         )
 
 
-def test_gpu_router_verdicts_set_at_run_time_are_seen(monkeypatch):
+def test_gpu_router_verdicts_set_at_run_time_are_seen(
+    record_property, monkeypatch
+):
     """The convenience path keeps whether a router row has a verdict (per device and view geometry) and whether any
     router table gives the forward one until a router table changes: on a row without a verdict at the call's token
-    count the forward and the weight gradient give the deterministic program's bits (unplanned, also on the second call, from the memo); a
-    verdict set at run time in the table of the device's SM count runs this package's program at the next call,
-    without clearing a cache, and its removal the deterministic program again."""
+    count the forward and the weight gradient run the deterministic program (unplanned: nothing in
+    ``_K2_ATOMIC_CACHE``, also on the second call, from the memo); a verdict set at run time in the table of the
+    device's SM count runs this package's program at the next call (by kernel name), without clearing a cache, and
+    its removal the deterministic program again (no entry of ``_K2_ENTRY_CACHE`` bound to this package's program).  In
+    each of the three phases the forward and the weight gradient meet the naive BF16 tier against FP64
+    (:func:`judge_gemm`)."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     table, _ = cake_backend.router_rules(arch, sm_count)
@@ -13116,24 +13300,6 @@ def test_gpu_router_verdicts_set_at_run_time_are_seen(monkeypatch):
         )
         assert spec is None, (layout, spec)
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-    want_fwd = det_backend.cake_dense_gemm_det_train_router(
-        X, W.t(), torch.empty(T, 256, device=device)
-    )
-    want_wgrad = det_backend.cake_dense_gemm_det_train_router(
-        G.t(), X, torch.empty(256, hidden, device=device)
-    )
-
-    def unplanned():
-        for _ in range(2):
-            fwd = cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
-            wgrad = cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X)
-            assert torch.equal(fwd, want_fwd) and torch.equal(wgrad, want_wgrad)
-        assert not cake_backend._K2_ATOMIC_CACHE
-
-    unplanned()
-    monkeypatch.setitem(table, keys["fwd"], "forward")
-    monkeypatch.setitem(table, keys["wgrad"], "pairs")
-    ref_fwd, ref_wgrad = X.double() @ W.double().t(), G.double().t() @ X.double()
 
     def fwd():
         return cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
@@ -13141,29 +13307,47 @@ def test_gpu_router_verdicts_set_at_run_time_are_seen(monkeypatch):
     def wgrad():
         return cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X)
 
-    for op, A, B, ref, call in (
-        ("fwd", X, W.t(), ref_fwd, fwd),
-        ("wgrad", G.t(), X, ref_wgrad, wgrad),
+    def judged(phase, launches):
+        """Judge the forward and the weight gradient of ``phase``, ``launches`` calls each on the first draw."""
+        judge_gemm(
+            record_property,
+            seed=SEED + 26,
+            draw=_n3_router_draw(X, W, G, {}),
+            launch=lambda v: {f"forward {phase}": fwd(), f"wgrad {phase}": wgrad()},
+            product=_n3_router_product(
+                {f"forward {phase}": "fwd", f"wgrad {phase}": "wgrad"}
+            ),
+            launches=launches,
+        )
+
+    judged("without a verdict", 2)
+    assert not cake_backend._K2_ATOMIC_CACHE
+    monkeypatch.setitem(table, keys["fwd"], "forward")
+    monkeypatch.setitem(table, keys["wgrad"], "pairs")
+    for op, A, B, call in (
+        ("fwd", X, W.t(), fwd),
+        ("wgrad", G.t(), X, wgrad),
     ):
         out = torch.empty(A.shape[0], B.shape[1], device=device)
         plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
         assert isinstance(plan, cake_backend.CakeDenseGemmNondetRouterPlan), op
         _assert_ran(call, cake_jit.select_module(arch, plan.template))
-        assert _rel_fro(call(), ref) <= ROUTER_REL_FRO_MAX, op
-    first = fwd()
-    assert torch.equal(fwd(), first)
+    judged("with a verdict", 1)
     assert len(cake_backend._K2_ATOMIC_CACHE) == 2
     table[keys["fwd"]] = None
     table[keys["wgrad"]] = None
-    for _ in range(2):
-        assert torch.equal(fwd(), want_fwd) and torch.equal(wgrad(), want_wgrad)
+    judged("after its removal", 2)
+    assert not any(e.atomic for e in cake_backend._K2_ENTRY_CACHE.values())
 
 
-def test_gpu_router_verdict_changed_at_run_time_runs_the_new_program(monkeypatch):
+def test_gpu_router_verdict_changed_at_run_time_runs_the_new_program(
+    record_property, monkeypatch
+):
     """A weight-gradient verdict changed from one program to another between calls of the same tensors: the next call
     -- through ``cake_dense_gemm_nondet_train_router_wgrad`` and through ``cake_dense_gemm_nondet_train_router`` -- runs the program the planner gives under the new
     verdict (the stream-K ``"pairs"`` partition, then a SIMT tile this checkout registers for the architecture, else
-    two units per tile), within the router budget, without clearing a cache."""
+    two units per tile), without clearing a cache, and its output meets the naive BF16 tier against FP64
+    (:func:`judge_gemm`)."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     table, _ = cake_backend.router_rules(arch, sm_count)
@@ -13171,9 +13355,8 @@ def test_gpu_router_verdict_changed_at_run_time_runs_the_new_program(monkeypatch
         # a verdict of ROUTER_RULES applies on this device whatever its SM count
         monkeypatch.setitem(cake_backend.ROUTER_SM_COUNT, arch, sm_count)
     hidden, T = 6144, 1000
-    X, _, G = _router_inputs(T, device, SEED + 28, K=hidden)
+    X, W, G = _router_inputs(T, device, SEED + 28, K=hidden)
     A, B = G.t(), X
-    ref = A.double() @ B.double()
     out = torch.empty(256, hidden, device=device)
     simt = next(
         (
@@ -13193,62 +13376,84 @@ def test_gpu_router_verdict_changed_at_run_time_runs_the_new_program(monkeypatch
         monkeypatch.setitem(table, (arch, "nn_t", hidden, 256), ((1, T, spec),))
         plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
         assert isinstance(plan, cake_backend.CakeDenseGemmNondetRouterPlan), spec
-        for call in calls:
+        for name, call in zip(("router_wgrad", "router"), calls, strict=True):
             _assert_ran(call, cake_jit.select_module(arch, plan.template))
-            assert _rel_fro(call(), ref) <= ROUTER_REL_FRO_MAX, spec
+            what = f"{spec} {name}"
+            judge_gemm(
+                record_property,
+                seed=SEED + 28,
+                draw=_n3_router_draw(X, W, G, {what: out}),
+                launch=_n3_launch(call),
+                product=_n3_router_product({what: "wgrad"}),
+            )
         cached = [e.plan for e in cake_backend._K2_ATOMIC_CACHE.values()]
         assert cached and all(p == plan for p in cached), spec
         plans.append(plan)
     assert plans[0] != plans[1]
 
 
-def test_gpu_router_deterministic_program_through_the_binding():
+def test_gpu_router_deterministic_program_through_the_binding(record_property):
     """Calls of this package that run the deterministic program -- the forward and the input gradient, the
     weight gradient of a row without a verdict, the generic ``kn`` call -- go through this package's binding
-    (``_K2_SPLITK_CACHE``; nothing in ``_K2_ATOMIC_CACHE``) and give the deterministic package's bits: dense and
-    padded outputs (one split stores into a padded ``out`` through its flat alias, several splits reduce into it), a
-    split source with padded rows (the torch chain), repeated calls; a larger row grows the arena and the smaller
-    rows' launches are carved again with the same bits; another stream binds an arena of its own; a binding the
+    (``_K2_SPLITK_CACHE``; nothing in ``_K2_ATOMIC_CACHE``) and their outputs meet the naive BF16 tier against FP64
+    (:func:`judge_gemm`; on the first draw in each of two calls into NaN-filled outputs): dense and padded outputs (one
+    split stores into a padded ``out`` through its flat alias, several splits reduce into it; the padding stays
+    untouched), a split source with padded rows (the torch chain), repeated calls; a larger row grows the arena and
+    the smaller rows' launches are carved again; another stream binds an arena of its own; a binding the
     deterministic package refuses raises its error."""
     device, arch = _atomic_device_or_skip()
     # no router verdict on any architecture from 257 to 16171 tokens (the SIMT windows end at 256 tokens or before)
     hidden = 6144
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
 
-    def check(T, seed, pad_out=False, pad_g=False):
+    def check(T, seed, pad_out=False, pad_g=False, label=""):
         X, W, G = _router_inputs(T, device, seed, K=hidden)
         if pad_g:
             G = torch.cat([G, torch.zeros(T, 16, device=device)], 1)[:, :256]
-        shapes = {"fwd": (T, 256), "dgrad": (T, hidden), "wgrad": (256, hidden)}
-        # op -> (the deterministic package's call, this package's call)
+        what = f"T={T}" + " padded out" * pad_out + " padded G" * pad_g + label
+        shapes = {
+            "fwd": (T, 256),
+            "dgrad": (T, hidden),
+            "wgrad": (256, hidden),
+            "kn": (T, hidden),
+        }
+        # op -> (this package's call, the GEMM it computes); ``kn``: the generic call, never into a padded ``out``
         # fmt: off
         calls = {
-            "fwd": (lambda out: det_backend.cake_dense_gemm_det_train_router_forward(X, W, out),
-                    lambda out: cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, out)),
-            "dgrad": (lambda out: det_backend.cake_dense_gemm_det_train_router_dgrad(G, W, out),
-                      lambda out: cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, out)),
-            "wgrad": (lambda out: det_backend.cake_dense_gemm_det_train_router_wgrad(G, X, out),
-                      lambda out: cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, out)),
+            "fwd": (lambda out: cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, out), "fwd"),
+            "dgrad": (lambda out: cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, out), "dgrad"),
+            "wgrad": (lambda out: cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, out), "wgrad"),
+            "kn": (lambda out: cake_backend.cake_dense_gemm_nondet_train_router(G, W, out), "dgrad"),
         }
         # fmt: on
-        for op, (det_call, call) in calls.items():
-            rows, cols = shapes[op]
-            if pad_out:
-                storage = torch.full((rows, cols + 64), 7.0, device=device)
-                out = storage[:, :cols]
+        outs, storages = {}, {}
+        for op, (rows, cols) in shapes.items():
+            if pad_out and op != "kn":
+                storages[op] = torch.full((rows, cols + 64), 7.0, device=device)
+                outs[f"{op} {what}"] = storages[op][:, :cols]
             else:
-                out = torch.empty(rows, cols, device=device)
-            want = det_call(out).clone()
-            for _ in range(2):
-                out.fill_(float("nan"))
-                assert call(out) is out
-                assert torch.equal(out, want), (op, T, pad_out, pad_g)
-            if pad_out:
-                assert bool((storage[:, cols:] == 7.0).all()), op
-        out = torch.empty(T, hidden, device=device)
-        want = det_backend.cake_dense_gemm_det_train_router(G, W, out.clone())
-        assert cake_backend.cake_dense_gemm_nondet_train_router(G, W, out) is out
-        assert torch.equal(out, want)
+                outs[f"{op} {what}"] = torch.empty(rows, cols, device=device)
+
+        def launch(v):
+            for op, (call, _) in calls.items():
+                out = v.outs[f"{op} {what}"]
+                assert call(out) is out, (op, what)
+            torch.cuda.synchronize()
+            return v.outs
+
+        judge_gemm(
+            record_property,
+            seed=seed,
+            draw=_n3_router_draw(X, W, G, outs),
+            launch=launch,
+            product=_n3_router_product(
+                {f"{op} {what}": gemm for op, (_, gemm) in calls.items()}
+            ),
+            launches=2,
+            poison=_n3_outs,
+        )
+        for op, storage in storages.items():
+            assert bool((storage[:, shapes[op][1] :] == 7.0).all()), op
 
     variants = ((320, False, False), (1000, True, False), (1000, False, True))
     for T, pad_out, pad_g in variants:
@@ -13265,12 +13470,12 @@ def test_gpu_router_deterministic_program_through_the_binding():
     assert any(e.split_entry is None for e in entries)  # the padded split source
     versions = {id(e): e.k2.version for e in entries}
     check(8000, SEED + 71)  # a larger row: the arena grows
-    check(320, SEED + 70 + 320)
+    check(320, SEED + 70 + 320, label=" after the growth")
     assert any(e.k2.version != versions[id(e)] for e in entries)
     stream = torch.cuda.Stream(device)
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        check(1000, SEED + 72)
+        check(1000, SEED + 72, label=" on another stream")
     torch.cuda.synchronize()
     assert stream.cuda_stream in {key[1] for key in cake_backend._ATOMIC_ARENAS}
     # a binding the deterministic package refuses: its error
