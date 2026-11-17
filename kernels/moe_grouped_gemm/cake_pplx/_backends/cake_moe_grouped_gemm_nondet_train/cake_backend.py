@@ -1244,6 +1244,8 @@ HOST_ARGUMENTS: dict[str, frozenset[str]] = {
             "K",
             "ldc",
             "stride_e",
+            "lda",
+            "ldb",
             "wave_mode",
         )
     ),
@@ -1265,19 +1267,14 @@ HOST_ARGUMENTS: dict[str, frozenset[str]] = {
 }
 # Row-base buffers: a program may take the base of an operand again under this name, besides its TMA
 # descriptor.  The kernel build reads rows through it only in its sm_107a override (``ROW_BASE_READ_ARCHS``),
-# which takes the row pitch to be the row width, so the operand must have dense rows there.  On another
-# architecture the build never reads it, and the host binds a one-element view of the operand: no copy, any
-# row stride, safe under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave`` programs take
-# row bases; only the ``main`` build for sm_107a reads them.)
+# at the row pitches ``lda`` / ``ldb`` (the operands' row strides, which the weight-gradient binding passes):
+# the host binds the operand itself when its rows are dense, else the flat span of its rows.  On another
+# architecture the build never reads it, and the host binds a one-element view of the operand.  Either way: no
+# copy, any row stride, safe under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave``
+# programs take row bases; only the ``main`` build for sm_107a reads them.)
 ROW_BASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
 GRID_ARGUMENTS = ("grid_x", "grid_y", "grid_z")
-# The caller's names of the operands ``A`` / ``B`` per operation, for error messages.
-_OPERAND_NAMES = {
-    "fwd": {"A": "x", "B": "w"},
-    "dgrad": {"A": "g", "B": "w"},
-    "wgrad": {"A": "g", "B": "x"},
-}
 
 
 def host_binding(op: str, stage: str) -> str:
@@ -1295,22 +1292,18 @@ def bindable_arguments(op: str, stage: str) -> frozenset[str]:
     return host | set(STREAM_WORKSPACES) | rows | set(GRID_ARGUMENTS)
 
 
-def _row_base(
-    t: torch.Tensor, op: str, operand: str, program: str, stage: str, arch: str
-) -> torch.Tensor:
-    """The row-base argument of ``operand`` (``t``, two or more dimensions) for a launch on ``arch``: ``t``
-    itself where the build reads rows through it (``ROW_BASE_READ_ARCHS``), refused unless its rows are dense
-    (row stride = row width; a single row has any stride); else a one-element view at ``t``'s first element."""
+def _row_base(t: torch.Tensor, arch: str) -> torch.Tensor:
+    """The row-base argument of an operand ``t`` (two or more dimensions) for a launch on ``arch``.  Where the
+    build reads rows through it (``ROW_BASE_READ_ARCHS``): ``t`` itself when its rows are dense (row stride =
+    row width; a single row has any stride), else the flat span of its rows (``(rows - 1) * row stride + row
+    width`` elements from ``t``'s first element), which the build addresses at the row pitch the binding passes
+    with it (``lda`` / ``ldb``; the binding refuses a pitch the build cannot take, as the TMA descriptor of the
+    operand does).  Elsewhere a one-element view at ``t``'s first element."""
     if arch not in ROW_BASE_READ_ARCHS:
         return t.as_strided((1,), (1,))
-    if t.size(-2) > 1 and t.stride(-2) != t.size(-1):
-        label = _OPERAND_NAMES.get(op, {}).get(operand, operand)
-        raise ValueError(
-            f"{op}: {label} must have dense rows (row stride {t.size(-1)}, got {t.stride(-2)}): the {arch} "
-            f"build of the {stage!r} stage ({program}) also reads its rows through a plain pointer; pass "
-            f"{label}.contiguous()"
-        )
-    return t
+    if t.size(-2) <= 1 or t.stride(-2) == t.size(-1):
+        return t
+    return t.as_strided(((t.size(-2) - 1) * t.stride(-2) + t.size(-1),), (1,))
 
 
 # Stream workspaces (module docstring): one buffer per (kind, device index,
@@ -1813,16 +1806,7 @@ def _bind(
             slots.append((len(arguments), kinds.get(arg, arg), size))
             arguments.append(None)
         elif kind == "buffer" and arg in ROW_BASES and ROW_BASES[arg] in kwargs:
-            arguments.append(
-                _row_base(
-                    kwargs[ROW_BASES[arg]],
-                    op,
-                    ROW_BASES[arg],
-                    binding["program"],
-                    stage,
-                    arch,
-                )
-            )
+            arguments.append(_row_base(kwargs[ROW_BASES[arg]], arch))
         elif arg in kwargs:
             arguments.append(kwargs[arg])
         else:
@@ -2327,6 +2311,8 @@ def _prepare_wgrad(
         K=k,
         ldc=int(target.stride(1)),
         stride_e=int(target.stride(0)),
+        lda=int(g.stride(0)),
+        ldb=int(x.stride(0)),
         wave_mode=plan["wave_mode"],
         grid=plan["grid"],
     )

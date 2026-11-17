@@ -934,10 +934,13 @@ except AttributeError:  # pragma: no cover - older torch
 STREAM_WORKSPACES = ("sched", "wave_sync")
 # Arguments a generated program may name beside the operands it addresses through TMA descriptors: the
 # operands' row-addressed bases, the same tensors as ``A`` / ``B`` (``_bind`` passes them where the
-# argument plan names them).  A build on an architecture outside ``ROW_BASE_READ_ARCHS`` never reads its
-# row bases, and the host binds a one-element view of the operand there: no copy, any row stride, safe
-# under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave`` programs take row bases;
-# only the ``main`` build for sm_107a reads them.)
+# argument plan names them).  A build on an architecture of ``ROW_BASE_READ_ARCHS`` reads rows through
+# them at the row pitches ``lda`` / ``ldb`` (the operands' row strides, which the weight-gradient binding
+# passes with them): the host binds the operand itself when its rows are dense, else the flat span of its
+# rows.  A build on another architecture never reads its row bases, and the host binds a one-element view
+# of the operand there.  Either way: no copy, any row stride, safe under CUDA graph capture.  (The 256-wide
+# k tile's ``main`` and ``main_wave`` programs take row bases; only the ``main`` build for sm_107a reads
+# them.)
 OPERAND_ALIASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
 # Stream workspaces (module docstring): one buffer per (kind, device index,
@@ -1339,19 +1342,18 @@ def _aligned_bytes(nbytes: int, device: torch.device, what: str) -> torch.Tensor
     return ws
 
 
-def _row_base(t: torch.Tensor, operand: str, program: str, arch: str) -> torch.Tensor:
-    """The row-base argument of ``operand`` (``t``, two or more dimensions) for a launch on ``arch``: ``t``
-    itself where the build reads rows through it (``ROW_BASE_READ_ARCHS``), refused unless its rows are
-    dense (row stride = row width; a single row has any stride); else a one-element view at ``t``'s first
-    element."""
+def _row_base(t: torch.Tensor, arch: str) -> torch.Tensor:
+    """The row-base argument of an operand ``t`` (two or more dimensions) for a launch on ``arch``.  Where
+    the build reads rows through it (``ROW_BASE_READ_ARCHS``): ``t`` itself when its rows are dense (row
+    stride = row width; a single row has any stride), else the flat span of its rows (``(rows - 1) * row
+    stride + row width`` elements from ``t``'s first element), which the build addresses at the row pitch
+    the binding passes with it (``lda`` / ``ldb``; the binding refuses a pitch the build cannot take, as
+    the TMA descriptor of the operand does).  Elsewhere a one-element view at ``t``'s first element."""
     if arch not in ROW_BASE_READ_ARCHS:
         return t.as_strided((1,), (1,))
-    if t.size(-2) > 1 and t.stride(-2) != t.size(-1):
-        raise ValueError(
-            f"{operand} must have dense rows (row stride {t.size(-1)}, got {t.stride(-2)}): the {arch} "
-            f"build {program} also reads its rows through a plain pointer; pass a contiguous tensor"
-        )
-    return t
+    if t.size(-2) <= 1 or t.stride(-2) == t.size(-1):
+        return t
+    return t.as_strided(((t.size(-2) - 1) * t.stride(-2) + t.size(-1),), (1,))
 
 
 def _bind(
@@ -1377,14 +1379,7 @@ def _bind(
         elif arg in kwargs:
             arguments.append(kwargs[arg])
         elif OPERAND_ALIASES.get(arg) in kwargs:
-            arguments.append(
-                _row_base(
-                    kwargs[OPERAND_ALIASES[arg]],
-                    OPERAND_ALIASES[arg],
-                    binding["program"],
-                    arch,
-                )
-            )
+            arguments.append(_row_base(kwargs[OPERAND_ALIASES[arg]], arch))
         else:
             raise KeyError(
                 f"generated program {binding['program']!r} (route {name!r}, stage {stage!r}) "
@@ -1864,6 +1859,8 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
         K=k,
         ldc=int(target.stride(1)),
         stride_e=int(target.stride(0)),
+        lda=int(g.stride(0)),
+        ldb=int(x.stride(0)),
         wave_mode=plan["wave_mode"],
         grid=plan["grid"],
     )

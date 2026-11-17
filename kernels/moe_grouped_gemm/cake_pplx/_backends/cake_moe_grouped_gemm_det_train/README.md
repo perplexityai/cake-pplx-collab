@@ -32,9 +32,7 @@ Alignment: `fwd` needs `N % 256 == 0` and `K % 64 == 0`; `dgrad` needs
 `K % 256 == 0` and `N % 64 == 0`; `wgrad` needs `N % 256 == 0` and `K` a
 multiple of its k tile (256, or 512 when selected, see below). Outputs may be
 row-padded (any leading strides, unit stride along the last dimension); the
-padding is never written. On `sm_107a` the weight gradient with the 256-wide
-k tile also reads `g` and `x` through plain row pointers, so there both need
-dense rows (row stride equal to the row width; `ValueError` otherwise).
+padding is never written.
 
 Numerics: fp32 tensor-core accumulation with one bf16 rounding at the store
 (the fp32 weight-gradient variant stores the accumulator); bitwise
@@ -538,7 +536,8 @@ architecture-dependent line is folded under `__CUDA_ARCH__`):
 - the weight-gradient main kernel with a 256- or 512-wide k tile (the routes'
   `main` stage): the 512-wide one for `sm_100a` and `sm_103a`, the 256-wide
   one in two builds, one for `sm_100a` and `sm_103a` and one for `sm_107a`
-  that also reads the operands' rows through `A_rows` / `B_rows` (above).
+  that also reads the rows of `g` and `x` through `A_rows` / `B_rows` at
+  their row strides, which the host passes as `lda` / `ldb`.
 - the weight-gradient tail-reduce, one kernel for both k tiles.
 
 The host launches a stage only where the constants above list the

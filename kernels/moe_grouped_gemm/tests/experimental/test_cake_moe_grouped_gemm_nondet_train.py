@@ -958,29 +958,29 @@ def test_every_program_argument_is_bound_by_the_host():
                     assert kind == "tma_buffer", where
 
 
-@pytest.mark.parametrize(
-    "op,operand,label", [("wgrad", "A", "g"), ("wgrad", "B", "x"), ("fwd", "A", "x")]
-)
-def test_row_base_arguments(op, operand, label):
+def test_row_base_arguments():
     """Where the build never reads a row base (not ``ROW_BASE_READ_ARCHS``) the row base of
     an operand is a one-element view at its first element, whatever its row stride (no
-    copy); where the build reads it, the operand itself, refused with a ``ValueError``
-    naming the caller's tensor unless its rows are dense (a single row may have any
-    stride)."""
+    copy); where the build reads it, the operand itself when its rows are dense (a single
+    row may have any stride), else the flat span of its rows from its first element to
+    its last (no copy; the build reads it at the row pitch the binding passes, ``lda`` /
+    ``ldb``)."""
     padded = torch.zeros(5, 136, dtype=torch.bfloat16)[1:, 8:72]
     for arch in ("sm_100a", "sm_103a", "sm_107a"):
         if arch in cb.ROW_BASE_READ_ARCHS:
             continue
-        view = cb._row_base(padded, op, operand, "program", "main_wave", arch)
+        view = cb._row_base(padded, arch)
         assert view.shape == (1,) and view.is_contiguous(), arch
         assert view.data_ptr() == padded.data_ptr(), arch
     for arch in cb.ROW_BASE_READ_ARCHS:
         dense = torch.zeros(4, 64, dtype=torch.bfloat16)
-        assert cb._row_base(dense, op, operand, "program", "main_wave", arch) is dense
+        assert cb._row_base(dense, arch) is dense
         single = torch.zeros(1, 128, dtype=torch.bfloat16)[:, :64]
-        assert cb._row_base(single, op, operand, "program", "main_wave", arch) is single
-        with pytest.raises(ValueError, match=f"{label} must have dense rows"):
-            cb._row_base(padded, op, operand, "program", "main_wave", arch)
+        assert cb._row_base(single, arch) is single
+        span = cb._row_base(padded, arch)
+        assert span.shape == (3 * 136 + 64,) and span.stride() == (1,), arch
+        assert span.is_contiguous() and span.data_ptr() == padded.data_ptr(), arch
+        assert span[-1].data_ptr() == padded[-1, -1].data_ptr(), arch
 
 
 class _NoModule:
@@ -994,8 +994,9 @@ def test_bind_accepts_row_strided_operands_of_the_row_base_programs(monkeypatch)
     """``_bind`` binds every program of the registry that takes row bases for row-strided
     operands (the leading columns of wider tensors): on an architecture whose build never
     reads them the row base is a one-element view at the operand's first element; on one
-    whose build reads them (``ROW_BASE_READ_ARCHS``) a row-strided operand is refused and
-    a dense one bound as is.  Static: the rendered tables, no program is loaded."""
+    whose build reads them (``ROW_BASE_READ_ARCHS``) a row-strided operand is bound as the
+    flat span of its rows and a dense one as is.  Static: the rendered tables, no program
+    is loaded."""
     monkeypatch.setattr(cb, "load_module", lambda *args, **kwargs: _NoModule())
     bound = 0
     for name, route in ROUTES.items():
@@ -1013,20 +1014,24 @@ def test_bind_accepts_row_strided_operands_of_the_row_base_programs(monkeypatch)
                 kwargs["A"] = torch.zeros(16, 80, dtype=torch.bfloat16)[:, :64]
                 kwargs["B"] = torch.zeros(16, 144, dtype=torch.bfloat16)[:, :128]
                 kwargs["grid"] = [1, 1, 1]
-                if arch in cb.ROW_BASE_READ_ARCHS:
-                    with pytest.raises(ValueError, match="dense rows"):
-                        cb._bind(name, stage["name"], kwargs, arch)
-                    kwargs["A"] = kwargs["A"].contiguous()
-                    kwargs["B"] = kwargs["B"].contiguous()
                 launch = cb._bind(name, stage["name"], kwargs, arch)
                 for arg in rows:
                     value = launch.arguments[plan_args.index(arg)]
                     operand = kwargs[cb.ROW_BASES[arg]]
                     assert value.data_ptr() == operand.data_ptr(), (name, arch, arg)
                     if arch in cb.ROW_BASE_READ_ARCHS:
-                        assert value is operand, (name, arch, arg)
+                        span = (operand.size(0) - 1) * operand.stride(0) + operand.size(1)
+                        assert value.shape == (span,) and value.is_contiguous()
                     else:
                         assert value.shape == (1,) and value.is_contiguous()
+                if arch in cb.ROW_BASE_READ_ARCHS:
+                    dense = dict(
+                        kwargs, A=kwargs["A"].contiguous(), B=kwargs["B"].contiguous()
+                    )
+                    launch = cb._bind(name, stage["name"], dense, arch)
+                    for arg in rows:
+                        value = launch.arguments[plan_args.index(arg)]
+                        assert value is dense[cb.ROW_BASES[arg]], (name, arch, arg)
                 bound += 1
     if not bound:
         pytest.skip("no program of the registry takes row bases")

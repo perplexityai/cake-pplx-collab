@@ -783,6 +783,8 @@ WGRAD_MAIN_ARGUMENTS = {
     "K",
     "ldc",
     "stride_e",
+    "lda",
+    "ldb",
     "wave_mode",
 }
 TAIL_ARGUMENTS = {
@@ -831,7 +833,8 @@ def test_argument_plans_name_only_bound_arguments():
 def test_bind_passes_each_operand_alias_its_operand(monkeypatch):
     """A program whose argument plan names ``A_rows`` / ``B_rows`` gets the row bases of
     the tensors the host binds as ``A`` / ``B``, in the plan's order: on an architecture
-    of ``ROW_BASE_READ_ARCHS`` the tensor itself, refused unless its rows are dense;
+    of ``ROW_BASE_READ_ARCHS`` the tensor itself when its rows are dense, else the flat
+    span of its rows (no copy; the build reads it at the row pitch ``lda`` / ``ldb``);
     elsewhere a one-element view at its first element, whatever its row stride (the
     build does not read it).  An argument the host does not bind is refused with a
     ``KeyError`` naming it."""
@@ -879,8 +882,13 @@ def test_bind_passes_each_operand_alias_its_operand(monkeypatch):
     assert launch.arguments[0] is padded
     assert launch.arguments[1].shape == (1,)
     assert launch.arguments[1].data_ptr() == padded.data_ptr()
-    with pytest.raises(ValueError, match="dense rows"):
-        cb._bind("alias_probe", "main", dict(kwargs, A=padded), "sm_107a")
+    launch = cb._bind("alias_probe", "main", dict(kwargs, A=padded), "sm_107a")
+    assert launch.arguments[0] is padded
+    span = launch.arguments[1]
+    assert span.shape == (3 * 16 + 8,) and span.stride() == (1,)
+    assert span.is_contiguous() and span.data_ptr() == padded.data_ptr()
+    assert span[-1].data_ptr() == padded[-1, -1].data_ptr()
+    assert launch.arguments[2] is b
     arg_plan.insert(1, ["buffer", "C_rows"])
     with pytest.raises(KeyError, match="C_rows"):
         cb._bind("alias_probe", "main", kwargs, "sm_100a")
