@@ -291,6 +291,15 @@ kernel_cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn__h7168(__nv_bfloat16* __r
     gc[0] = bid;
     int own_last[1];
     own_last[0] = 0;
+#if __CUDA_ARCH__ == 1030
+    float pend[2];
+    #pragma unroll
+    for (int e = 0; e < 2; e++) {
+        pend[e] = 0.0f;
+    }
+    int pgb[1];
+    pgb[0] = 0;
+#endif
     int ring_grp = 0;
     unsigned int _phase_tk_full = 0;
     #pragma unroll 1
@@ -330,6 +339,12 @@ kernel_cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn__h7168(__nv_bfloat16* __r
         int gnext_in = g_end;
         unsigned int gvalid = ((dyn_on) ? (unsigned int)(n_groups - grid) : 0);
         unsigned int gpub = ((drawn < gvalid) ? drawn + (unsigned int)grid : (unsigned int)n_groups);
+#if __CUDA_ARCH__ == 1030
+        if (gi[0] > 0) {
+            gfold[pgb[0] + lane_1] = pend[0];
+            gfold[pgb[0] + 32 + lane_1] = pend[1];
+        }
+#endif
         int tokc = ((tok < t1) ? tok : t_last);
         long long tok64 = (long long)tokc;
         float dp[1];
@@ -7930,14 +7945,25 @@ kernel_cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn__h7168(__nv_bfloat16* __r
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + 2ll + lane64])), "f"(_add_1), "r"((unsigned int)(tok < t1 && lane_1 < 4)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(c_37), "r"((unsigned int)(tok < t1 && (lane_1 >= 8 && lane_1 < 24))) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(0.0f), "r"((unsigned int)(tok < t1 && (lane_1 >= 24 && lane_1 < 26))) : "memory");
+#if __CUDA_ARCH__ == 1030
+        pend[0] = ((tok < t1) ? da_0 : 0.0f);
+        pend[1] = ((tok < t1) ? daz : 0.0f);
+        pgb[0] = (gi[0] & 1) * 512 + warp_0 * 64;
+#else
         gfold[(gi[0] & 1) * 512 + warp_0 * 64 + lane_1] = ((tok < t1) ? da_0 : 0.0f);
         gfold[(gi[0] & 1) * 512 + warp_0 * 64 + 32 + lane_1] = ((tok < t1) ? daz : 0.0f);
+#endif
         if (gi[0] > 0) {
             if (warp_0 == (gi[0] & 7)) {
                 float o[2];
                 #pragma unroll
+#if __CUDA_ARCH__ == 1030
+                for (int e_1 = 0; e_1 < 2; e_1++) {
+                    o[e_1] = 0.0f;
+#else
                 for (int e = 0; e < 2; e++) {
                     o[e] = 0.0f;
+#endif
                 }
                 #pragma unroll
                 for (int w = 0; w < 8; w++) {
@@ -7985,12 +8011,21 @@ kernel_cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn__h7168(__nv_bfloat16* __r
         mbarrier_wait(ring_bar_addr + (st_b) * 8, 0);
     }
     if (lo < hi) {
+#if __CUDA_ARCH__ == 1030
+        gfold[pgb[0] + lane_1] = pend[0];
+        gfold[pgb[0] + 32 + lane_1] = pend[1];
+#endif
         __syncthreads();
         if (warp_0 == (gi[0] & 7)) {
             float o_1[2];
             #pragma unroll
+#if __CUDA_ARCH__ == 1030
+            for (int e_2 = 0; e_2 < 2; e_2++) {
+                o_1[e_2] = 0.0f;
+#else
             for (int e_1 = 0; e_1 < 2; e_1++) {
                 o_1[e_1] = 0.0f;
+#endif
             }
             #pragma unroll
             for (int w_1 = 0; w_1 < 8; w_1++) {

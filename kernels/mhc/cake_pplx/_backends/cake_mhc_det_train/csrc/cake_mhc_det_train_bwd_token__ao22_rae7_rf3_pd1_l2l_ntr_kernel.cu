@@ -203,6 +203,11 @@ kernel_cake_mhc_det_train_bwd_token__ao22_rae7_rf3_pd1_l2l_ntr(__nv_bfloat16* __
     for (int e = 0; e < 2; e++) {
         acc[e] = 0.0f;
     }
+    float pend[2];
+    #pragma unroll
+    for (int e_1 = 0; e_1 < 2; e_1++) {
+        pend[e_1] = 0.0f;
+    }
     long long wcol = (long long)warp_0 * 512ll;
     unsigned int lane32 = (unsigned int)(lane_1 * 32);
     int st__1_0 = warp_0 * 2;
@@ -5214,15 +5219,23 @@ kernel_cake_mhc_det_train_bwd_token__ao22_rae7_rf3_pd1_l2l_ntr(__nv_bfloat16* __
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + 2ll + lane64])), "f"(_add_1), "r"((unsigned int)(tok < t1 && lane_1 < 4)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(c_37), "r"((unsigned int)(tok < t1 && (lane_1 >= 8 && lane_1 < 24))) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(0.0f), "r"((unsigned int)(tok < t1 && (lane_1 >= 24 && lane_1 < 26))) : "memory");
-        float _add_2;
-        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_2) : "f"(acc[0]), "f"(da_0));
-        acc[0] = ((tok < t1) ? _add_2 : acc[0]);
-        float _add_4;
-        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_4) : "f"(acc[1]), "f"(daz));
-        acc[1] = ((tok < t1) ? _add_4 : acc[1]);
+        float _add_765;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_765) : "f"(acc[0]), "f"(pend[0]));
+        acc[0] = _add_765;
+        float _add_766;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_766) : "f"(acc[1]), "f"(pend[1]));
+        acc[1] = _add_766;
+        pend[0] = ((tok < t1) ? da_0 : 0.0f);
+        pend[1] = ((tok < t1) ? daz : 0.0f);
         gi[0] = gi[0] + 1;
         ring_grp += 1;
     }
+    float _add_767;
+    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_767) : "f"(acc[0]), "f"(pend[0]));
+    acc[0] = _add_767;
+    float _add_768;
+    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_768) : "f"(acc[1]), "f"(pend[1]));
+    acc[1] = _add_768;
     int fbase = (warp_0 * 32 + lane_1) * 2;
     fold[fbase] = acc[0];
     fold[fbase + 1] = acc[1];
@@ -5231,18 +5244,18 @@ kernel_cake_mhc_det_train_bwd_token__ao22_rae7_rf3_pd1_l2l_ntr(__nv_bfloat16* __
         long long prow = (long long)bid * 32ll;
         float o[2];
         #pragma unroll
-        for (int e_1 = 0; e_1 < 2; e_1++) {
-            o[e_1] = 0.0f;
+        for (int e_2 = 0; e_2 < 2; e_2++) {
+            o[e_2] = 0.0f;
         }
         #pragma unroll
         for (int w = 0; w < 8; w++) {
             int src = (w * 32 + lane_1) * 2;
-            float _add_765;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_765) : "f"(o[0]), "f"(fold[src]));
-            o[0] = _add_765;
-            float _add_766;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_766) : "f"(o[1]), "f"(fold[src + 1]));
-            o[1] = _add_766;
+            float _add_769;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_769) : "f"(o[0]), "f"(fold[src]));
+            o[0] = _add_769;
+            float _add_770;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_770) : "f"(o[1]), "f"(fold[src + 1]));
+            o[1] = _add_770;
         }
         gsum[lane_1] = o[1];
         __syncwarp();
@@ -5256,9 +5269,9 @@ kernel_cake_mhc_det_train_bwd_token__ao22_rae7_rf3_pd1_l2l_ntr(__nv_bfloat16* __
             ga[0] = 0.0f;
             #pragma unroll 1
             for (int mrow = glo; mrow < ghi; mrow++) {
-                float _add_767;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_767) : "f"(ga[0]), "f"(gsum[mrow]));
-                ga[0] = _add_767;
+                float _add_771;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_771) : "f"(ga[0]), "f"(gsum[mrow]));
+                ga[0] = _add_771;
             }
             *(reinterpret_cast<float*>(param_partial + (prow + 24ll + lane64)) + (0)) = ga[0];
         }
