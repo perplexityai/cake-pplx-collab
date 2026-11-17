@@ -2206,7 +2206,7 @@ def _operands(ops: dict[str, torch.Tensor]) -> list[torch.Tensor]:
 
 
 @pytest.mark.parametrize("layout", ("contiguous", "zigzag"))
-def test_fake_backend_meets_the_naive_tier(layout, record_property) -> None:
+def test_fake_backend_naive_tier_verdict(layout, record_property) -> None:
     """Result 4: the fake backend's forward / backward of a 2-rank C and Z row (``FAKE_CU``, (H_qk, HV) =
     ``FAKE_HEADS``; outputs ``kcp.<name>``) and, in the contiguous case, of the one-rank form without CP (outputs
     ``single.<name>``), judged against the FP64 reference (``gdn_exact_with_grads``) beside the naive BF16 tier
@@ -2278,7 +2278,7 @@ def test_fake_backend_meets_the_naive_tier(layout, record_property) -> None:
     assert not failures, failures
 
 
-def test_fake_backend_fragment_state_meets_the_naive_tier(record_property) -> None:
+def test_fake_backend_fragment_state_naive_tier_verdict(record_property) -> None:
     """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment of the 2-rank Z
     row (outputs ``s_in.rank<r>.slot<s>``, FP32), judged against the FP64 state at its cut (``cut_states``) beside
     the naive BF16 tier (``naive_cut_states``) over 32 draws."""

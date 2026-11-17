@@ -328,7 +328,7 @@ def _judge(draw, *, seed: int) -> tuple[TierJudge, list[str]]:
     [s[1:] for s in SHAPES],
     ids=[s[0] for s in SHAPES],
 )
-def test_local_path_meets_the_naive_tier(
+def test_local_path_naive_tier_verdict(
     device, record_property, lengths, heads, regime
 ) -> None:
     """``out`` and the five gradients of the autograd path, judged against the FP64 oracle with the naive BF16 tier
@@ -364,7 +364,7 @@ def test_local_path_meets_the_naive_tier(
     [((300, 700), (2, 6)), ((950, 37), (16, 48))],
     ids=["2x6", "16x48"],
 )
-def test_packed_qkv_strided_view_and_the_contiguous_input_meet_the_naive_tier(
+def test_packed_qkv_strided_view_and_the_contiguous_input_naive_tier_verdict(
     device, record_property, lengths, heads
 ) -> None:
     """The packed-QKV strided views pass through (no copy); their results and the contiguous input's (arms
@@ -480,7 +480,7 @@ def _split_view_pass(form, row0, g0, b0, dout, ctx, heads, *, ckpt, **o) -> dict
     [((300, 700), (2, 6)), ((512 + 37, 400), (16, 48))],
     ids=["2x6", "16x48"],
 )
-def test_plain_split_views_keep_hooks_and_meet_the_naive_tier(
+def test_plain_split_views_keep_hooks_with_a_naive_tier_verdict(
     device, record_property, lengths, heads, norm, ckpt
 ) -> None:
     """Issue #8367 on the device programs: plain ``split`` / ``view`` head views of one packed QKV row, the
@@ -548,7 +548,7 @@ def test_plain_split_views_keep_hooks_and_meet_the_naive_tier(
     assert not failures, failures
 
 
-def test_explicit_entries_and_autograd_meet_the_naive_tier_and_keep_the_output_order(
+def test_explicit_entries_and_autograd_keep_the_output_order_with_a_naive_tier_verdict(
     device, record_property
 ) -> None:
     """The explicit forward / backward entries (output order ``dq, dk, dv, dbeta, dg``, storage dtypes), the replay
@@ -594,7 +594,7 @@ def test_explicit_entries_and_autograd_meet_the_naive_tier_and_keep_the_output_o
 
 
 @pytest.mark.parametrize("warn_only", [False, True], ids=("strict", "warn_only"))
-def test_torch_deterministic_algorithms_run_this_package_and_meet_the_naive_tier(
+def test_torch_deterministic_algorithms_run_this_package_with_a_naive_tier_verdict(
     device, record_property, warn_only
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only``; torch then also fills the
@@ -602,7 +602,7 @@ def test_torch_deterministic_algorithms_run_this_package_and_meet_the_naive_tier
     this package with no alert, no warning and no fallback, and their results (arms ``explicit_saved`` /
     ``explicit_replay`` / ``autograd``) are judged against the FP64 oracle with the naive BF16 tier.  The same arms
     with the setting off, on the same pack and seeds, are judged by
-    ``test_explicit_entries_and_autograd_meet_the_naive_tier_and_keep_the_output_order``."""
+    ``test_explicit_entries_and_autograd_keep_the_output_order_with_a_naive_tier_verdict``."""
     cu = _cu((100, 640, 77))
     ctx = _local_context(cu, device)
 
@@ -958,7 +958,7 @@ def test_reuse_recompute_tapes_auto_follows_the_region_shape(
 # --------------------------------------------------------------------------- two caller streams (one GPU)
 
 
-def test_two_caller_streams_with_cached_workspaces_meet_the_naive_tier(
+def test_two_caller_streams_with_cached_workspaces_naive_tier_verdict(
     device, record_property
 ) -> None:
     """Two caller streams, each with its own cached caller-held workspace and its own pack, issue the explicit entries
@@ -1349,7 +1349,7 @@ def _judge_fused_form(device, cu, heads, form, log, check, *, knob="fused_o"):
     [s[1:] for s in FUSED_SHAPES],
     ids=[s[0] for s in FUSED_SHAPES],
 )
-def test_fused_output_walk_and_the_split_forward_meet_the_naive_tier(
+def test_fused_output_walk_and_the_split_forward_naive_tier_verdict(
     device, monkeypatch, record_property, lengths, heads, form
 ) -> None:
     """The same-build matrix of the output walk: direct, explicit, checkpointed (the region closed by the node, a later
@@ -1434,7 +1434,7 @@ FULL_TAPE_FORMS = (
     [s[1:] for s in FUSED_SHAPES],
     ids=[s[0] for s in FUSED_SHAPES],
 )
-def test_fused_tape_walk_and_the_split_full_forward_meet_the_naive_tier(
+def test_fused_tape_walk_and_the_split_full_forward_naive_tier_verdict(
     device, monkeypatch, record_property, lengths, heads, form
 ) -> None:
     """The same-build matrix of the tape-and-output walk under ``save_mode="full"``: direct, explicit (its backward
@@ -1591,7 +1591,7 @@ def test_graph_replay_keeps_each_view_form_its_own_gradient_layout(
 
 
 @pytest.mark.parametrize("norm", [False, True], ids=["l2n-off", "l2n-on"])
-def test_full_backward_without_save_transfer_and_light_meet_the_naive_tier_on_poisoned_memory(
+def test_full_backward_without_save_transfer_and_light_on_poisoned_memory_naive_tier_verdict(
     device, monkeypatch, record_property, norm
 ) -> None:
     """``save_mode="full"`` with ``save_transfer=False`` (the only form of ``exchange="ring"``) at ``P = 2``: every
@@ -1708,7 +1708,7 @@ def _akk_or_skip(kcp):
 
 
 @pytest.mark.parametrize("form", AKK_FORMS, ids=[f[0] for f in AKK_FORMS])
-def test_light_akk_and_light_meet_the_naive_tier_on_poisoned_memory(
+def test_light_akk_and_light_on_poisoned_memory_naive_tier_verdict(
     device, monkeypatch, record_property, form
 ) -> None:
     """``save_mode="light_akk"`` (``use_qk_l2norm_in_kernel=True``) and ``"light"`` (the same programs on the same
@@ -1851,7 +1851,7 @@ def test_light_akk_and_light_meet_the_naive_tier_on_poisoned_memory(
     [((300, 700), (2, 6)), ((512 + 37, 400), (16, 48))],
     ids=["2x6", "16x48"],
 )
-def test_graph_replay_light_akk_steps_and_the_eager_light_step_meet_the_naive_tier(
+def test_graph_replay_light_akk_steps_and_the_eager_light_step_naive_tier_verdict(
     device, record_property, lengths, heads
 ) -> None:
     """Forward + backward steps of ``save_mode="light_akk"`` under ``graph="replay"`` on one caller-held workspace

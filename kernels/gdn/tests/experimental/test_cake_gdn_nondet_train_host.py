@@ -246,7 +246,8 @@ def _judge(record_property, seed: int, draw) -> None:
     """Judge a case over ``DRAWS`` draws: draw ``j`` seeds the Python and torch random state with
     ``s = draw_seed(seed, j)``, and ``draw(j, s)`` returns ``(runs, oracle)``: arm -> result or a list of results (judged
     by the worst; arm ``""`` names the outputs plainly, any other ``<arm>.<output>``) and :func:`_oracle` of the draw's
-    problem.  Every value is held to its contract and the rest to the naive tier; the random state is restored."""
+    problem.  Every value is held to its contract and the rest judged against the naive tier (recorded: a miss does
+    not fail the test); the random state is restored."""
     judge, failures = TierJudge(), []
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     state = (random.getstate(), torch.get_rng_state())
@@ -307,7 +308,7 @@ def _deterministic_algorithms(mode: bool, *, warn_only: bool = False):
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
 @pytest.mark.parametrize("route", ROUTES)
-def test_repeated_calls_meet_the_naive_tier(
+def test_repeated_calls_naive_tier_verdict(
     route, checkpointed, device, record_property
 ) -> None:
     # three calls per draw: the output, the final state and the gradients of q, k, v (or the packed row), g, beta and
@@ -336,7 +337,7 @@ def test_repeated_calls_meet_the_naive_tier(
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_accumulated_gradients_meet_the_naive_tier(
+def test_accumulated_gradients_naive_tier_verdict(
     route, device, record_property
 ) -> None:
     # a second backward into the same leaves adds its gradients to the first one's: the accumulated gradients are
@@ -382,7 +383,7 @@ def _reuse_call(
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
 @pytest.mark.parametrize("layout", sorted(REUSE_LAYOUTS))
-def test_reused_plans_on_recycled_scratch_meet_the_naive_tier(
+def test_reused_plans_on_recycled_scratch_naive_tier_verdict(
     layout, checkpointed, device, record_property
 ) -> None:
     # a layout's call with new inputs, after a call of the same layout (its plans and tables cached) and a call of

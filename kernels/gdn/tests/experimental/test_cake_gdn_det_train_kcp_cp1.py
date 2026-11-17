@@ -171,7 +171,7 @@ def _check_dtypes(res: dict) -> None:
     [s[1:] for s in SHAPES],
     ids=[s[0] for s in SHAPES],
 )
-def test_local_path_meets_the_naive_tier(
+def test_local_path_naive_tier_verdict(
     device, record_property, lengths, heads, regime
 ) -> None:
     """``out, dq, dk, dv, dg, dbeta`` of the autograd forward + backward over 32 draws of the row's operands (draw 0

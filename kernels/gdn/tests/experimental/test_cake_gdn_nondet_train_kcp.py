@@ -141,10 +141,11 @@ def _evidence(name: str, record: dict) -> None:
 
 
 # --------------------------------------------------------------------------- the naive tier and fake-backend bits
-# A judged output is held by tests/cake_naive.py to the PyTorch BF16 naive implementation of its FP64 reference over
-# DRAWS draws (the small packs JUDGE_CU and MR_JUDGE_CU).  Two forms that the fake backend runs with the same programs
-# on the same operands give the same bits (the CPU emulation is deterministic for one device and thread count): they
-# are compared exactly.
+# A judged output's error against its FP64 reference is compared by tests/cake_naive.py with the error of the PyTorch
+# BF16 naive implementation of that reference over DRAWS draws (the small packs JUDGE_CU and MR_JUDGE_CU; the verdict
+# is recorded, a miss does not fail the test).  Two forms that the fake backend runs with the same programs on the
+# same operands give the same bits (the CPU emulation is deterministic for one device and thread count): they are
+# compared exactly.
 
 # The one-rank pack of the host-orchestration tests (the C1 documents).
 CKPT_CU = [0, 100, 740, 817, 1817, 1946]
@@ -2016,13 +2017,14 @@ def _bitwise(a: dict, b: dict, names) -> bool:
 
 
 @pytest.mark.parametrize("layout", ("contiguous", "zigzag"))
-def test_fake_backend_meets_the_naive_tier(layout, record_property) -> None:
+def test_fake_backend_naive_tier_verdict(layout, record_property) -> None:
     """Result 4: the fake backend's forward / backward of a 2-rank C and Z row (:data:`JUDGE_CU` at
-    :data:`JUDGE_HEADS`) meets the naive tier of the FP64 reference over ``DRAWS`` draws: ``out`` and the five
-    gradients of the saved-boundary backward against ``gdn_exact_with_grads``, beside ``gdn_naive_with_grads``.  On
-    every draw the replay boundary gives the saved boundary's gradients bit for bit; on the first draw a second run,
-    ``save_transfer=False`` and ``save_mode="full"`` give the first run's bits too, each with its replay equal to its
-    saved boundary (the CPU emulation is deterministic: a property of the fake backend, not of the kernels)."""
+    :data:`JUDGE_HEADS`) judged against the naive tier of the FP64 reference over ``DRAWS`` draws (recorded: a miss
+    does not fail the test): ``out`` and the five gradients of the saved-boundary backward against
+    ``gdn_exact_with_grads``, beside ``gdn_naive_with_grads``.  On every draw the replay boundary gives the saved
+    boundary's gradients bit for bit; on the first draw a second run, ``save_transfer=False`` and ``save_mode="full"``
+    give the first run's bits too, each with its replay equal to its saved boundary (the CPU emulation is
+    deterministic: a property of the fake backend, not of the kernels)."""
     H_qk, HV = JUDGE_HEADS
     cu = JUDGE_CU
     part = gp.cake_gdn_nondet_train_kcp_partition(
@@ -2069,10 +2071,11 @@ def test_fake_backend_meets_the_naive_tier(layout, record_property) -> None:
     assert not failures, failures
 
 
-def test_fake_backend_fragment_state_meets_the_naive_tier(record_property) -> None:
+def test_fake_backend_fragment_state_naive_tier_verdict(record_property) -> None:
     """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment of the 2-rank Z
-    row (:data:`JUDGE_CU` at :data:`JUDGE_HEADS`) meets, over ``DRAWS`` draws, the naive tier (``naive_cut_states``)
-    of the FP64 state at its cut (``cut_states``); one judged output per cut (``S_in@<global token>``)."""
+    row (:data:`JUDGE_CU` at :data:`JUDGE_HEADS`), judged over ``DRAWS`` draws against the naive tier
+    (``naive_cut_states``) of the FP64 state at its cut (``cut_states``; recorded: a miss does not fail the test); one
+    judged output per cut (``S_in@<global token>``)."""
     H_qk, HV = JUDGE_HEADS
     cu = JUDGE_CU
     part = gp.cake_gdn_nondet_train_kcp_partition(
@@ -7291,11 +7294,12 @@ def _mr_run(kcp, part, ops, monkeypatch, *, sm_count: int = SM_COUNT, knobs=None
     return res, ctxs, calls, launched
 
 
-def test_multi_rank_row_meets_the_naive_tier(monkeypatch, record_property) -> None:
+def test_multi_rank_row_naive_tier_verdict(monkeypatch, record_property) -> None:
     """The multi-rank row (one document over W = 8 ranks, ``zigzag_per_document``, SM count 152; the judged length
     :data:`MR_JUDGE_CU`) on the shipped options: every rank runs one forward call and its backward, and out and the
-    five gradients meet the naive tier of the FP64 reference over ``DRAWS`` draws (``gdn_exact_with_grads`` /
-    ``gdn_naive_with_grads`` of the whole document)."""
+    five gradients are judged against the naive tier of the FP64 reference over ``DRAWS`` draws
+    (``gdn_exact_with_grads`` / ``gdn_naive_with_grads`` of the whole document; recorded: a miss does not fail the
+    test)."""
     kcp = _package("cake_kcp")
     cu = MR_JUDGE_CU
     part = gp.cake_gdn_nondet_train_kcp_partition(
@@ -8414,13 +8418,14 @@ def test_reused_workspace_poisoned_between_changed_shapes_reads_no_stale_scratch
     [(False, 1), (False, 2), (True, 2)],
     ids=["direct-P1", "direct-P2", "checkpoint-P2"],
 )
-def test_worst_case_over_repeated_runs_meets_the_naive_tier(
+def test_worst_case_over_repeated_runs_naive_tier_verdict(
     ckpt, segments, record_property
 ) -> None:
     """NONDET_REPEATS runs per draw of the same autograd step of ``cake_gdn_nondet_kcp`` on the judged pack
     (:data:`JUDGE_CU` at :data:`JUDGE_HEADS`, one rank, ``segments`` per fragment, directly or under a non-reentrant
-    checkpoint): out and the five gradients meet the naive tier of the FP64 reference over ``DRAWS`` draws
-    (``gdn_exact_with_grads`` / ``gdn_naive_with_grads``), every run judged (a draw counts its worst run)."""
+    checkpoint): out and the five gradients are judged against the naive tier of the FP64 reference over ``DRAWS``
+    draws (``gdn_exact_with_grads`` / ``gdn_naive_with_grads``; recorded: a miss does not fail the test), every run
+    judged (a draw counts its worst run)."""
     kcp = _package("cake_kcp")
     part = gp.cake_gdn_nondet_train_kcp_partition(
         torch.tensor(JUDGE_CU, dtype=torch.int64), 1, "contiguous"

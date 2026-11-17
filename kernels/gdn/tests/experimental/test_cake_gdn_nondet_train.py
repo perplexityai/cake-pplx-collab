@@ -25,7 +25,7 @@ longest-first order, one stream and two, the preps, the tails, CUDA graph replay
 replays, the forward and adjoint forms), each arm is judged against the oracle under its own name
 (``<arm>.<output>``), and the launches repeated on one draw are judged by the worst of them.  The cases are sized for
 the oracle (about 1000 tokens; up to about 4000 where a split route needs it); one production-size case on the
-production route, the device route (test_the_production_route_meets_the_naive_tier, 12750 tokens), is judged against
+production route, the device route (test_the_production_route_naive_tier_verdict, 12750 tokens), is judged against
 the checkpointed FP64 reference of the shared helpers; the cases far beyond that size keep their table and launch
 checks only.  Bit-level checks remain for plumbing alone: counters left zero, byte copies, byte patterns of
 workspaces.  No output of this package is compared with the deterministic package.
@@ -38,9 +38,9 @@ bytes, gradient accumulation into a nonzero ``.grad``, changed shapes over poiso
 over repeated runs, two concurrent caller streams, cached device tables, workspaces and backward plans across streams
 and CUDA graph captures, and a resident side-stream kernel.  The tail's own contract: it serves every value-head
 group, leaves its counters zero after every launch, launches in segments, and protocol controls (stale counters must
-break ``dq`` / ``dk``, stale workspace slots must not).  The packed row: q / k / v as head views of one row that
-requires grad take one packed gradient row (a leaf or a non-leaf row, other consumers of the row, a row without a
-gradient, checkpoint replay).
+break ``dq`` / ``dk``: a contract break or a missed tier; with stale workspace slots every output keeps its contract,
+its verdict recorded).  The packed row: q / k / v as head views of one row that requires grad take one packed
+gradient row (a leaf or a non-leaf row, other consumers of the row, a row without a gradient, checkpoint replay).
 
 The suite names its packages through the shared alias helper and imports nothing else from cake_pplx.  The tests of
 the facade ``cake_pplx.cake_gdn_nondet_train`` and of the old module path live in
@@ -323,8 +323,9 @@ def _judge(record_property, seed: int, draw) -> TierJudge:
     """Judge a case over ``DRAWS`` draws against the naive BF16 tier and record the verdicts.  Draw ``j`` seeds the
     Python and torch random state with ``s = draw_seed(seed, j)`` and calls ``draw(j, s)``, which makes the draw's
     inputs from ``s``, launches the package and returns :func:`_judged` entries.  Every value is held to its contract
-    (shape, finite where the oracle is finite) and the rest to the tier; the random state is restored afterwards.
-    Fails the test on any contract break or missed tier."""
+    (shape, finite where the oracle is finite) and the rest judged against the tier; the random state is restored
+    afterwards.  Fails the test on any contract break or failure of the judge (an output not judged on every draw,
+    draws with the same oracle values); a missed tier is recorded (a ``FAIL`` ``TIER`` line) and does not fail it."""
     judge, failures = TierJudge(), []
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     state = (random.getstate(), torch.get_rng_state())
@@ -1298,7 +1299,7 @@ DEVICE_SPLIT_LAYOUTS = (
 @pytest.mark.parametrize(
     "layout", DEVICE_SPLIT_LAYOUTS, ids=[c[0] for c in DEVICE_SPLIT_LAYOUTS]
 )
-def test_device_route_split_plans_meet_the_naive_tier(
+def test_device_route_split_plans_naive_tier_verdict(
     layout, device, record_property
 ) -> None:
     # the device route plans the bound layout (a split table here) and runs it twice per draw (the worst judged); the
@@ -1348,7 +1349,7 @@ def _production_oracle(inputs, seq_lens) -> tuple[dict, dict]:
     return found[0], found[1]
 
 
-def test_the_production_route_meets_the_naive_tier(
+def test_the_production_route_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # two runs of the production route per draw (the worst judged); the route asserted from the plans and the launches
@@ -1396,7 +1397,7 @@ def test_segments_beyond_the_prescan_capacity_raise(device) -> None:
     ],
     ids=["serial-32x2", "serial-dhu-tc", "split-32x2", "split-64x1", "split-64x1-tc"],
 )
-def test_table_routes_meet_the_naive_tier(pins, device, record_property) -> None:
+def test_table_routes_naive_tier_verdict(pins, device, record_property) -> None:
     # the host and the device table routes on the same pins (800 tokens: 13 chunks, 4 segments of 4 or 3 of 6)
     seq_lens = (800, 77, 130)
 
@@ -1409,7 +1410,7 @@ def test_table_routes_meet_the_naive_tier(pins, device, record_property) -> None
 
 
 @pytest.mark.parametrize("route", ["host", "device"])
-def test_run_to_run_meets_the_naive_tier(route, device, record_property) -> None:
+def test_run_to_run_naive_tier_verdict(route, device, record_property) -> None:
     # three runs on the cached tables (the worst judged) and one without the host cache
     seq_lens = (640, 100, 257)
 
@@ -1573,7 +1574,7 @@ SPLIT_R_PINS = {
 
 
 @pytest.mark.parametrize("lpt", [True, False], ids=["lpt", "caller-order"])
-def test_split_r_form_meets_the_naive_tier(
+def test_split_r_form_naive_tier_verdict(
     lpt, device, monkeypatch, record_property
 ) -> None:
     seq_lens, heads = STREAM_LAYOUT, (2, 6)
@@ -1618,8 +1619,8 @@ def test_split_r_form_meets_the_naive_tier(
 # GB300 (the (2, 6) head pair): 64 x 4096 tokens on its serial table, and six packed sequences on the planner's split
 # adjoint table that SPLIT_R_FORM keeps.  Launches only: the rows are far beyond the judge's size.  The serial R form
 # beside tail_g3_f32x is judged on the two-stream tests' layout (test_two_streams_match_one_stream[g3]), the split R
-# form on test_split_r_form_meets_the_naive_tier, and the one-wave split's forms on
-# test_adjoint_split_one_wave_meets_the_naive_tier.
+# form on test_split_r_form_naive_tier_verdict, and the one-wave split's forms on
+# test_adjoint_split_one_wave_naive_tier_verdict.
 G3_R_FORM_ROWS = {
     "64x4096": (4096,) * 64,
     "P1": (126565, 32714, 33696, 15081, 22979, 10782),
@@ -1688,7 +1689,7 @@ def _check_group_of_three_split(inputs, seq_lens, device, monkeypatch) -> None:
 ONE_ROUND_LAYOUT = (400, 300, 250)
 
 
-def test_one_round_groups_meet_the_naive_tier(
+def test_one_round_groups_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # the one-round groups (one_round_split) of the (16, 48) head pair: both walks forked together, group A's walk and
@@ -2042,7 +2043,7 @@ def test_workspaces_are_keyed_by_the_current_stream(device) -> None:
 @pytest.mark.parametrize(
     "beta_dtype", [torch.bfloat16, torch.float32], ids=["bf16beta", "fp32beta"]
 )
-def test_prep_forms_meet_the_naive_tier(
+def test_prep_forms_naive_tier_verdict(
     route, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # the prep_tma and the plain prep, each judged
@@ -2067,7 +2068,7 @@ def test_prep_forms_meet_the_naive_tier(
 
 
 @pytest.mark.parametrize("save_state", [True, False], ids=["saved", "recompute"])
-def test_the_wy_stage_of_the_device_and_wy_tc_meet_the_naive_tier(
+def test_the_wy_stage_of_the_device_and_wy_tc_naive_tier_verdict(
     save_state, device, monkeypatch, record_property
 ) -> None:
     # every forward WY launch (and the backward's recompute) runs the device's stage, wy_tc2; wy_tc in its place: both
@@ -2818,7 +2819,7 @@ def test_the_tail_serves_every_group_and_leaves_its_counters_zero(
 
 
 @pytest.mark.parametrize("slots", [1, 5, 16], ids=["slots1", "slots5", "slots16"])
-def test_segmented_tail_launches_meet_the_naive_tier(
+def test_segmented_tail_launches_naive_tier_verdict(
     slots, device, monkeypatch, record_property
 ) -> None:
     # a workspace of `slots` slots: the chunk table in launches of max(1, slots // HV) chunks, in stream order; the
@@ -3058,7 +3059,7 @@ def test_tail_segments_rule(monkeypatch) -> None:
 @pytest.mark.parametrize(
     "heads", [(2, 4), (2, 6), (2, 2), (1, 4)], ids=["g2", "g3", "g1", "g4"]
 )
-def test_the_tail_forms_on_the_bf16_dv2_adjoint_meet_the_naive_tier(
+def test_the_tail_forms_on_the_bf16_dv2_adjoint_naive_tier_verdict(
     heads, device, monkeypatch, record_property
 ) -> None:
     # every tail form at the planner's tables, each judged: the package tail (twice, the worst judged), the unfused
@@ -3087,7 +3088,7 @@ def test_the_tail_forms_on_the_bf16_dv2_adjoint_meet_the_naive_tier(
 @pytest.mark.parametrize(
     "heads", [(2, 4), (2, 6), (2, 2), (1, 4)], ids=["g2", "g3", "g1", "g4"]
 )
-def test_the_tail_forms_on_the_fp32_dv_local_adjoint_meet_the_naive_tier(
+def test_the_tail_forms_on_the_fp32_dv_local_adjoint_naive_tier_verdict(
     heads, device, monkeypatch, record_property
 ) -> None:
     # the same tail forms with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once), each judged
@@ -3118,9 +3119,10 @@ def test_a_poisoned_tail_counter_breaks_dq_dk_a_poisoned_slot_does_not(
 ) -> None:
     # protocol control: the tail relies on zero counters (created zero, left zero) and writes every workspace slot
     # before the group reads it.  Counters left at G: no CTA of a group reads G - 1, so no group finalizes (its dq /
-    # dk rows keep the NaN of the poisoned allocator), dq / dk miss the naive tier (a separate judge, not recorded) or
-    # break their contract, the counters stay nonzero, and o / dv / dg / dbeta (which the counters do not gate) are
-    # judged.  Slots left at 64: every CTA overwrites its slot, so every output of the poisoned call is judged.
+    # dk rows keep the NaN of the poisoned allocator), dq / dk miss the naive tier (a separate judge, not recorded,
+    # read through its misses) or break their contract, the counters stay nonzero, and o / dv / dg / dbeta (which the
+    # counters do not gate) are judged.  Slots left at 64: every CTA overwrites its slot, so every output of the
+    # poisoned call is judged (held to its contract, its verdict recorded).
     # The clean call before the poison and the call after the counters are rebuilt are judged too
     seq_lens, heads = TAIL_LAYOUT, (2, 4)
     key = (
@@ -3163,7 +3165,7 @@ def test_a_poisoned_tail_counter_breaks_dq_dk_a_poisoned_slot_does_not(
 
     _judge(record_property, 283, draw)
     if poison == "counter":
-        assert breaks or broken.failures(), (
+        assert breaks or broken.misses(), (
             "dq / dk met the naive tier with poisoned tail counters"
         )
 
@@ -3172,13 +3174,13 @@ def test_a_poisoned_tail_counter_breaks_dq_dk_a_poisoned_slot_does_not(
     "beta_dtype", [torch.bfloat16, torch.float32], ids=["bf16beta", "fp32beta"]
 )
 @pytest.mark.parametrize("heads", [(2, 4), (2, 6)], ids=["g2", "g3"])
-def test_split_pass2_on_dhu_tc2_and_the_register_pass2_meet_the_naive_tier(
+def test_split_pass2_on_dhu_tc2_and_the_register_pass2_naive_tier_verdict(
     heads, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # a split (64, 1) plan's pass 2 on dhu_tc2 from the stitched segment states and the register pass 2 at the same
     # segment table, both judged with an initial state and a final-state gradient (800 tokens: 13 chunks, 3 segments of
     # 6).  The adjoint rounds dv2 as the register pass 2 does (DVL32_ARCHS empty; the FP32 dv_local adjoint:
-    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_meet_the_naive_tier)
+    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict)
     monkeypatch.setattr(cake_chain, "DVL32_ARCHS", ())
     seq_lens = (800, 77, 130)
     launches = _record_streams(monkeypatch)
@@ -3215,7 +3217,7 @@ def test_split_pass2_on_dhu_tc2_and_the_register_pass2_meet_the_naive_tier(
     "beta_dtype", [torch.bfloat16, torch.float32], ids=["bf16beta", "fp32beta"]
 )
 @pytest.mark.parametrize("heads", [(2, 4), (2, 6)], ids=["g2", "g3"])
-def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_meet_the_naive_tier(
+def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     heads, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # the same plan with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once): both passes are judged.  The
@@ -3254,7 +3256,7 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_meet_the_naive_tier
     "beta_dtype", [torch.bfloat16, torch.float32], ids=["bf16beta", "fp32beta"]
 )
 @pytest.mark.parametrize("route", ["host", "device"])
-def test_group_of_three_tail_and_the_unfused_tails_meet_the_naive_tier(
+def test_group_of_three_tail_and_the_unfused_tails_naive_tier_verdict(
     route, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # HV = 3 H: the fused tail_g3 (pinned; the rule's tail at G = 3 on sm_103a and sm_107a) and dqkwg + the WY pullback
@@ -3339,7 +3341,7 @@ def test_tc_plan_changes_only_the_adjoint_table(
     # a plan pin keeps the planner's tables.  Tables and launches only: the pricing takes the tc table on long sequences
     # of many value heads, far beyond the judge's size; it changes the segment length of the adjoint table only, and
     # the same kernels on split tables (the SDT pre-scan, dhu_tc2 and the stitch) are judged by
-    # test_split_pass2_on_dhu_tc2_and_the_register_pass2_meet_the_naive_tier
+    # test_split_pass2_on_dhu_tc2_and_the_register_pass2_naive_tier_verdict
     # plan "planner": the planner's tables (ADJOINT_SPLIT_ARCHS empty); plan "stage1": the shipped plan, where the
     # one-wave split takes the adjoint table on the architectures of ADJOINT_SPLIT_ARCHS (_check_tc_plan_split)
     seq_lens = (16384,)
@@ -3901,7 +3903,7 @@ VH2_FORMS = {
 
 
 @pytest.mark.parametrize("form", sorted(VH2_FORMS))
-def test_the_value_half_split_and_fwd_ho_meet_the_naive_tier(
+def test_the_value_half_split_and_fwd_ho_naive_tier_verdict(
     form, device, monkeypatch, record_property
 ) -> None:
     # with the rule on for the device's architecture (fwd_ho_vh2 is delivered for every architecture) the forward scan
@@ -4106,13 +4108,13 @@ def _run_packed(inputs, seq_lens, heads, **pins):
 
 @pytest.mark.parametrize("band", ["rule", "plain-band", "plain-pin"])
 @pytest.mark.parametrize("heads", [(2, 6), (1, 3), (2, 4)], ids=["g3", "g3-h1", "g2"])
-def test_packed_views_and_contiguous_copies_meet_the_naive_tier(
+def test_packed_views_and_contiguous_copies_naive_tier_verdict(
     band, heads, device, monkeypatch, record_property
 ) -> None:
     # q / k / v as head views of one packed row and contiguous copies, both judged: prep_tma reads q / k in place (also
     # where the rule's band runs the plain prep on contiguous rows), v is copied byte for byte; a plain pin copies q / k
     # as well.  The prep's forward: fwd_a_route's forward reads the packed row in place too
-    # (test_fwd_a_packed_views_and_contiguous_copies_meet_the_naive_tier)
+    # (test_fwd_a_packed_views_and_contiguous_copies_naive_tier_verdict)
     monkeypatch.setattr(cake_chain, "FWD_A_ARCHS", ())
     monkeypatch.setattr(cake_chain, "FWD_SPLIT_ARCHS", ())
     seq_lens = (300, 77, 640, 1)
@@ -4446,7 +4448,7 @@ F32X_HEADS = {"g2": (2, 4), "g2-h4": (4, 8), "g3": (2, 6), "g3-h1": (1, 3)}
 )
 @pytest.mark.parametrize("route", ["host", "device"])
 @pytest.mark.parametrize("heads", list(F32X_HEADS.values()), ids=list(F32X_HEADS))
-def test_cluster_tails_meet_the_naive_tier(
+def test_cluster_tails_naive_tier_verdict(
     heads, route, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # the rule's cluster tail exchanges the group's FP32 dq / dk partials over distributed shared memory and rounds
@@ -4480,7 +4482,7 @@ def test_cluster_tails_meet_the_naive_tier(
 
 
 @pytest.mark.parametrize("heads", [(2, 4), (2, 6)], ids=["g2", "g3"])
-def test_repeated_cluster_tails_on_the_packed_row_meet_the_naive_tier(
+def test_repeated_cluster_tails_on_the_packed_row_naive_tier_verdict(
     heads, device, record_property
 ) -> None:
     # five runs of the rule's route on the packed row per draw, judged by the worst (1377 tokens)
@@ -4529,7 +4531,7 @@ def _row_results(o, row_grad, widths, g, beta) -> dict:
 @pytest.mark.parametrize(
     "heads", [(2, 6), (1, 3), (2, 4), (1, 4)], ids=["g3", "g3-h1", "g2", "g4"]
 )
-def test_packed_row_and_the_views_route_meet_the_naive_tier(
+def test_packed_row_and_the_views_route_naive_tier_verdict(
     heads, pins, device, monkeypatch, record_property
 ) -> None:
     # q / k / v as head views of one packed row that requires grad: under a cluster tail the row is the autograd input
@@ -5067,7 +5069,7 @@ def test_adjoint_split_matches_the_fp64_recurrence_and_the_serial_walk(
     _judge(record_property, 7007, draw)
 
 
-def test_adjoint_split_end_adjoints_meet_the_naive_tier(
+def test_adjoint_split_end_adjoints_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # the end adjoints of the split's pieces composed by the stitch (M x + B with hi / lo BF16 operand pairs: about 16
@@ -5106,7 +5108,7 @@ def test_adjoint_split_end_adjoints_meet_the_naive_tier(
 
 
 @pytest.mark.parametrize("how", ["fork_cost", "streams_1"])
-def test_adjoint_split_on_one_stream_and_on_two_meets_the_naive_tier(
+def test_adjoint_split_on_one_stream_and_on_two_naive_tier_verdict(
     how, device, monkeypatch, record_property
 ) -> None:
     # wave 1 on the caller's stream, chosen by the pricing's fork cost or by a caller that keeps every launch on its
@@ -5162,7 +5164,7 @@ def test_adjoint_split_one_wave_tables() -> None:
     [(True, True), (False, False)],
     ids=["lpt-h0-dht", "caller-order-no-states"],
 )
-def test_adjoint_split_one_wave_meets_the_naive_tier(
+def test_adjoint_split_one_wave_naive_tier_verdict(
     lpt, states, device, monkeypatch, record_property
 ) -> None:
     # every piece of the split layout fits the small device in one wave (10 pieces x 4 value heads = 40 SMs): with
@@ -5348,7 +5350,7 @@ def test_adjoint_form_makes_the_launches_of_no_split(
     assert "dhu_tc2_dvl32_gm" in [entry[0] for entry in launches]
 
 
-def test_adjoint_split_packed_views_and_contiguous_copies_meet_the_naive_tier(
+def test_adjoint_split_packed_views_and_contiguous_copies_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
@@ -5906,7 +5908,7 @@ def test_fwd_a_matches_the_fp64_recurrence(
 
 
 @pytest.mark.parametrize("case", sorted(FWD_A_CASES))
-def test_fwd_a_and_the_prep_forward_meet_the_naive_tier(
+def test_fwd_a_and_the_prep_forward_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # the forward on the WY stage's A and the forward of the prep, the WY stage and fwd_ho on the same inputs, each
@@ -5928,7 +5930,7 @@ def test_fwd_a_and_the_prep_forward_meet_the_naive_tier(
     _judge(record_property, 403, draw)
 
 
-def test_fwd_a_tape_off_meets_the_naive_tier(
+def test_fwd_a_tape_off_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # a call that records no backward (no_grad, or no input that requires grad) writes no tape (word 0), the taped call
@@ -6039,7 +6041,7 @@ def test_fwd_a_checkpoint_writes_the_tape_once(
 
 
 @pytest.mark.parametrize("case", sorted(FWD_A_CASES))
-def test_fwd_a_packed_views_and_contiguous_copies_meet_the_naive_tier(
+def test_fwd_a_packed_views_and_contiguous_copies_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # q / k / v as head views of one packed row: wy_a reads q / k and fwd_ho_a reads v in place (no copy launch); the
@@ -6364,7 +6366,7 @@ def test_fwd_split_matches_the_fp64_recurrence(
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_fwd_split_and_the_prep_forward_meet_the_naive_tier(
+def test_fwd_split_and_the_prep_forward_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # the split forward and the prep forward's split scan (pre-scan, stitch, fwd_ho) on the same inputs, each judged
@@ -6399,7 +6401,7 @@ FWD_PRESCAN_CHUNKS = 8
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
 @pytest.mark.parametrize("route", FWD_STITCH_ROUTES)
-def test_fwd_split_final_state_meets_the_naive_tier(
+def test_fwd_split_final_state_naive_tier_verdict(
     route, device, monkeypatch, record_property
 ) -> None:
     # a forward through the stitch composes each piece's start state as x' = M x + B with x and M as hi / lo BF16
@@ -6444,7 +6446,7 @@ def test_fwd_split_final_state_meets_the_naive_tier(
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_fwd_split_on_one_stream_and_two_meets_the_naive_tier(
+def test_fwd_split_on_one_stream_and_two_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # the split forward on two streams (two runs per draw, the worst judged) and on one (the summary then wave 1), each
@@ -6482,7 +6484,7 @@ def test_fwd_split_short_pieces_keep_the_prep_forward(row, device, monkeypatch) 
 
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
-def test_fwd_split_tape_off_meets_the_naive_tier(
+def test_fwd_split_tape_off_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # a call that records no backward writes no tape (word 0 on both waves), the taped call fwd_fused word 3 (h and
@@ -6599,7 +6601,7 @@ def test_fwd_split_checkpoint_writes_the_tape_once(
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_fwd_split_packed_views_and_contiguous_copies_meet_the_naive_tier(
+def test_fwd_split_packed_views_and_contiguous_copies_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # q / k / v as head views of one packed row: wy_a reads q / k and wy_tc2 (on wy_a's A: the waves) reads v in place
@@ -6628,7 +6630,7 @@ def test_fwd_split_packed_views_and_contiguous_copies_meet_the_naive_tier(
 
 
 @pytest.mark.usefixtures("fwd_split_judge_class")
-def test_fwd_split_a_tape_and_the_w_form_meet_the_naive_tier(
+def test_fwd_split_a_tape_and_the_w_form_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # on wy_a's A the waves write the T_full tape themselves (fwd_ho_a word 11), u a placeholder (the first draw's
@@ -6778,7 +6780,7 @@ def _run_rows(inputs, seq_lens, h0, dht, *, offset=0, names=(), ckpt=False, **pi
 
 @pytest.mark.parametrize("operands", sorted(ROW_OPERANDS))
 @pytest.mark.parametrize("route", ROW_ROUTES)
-def test_unaligned_rows_and_aligned_copies_meet_the_naive_tier(
+def test_unaligned_rows_and_aligned_copies_naive_tier_verdict(
     route, operands, device, monkeypatch, record_property
 ) -> None:
     # contiguous operands whose base is 2, 4, 8 or 14 bytes past a 16-byte boundary are copied before a stage reads
@@ -7064,7 +7066,7 @@ def test_m_share_matches_the_fp64_recurrence(
 
 @pytest.mark.parametrize("states", [False, True], ids=["no-states", "h0-dht"])
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_m_share_and_the_summary_meet_the_naive_tier(
+def test_m_share_and_the_summary_naive_tier_verdict(
     case, states, device, monkeypatch, record_property
 ) -> None:
     # M-share and the same split backward on the adjoint's own maps (dhu_tc2_dvl32_gm and the plain stitch), both
@@ -7101,7 +7103,7 @@ def test_m_share_and_the_summary_meet_the_naive_tier(
 
 
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_m_share_runs_meet_the_naive_tier(
+def test_m_share_runs_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # M-share run after run (the second run on, the recorded backward plan; the worst of three judged), on one stream,
@@ -7217,7 +7219,7 @@ def test_m_share_checkpoint_keeps_the_maps_of_the_recompute(
 
 
 @pytest.mark.parametrize("case", sorted(FWD_SPLIT_JUDGE_CASES))
-def test_m_share_packed_views_and_contiguous_copies_meet_the_naive_tier(
+def test_m_share_packed_views_and_contiguous_copies_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # q / k / v as head views of one packed row and contiguous copies, both judged

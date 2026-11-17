@@ -34,13 +34,14 @@ at least half of the draws; and its error is 0 on every draw where the tier's
 error is 0.  An output whose oracle holds at most :data:`PAIRED_EFFECTIVE`
 distinct nonzero finite value on every draw (one effective element: a single
 token's scalar, one value repeated over heads) is judged draw by draw in the L2
-norm too.  It passes
-when it meets the tier and fails when it misses it.  A tier whose naive value
-is not finite where the oracle is finite is not met.  Each test records every
-output's verdict with pytest's ``record_property``
-(:meth:`TierJudge.record`), and the family's ``conftest.py`` prints one
-``TIER`` line per recorded output in the terminal summary, for passing tests
-too::
+norm too.  A tier whose naive value is not finite where the oracle is finite is
+not met.
+
+The verdict is record-only (the owner's ruling for this family): an output that
+misses the tier does not fail its test.  Each test records every output's
+verdict with pytest's ``record_property`` (:meth:`TierJudge.record`), and the
+family's ``conftest.py`` prints one ``TIER`` line per recorded output in the
+terminal summary, for passing tests too::
 
     from .cake_naive import summarize_tiers
 
@@ -48,12 +49,18 @@ too::
     def pytest_terminal_summary(terminalreporter, exitstatus, config):
         summarize_tiers(terminalreporter)
 
+A ``TIER`` line reads ``bf16`` when the output meets the tier and ``FAIL`` when
+it misses it (:meth:`TierJudge.misses` gives the reason).
+
 Every output is also held to its contract on every draw (:func:`contract`):
 its shape is the oracle's; it is finite where the oracle is finite and holds
 the oracle's inf or a NaN where the oracle holds one; an integer, index or
 table output equals the oracle exactly.  A case whose inputs do not change
 with the seed (all zeros, a fixed pattern of infs and NaNs) is held to its
-contract only (:func:`contract`), as one input judges no accuracy.
+contract only (:func:`contract`), as one input judges no accuracy.  A broken
+contract fails the test, and so does a judge that did not see an output on
+every draw or saw two draws with the same oracle values
+(:meth:`TierJudge.failures`).
 
 The tests never compare a deterministic kernel with a non-deterministic one,
 and never compare two versions of a kernel bit for bit.  A deterministic
@@ -62,7 +69,7 @@ the same bytes.
 
 The comparisons work in blocks of about :data:`BLOCK` elements along dim 0, so
 the float64 copies of a large output stay bounded.  Only torch is imported.
-This file is the same in every family that uses it.
+This file is the same in the family's own tests and in its cross-family tests.
 """
 
 from __future__ import annotations
@@ -243,8 +250,10 @@ class TierJudge:
     inputs, judged against the naive BF16 tier.
 
     Call :meth:`add` once per output and draw, then :meth:`failures` (empty
-    when every output met the tier and every draw was judged), and record the
-    verdicts with :meth:`record` or :meth:`lines`."""
+    when every output was judged on every draw and no two draws had the same
+    oracle values), and record the verdicts with :meth:`record` or
+    :meth:`lines`.  A missed tier is recorded, not a failure; :meth:`misses`
+    gives the reason for each output that missed it."""
 
     def __init__(self, draws: int = DRAWS) -> None:
         if draws < DRAWS:
@@ -361,13 +370,34 @@ class TierJudge:
         return found
 
     def failures(self) -> list[str]:
-        """One message per output that missed the tier or was not judged on every
-        draw, and one per pair of draws whose oracle values are the same."""
+        """The judge's own failures, which fail the test: one message per output
+        not judged on every draw, and one per pair of draws whose oracle values
+        are the same.  A missed tier is not one of them (:meth:`misses`)."""
         found = []
-        for name, verdict in self.verdicts().items():
+        for name in dict.fromkeys(name for name, _ in self.errors):
             recorded = sorted(self.errors[(name, NORMS[0])])
             if recorded != list(range(self.draws)):
                 found.append(f"{name}: judged on {len(recorded)} of {self.draws} draws")
+        seen: dict[tuple, int] = {}
+        for draw, prints in sorted(self.prints.items()):
+            key = tuple(sorted(prints.items()))
+            if key in seen:
+                found.append(
+                    f"draws {seen[key]} and {draw} have the same oracle values: the "
+                    "inputs do not change with the seed"
+                )
+            else:
+                seen[key] = draw
+        return found
+
+    def misses(self) -> list[str]:
+        """One message per output that missed the tier: per norm the median and
+        largest error of the output and of the tier, the draws where the tier's
+        error was 0 and the output's was not, and the draws within
+        :data:`NEAR_TIE` of the tier.  A miss is recorded (a ``FAIL`` ``TIER``
+        line); it does not fail the test."""
+        found = []
+        for name, verdict in self.verdicts().items():
             if verdict["tier"] is not None:
                 continue
             parts = []
@@ -389,16 +419,6 @@ class TierJudge:
                 "median / largest): "
                 + "; ".join(parts)
             )
-        seen: dict[tuple, int] = {}
-        for draw, prints in sorted(self.prints.items()):
-            key = tuple(sorted(prints.items()))
-            if key in seen:
-                found.append(
-                    f"draws {seen[key]} and {draw} have the same oracle values: the "
-                    "inputs do not change with the seed"
-                )
-            else:
-                seen[key] = draw
         return found
 
     def lines(self, test_id: str) -> list[str]:
@@ -475,8 +495,9 @@ def judge_case(
     :func:`contract` (exact for the names in ``exact``), and each other output
     is recorded in the judge.  The Python, torch CPU and every CUDA device's
     random state are restored after the last draw.  Returns the judge and
-    every failure: the contract's, then the judge's; record the verdicts with
-    ``judge.record(record_property)``."""
+    every failure: the contract's, then the judge's (:meth:`TierJudge.failures`;
+    a missed tier is not a failure, :meth:`TierJudge.misses`); record the
+    verdicts with ``judge.record(record_property)``."""
     judge = TierJudge(draws)
     failures = []
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None

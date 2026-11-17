@@ -167,7 +167,8 @@ def _judge_add(
 
 def _judge_report(report: dict, judge: TierJudge | None, failures: list[str]) -> None:
     """Rank 0: the row's verdicts (``naive_tier``, one per judged output) and its failures (contracts, then the
-    judge's), folded into ``report["pass"]``."""
+    judge's), folded into ``report["pass"]``.  A missed tier is in the verdicts only; the failing label ``naive_tier``
+    marks a contract or judge failure, not a missed tier."""
     if judge is None:
         return
     failures = failures + judge.failures()

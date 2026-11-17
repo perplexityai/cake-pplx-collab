@@ -1180,7 +1180,9 @@ def _fold(
 
 def _fold_judge(report: dict, verdicts: dict, failures: list[str]) -> None:
     """Fold the judge into ``report["pass"]``: rank 0's verdicts (one per judged output) and every failure of the group
-    (the ranks' shapes, the contracts, the outputs that missed the naive tier or a draw)."""
+    (the ranks' shapes, the contracts, the outputs not judged on every draw, the draws with the same oracle values).
+    A missed naive tier is in the verdicts only (a ``FAIL`` ``TIER`` line); it does not fail the row.  The failing label
+    stays ``naive_tier``: it marks a contract or judge failure, not a missed tier."""
     report["verdicts"] = verdicts
     report["judge_failures"] = failures
     if failures:

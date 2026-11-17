@@ -2323,7 +2323,7 @@ def test_long_device_route_runs_and_is_deterministic(layout, device) -> None:
 PRODUCTION_CASE = (LONG_LAYOUTS[2][1], LONG_LAYOUTS[2][2])
 
 
-def test_production_case_meets_the_naive_tier(
+def test_production_case_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # each table route of PRODUCTION_CASE judged ("device.*", "host.*") against the FP64 recurrence checkpointed in
@@ -2398,7 +2398,7 @@ def test_table_routes_agree_bitwise(pins, device, monkeypatch) -> None:
     # the host- and device-built tables of one plan: the same bits on every output.  A split (64, 1) plan runs its
     # tcgen05 pass 2 on a host-built table only (_sdt_selected); the device-built one keeps dv_local + the register pass
     # 2, whose bits dhu_tc2 gives.  dhu_tc2_dvl32 (this value-head group of three on DVL32_ARCHS) rounds dv2 once, so
-    # the split tc pin runs here with DVL32_ARCHS off (on: test_table_routes_split_tc_on_dhu_tc2_dvl32_meet_the_naive_tier)
+    # the split tc pin runs here with DVL32_ARCHS off (on: test_table_routes_split_tc_on_dhu_tc2_dvl32_naive_tier_verdict)
     if pins["dhu_scan"] == "tc" and pins["segment_chunks"] > 0:
         _round_once_off(monkeypatch, ("DVL32_ARCHS",))
     seq_lens = (1500, 77, 640)
@@ -2408,7 +2408,7 @@ def test_table_routes_agree_bitwise(pins, device, monkeypatch) -> None:
     _assert_bitwise(host, dev, OUTPUT_NAMES)
 
 
-def test_table_routes_split_tc_on_dhu_tc2_dvl32_meet_the_naive_tier(
+def test_table_routes_split_tc_on_dhu_tc2_dvl32_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # the split-64x1-tc pins with DVL32_ARCHS on: the host-built table runs pass 2 on dhu_tc2_dvl32 (after the fused
@@ -2773,7 +2773,7 @@ def test_split_pass2_on_dhu_tc2_matches_the_register_pass2(
     # a split (64, 1) plan's pass 2 on dhu_tc2 from the stitched segment states against the register pass 2 at the
     # same segment table: the same bits on every output, with an initial state and a final-state gradient.  The
     # adjoint rounds dv2 as the register pass 2 does (DVL32_ARCHS empty; the FP32 dv_local adjoint:
-    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_meet_the_naive_tier)
+    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict)
     _round_once_off(monkeypatch, ("DVL32_ARCHS",))
     seq_lens = (1500, 77, 640)
     inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=83)
@@ -2818,7 +2818,7 @@ def test_split_pass2_on_dhu_tc2_matches_the_register_pass2(
     "beta_dtype", [torch.bfloat16, torch.float32], ids=["bf16beta", "fp32beta"]
 )
 @pytest.mark.parametrize("heads", [(2, 6), (1, 3)], ids=["g3", "g3-h1"])
-def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_meet_the_naive_tier(
+def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     heads, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # the same plan with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once; a value-head group of three): o and
@@ -5769,7 +5769,7 @@ FWD_ACCURACY_CASES = tuple(("a", case) for case in sorted(FWD_A_CASES)) + tuple(
 @pytest.mark.parametrize(
     "route, case", FWD_ACCURACY_CASES, ids=[f"{r}-{c}" for r, c in FWD_ACCURACY_CASES]
 )
-def test_fwd_routes_and_the_prep_forward_meet_the_naive_tier(
+def test_fwd_routes_and_the_prep_forward_naive_tier_verdict(
     route, case, device, monkeypatch, record_property
 ) -> None:
     # the forwards on wy_a's A beside the prep forward (the switches of PREP_FORWARD_OFF off: the prep, the WY stage,
