@@ -73,7 +73,7 @@ Other public names:
 
 The forward runs the det forward programs and is bitwise reproducible.
 
-In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP64 sums in scheduling order (or into FP32 TwoSum pairs for the pair-row kernel), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible and within one BF16 ulp of `max(|dx|, rms(dx))` of the det `dx`. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
+In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP32 sums, one word per column, in scheduling order (the part-row kernel instead writes one FP32 row per CTA, which helper CTAs fold), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible and within one BF16 ulp of `max(|dx|, rms(dx))` of the det `dx`. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
