@@ -701,7 +701,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (384, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 197760,
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_train_41fae982d4ff234293cb_kcp",
