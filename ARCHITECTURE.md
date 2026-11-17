@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 14 families and 31 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 15 families and 32 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -93,6 +93,7 @@ The repository has 14 families and 31 backend packages, about 212 MB in total. M
 | `dsa_sparse_attention` | det, nondet | `cake-pplx-dsa-sparse-attention` |
 | `gqa` | det, nondet | `cake-pplx-gqa` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
+| `mok` | det (backend package `cake_mok_bf16`) | `cake-pplx-mok` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
