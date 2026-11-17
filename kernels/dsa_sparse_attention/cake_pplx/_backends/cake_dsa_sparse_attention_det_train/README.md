@@ -343,4 +343,8 @@ or a compute capability 10.0 / 10.3 / 10.7 device),
 public entry points and the environment variables of the facade) and the
 CPU-only `tests/experimental/test_cake_dsa_sparse_attention_det_train_names.py`
 and `tests/experimental/test_cake_dsa_sparse_attention_det_train_standalone.py`.
-Benchmark: `benchmarks/bench_cake_dsa_sparse_attention_det_train.py`.
+Accuracy is judged by `tests/cake_naive.py` through
+`tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
+reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
+one `TIER` line per judged output); the run-to-run and one-feature checks of
+this package are bitwise.  Benchmark: `benchmarks/bench_cake_dsa_sparse_attention_det_train.py`.

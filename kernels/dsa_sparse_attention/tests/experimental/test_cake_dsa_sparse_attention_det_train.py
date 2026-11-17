@@ -15,10 +15,14 @@ limitations under the License.
 
 Backend suite of the deterministic DSA sparse-attention training package
 (``cake_pplx._backends.cake_dsa_sparse_attention_det_train``): the host plan (stage order, storage plan,
-workspace sizes), the forward against the non-deterministic package's forward (the same kernels: bit for bit), and
-the bit-for-bit repeat, accuracy, accumulate, ``o_lo`` replay, checkpoint, CUDA graph and no-host-sync contracts of
-the backward.  "Bitwise" here is bit-pattern equality (integer views), not ``torch.equal``: ``-0.0`` and NaN payloads
-count.  GPU cases skip without a compute capability 10.0 / 10.3 / 10.7 device or without the registered stages.
+workspace sizes), the forward's accuracy and its bit-for-bit repeat, and the bit-for-bit repeat, accuracy,
+accumulate, ``o_lo`` replay, checkpoint, CUDA graph and no-host-sync contracts of the backward.  Accuracy is judged by
+``tests/cake_naive.py`` through ``tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py``: over 32 draws
+per case, each floating output's error against an FP64 oracle of the same inputs is at most that of the same math in
+PyTorch BF16 (the naive tier; the template's near tie), and 0 wherever that error is 0; the issue layouts are held to
+their contract (finite outputs, exact zeros) without an oracle.  Run-to-run and one-feature checks are bitwise:
+"bitwise" here is bit-pattern equality (integer views), not ``torch.equal``: ``-0.0`` and NaN payloads count.  GPU
+cases skip without a compute capability 10.0 / 10.3 / 10.7 device or without the registered stages.
 """
 
 import contextlib
@@ -28,13 +32,13 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from tests.experimental.test_helpers import cake_dsa_sparse_attention_naive as nv
 from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (
+    derive_topk_length,
     make_inputs,
     make_nope_inputs,
     reference_fp64,
     reference_fp64_nope,
-    rel_l2,
-    rel_l2_rows,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -52,15 +56,6 @@ D_ROPE = cake_backend.D_ROPE
 D_QK = cake_backend.D_QK
 WORKSPACE_ALIGN = cake_backend.WORKSPACE_ALIGN
 SUPPORTED_COMPUTE_CAPABILITIES = cake_backend.SUPPORTED_COMPUTE_CAPABILITIES
-
-# The accuracy gates of the non-deterministic suite (relative L2 vs the chunked FP64 reference of the same BF16
-# inputs): the integer accumulation adds one rounding per contribution on a grid 2 ** 12 finer than the row bound
-# needs, well inside them.
-GATE_DQ_LATENT = 0.00226
-GATE_DKV_LATENT = 0.00243
-GATE_ROPE_FACTOR = 2.0
-FLOOR_MARGIN = 1.05
-FLOOR_ABS = 1e-5
 
 SEED = 20261107
 REPEATS = 5
@@ -472,7 +467,7 @@ def test_parity_keywords_are_validated():
 
 
 # ---------------------------------------------------------------------------
-# Forward (GPU): the non-deterministic package's kernels under this package's names
+# Forward (GPU): the naive tier and the bit-for-bit repeat
 # ---------------------------------------------------------------------------
 
 FORWARD_SHAPES = [
@@ -484,44 +479,60 @@ FORWARD_SHAPES = [
 
 @pytest.mark.parametrize("seq_q, seq_k, topk", FORWARD_SHAPES)
 @pytest.mark.parametrize("lengths", ["caller", "derived"])
-def test_forward_matches_nondet_bit_for_bit(seq_q, seq_k, topk, lengths):
-    """The forward stages are the non-deterministic package's forward kernels (same build, this package's program
-    names): ``out``, ``lse`` and ``o_lo`` -- and the derived lengths -- equal the non-deterministic forward bit for
-    bit, and repeat bit for bit."""
+def test_forward_meets_the_naive_tier_and_repeats_bit_for_bit(seq_q, seq_k, topk, lengths, record_property):
+    """``out``, ``lse`` and ``o_lo`` (judged as ``out + o_lo``) meet the naive tier over the draws, with the caller's
+    lengths or with the lengths the forward derives (the last valid slot + 1 of each row, exactly); on the first draw
+    the forward repeats bit for bit, derived lengths included."""
     _require_program()
-    inp = make_inputs(seq_q, seq_k, seed=SEED, topk=topk)
-    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
 
-    def run(backend):
+    def run(inp):
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
         if lengths == "caller":
-            return backend.forward(*args, topk_length=inp.topk_length), None
+            return cake_backend.forward(*args, topk_length=inp.topk_length), None
         derived = torch.full_like(inp.topk_length, -7)
-        outs = backend.forward(*args, topk_length=derived, derive_topk_length=True)
+        outs = cake_backend.forward(*args, topk_length=derived, derive_topk_length=True)
         return outs, derived
 
-    ref, ref_len = run(nondet_backend)
-    for _ in range(REPEATS):
-        got, got_len = run(cake_backend)
-        for a, b in zip(got, ref, strict=True):
-            assert _same_bits(a, b)
-        if ref_len is not None:
-            assert _same_bits(got_len, ref_len)
+    def case(s, j):
+        inp = make_inputs(seq_q, seq_k, seed=s, topk=topk)
+        (out, lse, o_lo), derived = run(inp)
+        if derived is not None:
+            assert torch.equal(derived, derive_topk_length(inp.idx_global, inp.total_k))
+        if j == 0:
+            for _ in range(REPEATS):
+                again, again_len = run(inp)
+                for a, b in zip(again, (out, lse, o_lo), strict=True):
+                    assert _same_bits(a, b)
+                if derived is not None:
+                    assert _same_bits(again_len, derived)
+        problem = nv.rope_problem(inp, topk_length=inp.topk_length if derived is None else None, dout=None)
+        return nv.judged(problem, {"": dict(out=out, lse=lse, o_lo=o_lo)})
+
+    nv.judge_draws(record_property, case, seed=SEED)
 
 
-def test_nope_forward_matches_nondet_bit_for_bit():
+def test_nope_forward_meets_the_naive_tier_and_repeats_bit_for_bit(record_property):
+    """NoPE: ``out``, ``lse`` and ``o_lo`` (judged as ``out + o_lo``) meet the naive tier over the draws; on the first
+    draw the forward repeats bit for bit."""
     _require_program(program=cake_jit.NOPE_PROGRAM)
-    inp = make_inputs([256], [1024], seed=SEED + 1, topk=512)
-    q = inp.q_latent
-    kv = inp.kv_latent
-    ref = nondet_backend.forward_nope(
-        q, kv, inp.idx_global, topk_length=inp.topk_length
-    )
-    for _ in range(REPEATS):
-        got = cake_backend.forward_nope(
-            q, kv, inp.idx_global, topk_length=inp.topk_length
-        )
-        for a, b in zip(got, ref, strict=True):
-            assert _same_bits(a, b)
+
+    def case(s, j):
+        inp = make_inputs([256], [1024], seed=s, topk=512)
+
+        def run():
+            return cake_backend.forward_nope(
+                inp.q_latent, inp.kv_latent, inp.idx_global, topk_length=inp.topk_length
+            )
+
+        out, lse, o_lo = run()
+        if j == 0:
+            for _ in range(REPEATS):
+                for a, b in zip(run(), (out, lse, o_lo), strict=True):
+                    assert _same_bits(a, b)
+        problem = nv.nope_problem(inp, topk_length=inp.topk_length, dout=None)
+        return nv.judged(problem, {"": dict(out=out, lse=lse, o_lo=o_lo)})
+
+    nv.judge_draws(record_property, case, seed=SEED + 1)
 
 
 def test_forward_into_given_storage_is_bit_for_bit():
@@ -599,36 +610,29 @@ def test_backward_repeats_bit_for_bit(seq_q, seq_k, topk, dkv_fp32):
                 assert _same_bits(a, b)
 
 
-@pytest.mark.parametrize("seq_q, seq_k, topk", BACKWARD_SHAPES)
-def test_backward_accuracy_vs_fp64(seq_q, seq_k, topk):
-    """dQ is the non-deterministic package's dQ bit for bit (the same computation; its error against FP64 is that
-    package's, reported); dK/dV within the fixed gates."""
+@pytest.mark.parametrize(
+    "seq_q, seq_k, topk",
+    BACKWARD_SHAPES + [pytest.param([256], [4096], 2048, id="T256_S4096_k2048")],
+)
+@pytest.mark.parametrize("dkv_fp32", [False, True])
+def test_backward_meets_the_naive_tier(seq_q, seq_k, topk, dkv_fp32, record_property):
+    """The forward's outputs and the gradients (BF16 or natural-layout FP32 dK/dV) meet the naive tier over the
+    draws."""
     _require_program(backward=True)
-    inp = make_inputs(seq_q, seq_k, seed=SEED + 4, topk=topk)
-    args = _rope_args(inp)
-    tl = inp.topk_length
-    out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-    dql, dqr, dkvl, dkr = cake_backend.backward(
-        *args, out, o_lo, lse, inp.dout, topk_length=tl
-    )
-    n = nondet_backend.forward(*args, topk_length=tl)
-    nondet = nondet_backend.backward(*args, n[0], n[2], n[1], inp.dout, topk_length=tl)
-    ref = reference_fp64(*args, dout=inp.dout, topk_length=tl)
-    _report(
-        f"vs_fp64_{len(seq_q)}docs_k{topk}",
-        dict(
-            dq_latent=rel_l2(dql, ref["dq_latent"]),
-            dq_rope=rel_l2(dqr, ref["dq_rope"]),
-            dkv_latent=rel_l2(dkvl, ref["dkv_latent"]),
-            dkv_latent_nondet=rel_l2(nondet[2], ref["dkv_latent"]),
-            dk_rope=rel_l2(dkr, ref["dk_rope"]),
-            dk_rope_nondet=rel_l2(nondet[3], ref["dk_rope"]),
-        ),
-    )
-    assert _same_bits(dql, nondet[0])
-    assert _same_bits(dqr, nondet[1])
-    assert rel_l2(dkvl, ref["dkv_latent"]) < GATE_DKV_LATENT
-    assert rel_l2(dkr, ref["dk_rope"]) < GATE_DKV_LATENT * GATE_ROPE_FACTOR
+
+    def case(s, j):
+        inp = make_inputs(seq_q, seq_k, seed=s, topk=topk)
+        args = _rope_args(inp)
+        tl = inp.topk_length
+        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+        got = dict(out=out, lse=lse, o_lo=o_lo.clone())
+        dql, dqr, dkvl, dkr = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, topk_length=tl, dkv_fp32=dkv_fp32
+        )
+        got.update(dq_latent=dql, dq_rope=dqr, dkv_latent=dkvl, dk_rope=dkr)
+        return nv.judged(nv.rope_problem(inp, topk_length=tl), {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 4)
 
 
 @pytest.mark.parametrize("with_map", [False, True])
@@ -958,94 +962,15 @@ def test_nope_runner_graph_replays_bit_for_bit(accumulate):
 
 
 # ---------------------------------------------------------------------------
-# Accuracy against FP64 at the repro shapes and on adversarial inputs, the recomputation of flagged rows,
-# non-finite inputs and host synchronization (GPU, needs the registered backward stages)
+# The repro shapes (contract), adversarial inputs (naive tier), the recomputation of flagged rows, non-finite
+# inputs and host synchronization (GPU, needs the registered backward stages)
 # ---------------------------------------------------------------------------
-
-GATE_LSE_ABS = 2e-5  # the non-deterministic suite's lse gate (natural log, absolute)
-NOPE_FLOOR_MARGIN = 1.02  # the non-deterministic suite's NoPE dq floor margin
 
 
 def _globals(runner) -> list[int]:
     """The global words of the runner's last backward (word 8: rows the redo preparation flagged; word 9: rows
     with a non-finite contribution)."""
     return [int(x) for x in runner.tensors["det_globals"].view(torch.int32).tolist()]
-
-
-def _report(case: str, errors: dict) -> None:
-    print(
-        "ACCURACY",
-        case,
-        " ".join(f"{k}={v:.6g}" for k, v in errors.items()),
-        flush=True,
-    )
-
-
-def _check_lse(lse, ref):
-    lse_ref = ref["lse"]
-    finite = torch.isfinite(lse_ref)
-    assert torch.equal(torch.isfinite(lse), finite)
-    if finite.any():
-        err = (lse.double()[finite] - lse_ref[finite]).abs().max().item()
-        assert err <= GATE_LSE_ABS, err
-
-
-def _check_rope_accuracy(case, grads, ref, *, canonical, nondet=None, dq_bitwise=False):
-    """The non-deterministic suite's rule: every gradient within 1.05x its BF16-P/dS numerics floor on the same
-    inputs (+1e-5); the canonical top-k-2048 configurations also within the fixed gates.  ``nondet`` (the
-    non-deterministic package's gradients on the same inputs) is reported next to it.  ``dq_bitwise``: dQ (the
-    same computation in both packages) is held to the non-deterministic dQ bit for bit instead of the floor,
-    on inputs where that package's dQ is above the floor too."""
-    names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
-    errors, failures = {}, []
-    for i, (g, name) in enumerate(zip(grads, names, strict=True)):
-        got, floor = rel_l2(g, ref[name]), rel_l2(ref[f"{name}_emu"], ref[name])
-        errors[name], errors[f"{name}_floor"] = got, floor
-        if nondet is not None:
-            errors[f"{name}_nondet"] = rel_l2(nondet[i], ref[name])
-        if not torch.isfinite(g.float()).all():
-            failures.append(f"{name}: non-finite")
-        if dq_bitwise and name.startswith("dq"):
-            if not _same_bits(g, nondet[i]):
-                failures.append(f"{name}: not the non-deterministic dQ bit for bit")
-        elif got > FLOOR_MARGIN * floor + FLOOR_ABS:
-            failures.append(f"{name}: rel-L2 {got:.6f} vs floor {floor:.6f}")
-    if canonical:
-        gates = dict(
-            dq_latent=GATE_DQ_LATENT,
-            dq_rope=GATE_DQ_LATENT * GATE_ROPE_FACTOR,
-            dkv_latent=GATE_DKV_LATENT,
-            dk_rope=GATE_DKV_LATENT * GATE_ROPE_FACTOR,
-        )
-        failures += [
-            f"{n}: rel-L2 {errors[n]:.6f} above the gate {g}"
-            for n, g in gates.items()
-            if errors[n] > g
-        ]
-    _report(case, errors)
-    assert not failures, failures
-
-
-def _check_nope_accuracy(case, dq, dkv, ref, *, nondet=None, dq_bitwise=False):
-    """The non-deterministic suite's NoPE rule: ``dq`` within 1.02x and ``dkv`` within 1.05x their numerics floors
-    on the same inputs (+1e-5); ``dq_bitwise`` as in :func:`_check_rope_accuracy`."""
-    errors, failures = {}, []
-    for i, (got_t, name, margin) in enumerate(
-        ((dq, "dq", NOPE_FLOOR_MARGIN), (dkv, "dkv", FLOOR_MARGIN))
-    ):
-        got, floor = rel_l2(got_t, ref[name]), rel_l2(ref[f"{name}_emu"], ref[name])
-        errors[name], errors[f"{name}_floor"] = got, floor
-        if nondet is not None:
-            errors[f"{name}_nondet"] = rel_l2(nondet[i], ref[name])
-        if not torch.isfinite(got_t.float()).all():
-            failures.append(f"{name}: non-finite")
-        if dq_bitwise and name == "dq":
-            if not _same_bits(got_t, nondet[i]):
-                failures.append("dq: not the non-deterministic dQ bit for bit")
-        elif ref[name].any() and got > margin * floor + FLOOR_ABS:
-            failures.append(f"{name}: rel-L2 {got:.6f} vs floor {floor:.6f}")
-    _report(case, errors)
-    assert not failures, failures
 
 
 def _p8949_indices(t, s, gen):
@@ -1087,15 +1012,16 @@ def _p8949_problem(nope, t=1024, s=8192):
     return p
 
 
-def test_accuracy_issue_8949_shape():
-    """The long-context repro's accuracy shape (T 1024, S 8192, its index generator): every gradient within the floors and
-    the fixed gates, the BF16 and FP32 dK/dV forms both; adding into a zeroed ``dkv_acc`` gives the FP32 form's
-    bits (``+0.0 + v = v``)."""
+def test_issue_8949_shape_holds_its_contract():
+    """The long-context repro's shape (T 1024, S 8192, its index generator; an issue layout, held to its contract
+    without an oracle): the forward and the BF16 and FP32 dK/dV forms are finite with the contract's exact zeros,
+    and adding into a zeroed ``dkv_acc`` gives the FP32 form's bits (``+0.0 + v = v``)."""
     _require_program(backward=True)
     p = _p8949_problem(nope=False)
     args = (p["q_latent"], p["q_rope"], p["kv_latent"], p["k_rope"], p["indices"])
     tl = p["topk_length"]
     out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
     bf16 = cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl)
     out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
     fp32 = cake_backend.backward(
@@ -1107,22 +1033,25 @@ def test_accuracy_issue_8949_shape():
     assert _same_bits(acc[:, :D_LATENT], fp32[2]) and _same_bits(
         acc[:, D_LATENT:], fp32[3]
     )
-    n_out, n_lse, n_o_lo = nondet_backend.forward(*args, topk_length=tl)
-    nondet = nondet_backend.backward(
-        *args, n_out, n_o_lo, n_lse, p["dout"], topk_length=tl
-    )
-    ref = reference_fp64(*args, dout=p["dout"], topk_length=tl)
-    _check_lse(lse, ref)
-    _check_rope_accuracy("p8949_rope_bf16", bf16, ref, canonical=True, nondet=nondet)
-    _check_rope_accuracy("p8949_rope_fp32", fp32, ref, canonical=True)
+    problem = nv.Problem(
+        q_latent=p["q_latent"], q_rope=p["q_rope"], kv_latent=p["kv_latent"], k_rope=p["k_rope"],
+        indices=p["indices"], topk_length=tl, dout=p["dout"],
+    )  # fmt: skip
+    names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
+    nv.assert_contract("forward", problem, forward)
+    nv.assert_contract("bf16", problem, dict(zip(names, bf16, strict=True)))
+    nv.assert_contract("fp32", problem, dict(zip(names, fp32, strict=True)))
 
 
-def test_accuracy_issue_8949_shape_nope():
+def test_issue_8949_shape_holds_its_contract_nope():
+    """NoPE at the long-context repro's shape (an issue layout, held to its contract without an oracle): finite
+    outputs with the contract's exact zeros, and a zeroed ``dkv_acc`` receives the fresh ``dkv`` bits."""
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
     p = _p8949_problem(nope=True)
     args = (p["q_latent"], p["kv_latent"], p["indices"])
     tl = p["topk_length"]
     out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
     dq, dkv = cake_backend.backward_nope(
         *args, out, o_lo, lse, p["dout"], topk_length=tl
     )
@@ -1132,13 +1061,11 @@ def test_accuracy_issue_8949_shape_nope():
         *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc
     )
     assert _same_bits(acc, dkv)
-    n_out, n_lse, n_o_lo = nondet_backend.forward_nope(*args, topk_length=tl)
-    nondet = nondet_backend.backward_nope(
-        *args, n_out, n_o_lo, n_lse, p["dout"], topk_length=tl
+    problem = nv.Problem(
+        q_latent=p["q_latent"], kv_latent=p["kv_latent"], indices=p["indices"], topk_length=tl, dout=p["dout"]
     )
-    ref = reference_fp64_nope(*args, dout=p["dout"], topk_length=tl)
-    _check_lse(lse, ref)
-    _check_nope_accuracy("p8949_nope", dq, dkv, ref, nondet=nondet)
+    nv.assert_contract("forward", problem, forward)
+    nv.assert_contract("backward", problem, dict(dq=dq, dkv=dkv))
 
 
 def _glm_dst_map(num_kv: int) -> tuple[torch.Tensor, int]:
@@ -1149,11 +1076,11 @@ def _glm_dst_map(num_kv: int) -> tuple[torch.Tensor, int]:
     return dst.to(torch.int32).contiguous(), int(dst[-1].item()) + 1
 
 
-def test_accuracy_issue_8946_glm52_packed_dkv_acc_with_map():
-    """The GLM-5.2 workload form: packed documents (context-parallel tails of longer prefixes), top-k
-    2048, the FP32 ``dkv_acc`` addressed through ``dkv_dst_map`` with repeated destination rows.  ``dq`` within the
-    floors and gates; ``dkv_acc`` (zeroed) against the FP64 gradient mapped by ``index_add_`` within the gates and
-    the mapped BF16 floor; repeats bit for bit."""
+def test_issue_8946_glm52_packed_dkv_acc_with_map_holds_its_contract():
+    """The GLM-5.2 workload form (an issue layout, held to its contract without an oracle): packed documents
+    (context-parallel tails of longer prefixes), top-k 2048, the FP32 ``dkv_acc`` addressed through ``dkv_dst_map``
+    with repeated destination rows.  ``dq`` and the accumulated rows are finite with the contract's exact zeros and
+    untouched rows, and the step repeats bit for bit."""
     _require_program(backward=True)
     inp = make_inputs([2048, 1024, 1024], [6144, 1024, 3072], seed=SEED + 20, topk=2048)
     args = _rope_args(inp)
@@ -1174,31 +1101,24 @@ def test_accuracy_issue_8946_glm52_packed_dkv_acc_with_map():
         again = run()
         for a, b in zip(again[:3], (dql, dqr, acc), strict=True):
             assert _same_bits(a, b)
-    ref = reference_fp64(*args, dout=inp.dout, topk_length=inp.topk_length)
-    _check_lse(lse, ref)
-    index = dst_map.long()
-
-    def mapped(t):
-        return torch.zeros(
-            rows, t.shape[1], dtype=torch.float64, device="cuda"
-        ).index_add_(0, index, t.double())
-
-    grads = (dql, dqr, acc[:, :D_LATENT], acc[:, D_LATENT:])
-    ref_mapped = dict(ref)
-    for name in ("dkv_latent", "dk_rope"):
-        ref_mapped[name] = mapped(ref[name])
-        ref_mapped[f"{name}_emu"] = mapped(ref[f"{name}_emu"])
-    _check_rope_accuracy("i8946_glm52_packed_map", grads, ref_mapped, canonical=True)
+    problem = nv.rope_problem(inp, topk_length=inp.topk_length)
+    zero = torch.zeros_like(acc)
+    nv.assert_contract(
+        "glm52", problem,
+        dict(lse=lse, dq_latent=dql, dq_rope=dqr, dkv_acc=nv.Acc(before=zero, after=acc, dst_map=dst_map)),
+    )  # fmt: skip
 
 
-def test_accuracy_issue_8946_glm53_flash_nope():
-    """The GLM-5.3-Flash NoPE form: the pooled index structure (four-token pools, 2176 slots), scale
-    1/16, fresh ``dkv`` and a zeroed ``dkv_acc`` (the same bits)."""
+def test_issue_8946_glm53_flash_nope_holds_its_contract():
+    """The GLM-5.3-Flash NoPE form (an issue layout, held to its contract without an oracle): the pooled index
+    structure (four-token pools, 2176 slots), scale 1/16; fresh ``dkv`` and a zeroed ``dkv_acc`` give the same bits,
+    finite with the contract's exact zeros."""
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
     inp = make_nope_inputs([2048, 2048], [8192, 4096], seed=SEED + 21)
     args = (inp.q, inp.kv, inp.idx_global)
     tl = inp.topk_length
     out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
     dq, dkv = cake_backend.backward_nope(
         *args, out, o_lo, lse, inp.dout, topk_length=tl
     )
@@ -1208,13 +1128,9 @@ def test_accuracy_issue_8946_glm53_flash_nope():
         *args, out, o_lo, lse, inp.dout, topk_length=tl, dkv_acc=acc
     )
     assert _same_bits(acc, dkv)
-    n_out, n_lse, n_o_lo = nondet_backend.forward_nope(*args, topk_length=tl)
-    nondet = nondet_backend.backward_nope(
-        *args, n_out, n_o_lo, n_lse, inp.dout, topk_length=tl
-    )
-    ref = reference_fp64_nope(*args, dout=inp.dout, topk_length=tl)
-    _check_lse(lse, ref)
-    _check_nope_accuracy("i8946_glm53_nope", dq, dkv, ref, nondet=nondet)
+    problem = nv.nope_problem(inp, topk_length=tl)
+    nv.assert_contract("forward", problem, forward)
+    nv.assert_contract("backward", problem, dict(dq=dq, dkv=dkv))
 
 
 def _sink_beta(q_parts, k_parts, scale, target=0.95):
@@ -1259,46 +1175,45 @@ def _sink_problem(nope, seed, T=256):
     return inp, dout
 
 
-def test_backward_dominant_key_exercises_the_redo():
+def test_backward_dominant_key_exercises_the_redo(record_property):
     """The dominant-key problem flags key 0's row for recomputation on the default grid (the redo runs: coverage
-    guard), no row is left non-finite, the gradients are within the floors, and the runner and the eager entry
-    give the same bits on every repeat."""
+    guard on the first draw), no row is left non-finite, the gradients meet the naive tier over the draws, and on the
+    first draw the runner and the eager entry give the same bits on every repeat."""
     _require_program(backward=True)
-    inp, dout = _sink_problem(nope=False, seed=SEED + 22)
-    args = _rope_args(inp)
-    runner = cake_backend.prepare_dsa_train(
-        *args, topk_length=inp.topk_length, dout=dout, dkv_fp32=True
-    )
-    first = [t.clone() for t in runner.step()]
-    words = _globals(runner)
-    assert words[cake_backend.REDO_WORD] > 0, (
-        "coverage: no row was flagged for the redo"
-    )
-    assert words[cake_backend.NONFINITE_WORD] == 0
-    for _ in range(REPEATS - 1):
-        for a, b in zip(runner.step(), first, strict=True):
-            assert _same_bits(a, b)
-    out, lse, o_lo = cake_backend.forward(*args, topk_length=inp.topk_length)
-    eager = cake_backend.backward(
-        *args, out, o_lo, lse, dout, topk_length=inp.topk_length, dkv_fp32=True
-    )
-    for a, b in zip(eager, first, strict=True):
-        assert _same_bits(a, b)
-    n_out, n_lse, n_o_lo = nondet_backend.forward(*args, topk_length=inp.topk_length)
-    nondet = nondet_backend.backward(
-        *args, n_out, n_o_lo, n_lse, dout, topk_length=inp.topk_length, dkv_fp32=True
-    )
-    ref = reference_fp64(
-        *args,
-        dout=dout,
-        topk_length=inp.topk_length,
-        own_key=torch.zeros(inp.total_q, dtype=torch.long, device="cuda"),
-    )
-    print(
-        "SINK rope flagged", words[cake_backend.REDO_WORD], "weight", ref["self_weight"]
-    )
-    assert 0.8 < ref["self_weight"] < 0.999
-    _check_rope_accuracy("sink_rope", first, ref, canonical=False, nondet=nondet)
+
+    def case(s, j):
+        inp, dout = _sink_problem(nope=False, seed=s)
+        args = _rope_args(inp)
+        runner = cake_backend.prepare_dsa_train(
+            *args, topk_length=inp.topk_length, dout=dout, dkv_fp32=True
+        )
+        first = [t.clone() for t in runner.step()]
+        words = _globals(runner)
+        assert words[cake_backend.NONFINITE_WORD] == 0
+        if j == 0:
+            assert words[cake_backend.REDO_WORD] > 0, (
+                "coverage: no row was flagged for the redo"
+            )
+            weight = reference_fp64(
+                *args,
+                topk_length=inp.topk_length,
+                own_key=torch.zeros(inp.total_q, dtype=torch.long, device="cuda"),
+            )["self_weight"]
+            print("SINK rope flagged", words[cake_backend.REDO_WORD], "weight", weight)
+            assert 0.8 < weight < 0.999
+            for _ in range(REPEATS - 1):
+                for a, b in zip(runner.step(), first, strict=True):
+                    assert _same_bits(a, b)
+            out, lse, o_lo = cake_backend.forward(*args, topk_length=inp.topk_length)
+            eager = cake_backend.backward(
+                *args, out, o_lo, lse, dout, topk_length=inp.topk_length, dkv_fp32=True
+            )
+            for a, b in zip(eager, first, strict=True):
+                assert _same_bits(a, b)
+        got = dict(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), first, strict=True))
+        return nv.judged(nv.rope_problem(inp, topk_length=inp.topk_length, dout=dout), {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 22)
 
 
 def test_nope_runner_rejects_misaligned_dkv_and_workspace():
@@ -1324,55 +1239,52 @@ def test_nope_runner_rejects_misaligned_dkv_and_workspace():
     )
 
 
-def test_backward_dominant_key_exercises_the_redo_nope():
+def test_backward_dominant_key_exercises_the_redo_nope(record_property):
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
-    inp, dout = _sink_problem(nope=True, seed=SEED + 23)
-    args = (inp.q_latent, inp.kv_latent, inp.idx_global)
-    runner = cake_backend.prepare_dsa_nope_train(
-        *args, topk_length=inp.topk_length, dout=dout
-    )
-    runner.forward()
-    first = [t.clone() for t in runner.backward()]
-    words = _globals(runner)
-    assert words[cake_backend.REDO_WORD] > 0, (
-        "coverage: no row was flagged for the redo"
-    )
-    assert words[cake_backend.NONFINITE_WORD] == 0
-    for _ in range(REPEATS - 1):
+
+    def case(s, j):
+        inp, dout = _sink_problem(nope=True, seed=s)
+        args = (inp.q_latent, inp.kv_latent, inp.idx_global)
+        runner = cake_backend.prepare_dsa_nope_train(
+            *args, topk_length=inp.topk_length, dout=dout
+        )
         runner.forward()
-        for a, b in zip(runner.backward(), first, strict=True):
-            assert _same_bits(a, b)
-    out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=inp.topk_length)
-    eager = cake_backend.backward_nope(
-        *args, out, o_lo, lse, dout, topk_length=inp.topk_length
-    )
-    for a, b in zip(eager, first, strict=True):
-        assert _same_bits(a, b)
-    n_out, n_lse, n_o_lo = nondet_backend.forward_nope(
-        *args, topk_length=inp.topk_length
-    )
-    nondet = nondet_backend.backward_nope(
-        *args, n_out, n_o_lo, n_lse, dout, topk_length=inp.topk_length
-    )
-    ref = reference_fp64_nope(
-        *args,
-        dout=dout,
-        topk_length=inp.topk_length,
-        own_key=torch.zeros(inp.total_q, dtype=torch.long, device="cuda"),
-    )
-    print(
-        "SINK nope flagged", words[cake_backend.REDO_WORD], "weight", ref["self_weight"]
-    )
-    assert 0.8 < ref["self_weight"] < 0.999
-    _check_nope_accuracy("sink_nope", first[0], first[1], ref, nondet=nondet)
+        first = [t.clone() for t in runner.backward()]
+        words = _globals(runner)
+        assert words[cake_backend.NONFINITE_WORD] == 0
+        if j == 0:
+            assert words[cake_backend.REDO_WORD] > 0, (
+                "coverage: no row was flagged for the redo"
+            )
+            weight = reference_fp64_nope(
+                *args,
+                topk_length=inp.topk_length,
+                own_key=torch.zeros(inp.total_q, dtype=torch.long, device="cuda"),
+            )["self_weight"]
+            print("SINK nope flagged", words[cake_backend.REDO_WORD], "weight", weight)
+            assert 0.8 < weight < 0.999
+            for _ in range(REPEATS - 1):
+                runner.forward()
+                for a, b in zip(runner.backward(), first, strict=True):
+                    assert _same_bits(a, b)
+            out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=inp.topk_length)
+            eager = cake_backend.backward_nope(
+                *args, out, o_lo, lse, dout, topk_length=inp.topk_length
+            )
+            for a, b in zip(eager, first, strict=True):
+                assert _same_bits(a, b)
+        problem = nv.nope_problem(inp, topk_length=inp.topk_length, dout=dout)
+        return nv.judged(problem, {"": dict(dq=first[0], dkv=first[1])})
+
+    nv.judge_draws(record_property, case, seed=SEED + 23)
 
 
 @pytest.mark.parametrize("nope", [False, True], ids=["rope", "nope"])
 def test_forced_redo_of_most_rows_repeats_bit_for_bit(monkeypatch, nope):
     """With the grid 24 bits finer than the bound needs (``GRID_SHIFT = 24``, ``MIN_BUMP = 25``) most rows overflow
     and are recomputed by the redo: no row is left flagged or non-finite, ``dq`` keeps its bits (it does not depend
-    on the grid), and five steps give the same bits.  The error against FP64 is reported (this grid is not a
-    shipped configuration)."""
+    on the grid), and five steps give the same bits (this grid is not a shipped configuration: its accuracy is not
+    judged)."""
     program = cake_jit.NOPE_PROGRAM if nope else cake_jit.PROGRAM
     _require_program(backward=True, program=program)
     inp = make_inputs([256], [1024], seed=SEED + 24, topk=256)
@@ -1412,9 +1324,6 @@ def test_forced_redo_of_most_rows_repeats_bit_for_bit(monkeypatch, nope):
     for _ in range(REPEATS - 1):
         for a, b in zip(step(runner), first, strict=True):
             assert _same_bits(a, b)
-    dkv = first[-1] if nope else torch.cat(first[2:], 1)
-    ref_dkv = shipped[-1] if nope else torch.cat(shipped[2:], 1)
-    print("FORCED_REDO rel-L2 vs the shipped grid", rel_l2(dkv, ref_dkv))
 
 
 @pytest.mark.parametrize("nope", [False, True], ids=["rope", "nope"])
@@ -1473,8 +1382,8 @@ def _require_key_passes():
 def test_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
     """A backward of P key-range passes (``bwd_compact`` + ``bwd_main_pass`` per pass, in place of ``bwd_main``)
     gives the dK/dV, overflow-counter and global-word bits of one main launch -- with most rows recomputed by the
-    redo too (``GRID_SHIFT = 24``) -- and the dQ bits of the non-deterministic package's backward of the same
-    passes; the eager backward with the same ``key_passes`` gives the runner's bits.  The counters and pair counts
+    redo too (``GRID_SHIFT = 24``); the eager backward with the same ``key_passes`` gives the runner's bits (the
+    passes' accuracy: :func:`test_key_passes_meet_the_naive_tier`).  The counters and pair counts
     are compared on the rows a pair touches (the grid stage zeroes only those; the others keep whatever the
     allocator handed the region)."""
     _require_key_passes()
@@ -1523,7 +1432,6 @@ def test_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
     one, one_state, one_words = run(1)
     if redo:
         assert one_words[cake_backend.REDO_WORD] > S // 4
-    n = nondet_backend.forward(*args, topk_length=tl)
     for passes in (2, 3):
         grads, state, words = run(passes)
         # dK/dV (or the accumulated rows), the counters and the global words: the bits of one launch
@@ -1534,16 +1442,6 @@ def test_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
         assert words[cake_backend.REDO_WORD] == one_words[cake_backend.REDO_WORD]
         nonfinite = cake_backend.NONFINITE_WORD
         assert words[nonfinite] == one_words[nonfinite] == 0
-        # dQ: the non-deterministic package's dQ of the same passes
-        nd = nondet_backend.backward(
-            *args, n[0], n[2], n[1], inp.dout, topk_length=tl, key_passes=passes
-        )
-        assert _same_bits(grads[0], nd[0])
-        assert _same_bits(grads[1], nd[1])
-        print(
-            "KEY_PASSES", dkv, "redo" if redo else "no_redo", passes,
-            "dq rel-L2 vs one launch", rel_l2(grads[0], one[0]),
-        )  # fmt: skip
         if dkv == "bf16":
             out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
             eager = cake_backend.backward(
@@ -1551,6 +1449,27 @@ def test_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
             )
             for a, b in zip(eager, grads, strict=True):
                 assert _same_bits(a, b)
+
+
+
+@pytest.mark.parametrize("passes", [2, 3])
+def test_key_passes_meet_the_naive_tier(passes, record_property):
+    """A backward of P key-range passes: the forward's outputs and the gradients meet the naive tier over the
+    draws (its dK/dV bits are one launch's: :func:`test_key_passes_give_the_bits_of_one_launch`)."""
+    _require_key_passes()
+
+    def case(s, j):
+        inp = make_inputs([384], [4096], seed=s, topk=512)
+        args, tl = _rope_args(inp), inp.topk_length
+        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+        got = dict(out=out, lse=lse, o_lo=o_lo.clone())
+        grads = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, topk_length=tl, key_passes=passes
+        )
+        got.update(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True))
+        return nv.judged(nv.rope_problem(inp, topk_length=tl), {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 33)
 
 
 # The poisoned-scratch cases: (program, dK/dV form, key-range passes).  "fresh": the runner's own dK/dV outputs
@@ -1737,119 +1656,109 @@ def test_scratch_in_dead_output_storage_gives_the_same_bits(monkeypatch, mode):
 
 
 @pytest.mark.parametrize("nope", [False, True], ids=["rope", "nope"])
-def test_backward_skewed_magnitudes(nope):
+def test_backward_skewed_magnitudes(nope, record_property):
     """Key rows scaled by powers of two over 2 ** +-3 and ``dout`` tokens over 2 ** +-8, independently (per-row
-    grids far apart; the key scale stays small enough to keep the softmax unsaturated): dQ is the
-    non-deterministic dQ bit for bit (both are above the dQ floor on these inputs), dK/dV within the floors, and
-    the 99th percentile of the per-row relative error of the FP32 dK/dV within that of the BF16
-    floor."""
+    grids far apart; the key scale stays small enough to keep the softmax unsaturated): the forward's outputs and
+    the gradients (natural-layout FP32 dK/dV for RoPE) meet the naive tier over the draws."""
     program = cake_jit.NOPE_PROGRAM if nope else cake_jit.PROGRAM
     _require_program(backward=True, program=program)
-    inp = make_inputs([512], [1024], seed=SEED + 25, topk=256)
-    gen = torch.Generator(device="cuda").manual_seed(SEED + 25)
-    S, T = inp.total_k, inp.total_q
-    k_scale = torch.exp2(
-        torch.randint(-3, 4, (S, 1), device="cuda", generator=gen).float()
-    )
-    t_scale = torch.exp2(
-        torch.randint(-8, 9, (T, 1, 1), device="cuda", generator=gen).float()
-    )
-    kv = (inp.kv_latent.float() * k_scale).bfloat16()
-    dout = (inp.dout.float() * t_scale).bfloat16()
-    tl = inp.topk_length
-    if nope:
-        args = (inp.q_latent, kv, inp.idx_global)
-        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
-        dq, dkv = cake_backend.backward_nope(
-            *args, out, o_lo, lse, dout, topk_length=tl
+
+    def case(s, j):
+        inp = make_inputs([512], [1024], seed=s, topk=256)
+        gen = torch.Generator(device="cuda").manual_seed(s)
+        S, T = inp.total_k, inp.total_q
+        k_scale = torch.exp2(
+            torch.randint(-3, 4, (S, 1), device="cuda", generator=gen).float()
         )
-        n = nondet_backend.forward_nope(*args, topk_length=tl)
-        nondet = nondet_backend.backward_nope(
-            *args, n[0], n[2], n[1], dout, topk_length=tl
+        t_scale = torch.exp2(
+            torch.randint(-8, 9, (T, 1, 1), device="cuda", generator=gen).float()
         )
-        ref = reference_fp64_nope(*args, dout=dout, topk_length=tl)
-        _check_nope_accuracy(
-            "skewed_nope", dq, dkv, ref, nondet=nondet, dq_bitwise=True
-        )
-        got_rows, floor_rows = (
-            rel_l2_rows(dkv, ref["dkv"]),
-            rel_l2_rows(ref["dkv_emu"], ref["dkv"]),
-        )
-    else:
-        k_rope = (inp.k_rope.float() * k_scale).bfloat16()
-        args = (inp.q_latent, inp.q_rope, kv, k_rope, inp.idx_global)
-        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-        grads = cake_backend.backward(
-            *args, out, o_lo, lse, dout, topk_length=tl, dkv_fp32=True
-        )
-        n = nondet_backend.forward(*args, topk_length=tl)
-        nondet = nondet_backend.backward(
-            *args, n[0], n[2], n[1], dout, topk_length=tl, dkv_fp32=True
-        )
-        ref = reference_fp64(*args, dout=dout, topk_length=tl)
-        _check_rope_accuracy(
-            "skewed_rope", grads, ref, canonical=False, nondet=nondet, dq_bitwise=True
-        )
-        got_rows = rel_l2_rows(grads[2], ref["dkv_latent"])
-        floor_rows = rel_l2_rows(ref["dkv_latent_emu"], ref["dkv_latent"])
-    touched = (ref["dkv"] if nope else ref["dkv_latent"]).abs().sum(1) > 0
-    p99 = got_rows[touched].quantile(0.99).item()
-    p99_floor = floor_rows[touched].quantile(0.99).item()
-    print("SKEWED", "nope" if nope else "rope", "row p99", p99, "floor p99", p99_floor)
-    assert p99 <= FLOOR_MARGIN * p99_floor + FLOOR_ABS
+        kv = (inp.kv_latent.float() * k_scale).bfloat16()
+        dout = (inp.dout.float() * t_scale).bfloat16()
+        tl = inp.topk_length
+        if nope:
+            args = (inp.q_latent, kv, inp.idx_global)
+            out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+            got = dict(out=out, lse=lse, o_lo=o_lo.clone())
+            dq, dkv = cake_backend.backward_nope(
+                *args, out, o_lo, lse, dout, topk_length=tl
+            )
+            got.update(dq=dq, dkv=dkv)
+            problem = nv.Problem(
+                q_latent=inp.q_latent, kv_latent=kv, indices=inp.idx_global, topk_length=tl, dout=dout
+            )
+        else:
+            k_rope = (inp.k_rope.float() * k_scale).bfloat16()
+            args = (inp.q_latent, inp.q_rope, kv, k_rope, inp.idx_global)
+            out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+            got = dict(out=out, lse=lse, o_lo=o_lo.clone())
+            grads = cake_backend.backward(
+                *args, out, o_lo, lse, dout, topk_length=tl, dkv_fp32=True
+            )
+            got.update(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True))
+            problem = nv.Problem(
+                q_latent=inp.q_latent, q_rope=inp.q_rope, kv_latent=kv, k_rope=k_rope,
+                indices=inp.idx_global, topk_length=tl, dout=dout,
+            )  # fmt: skip
+        return nv.judged(problem, {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 25)
 
 
 @pytest.mark.parametrize("nope", [False, True], ids=["rope", "nope"])
-def test_negative_softmax_scale(nope):
+def test_negative_softmax_scale(nope, record_property):
     """A negative ``softmax_scale``, admitted as in the non-deterministic package: the bound stages
     (``BOUND_SCALE_STAGES``) take its magnitude, so a per-query bound term cannot cancel below the gradient it
     bounds, and the gradient stages keep its sign.  ``dout`` follows ``out`` (a large ``delta``, the term a signed
-    scale subtracts); the gradients are within the floors of the FP64 reference at that scale and repeat bit for
-    bit."""
+    scale subtracts); the outputs meet the naive tier at that scale over the draws, and on the first draw the
+    gradients repeat bit for bit."""
     program = cake_jit.NOPE_PROGRAM if nope else cake_jit.PROGRAM
     _require_program(backward=True, program=program)
-    inp = make_inputs([512], [1024], seed=SEED + 31, topk=256)
-    tl = inp.topk_length
-    seen = None
-    for _ in range(2):
+
+    def case(s, j):
+        inp = make_inputs([512], [1024], seed=s, topk=256)
+        tl = inp.topk_length
         if nope:
             scale = -cake_backend.NOPE_SOFTMAX_SCALE
             args = (inp.q_latent, inp.kv_latent, inp.idx_global)
-            out, lse, o_lo = cake_backend.forward_nope(
-                *args, topk_length=tl, softmax_scale=scale
-            )
-            dout = (out.float() * 8 + inp.dout.float()).bfloat16()
-            grads = cake_backend.backward_nope(
-                *args, out, o_lo, lse, dout, topk_length=tl, softmax_scale=scale
-            )
         else:
             scale = -cake_backend.default_softmax_scale()
             args = _rope_args(inp)
+
+        def run():
+            if nope:
+                out, lse, o_lo = cake_backend.forward_nope(
+                    *args, topk_length=tl, softmax_scale=scale
+                )
+                fwd = dict(out=out, lse=lse, o_lo=o_lo.clone())
+                dout = (out.float() * 8 + inp.dout.float()).bfloat16()
+                grads = cake_backend.backward_nope(
+                    *args, out, o_lo, lse, dout, topk_length=tl, softmax_scale=scale
+                )
+                return fwd, dout, dict(zip(("dq", "dkv"), grads, strict=True))
             out, lse, o_lo = cake_backend.forward(
                 *args, topk_length=tl, softmax_scale=scale
             )
+            fwd = dict(out=out, lse=lse, o_lo=o_lo.clone())
             dout = (out.float() * 8 + inp.dout.float()).bfloat16()
             grads = cake_backend.backward(
-                *args,
-                out,
-                o_lo,
-                lse,
-                dout,
-                topk_length=tl,
-                softmax_scale=scale,
-                dkv_fp32=True,
-            )
-        if seen is None:
-            seen = grads
+                *args, out, o_lo, lse, dout, topk_length=tl, softmax_scale=scale, dkv_fp32=True,
+            )  # fmt: skip
+            return fwd, dout, dict(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True))
+
+        fwd, dout, grads = run()
+        if j == 0:
+            _, again_dout, again = run()
+            assert _same_bits(again_dout, dout)
+            for name, value in grads.items():
+                assert _same_bits(again[name], value), name
+        if nope:
+            problem = nv.nope_problem(inp, topk_length=tl, dout=dout, scale=scale)
         else:
-            for a, b in zip(grads, seen, strict=True):
-                assert _same_bits(a, b)
-    if nope:
-        ref = reference_fp64_nope(*args, dout=dout, topk_length=tl, softmax_scale=scale)
-        _check_nope_accuracy("negative_scale_nope", grads[0], grads[1], ref)
-    else:
-        ref = reference_fp64(*args, dout=dout, topk_length=tl, softmax_scale=scale)
-        _check_rope_accuracy("negative_scale_rope", grads, ref, canonical=False)
+            problem = nv.rope_problem(inp, topk_length=tl, dout=dout, scale=scale)
+        return nv.judged(problem, {"": {**fwd, **grads}})
+
+    nv.judge_draws(record_property, case, seed=SEED + 31)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])

@@ -1304,7 +1304,9 @@ class ArmCakeNope:
             missing = [
                 stage
                 for stage in cake_jit.registered_stages(program)
-                if cake_jit.library_name(stage, arch, program) not in installed
+                # each stage on the architectures it ships for (the scanner-warp forward on sm_107a only)
+                if arch in cake_jit.stage_arches(stage, program)
+                and cake_jit.library_name(stage, arch, program) not in installed
             ]
         except Exception:  # noqa: BLE001 -- an older manifest API: let the first launch decide
             missing = []

@@ -22,9 +22,10 @@ package").
 ## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
-keyword.  This is the `nondet` package: the forward and `dq` are fixed-order,
-and the backward adds the dK / dV contributions with unordered FP32 atomics, so
-the key gradients may differ run to run within the FP32 reduction spread.
+keyword.  This is the `nondet` package: the backward adds the dK / dV
+contributions with unordered FP32 atomics, and the package does not promise that
+any output repeats bit for bit, from run to run or across routes, views,
+layouts, streams or kernels running beside it.
 Under `torch.use_deterministic_algorithms(True)` the forward runs and every
 backward launch sequence (the autograd backward, `backward` / `backward_nope`
 and the prepared runners' `backward`) raises PyTorch's `RuntimeError` before it
@@ -40,21 +41,23 @@ deterministic package `cake_pplx.cake_dsa_sparse_attention_det_train` has
 the same entry points (`det` in place of `nondet`); its outputs repeat bit for
 bit run to run.
 
-Run to run, with identical inputs on the same GPU, and the error of each output
-against an FP64 reference: relative L2 / worst element over max |reference|,
-median of 5 runs at T 1024, S 8192, top-k 2048 (B200; rope form, then NoPE
-form):
+The tests judge every output against an FP64 reference instead: over 32 random
+inputs per case, the error of each output, in the L2 and the max norm, median
+and largest, is at most that of the same math in PyTorch BF16 (within a factor
+1.005), and exactly 0 where that error is 0.  The error of each output against
+an FP64 reference, relative L2 / worst element over max |reference|, median of
+5 runs at T 1024, S 8192, top-k 2048 (B200; rope form, then NoPE form):
 
-| Output | Run to run | Error vs FP64 |
-|---|---|---|
-| `out` | repeats bit for bit | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 |
-| `lse` | repeats bit for bit | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 |
-| the `o_lo` residual (forward) | repeats bit for bit | (internal) |
-| `dq_latent`; the NoPE `dq` | repeats bit for bit | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 |
-| `dq_rope` | repeats bit for bit | 2.35e-3 / 4.35e-3 |
-| `dkv_latent`; the NoPE `dkv` (fresh, or the `kv` gradient) | may vary (unordered FP32 atomic adds) | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 |
-| `dk_rope` | may vary (unordered FP32 atomic adds) | 1.66e-3 / 1.93e-3 |
-| the rows accumulated into `dkv_acc` | may vary (unordered FP32 atomic adds) | as `dkv_latent` / `dk_rope` |
+| Output | Error vs FP64 |
+|---|---|
+| `out` | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 |
+| `lse` | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 |
+| the `o_lo` residual (forward) | (internal) |
+| `dq_latent`; the NoPE `dq` | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 |
+| `dq_rope` | 2.35e-3 / 4.35e-3 |
+| `dkv_latent`; the NoPE `dkv` (fresh, or the `kv` gradient) | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 |
+| `dk_rope` | 1.66e-3 / 1.93e-3 |
+| the rows accumulated into `dkv_acc` | as `dkv_latent` / `dk_rope` |
 
 | Before | Now |
 |---|---|
@@ -141,8 +144,8 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   `lse [T, 64]` FP32 over the valid keys; fully masked rows give `out = 0` and
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
   `o_lo = bf16(fp32(O) - bf16(O))` for the backward's exact `delta`.
-* Backward: `dq_latent`, `dq_rope` (computed once per row, bitwise
-  deterministic), `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
+* Backward: `dq_latent`, `dq_rope` (computed once per row),
+  `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
   accumulation, then a cast to natural-layout BF16).  BF16 MMA operands, FP32
   accumulation throughout.  `cake_backend.backward(..., dkv_fp32=True)` (and a
   runner prepared with `dkv_fp32=True`) returns the dK/dV gradients as
@@ -183,9 +186,8 @@ trainer's packed layouts are consumed in place
   the descriptor cannot address it (base not 16-byte aligned, strides not
   multiples of 8 elements, channel stride != 1); `prepare_dsa_train` rejects
   such a view.
-* A strided view yields bitwise the same `out`, `lse` and `dq` as the
-  contiguous copy (only descriptor fields and pointer offsets change); dK/dV
-  agree within the FP32 `red.global` reduction spread.
+* A strided view runs the kernels of the contiguous copy (only descriptor
+  fields and pointer offsets change).
 
 ### Packed fp32 dKV accumulation and destination mapping
 
@@ -241,7 +243,7 @@ context-parallel window):
   (`accumulate = 1`).  With a map the adds are `red.global.add.v4.f32`, whose
   order is not fixed for repeated destination rows (an injective map is still
   exactly one add per element); without a map every 16-byte vector is a
-  load-add-store, bitwise `previous + value`.
+  load-add-store, `previous + value`.
 * The generated `bwd_cast` launcher takes the packed-accumulate operands
   (`dst_packed, dst_row_stride, dst_map, has_dst_map, accumulate`); a plan
   that does not accumulate passes inert placeholders with `accumulate = 0`.
@@ -271,7 +273,7 @@ value is part of the binding key (the public wrapper maps
 `CAKE_PPLX_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
 leaves it at `None`).  Both
 paths add the same FP32 contributions into the same rows in another summation
-order; dq is bitwise the same.  Without the natural stages every `dkv_acc`
+order; dq is computed the same way.  Without the natural stages every `dkv_acc`
 call takes the cast's accumulate path.
 
 Explicit forward / backward entry points without autograd, a prepared
@@ -349,7 +351,7 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
 * `bwd_main`: one CTA per query token (20 warps: gather, compute, reduce, MMA,
   load and metadata roles) recomputes S and P from the BF16 Q and the gathered
   K, forms dP and dS, accumulates dQ / dQ_rope in tensor memory (written once
-  per row: bitwise deterministic) and scatters the per-token dK/dV and dK_rope
+  per row) and scatters the per-token dK/dV and dK_rope
   contributions with vectorized FP32 `red.global.add` into the accumulators.
 * `bwd_compact` / `bwd_main_pass`: the key-range-pass form of the main stage
   for the DRAM regime (see below).  Per pass, `bwd_compact` (one warp per
@@ -423,9 +425,9 @@ binding of the last one.  The passes add
 `min(T, 4224) * (147,456 + 4 * topk + 4)` B to the workspace (`dq_partial`,
 `key_scratch`, `pass_counts`; 608 MiB at `T = 4096`, top-k 2048;
 `dsa_train_workspace_size` includes them).  dQ is
-still written once per row from the carried FP32 partial (bitwise
-deterministic run to run; its partial sums are re-associated, so it differs
-from the single pass in the last FP32 places), and the dK/dV reductions are
+still written once per row from the carried FP32 partial (its partial sums
+are re-associated, so it can differ from the single pass in the last FP32
+places), and the dK/dV reductions are
 the same reds in another order.  `key_passes=` on the entry points overrides
 the policy (`1` = single pass, `n` = that many passes); a program without the
 pass stages serves the single pass only.
@@ -614,8 +616,7 @@ rope program: `nope_fwd` (own kernel, 320 threads), `nope_bwd_delta` (the
 strided delta kernel, shared with the rope program's `bwd_delta`, 256 threads:
 the `[T * 64, 512]` rows of `dout` addressed as `dout_offset + token *
 dout_token_stride + head * dout_head_stride + channel`, strides and offset
-multiples of 8 elements; with contiguous strides it is bitwise the dense form
-it replaced),
+multiples of 8 elements),
 `nope_bwd_main` /
 `nope_bwd_main_natural` (own kernels, 640 threads: no rope operands, one
 accumulator `dkv_f32` with `dkv_stride >= 512`, a multiple of 4, and the
@@ -724,5 +725,9 @@ only this package; skips without a registered program or a compute capability
 resolves into this package's keyword switches and the behaviour under
 `torch.use_deterministic_algorithms`); the CPU-only
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_names.py`
-checks the public names.  Benchmark:
+checks the public names.  Accuracy is judged by `tests/cake_naive.py` through
+`tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
+reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
+one `TIER` line per judged output); index, length and map outputs are checked
+exactly.  Benchmark:
 `benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py`.
