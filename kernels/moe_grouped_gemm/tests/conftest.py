@@ -10,7 +10,8 @@ import torch
 from tests import known_gaps
 from tests.cake.test_helpers.cake_naive import summarize_tiers
 
-_KNOWN_GAP = pytest.StashKey[bool]()
+#: The outputs of a test's known gap on the current GPU model (set when it is marked xfail).
+_KNOWN_GAP = pytest.StashKey[frozenset]()
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -26,22 +27,23 @@ def _known_gap(request):
         return
     name = torch.cuda.get_device_name(torch.cuda.current_device())
     if gap := known_gaps.known_gap(name, key):
-        reason, strict = gap
+        reason, strict, outputs = gap
         request.node.add_marker(pytest.mark.xfail(reason=reason, strict=strict))
-        request.node.stash[_KNOWN_GAP] = True
+        request.node.stash[_KNOWN_GAP] = outputs
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
-    """A known gap's xfail covers its miss of the naive tier only: a failure whose message
-    does not report that miss stays a failure."""
+    """A known gap's xfail covers its known miss of the naive tier only
+    (``known_gaps.covers``): any other failure of the test stays a failure."""
     outcome = yield
     report = outcome.get_result()
+    outputs = item.stash.get(_KNOWN_GAP, None)
     if (
-        item.stash.get(_KNOWN_GAP, False)
+        outputs is not None
         and hasattr(report, "wasxfail")
         and call.excinfo is not None
-        and known_gaps.MISS not in str(call.excinfo.value)
+        and not known_gaps.covers(call.excinfo.value, outputs)
     ):
         report.outcome = "failed"
         del report.wasxfail
