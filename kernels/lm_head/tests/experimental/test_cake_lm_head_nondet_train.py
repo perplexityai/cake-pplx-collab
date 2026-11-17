@@ -8508,8 +8508,9 @@ def _keep_problem(T, H, V, C, entry="loss"):
 
 def _same_dx(dx, base, plan, case):
     """``dX`` of the kept path against the default call ``base``: the same bits when every chunk of ``plan`` (the kept
-    backward's) runs one dX slice; else (the same products in the unordered K-slice reduction) ``base``'s dtype and
-    shape and finite values (the kept form's accuracy: :func:`test_device_logprob_keep_meets_the_naive_tier`)."""
+    backward's) runs one dX slice; else (the same products through the K-sliced reduction, its slab summed in slice
+    order) ``base``'s dtype and shape and finite values (the kept form's accuracy:
+    :func:`test_device_logprob_keep_meets_the_naive_tier`)."""
     if dx is None or base["dX"] is None:
         assert dx is None and base["dX"] is None, case
         return
@@ -8791,8 +8792,8 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
     ``memory_mode="keep_logits"``) and the explicit pair (``forward_logprob_keep`` keeps one BF16 ``[rows_c, V]`` view
     per chunk, ``backward_logprob_keep`` on the forward's row index and on a recount) give bitwise the same ``logp`` /
     ``dW`` -- and ``dX`` wherever the call runs one dX slice per chunk (pinned or by the rule; else the same products
-    in the unordered K-slice reduction: finite, judged by :func:`test_device_logprob_keep_meets_the_naive_tier`) --
-    over one-, two- and many-chunk calls, compacted and
+    through the K-sliced reduction, its slab summed in slice order: finite, judged by
+    :func:`test_device_logprob_keep_meets_the_naive_tier`) -- over one-, two- and many-chunk calls, compacted and
     uncompacted calls, every row valid, the hidden valid-row count on and off, the dW side stream, the unfused dW
     cast and dX finalize, labels at and beyond the last vocabulary column and an ``X`` with a padded leading stride;
     the kept bindings are their own (``_KeptBinding``, keys ending in ``"keep"``) and the kept backward bindings
@@ -9002,7 +9003,8 @@ def test_device_logprob_keep_meets_the_naive_tier(
     logprob_chunk_loop, chunked_keep, record_property, T, C, ignore, switches, ld_pad
 ):
     """The kept logits (the chunked kept form, :data:`CHUNKED_KEEP`) of :func:`test_device_logprob_keep_is_bitwise`'s
-    calls, whose ``dX`` of a chunk of more than one slice comes from the unordered K-slice reduction: ``logp`` /
+    calls, whose ``dX`` of a chunk of more than one slice comes from the ordered K-slice reduction (a slab sum in slice
+    order): ``logp`` /
     ``dX`` / ``dW`` of the kept autograd entry meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws, every
     draw's backward through a kept binding."""
     _require_program(entry="logprob")
@@ -11061,14 +11063,14 @@ def test_device_zero_dlogp_one_chunk_backward_cuda_graph(
     temperature) captured in a CUDA graph through its remembered binding -- the first warm-up call (the runner's) makes
     and remembers the binding, so the captured call is the binding's first remembered call after one warm-up and its
     second after two -- replays with other ``dlogp`` values written into the captured input (other zero rows and live
-    counts, none, a single live row and every row zero), with one dX slice pinned, the default slices (an unordered
-    split-K reduction) or ``"raised"`` ones (the chunk below the K-sliced reduction's row floor, so the slice rule
-    gives it one slice and the counted plan the architecture's ``DX_COUNTED_MIN_SLICES_BY_ARCH`` count): every replay
-    holds its contract on those values, with exact ``+0`` ``dX`` on the zero and ignored rows and zero ``dW`` when
-    every row is zero.  The replays leave the forward's ``lse`` bits unchanged, and every warm-up and captured call ran
-    the partition over every valid row.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds of
-    ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
-    (:func:`_judge_zero_dlogp_replay`)."""
+    counts, none, a single live row and every row zero), with one dX slice pinned, the default slices (the ordered
+    split-K reduction: a slab sum in slice order) or ``"raised"`` ones (the chunk below the K-sliced reduction's row
+    floor, so the slice rule gives it one slice and the counted plan the architecture's
+    ``DX_COUNTED_MIN_SLICES_BY_ARCH`` count): every replay holds its contract on those values, with exact ``+0`` ``dX``
+    on the zero and ignored rows and zero ``dW`` when every row is zero.  The replays leave the forward's ``lse`` bits
+    unchanged, and every warm-up and captured call ran the partition over every valid row.  At ``JUDGE_H`` / ``JUDGE_V``
+    each draw's graph replays the same kinds of ``dlogp``, and every kind's replay is judged against the naive tier on
+    every draw as its own output (:func:`_judge_zero_dlogp_replay`)."""
     _require_zero_dlogp_skip()
     if tau is not None:
         _require_tau_program()
@@ -12033,8 +12035,8 @@ def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight
 
 # ---------------------------------------------------------------------------
 # Temperature of the log-probability entry (``*_temperature``; the deterministic suite's temperature tests on this
-# package: ``logp`` / ``dW`` keep their fixed order, ``dX`` of a chunk of more than one slice comes from the unordered
-# K-slice reduction)
+# package: ``logp`` / ``dW`` keep their fixed order, ``dX`` of a chunk of more than one slice comes from the ordered
+# K-slice reduction, a slab sum in slice order)
 # ---------------------------------------------------------------------------
 
 # The keywords of the log-probability entries' temperature forms (``*_temperature``).
@@ -12174,9 +12176,10 @@ def _assert_same_bits(a, b, keys=("loss", "logp", "dX", "dW")):
 
 
 def _assert_fixed_order_bits(a, b, case=None, keys=("logp", "dX", "dW")):
-    """Two calls of the same problem on this package: ``logp`` / ``dW`` (and ``loss``) have the same bits; ``dX`` --
-    whose K-sliced reduction of a chunk of more than one slice adds its slices in the order they finish -- the same
-    dtype and shape (its accuracy is judged against the naive tier)."""
+    """Two calls of the same problem on this package with different options: ``logp`` / ``dW`` (and ``loss``) have the
+    same bits; ``dX`` -- whose K-sliced reduction of a chunk of more than one slice sums its slices in slice order, so
+    another slice count gives other bits -- the same dtype and shape (its accuracy is judged against the naive
+    tier)."""
     for key in keys:
         x, y = a[key], b[key]
         assert (x is None) == (y is None), (case, key)
@@ -15136,10 +15139,10 @@ def test_device_temperature_counted_dz_is_the_mixed_plans_bits(
     (one dX slice pinned: binding and remembered binding) are the mixed plan's bits
     (``set_zero_dlogp_temperature_dz_counted(False)``: ``gemm_logits_dz_tau`` over every row) -- the same row order,
     the same counted dX / dW forms, the same ``dz`` on every row they read; with the default slices ``logp`` and
-    ``dW`` are its bits (:func:`_assert_fixed_order_bits`; ``dX`` -- whose K-sliced reduction adds its slices in the
-    order they finish -- is not compared).  Unless every row is zero, the default-slice calls of both plans meet the
-    naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (``name@counted`` / ``name@mixed``; each plan's ``dz`` form
-    bound on every draw)."""
+    ``dW`` are its bits (:func:`_assert_fixed_order_bits`; ``dX`` -- whose K-sliced reduction sums its slices in slice
+    order, with no bit promise between the two plans -- is not compared).  Unless every row is zero, the default-slice
+    calls of both plans meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (``name@counted`` /
+    ``name@mixed``; each plan's ``dz`` form bound on every draw)."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     module_name, _ = cake_backend.record_for(CUDA)

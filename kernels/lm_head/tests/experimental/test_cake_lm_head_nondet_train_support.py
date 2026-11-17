@@ -24,10 +24,11 @@ the median and the largest absolute error against the FP64 oracle at most 1.005 
 ``naive_support_bf16`` on the same inputs; every draw also keeps its contract (dtypes, shapes, finite values, the
 selected ``logp`` of an ignored row and the packed ``logp`` of a single-candidate row exactly 0).  The dense dX adds
 its vocabulary blocks into the chunk sum through the K-sliced reduction (``cake_support.support_dx_form``: one slice
-adds in one fixed order, more slices -- only inside the rule's measured cells, or forced by a test -- add in the order
-they finish).  The gradients carry no run-to-run promise in this package: a repeated case launches every draw
-``REPEATS`` times and the judge keeps each output's largest error.  No test compares this package's outputs with the
-deterministic package's.  The package is reached through ``tests.cake.test_helpers.cake_package``.
+adds in block order; more slices -- only inside the rule's measured cells, or forced by a test -- store into a slab
+whose sum is taken in slice order: one fixed order either way, with no run-to-run promise).  The gradients carry no
+run-to-run promise in this package: a repeated case launches every draw ``REPEATS`` times and the judge keeps each
+output's largest error.  No test compares this package's outputs with the deterministic package's.  The package is
+reached through ``tests.cake.test_helpers.cake_package``.
 """
 
 import contextlib
