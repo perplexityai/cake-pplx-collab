@@ -10824,9 +10824,12 @@ def _judge_zero_dlogp_replay(
     from the draw's own generator, :func:`_draw_zero_dlogp`).  The route on every draw: each warm-up and the captured
     call run the partition over every valid row and, where the backward runs the chunk loop (``chunk_loop``), the
     remembered backward binding's plan has the counted forms (and the dX slice counts ``dx_slices`` when given).
-    Every replay holds :func:`_zero_dlogp_contract` (every row zero: zero ``dW``), and draw ``j``'s replay of
-    ``kinds[j % len(kinds)]`` meets the naive tier (``dX`` / ``dW``)."""
+    Every replay holds :func:`_zero_dlogp_contract` (every row zero: zero ``dW``), and every draw's replay of each kind
+    of ``kinds`` is judged against the naive tier as its own output (``dX@replay_<kind>`` / ``dW@replay_<kind>``,
+    :func:`_replay_label`: each kind on all the draws, against its own float64 oracle and naive value)."""
     kinds = tuple(kinds)
+    labels = tuple(_replay_label(kind) for kind in kinds)
+    assert len(set(labels)) == len(labels), labels
     extra = dict(extra or {})
     kw = dict(chunk_size=4096)
     partition = cake_backend.zero_dlogp_partition
@@ -10858,7 +10861,7 @@ def _judge_zero_dlogp_replay(
                 draw.X, draw.W, draw.labels, fr.lse, d, row_index=fr.row_index, **more, **extra, **kw
             )
 
-        judged, problems = kinds[j % len(kinds)], []
+        problems = []
         with _zero_dlogp_floor(0):
             cake_backend.BINDING_CACHE.clear()
             partitioned.clear()
@@ -10895,20 +10898,26 @@ def _judge_zero_dlogp_replay(
                 _zero_dlogp_contract(result, inp)
                 if kind == "all":
                     assert not bool(result["dW"].float().any()), (j, kind)
-                if kind == judged:
-                    problems.append((inp, {"replay": result}))
+                else:
+                    problems.append((inp, {_replay_label(kind): result}))
         del graph, dx_g, dw_g
         return problems
 
     _judge_problems(
         record_property,
         launch,
-        ("replay",),
+        labels,
         seed=SEED + T,
         entry="logprob",
-        names={"replay": ("dX", "dW")},
+        names={label: ("dX", "dW") for label in labels},
         contract=_zero_dlogp_contract,
     )
+
+
+def _replay_label(kind):
+    """The judged output form of a replay with the zero rows of ``kind`` (:func:`_zero_dlogp_set`): ``replay_none``,
+    ``replay_single``, ``replay_last``, ``replay_random0.166``, ``replay_group0.5`` ..."""
+    return "replay_" + (kind if isinstance(kind, str) else "".join(str(part) for part in kind))
 
 
 @pytest.mark.parametrize("slices", ["one", "default", "raised"])
@@ -10927,7 +10936,8 @@ def test_device_zero_dlogp_one_chunk_backward_cuda_graph(
     holds its contract on those values, with exact ``+0`` ``dX`` on the zero and ignored rows and zero ``dW`` when
     every row is zero.  The replays leave the forward's ``lse`` bits unchanged, and every warm-up and captured call ran
     the partition over every valid row.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds of
-    ``dlogp`` and one replay per draw meets the naive tier (:func:`_judge_zero_dlogp_replay`)."""
+    ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
+    (:func:`_judge_zero_dlogp_replay`)."""
     _require_zero_dlogp_skip()
     if tau is not None:
         _require_tau_program()
@@ -11841,7 +11851,8 @@ def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight
     capture stream): replays with other ``dlogp`` values -- other zero rows and live counts per chunk, none and every
     row zero -- written into the captured input give finite results on those values, the zero rows' ``dX`` exact
     ``+0`` and every row zero zero ``dW``.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds of
-    ``dlogp`` and one replay per draw meets the naive tier (:func:`_judge_zero_dlogp_replay`)."""
+    ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
+    (:func:`_judge_zero_dlogp_replay`)."""
     _require_program(entry="logprob")
     base = _device_inputs(12289, "ce", W=glm_weight)
     kw = dict(chunk_size=4096)
@@ -15047,7 +15058,8 @@ def test_device_temperature_zero_dlogp_backward_cuda_graph(
     its resolved temperature): replays with other ``dlogp`` values -- other zero rows and live counts per chunk, none
     and every row zero -- written into the captured input give finite results on those values, the zero rows' ``dX``
     exact ``+0`` and every row zero zero ``dW``.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds
-    of ``dlogp`` and one replay per draw meets the naive tier (:func:`_judge_zero_dlogp_replay`)."""
+    of ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
+    (:func:`_judge_zero_dlogp_replay`)."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     base = _tau_inputs(12289, W=glm_weight)
