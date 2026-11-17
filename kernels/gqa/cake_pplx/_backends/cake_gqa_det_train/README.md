@@ -187,4 +187,7 @@ python benchmarks/bench_cake_gqa_det_train.py --layouts issue1,issue2,issue3 --b
   dropout, no sliding window.
 - `H_q / H_kv` must be even.
 - `dout` of the low-level backward must be contiguous (autograd makes it so).
-- `sm_100a`, `sm_103a` and `sm_107a` only.
+- `sm_100a`, `sm_103a` and `sm_107a` only, minimum CUDA 12.8 / 12.9 / 13.5
+  (`build.json`): every `sm_107a` entry has `min_cuda` 13.5, and on an older
+  toolkit `cake_build.jit_spec` raises and `cake_build.jit_specs` leaves the
+  entry out.

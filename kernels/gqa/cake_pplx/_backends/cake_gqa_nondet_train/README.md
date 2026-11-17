@@ -191,7 +191,10 @@ device stream gets its own default workspace.
   dropout, no sliding window.
 - `H_q / H_kv` must be even.
 - `dout` of the low-level backward must be contiguous (autograd makes it so).
-- `sm_100a`, `sm_103a` and `sm_107a` only.
+- `sm_100a`, `sm_103a` and `sm_107a` only, minimum CUDA 12.8 / 12.9 / 13.5
+  (`build.json`): every `sm_107a` entry has `min_cuda` 13.5, and on an older
+  toolkit `cake_build.jit_spec` raises and `cake_build.jit_specs` leaves the
+  entry out.
 - Tiny calls can be slower than the previous version of this package: a
   training step (forward and backward, row-map form, 24 query and 4 KV heads)
   with up to about 2K query and 8K key tokens, 0.1 to 0.5 ms long, takes up
