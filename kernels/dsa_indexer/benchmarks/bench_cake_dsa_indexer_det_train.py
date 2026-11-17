@@ -74,9 +74,10 @@ directory of a main checkout, in the same process: the package is
 self-contained -- relative imports, ``Path(__file__)`` manifest, JIT names
 salted by its own closure digests -- so both versions run on the same input
 tensors), ``cake_aa`` / ``cake_far_aa`` / ``cake_main_aa`` (the same arm prepared a second time:
-the in-process A/A band).  Every pair of arms is compared bitwise (ids and score bits) on
-every row and the verdicts are recorded (``same_bits``), together with a
-SHA-256 of each arm's ids and score bits for cross-process comparisons.
+the in-process A/A band).  Every pair of arms of one package is compared bitwise (ids and score bits)
+on every row and the verdicts are recorded (``same_bits``); the arms of the ``--main-package`` copy
+are not compared bitwise with this package's arms (the bits may change between package versions).
+A SHA-256 of each arm's ids and score bits is recorded for cross-process comparisons.
 
 Timing: :func:`gpu_times`, CUPTI activity tracing through ``torch.profiler``
 with a cold L2 between iterations (per-iteration GPU span of the whole
@@ -118,7 +119,7 @@ BF16 form on the same data dequantized to BF16: ``q`` exactly, ``bf16(k * k_scal
 ``softmax_scale = 1``).
 Timing boundary: a Cake arm's span is the complete operator (scan, merge,
 finalize into caller-owned outputs and workspace).  ``same_bits`` / ``all_cake_arms_identical``
-compare the Cake arms of one form; the speed ratios are against ``cake_fp8``.
+compare the Cake arms of one form and one package; the speed ratios are against ``cake_fp8``.
 
 Usage::
 
@@ -1176,10 +1177,12 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
                 "main" if arm.backend is not cake_backend else "candidate"
             )
         result["arms"][arm_name] = record
-    # bitwise identity of every pair of arms (ids and score bits): the contract says every cake arm agrees
+    # bitwise identity of every pair of arms of one package (ids and score bits): every arm of this package agrees
+    # (run-to-run and invariance); arms of another package version are not compared bitwise
     result["same_bits"] = {
         f"{a}|{b}": ref.same_bits(outputs[a], outputs[b])
         for a, b in itertools.combinations(outputs, 2)
+        if _same_package(a, b)
     }
     # the cake arms of one form agree bitwise; the FP8 form's bits are not the BF16 form's
     cake_pairs = [key for key in result["same_bits"] if _cake_pair(key)]
@@ -1218,10 +1221,20 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
     return result
 
 
+def _same_package(a: str, b: str) -> bool:
+    """``a`` and ``b`` run the same package: both or neither of them from ``--main-package`` (``MAIN_ARMS``)."""
+    return (a in MAIN_ARMS) == (b in MAIN_ARMS)
+
+
 def _cake_pair(key: str) -> bool:
-    """``a|b`` names two cake arms of one form."""
+    """``a|b`` names two cake arms of one form and one package."""
     a, b = key.split("|")
-    return a.startswith("cake") and b.startswith("cake") and arm_form(a) == arm_form(b)
+    return (
+        a.startswith("cake")
+        and b.startswith("cake")
+        and arm_form(a) == arm_form(b)
+        and _same_package(a, b)
+    )
 
 
 def print_row(result):

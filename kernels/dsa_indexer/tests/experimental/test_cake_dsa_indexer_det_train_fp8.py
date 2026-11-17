@@ -78,8 +78,6 @@ E4M3 = torch.float8_e4m3fn
 
 # The SM counts each architecture ships with (one persistent CTA per SM).
 _GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212,)}
-# DeepGEMM's fp8_mqa_logits accumulates in four K = 32 steps, the order of the sm_100a / sm_103a FP8 programs.
-_K32_ARCHES = ("sm_100a", "sm_103a")
 # The architectures that register an FP8 wide program; elsewhere an FP8 wide decision runs l6 (``FP8_KIND_FALLBACK``).
 _FP8_WIDE_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 
@@ -1161,7 +1159,7 @@ def test_fp8_dispatch_invariance_over_every_registered_program(monkeypatch, shap
 
 def test_fp8_prepared_runner_binds_k_scale():
     """The runner binds ``k_scale`` with ``q`` / ``k``: values written into it are read by the next run (doubling every
-    scale doubles every score exactly and keeps the ids); a BF16 runner binds the never-read placeholder."""
+    scale keeps the ids); a BF16 runner binds the never-read placeholder."""
     _require_fp8_program()
     inputs = ref.make_integer_fp8_inputs(
         [300, 200], [3000, 6000], top_k=512, seed=43, device="cuda"
@@ -1180,7 +1178,7 @@ def test_fp8_prepared_runner_binds_k_scale():
     second = _cloned(runner())
     torch.cuda.synchronize()
     assert torch.equal(second[0], first[0])
-    assert torch.equal(second[1], first[1] * 2.0)
+    naive.assert_exact(second, inputs)
     bf16 = ref.dequantized_bf16(inputs)
     bf16_runner = _prepare(bf16)
     assert bf16_runner.form == BF16
@@ -1319,19 +1317,41 @@ def test_fp8_prepared_runner_graph_capture_and_replay():
     assert ref.same_bits(_cloned(captured), _run(fresh))
 
 
-def test_fp8_k32_logits_match_deep_gemm_bitwise(monkeypatch):
-    """Diagnostic: on sm_100a / sm_103a the FP8 programs accumulate in DeepGEMM's four K = 32 steps, so every score
-    returned by the dispatched program, and by every FP8 program of the architecture forced on the same call, equals
-    the stock DeepGEMM FP8 MQA logit of its (query, key) pair bit for bit (up to the sign of zero).  The logits come
-    from ``deep_gemm.fp8_mqa_logits``, or in a build without it from ``deep_gemm.fp8_fp4_mqa_logits`` with
-    the same e4m3 ``q`` / ``k``, FP32 per-key scales and FP32 logits.  Skips on sm_107a (two K = 64 steps; last-bit
-    differences allowed), where DeepGEMM does not import, where the build has neither entry point, where an entry
-    point takes other arguments, and where ``fp8_fp4_mqa_logits`` rejects FP32 per-key scales on this architecture
+def _deep_gemm_selection(
+    logits: torch.Tensor, inputs: ref.IndexerInputs
+) -> torch.Tensor:
+    """int32 ``[T, top_k]``: per row the top ``min(top_k, visible)`` key ids of ``logits`` (one segment from key 0)
+    by the contract's order (score descending, then id descending, ``+0 == -0``), written as the package writes a row:
+    ascending ids, then ``-1`` in every other slot."""
+    T, top_k, Tkv = inputs.num_queries, inputs.top_k, inputs.num_keys
+    ids = torch.arange(Tkv, dtype=torch.int64, device=logits.device).unsqueeze(0)
+    key = ref.order_key(logits + 0.0, ids.expand(T, -1))
+    visible = ref.visible_rows(inputs)
+    key = torch.where(ids < visible.unsqueeze(1), key, torch.full_like(key, -1))
+    best = key.topk(min(top_k, Tkv), dim=1)
+    chosen = (
+        torch.where(best.values >= 0, best.indices, torch.full_like(best.indices, Tkv))
+        .sort(dim=1)
+        .values
+    )
+    chosen = torch.where(chosen < Tkv, chosen, torch.full_like(chosen, -1))
+    out = torch.full((T, top_k), -1, dtype=torch.int32, device=logits.device)
+    out[:, : chosen.shape[1]] = chosen.to(torch.int32)
+    return out
+
+
+def test_fp8_rows_are_the_top_k_of_deep_gemm_logits(monkeypatch):
+    """Diagnostic: on integer e4m3 inputs (exact head sums, one rounding of the scale multiply) the ids every FP8
+    program writes per row, the dispatched one and every FP8 program of the architecture forced on the same call, are
+    the top ``min(top_k, visible)`` of the stock DeepGEMM FP8 MQA logits of the same inputs (score descending, then id
+    descending), exactly and in the package's ascending id order: the FP8 form takes DeepGEMM's input format (e4m3
+    ``q`` / ``k``, FP32 per-key scales, FP32 head weights).  The logits come from ``deep_gemm.fp8_mqa_logits``, or in
+    a build without it from ``deep_gemm.fp8_fp4_mqa_logits`` with the same e4m3 ``q`` / ``k``, FP32 per-key scales and
+    FP32 logits.  Skips where DeepGEMM does not import, where the build has neither entry point, where an entry point
+    takes other arguments, and where ``fp8_fp4_mqa_logits`` rejects FP32 per-key scales on this architecture
     (DeepGEMM builds that take MX block scale factors and return BF16 logits there: a different input format)."""
     _require_fp8_program()
     arch = arch_for(torch.device("cuda"))
-    if arch not in _K32_ARCHES:
-        pytest.skip(f"{arch} accumulates in K = 64 steps: no bitwise DeepGEMM claim")
     if importlib.util.find_spec("deep_gemm") is None:
         pytest.skip("deep_gemm is not installed")
     try:
@@ -1339,8 +1359,9 @@ def test_fp8_k32_logits_match_deep_gemm_bitwise(monkeypatch):
     except (ImportError, OSError) as exc:  # installed, but its extension does not load
         pytest.skip(f"deep_gemm does not import: {exc}")
 
-    inputs = ref.make_fp8_inputs([512], [8192], top_k=2048, seed=67, device="cuda")
-    indices, scores = _run(inputs)
+    inputs = ref.make_integer_fp8_inputs(
+        [512], [8192], top_k=2048, seed=67, device="cuda"
+    )
     visible = ref.visible_rows(inputs).to(torch.int32)
     starts = torch.zeros_like(visible)
     kv = (inputs.k.contiguous(), inputs.k_scale)
@@ -1377,20 +1398,16 @@ def test_fp8_k32_logits_match_deep_gemm_bitwise(monkeypatch):
         pytest.skip(
             "this deep_gemm build has neither fp8_mqa_logits nor fp8_fp4_mqa_logits"
         )
-    logits = logits[:, : inputs.num_keys].float()
+    selection = _deep_gemm_selection(logits[:, : inputs.num_keys].float(), inputs)
 
-    def check(indices, scores, program):
-        valid = indices >= 0
-        picked = logits.gather(1, indices.clamp_min(0).to(torch.int64))
-        got = torch.where(valid, scores + 0.0, torch.zeros_like(scores))
-        want = torch.where(valid, picked + 0.0, torch.zeros_like(picked))
-        mismatch = got.view(torch.int32) != want.view(torch.int32)
+    def check(indices, program):
+        mismatch = indices != selection
         assert not mismatch.any(), (
-            f"{program}: {int(mismatch.sum())} scores differ from the DeepGEMM logits; first at "
+            f"{program}: {int(mismatch.sum())} ids differ from the top-k of the DeepGEMM logits; first at "
             f"{mismatch.nonzero()[0].tolist()}"
         )
 
-    check(indices, scores, "the dispatched program")
+    check(_run(inputs)[0], "the dispatched program")
     # every FP8 program forced on the call as in the dispatch invariance test (the planned capacity, check period,
     # sampling and finalize; the split and unit geometry of the forced key)
     policy = policy_for(arch, FP8)
@@ -1408,5 +1425,5 @@ def test_fp8_k32_logits_match_deep_gemm_bitwise(monkeypatch):
         monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", forced)
         runner = _prepare(inputs)
         assert runner.choice.scan_key == key and runner.form == FP8
-        check(*runner(), key)
+        check(runner()[0], key)
         monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", original)

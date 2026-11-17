@@ -79,9 +79,8 @@ FP8 form (opt-in, selected by the input dtype)
 * Score ``s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j,
   d])``: the e4m3 products are exact and accumulate in FP32 on the tensor
   cores, four K = 32 steps on sm_100a / sm_103a (the order of DeepGEMM's
-  ``fp8_mqa_logits``, whose logits these programs reproduce bit for bit) and
-  two K = 64 steps on sm_107a (which can differ from DeepGEMM's logit in the
-  last bits); the head sum and the ``k_scale[j]`` product are FP32.
+  ``fp8_mqa_logits``) and two K = 64 steps on sm_107a; the head sum and the
+  ``k_scale[j]`` product are FP32.
 * Selection, visibility, outputs and the workspace bound follow the BF16
   contract; every FP8 program of one architecture computes the same ids and
   score bits, so the dispatched program never changes a result.  FP8 results

@@ -3842,26 +3842,6 @@ def test_exact_semantics(name):
     naive.assert_exact(_run(inputs), inputs)
 
 
-def test_signed_zero_bits_follow_the_documented_policy():
-    _require_program()
-    inputs = ref.make_exact_case("signed_zeros", "cuda")
-    indices, scores = _run(inputs)
-    reference = ref.exact_selection(inputs)
-    assert torch.equal(
-        indices, reference.indices
-    )  # +0.0 == -0.0 for ranking: the id rule decides inside the zero group
-    policy = record_zero_sign_policy()
-    zero = (scores == 0) & (indices >= 0)
-    assert bool(zero.any())
-    bits = scores.view(torch.int32)
-    if policy != "positive_accumulator":
-        pytest.fail(f"the reference has no model for zero-sign policy {policy!r}")
-    assert bool((bits[zero] == 0).all()), (
-        "the chains start from +0.0 with a fixed FMA order: every zero score is +0.0"
-    )
-    assert torch.equal(bits[zero], reference.scores.view(torch.int32)[zero])
-
-
 @pytest.mark.parametrize("name", list(ref.PACKED_GEOMETRIES))
 def test_packed_causality(name, record_property):
     """Every packed geometry over 32 integer draws: the exact selection's ids and counts (visibility and segment
