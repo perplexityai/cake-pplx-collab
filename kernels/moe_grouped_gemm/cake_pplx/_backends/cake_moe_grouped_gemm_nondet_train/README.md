@@ -464,11 +464,13 @@ empty groups give zeros in overwrite mode and stay untouched on the fused
 route; padding is never written; fused tiles are bitwise `out0.add_(dW32)`.
 
 Known gaps: on B200, GB200, GB300 and VR200 some tests miss the naive tier on a
-BF16 output, in the max norm only (their L2 error meets it). Most are BF16
+BF16 output, in the max norm only (their L2 error meets it). They are BF16
 rounding near ties: the kernel's FP32 sum lands on the other side of a BF16
-rounding midpoint a little more often than torch's. The others are the composed
-BF16 accumulate (`accumulate=True` into a bf16 `out`), which rounds twice (`dW`
-to BF16, then `out.add_`) where the naive tier rounds once.
+rounding midpoint a little more often than torch's. The composed BF16
+accumulate (`accumulate=True` into a bf16 `out`) rounds as the naive tier does
+(`dW` to BF16, then `out0 + dW` to BF16), and its misses are the same near
+ties: `dW` rounds to the other BF16 neighbour, and the second rounding carries
+that into `out`.
 `tests/known_gaps.py` lists them per GPU model, and the suites mark each one
 xfail (not strict) on that model only; any other failure of such a test still
 fails.

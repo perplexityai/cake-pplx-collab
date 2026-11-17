@@ -3,12 +3,13 @@
 """Known gaps: the tests that miss the naive BF16 tier on a GPU model, expected to fail there.
 
 Every listed test misses the tier (``tests/cake/test_helpers/cake_naive.py``) on a BF16
-output only and in the max norm only; its L2 error meets the tier.  Most are BF16
+output only and in the max norm only; its L2 error meets the tier.  They are BF16
 rounding near ties: the largest error is about half a BF16 ulp of the top binade, and
 the kernel's FP32 sum lands on the other side of a BF16 rounding midpoint a little more
 often than torch's.  The composed BF16 accumulate (``accumulate=True`` into a bf16
-``out``) rounds twice, the weight gradient to BF16 and then ``out.add_``, where the
-naive tier rounds ``out0 + dW`` once.
+``out``) rounds as the naive tier does, the weight gradient to BF16 and then
+``out0 + dW`` to BF16; its misses are the same near ties: the weight gradient rounds
+to the other BF16 neighbour, and the second rounding carries that into ``out``.
 
 A gap is keyed by the GPU model and the test's node id, and names the outputs that miss
 the tier there (as the TIER lines name them).  ``tests/conftest.py`` marks a listed test
@@ -59,17 +60,10 @@ class Gap(NamedTuple):
 
 
 _NEAR_TIE = "known gap: BF16 rounding near tie in the max norm (L2 meets the naive tier)"
-_ROUNDS_TWICE = (
-    "known gap: the composed BF16 accumulate rounds twice (dW to BF16, then out.add_)"
-)
 
 
 def _near_tie(*outputs: str) -> Gap:
     return Gap(frozenset(outputs), _NEAR_TIE)
-
-
-def _rounds_twice(*outputs: str) -> Gap:
-    return Gap(frozenset(outputs), _ROUNDS_TWICE)
 
 
 #: GPU model -> {node id: gap} of the tests that miss the naive tier there.
@@ -115,11 +109,11 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves_queue-out_dtype0]": _near_tie("dW[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e8_m131072_balanced-gate_up]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e32_m131072_balanced_bf16]": _rounds_twice("out[spot]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_balanced_bf16]": _rounds_twice("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e8_m131072_balanced-gate_up]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e32_m131072_balanced_bf16]": _near_tie("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_balanced_bf16]": _near_tie("out[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m112576_balanced_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m112576_one_empty_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m136064_balanced_bf16-planned]": _near_tie("dW[spot]"),
@@ -184,14 +178,14 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves_queue-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_wave-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_wave_halves-out_dtype0]": _near_tie("dW[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_wave_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves_queue-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_wave_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e4_m136064_balanced_bf16]": _rounds_twice("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_wave_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves_queue-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_wave_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e4_m136064_balanced_bf16]": _near_tie("out[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m112576_balanced_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m136064_balanced_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m136064_one_empty_bf16-planned]": _near_tie("dW[spot]"),
@@ -257,14 +251,14 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves_queue-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_wave-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_wave_halves-out_dtype0]": _near_tie("dW[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_wave_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves_queue-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_wave_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e4_m136064_balanced_bf16]": _rounds_twice("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_wave_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves_queue-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_wave_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_down_e4_m136064_balanced_bf16]": _near_tie("out[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m112576_balanced_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m136064_balanced_bf16-planned]": _near_tie("dW[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_repeat_launches_give_identical_bits[wgrad_down_e4_m136064_one_empty_bf16-planned]": _near_tie("dW[spot]"),
@@ -332,16 +326,16 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py::test_wgrad_short_groups_never_include_the_next_group[mixed-main_halves_k256t-out_dtype0]": _near_tie("dW[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_halves_k256t-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_balanced-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_skewed-down]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _rounds_twice("out[sampled]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_balanced_bf16]": _rounds_twice("out[spot]"),
-        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_one_empty_bf16]": _rounds_twice("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_accumulate_on_two_concurrent_streams[main_halves_k256t-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_balanced-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m112576_skewed-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_one_empty-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_composed_bf16_accumulate_on_the_benchmark_rows[e4_m136064_skewed-down]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py::test_short_groups_accumulate_their_own_rows[mixed-main_halves-out_dtype1]": _near_tie("out[sampled]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_balanced_bf16]": _near_tie("out[spot]"),
+        "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_accumulate_sequences_give_identical_bits[wgrad_acc_gate_up_e4_m136064_one_empty_bf16]": _near_tie("out[spot]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_autograd_steps_give_identical_bits": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_forced_forms_give_identical_bits[main-out_dtype0]": _near_tie("dW[sampled]"),
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py::test_forced_forms_give_identical_bits[main_halves-out_dtype0]": _near_tie("dW[sampled]"),
