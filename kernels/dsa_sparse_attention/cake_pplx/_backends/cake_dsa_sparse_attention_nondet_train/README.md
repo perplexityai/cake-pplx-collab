@@ -16,8 +16,11 @@ the acceptance architecture of the packed / strided-layout extension.  On
 `nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
 `sm_100a` and `sm_103a`; the other stages compile from the same sources for
 all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
-in their `build.json` entries).  The feature does not participate in
-automatic backend selection, autotuning or trace-apply.  Its libraries are
+in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
+or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
+`nope_bwd_delta` and `index_prep`, which need 12.8.  The feature does not
+participate in automatic backend selection, autotuning or trace-apply.
+Its libraries are
 loaded prebuilt from `aot/` when the package ships them and JIT-built through
 the package's JIT shim from `build.json` otherwise (see "Layout of this
 package").

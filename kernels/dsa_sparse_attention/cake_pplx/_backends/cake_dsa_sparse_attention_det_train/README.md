@@ -12,7 +12,10 @@ On `sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan`
 and `nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
 `sm_100a` and `sm_103a` (see "Layout of this package").  The `sm_107a`
 libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
-entries).  The feature does not participate in automatic backend
+entries).  On `sm_100a` the libraries of the stages `fwd`, `bwd_main`,
+`bwd_main_pass`, `bwd_redo` and `bwd_compact`, each with its `nope_` form,
+need CUDA 12.9 or newer (`min_cuda` 12.9); the other `sm_100a` libraries
+need 12.8.  The feature does not participate in automatic backend
 selection, autotuning or trace-apply.  Its libraries are loaded prebuilt from
 `aot/` when the package ships them and JIT-built through the package's JIT
 shim from `build.json` otherwise (see "Layout of this package").
