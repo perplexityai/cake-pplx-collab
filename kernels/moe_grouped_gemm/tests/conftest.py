@@ -12,9 +12,9 @@ import torch
 from tests import known_gaps
 from tests.cake.test_helpers.cake_naive import summarize_tiers
 
-#: The outputs of a test's known gap on the current GPU model and their caps (set when it
-#: is marked xfail).
-_KNOWN_GAP = pytest.StashKey[Mapping[str, float]]()
+#: The outputs of a test's known gap on the current GPU model and the caps of their median
+#: and largest max-norm miss ratios (set when it is marked xfail).
+_KNOWN_GAP = pytest.StashKey[Mapping[str, tuple[float, float]]]()
 #: The title of the report section that says why a known gap's xfail does not cover a failure.
 _NOT_COVERED = "the known gap's xfail does not cover this failure"
 

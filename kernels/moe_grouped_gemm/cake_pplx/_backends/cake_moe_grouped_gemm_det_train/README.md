@@ -80,11 +80,12 @@ Known gaps: on B200, GB200, GB300 and VR200 some tests miss the naive tier on a
 BF16 output, in the max norm only (their L2 error meets it). They are BF16
 rounding near ties: the kernel's FP32 sum lands on the other side of a BF16
 rounding midpoint a little more often than torch's. `tests/known_gaps.py` lists
-them per GPU model, each output with a cap: the largest ratio of its max-norm
-error to the tier's (median or largest over the inputs) that the validation
-runs measured on that model, rounded up to four decimals. The suites mark each
-one a strict xfail on that model only; a miss above its cap, and any other
-failure of such a test, still fails.
+them per GPU model, each output with two caps, one for the ratio of its median
+max-norm error over the inputs to the tier's and one for that of its largest:
+the largest value of that ratio the validation runs measured on that model,
+rounded up to four decimals, or the tier's own 1.005 where the runs met it.
+The suites mark each one a strict xfail on that model only; a ratio above its
+cap, and any other failure of such a test, still fails.
 
 ## Mode rules
 

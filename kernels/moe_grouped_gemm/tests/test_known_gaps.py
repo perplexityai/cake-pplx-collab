@@ -4,10 +4,11 @@
 is launched.
 
 * The table names collected tests only, of known GPU models (the suites are collected in
-  a subprocess that sees no GPU), and caps each output of a gap.
-* The xfail covers a test's known miss only, at most its cap (``known_gaps.covers``): the
-  failures are those ``judge_draws`` raises on CPU tensors whose errors against their
-  oracle are set by construction, and plain failures.
+  a subprocess that sees no GPU), and caps both max-norm miss ratios of each output of a
+  gap.
+* The xfail covers a test's known miss only, each ratio at most its cap
+  (``known_gaps.covers``): the failures are those ``judge_draws`` raises on CPU tensors
+  whose errors against their oracle are set by construction, and plain failures.
 * The conftest's fixture and hook apply that rule: a pytest run of synthetic suites in a
   subprocess, whose device is named as a GPU model of the table (no GPU is used).
 * No test checks anything after its judgment (a static check of the suites' source), so
@@ -80,17 +81,27 @@ def test_every_known_gap_model_is_a_device_model():
 
 
 def test_every_known_gap_caps_each_of_its_outputs():
-    """Every gap names an output and a reason, and each output has a cap: a ratio of four
-    decimals, at least NEAR_TIE (a miss of the tier has a larger ratio, so a lower cap
-    could cover nothing)."""
+    """Every gap names an output and a reason, and each output has two caps, of its median
+    and of its largest max-norm miss ratio: each a ratio of four decimals, at least
+    NEAR_TIE (NEAR_TIE itself: the ratio must meet the tier), and one of them above NEAR_TIE
+    (a miss of the tier has a ratio above it, so caps of NEAR_TIE only would cover
+    nothing)."""
     bad = []
     for model, gaps in known_gaps.KNOWN_GAPS.items():
         for key, gap in gaps.items():
             if not gap.caps or not gap.reason:
                 bad.append((model, key, dict(gap.caps), gap.reason))
-            for output, cap in gap.caps.items():
-                if not (type(cap) is float and cap >= NEAR_TIE and round(cap, 4) == cap):
-                    bad.append((model, key, output, cap))
+            for output, caps in gap.caps.items():
+                if not (
+                    type(caps) is tuple
+                    and len(caps) == len(known_gaps.STATISTICS)
+                    and all(
+                        type(cap) is float and cap >= NEAR_TIE and round(cap, 4) == cap
+                        for cap in caps
+                    )
+                    and max(caps) > NEAR_TIE
+                ):
+                    bad.append((model, key, output, caps))
     assert not bad, bad
 
 
@@ -127,32 +138,51 @@ def _bumped(naive: torch.Tensor, *rows: int) -> torch.Tensor:
     return out.to(torch.bfloat16)
 
 
-#: The max-norm miss ratio of each synthetic output (:func:`_output`) that misses the
-#: tier: three quarters of an ulp off at one element (``max_only``, ``nan``) or at every
-#: element (``l2``) where the tier is a quarter ulp off, on every draw; and one ulp off at
-#: one element of draw 0 (``zero``), where the tier's largest error is a quarter ulp.
-_RATIO = {"max_only": 3.0, "nan": 3.0, "l2": 3.0, "zero": 4.0}
+#: The median and largest max-norm miss ratios of each synthetic output (:func:`_output`)
+#: that misses the tier: three quarters of an ulp off at one element (``max_only``,
+#: ``nan``) or at every element (``l2``) where the tier is a quarter ulp off, on every
+#: draw; ``median_only`` is ``max_only`` with the tier 3.75 ulps off at another element on
+#: draw 0, so its largest ratio is 0.75 / 3.75; and one ulp off at one element of draw 0,
+#: where the tier is exact (``zero``); the tier's largest error over the draws is a
+#: quarter ulp.
+_RATIO = {
+    "max_only": (3.0, 3.0),
+    "nan": (3.0, 3.0),
+    "l2": (3.0, 3.0),
+    "median_only": (3.0, 0.75 / 3.75),
+    "zero": (1.0, 4.0),
+}
 
 
-def _at_cap(*names: str) -> dict[str, float]:
-    """The caps of a gap of the outputs ``names``: each synthetic output's own ratio (a
-    miss at its cap); NEAR_TIE for an output with no synthetic miss."""
-    return {name: _RATIO.get(name, NEAR_TIE) for name in names}
+def _at_cap(*names: str) -> dict[str, tuple[float, float]]:
+    """The caps of a gap of the outputs ``names``, as the table's: each ratio of a
+    synthetic output's miss (a miss at its caps), NEAR_TIE where that ratio meets the tier
+    and for an output with no synthetic miss."""
+    return {
+        name: tuple(max(ratio, NEAR_TIE) for ratio in _RATIO.get(name, (NEAR_TIE, NEAR_TIE)))
+        for name in names
+    }
 
 
 def _output(name: str, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``(actual, oracle, naive)`` of the synthetic output ``name`` on draw ``index``:
     ``meets`` is the naive tier; ``max_only`` misses the tier in the max norm only (one
-    element one ulp off on every draw); ``l2`` misses it in both norms (every element one
-    ulp off); ``zero`` breaks the zero rule on draw 0 only (an exact oracle, one element
-    off); ``nan`` is ``max_only`` with a NaN where the oracle is finite."""
+    element one ulp off on every draw); ``median_only`` is ``max_only`` with the tier's
+    value four ulps higher at another element on draw 0 (it misses the tier in the median
+    max-norm error only); ``l2`` misses it in both norms (every element one ulp off); ``zero`` breaks the
+    zero rule on draw 0 only (an exact oracle, one element off); ``nan`` is ``max_only``
+    with a NaN where the oracle is finite."""
     oracle, naive = _draw_values(index, exact=name == "zero" and index == 0)
     if name == "meets":
         actual = naive.clone()
-    elif name in ("max_only", "nan"):
+    elif name in ("max_only", "median_only", "nan"):
         actual = _bumped(naive, 1)
         if name == "nan":
             actual[2] = float("nan")
+        if name == "median_only" and index == 0:
+            naive = naive.double()
+            naive[2] += 4 * _ULP
+            naive = naive.to(torch.bfloat16)
     elif name == "l2":
         actual = _bumped(naive)
     elif name == "zero":
@@ -193,24 +223,43 @@ def test_a_listed_miss_at_its_cap_keeps_the_xfail():
     error = _failure(["meets", "max_only"])
     (miss,) = error.missed
     assert miss.ratios["max"] == (3.0, 3.0)
-    assert known_gaps.uncovered(error, {"max_only": 3.0}) == []
-    assert known_gaps.covers(error, {"max_only": 3.0})
+    assert known_gaps.uncovered(error, {"max_only": (3.0, 3.0)}) == []
+    assert known_gaps.covers(error, {"max_only": (3.0, 3.0)})
+    # a miss in the median ratio only, at its cap; its largest ratio meets its cap NEAR_TIE
+    median = _failure(["meets", "median_only"])
+    (miss,) = median.missed
+    assert miss.met == {"l2": True, "max": False} and not miss.zero
+    assert miss.ratios["max"] == (3.0, 0.75 / 3.75)
+    assert known_gaps.uncovered(median, {"median_only": (3.0, NEAR_TIE)}) == []
+    assert known_gaps.covers(median, _at_cap("median_only"))
 
 
 def test_a_listed_miss_above_its_cap_fails():
+    """Each of the median and the largest max-norm miss ratio is held to its own cap."""
     error = _failure(["meets", "max_only"])
     for cap in (2.9999, math.nextafter(3.0, 0.0)):
-        assert not known_gaps.covers(error, {"max_only": cap})
-        assert known_gaps.uncovered(error, {"max_only": cap}) == [
-            f"max_only: max-norm miss ratio 3 is above its cap {cap!r}"
+        median = f"max_only: median max-norm miss ratio 3 is above its cap {cap!r}"
+        largest = f"max_only: largest max-norm miss ratio 3 is above its cap {cap!r}"
+        for caps, reasons in (
+            ((3.0, cap), [largest]),
+            ((cap, 3.0), [median]),
+            ((cap, cap), [median, largest]),
+        ):
+            assert not known_gaps.covers(error, {"max_only": caps})
+            assert known_gaps.uncovered(error, {"max_only": caps}) == reasons
+    # the median ratio above its cap fails, whatever the largest ratio and its cap
+    median = _failure(["meets", "median_only"])
+    for caps in ((2.9999, NEAR_TIE), (2.9999, 3.0), (NEAR_TIE, 3.0)):
+        assert not known_gaps.covers(median, {"median_only": caps})
+        assert known_gaps.uncovered(median, {"median_only": caps}) == [
+            f"median_only: median max-norm miss ratio 3 is above its cap {caps[0]!r}"
         ]
-    # the larger of the median and the largest ratio is held to the cap
     zero = _failure(["zero"])
     (miss,) = zero.missed
     assert miss.ratios["max"] == (1.0, 4.0)
-    assert known_gaps.uncovered(zero, {"zero": 3.9999}) == [
+    assert known_gaps.uncovered(zero, {"zero": (NEAR_TIE, 3.9999)}) == [
         "zero: error not 0 on draws [0], where the tier's is 0",
-        "zero: max-norm miss ratio 4 is above its cap 3.9999",
+        "zero: largest max-norm miss ratio 4 is above its cap 3.9999",
     ]
 
 
@@ -315,10 +364,10 @@ _SUITES = (
 )
 #: The synthetic gaps of each suite's tests (``test_unlisted`` has none).
 _GAPS = {
-    "test_miss": {"max_only": 3.0},
-    "test_above_cap": {"max_only": 2.9999},
-    "test_plain_failure": {"max_only": 3.0},
-    "test_pass": {"max_only": 3.0},
+    "test_miss": {"max_only": (3.0, 3.0)},
+    "test_above_cap": {"max_only": (3.0, 2.9999)},
+    "test_plain_failure": {"max_only": (3.0, 3.0)},
+    "test_pass": {"max_only": (3.0, 3.0)},
 }
 #: Each synthetic test's outcome in the deterministic and the non-deterministic suite.
 _OUTCOMES = {
@@ -378,9 +427,9 @@ known_gaps.LISTED = frozenset(known_gaps.KNOWN_GAPS["B200"])
 def test_the_conftest_fixture_and_hook_apply_the_rule(tmp_path):
     """The conftest's fixture and hook (``tests/conftest.py``) in a pytest run of a
     deterministic and a non-deterministic synthetic suite, on a device named as a B200 (no
-    GPU is used): a listed miss at its cap is an XFAIL; a listed miss above its cap, a
-    plain failure of a listed test and an unlisted test's miss fail; a listed test that
-    passes fails in the deterministic suite (a strict XPASS) and is an XPASS in the
+    GPU is used): a listed miss at its caps is an XFAIL; a listed miss above a cap, a plain
+    failure of a listed test and an unlisted test's miss fail; a listed test that passes
+    fails in the deterministic suite (a strict XPASS) and is an XPASS in the
     non-deterministic one.  The failure reports say why the xfail does not cover them."""
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "conftest.py").write_text(
@@ -410,7 +459,7 @@ def test_the_conftest_fixture_and_hook_apply_the_rule(tmp_path):
     log = done.stdout[-8000:] + done.stderr[-2000:]
     assert done.returncode == 1 and got == want, log
     for reason, count in (
-        ("max_only: max-norm miss ratio 3 is above its cap 2.9999", 2),
+        ("max_only: largest max-norm miss ratio 3 is above its cap 2.9999", 2),
         ("the failure is not a miss of the naive tier alone (a NaiveTierMiss)", 2),
         ("XPASS(strict)", 1),
     ):
