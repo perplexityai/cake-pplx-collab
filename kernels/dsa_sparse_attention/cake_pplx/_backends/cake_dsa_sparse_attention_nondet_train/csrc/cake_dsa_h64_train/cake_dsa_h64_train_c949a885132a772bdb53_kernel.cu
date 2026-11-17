@@ -3352,11 +3352,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_4 = ((((uint64_t)(rope_addr)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(512)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (4ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_4 = ((((uint64_t)(rope_addr)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(512)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (4ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 384 + 0)), "l"(_tcgen05_cp_desc_4)
@@ -3366,11 +3362,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_5 = ((((uint64_t)(rope_addr + 32)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(512)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (4ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_5 = ((((uint64_t)(rope_addr + 32)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(512)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (4ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 384 + 8)), "l"(_tcgen05_cp_desc_5)
@@ -3385,11 +3377,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_6 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536))) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_6 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536))) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 0 + 0)), "l"(_tcgen05_cp_desc_6)
@@ -3399,11 +3387,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_7 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_7 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 0 + 8)), "l"(_tcgen05_cp_desc_7)
@@ -3413,11 +3397,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_8 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 64)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_8 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 64)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 0 + 16)), "l"(_tcgen05_cp_desc_8)
@@ -3427,11 +3407,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_9 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 96)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_9 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 96)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 0 + 24)), "l"(_tcgen05_cp_desc_9)
@@ -3441,11 +3417,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_10 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_10 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 32 + 0)), "l"(_tcgen05_cp_desc_10)
@@ -3455,11 +3427,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_11 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 32)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_11 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 32)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 32 + 8)), "l"(_tcgen05_cp_desc_11)
@@ -3469,11 +3437,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_12 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 64)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_12 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 64)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 32 + 16)), "l"(_tcgen05_cp_desc_12)
@@ -3483,11 +3447,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_13 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 96)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_13 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 16384 + 96)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 32 + 24)), "l"(_tcgen05_cp_desc_13)
@@ -3497,11 +3457,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_14 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_14 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 64 + 0)), "l"(_tcgen05_cp_desc_14)
@@ -3511,11 +3467,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_15 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 32)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_15 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 32)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 64 + 8)), "l"(_tcgen05_cp_desc_15)
@@ -3525,11 +3477,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_16 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 64)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_16 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 64)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 64 + 16)), "l"(_tcgen05_cp_desc_16)
@@ -3539,11 +3487,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_17 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 96)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_17 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 32768 + 96)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 64 + 24)), "l"(_tcgen05_cp_desc_17)
@@ -3553,11 +3497,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_18 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_18 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 96 + 0)), "l"(_tcgen05_cp_desc_18)
@@ -3567,11 +3507,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_19 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 32)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_19 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 32)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 96 + 8)), "l"(_tcgen05_cp_desc_19)
@@ -3581,11 +3517,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_20 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 64)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_20 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 64)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 96 + 16)), "l"(_tcgen05_cp_desc_20)
@@ -3595,11 +3527,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     #error "Tcgen05Cp requires Blackwell tcgen05.cp support"
                     #endif
                     {
-#if __CUDA_ARCH__ == 1070
-                        uint64_t _tcgen05_cp_desc_21 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 96)) & 0x7FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#else
                         uint64_t _tcgen05_cp_desc_21 = ((((uint64_t)(qko_addr + (unsigned int)(q_slot * 65536) + 49152 + 96)) & 0x3FFFFULL) >> 4ULL) | (((((uint64_t)(16)) & 0x3FFFFULL) >> 4ULL) << 16ULL) | (((((uint64_t)(1024)) & 0x3FFFFULL) >> 4ULL) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-#endif
                         asm volatile(
                             "tcgen05.cp.cta_group::1.128x256b [%0], %1;"
                             :: "r"((uint32_t)(tmem_tmem + 256 + 96 + 24)), "l"(_tcgen05_cp_desc_21)
@@ -3615,11 +3543,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                             int _parity_kr_ready = (int)((unsigned int)cursor_2 % 2);
                             mbarrier_wait(kr_ready_addr, _parity_kr_ready);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_22 = ((rope_addr) >> 4) & 0x7FFF;
-#else
                             int _smem_desc_lo_22 = ((rope_addr) >> 4) & 0x3FFF;
-#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -3651,11 +3575,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                             int _parity_kv_ready_lo = (int)((unsigned int)cursor_2 / 3 % 2);
                             mbarrier_wait(kv_ready_lo_addr + (_stage_kv_ready_lo) * 8, _parity_kv_ready_lo);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_23 = (((k_dual_addr) >> 4) & 0x7FFF) + (slot_2) * 4096;
-#else
                             int _smem_desc_lo_23 = (((k_dual_addr) >> 4) & 0x3FFF) + (slot_2) * 4096;
-#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -3707,11 +3627,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                             int _parity_kv_ready_hi = (int)((unsigned int)cursor_2 / 3 % 2);
                             mbarrier_wait(kv_ready_hi_addr + (_stage_kv_ready_hi) * 8, _parity_kv_ready_hi);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_24 = (((k_dual_addr + 32768) >> 4) & 0x7FFF) + (slot_2) * 4096;
-#else
                             int _smem_desc_lo_24 = (((k_dual_addr + 32768) >> 4) & 0x3FFF) + (slot_2) * 4096;
-#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -3764,13 +3680,8 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                             int _parity_so_ready = (int)((unsigned int)cursor_2 % 2) ^ 1;
                             mbarrier_wait(so_ready_addr, _parity_so_ready);
                             asm volatile("tcgen05.fence::after_thread_sync;");
-#if __CUDA_ARCH__ == 1070
-                            int _mma_a_lo_0 = (((probability_addr) >> 4) & 0x7FFF) | 0x400000;
-                            int _smem_desc_lo_25 = ((((v_addr) >> 4) & 0x7FFF) | 0x2000000) + (slot_3) * 4096;
-#else
                             int _mma_a_lo_0 = (((probability_addr) >> 4) & 0x3FFF) | 0x400000;
                             int _smem_desc_lo_25 = ((((v_addr) >> 4) & 0x3FFF) | 0x2000000) + (slot_3) * 4096;
-#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -3805,11 +3716,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     "tcgen05.mma.ws.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_0), "r"(_smem_desc_lo_25), "r"(tmem_tmem), "r"(((block_2 == 1) ? 0 : 1)) : "memory");
-#if __CUDA_ARCH__ == 1070
-                            int _smem_desc_lo_26 = ((((v_addr + 32768) >> 4) & 0x7FFF) | 0x2000000) + (slot_3) * 4096;
-#else
                             int _smem_desc_lo_26 = ((((v_addr + 32768) >> 4) & 0x3FFF) | 0x2000000) + (slot_3) * 4096;
-#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
