@@ -102,12 +102,14 @@ ratios. A fix makes such an item pass, and the strict marker then fails the item
 other output of the same case stays judged in the case's main item. Ratios are kernel error / naive error, median /
 largest over the inputs:
 
-| Outputs | Items | `sm_103a` (GB300) | `sm_107a` (VR200) |
+| Outputs | Items | `sm_100a`, `sm_103a` (GB200, GB300) | `sm_107a` (VR200) |
 |---|---|---|---|
 | MXFP8 `d_scores` | every MXFP8 case, single GPU | L2 1.46-1.84 / 1.45-1.86 | L2 1.44-1.84 / 1.46-1.84 |
 | MXFP8 `d_scores` | every MXFP8 case, EP1 and EP4 | not measured | L2 1.71-1.72 / 1.70-1.73 |
-| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 (gate, up, down); EP1 clamped cases (down) | L2 1.034-1.035 / 1.033-1.035 (unequal sources) | L2 1.033-1.038 / 1.033-1.072 |
+| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 (gate, up, down); EP1 clamped cases (down) | L2 1.034-1.035 / 1.033-1.035 (unequal sources, GB300) | L2 1.033-1.038 / 1.033-1.072 |
 | same | single-GPU empty-experts cases with 768-row macrobatches; EP1 plain recompute (gate, up, down) | max 1.05-1.14 / 0.85-1.25 (single GPU) | max 1.05-1.14 / 0.93-1.25 |
+
+GB200 and GB300 give the same single-GPU ratios.
 
 The MXFP8 score gradient is formed as `sum(dh * hidden) / score` from the kernel's own intermediate values, and the
 BF16 routed weight gradient is rounded to BF16 per macrobatch; follow-up kernel changes remove both gaps.

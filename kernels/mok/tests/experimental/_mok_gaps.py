@@ -40,8 +40,8 @@ MXFP8_D_SCORES = pytest.mark.xfail(
     reason=(
         "known gap: the MXFP8 kernels' score gradient (the fused form sum(dh * hidden) / score) misses the naive "
         "tier (dY * y_route).sum(-1) on every architecture; L2 error ratio, median / largest: single GPU "
-        "1.46-1.84 / 1.45-1.86 (sm_103a) and 1.44-1.84 / 1.46-1.84 (sm_107a), EP1 and EP4 1.71-1.72 / 1.70-1.73 "
-        "(sm_107a).  A follow-up kernel change fixes it."
+        "1.46-1.84 / 1.45-1.86 (sm_100a, sm_103a) and 1.44-1.84 / 1.46-1.84 (sm_107a), EP1 and EP4 1.71-1.72 / "
+        "1.70-1.73 (sm_107a).  A follow-up kernel change fixes it."
     ),
 )
 
