@@ -137,8 +137,10 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   package's copy of the deterministic package's BF16
   backward: the fused backward's grid and row arithmetic, its CTAs claiming
   the blocks in chunks whose rows are fixed by the row count and the grid,
-  each chunk's weight-gradient terms added exactly into fixed-point digits in
-  the workspace and the sum rounded once by the CTA that arrives last.  Its
+  each thread's FP32 runs of at most 16 rows of a chunk added into plain FP32
+  words, each CTA adding a column's FP32 word exactly into 64-bit fixed-point
+  digits in the workspace and the sum rounded once by the CTA that arrives
+  last.  Its
   ``dx``, ``dz`` and weight gradient are the deterministic package's bits,
   the same for the rows and the SM count.  Packed rows (``grad_out``, ``x``
   and ``z`` each with head stride
@@ -506,8 +508,9 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     the last bits of that ``dw`` may vary from run to run.
     Past 1000 rows per SM (on SM107 past 512 rows up to 64 rows per SM and past
     256) the repeatable backward, this package's copy of the deterministic
-    package's backward, adds each chunk's weight-gradient terms
-    exactly into fixed-point digits in the workspace: ``dx``, ``dz`` and
+    package's backward, adds each thread's FP32 runs of rows into plain FP32
+    words and each CTA's FP32 column words exactly into 64-bit fixed-point
+    digits in the workspace: ``dx``, ``dz`` and
     ``dw`` the deterministic package's bits, the same for the rows and the SM
     count (packed rows from 2560 rows per SM on SM100 and SM103 and from 1536
     on SM107 run its look-ahead program, with the same bits).  Every other

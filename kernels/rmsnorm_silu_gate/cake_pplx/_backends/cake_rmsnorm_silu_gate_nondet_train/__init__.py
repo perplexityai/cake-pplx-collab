@@ -90,9 +90,10 @@ repeatable backward (``bwd_bf16_rep``, on every architecture), this
 package's copy of the deterministic package's BF16
 backward: the fused backward's schedule and row arithmetic, the CTAs
 claiming the blocks in chunks whose rows are fixed by the row count and the
-grid, each chunk's weight-gradient terms added exactly into fixed-point
-digits in the workspace and the sum rounded once by the CTA that arrives
-last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
+grid, each thread's FP32 runs of at most 16 rows of a chunk added into
+plain FP32 words, each CTA adding a column's FP32 word exactly into 64-bit
+fixed-point digits in the workspace and the sum rounded once by the CTA that
+arrives last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
 the same for the rows and the SM count.
 On sm_100a and sm_103a the row-claims backwards (``bwd_bf16_rc``,
 ``bwd_bf16_rc_mid``: 256-thread CTAs of 16-row blocks, the CTAs past one
@@ -1091,12 +1092,13 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     same bits at any grid, its
     weight gradient FP32 runs of rows added into FP32 words and the CTAs'
     FP32 column sums added into FP32 replicas with FP32 atomic adds, so the
-    last bits of ``dw`` may vary from run to run, and so do the
-    row-claims backwards (``bwd_bf16_rc``, ``bwd_bf16_rc_mid``) where a band
-    of sm_100a or sm_103a runs one.  Past the fused band the repeatable
-    backward (``bwd_bf16_rep``), this package's copy of the deterministic
-    package's backward, adds each chunk's weight-gradient terms exactly into
-    fixed-point digits in the workspace: ``dx``, ``dz`` and ``dw`` the
+    last bits of ``dw`` may vary from run to run (as would those of the
+    row-claims backwards ``bwd_bf16_rc`` and ``bwd_bf16_rc_mid``, which no
+    band runs).  Past the fused band the repeatable backward
+    (``bwd_bf16_rep``), this package's copy of the deterministic package's
+    backward, adds each thread's FP32 runs of rows into plain FP32 words and
+    each CTA's FP32 column words exactly into 64-bit fixed-point digits in the
+    workspace: ``dx``, ``dz`` and ``dw`` the
     deterministic package's bits, the same for the rows and the SM count.
     Every other output repeats bit for bit; the modules' ``.f32x2`` FMA
     chains for a row's sums differ by module and by architecture, so the
@@ -1111,7 +1113,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     buffer of the current device and stream; during CUDA Graph capture, a
     zero-filled buffer of the capture and capture stream).  Under
     ``torch.use_deterministic_algorithms(True)`` a call that computes the
-    weight gradient in a fused or a row-claims band raises PyTorch's alert
+    BF16 weight gradient in the fused band raises PyTorch's alert
     (``RuntimeError``; a ``UserWarning`` under ``warn_only=True``, then it
     runs) after the argument checks, immediately before the launch; no other
     call alerts.
@@ -1141,7 +1143,7 @@ class CakeRMSNormSiLUGateNondetFunction(torch.autograd.Function):
 
     ``forward(x, z, weight, eps)``: both directions run this package's
     kernels; every output repeats bit for bit but a BF16 weight gradient in
-    the fused and the row-claims bands (whose backward alerts under
+    the fused band (whose backward alerts under
     ``torch.use_deterministic_algorithms(True)``); a checkpoint replay reruns
     the forward (the same ``y``).
     """

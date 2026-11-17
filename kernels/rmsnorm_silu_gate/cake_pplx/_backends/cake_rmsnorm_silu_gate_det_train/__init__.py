@@ -115,7 +115,7 @@ Host design (every control is a keyword; no environment variable):
   that ran a backward).  Such eager calls also keep a reserve of zero-filled
   workspaces per device, filled outside any capture in allocations of 64
   (about 1.2 MiB each) whenever fewer than 32 are ready, up to 1024 per
-  process (about 18.75 MiB), from which a call during CUDA Graph capture takes
+  device (about 18.75 MiB per device), from which a call during CUDA Graph capture takes
   the workspace of its capture and capture stream for good, so a replay
   launches no fill kernel (see ``_RESERVES``; with none ready, the graph
   zero-fills one of its own).

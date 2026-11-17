@@ -56,8 +56,9 @@ walking the blocks ``b``, ``b + grid``, ``b + 2 * grid``, ... and loading each
 next block while it computes the current one.  The backward launches
 ``min(blocks, ctas_per_sm * SMs)`` CTAs of ``rows_per_block``-row blocks; past
 one block per CTA its CTAs claim the blocks in chunks whose rows are fixed by
-the row count and the grid, and add each chunk's weight-gradient terms exactly
-into fixed-point digits, so the weight gradient's bits depend on the rows and
+the row count and the grid, add each thread's FP32 runs of rows into plain
+FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
+so the weight gradient's bits depend on the rows and
 the SM count only, not on which CTA runs a chunk.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two

@@ -45,8 +45,8 @@ into a weight gradient rounded once to FP32 from the exact sum in integer
 arithmetic, then to BF16 for a BF16 one, so every output is the same bits
 at any grid and in any order of the CTAs; the repeatable program of a BF16
 weight gradient, the deterministic package's fused backward, adds each
-chunk's weight-gradient
-terms exactly into fixed-point digits, so every output is the same bits
+thread's FP32 runs of rows into plain FP32 words and each CTA's FP32
+column words exactly into fixed-point digits, so every output is the same bits
 for the rows and the SM count; the fused and the row-claims
 programs of a BF16 weight gradient add each CTA's FP32 column sums, one
 plain FP32 word a column, into FP32 replicas with FP32 atomic adds, which the
@@ -166,8 +166,9 @@ architecture (``bwd_bf16_rep``) is a build of the deterministic package's
 fused backward kernel file under this package's name (its build
 ``{"math": "ax", "min_blocks": 4, "out": "bf16", "prefetch_share":
 None, "threads": 256}``), the same schedule and row arithmetic as the
-fused backward's, each chunk's weight-gradient terms added exactly into
-fixed-point digits and the sum rounded once by the CTA that arrives last,
+fused backward's, each thread's FP32 runs of rows added into plain FP32
+words, each CTA's FP32 column words added exactly into fixed-point digits
+and the sum rounded once by the CTA that arrives last,
 so its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits, the
 same for the rows and the SM count.
 Its long program (``bwd_bf16_rep_long``, every architecture; build

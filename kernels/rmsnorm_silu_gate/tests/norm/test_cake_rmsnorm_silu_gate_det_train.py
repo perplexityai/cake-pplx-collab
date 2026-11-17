@@ -24,8 +24,11 @@ terminal summary): over dynamic token and head counts, irregular tails,
 strided layouts, near-zero variance, saturated gates, finite gate inputs at
 the edges of the forward's gate, the row counts at the edges of the grids,
 the claimed backward far past one wave, the grids of other SM counts and
-gradient accumulation.  Infinite and NaN gates and upstream gradients give
-the oracle's classes.  ``y``, ``dx``,
+gradient accumulation.  With infinite and NaN gates, ``y`` and the BF16 and
+FP32 weight gradients have the oracle's classes, and ``dx`` and ``dz`` are
+finite in the rows whose gates are all finite (where the oracle is finite);
+with an infinite upstream gradient the weight gradients have the oracle's
+infinities; no test uses a NaN upstream gradient.  ``y``, ``dx``,
 ``dz`` and the BF16, FP32 and accumulated FP32 weight gradients are the same
 bits at every call with the same inputs: at the issue's shapes, small and odd
 shapes, the row counts at the edges of the forward's grids (one CTA a row
