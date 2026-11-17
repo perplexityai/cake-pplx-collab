@@ -575,6 +575,7 @@ kernel_cake_lm_head_det_loss_2d208100e3449732f3fc(const __grid_constant__ CUtens
                 }
                 row[3] = _table_search_16;
                 int col[4];
+                int slot_2[4];
                 int head[4];
                 int n_tok_1 = 0;
                 int prev_last = -1;
@@ -582,47 +583,59 @@ kernel_cake_lm_head_det_loss_2d208100e3449732f3fc(const __grid_constant__ CUtens
                 int prev_0 = ((lane == 0) ? prev_last : up_0);
                 unsigned int heads_0 = __ballot_sync(0xFFFFFFFF, row[0] != prev_0);
                 head[0] = ((row[0] != prev_0) ? 1 : 0);
-                int _max_18 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
+                int _max_18 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) : (0));
                 int _min_17 = ((_max_18) < (127) ? (_max_18) : (127));
-                col[0] = _min_17;
+                slot_2[0] = _min_17;
+                int _max_20 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
+                int _min_19 = ((_max_20) < (127) ? (_max_20) : (127));
+                col[0] = _min_19;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_0);
-                int _shfl_sync_19 = __shfl_sync(0xFFFFFFFF, row[0], 31);
-                prev_last = _shfl_sync_19;
+                int _shfl_sync_21 = __shfl_sync(0xFFFFFFFF, row[0], 31);
+                prev_last = _shfl_sync_21;
                 int up_1 = __shfl_up_sync(0xFFFFFFFF, row[1], 1, 32);
                 int prev_1 = ((lane == 0) ? prev_last : up_1);
                 unsigned int heads_1 = __ballot_sync(0xFFFFFFFF, row[1] != prev_1);
                 head[1] = ((row[1] != prev_1) ? 1 : 0);
-                int _max_21 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
-                int _min_20 = ((_max_21) < (127) ? (_max_21) : (127));
-                col[1] = _min_20;
+                int _max_23 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) : (0));
+                int _min_22 = ((_max_23) < (127) ? (_max_23) : (127));
+                slot_2[1] = _min_22;
+                int _max_25 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
+                int _min_24 = ((_max_25) < (127) ? (_max_25) : (127));
+                col[1] = _min_24;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_1);
-                int _shfl_sync_22 = __shfl_sync(0xFFFFFFFF, row[1], 31);
-                prev_last = _shfl_sync_22;
+                int _shfl_sync_26 = __shfl_sync(0xFFFFFFFF, row[1], 31);
+                prev_last = _shfl_sync_26;
                 int up_2 = __shfl_up_sync(0xFFFFFFFF, row[2], 1, 32);
                 int prev_2 = ((lane == 0) ? prev_last : up_2);
                 unsigned int heads_2 = __ballot_sync(0xFFFFFFFF, row[2] != prev_2);
                 head[2] = ((row[2] != prev_2) ? 1 : 0);
-                int _max_24 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
-                int _min_23 = ((_max_24) < (127) ? (_max_24) : (127));
-                col[2] = _min_23;
+                int _max_28 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) : (0));
+                int _min_27 = ((_max_28) < (127) ? (_max_28) : (127));
+                slot_2[2] = _min_27;
+                int _max_30 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
+                int _min_29 = ((_max_30) < (127) ? (_max_30) : (127));
+                col[2] = _min_29;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_2);
-                int _shfl_sync_25 = __shfl_sync(0xFFFFFFFF, row[2], 31);
-                prev_last = _shfl_sync_25;
+                int _shfl_sync_31 = __shfl_sync(0xFFFFFFFF, row[2], 31);
+                prev_last = _shfl_sync_31;
                 int up_3 = __shfl_up_sync(0xFFFFFFFF, row[3], 1, 32);
                 int prev_3 = ((lane == 0) ? prev_last : up_3);
                 unsigned int heads_3 = __ballot_sync(0xFFFFFFFF, row[3] != prev_3);
                 head[3] = ((row[3] != prev_3) ? 1 : 0);
-                int _max_27 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
-                int _min_26 = ((_max_27) < (127) ? (_max_27) : (127));
-                col[3] = _min_26;
+                int _max_33 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) : (0));
+                int _min_32 = ((_max_33) < (127) ? (_max_33) : (127));
+                slot_2[3] = _min_32;
+                int _max_35 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
+                int _min_34 = ((_max_35) < (127) ? (_max_35) : (127));
+                col[3] = _min_34;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_3);
-                int _shfl_sync_28 = __shfl_sync(0xFFFFFFFF, row[3], 31);
-                prev_last = _shfl_sync_28;
+                int _shfl_sync_36 = __shfl_sync(0xFFFFFFFF, row[3], 31);
+                prev_last = _shfl_sync_36;
                 mbarrier_wait(meta_empty_addr + (ms_1) * 8, _phase_meta_empty);
                 meta_ids[ms_1 * 128 + lane] = vid[0];
                 meta_col[ms_1 * 128 + lane] = col[0];
                 if (head[0] != 0) {
-                    meta_tok[ms_1 * 128 + col[0]] = row[0];
+                    meta_tok[ms_1 * 128 + slot_2[0]] = row[0];
                 }
                 if (lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + lane] = prev_last;
@@ -630,7 +643,7 @@ kernel_cake_lm_head_det_loss_2d208100e3449732f3fc(const __grid_constant__ CUtens
                 meta_ids[ms_1 * 128 + (32 + lane)] = vid[1];
                 meta_col[ms_1 * 128 + (32 + lane)] = col[1];
                 if (head[1] != 0) {
-                    meta_tok[ms_1 * 128 + col[1]] = row[1];
+                    meta_tok[ms_1 * 128 + slot_2[1]] = row[1];
                 }
                 if (32 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (32 + lane)] = prev_last;
@@ -638,7 +651,7 @@ kernel_cake_lm_head_det_loss_2d208100e3449732f3fc(const __grid_constant__ CUtens
                 meta_ids[ms_1 * 128 + (64 + lane)] = vid[2];
                 meta_col[ms_1 * 128 + (64 + lane)] = col[2];
                 if (head[2] != 0) {
-                    meta_tok[ms_1 * 128 + col[2]] = row[2];
+                    meta_tok[ms_1 * 128 + slot_2[2]] = row[2];
                 }
                 if (64 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (64 + lane)] = prev_last;
@@ -646,7 +659,7 @@ kernel_cake_lm_head_det_loss_2d208100e3449732f3fc(const __grid_constant__ CUtens
                 meta_ids[ms_1 * 128 + (96 + lane)] = vid[3];
                 meta_col[ms_1 * 128 + (96 + lane)] = col[3];
                 if (head[3] != 0) {
-                    meta_tok[ms_1 * 128 + col[3]] = row[3];
+                    meta_tok[ms_1 * 128 + slot_2[3]] = row[3];
                 }
                 if (96 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (96 + lane)] = prev_last;
