@@ -598,6 +598,7 @@ def _baselines(
             calls, rows = built
             error = None
             try:
+                calls["record"]()
                 for phase in PHASES:
                     calls[phase]()
                 calls["record"]()

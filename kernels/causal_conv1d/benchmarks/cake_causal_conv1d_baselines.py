@@ -151,7 +151,7 @@ def _library(module: str, package: str) -> str:
         ) from exc
     version = getattr(mod, "__version__", None)
     if version is None and module == "attn_gym":
-        version = os.environ.get("ATTN_GYM_COMMIT")
+        version = os.environ.get("ATTN_GYM_COMMIT") or _distribution("attn-gym")
     return f"{package} {version or 'unknown'}"
 
 
