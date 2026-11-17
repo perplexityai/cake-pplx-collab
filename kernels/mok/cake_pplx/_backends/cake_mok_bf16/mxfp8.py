@@ -11,7 +11,13 @@ Recipe (MoK ``mxfp8_quantize``): 32 consecutive elements along the quantized
 ``(row % 32) * 16 + (row // 32) * 4 + k_block`` (tensor-core scale layout);
 experts are concatenated along the first dimension.
 
-Every layout is quantized with PyTorch operations (no Triton dependency).
+Every layout is quantized with PyTorch operations (no Triton dependency) on
+the BF16 input, without an FP32 copy: the block maximum of ``|x|`` is exact in
+BF16, and ``x * 2**(127 - byte)`` is exact in BF16 (a power-of-two factor of a
+BF16 value, at most 448 in magnitude; a product below the BF16 normal range
+is below the smallest E4M3 value either way), so the bytes equal those of the
+FP32 form of the recipe. The transposed layout takes its 32-element blocks
+along M of the input as stored and transposes the E4M3 result.
 """
 
 import functools
@@ -21,8 +27,8 @@ import torch
 _BLOCK = 32
 # The FP32 ``1 / 448`` factor of the recipe.
 _SCALE_FACTOR = 0.002232142857
-# Float32 temporaries of one quantization pass stay below this many bytes:
-# experts are quantized together in chunks of this size.
+# Temporaries of one quantization pass stay below this many bytes (at most four
+# per element): experts are quantized together in chunks of this size.
 _CHUNK_BYTES = 1 << 30
 
 
@@ -41,16 +47,24 @@ def _e8m0_round_up(scale):
     return byte.clamp(max=254).to(torch.uint8)
 
 
-def _quantize_rows(x):
-    """Quantize ``[E, rows, cols]`` along ``cols``: ``(E4M3 data, [E, rows, cols / 32] bytes)``."""
-    experts, rows, cols = x.shape
-    blocks = x.float().reshape(experts, rows, cols // _BLOCK, _BLOCK)
-    amax = blocks.abs().amax(-1)
-    scale = torch.clamp(amax * _scale_factor(x.device), min=1e-12)
+def _block_scales(blocks, dim):
+    """UE8M0 bytes of the 32-element blocks of BF16 ``blocks`` along ``dim`` and
+    the BF16 factors ``2**(127 - byte)`` (0 for byte 254, which only a NaN or
+    infinite block takes). The block maximum of ``|x|`` comes from the block's
+    minimum and maximum; a NaN propagates."""
+    low, high = torch.aminmax(blocks, dim=dim)
+    amax = torch.maximum(high, low.neg())
+    scale = torch.clamp(amax.float() * _scale_factor(blocks.device), min=1e-12)
     byte = _e8m0_round_up(scale)
     inverse = ((254 - byte.to(torch.int32)) << 23).view(torch.float32)
-    data = (blocks * inverse[..., None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-    return data.reshape(experts, rows, cols), byte
+    return byte, inverse.to(torch.bfloat16)
+
+
+def _scaled_codes(blocks, inverse):
+    """E4M3 codes of BF16 ``blocks`` times the broadcast BF16 factors."""
+    scaled = blocks * inverse
+    scaled.clamp_(-448.0, 448.0)
+    return scaled.to(torch.float8_e4m3fn)
 
 
 def _scale_tiles(byte):
@@ -66,8 +80,10 @@ def _scale_tiles(byte):
 
 def _quantize_layout_torch(matrices, transposed):
     """One layout of ``[E, M, N]`` matrices with PyTorch operations: experts are
-    quantized together in chunks that bound the FP32 temporaries to
-    ``_CHUNK_BYTES``; the result does not depend on the chunking."""
+    quantized together in chunks that bound the temporaries to
+    ``_CHUNK_BYTES``; the result does not depend on the chunking. The
+    transposed layout quantizes 32-element blocks along M of the input as
+    stored and transposes the E4M3 codes and the scale bytes."""
     experts, rows, cols = matrices.shape
     chunk = max(1, _CHUNK_BYTES // (rows * cols * 4))
     shape = (experts, cols, rows) if transposed else (experts, rows, cols)
@@ -75,8 +91,19 @@ def _quantize_layout_torch(matrices, transposed):
     scales = []
     for start in range(0, experts, chunk):
         part = matrices[start : start + chunk]
-        source = part.transpose(1, 2).contiguous() if transposed else part
-        data[start : start + chunk], byte = _quantize_rows(source)
+        count = part.shape[0]
+        if transposed:
+            blocks = part.reshape(count, rows // _BLOCK, _BLOCK, cols)
+            byte, inverse = _block_scales(blocks, 2)
+            codes = _scaled_codes(blocks, inverse[:, :, None, :])
+            codes = codes.reshape(count, rows, cols)
+            data[start : start + chunk] = codes.transpose(1, 2)
+            byte = byte.transpose(1, 2).contiguous()
+        else:
+            blocks = part.reshape(count, rows, cols // _BLOCK, _BLOCK)
+            byte, inverse = _block_scales(blocks, 3)
+            codes = _scaled_codes(blocks, inverse[..., None])
+            data[start : start + chunk] = codes.reshape(count, rows, cols)
         scales.append(_scale_tiles(byte))
     return data, torch.cat(scales)
 
@@ -88,9 +115,9 @@ def mxfp8_quantize(x, return_normal=True, return_transposed=True):
     ``None``. ``fp8`` is E4M3 with the input shape and ``scales`` is uint8
     ``[E * M // 128, N // 128, 32, 16]``; the transposed pair quantizes
     ``x.transpose(-1, -2)`` the same way. M and N must be multiples of 128.
-    Each requested layout is quantized with PyTorch operations, experts in
-    chunks that bound the FP32 temporaries; the bytes do not depend on the
-    chunking.
+    Each requested layout is quantized with PyTorch operations on the BF16
+    input, experts in chunks that bound the temporaries; the bytes do not
+    depend on the chunking.
     """
     if not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16:
         raise ValueError("x must be a BF16 tensor")
