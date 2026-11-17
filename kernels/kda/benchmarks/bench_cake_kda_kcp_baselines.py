@@ -40,10 +40,12 @@ the ranks: ``..._kcp_reduce_gate_param_grads`` for the Cake arms, an NCCL all-re
   its exchange) and the backward.
 
 Timing: eager (no CUDA graph), CUDA events around one call on every rank, after an L2 flush, a device
-synchronization and a barrier; the slowest rank's time counts for the call.  Per round and arm: ``--warmup``
-untimed calls, then ``--samples`` timed calls of every boundary, whose median is the round's figure; the arms run
-interleaved for ``--rounds`` rounds, the order reversed on every other round.  A row reports the median of the
-round figures with their ``[min, max]``, and the speedups ``cudnn_cp_bi1 / cake_det_kcp``,
+synchronization and a barrier; the slowest rank's time counts for the call.  As the device is idle when a call
+starts, its time includes the host time to issue the call: a call whose launches take longer to issue than to run
+is timed by its host path (the explicit calls and the autograd step can differ by that alone).  Per round and arm:
+``--warmup`` untimed calls, then ``--samples`` timed calls of every boundary, whose median is the round's figure;
+the arms run interleaved for ``--rounds`` rounds, the order reversed on every other round.  A row reports the
+median of the round figures with their ``[min, max]``, and the speedups ``cudnn_cp_bi1 / cake_det_kcp``,
 ``cudnn_cp_bi0 / cake_nondet_kcp`` and ``cake_det_kcp / cake_nondet_kcp`` (above 1: the second arm is faster).
 
 Check (``--check``, on by default): every arm's ``out`` and gradients of the whole batch (gathered to rank 0)
@@ -609,7 +611,8 @@ def main() -> int:
         "protocol": {
             "boundaries": list(BOUNDARIES),
             "execution": "eager",
-            "timer": "CUDA events per call on every rank, slowest rank; L2 flushed, synchronized, barrier before each call",
+            "timer": "CUDA events per call on every rank, slowest rank; L2 flushed, synchronized, barrier before each call "
+            "(so the host time to issue the call is included)",
             "warmup_calls": args.warmup,
             "samples": args.samples,
             "rounds": args.rounds,
