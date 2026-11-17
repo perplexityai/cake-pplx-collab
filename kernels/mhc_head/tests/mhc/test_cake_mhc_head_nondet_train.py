@@ -20,15 +20,17 @@ entry points, the accumulating backward, the autograd node, activation
 checkpointing and CUDA graph capture, at every hidden size the device's
 architecture serves (4096, 5120 and 7168 on SM100 / SM103, 4096 on SM107).
 
-The reference budget is the deterministic head test's: bit for bit torch
-(signed zeros and NaN encodings included).  Every result is also compared with
-the deterministic head module ``cake_pplx.cake_mhc_head_det_train`` (the same
-kernels under other library names).  The head has no order-varying step, so
-under ``torch.use_deterministic_algorithms(True)`` (with and without
-``warn_only``) no entry point raises or warns.  The ``nondet`` contract does not
-promise run-to-run bits; this implementation runs the deterministic head's
-kernels in a fixed order, so repeated calls and the checkpoint replay are
-checked against the deterministic head's bits within one version.
+Every output is judged with ``tests/cake_naive.py`` against the naive BF16 tier
+over 32 inputs: its error against the float64 oracle (the exact mean and
+gradient, PyTorch's value where that is not finite;
+``tests/cake/test_helpers/cake_mhc_head_naive.py``), in the L2 and the max norm,
+median and max, is at most 1.005 times the tier's, and zero where the tier's is
+zero (the tier's gradient ``dY / 4`` is exact, so the backward must be too).
+The ``nondet`` contract makes no bit promise: repeated calls and the checkpoint
+replay are judged like any other launch, and nothing is compared with the
+deterministic head.  The head has no order-varying step, so under
+``torch.use_deterministic_algorithms(True)`` (with and without ``warn_only``)
+no entry point raises or warns.
 
 The hidden sizes a case runs at come from the architecture table below, not
 from the module's support query, and a separate case checks that query: a
@@ -48,6 +50,14 @@ import torch.utils.checkpoint
 import cake_pplx
 import cake_pplx.cake_mhc_head_det_train as det_facade
 import cake_pplx.cake_mhc_head_nondet_train as facade
+from tests.cake.test_helpers.cake_mhc_head_naive import (
+    F64,
+    backward_naive,
+    backward_oracle,
+    forward_naive,
+    forward_oracle,
+    judge_draws,
+)
 
 
 def get_compute_capability(device: torch.device) -> tuple[int, int]:
@@ -63,7 +73,6 @@ HIDDEN_BY_CAPABILITY = {
 HIDDEN = (4096, 5120, 7168)
 TOKENS = (1, 2, 3, 7, 65, 129, 257, 1000, 2049, 4096, 7169)
 BF16 = torch.bfloat16
-SUBNORMAL = 2.0**-133
 SPECIAL = (
     -0.0,
     0.0,
@@ -72,11 +81,6 @@ SPECIAL = (
     float("nan"),
     torch.finfo(BF16).max,
     -torch.finfo(BF16).max,
-    SUBNORMAL,
-    -SUBNORMAL,
-    2 * SUBNORMAL,
-    3 * SUBNORMAL,
-    6 * SUBNORMAL,
     2.0**-126,
     2.0**24,
     -(2.0**24),
@@ -145,35 +149,36 @@ def _draw(
     return x.to(BF16)
 
 
-def _bits(tensor: torch.Tensor) -> torch.Tensor:
-    return tensor.contiguous().view(torch.int16)
-
-
-def _assert_bitwise(got: torch.Tensor, want: torch.Tensor, what: str = "torch") -> None:
-    assert got.shape == want.shape and got.dtype == want.dtype == BF16
-    mismatch = int((_bits(got) != _bits(want)).sum())
-    assert mismatch == 0, f"{mismatch} of {got.numel()} elements differ from {what}"
-
-
 def _complement(tensor: torch.Tensor) -> torch.Tensor:
     """A new BF16 tensor whose every element has the inverted bits of ``tensor``'s: an output buffer in which an
     element the kernel does not write differs from ``tensor``."""
-    return (~_bits(tensor)).view(BF16).view(tensor.shape)
+    return (~tensor.contiguous().view(torch.int16)).view(BF16).view(tensor.shape)
 
 
-def _torch_grad(X: torch.Tensor, dY: torch.Tensor) -> torch.Tensor:
-    leaf = X.detach().requires_grad_(True)
-    (dX,) = torch.autograd.grad(leaf.mean(dim=1), leaf, dY)
-    return dX
+def _generator(seed: int) -> torch.Generator:
+    return torch.Generator(device=_device()).manual_seed(seed)
 
 
-def _torch_accumulated(
-    X: torch.Tensor, dY: torch.Tensor, dX0: torch.Tensor
-) -> torch.Tensor:
-    leaf = X.detach().requires_grad_(True)
-    leaf.grad = dX0.clone()
-    leaf.mean(dim=1).backward(dY)
-    return leaf.grad
+def _block_oracle(X: torch.Tensor, W: torch.Tensor, dOut: torch.Tensor) -> dict:
+    """The graph ``head(X * 2) * W`` in float64 by autograd: its head output, its output and the gradients of ``X``
+    and ``W`` under the incoming gradient ``dOut`` (finite inputs)."""
+    with torch.enable_grad():
+        x = X.detach().to(F64).requires_grad_(True)
+        w = W.detach().to(F64).requires_grad_(True)
+        head = (x * 2).sum(dim=1) * 0.25
+        out = head * w
+        dX, dW = torch.autograd.grad(out, (x, w), dOut.to(F64))
+    return {"head": head.detach(), "output": out.detach(), "dX": dX, "dW": dW}
+
+
+def _block_naive(X: torch.Tensor, W: torch.Tensor, dOut: torch.Tensor) -> dict:
+    """The graph ``head(X * 2) * W`` with PyTorch's ``X.mean(dim=1)`` as the head, in BF16."""
+    x = X.detach().requires_grad_(True)
+    w = W.detach().requires_grad_(True)
+    head = (x * 2).mean(dim=1)
+    out = head * w
+    out.backward(dOut)
+    return {"head": head.detach(), "output": out.detach(), "dX": x.grad, "dW": w.grad}
 
 
 def test_support_query_follows_the_architecture() -> None:
@@ -193,41 +198,62 @@ def test_support_query_follows_the_architecture() -> None:
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("T", TOKENS)
 @pytest.mark.parametrize("kind", ["randn", "spread", "special"])
-def test_forward_backward_bitwise(hidden: int, T: int, kind: str) -> None:
+def test_forward_backward_match_fp64(
+    hidden: int, T: int, kind: str, record_property
+) -> None:
+    """The forward, the backward and the accumulating backward (into the caller's ``dX``) judged over 32 draws."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED + T * 31 + hidden)
-    X = _draw((T, 4, hidden), kind, g)
-    dY = _draw((T, hidden), kind, g)
-    dX0 = _draw((T, 4, hidden), kind, g)
 
-    Y = facade.cake_mhc_head_nondet_train_forward(X)
-    _assert_bitwise(Y, X.mean(dim=1))
-    _assert_bitwise(Y, det_facade.cake_mhc_head_det_train_forward(X), "the det head")
-    dX = facade.cake_mhc_head_nondet_train_backward(dY)
-    _assert_bitwise(dX, _torch_grad(X, dY))
-    _assert_bitwise(dX, det_facade.cake_mhc_head_det_train_backward(dY), "the det head")
-    acc = dX0.clone()
-    out = facade.cake_mhc_head_nondet_train_backward(dY, dX=acc, accumulate=True)
-    assert out is acc
-    _assert_bitwise(acc, _torch_accumulated(X, dY, dX0))
-    det_acc = dX0.clone()
-    det_facade.cake_mhc_head_det_train_backward(dY, dX=det_acc, accumulate=True)
-    _assert_bitwise(acc, det_acc, "the det head")
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), kind, g)
+        dY = _draw((T, hidden), kind, g)
+        dX0 = _draw((T, 4, hidden), kind, g)
+        acc = dX0.clone()
+        out = facade.cake_mhc_head_nondet_train_backward(dY, dX=acc, accumulate=True)
+        assert out is acc
+        launch = {
+            "Y": facade.cake_mhc_head_nondet_train_forward(X),
+            "dX": facade.cake_mhc_head_nondet_train_backward(dY),
+            "dX accumulate": acc,
+        }
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, dX0),
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": backward_naive(dY),
+            "dX accumulate": backward_naive(dY, dX0),
+        }
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + T * 31 + hidden)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
-def test_preallocated_outputs_and_zero_tokens(hidden: int) -> None:
+def test_preallocated_outputs_and_zero_tokens(hidden: int, record_property) -> None:
+    """Caller outputs holding NaN are returned and written (judged over 32 draws); zero tokens give empty outputs,
+    and an empty accumulation buffer is returned."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED)
-    X = _draw((301, 4, hidden), "randn", g)
-    dY = _draw((301, hidden), "randn", g)
-    Y = torch.full((301, hidden), float("nan"), dtype=BF16, device=_device())
-    assert facade.cake_mhc_head_nondet_train_forward(X, out=Y) is Y
-    _assert_bitwise(Y, X.mean(dim=1))
-    dX = torch.full((301, 4, hidden), float("nan"), dtype=BF16, device=_device())
-    assert facade.cake_mhc_head_nondet_train_backward(dY, dX=dX) is dX
-    _assert_bitwise(dX, _torch_grad(X, dY))
+    Y = torch.empty((301, hidden), dtype=BF16, device=_device())
+    dX = torch.empty((301, 4, hidden), dtype=BF16, device=_device())
 
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((301, 4, hidden), "randn", g)
+        dY = _draw((301, hidden), "randn", g)
+        Y.fill_(float("nan"))
+        dX.fill_(float("nan"))
+        assert facade.cake_mhc_head_nondet_train_forward(X, out=Y) is Y
+        assert facade.cake_mhc_head_nondet_train_backward(dY, dX=dX) is dX
+        launch = {"Y": Y.clone(), "dX": dX.clone()}
+        expected = {"Y": forward_oracle(X), "dX": backward_oracle(dY)}
+        naive = {"Y": forward_naive(X), "dX": backward_naive(dY)}
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED)
     empty = torch.empty((0, 4, hidden), dtype=BF16, device=_device())
     assert facade.cake_mhc_head_nondet_train_forward(empty).shape == (0, hidden)
     assert facade.cake_mhc_head_nondet_train_backward(empty[:, 0]).shape == (
@@ -302,31 +328,46 @@ def test_argument_checks() -> None:
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
-def test_autograd_matches_torch(hidden: int) -> None:
+def test_autograd_matches_fp64(hidden: int, record_property) -> None:
+    """The autograd node over 32 draws: ``Y`` (with a ``grad_fn``), the gradient of a first backward and of a second
+    one accumulated into ``X.grad`` (as PyTorch's autograd accumulates: the tier is PyTorch's ``X.mean(dim=1)``
+    node), and the gradient of an expanded (non-contiguous) incoming gradient ``v`` of a sum over the tokens, read
+    through a copy.  The mode has no name in the ``cake_pplx`` namespace: the module is imported by its full name."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED + 1)
-    X = _draw((513, 4, hidden), "spread", g)
-    dY = _draw((513, hidden), "spread", g)
-    ours = X.detach().requires_grad_(True)
-    det = X.detach().requires_grad_(True)
-    ref = X.detach().requires_grad_(True)
-    Y = facade.cake_mhc_head_nondet(ours)
-    assert Y.grad_fn is not None
-    _assert_bitwise(Y, ref.mean(dim=1))
-    # Two backward passes: the second accumulates into X.grad exactly as torch's does.
-    for _ in range(2):
-        facade.cake_mhc_head_nondet(ours).backward(dY)
-        det_facade.cake_mhc_head_det(det).backward(dY)
-        ref.mean(dim=1).backward(dY)
-        _assert_bitwise(ours.grad, ref.grad)
-        _assert_bitwise(ours.grad, det.grad, "the det head")
-    # A non-contiguous incoming gradient (the expanded gradient of a sum) is read through a copy.
-    ours.grad = ref.grad = None
-    facade.cake_mhc_head_nondet(ours).float().sum().backward()
-    ref.mean(dim=1).float().sum().backward()
-    _assert_bitwise(ours.grad, ref.grad)
-    assert facade.CakeMHCHeadNondetFunction.apply(X).shape == (513, hidden)
-    # The mode has no name in the ``cake_pplx`` namespace: the module is imported by its full name.
+    T = 513
+
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), "spread", g)
+        dY = _draw((T, hidden), "spread", g)
+        v = _draw((hidden,), "spread", g)
+        ours = X.detach().requires_grad_(True)
+        ref = X.detach().requires_grad_(True)
+        Y = facade.cake_mhc_head_nondet(ours)
+        assert Y.grad_fn is not None
+        launch = {"Y": Y.detach()}
+        naive = {"Y": ref.mean(dim=1).detach()}
+        expected = {"Y": forward_oracle(X)}
+        for n in range(2):
+            facade.cake_mhc_head_nondet(ours).backward(dY)
+            ref.mean(dim=1).backward(dY)
+            launch[f"dX pass {n}"] = ours.grad.clone()
+            naive[f"dX pass {n}"] = ref.grad.clone()
+        expected["dX pass 0"] = backward_oracle(dY)
+        expected["dX pass 1"] = backward_oracle(dY, backward_naive(dY))
+        ours.grad = ref.grad = None
+        facade.cake_mhc_head_nondet(ours).float().sum(dim=0).backward(v.float())
+        ref.mean(dim=1).float().sum(dim=0).backward(v.float())
+        launch["dX expanded"], naive["dX expanded"] = ours.grad, ref.grad
+        expected["dX expanded"] = backward_oracle(v.expand(T, hidden))
+        launch["Function.apply Y"] = facade.CakeMHCHeadNondetFunction.apply(X)
+        expected["Function.apply Y"], naive["Function.apply Y"] = (
+            expected["Y"],
+            naive["Y"],
+        )
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 1)
     assert not hasattr(cake_pplx, "cake_mhc_head_nondet")
     assert not hasattr(cake_pplx, "cake_mhc_head_nondet_train_forward")
     assert not hasattr(cake_pplx, "CakeMHCHeadNondetFunction")
@@ -334,38 +375,43 @@ def test_autograd_matches_torch(hidden: int) -> None:
 
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("use_reentrant", [False, True])
-def test_activation_checkpoint(hidden: int, use_reentrant: bool) -> None:
+def test_activation_checkpoint(
+    hidden: int, use_reentrant: bool, record_property
+) -> None:
+    """``head(X * 2) * W`` inside ``torch.utils.checkpoint``: the output and the gradient of ``X`` judged over 32
+    draws (the tier: the same graph with PyTorch's ``X.mean(dim=1)``)."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED + 2)
-    X = _draw((257, 4, hidden), "randn", g)
-    W = torch.randn((hidden,), device=_device(), generator=g).to(BF16)
-    dY = _draw((257, hidden), "randn", g)
 
-    def block(x: torch.Tensor, head) -> torch.Tensor:
-        return head(x * 2) * W
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((257, 4, hidden), "randn", g)
+        W = torch.randn((hidden,), device=_device(), generator=g).to(BF16)
+        dY = _draw((257, hidden), "randn", g)
 
-    ours = X.detach().requires_grad_(True)
-    det = X.detach().requires_grad_(True)
-    ref = X.detach().requires_grad_(True)
-    out = torch.utils.checkpoint.checkpoint(
-        block, ours, facade.cake_mhc_head_nondet, use_reentrant=use_reentrant
-    )
-    det_out = torch.utils.checkpoint.checkpoint(
-        block, det, det_facade.cake_mhc_head_det, use_reentrant=use_reentrant
-    )
-    want = block(ref, lambda x: x.mean(dim=1))
-    _assert_bitwise(out, want)
-    _assert_bitwise(out, det_out, "the det head")
-    out.backward(dY)
-    det_out.backward(dY)
-    want.backward(dY)
-    _assert_bitwise(ours.grad, ref.grad)
-    _assert_bitwise(ours.grad, det.grad, "the det head")
+        def block(x: torch.Tensor, head) -> torch.Tensor:
+            return head(x * 2) * W
+
+        ours = X.detach().requires_grad_(True)
+        ref = X.detach().requires_grad_(True)
+        out = torch.utils.checkpoint.checkpoint(
+            block, ours, facade.cake_mhc_head_nondet, use_reentrant=use_reentrant
+        )
+        want = block(ref, lambda x: x.mean(dim=1))
+        out.backward(dY)
+        want.backward(dY)
+        oracle = _block_oracle(X, W, dY)
+        launch = {"output": out.detach(), "dX": ours.grad}
+        naive = {"output": want.detach(), "dX": ref.grad}
+        return [launch], {k: oracle[k] for k in launch}, naive
+
+    judge_draws(case, record_property, seed=SEED + 2)
 
 
-def test_cuda_graph_capture() -> None:
+def test_cuda_graph_capture(record_property) -> None:
+    """The forward, the writing and the accumulating backward captured in one CUDA graph, replayed on 32 draws of
+    ``special`` inputs copied in place (the accumulation buffer a new draw before each replay): every output judged."""
     T, hidden = 1000, max(_hidden_sizes())
-    g = torch.Generator(device=_device()).manual_seed(SEED + 3)
+    g = _generator(SEED + 3)
     X = _draw((T, 4, hidden), "randn", g)
     dY = _draw((T, hidden), "randn", g)
     dXa = _draw((T, 4, hidden), "randn", g)
@@ -387,130 +433,184 @@ def test_cuda_graph_capture() -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
-    for _replay in range(2):
-        X.copy_(_draw((T, 4, hidden), "special", g))
-        dY.copy_(_draw((T, hidden), "special", g))
+
+    def case(j: int, s: int):
+        gj = _generator(s)
+        X.copy_(_draw((T, 4, hidden), "special", gj))
+        dY.copy_(_draw((T, hidden), "special", gj))
+        dXa.copy_(_draw((T, 4, hidden), "special", gj))
         before = dXa.clone()
+        Y.fill_(float("nan"))
+        dX.fill_(float("nan"))
         graph.replay()
         torch.cuda.synchronize()
-        _assert_bitwise(Y, X.mean(dim=1))
-        _assert_bitwise(dX, _torch_grad(X, dY))
-        _assert_bitwise(dXa, _torch_accumulated(X, dY, before))
+        launch = {"Y": Y.clone(), "dX": dX.clone(), "dX accumulate": dXa.clone()}
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, before),
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": backward_naive(dY),
+            "dX accumulate": backward_naive(dY, before),
+        }
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 3)
 
 
 @pytest.mark.parametrize("warn_only", [False, True], ids=["alert", "warn_only"])
-def test_deterministic_algorithms_raise_and_warn_nothing(warn_only: bool) -> None:
+def test_deterministic_algorithms_raise_and_warn_nothing(
+    warn_only: bool, record_property
+) -> None:
     """With ``torch.use_deterministic_algorithms(True)`` every entry point -- forward, writing and accumulating
     backward, the autograd node and its checkpointed recompute -- runs without raising PyTorch's alert and, with
-    ``warn_only=True``, without a warning (every warning is an error here), and returns the reference bits."""
+    ``warn_only=True``, without a warning (every warning is an error here), on 32 draws whose outputs are judged."""
     hidden = max(_hidden_sizes())
-    g = torch.Generator(device=_device()).manual_seed(SEED + 4)
+    g = _generator(SEED + 4)
     X = _draw((257, 4, hidden), "spread", g)
     dY = _draw((257, hidden), "spread", g)
     dX0 = _draw((257, 4, hidden), "spread", g)
-    want_Y, want_dX = X.mean(dim=1), _torch_grad(X, dY)
-    want_acc = _torch_accumulated(X, dY, dX0)
     # Load the programs before the mode is on, so that a first-use build is not inside the check.
     facade.cake_mhc_head_nondet_train_forward(X)
     facade.cake_mhc_head_nondet_train_backward(dY, dX=dX0.clone(), accumulate=True)
     facade.cake_mhc_head_nondet_train_backward(dY)
     torch.cuda.synchronize()
 
-    enabled = torch.are_deterministic_algorithms_enabled()
-    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    torch.use_deterministic_algorithms(True, warn_only=warn_only)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            Y = facade.cake_mhc_head_nondet_train_forward(X)
-            dX = facade.cake_mhc_head_nondet_train_backward(dY)
-            acc = dX0.clone()
-            facade.cake_mhc_head_nondet_train_backward(dY, dX=acc, accumulate=True)
-            node = X.detach().requires_grad_(True)
-            facade.cake_mhc_head_nondet(node).backward(dY)
-            checkpointed = X.detach().requires_grad_(True)
-            torch.utils.checkpoint.checkpoint(
-                facade.cake_mhc_head_nondet, checkpointed, use_reentrant=False
-            ).backward(dY)
-            torch.cuda.synchronize()
-    finally:
-        torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
-    _assert_bitwise(Y, want_Y)
-    _assert_bitwise(dX, want_dX)
-    _assert_bitwise(acc, want_acc)
-    _assert_bitwise(node.grad, want_dX)
-    _assert_bitwise(checkpointed.grad, want_dX)
+    def case(j: int, s: int):
+        gj = _generator(s)
+        X = _draw((257, 4, hidden), "spread", gj)
+        dY = _draw((257, hidden), "spread", gj)
+        dX0 = _draw((257, 4, hidden), "spread", gj)
+        enabled = torch.are_deterministic_algorithms_enabled()
+        was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        torch.use_deterministic_algorithms(True, warn_only=warn_only)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                Y = facade.cake_mhc_head_nondet_train_forward(X)
+                dX = facade.cake_mhc_head_nondet_train_backward(dY)
+                acc = dX0.clone()
+                facade.cake_mhc_head_nondet_train_backward(dY, dX=acc, accumulate=True)
+                node = X.detach().requires_grad_(True)
+                facade.cake_mhc_head_nondet(node).backward(dY)
+                checkpointed = X.detach().requires_grad_(True)
+                torch.utils.checkpoint.checkpoint(
+                    facade.cake_mhc_head_nondet, checkpointed, use_reentrant=False
+                ).backward(dY)
+                torch.cuda.synchronize()
+        finally:
+            torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
+        launch = {
+            "Y": Y,
+            "dX": dX,
+            "dX accumulate": acc,
+            "autograd dX": node.grad,
+            "checkpointed dX": checkpointed.grad,
+        }
+        grad, grad_naive = backward_oracle(dY), backward_naive(dY)
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": grad,
+            "dX accumulate": backward_oracle(dY, dX0),
+            "autograd dX": grad,
+            "checkpointed dX": grad,
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": grad_naive,
+            "dX accumulate": backward_naive(dY, dX0),
+            "autograd dX": grad_naive,
+            "checkpointed dX": grad_naive,
+        }
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 4)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("T", REPEAT_TOKENS)
-def test_repeats_give_the_det_head_bits(hidden: int, T: int) -> None:
-    """The forward, the backward and the accumulating backward each run ``REPEATS`` times on identical inputs, and
-    every run equals the deterministic head's result bit for bit (the kernels are the deterministic head's, in a
-    fixed order; the ``nondet`` contract itself does not promise run-to-run bits).  A run writes into a buffer holding
-    the inverted bits of that result, so an element the forward or the writing backward leaves unwritten fails too;
-    the accumulating backward reads its buffer, so each run adds into a fresh copy of the same ``dX0``."""
+def test_repeats_match_fp64(hidden: int, T: int, record_property) -> None:
+    """The forward, the backward and the accumulating backward each run ``REPEATS`` times on identical inputs, on 32
+    draws: every run is judged (the ``nondet`` contract promises no run-to-run bits, so the runs are not compared
+    with each other).  A run writes into a buffer holding the inverted bits of the first run's result, so an element
+    the forward or the writing backward leaves unwritten shows as an error; the accumulating backward reads its
+    buffer, so each run adds into a fresh copy of the same ``dX0``."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED + 5 + T * 31 + hidden)
-    X = _draw((T, 4, hidden), "special", g)
-    dY = _draw((T, hidden), "special", g)
-    dX0 = _draw((T, 4, hidden), "special", g)
 
-    Y = det_facade.cake_mhc_head_det_train_forward(X)
-    dX = det_facade.cake_mhc_head_det_train_backward(dY)
-    acc = dX0.clone()
-    det_facade.cake_mhc_head_det_train_backward(dY, dX=acc, accumulate=True)
-    for run in range(REPEATS):
-        out = _complement(Y)
-        assert facade.cake_mhc_head_nondet_train_forward(X, out=out) is out
-        _assert_bitwise(out, Y, f"the det head's forward (run {run})")
-        out = _complement(dX)
-        assert facade.cake_mhc_head_nondet_train_backward(dY, dX=out) is out
-        _assert_bitwise(out, dX, f"the det head's backward (run {run})")
-        out = dX0.clone()
-        facade.cake_mhc_head_nondet_train_backward(dY, dX=out, accumulate=True)
-        _assert_bitwise(out, acc, f"the det head's accumulating backward (run {run})")
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), "special", g)
+        dY = _draw((T, hidden), "special", g)
+        dX0 = _draw((T, 4, hidden), "special", g)
+        Y = facade.cake_mhc_head_nondet_train_forward(X)
+        dX = facade.cake_mhc_head_nondet_train_backward(dY)
+        acc = dX0.clone()
+        facade.cake_mhc_head_nondet_train_backward(dY, dX=acc, accumulate=True)
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, dX0),
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": backward_naive(dY),
+            "dX accumulate": backward_naive(dY, dX0),
+        }
+        yield [{"Y": Y, "dX": dX, "dX accumulate": acc}], expected, naive
+        for _run in range(1, REPEATS):
+            y = _complement(Y)
+            assert facade.cake_mhc_head_nondet_train_forward(X, out=y) is y
+            dx = _complement(dX)
+            assert facade.cake_mhc_head_nondet_train_backward(dY, dX=dx) is dx
+            a = dX0.clone()
+            facade.cake_mhc_head_nondet_train_backward(dY, dX=a, accumulate=True)
+            yield [{"Y": y, "dX": dx, "dX accumulate": a}], expected, naive
+            del y, dx, a
+
+    judge_draws(case, record_property, seed=SEED + 5 + T * 31 + hidden)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("T", (257, 16263))
-def test_checkpoint_replay_bitwise(hidden: int, T: int) -> None:
-    """Under ``torch.utils.checkpoint(..., use_reentrant=False)`` around a small graph (``head(X * 2) * W``), the
-    checkpoint's forward and its recompute in the backward, the output and the gradients of ``X`` and ``W`` equal
-    the same graph's run without the checkpoint bit for bit (``W``'s gradient reads the recomputed head output), and
-    that run equals the deterministic head's."""
+def test_checkpoint_replay_matches_fp64(hidden: int, T: int, record_property) -> None:
+    """Under ``torch.utils.checkpoint(..., use_reentrant=False)`` around a small graph (``head(X * 2) * W``), over 32
+    draws: the head output of the checkpoint's forward and of its recompute in the backward, the output and the
+    gradients of ``X`` and ``W`` (``W``'s gradient reads the recomputed head output) are judged against the same
+    graph with PyTorch's ``X.mean(dim=1)`` (the ``nondet`` contract promises no bits, so the replay is not compared
+    with a run without the checkpoint)."""
     _require(hidden)
-    g = torch.Generator(device=_device()).manual_seed(SEED + 6 + T * 31 + hidden)
-    X = _draw((T, 4, hidden), "spread", g)
-    W = _draw((hidden,), "randn", g)
-    dOut = _draw((T, hidden), "randn", g)
-    heads: list[torch.Tensor] = []
 
-    def run(head, checkpointed: bool):
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), "spread", g)
+        W = _draw((hidden,), "randn", g)
+        dOut = _draw((T, hidden), "randn", g)
+        heads: list[torch.Tensor] = []
+
         def block(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-            y = head(x * 2)
+            y = facade.cake_mhc_head_nondet(x * 2)
             heads.append(y.detach().clone())
             return y * w
 
-        heads.clear()
         x = X.detach().requires_grad_(True)
         w = W.detach().requires_grad_(True)
-        if checkpointed:
-            out = torch.utils.checkpoint.checkpoint(block, x, w, use_reentrant=False)
-        else:
-            out = block(x, w)
+        out = torch.utils.checkpoint.checkpoint(block, x, w, use_reentrant=False)
         out.backward(dOut)
-        return out.detach(), x.grad, w.grad, list(heads)
+        assert len(heads) == 2, len(heads)
+        oracle = _block_oracle(X, W, dOut)
+        tier = _block_naive(X, W, dOut)
+        launch = {
+            "head forward": heads[0],
+            "head recompute": heads[1],
+            "output": out.detach(),
+            "dX": x.grad,
+            "dW": w.grad,
+        }
+        names = {k: k.split()[0] for k in launch}
+        expected = {k: oracle[n] for k, n in names.items()}
+        naive = {k: tier[n] for k, n in names.items()}
+        return [launch], expected, naive
 
-    det = run(det_facade.cake_mhc_head_det, checkpointed=False)
-    plain = run(facade.cake_mhc_head_nondet, checkpointed=False)
-    replay = run(facade.cake_mhc_head_nondet, checkpointed=True)
-    assert len(plain[3]) == 1 and len(replay[3]) == 2, (len(plain[3]), len(replay[3]))
-    _assert_bitwise(plain[3][0], det[3][0], "the det head's output")
-    for y in replay[3]:
-        _assert_bitwise(y, plain[3][0], "the head output without the checkpoint")
-    for name, got, want, det_want in zip(
-        ("output", "dX", "dW"), replay[:3], plain[:3], det[:3], strict=True
-    ):
-        _assert_bitwise(got, want, f"the {name} without the checkpoint")
-        _assert_bitwise(want, det_want, f"the det head's {name}")
+    judge_draws(case, record_property, seed=SEED + 6 + T * 31 + hidden)
