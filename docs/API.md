@@ -1075,7 +1075,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 - **Rope form:** `O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent`, over the keys that each row's indices select (K = V = latent).
 - **NoPE form:** `O = softmax(softmax_scale * q . kv^T) . kv`.
 
-The autograd entries run the forward eagerly and the backward through autograd; the `*_train_*_forward` / `*_train_*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
+The autograd entries run the forward eagerly and the backward through autograd; the `*_train*_forward` / `*_train*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only.
 
