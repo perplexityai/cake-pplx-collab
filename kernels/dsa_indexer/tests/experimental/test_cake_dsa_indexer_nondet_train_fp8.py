@@ -79,6 +79,9 @@ E4M3 = torch.float8_e4m3fn
 
 # The SM counts each architecture ships with (one persistent CTA per SM).
 _GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212,)}
+# DeepGEMM's FP8 MQA logits kernels run on these architectures; on sm_107a the call ends the process's CUDA
+# context with a device-side assert.
+_DEEP_GEMM_ARCHES = ("sm_100a", "sm_103a")
 # The architectures that register an FP8 wide program; elsewhere an FP8 wide decision runs l6 (``FP8_KIND_FALLBACK``).
 _FP8_WIDE_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 
@@ -1365,12 +1368,15 @@ def test_fp8_rows_are_the_top_k_of_deep_gemm_logits(monkeypatch):
     the top ``min(top_k, visible)`` of the stock DeepGEMM FP8 MQA logits of the same inputs (score descending, then id
     descending): the FP8 form takes DeepGEMM's input format (e4m3 ``q`` / ``k``, FP32 per-key scales, FP32 head
     weights).  The logits come from ``deep_gemm.fp8_mqa_logits``, or in a build without it from
-    ``deep_gemm.fp8_fp4_mqa_logits`` with the same e4m3 ``q`` / ``k``, FP32 per-key scales and FP32 logits.  Skips
-    where DeepGEMM does not import, where the build has neither entry point, where an entry point takes other
-    arguments, and where ``fp8_fp4_mqa_logits`` rejects FP32 per-key scales on this architecture (DeepGEMM builds that
-    take MX block scale factors and return BF16 logits there: a different input format)."""
+    ``deep_gemm.fp8_fp4_mqa_logits`` with the same e4m3 ``q`` / ``k``, FP32 per-key scales and FP32 logits.  Skips on
+    architectures DeepGEMM does not run on (sm_107a), where DeepGEMM does not import, where the build has neither entry
+    point, where an entry point takes other arguments, and where ``fp8_fp4_mqa_logits`` rejects FP32 per-key scales on
+    this architecture (DeepGEMM builds that take MX block scale factors and return BF16 logits there: a different input
+    format)."""
     _require_fp8_program()
     arch = arch_for(torch.device("cuda"))
+    if arch not in _DEEP_GEMM_ARCHES:
+        pytest.skip(f"DeepGEMM's FP8 MQA logits do not run on {arch}")
     if importlib.util.find_spec("deep_gemm") is None:
         pytest.skip("deep_gemm is not installed")
     try:
