@@ -11192,9 +11192,7 @@ def test_convenience_path_reuses_its_planned_launch_without_allocation(
             W=(torch.randn(N, K, device=device, generator=gen) * K**-0.5).to(
                 torch.bfloat16
             ),
-            out=torch.full(
-                (T, N), float("nan"), device=device, dtype=torch.bfloat16
-            ),
+            out=torch.full((T, N), float("nan"), device=device, dtype=torch.bfloat16),
         )
 
     def launch(d):
