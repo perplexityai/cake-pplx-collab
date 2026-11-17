@@ -1171,6 +1171,15 @@ def test_autograd_accumulates_into_existing_grads(
     check.check(record_property)
 
 
+def _requested_bytes() -> int:
+    """Device bytes this process requested from the CUDA caching allocator and
+    still holds.  ``torch.cuda.memory_allocated`` counts whole allocator blocks
+    instead, and the allocator can serve a request with a cached block up to
+    1 MiB larger without splitting it, so the blocks it counts depend on what
+    earlier tests left in the cache."""
+    return torch.cuda.memory_stats()["requested_bytes.all.current"]
+
+
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
 def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w: str):
     """The autograd function saves three tensors -- the normalized input (the
@@ -1193,7 +1202,7 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
         return tensor
 
     torch.cuda.synchronize()
-    base = torch.cuda.memory_allocated()
+    base = _requested_bytes()
     with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
         outputs = rmsnorm(xa, wa, eps, residual=ua)
     y = outputs[0] if residual else outputs
@@ -1205,11 +1214,11 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
     assert len(others) == 1, [(tuple(t.shape), t.dtype) for t in saved]
     assert others[0].dtype == torch.float32 and tuple(others[0].shape) == (rows,)
     torch.cuda.synchronize()
-    held = torch.cuda.memory_allocated() - base
+    held = _requested_bytes() - base
     outputs_bytes = y.numel() * y.element_size() + (
         normalized.numel() * normalized.element_size() if residual else 0
     )
-    # the outputs plus the FP32 rstd (allocator blocks of 512 bytes)
+    # the outputs plus the FP32 rstd (requested bytes, 2048 bytes of slack)
     assert held <= outputs_bytes + 4 * rows + 2048, (held, outputs_bytes)
     saved.clear()  # drop this test's references to the saved tensors
     others.clear()
@@ -1225,7 +1234,7 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
         t.untyped_storage().data_ptr(): t.untyped_storage().nbytes() for t in grads
     }
     grads_bytes = sum(storages.values())
-    left = torch.cuda.memory_allocated() - base
+    left = _requested_bytes() - base
     assert left <= grads_bytes + 2048, (
         f"{left} bytes held after the backward, gradients {grads_bytes}"
     )
