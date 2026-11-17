@@ -933,7 +933,7 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 - Selection: the exact global top `min(top_k, visible)` keys per query row, ranked by score descending, then key id descending. det returns them in ascending id order, and nondet leaves the slot order unspecified.
 - Forward only. It returns int32 indices and FP32 scores. No autograd or backward is documented.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. On `sm_107a`, the FP8 logits can differ from DeepGEMM's in the last bits.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`.
 
 **Inputs.**
 
@@ -970,7 +970,7 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 **Options and environment.**
 
 - `workspace_buffer`: when omitted, the buffer is allocated through the caching allocator. On the ticket architectures, a shared buffer has its ticket word zeroed before every run.
-- `max_seqlen_k`: does not change results. It selects the rank-finalize variant and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
+- `max_seqlen_k`: does not change the selected ids (det: nor the score bits). It selects the rank-finalize variant (det) and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
 - `return_scores=False` returns `None` for `scores`, but the scores are still computed internally.
 - The facades read no environment variable of their own. Backend partition knobs are private.
 
@@ -1001,7 +1001,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 - The geometry is fixed at 32 indexer heads and head dim 128.
 - FP8 is an opt-in form in both modes.
-- Nondet output tensors vary between calls. Compare the per-row sets, not the tensors.
+- Nondet output tensors vary between calls. Compare the per-row id sets, not the tensors.
 - Operator tests skip on devices other than compute capability 10.0, 10.3 or 10.7.
 - Finite inputs are the normal domain. With NaN or inf, the output structure stays intact and the kernels do not hang, but the values are not otherwise specified.
 - `cu_seqlens` are never read on the host.

@@ -75,12 +75,12 @@ def cake_dsa_indexer_nondet_train_topk(
     ``s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])``
 
     with FP32 products, accumulation and score arithmetic (no BF16 intermediate
-    rounding; the reduction scheme is fixed and documented in
+    rounding; the reduction scheme is documented in
     ``cake_pplx/_backends/cake_dsa_indexer_nondet_train/README.md``).
     Every row selects the exact global top ``min(top_k, visible)`` keys of its
     visible prefix, ranked by score descending then key id descending
-    (``+0.0 == -0.0`` for ranking), and returns them with aligned scores (the
-    computed bits) in no specified slot order.
+    (``+0.0 == -0.0`` for ranking), and returns them with aligned scores in
+    no specified slot order.
 
     The FP8 form is selected by float8_e4m3fn ``q`` and ``k`` with a per-key
     FP32 ``k_scale``:
@@ -158,8 +158,7 @@ def cake_dsa_indexer_nondet_train_topk(
         slots, in no specified slot order.
     scores : Optional[torch.Tensor]
         ``None`` with ``return_scores=False``; else FP32 ``[T, top_k]`` scores
-        aligned with ``indices`` (a selected ``-0.0`` stays ``-0.0``); the
-        slots of ``-1`` ids hold ``-inf``.
+        aligned with ``indices``; the slots of ``-1`` ids hold ``-inf``.
 
     Every row holds the exact selection above in its ``min(top_k, visible)``
     valid (non ``-1``) slots; the slot order within a row and the positions of

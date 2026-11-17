@@ -49,8 +49,7 @@ Contract
   never selected; negative offsets, empty segments and rows without visible
   keys are defined (all padding).
 * Selection: the exact global top ``min(top_k, visible)`` keys per row, ranked
-  by score descending then key id descending (``+0.0 == -0.0`` for ranking);
-  the returned score bits are the computed FP32 bits.
+  by score descending then key id descending (``+0.0 == -0.0`` for ranking).
 * Set semantics: every row holds the exact selection in its ``min(top_k,
   visible)`` valid (non-``-1``) slots; no output is promised to repeat bit for
   bit between calls.  The program the host dispatches (unit geometry, key-range
@@ -234,12 +233,8 @@ CONTRACT_ALIASES = {
     "num_splits": "n_split",
 }
 
-# Documented zero-sign behaviour of the head reduction (registry field
-# ``NUMERICS["zero_sign_policy"]``): ``positive_accumulator`` -- the FMA chains
-# start from ``+0.0``, so a row whose head terms are all zero scores ``+0.0``;
-# ``ieee_sum`` -- the sum starts from the ``h = 0`` term, so an all-zero sum is
-# ``-0.0`` iff every term is ``-0.0``.  Either way the computed bits are
-# returned unchanged and ``+0.0 == -0.0`` for ranking.
+# Registry field ``NUMERICS["zero_sign_policy"]``: the head-reduction model of
+# the shared scan programs; this package promises no score bits.
 ZERO_SIGN_POLICIES = ("positive_accumulator", "ieee_sum")
 
 
@@ -377,7 +372,7 @@ def generated_program_available(
 
 
 def record_zero_sign_policy() -> str:
-    """The documented zero-sign policy of the program's head reduction."""
+    """The registry's zero-sign policy field."""
     policy = NUMERICS.get("zero_sign_policy") if isinstance(NUMERICS, dict) else None
     if policy not in ZERO_SIGN_POLICIES:
         raise ValueError(

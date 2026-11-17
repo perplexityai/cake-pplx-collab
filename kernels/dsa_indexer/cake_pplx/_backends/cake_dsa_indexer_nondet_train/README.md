@@ -118,7 +118,7 @@ padding.
 | output | contents | not specified |
 |---|---|---|
 | `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids, unique within the row, and `-1` in every other slot | the slot order of the selected ids and the positions of the `-1` slots; both may vary between calls |
-| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot, with its computed FP32 bits (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | the slot order, which follows `indices` |
+| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot; `-inf` in every padding slot; `None` with `return_scores=False` | the slot order, which follows `indices` |
 
 * A caller that needs ascending id order can sort the row or use the
   deterministic package.  The following rearranges every row into ascending
@@ -158,19 +158,11 @@ evaluates the score in this sequence:
 3. **Weights**: `w'_h = fl(w_h * softmax_scale)` once per query block
    (`relu(scale * x) = scale * relu(x)` for `scale > 0`).
 
-Every head term therefore sees at most 11 roundings after the MMA.  Two
-independent FP32 evaluations of one score differ by at most `gamma_n * A`,
-with `n = 2D + 4H + 4 = 388`, `gamma_n = n u / (1 - n u)`, `u = 2 ** -24` and
-`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|`.
+Every head term therefore sees at most 11 roundings after the MMA.
 
-**Signed zeros.**  Every chain accumulator starts at `+0.0` and the FMA order
-is fixed.  Because `fma(+0, w', +0) = +0` for either sign of `w'`, a row whose
-head terms are all zero yields `+0.0`.  A `-0.0` score cannot come from this
-reduction (registry field `NUMERICS["zero_sign_policy"] =
-"positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, and
-an equal-score tie goes to the larger key id.  The written score keeps the
-computed bits and is never canonicalized.  The tests hold the signed-zero
-cases to the exact selection of
+**Signed zeros.**  `+0.0` and `-0.0` compare equal for ranking, and an
+equal-score tie goes to the larger key id.  The tests hold the signed-zero
+cases to the ids and valid counts of the exact selection of
 `tests/experimental/test_helpers/cake_dsa_indexer_reference.py` after each row
 is canonicalized (see "Tests and benchmark").
 
@@ -266,7 +258,7 @@ defined: the row is all padding.
   equal-score tie).  `+0.0 == -0.0`.
 * Output: no specified slot order (see "Outputs").  Ids are unique.  Every slot
   that does not hold a selected entry holds `id = -1`, `score = -inf`.
-* The following never change the selected set of a row, only its slot order:
+* The following never change the selected ids of a row:
   * the program the host dispatches for a geometry: unit geometry, key-range
     split, CTA pair, tile-loop unroll, unit order, segment order, descending
     walk and sampled first threshold;
