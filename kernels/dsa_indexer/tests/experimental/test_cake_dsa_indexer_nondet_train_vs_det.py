@@ -25,7 +25,7 @@ limitations under the License.
 # * every host plan has the deterministic plan's fields (scan program, split, grid, unit, capacity, check period,
 #   sampling, segment order, pair, staging and workspace bytes, ticket decisions), the deterministic package's
 #   rank-fused merge being the plain merge here;
-# * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) of a BF16 call can differ
+# * on sm_107a the sampled first threshold's rank shift of a BF16 call can differ
 #   (``_OWN_SAMPLING_ARCHES``): both records carry the same ``sample_class_rule`` / ``sample_long_rule``, but this
 #   package's ``sample_class_for`` applies the class shift (keeping the tile count) where the deterministic package
 #   skips the class rule, so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.
@@ -73,9 +73,9 @@ P1_CU_SEQLENS_K = (0, 1777, 58619, 60742, 128665, 130788, 198711, 200834, 268757
 P2_T, P2_TKV = 16172, 267520
 
 
-# the architectures where the sampled launch scalars of a BF16 call can differ: both records carry the same
+# the architectures where the sampled rank shift of a BF16 call can differ: both records carry the same
 # ``sample_class_rule`` / ``sample_long_rule``; on sm_107a this package's ``sample_class_for`` applies the class shift
-# (keeping the tile count) where the deterministic package skips the class rule, so the launch scalars can differ
+# (keeping the tile count) where the deterministic package skips the class rule, so the rank shift can differ
 _OWN_SAMPLING_ARCHES = ("sm_107a",)
 
 
@@ -194,9 +194,9 @@ def test_policy_records_are_the_deterministic_records_restricted():
 
 
 def _assert_same_decisions(arch, plan, det_plan, where, *, own_sampling=True) -> None:
-    # sm_107a: the sampled tile count and rank shift of a BF16 call can differ (launch scalars only;
-    # ``_OWN_SAMPLING_ARCHES``), whether the call samples does not; ``own_sampling=False`` (an FP8 call) compares
-    # them too
+    # sm_107a: the sampled rank shift of a BF16 call can differ (a launch scalar; ``_OWN_SAMPLING_ARCHES``), so the
+    # rank shift and the tile count are left out there; whether the call samples is compared; ``own_sampling=False``
+    # (an FP8 call) compares both
     own = (
         ("sample_tiles_max", "sample_shift_permille")
         if own_sampling and arch in _OWN_SAMPLING_ARCHES
