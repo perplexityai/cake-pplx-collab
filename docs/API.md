@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 14 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 15 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family except fmha supports `sm_100a`, `sm_103a` and `sm_107a`; fmha supports `sm_100a` and `sm_103a`. Some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,14 +11,14 @@ This page covers the public modules of all 14 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, and gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry. Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, and fmha has only a backward step (`cake_fmha_nondet_train_backward`). Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
 ## det and nondet
 
 - **det:** reductions run in a fixed order, so the same inputs, hardware and plan give bitwise identical outputs and gradients. Some families add conditions, such as the same token count, the same SM count or the same topology.
-- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other.
+- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other. fmha has no det module; its accuracy reference is an FP64 oracle beside the same math in BF16.
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
@@ -30,6 +30,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mhc | `dfn` differs from det only near an FP32 rounding boundary; everything else is bitwise det. Repeats run to run. | Not stated |
 | mhc_head | Same kernels as det | No alert |
 | gqa | Fixed order and bitwise reproducible, no atomics | No alert |
+| fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
 | dsa_indexer | The per-row set of (id, score) repeats, but slot order varies | Raises before launch |
 | dsa_sparse_attention | Forward and `dq` use a fixed order. `dkv` uses atomics. | Backward raises |
 | dense_gemm | Some routes add partials in arrival order. No run-to-run guarantee. | Alerts only for order-varying launches (explicit split counts) |
@@ -922,6 +923,67 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 - Autograd holds the workspace by weak reference.
 - The result bits depend on the shape, `max_seqlen_k`, the workspace `budget_bytes` and the host boundaries.
 - The autograd entries are named without `_train` (`cake_gqa_det`, `cake_gqa_nondet`). The non-autograd steps and workspace helpers include `_train`.
+
+---
+
+## fmha
+
+**Computes.** The backward of dense multi-head attention for training, head dimension 64 or 128, non-causal or causal.
+
+- Per batch and head, `P = softmax(softmax_scale * q k^T)` (with `causal=True`, query row `i` sees the keys `j <= i`) and `out = P v`.
+- The backward returns `dv = P^T dout`, `dq = softmax_scale * dS k` and `dk = softmax_scale * dS^T q`, with `dS = P * (dout v^T - rowsum(out * dout))`.
+- Three kernels run in order on the current stream. The preprocess computes `rowsum(out * dout)` and `lse * log2(e)` and clears an FP32 `dQ` accumulator. The main kernel runs one CTA per 128 keys of one head: it sums `dK`/`dV` in FP32, stores them once, and adds its `dQ` tiles into the accumulator. The postprocess writes `dq = bf16(acc * softmax_scale)`.
+- The family has no forward kernel and no autograd entry. The caller brings `out` and `lse` from its own forward and calls the backward from its own `torch.autograd.Function`.
+
+**Architectures.** `sm_100a`, `sm_103a`, with every variant (head dim 64 and 128, causal or not) on both. There is no `sm_107a` build: other devices, R200 included, raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` and 12.9 for `sm_103a`.
+
+**Inputs.**
+
+- `q`, `out`, `dout`: BF16 `[B, Sq, H, D]`. `k`, `v`: BF16 `[B, Skv, H, D]` with `q`'s `B`, `H` and `D` (no grouped heads).
+- `lse`: FP32 `[B, H, Sq]`, the natural-log logsumexp of `softmax_scale * q k^T` over each query row with the mask applied (FlashAttention's `softmax_lse`).
+- `D` is 64 or 128 and `H >= 1`. `Sq` and `Skv` are positive multiples of 128. `causal=True` needs `Sq == Skv`.
+- Every operand is contiguous and on one CUDA device. BF16 operands start on a 16-byte boundary, `lse` on a 4-byte boundary.
+- `B` and `H` are each at most 65535, and `B * H * max(Sq, Skv) * D` is below 2^31.
+
+### `cake_pplx.cake_fmha_nondet_train`
+
+The only module of the family. The `dQ` tiles of the key blocks of one head are added into an FP32 accumulator in arrival order, so `dq` may differ in its last bits run to run. `dk` and `dv` are summed in one fixed order. Under `torch.use_deterministic_algorithms(True)` the backward raises PyTorch's `RuntimeError` before it allocates or launches; with `warn_only=True` it warns once and runs. Source: [`kernels/fmha/cake_pplx/cake_fmha_nondet_train.py`](../kernels/fmha/cake_pplx/cake_fmha_nondet_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_fmha_nondet_train_backward` | `(q, k, v, out, lse, dout, *, softmax_scale=None, causal=False)` | As above. `softmax_scale` defaults to `D**-0.5`, must be finite, and must be the forward's. | Returns contiguous BF16 `(dq, dk, dv)`: `dq [B, Sq, H, D]`, `dk`/`dv [B, Skv, H, D]`. Not autograd. `B == 0` returns empty gradients without a launch or an alert. A malformed call raises `ValueError` before any launch. Each call allocates its outputs and an FP32 workspace of `B * H * Sq * (D + 2)` elements. |
+
+**Options and environment.** `softmax_scale` and `causal` are the only keywords. The facade reads no environment variable.
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+import torch
+from cake_pplx.cake_fmha_nondet_train import cake_fmha_nondet_train_backward
+
+B, S, H, D = 2, 1024, 8, 128
+q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+scale = D ** -0.5
+
+# Any forward that returns out and its natural-log LSE works; here, plain PyTorch with the causal mask.
+scores = torch.einsum("bqhd,bkhd->bhqk", q.float(), k.float()) * scale
+scores = scores.masked_fill(torch.ones(S, S, device="cuda", dtype=torch.bool).triu(1), float("-inf"))
+lse = scores.logsumexp(-1)  # FP32 [B, H, S]
+out = torch.einsum("bhqk,bkhd->bqhd", scores.softmax(-1), v.float()).to(torch.bfloat16).contiguous()
+
+dout = torch.randn_like(out)
+dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_scale=scale, causal=True)
+```
+
+**Caveats.**
+
+- Backward only: there is no forward kernel and no autograd entry.
+- There is no det module, and `dq` is not bitwise reproducible run to run.
+- No grouped-query or multi-query attention, variable-length segments, dropout, sliding window, softcap or attention bias.
+- The causal mask is top-left and needs `Sq == Skv`.
+- There is no `sm_107a` build.
 
 ---
 

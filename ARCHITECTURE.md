@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 14 families and 31 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 15 families and 32 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -92,6 +92,7 @@ The repository has 14 families and 31 backend packages, about 212 MB in total. M
 | `dsa_indexer` | det, nondet | `cake-pplx-dsa-indexer` |
 | `dsa_sparse_attention` | det, nondet | `cake-pplx-dsa-sparse-attention` |
 | `gqa` | det, nondet | `cake-pplx-gqa` |
+| `fmha` | nondet | `cake-pplx-fmha` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
@@ -177,7 +178,7 @@ Each backend package has these files:
 
 | File | Purpose |
 |---|---|
-| `build.json` | Self-contained build manifest, schema `cake-build/1`. It lists per-library sources, the sha256 closure, the arch flags (`sm_100a`, `sm_103a`, `sm_107a`), compile and link flags, and the minimum CUDA version. |
+| `build.json` | Self-contained build manifest, schema `cake-build/1`. It lists per-library sources, the sha256 closure, the arch flags (`sm_100a`, `sm_103a`, `sm_107a`; fmha: `sm_100a`, `sm_103a`), compile and link flags, and the minimum CUDA version. |
 | `cake_build.py` | Library loader. It loads `aot/<name>.so` when a builder made it, else builds the library through the JIT shim. |
 | `_cake_pplx_jit.py` | JIT shim. It compiles one manifest entry with `nvcc` and caches the result under `$CAKE_PPLX_CACHE_DIR` (default `~/.cache/cake_pplx`). |
 | `cake_jit.py` | The package's library registry, used by the backend code. |
@@ -220,6 +221,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet.
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exception: fmha is validated on GB200 (`sm_100a`) and GB300 (`sm_103a`) and has no `sm_107a` build.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
