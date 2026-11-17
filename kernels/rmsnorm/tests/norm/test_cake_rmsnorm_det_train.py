@@ -1195,8 +1195,8 @@ def test_fp32_weight_meets_the_naive_tier(
     hidden: int, residual: bool, rows: int, record_property
 ) -> None:
     """The FP32-weight routes: y, rstd (h_new), dx and dw meet the naive BF16 tier against the FP64 oracle of the
-    FP32 weight.  The weight holds a BF16 draw, as the kernel tests draw it, so the naive tier reads the same weight
-    as the oracle (``ref.naive_weight``)."""
+    FP32 weight.  The weight holds a BF16 draw, so the naive tier reads the same weight as the oracle
+    (``ref.naive_weight``)."""
 
     _skip_unless_fp32_routes(hidden, residual)
     eps = EPS[hidden]

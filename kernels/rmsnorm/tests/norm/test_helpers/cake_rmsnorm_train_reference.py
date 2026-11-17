@@ -20,9 +20,9 @@ PyTorch code on the same inputs: ``y`` is ``torch.nn.functional.rms_norm`` (an
 FP32 weight is read as stored), ``rstd`` its formula in BF16 ops, ``h_new`` the
 BF16 sum, ``dx`` the backward formula with every op in BF16 (the FP32 ``rstd``
 rounded to BF16 once) and ``dw`` the weight gradient of ``rms_norm``'s BF16
-autograd.  An FP32 weight judged here holds a BF16 draw, as the kernel tests
-draw it, so its BF16 cast is exact: the naive tier and the FP64 oracle see the
-same weight (:func:`naive_weight` refuses any other FP32 weight).
+autograd.  An FP32 weight judged here holds a BF16 draw, so its BF16 cast is
+exact: the naive tier and the FP64 oracle see the same weight
+(:func:`naive_weight` refuses any other FP32 weight).
 
 Nothing here imports a package: the registry readers take the package's
 ``cake_jit`` module, so a suite run against a vendored copy uses them unchanged.
