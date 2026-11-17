@@ -261,7 +261,12 @@ reduce-bound rows per tile, and only rows with many keys per query token pay
 it back (B200 backward: `S / T >= 16` 0.5-4 % faster, `S = T` 3.7 % slower), so
 the host takes the direct path by the size rule the record carries
 (`dkv_direct`: `min_keys_per_query`, 4 -- direct iff `S >= 4 T`) whenever
-`dkv_acc` is given; the keyword `dkv_direct` of the entry points (default
+`dkv_acc` is given.  Like `key_pass_policy`, the rule may differ per
+architecture: `dkv_direct.rules[arch].min_keys_per_query` replaces the base
+on that target, an architecture without a rule takes the base, and the
+planners apply the rule of the device's architecture.  Both records carry
+one rule, `sm_107a`: 20 keys per query (see "Direct accumulation on
+`sm_107a`" below).  The keyword `dkv_direct` of the entry points (default
 `None` = the rule) forces (`True`) or disables (`False`) it, and the resolved
 value is part of the binding key (the public wrapper maps
 `CAKE_PPLX_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
@@ -269,6 +274,38 @@ leaves it at `None`).  Both
 paths add the same FP32 contributions into the same rows in another summation
 order.  Without the natural stages every `dkv_acc`
 call takes the cast's accumulate path.
+
+| record | `sm_100a` | `sm_103a` | `sm_107a` |
+|---|---|---|---|
+| RoPE (`dkv_acc` only) | `S >= 4 T` | `S >= 4 T` | `S >= 20 T` |
+| NoPE (fresh `dkv` and `dkv_acc`) | `S >= T` | `S >= T` | `S >= 20 T` |
+
+#### Direct accumulation on `sm_107a`
+
+On VR200 (`sm_107a`, CUDA 13.5) the natural-layout drain of the main stage is
+slower than the permuted one: on the NoPE `p8949_nope` row (`T = 16,384`,
+`S = 65,536`) the natural main stage takes 8.30 ms against 7.88 ms for the
+permuted build.  The natural build issues local loads and stores and more
+lane-transpose shuffles; its reduction traffic to L2 is the same as the
+permuted build's.  Backward medians over fresh processes, `dkv_direct=False`
+(the permuted accumulator plus the cast) against the natural drain:
+
+| record | rows (`S / T`) | permuted + cast against natural, backward |
+|---|---|---|
+| NoPE | 1 .. 16.6 (8 rows) | 0.3-6.3 % faster on every row |
+| NoPE | 20 .. 28 (6 rows) | from 2.5 % faster to 2.4 % slower |
+| NoPE | 32 .. 65.8 (5 rows) | 1.8-5.2 % slower |
+| RoPE with `dkv_acc` | 4 .. 16.6 (9 rows) | 2.3-6.3 % faster on every row |
+| RoPE with `dkv_acc` | 32 .. 68.9 (4 rows) | from 2.1 % faster to 0.4 % slower |
+
+With the `sm_107a` rule at 20 keys per query, every measured row below 20
+moves to the permuted path, which was faster on each of them, and every row
+at or above 20 keeps the natural drain it ran before: no measured row is
+slower than with the base rules.  The NoPE `p8949_nope` backward is 4.3-4.7 %
+faster.  Between 20 and 28 keys per query the faster NoPE path depends on the
+token count as well (crossover between 16 and 20 at `T = 2048`, between 24 and
+28 at `T = 4096`), so one count is a compromise.  `sm_100a` and `sm_103a`
+keep their base rules.
 
 Explicit forward / backward entry points without autograd, a prepared
 allocation-free runner (`prepare_dsa_train`, CUDA-graph capturable) and the
@@ -505,11 +542,13 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   autograd backward's predictions) and never collide with the rope keys.
 * `dkv` semantics.  Fresh (no `dkv_acc`): `backward_nope` returns a new natural
   FP32 `[S, 512]` buffer -- filled by the natural-layout main stage adding into
-  the zero-filled buffer when the record's direct rule selects it (`dkv_direct`:
-  `min_keys_per_query` 1, so whenever the row has at least one key per query --
-  every packed causal problem; measured faster than the permuted drain on every
-  row), else -- more query rows than keys, or `dkv_direct=False` -- by the cast
-  stage writing the permuted accumulator out densely (`out_f32`).  Accumulate
+  the zero-filled buffer when the record's direct rule of the device's
+  architecture selects it (`dkv_direct`: `min_keys_per_query` 1 on `sm_100a` /
+  `sm_103a`, so whenever the row has at least one key per query -- every packed
+  causal problem; measured faster than the permuted drain on every row there;
+  20 on `sm_107a`, see "Direct accumulation on `sm_107a`"), else -- a row below
+  the threshold, or `dkv_direct=False` -- by the cast stage writing the
+  permuted accumulator out densely (`out_f32`).  Accumulate
   (`dkv_acc` FP32 `[S_dst, >= 512]`, optional `dkv_dst_map`): `+=` into columns
   `0:512` of the caller's rows by the same two
   paths and `None` for `dkv`; chunked backward passes of one long row add

@@ -114,9 +114,10 @@ _FROM_BACKEND = (
     "CakeDSASparseAttentionNondetNopeVarlenFunction",
 )
 
-# ``auto`` (default): the registered record's size rule decides whether a
-# backward with ``dkv_acc`` accumulates directly from the main stage; ``1``
-# forces the direct path, ``0`` the accumulate-and-cast path.
+# ``auto`` (default): the registered record's size rule of the device's
+# architecture decides whether a backward with ``dkv_acc`` accumulates directly
+# from the main stage; ``1`` forces the direct path, ``0`` the
+# accumulate-and-cast path.
 DKV_DIRECT_ENV = "CAKE_PPLX_DSA_DKV_DIRECT"
 # Unset, empty or ``0`` (default): the values of ``dkv_dst_map`` are not
 # checked; anything else validates them on every backward (one device sync).
@@ -287,10 +288,12 @@ def cake_dsa_sparse_attention_nondet(
         How the backward accumulates dK / dV into ``dkv_acc`` when the
         registered program has the natural-layout main stages.  ``None``
         (default) reads ``CAKE_PPLX_DSA_DKV_DIRECT``: ``auto`` (its
-        default) applies the record's size rule -- the main stage adds into
-        the caller's packed rows directly (no workspace accumulators, zero
-        fill or cast launch) when the row has at least
-        ``dkv_direct.min_keys_per_query`` (4) keys per query token --, ``1``
+        default) applies the record's size rule of the device's architecture
+        -- the main stage adds into the caller's packed rows directly (no
+        workspace accumulators, zero fill or cast launch) when the row has at
+        least ``dkv_direct.min_keys_per_query`` keys per query token, 4 on
+        ``sm_100a`` / ``sm_103a`` and 20 on ``sm_107a`` (whose natural-layout
+        drain is slower) --, ``1``
         forces the direct path whenever the stages are registered, ``0`` always
         takes the accumulate-and-cast path; any other value raises
         ``ValueError``.  ``True`` / ``False`` select the path explicitly and
@@ -557,14 +560,17 @@ def cake_dsa_sparse_attention_nondet_nope(
         (``dkv_acc`` or the fresh ``dkv``) when the registered program has the
         natural-layout main stages.  ``None`` (default) reads
         ``CAKE_PPLX_DSA_DKV_DIRECT``: ``auto`` (its default) applies the
-        record's rule -- the main stage adds into the buffer directly (no
-        permuted accumulator, no cast launch) when the row has at least
-        ``dkv_direct.min_keys_per_query`` keys per query token, 1 for this
-        program (every row with at least as many keys as query tokens; the
-        direct path measured faster than the permuted drain on every such
-        row), so only a problem with more query rows than keys takes the
-        cast --, ``1`` forces the direct path whenever the stages are
-        registered, ``0`` always takes the accumulate-and-cast path; any
+        record's rule of the device's architecture -- the main stage adds
+        into the buffer directly (no permuted accumulator, no cast launch)
+        when the row has at least ``dkv_direct.min_keys_per_query`` keys per
+        query token: 1 for this program on ``sm_100a`` / ``sm_103a`` (every
+        row with at least as many keys as query tokens; the direct path
+        measured faster than the permuted drain on every such row), 20 on
+        ``sm_107a`` (whose natural-layout drain is slower: the permuted
+        accumulator plus cast was faster on every measured row below 20 keys
+        per query); a row below the threshold takes the cast --, ``1`` forces
+        the direct path whenever the stages are registered, ``0`` always
+        takes the accumulate-and-cast path; any
         other value raises ``ValueError``.  ``True`` / ``False`` select the path explicitly and
         ignore the variable.  Both paths add the same FP32 contributions into
         the same rows (another summation order).
