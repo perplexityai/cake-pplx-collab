@@ -1001,10 +1001,9 @@ def cake_rmsnorm_nondet_train_backward(
     token count" notes list for that window: in the windows that ship it, one
     kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP32
     sums in the workspace (one word per column), which the CTA that finishes
-    last adds into ``dw``
-    (``dx`` is bitwise reproducible and within one BF16 ulp of
-    ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not always
-    bitwise equal to it; the order of the FP32 additions depends on
+    last adds into ``dw`` (``dx`` is bitwise reproducible and within one BF16
+    ulp of ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not
+    always bitwise equal to it; the order of the FP32 additions depends on
     scheduling, so ``dw`` is not guaranteed bitwise reproducible); in the
     others, the deterministic package's backward pair rendered into this
     package.
