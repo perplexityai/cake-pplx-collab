@@ -22,22 +22,22 @@ non-deterministic implementation of the chunked LM-head + loss entries.  Its
 contract is the deterministic package's (``cake_pplx.cake_lm_head_det_train``,
 backend ``cake_pplx._backends.cake_lm_head_det_train``) with one
 relaxation:
-this package makes no run-to-run bitwise promise for its gradients (the
+this package makes no run-to-run bit-equality promise for any output (the
 deterministic package makes it).  Every precision boundary below holds
 (BF16 logits and ``dlogits``, FP32 probability / loss arithmetic, FP32
 accumulation of ``dX`` and of the cross-chunk weight gradient, the one final
 cast of each); the dX GEMM of a K-sliced chunk stores its K-slice partial
 tiles into an FP32 slab and the slab sum launched after it stores their sum, in
-slice order, into the FP32 ``dX_acc`` rows: one fixed order per element, so ``dX``
-repeats bit for bit from run to run and may differ
+slice order, into the FP32 ``dX_acc`` rows: one fixed order per element (a
+design note, no run-to-run promise), so ``dX`` may differ
 from the deterministic package's by FP32 rounding of that sum (the ordered
 split-K bullet below).  ``loss``, ``logp``
 and ``lse`` keep their fixed order (a policy call with zero-weight rows sums
 its loss over fewer rows, see the zero-weight bullet below).  A one-pass
 cross-entropy call (:func:`set_one_pass_rows`; by default a one-row loss call)
 sums ``lse`` and the loss in a fixed order of its own: its ``loss``, ``logp``,
-``lse`` and ``dW`` are bitwise reproducible from run to run but are not the
-deterministic package's bits (both within the accuracy budgets).  Statements below that two forms give "bitwise the
+``lse`` and ``dW`` are not the deterministic package's bits (both meet the
+naive tier; see the package README, Tests).  Statements below that two forms give "bitwise the
 same" output compare the same operations within one run.
 
 Contract
@@ -71,7 +71,8 @@ Contract
   placement ``"auto"`` (the default, :func:`set_gradient_placement`) a call no
   backward can follow forms no accumulator, and inside a non-reentrant
   ``torch.utils.checkpoint`` the recomputation forms them instead of the
-  checkpointed forward (the same bits).  Entry (b)
+  checkpointed forward (the same kernels in one fixed order; no run-to-run
+  promise).  Entry (b)
   ``cake_lm_head_nondet_train_logprob``: the forward saves the FP32 row statistic
   ``lse[T]`` and the valid-row index, so the backward plans its chunks without
   counting the rows again (no host synchronization); the backward recomputes
@@ -109,11 +110,11 @@ Contract
   launch of the slab sum :data:`DX_SLAB_SUM_STAGE` (:func:`_dx_keys`; its counted form under the zero-gradient row
   skip), which sums the ``S`` tiles in slice order and stores the sum into the chunk's rows of ``dX_acc``.  The slab
   sum is the only writer of those rows and never reads them, so no call fills or zeroes ``dX_acc``.  Each element is
-  summed in one order, so ``dX`` repeats bit for bit from run to run (its bits need not equal the deterministic
+  summed in one fixed order (a design note, no run-to-run promise; its bits need not equal the deterministic
   package's).  A chunk of one slice keeps the deterministic package's plain-store ``gemm_dx`` forms, so its ``dX``
-  rows are that package's bits.  The slice rule is selectable programmatically (:func:`set_dx_slice_policy`:
-  ``"det"``, the deterministic package's slice counts, the default; ``"measured"``, the measured form-aware rule;
-  :func:`set_dx_red_min_rows`: one slice below a chunk size, default 0).
+  rows come from that package's programs in its order.  The slice rule is selectable programmatically
+  (:func:`set_dx_slice_policy`: ``"det"``, the deterministic package's slice counts, the default; ``"measured"``,
+  the measured form-aware rule; :func:`set_dx_red_min_rows`: one slice below a chunk size, default 0).
 * Fused dX finalize (``dx_finalize``, default on): a compacted call's dX output boundary writes the
   ``[T, H]`` BF16 ``dX`` in one pass (``scale_cast_scatter_bf16``: ``bf16(g *
   dX_acc[compact row])`` on the valid rows, exact zeros elsewhere, addressed by
@@ -176,16 +177,16 @@ Contract
   row for the gradients: a non-finite value in its ``X`` row, its logits or its ``infer_logp`` does not reach
   ``loss`` / ``dX`` / ``dW`` (the deterministic package gives NaN there through ``0 * inf``).  Finite inputs: the
   same mathematics; ``dW`` (and the FP32 loss sum) group their additions over different chunk rows, so their bits
-  may differ from the deterministic package's within the accuracy budgets.  Not applied (the plain path runs):
+  may differ from the deterministic package's (both meet the naive tier).  Not applied (the plain path runs):
   ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
   (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits
   the rows as here).
 * Non-deterministic mode (the only mode of this package; the mode is in its
   name, and no entry takes a ``deterministic`` keyword): the chunks
   run in sequential order; the dX GEMM's K-slice partials combine through the
-  ordered FP32 reduction (:func:`_dx_keys`, :data:`DX_RED_STAGE`), so ``dX``
-  repeats bit for bit.  Even so, the package makes no run-to-run bitwise promise
-  for its gradients (the deterministic package ``cake_lm_head_det_train``
+  ordered FP32 reduction (:func:`_dx_keys`, :data:`DX_RED_STAGE`), one fixed
+  summation order.  The package makes no run-to-run bit-equality promise
+  (the deterministic package ``cake_lm_head_det_train``
   makes it) and keeps PyTorch's alert as part of that contract.  With
   ``torch.use_deterministic_algorithms(True)`` an entry raises PyTorch's alert
   where its plan is final and before it launches that K-sliced reduction (a
@@ -353,7 +354,7 @@ HOST_COUNT_MAX_ROWS = 1024
 # value in an ignored row reaches no output, as on the compacted path that never reads such a row; the staged buffer
 # is what the call saves for its backward.  All rows valid: the same launches and bits as the compacted call (which
 # keeps no index then).  With ignored rows: exact zero contributions of the ignored rows (``loss`` / ``dW`` group their
-# additions over other rows, so their bits may differ within the accuracy budgets).  Every row ignored: zeros through
+# additions over other rows, so their bits may differ; both meet the naive tier).  Every row ignored: zeros through
 # the kernels (no early return: that needs the count).  Not applied: a call the zero-weight split would serve
 # (:func:`zero_weight_split`), an explicit ``compact_rows=False``, the reference backend, CPU tensors, the low-level
 # ``forward_*`` / ``backward_*`` functions and the kept-logits entry (each keeps its own resolution).
@@ -366,7 +367,7 @@ _UNCOMPACTED_MAX_ROWS = {"rows": UNCOMPACTED_MAX_ROWS_DEFAULT}
 # held from the forward to the backward, at most 79 MB at ``V = 154880``).  Bitwise the same ``logp``; ``dX`` the same
 # products; bitwise the same ``dW`` for a call of one chunk (``T <= chunk_size``: with more chunks the kept form's one
 # weight-gradient GEMM over every row groups ``dW`` differently from the default Function's chunk loop or
-# vocabulary-major form, within the accuracy budgets).
+# vocabulary-major form; both meet the naive tier).
 SMALL_T_KEEP_MAX_ROWS = 256
 _SMALL_T_KEEP = {"on": True}
 # Small-call row padding (:func:`small_pad_rows`): a small call of ``T < rows`` rows, when ``rows <=
@@ -602,7 +603,8 @@ DX_RED_SLICES_MAX = (
 # ``SLAB`` (``[k_slices * m_tiles * 128, H]``; slice ``s`` writes rows ``s * m_tiles * 128 + r``) and the launch
 # writes nothing into ``dX_acc``.  The slab sum :data:`DX_SLAB_SUM_STAGE`, launched right after it (:func:`_dx_keys`),
 # stores ``(s_0 + s_1) + ...``, summed in slice order, into the chunk's rows: it never reads them and is their only
-# writer, so the call neither fills nor zeroes ``dX_acc``, and dX repeats bit for bit.  A launch of one slice (the
+# writer, so the call neither fills nor zeroes ``dX_acc``, and dX is summed in one fixed order (no run-to-run
+# promise).  A launch of one slice (the
 # support path's later vocabulary blocks) adds its tile into ``C`` directly, touches no slab and has no slab sum.  The
 # slab is one buffer per call workspace sized for the call's largest K-sliced chunk (:attr:`Plan.dx_slab_bytes`,
 # allocated with the call's first K-sliced dX launch, :func:`_dx_ordered_values`); a chunk's slab sum reads it before
@@ -4070,8 +4072,8 @@ def _alert_nondeterministic(entry: str, kind: str) -> None:
     its deterministic counterpart ``cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_<kind>``, and nothing
     falls back to it.  Raised by :func:`_alert_unordered_dx` (the dX GEMM's K-sliced reduction) and by the
     candidate-support backward (its dense dX at more than one K slice), before the call's first such launch.  The
-    alert is part of this package's contract: the package makes no run-to-run bitwise promise for its gradients
-    (the deterministic package makes it), although both reductions have one fixed order and repeat bit for bit.  The
+    alert is part of this package's contract: the package makes no run-to-run bit-equality promise (the
+    deterministic package makes it), although both reductions have one fixed summation order.  The
     alert is raised here, not through a private PyTorch hook (PyTorch exposes no public Python entry
     for it)."""
     if not torch.are_deterministic_algorithms_enabled():
@@ -4095,7 +4097,7 @@ def _alert_nondeterministic(entry: str, kind: str) -> None:
 def _alert_unordered_dx(plan: "Plan", entry: str, kind: str) -> None:
     """:func:`_alert_nondeterministic` for a call whose ``plan`` launches the dX GEMM's K-sliced reduction
     (:data:`DX_RED_STAGE`, a chunk of more than one slice: :attr:`Plan.dx_sliced`), whose slab sum adds the slices in
-    slice order and stores the sum (one fixed order: ``dX`` repeats bit for bit; the alert is kept by this package's
+    slice order and stores the sum (one fixed order, no run-to-run promise; the alert is kept by this package's
     contract, :func:`_alert_nondeterministic`).  A plan without one (the one-slice dX store, the weight-gradient GEMMs,
     the casts) does not alert.  Each entry calls it where its plan is final (after a
     valid-row count, before the call's first dX launch).  Torch's flag is read first: outside its deterministic
@@ -11154,8 +11156,8 @@ def backward_logprob(
 # first block stores (the plain-store form; under the zero-gradient row skip every block adds into the ``-0.0`` fill,
 # the exact additive identity, which reproduces the store bit for bit), each later block adds (the reduction form at
 # ONE K slice: one writer per element per launch; its ordered form's slab operand is ``dX_acc`` itself,
-# :func:`dx_ordered_operands`) in block order on one stream.  Every output therefore repeats bit for
-# bit; ``dW`` / ``dX`` round differently from the chunk loop (other summation groupings, same FP32 contract).  The
+# :func:`dx_ordered_operands`) in block order on one stream: one fixed summation order for every output (no run-to-run
+# promise); ``dW`` / ``dX`` round differently from the chunk loop (other summation groupings, same FP32 contract).  The
 # weight-gradient GEMM of a block runs on the dW side stream (:func:`dw_side_stream` of the block count) beside the
 # block's dX GEMM and joins before the next block's recompute.  The dX GEMM takes the chunk rule's knobs for ``T_v``
 # rows (:func:`chunk_variants`), except on an architecture whose long-chunk ring takes no split: there a launch that
@@ -12322,7 +12324,7 @@ def backward_logprob_keep(
     view in place -- no logits GEMM; the chunk's ``X`` rows are gathered for the weight gradient only -- then ``dX`` /
     ``dW`` as in its chunk loop (a chunk of more than one dX slice sums its slices in slice order).  ``dW`` / ``dX``
     can round differently from :func:`backward_logprob`'s (another summation order: its vocabulary-major form of the
-    auto rule's calls, its zero-gradient row skip), within the same accuracy budget.
+    auto rule's calls, its zero-gradient row skip); both meet the naive tier.
     The views serve one backward: this call marks them consumed and a second
     backward on them is a ``ValueError``.  ``row_index`` as in :func:`backward_logprob`
     (the forward's valid-row index, or a recount); the hidden valid-row count and ``logprob_dz`` do not apply.
@@ -12330,7 +12332,7 @@ def backward_logprob_keep(
     rows, its folded chunks (:func:`loop_chunks`).  One view of all ``T_v`` rows with ``chunk_size >= T_v`` (the
     forward's contiguous kept buffer, :func:`kept_rows_of`) runs the backward as one chunk: one ``row_grad``, one dX
     GEMM over ``M = T_v`` and the fused weight-gradient cast over ``K = T_v`` (no FP32 ``dW`` accumulator); its
-    ``dW`` sums the rows in one GEMM, so its bits differ from the chunked backward's (each repeats bit for bit).
+    ``dW`` sums the rows in one GEMM, so its bits differ from the chunked backward's (each in its own fixed order).
     ``dz_ready`` / ``dx_side`` / ``after_dz``: the parts of the ordered one-pass backward
     (:func:`backward_logprob_keep_ordered`, :meth:`_KeptBinding.backward_logprob_keep`)."""
     if backend != "cake":
@@ -12478,7 +12480,8 @@ def backward_logprob_keep(
 # the backward, alerts as any call does.  The log-probability entry forms no gradient in its forward; under ``"auto"``
 # its checkpoint recomputation takes the checkpointed call's row results (:class:`_LogprobKept`).
 # ``"forward"``: every call with an input that requires a gradient forms them in its forward, also when no backward
-# follows.  The outputs are the same bits either way (the same kernels on the same operands, in the same order).
+# follows.  Either way the same kernels run on the same operands in one fixed order (a design note, no run-to-run bit
+# promise).
 GRADIENT_PLACEMENTS = ("auto", "forward")
 _GRADIENT_PLACEMENT = {"mode": "auto"}
 
@@ -12801,8 +12804,8 @@ def _hand_over(ctx, ckpt: _CheckpointPass, handed, result):
 # The log-probability entries inside a non-reentrant ``torch.utils.checkpoint`` (gradient placement ``"auto"``): the
 # checkpointed forward keeps its call's row results -- ``logp``, the FP32 row statistic ``lse``, the valid-row index
 # and the compact temperature, O(T) bytes -- in the checkpoint frame, and the recomputation in the backward takes them
-# instead of running the logits GEMMs again: it returns a copy of the same ``logp`` and saves the same row results, so
-# the backward reads the bits the plain call's backward reads.  A recomputed call takes them only when it repeats its
+# instead of running the logits GEMMs again: it returns a copy of the same ``logp`` and saves the same row results,
+# which the backward reads.  A recomputed call takes them only when it repeats its
 # checkpointed call (paired per frame and graph by call order) on the same input tensors (the same objects, unchanged
 # since: version counters) under the same options; otherwise, under the placement ``"forward"``, or after the kept
 # ``logp`` was modified in place, it runs the forward.
@@ -13013,8 +13016,8 @@ def _loss_backward_split(ctx, grad_loss):
 # the dX GEMM), and the weight gradient is a plain write.  Bits: ``z`` is the chunked path's (the same FP32 products
 # and BF16 rounding) and ``dz`` / ``dW`` take its per-element operation sequences, but ``lse`` and the loss sum in
 # another fixed order, so ``loss``, ``logp``, ``lse``, ``dz`` and ``dW`` are not the deterministic package's bits;
-# ``dX`` takes the FP32 softmax weights in place of the BF16 ``dz`` -- every output within the accuracy budgets, and
-# run to run identical (no reduction whose order the launch leaves open).  An ignored row (a
+# ``dX`` takes the FP32 softmax weights in place of the BF16 ``dz`` -- every output meets the naive tier, and no
+# reduction leaves its order to the launch (a design note, no run-to-run promise).  An ignored row (a
 # negative label) takes no part: its ``logp``, ``dX`` row and ``dW`` contribution are exact zeros and a non-finite ``X``
 # row never reaches an output; every row ignored streams no ``W``.  Applies on CUDA with ``backend="cake"``, a
 # contiguous BF16 ``W`` of ``ONE_PASS_HIDDEN`` columns, BF16 ``X`` rows with a 16-byte base and pitch, contiguous int64
@@ -13364,7 +13367,8 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
     Gradient placement ``"auto"`` (:func:`set_gradient_placement`) inside a non-reentrant ``torch.utils.checkpoint``:
     the checkpointed forward computes the loss only and saves the call's inputs; the recomputation in the backward runs
     the fused forward, saves the same inputs and hands its result to the checkpointed call's backward (which runs the
-    fused forward itself when nothing was handed over).  The outputs are the fused forward's bits either way."""
+    fused forward itself when nothing was handed over).  Either way the fused forward's kernels run in one fixed order
+    (no run-to-run bit promise)."""
 
     @staticmethod
     def forward(
@@ -13628,7 +13632,7 @@ def set_kept_logits_form(
     the weight gradient (off: in order on the caller's stream).  ``hidden_count`` (default ``True``: the hidden count where it is eligible): the kept entry's
     default of its ``hidden_count`` keyword.  ``logp`` / ``lse`` are the same bits under every setting; ``dW`` sums its
     rows in another grouping under ``one_pass``, or with ``tail_fold`` off on a call the default plan folds (each
-    setting repeats bit for bit); ``dX`` is the
+    setting in its own fixed order); ``dX`` is the
     chunked dX of the forward's chunks unless ``dx_one_pass`` (the same products)."""
     given = {
         name: value
@@ -14258,10 +14262,10 @@ def cake_lm_head_nondet_train_loss(
     offload or other saved-tensor hooks innermost and torch's deterministic
     algorithms keep the fused forward).  Under selective activation
     checkpointing the call runs with every active torch dispatch mode popped
-    (``_selective_checkpoint_modes``) and behaves the same way.  The outputs
-    are those of ``"forward"`` (gradients formed in every forward): the same
-    ``loss``, ``logp``, ``dW`` and ``dX`` bits (the K-sliced dX reduction sums
-    its slices in slice order either way).
+    (``_selective_checkpoint_modes``) and behaves the same way.  The placement
+    ``"forward"`` (gradients formed in every forward) runs the same kernels on
+    the same operands (one fixed order; no run-to-run bit promise; the
+    K-sliced dX reduction sums its slices in slice order either way).
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -14637,8 +14641,8 @@ def cake_lm_head_nondet_train_logprob_keep(
     is :func:`cake_lm_head_nondet_train_logprob` (the label-column forward).  A forward with a trainable input whose
     backward never runs pays the full-logits forward and holds the kept logits until the graph is freed.  Bitwise
     the same ``logp`` as the default entry; ``dW`` / ``dX`` can round differently from the default entry's (another
-    summation order: its vocabulary-major backward of the auto rule's calls, its zero-gradient row skip), within the
-    same accuracy budget (a chunk of more than one dX slice sums its slices in slice order, as there).  The kept form (:func:`set_kept_logits_form`; defaults ``tail_fold`` and
+    summation order: its vocabulary-major backward of the auto rule's calls, its zero-gradient row skip); both meet
+    the naive tier (a chunk of more than one dX slice sums its slices in slice order, as there).  The kept form (:func:`set_kept_logits_form`; defaults ``tail_fold`` and
     ``one_pass`` on): the forward keeps its chunks' logits as row slices of one contiguous buffer
     (``[T_v, V]`` with the valid rows counted on the host, ``[T, V]`` under the hidden count); it folds a last chunk
     of fewer than ``chunk_size / 2`` rows into the one before it where the default entry folds (:func:`loop_chunks`);
@@ -14646,8 +14650,8 @@ def cake_lm_head_nondet_train_logprob_keep(
     runs ``row_grad`` and dX in the forward's chunks, then the weight gradient as ONE fused-cast GEMM over ``K = T_v``
     rows (no FP32 ``dW`` accumulator; the FP32 dX accumulator is freed first; up to :func:`kept_one_pass_rows` rows,
     above that the forward's chunks).  On a call of two chunks or more that ``dW`` sums the rows in another grouping
-    than the default entry's chunks (each form repeats bit for bit); ``one_pass=False`` (``tail_fold`` on: the default
-    entry's chunks) gives the default entry's chunk-loop ``dW`` bits (the kept path never runs the
+    than the default entry's chunks (each form in its own fixed order); ``one_pass=False`` (``tail_fold`` on: the
+    default entry's chunks) gives the default entry's chunk-loop ``dW`` bits (the kept path never runs the
     vocabulary-major backward)."""
     if (
         backend == "cake"

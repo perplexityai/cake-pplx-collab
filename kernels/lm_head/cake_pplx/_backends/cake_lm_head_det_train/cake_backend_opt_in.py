@@ -61,8 +61,8 @@ are this module's.  Beyond the two keywords they differ from
   launches on them.
 
 Every output is bitwise the same as :mod:`.cake_backend`'s, with two
-exceptions of a default call whose automatic form is a budget form (both within
-the accuracy budgets, the same bits on every run): a log-probability backward
+exceptions of a default call whose automatic form is a budget form (both meet
+the naive tier, see the package README, Tests; the same bits on every run): a log-probability backward
 runs without :mod:`.cake_backend`'s zero-gradient row skip, so its ``dX`` /
 ``dW`` bits can differ from the fast form's where valid rows have a zero
 ``dlogp``; a loss call with zero-weight policy rows decides its split as

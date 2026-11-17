@@ -281,8 +281,8 @@ def cake_lm_head_det_train_loss(
         ``logp`` / ``dX`` / ``dW`` as ``"fast"``; the recompute forms run more
         GEMM work.  A default call whose automatic form is a budget form gives
         the same bits, except that a call with zero-weight policy rows decides
-        its row split as ``"budget"`` does (``dX`` / ``dW`` within the
-        accuracy budget; see the package README).  The bound assumes a
+        its row split as ``"budget"`` does (``dX`` / ``dW``: both meet the
+        naive tier; see the package README, Tests).  The bound assumes a
         backward that frees the graph (``retain_graph=True`` keeps the
         forward's state, also for a default call); its margin is measured on
         GB200, GB300 and B200 (see the package README).  ``"keep_logits"``
@@ -550,8 +550,8 @@ def cake_lm_head_det_train_logprob(
     :func:`cake_lm_head_det_train_loss`.  A default call whose backward runs
     a budget form runs it without the zero-gradient row skip: its ``dX`` /
     ``dW`` bits can then differ from the fastest form's where valid rows have
-    a zero upstream gradient (within the accuracy budget, the same bits on
-    every run).  ``memory_mode="keep_logits"`` (this
+    a zero upstream gradient (both meet the naive tier, see the package
+    README, Tests; the same bits on every run).  ``memory_mode="keep_logits"`` (this
     entry only; opt-in; with ``num_valid_rows`` its forward runs on the index
     formed from the caller's count, without a readback): where a backward can
     follow (grad mode on, ``X`` or ``W`` trainable) the forward keeps the BF16
