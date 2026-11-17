@@ -148,10 +148,17 @@ __device__ __forceinline__ void tmem_ld_x16(float* dst, int tmem_addr) {
 }
 
 
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(224) __cluster_dims__(2,1,1) void
-kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int M, int m_tiles, int k_iters, int ldc, int group_m, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, int* __restrict__ CNT)
+kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int M, int m_tiles, int k_iters, int ldc, int group_m, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ rlab, int* __restrict__ CNT)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -574,12 +581,26 @@ kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMa
                         dzp[j] = _exp_0;
                         dzv[j] = ((dz_skip != 0) ? 0.0f : dz_d * (-dzp[j]));
                     }
+                    float dzf_s = 0.0f;
+                    float dzf_r = 0.0f;
                     if (dz_skip == 0) {
                         if ((unsigned int)(dz_col - col) < 16) {
                             #pragma unroll
                             for (int jl = 0; jl < 16; jl++) {
-                                dzv[jl] = ((col + jl == dz_col) ? dz_d * (1.0f - dzp[jl]) : dzv[jl]);
+                                if (col + jl == dz_col) {
+                                    float _sub_1;
+                                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_1) : "f"(1.0f), "f"(dzp[jl]));
+                                    dzv[jl] = mul_f32_rn_noftz(dz_d, _sub_1);
+                                    dzf_s = dzv[jl];
+                                }
                             }
+                            float lr_hi = (float)(__nv_bfloat16)dzf_s;
+                            float _abs_2;
+                            asm("abs.f32 %0, %1;" : "=f"(_abs_2) : "f"(lr_hi));
+                            float _sub_3;
+                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_3) : "f"(dzf_s), "f"(lr_hi));
+                            float lr_r = ((_abs_2 <= 3.4028235e+38f) ? _sub_3 : 0.0f);
+                            dzf_r = lr_r;
                         }
                     }
                     if (global_row < M) {
@@ -625,10 +646,15 @@ kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMa
                             _packed_0[_lp + 7] = *(uint32_t*)&_bf2;
                         }
                         {
-                            const unsigned* _raw_stv8_1 = reinterpret_cast<const unsigned*>(_packed_0);
+                            const unsigned* _raw_stv8_4 = reinterpret_cast<const unsigned*>(_packed_0);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(C + (row_out + (unsigned long long)col))), "r"(_raw_stv8_1[0]), "r"(_raw_stv8_1[1]), "r"(_raw_stv8_1[2]), "r"(_raw_stv8_1[3]), "r"(_raw_stv8_1[4]), "r"(_raw_stv8_1[5]), "r"(_raw_stv8_1[6]), "r"(_raw_stv8_1[7]) : "memory");
+                                :: "l"((void*)(C + (row_out + (unsigned long long)col))), "r"(_raw_stv8_4[0]), "r"(_raw_stv8_4[1]), "r"(_raw_stv8_4[2]), "r"(_raw_stv8_4[3]), "r"(_raw_stv8_4[4]), "r"(_raw_stv8_4[5]), "r"(_raw_stv8_4[6]), "r"(_raw_stv8_4[7]) : "memory");
+                        }
+                        if (dz_skip == 0) {
+                            if ((unsigned int)(dz_col - col) < 16) {
+                                rlab[rin_t] = dzf_r;
+                            }
                         }
                     }
                 }
