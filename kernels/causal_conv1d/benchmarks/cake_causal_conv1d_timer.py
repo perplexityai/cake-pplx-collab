@@ -40,8 +40,8 @@ from typing import Callable, Optional
 import torch
 
 # The spin ahead of an eager iteration lasts at least SPIN_MIN_MS and SPIN_FACTOR times the slowest enqueue seen.
-SPIN_MIN_MS = 0.2
-SPIN_FACTOR = 2.0
+SPIN_MIN_MS = 0.5
+SPIN_FACTOR = 4.0
 SPIN_MAX_MS = 200.0
 
 
