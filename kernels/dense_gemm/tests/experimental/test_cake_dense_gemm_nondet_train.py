@@ -3268,7 +3268,8 @@ def test_k1_promote_template_and_rule(monkeypatch):
 
 def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
     """A one-chain BF16 transposed-store plan whose largest split holds more than 128 K blocks of 64 tokens runs the
-    promoted program (``promote_blocks`` 128, template ``..._kc128``), as the planner's choice and as an explicit one:
+    promoted program (``promote_blocks`` 128, template ``..._kc128``; not on the rows of
+    :data:`K1_PROMOTE_EXEMPT_ROWS`), as the planner's choice and as an explicit one:
     the 148-SM sm_100a weight gradient ``4096 -> 64`` BF16 at 65535 tokens (``G [65535, 64]``, ``X [65535, 4096]``:
     two splits of 64-wide tiles, 512 K blocks each), where one accumulator per split missed the naive BF16 tier; the
     plan is the one without promotion but for the template.  At 16384 tokens (128 blocks per split) the row keeps the
@@ -13206,7 +13207,8 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
     :data:`K1_TWO_SPLIT_RANGES_BY_SM` (``sm_107a``: 212 SMs; ``sm_100a`` / ``sm_103a``: 152 SMs): the
     convenience path binds the part's program
     (the range's, for an override or two-split range; its promoted program where a split holds more than
-    :data:`K1_PROMOTE_BLOCKS` K blocks) at the first and the last token count of every range of a row
+    :data:`K1_PROMOTE_BLOCKS` K blocks, outside :data:`K1_PROMOTE_EXEMPT_ROWS`, :func:`_k1_template_at`) at the first
+    and the last token count of every range of a row
     (its :data:`_K1_ATOMIC_CACHE` entry), the tickets zero after; one token outside a range, and one token past the
     first token count of a two-split range, it binds the deterministic package's plan.  On a part of exactly the SM
     count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` the reverse.  An edge inside a range of
