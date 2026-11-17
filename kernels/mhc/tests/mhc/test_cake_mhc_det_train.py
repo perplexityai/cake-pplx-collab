@@ -58,9 +58,10 @@ connection alive once its backward has run; the zero pad of ``gstats``; the
 workspace helpers, the argument checks and the module cache (no rebuild or
 reload when the token count, the epsilons or the hidden size change).
 
-The largest cases hold the FP64 reference in row blocks of 8192 tokens and
-the FP32 comparator in one block (about 40 GB of device memory at T = 65536
-and H = 4096; the footprint grows in proportion to H).
+The oracle and the naive tier evaluate the largest cases in row blocks of
+8192 tokens (``BLOCK_TOKENS`` of ``tests/cake/test_helpers/cake_mhc_naive.py``,
+as the reference they port does): the per-token values are concatenated and
+the parameter gradients are added in block order.
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
 ``cake_pplx``, so a build that vendors the package under another import path
