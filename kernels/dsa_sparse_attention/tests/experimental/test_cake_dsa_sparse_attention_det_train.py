@@ -1089,7 +1089,9 @@ def test_issue_8949_shape_meets_the_naive_tier(record_property):
         acc = torch.zeros(p["kv_latent"].shape[0], D_QK, device="cuda")
         zero = acc.clone()
         out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-        cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc)
+        cake_backend.backward(
+            *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc
+        )
         if j == 0:
             assert _same_bits(acc[:, :D_LATENT], fp32[2]) and _same_bits(
                 acc[:, D_LATENT:], fp32[3]
@@ -1134,7 +1136,11 @@ def test_issue_8949_shape_meets_the_naive_tier_nope(record_property):
         if j == 0:
             assert _same_bits(acc, dkv)
         problem = nv.Problem(
-            q_latent=p["q_latent"], kv_latent=p["kv_latent"], indices=p["indices"], topk_length=tl, dout=p["dout"]
+            q_latent=p["q_latent"],
+            kv_latent=p["kv_latent"],
+            indices=p["indices"],
+            topk_length=tl,
+            dout=p["dout"],
         )
         runs = {
             "forward": forward,
@@ -1184,7 +1190,10 @@ def test_issue_8946_glm52_packed_dkv_acc_with_map_meets_the_naive_tier(record_pr
                     assert _same_bits(a, b)
         zero = torch.zeros_like(acc)
         got = dict(
-            forward, dq_latent=dql, dq_rope=dqr, dkv_acc=nv.Acc(before=zero, after=acc, dst_map=dst_map)
+            forward,
+            dq_latent=dql,
+            dq_rope=dqr,
+            dkv_acc=nv.Acc(before=zero, after=acc, dst_map=dst_map),
         )
         return nv.judged(nv.rope_problem(inp, topk_length=inp.topk_length), {"": got})
 
