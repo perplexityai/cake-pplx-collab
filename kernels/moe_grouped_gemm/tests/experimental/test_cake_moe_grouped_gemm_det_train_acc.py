@@ -1041,7 +1041,8 @@ def test_build_manifest_lists_the_acc_libraries(tmp_path):
     """``build.json`` has an entry for every shipped accumulate build (program,
     architecture, specializations), whose ``min_cuda`` is at least its twin's; the main
     stages' fp32 builds (the PTX ISA 9.4 ``red.global.add.noftz.f32`` reduction) need
-    CUDA 13.4.  A vendored copy of the loader and the manifest lists them too."""
+    CUDA 13.4, or their twin's floor where that is higher (13.5 on sm_107a).  A vendored
+    copy of the loader and the manifest lists them too."""
     libraries = cake_jit.cake_build.libraries_by_name()
     vendored = _load_vendored_build(tmp_path).libraries_by_name()
     found = set()
@@ -1056,7 +1057,8 @@ def test_build_manifest_lists_the_acc_libraries(tmp_path):
         assert floor >= _cuda_version(libraries[twin_library]["min_cuda"]), library
         assert binding["specializations"].get("WGRAD_OUT") == 32, (name, stage)
         if stage != TAIL_REDUCE_ACC:
-            assert floor == (13, 4), (library, entry["min_cuda"])
+            twin_floor = _cuda_version(libraries[twin_library]["min_cuda"])
+            assert floor == max((13, 4), twin_floor), (library, entry["min_cuda"])
         found.add(library)
     # The tail reduce's build is one library per architecture and k tile.
     assert len(found) == len(_shipped_bindings())

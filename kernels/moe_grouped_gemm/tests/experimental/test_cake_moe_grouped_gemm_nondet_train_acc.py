@@ -735,13 +735,18 @@ def test_acc_library_loadable_is_the_loader_rule(name, stage, arch, monkeypatch)
     """``acc_library_loadable`` is the loader's own rule, decided without building,
     loading or probing anything: a prebuilt library under ``aot/`` loads whatever the
     toolkit; otherwise the JIT toolkit must reach the ``build.json`` entry's ``min_cuda``
-    (13.4 for the fp32 accumulate builds); without the JIT shim nothing builds."""
+    (13.4 for the fp32 accumulate builds, or their twin's floor where that is higher:
+    13.5 on sm_107a); without the JIT shim nothing builds."""
+    libraries = cake_jit.cake_build.libraries_by_name()
     binding = cake_jit.stage_binding(name, stage, arch)
     library = cake_jit.library_name(
         binding["program"], arch, binding["specializations"]
     )
-    floor = _cuda_version(cake_jit.cake_build.libraries_by_name()[library]["min_cuda"])
-    assert floor == (13, 4), (library, floor)
+    twin = cake_jit.stage_binding(name, stage[: -len(ACC)], arch)
+    twin_library = cake_jit.library_name(twin["program"], arch, twin["specializations"])
+    floor = _cuda_version(libraries[library]["min_cuda"])
+    twin_floor = _cuda_version(libraries[twin_library]["min_cuda"])
+    assert floor == max((13, 4), twin_floor), (library, floor)
     toolkit_of_process = cb._jit_cuda_version
     for loader in ("load_library", "jit_spec"):
         monkeypatch.setattr(cake_jit.cake_build, loader, _never_loads)
@@ -750,7 +755,7 @@ def test_acc_library_loadable_is_the_loader_rule(name, stage, arch, monkeypatch)
         (True, (12, 9), True),
         (False, None, False),
         (False, (13, 3), False),
-        (False, (13, 4), True),
+        (False, (13, 4), floor == (13, 4)),
         (False, (13, 5), True),
     ):
         monkeypatch.setattr(
@@ -1196,8 +1201,9 @@ def _cuda_version(text):
 def test_build_manifest_lists_the_acc_libraries(tmp_path):
     """``build.json`` has an entry for every shipped accumulate build (program,
     architecture, specializations), whose ``min_cuda`` is at least its twin's; the fp32
-    builds (``WGRAD_OUT`` 32: the PTX ISA 9.4 ``.noftz.f32`` reduction) need CUDA 13.4.
-    A vendored copy of the loader and the manifest lists them too."""
+    builds (``WGRAD_OUT`` 32: the PTX ISA 9.4 ``.noftz.f32`` reduction) need CUDA 13.4,
+    or their twin's floor where that is higher (13.5 on sm_107a).  A vendored copy of
+    the loader and the manifest lists them too."""
     libraries = cake_jit.cake_build.libraries_by_name()
     vendored = _load_vendored_build(tmp_path).libraries_by_name()
     found = set()
@@ -1216,7 +1222,8 @@ def test_build_manifest_lists_the_acc_libraries(tmp_path):
         floor = _cuda_version(entry["min_cuda"])
         assert floor >= _cuda_version(libraries[twin_library]["min_cuda"]), library
         assert binding["specializations"].get("WGRAD_OUT") == 32, (name, stage)
-        assert floor == (13, 4), (library, entry["min_cuda"])
+        twin_floor = _cuda_version(libraries[twin_library]["min_cuda"])
+        assert floor == max((13, 4), twin_floor), (library, entry["min_cuda"])
         found.add(library)
     assert len(found) == len(_shipped_bindings()) == 8
 
