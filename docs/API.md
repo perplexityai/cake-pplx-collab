@@ -141,7 +141,7 @@ The backward recomputes `rstd` and the gate from `x` and `z`. With `n = x*rstd`,
 
 ### `cake_pplx.cake_rmsnorm_silu_gate_det_train`
 
-`dw` is summed in FP32 runs of at most 16 rows. Each run is added into a plain FP32 word of its chunk, and each CTA sums its words in a fixed order in FP32. Those FP32 words are added exactly in fixed point, whatever the CTA order, and the total is rounded once to FP32 (no FP64, no two-word sums). The same row count on a device with the same SM count gives the same bits. No call alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py).
+`dw` is summed in FP32 runs of at most 16 rows. Each run is added into a plain FP32 word of its chunk, and each CTA sums its words in a fixed order in FP32. Each CTA's FP32 column sum is added exactly in fixed point, whatever the CTA order, and the total is rounded once to FP32 (no FP64, no two-word sums). The same row count on a device with the same SM count gives the same bits. No call alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|

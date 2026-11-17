@@ -91,8 +91,9 @@ backward (``bwd_bf16_rep``, a BF16 weight gradient past the fused band on
 every architecture and on sm_107a also before it; grid kind
 ``claimed_row_blocks``: the deterministic package's BF16 backward program) has
 the fused backward's grid and block
-schedule, and adds each claimed chunk's weight-gradient terms exactly into
-fixed-point digits of the workspace, so its ``dw`` depends on the rows and
+schedule, and adds each thread's FP32 runs of rows of a claimed chunk into
+plain FP32 words and each CTA's FP32 column words exactly into fixed-point
+digits of the workspace, so its ``dw`` depends on the rows and
 the SM count only.  Packed rows of its last band from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (2560 on SM100 and SM103, 1536
 on SM107) run its long role (``bwd_bf16_rep_long``: the deterministic
