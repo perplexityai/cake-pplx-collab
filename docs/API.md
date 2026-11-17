@@ -1020,7 +1020,7 @@ The module exports only these two functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
-Results are sets. Each row holds its selected ids with their scores, but the slot order and the positions of the `-1`/`-inf` padding are unspecified and may vary between calls. Under deterministic algorithms it raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. It takes the BF16 form and the opt-in FP8 form, as det. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
+Results are sets. Each row holds its selected ids with their scores, but the slot order and the positions of the `-1`/`-inf` padding are unspecified and may vary between calls. Under deterministic algorithms a call with queries and keys (T > 0 and Tkv > 0) raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. It takes the BF16 form and the opt-in FP8 form, as det. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
