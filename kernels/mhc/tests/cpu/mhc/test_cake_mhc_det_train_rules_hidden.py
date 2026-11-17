@@ -856,9 +856,14 @@ def test_per_size_tables() -> None:
             loader._tab(name, 6144)
     with pytest.raises(KeyError):
         loader._tab("RULES_T_VALUES", 4096)
-    # one CTA per SM of the token owner at 7168, two at 5120 (the module-level table: 4096)
-    assert loader._tab("K6_CTAS_PER_SM", 5120) == 2
-    assert loader._tab("K6_CTAS_PER_SM", 7168) == 1
+    # one CTA per SM of the token owner at 7168 (two on sm_107a, in its oversized shared-memory mode), two at 5120
+    # (the module-level table: 4096)
+    assert loader._tab("K6_CTAS_PER_SM", 5120) == {"sm_100a": 2, "sm_103a": 2, "sm_107a": 2}
+    assert loader._tab("K6_CTAS_PER_SM", 7168) == {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2}
+    assert [loader.k6_ctas_per_sm(7168, arch) for arch in loader.ARCHES] == [1, 1, 2]
+    assert loader.k6_ctas_per_sm(5120) == 2
+    with pytest.raises(ValueError):
+        loader.k6_ctas_per_sm(7168)  # the count differs by architecture there: name it
 
 
 @pytest.mark.cpu_only

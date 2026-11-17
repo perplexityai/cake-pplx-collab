@@ -9257,8 +9257,9 @@ BWD_SLAB_LPT_OVERRIDES: dict[tuple[str, int, int], Any] = {}
 FWD_FINISH_COL_SPLIT = 2
 # K3_TILING: the collapse's (rows_per_cta, col_split) of record (k3_grid): one half token per CTA at H 4096.
 K3_TILING = (1, 2)
-# K6_CTAS_PER_SM: the token owner's resident CTAs per SM, the factor of k6_grid's G6 (two 90112-B rings at H 4096).
-K6_CTAS_PER_SM = 2
+# K6_CTAS_PER_SM: the token owner's resident CTAs per SM per architecture, the factor of k6_grid's G6 (two 90112-B
+# rings at H 4096).
+K6_CTAS_PER_SM = {"sm_100a": 2, "sm_103a": 2, "sm_107a": 2}
 
 # H_TABLES: the tables of each hidden size other than 4096, read through ``_tab(name, hidden)`` as in the
 # deterministic registry (the tables above are those of record at H 4096). H_TABLE_NAMES is the deterministic list
@@ -9329,7 +9330,7 @@ H_TABLES: dict[int, dict[str, Any]] = {
         "FWD_FINISH_ROWS": {"w2": 8, "w1": 4},
         "FWD_FINISH_COL_SPLIT": 5,
         "K3_TILING": (2, 5),
-        "K6_CTAS_PER_SM": 2,
+        "K6_CTAS_PER_SM": {"sm_100a": 2, "sm_103a": 2, "sm_107a": 2},
     },
     7168: {
         "PK_BANDS": {"sm_100a": (), "sm_103a": (), "sm_107a": ()},
@@ -9384,7 +9385,9 @@ H_TABLES: dict[int, dict[str, Any]] = {
         "FWD_FINISH_ROWS": {"w2": 8, "w1": 4},
         "FWD_FINISH_COL_SPLIT": 7,
         "K3_TILING": (2, 7),
-        "K6_CTAS_PER_SM": 1,
+        # one 151552-B ring CTA per SM; two on sm_107a, whose oversized shared-memory mode holds two (the
+        # sm_107a token-owner forms at 7168 are built for two CTAs per SM and launched in that mode)
+        "K6_CTAS_PER_SM": {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2},
     },
 }
 
@@ -9560,7 +9563,7 @@ def bwd_token_program(
     ]:  # the token-count bands come first
         if above < T and (at_most is None or at_most >= T):
             return program + form
-    R = k6_grid(T, sm_count, hidden)[1]
+    R = k6_grid(T, sm_count, hidden, arch)[1]
     for program, r_min, r_max in _tab("BWD_TOKEN_REGIMES", hidden)[arch]:
         if r_min <= R <= r_max:
             return program + form
@@ -9804,11 +9807,24 @@ def bwd_slab_atomic_program(
     return base + ("_os" if order == "slab" else "")
 
 
+def k6_ctas_per_sm(hidden=HIDDEN, arch=None):  # -> the token owner's ring CTAs per SM (K6_CTAS_PER_SM)
+    """``K6_CTAS_PER_SM`` of ``arch`` at ``hidden``; without an architecture, the one count every
+    architecture shares there (``ValueError`` where they differ: H 7168, two on sm_107a)."""
+    counts = _tab("K6_CTAS_PER_SM", hidden)
+    if arch is not None:
+        return counts[arch]
+    if len(set(counts.values())) != 1:
+        raise ValueError(
+            f"K6_CTAS_PER_SM at H {hidden} differs by architecture: name the architecture"
+        )
+    return next(iter(counts.values()))
+
+
 def k6_grid(
-    T, sm_count, hidden=HIDDEN
+    T, sm_count, hidden=HIDDEN, arch=None
 ):  # static token chunks for the parameter partials -> (G6, R)
     groups = -(-T // 8)
-    G6 = min(_tab("K6_CTAS_PER_SM", hidden) * sm_count, groups)
+    G6 = min(k6_ctas_per_sm(hidden, arch) * sm_count, groups)
     R = 8 * (-(-groups // G6))
     return G6, R
 
@@ -9874,7 +9890,7 @@ def host_plan(
         raise ValueError(f"hidden must be one of {HIDDEN_SIZES}, got {hidden}")
     p_k, units1, grid1 = k1_units(rows, sm_count, arch, hidden)
     parts, units7, grid7, rpc = k7_chunks(rows, sm_count, hidden=hidden)
-    g6, r6 = k6_grid(rows, sm_count, hidden)
+    g6, r6 = k6_grid(rows, sm_count, hidden, arch)
     padded = t_pad(rows)
     groups = _ceil_div(rows, TOKEN_GROUP)
     group_rows = bwd_group_rows(rows, sm_count, arch, hidden)
@@ -10342,7 +10358,7 @@ def _selects(
             )
         return globals()[rule["rule"]](rows, sm_count, arch, hidden) == rule["program"]
     if kind == "chunk_rows_band":
-        rows_per_cta = k6_grid(rows, sm_count, hidden)[1]
+        rows_per_cta = k6_grid(rows, sm_count, hidden, arch)[1]
         return any(
             int(lo) <= rows_per_cta and (hi is None or rows_per_cta <= int(hi))
             for lo, hi in rule["ranges"]
@@ -10390,7 +10406,7 @@ def selected_modules(
     tile_rows)`` lies in the band ``lo_ctas_per_sm x sm_count .. hi_ctas_per_sm
     x sm_count`` with the recorded end inclusivity (``None`` = unbounded) -- the
     round-3 coefficient-pass regimes keyed on the device's SM count; ``chunk_rows_band``:
-    ``k6_grid(rows, sm_count).R`` lies in one of ``ranges`` -- the token-owner
+    ``k6_grid(rows, sm_count, hidden, arch).R`` lies in one of ``ranges`` -- the token-owner
     pass's regimes; ``program``: the named host rule (``fwd_map_program``,
     ``fwd_coef_program``, ``bwd_token_program`` or ``bwd_slab_atomic_program``)
     at ``(rows, sm_count, arch, hidden)`` equals the record's program key --
@@ -10764,7 +10780,9 @@ def launch_grid(
     mapping pass; ``P_K`` from :func:`k1_units`; the ticket region is bound for
     the opt-in ticket schedule and left unread by the static form).  ``chunks`` modules
     launch ``min(ctas_per_sm * SM count, ceil(rows / group_rows))`` CTAs, each
-    owning a static run of token groups (the token-owner pass).  ``slab_chunks``
+    owning a static run of token groups (the token-owner pass; ``ctas_per_sm`` of a
+    ``k6_grid`` rule is :func:`k6_ctas_per_sm` of the device's architecture, the G6 of
+    :func:`k6_grid`: two on sm_107a at hidden 7168).  ``slab_chunks``
     modules launch ``min(SM count, slabs * P)`` CTAs over (column slab, token
     chunk) units (the column-slab pass; ``P`` from :func:`k7_chunks`, or
     :func:`slab_plan`'s ``lpt_parts`` for the ``lpt_chunks`` rule; every form
@@ -10801,8 +10819,13 @@ def launch_grid(
         units = _ceil_div(rows, int(rule["tile_rows"])) * plan["p_k"]
         grid_x = min(int(rule["ctas_per_sm"]) * sm_count(device_index), units)
     elif kind == "chunks":
+        ctas_per_sm = int(rule["ctas_per_sm"])
+        if rule.get("chunks_rule") == "k6_grid":
+            # k6_grid's G6 on the device's architecture: the record's ctas_per_sm is the count of
+            # sm_100a / sm_103a; at hidden 7168 sm_107a holds two token-owner CTAs per SM
+            ctas_per_sm = k6_ctas_per_sm(record["hidden"], device_arch(device_index))
         grid_x = min(
-            int(rule["ctas_per_sm"]) * sm_count(device_index),
+            ctas_per_sm * sm_count(device_index),
             _ceil_div(rows, int(rule["group_rows"])),
         )
     elif kind == "slab_chunks":
@@ -11017,6 +11040,7 @@ __all__ = [
     "k4_grid",
     "k5_grid",
     "k5_program",
+    "k6_ctas_per_sm",
     "k6_grid",
     "k7_chunks",
     "launch_grid",

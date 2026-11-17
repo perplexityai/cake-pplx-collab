@@ -2028,7 +2028,9 @@ def test_host_rules_at_the_new_hidden_sizes(arch: str, sm: int) -> None:
             assert nd.k7_chunks(T, sm, hidden=hidden) == det.k7_chunks(
                 T, sm, hidden=hidden
             ), what
-            assert nd.k6_grid(T, sm, hidden) == det.k6_grid(T, sm, hidden), what
+            assert nd.k6_grid(T, sm, hidden, arch) == det.k6_grid(
+                T, sm, hidden, arch
+            ), what
             assert nd.k3_grid(T, hidden) == det.k3_grid(T, hidden), what
     for name in nd.H_TABLE_NAMES:
         assert nd._tab(name, HIDDEN) is getattr(nd, name), name
@@ -2044,8 +2046,12 @@ def test_host_rules_at_the_new_hidden_sizes(arch: str, sm: int) -> None:
         for hidden in HIDDEN_SIZES:
             with pytest.raises(KeyError):
                 nd._tab(name, hidden)
-    # the token owner's resident CTAs per SM (G6 = min(K6_CTAS_PER_SM x SMs, ceil(T / 8))): two at 5120, one at 7168
-    assert nd._tab("K6_CTAS_PER_SM", 5120) == 2 and nd._tab("K6_CTAS_PER_SM", 7168) == 1
+    # the token owner's resident CTAs per SM per architecture (G6 = min(K6_CTAS_PER_SM x SMs, ceil(T / 8))): two at
+    # 5120, one at 7168 (two on sm_107a, in its oversized shared-memory mode)
+    assert nd._tab("K6_CTAS_PER_SM", 5120) == {"sm_100a": 2, "sm_103a": 2, "sm_107a": 2}
+    assert nd._tab("K6_CTAS_PER_SM", 7168) == {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2}
+    with pytest.raises(ValueError):
+        nd.k6_grid(4096, 212, 7168)  # the count differs by architecture there: name it
     table = nd.rules_table()
     per_size = len(set(det.RULES_T_VALUES)) * len(det.RULES_BOARDS)
     assert [row["hidden"] for row in table] == [
@@ -3128,7 +3134,7 @@ def test_route_plan_binds_the_parameter_rows(monkeypatch, arch: str, sm: int) ->
             assert bound["param_rows"] == (
                 -(-T // det.TOKEN_GROUP)
                 if group_rows
-                else det.k6_grid(T, sm, hidden)[0]
+                else det.k6_grid(T, sm, hidden, arch)[0]
             ), (what, bound)
             checked.add(group_rows)
     assert checked == ({False, True} if arch in GROUP_ROW_ARCHES else {False}), checked
