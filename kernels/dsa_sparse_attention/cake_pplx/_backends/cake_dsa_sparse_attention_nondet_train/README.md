@@ -178,8 +178,8 @@ trainer's packed layouts are consumed in place
   the descriptor cannot address it (base not 16-byte aligned, strides not
   multiples of 8 elements, channel stride != 1); `prepare_dsa_train` rejects
   such a view.
-* A strided view runs the kernels of the contiguous copy (only descriptor
-  fields and pointer offsets change).
+* A strided view is read in place (only descriptor fields and pointer offsets
+  change).
 
 ### Packed fp32 dKV accumulation and destination mapping
 
@@ -265,7 +265,7 @@ value is part of the binding key (the public wrapper maps
 `CAKE_PPLX_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
 leaves it at `None`).  Both
 paths add the same FP32 contributions into the same rows in another summation
-order; dq is computed the same way.  Without the natural stages every `dkv_acc`
+order.  Without the natural stages every `dkv_acc`
 call takes the cast's accumulate path.
 
 Explicit forward / backward entry points without autograd, a prepared

@@ -776,7 +776,7 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     64]`` and ``o_lo`` BF16 ``[T, 64, 512]``, the rounding residual of ``out``
     (``out + o_lo`` is the output before its BF16 rounding). Pass the three
     unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
-    ``out``, ``lse`` and ``o_lo`` come from one fixed-order forward kernel. A
+    ``out``, ``lse`` and ``o_lo`` come from one forward kernel. A
     call without query rows returns empty outputs without launching.
     """
     return _backend(backend).forward(
@@ -875,7 +875,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_forward(
     the outputs those of
     :func:`cake_dsa_sparse_attention_nondet_train_forward`. Pass them unchanged
     to :func:`cake_dsa_sparse_attention_nondet_train_nope_backward`. ``out``,
-    ``lse`` and ``o_lo`` come from one fixed-order forward kernel.
+    ``lse`` and ``o_lo`` come from one forward kernel.
     """
     return _backend(backend).forward_nope(
         q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
@@ -964,7 +964,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
     (int32 ``[T]``) are the rows and row lengths the forward read. Pass all
     five unchanged to
     :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_backward`.
-    ``out``, ``lse`` and ``o_lo`` come from one fixed-order forward kernel.
+    ``out``, ``lse`` and ``o_lo`` come from one forward kernel.
     """
     return _backend(backend).forward_nope_varlen(
         q,
