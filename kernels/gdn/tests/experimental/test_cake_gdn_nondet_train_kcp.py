@@ -1715,7 +1715,7 @@ def test_byte_queries(W) -> None:
                         )
                     elif save_mode in gb.AKK_SAVE_MODES and boundary_mode == "saved":
                         # the light form of the norm, but #1's Akk goes to the saved set: no fwd.akk / bwd.akk
-                        # term, no h tape, #1's moment and every backward phase lower by the tape
+                        # term, no h tape, every backward phase lower by the tape
                         light_ws = gb.cake_gdn_nondet_train_kcp_workspace_layout(
                             ctx,
                             H_qk=H_qk,
@@ -1727,10 +1727,17 @@ def test_byte_queries(W) -> None:
                             **norm,
                         )
                         assert "fwd.akk" not in ws and "bwd.akk" not in ws
-                        assert light_ws["fwd.akk"] == light_ws["bwd.akk"] == akk
+                        # the light forward runs the forward form of #1_l2n (shipped): no akk / gcum at its #1
+                        assert not ({"fwd.akk", "fwd.gcum"} & set(light_ws))
+                        assert light_ws["bwd.akk"] == akk
                         assert "fwd.h_tape" not in ws and layout["h_tape"] == 0
                         assert layout["akk"] == akk
-                        assert light_ws["fwd.phase.prep"] - ws["fwd.phase.prep"] == akk
+                        # "light_akk"'s #1 is the full record: its Akk goes to the saved set, its gcum to the arena
+                        assert (
+                            ws["fwd.phase.prep"] - light_ws["fwd.phase.prep"]
+                            == ws["fwd.gcum"]
+                            > 0
+                        )
                         akk_phases = [k for k in light_ws if k.startswith("bwd.phase.")]
                         assert akk_phases == [
                             k for k in ws if k.startswith("bwd.phase.")
@@ -1838,9 +1845,10 @@ def test_registry_seed() -> None:
             "kcp_dhu_offset",
             "kcp_dhu_tape",
             "kcp_affine_merge",
+            "fwd_prep_l2n",
         )
-    )  # the vh=64 forms of the state walks #2 (L8A, the output walks too) / #7 and the c8 / c16 merges are the only
-    # multi-record programs
+    )  # the vh=64 forms of the state walks #2 (L8A, the output walks too) / #7, the c8 / c16 merges and the forward
+    # form of #1_l2n (fwd_prep_l2n_fwd) are the only multi-record programs
     assert set(gj.TEST_MODULES) == {
         "kcp_transfer_walk_three_mma",
         "kcp_transfer_walk_plain_tf32",
@@ -1885,9 +1893,12 @@ def test_registry_seed() -> None:
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ]
-        assert rec["select_rule"]["kind"] in ("always", "columns", "ctas_per_head"), (
-            name
-        )
+        assert rec["select_rule"]["kind"] in (
+            "always",
+            "columns",
+            "ctas_per_head",
+            "prep_form",
+        ), name
         assert ("test_knobs" in rec) == (name in gj.TEST_MODULES), name
         if not manifest_rendered:
             with pytest.raises(RuntimeError, match="no rendered library"):
@@ -8155,9 +8166,9 @@ def test_cake_gdn_nondet_kcp_options_dicts_are_validated_once_per_content() -> N
 
 
 def test_launch_key_reads_every_resolve_input() -> None:
-    """``_launch_key`` changes with the program, every private scalar ``resolve_launch`` reads, the grid rule's
-    arguments (values and order), ``ncols`` / ``cols_per_cta`` / the caller's grid x and the backend's merge columns,
-    and with nothing else (another tensor of the same launch is the same key)."""
+    """``_launch_key`` changes with the program, every private scalar ``resolve_launch`` reads (the form of #1_l2n,
+    ``_backward_tapes``, too), the grid rule's arguments (values and order), ``ncols`` / ``cols_per_cta`` / the
+    caller's grid x and the backend's merge columns, and with nothing else (another tensor of the same launch is the same key)."""
     kcp = _package("cake_kcp")
     base = {
         "_grid_args": {"n_walk": 2, "num_heads": 6},
@@ -8169,6 +8180,7 @@ def test_launch_key_reads_every_resolve_input() -> None:
         "_vh64_fits": False,
         "_dhu_long_chain": False,
         "_arch": "sm_100a",
+        "_backward_tapes": False,  # the forward form of #1_l2n (a full-record launch carries none)
         "ncols": 128,
         "cols_per_cta": 8,
         "_grid": 12,
@@ -8186,6 +8198,7 @@ def test_launch_key_reads_every_resolve_input() -> None:
         "_vh64_fits",
         "_dhu_long_chain",
         "_arch",
+        "_backward_tapes",
         "ncols",
         "cols_per_cta",
         "_grid",

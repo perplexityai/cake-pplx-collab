@@ -629,7 +629,12 @@ def test_workspace_layout_loses_the_akk_arena_tape() -> None:
             light["bwd.akk"] == akk and light["bwd.qk_rstd"] == got["bwd.qk_rstd"] > 0
         ), kw
         assert got["bwd.kept_tapes"] == 0, kw
-        assert light["fwd.phase.prep"] - got["fwd.phase.prep"] == akk, kw
+        # the light forward runs the forward form of #1_l2n (shipped): its #1 binds neither akk nor gcum; the
+        # "light_akk" forward runs the full #1, its Akk into the saved set and its gcum into the arena
+        assert not ({"fwd.akk", "fwd.gcum"} & set(light)), kw
+        assert got["fwd.phase.prep"] - light["fwd.phase.prep"] == got["fwd.gcum"] > 0, (
+            kw
+        )
         phases = [k for k in light if k.startswith("bwd.phase.")]
         assert phases and phases == [k for k in got if k.startswith("bwd.phase.")], kw
         for k in phases:  # every backward phase holds the replayed tapes: Akk is the saved set's in "light_akk"

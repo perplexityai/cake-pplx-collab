@@ -3413,7 +3413,7 @@ V1_LIBRARIES = {
     "kcp_fwdh_offset_vh64": "cake_gdn_train_fc32e3ea90cd1b718ad8_kcp",
     "kcp_fwdh_tape": "cake_gdn_train_01f0e0eab26c58ff3953_kcp",
     "kcp_fwdh_tape_vh64": "cake_gdn_train_2eade16c7f51796727a5_kcp",
-    "kcp_transfer_walk": "cake_gdn_train_4bf560a7ea389e92d5f1_kcp",
+    "kcp_transfer_walk": "cake_gdn_train_ca5488020bef49bf474b_kcp",
     "kcp_transfer_walk_three_mma": "cake_gdn_train_2f42874614b85ffc14fe_kcp",
     "kcp_transfer_walk_plain_tf32": "cake_gdn_train_efbba796414578cbd8b5_kcp",
 }
