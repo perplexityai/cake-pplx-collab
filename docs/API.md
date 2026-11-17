@@ -1269,6 +1269,7 @@ All three accumulate in FP32. The weight gradient has an optional accumulate mod
   - Forward: `N % 256 == 0` and `K % 64 == 0`.
   - Dgrad: `K % 256 == 0` and `N % 64 == 0`.
   - Wgrad: `N % 256 == 0` and K a multiple of the selected k tile (256 or 512).
+- On `sm_107a`, the wgrad with the 256 k tile also reads `g` and `x` through plain row pointers. There both need dense rows (row stride equal to the row width), else `ValueError`.
 
 ### `cake_pplx.cake_moe_grouped_gemm_det_train`
 
