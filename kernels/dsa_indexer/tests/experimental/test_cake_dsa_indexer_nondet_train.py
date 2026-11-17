@@ -21,18 +21,24 @@ limitations under the License.
 # and the recorded sink geometry through the FP64 reference (minutes on B200).
 #
 # The package returns the selected entries of a row in no specified slot order, with the row's padding in any of its
-# slots.  The operator tests compare results as sets: ``_canonical`` puts every row in the order of the shared
-# reference (the valid slots by ascending id with their scores, then the padding), a per-row permutation that keeps
-# each row's (id, score bits) pairs and valid count, so the reference's judgement (``ref.judge``) and bit identity
-# (``ref.same_bits``) apply unchanged; ``_same_sets`` compares two results by their per-row valid counts and sorted
-# (id, score bits) pairs.  No test compares the raw slot order of two calls.
+# slots.  The operator tests compare results as sets: ``naive.canonical`` puts every row in ascending id order with
+# its scores, then the padding, a per-row permutation that keeps each row's (id, score) pairs and valid count;
+# ``naive.same_ids`` compares two results by their per-row valid counts and sorted ids.  No test compares the raw slot
+# order of two calls or the score bits of two calls.
+#
+# Accuracy (``tests/experimental/test_helpers/cake_dsa_indexer_naive.py``): on integer inputs (the integer generators
+# of the reference module) every score is exact in FP32 under any summation order, so every call must select one set
+# per row, the exact selection (``ref.exact_selection``): its ids and valid counts are held exactly
+# (``naive.assert_exact`` with ``ordered=False``).  The scores are judged over 32 draws against their FP64 values
+# beside the naive tier's (the same scores of the same keys in torch BF16), on integer inputs and, at the kernel's own
+# keys, on Gaussian inputs (``naive.judge_exact``, ``naive.judge_gaussian``).
 #
 # This suite exercises the package alone: it names the package once, through ``tests.cake.test_helpers.cake_package``, and
 # imports nothing else from cake_pplx, so a build that vendors the package under another import path runs it
 # unchanged after pointing that table entry at its package.  The public entry points
 # (``cake_pplx.cake_dsa_indexer_nondet_train``) are covered by ``test_cake_dsa_indexer_nondet_train_api.py`` and
 # their naming rules by ``test_cake_dsa_indexer_nondet_train_names.py``; the parity with the deterministic package
-# (registry, host plans, device rows) by ``test_cake_dsa_indexer_nondet_train_vs_det.py``.
+# (registry, host plans) by ``test_cake_dsa_indexer_nondet_train_vs_det.py``.
 
 import contextlib
 import dataclasses
@@ -48,6 +54,7 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.experimental.test_helpers import cake_dsa_indexer_naive as naive
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -110,9 +117,6 @@ _PROGRAM_NAME = re.compile(r"cake_dsa_indexer_nondet_topk_[0-9a-f]{20}")
 # FP8 form: no role, key, program, policy field or module attribute of this package carries one
 _ORDERING_OR_FP8 = re.compile(r"finalize|rank|fp8", re.IGNORECASE)
 ALERT = "does not have a deterministic implementation"
-# sorts after every int32 id: the padding of a row goes behind its valid slots
-_PAD_SORT_KEY = 1 << 32
-
 
 def _lengths(cu):
     return [b - a for a, b in zip(cu[:-1], cu[1:], strict=True)]
@@ -202,56 +206,18 @@ def _lsf_key(keys, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _row_pairs(result) -> torch.Tensor:
-    """int64 ``[T, K]``: every slot as ``id << 32 | score bits``, each row sorted -- the row's multiset of (id, score
-    bits) pairs, its padding pairs included."""
-    ids, scores = result
-    bits = scores.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    return ((ids.to(torch.int64) << 32) | bits).sort(dim=1).values
-
-
 def _valid_counts(indices: torch.Tensor) -> torch.Tensor:
     """int64 ``[T]``: the valid (non-negative) ids of every row."""
     return (indices >= 0).sum(dim=1)
 
 
-def _canonical(result) -> tuple[torch.Tensor, torch.Tensor]:
-    """``result`` with every row in the shared reference's slot order: the valid slots by ascending id with their
-    scores, then the padding (any negative id keeps its score and goes behind them).  A stable per-row permutation of
-    the slots, so every row keeps its (id, score bits) pairs and its valid count (checked once by
-    ``test_set_comparison_ignores_slot_order_and_keeps_every_pair``): it cannot hide a duplicate, a missing entry, a
-    changed bit or a bad padding slot, which the structure checks of ``ref.judge`` then see."""
-    ids, scores = result
-    key = torch.where(ids >= 0, ids.to(torch.int64), _PAD_SORT_KEY)
-    order = key.sort(dim=1, stable=True).indices
-    return ids.gather(1, order), scores.gather(1, order)
-
-
-def _same_sets(a, b) -> bool:
-    """Set identity of two ``(indices, scores)`` results: per row the same valid count and the same (id, score bits)
-    pairs; the slot order and the positions of the padding are free."""
-    ia, sa = a
-    ib, sb = b
-    if tuple(ia.shape) != tuple(ib.shape) or tuple(sa.shape) != tuple(sb.shape):
-        return False
-    return bool(torch.equal(_valid_counts(ia), _valid_counts(ib))) and bool(
-        torch.equal(_row_pairs(a), _row_pairs(b))
-    )
-
-
-def _judge_ok(result, reference, **kw) -> ref.Judgement:
-    if kw.get("exact_bits") and "zero_sign_policy" not in kw:
-        kw["zero_sign_policy"] = record_zero_sign_policy()
-    verdict = ref.judge(_canonical(result), reference, **kw)
-    assert verdict.passed, str(verdict)
-    return verdict
-
-
-def _assert_sets_repeat(call, expected, calls: int = 5) -> None:
-    """``calls`` further results of ``call`` select ``expected``'s set per row (pairs and valid count; no slot order
-    is compared).  Each result is copied before the next call, so a runner writing into the same outputs works too."""
+def _assert_exact_calls(call, inputs: ref.IndexerInputs, reference, calls: int = 5) -> None:
+    """``calls`` further results of ``call`` each hold the exact contract on ``inputs`` (integer inputs): the exact
+    selection's ids and valid count per row, in any slot order.  Each result is copied before the next call, so a
+    runner writing into the same outputs works too."""
     for i in range(calls):
-        assert _same_sets(_cloned(call()), expected), i
+        failures = naive.exact_failures(naive.cloned(call()), inputs, reference, ordered=False)
+        assert not failures, f"call {i}:\n" + "\n".join(failures[:20])
 
 
 def _split_grids(inputs: ref.IndexerInputs, **extra) -> dict[str, int]:
@@ -272,7 +238,7 @@ def _split_grids(inputs: ref.IndexerInputs, **extra) -> dict[str, int]:
 def _independent_membership_check(inputs: ref.IndexerInputs, result) -> None:
     """Visibility and segment membership from the scalar rule in Python (no tensors shared with the reference), on
     the set of every row (its canonical order)."""
-    ids = _canonical(result)[0].cpu().tolist()
+    ids = naive.canonical(result)[0].cpu().tolist()
     K = inputs.top_k
     offsets = inputs.offsets()
     starts = inputs.query_starts()
@@ -300,13 +266,14 @@ def _torch_deterministic(*, warn_only: bool):
 
 
 def test_set_comparison_ignores_slot_order_and_keeps_every_pair():
-    """The comparison helpers on a reference result (CPU): permuting the slots of every row (the padding included)
-    changes neither the canonical form nor the pairs, and the canonical form keeps every row's pairs and valid count; a
-    changed score bit (the lowest or the sign), two ids' scores swapped, a duplicated id, a dropped entry, a padding
-    slot with a finite score or a padding id other than -1 changes the pairs and fails the judgement or the structure
-    checks of the canonical form."""
-    inputs = ref.make_random_inputs([9, 6], [11, 7], top_k=8, seed=3, device="cpu")
-    reference = ref.select_reference(inputs, order="sequential")
+    """The set comparison on the exact selection of integer inputs (CPU): permuting the slots of every row (the
+    padding included) leaves the canonical form (``naive.canonical``) equal to the selection, the ids
+    (``naive.same_ids``) unchanged and the exact contract (``naive.exact_failures``, ``ordered=False``) met, while the
+    ordered contract of the deterministic package sees the moved slots; a key swapped for an unselected one, a
+    duplicated id and an entry dropped to padding change the ids and break the contract, and a padding slot with a
+    finite score or a padding id other than -1 breaks the contract and the structure checks of the canonical form."""
+    inputs = ref.make_integer_inputs([9, 6], [11, 7], top_k=8, seed=3, device="cpu")
+    reference = ref.exact_selection(inputs)
     expected = (reference.indices, reference.scores)
     assert bool((_valid_counts(reference.indices) < inputs.top_k).any())  # padded rows
     gen = torch.Generator().manual_seed(5)
@@ -314,57 +281,47 @@ def test_set_comparison_ignores_slot_order_and_keeps_every_pair():
         [torch.randperm(inputs.top_k, generator=gen) for _ in range(inputs.num_queries)]
     )
     shuffled = expected[0].gather(1, order), expected[1].gather(1, order)
-    assert not ref.same_bits(shuffled, expected)  # the slot order moved
-    assert _same_sets(_canonical(shuffled), shuffled)
-    assert ref.same_bits(_canonical(shuffled), expected)
-    assert _same_sets(shuffled, expected)
-    assert ref.judge(_canonical(shuffled), reference, exact_bits=True).passed
-    r, c = (shuffled[0] >= 0).nonzero()[0].tolist()
-    shuffled_bits = shuffled[1].view(torch.int32)
-    # a second valid slot of row r with other score bits
-    c2 = next(
-        j
-        for j in range(inputs.top_k)
-        if j != c
-        and int(shuffled[0][r, j]) >= 0
-        and int(shuffled_bits[r, j]) != int(shuffled_bits[r, c])
-    )
+    assert not torch.equal(shuffled[0], expected[0])  # the slot order moved
+    assert ref.same_bits(naive.canonical(shuffled), expected)
+    assert naive.same_ids(shuffled, expected)
+    assert not naive.exact_failures(shuffled, inputs, reference, ordered=False)
+    assert naive.exact_failures(shuffled, inputs, reference)  # the ordered contract
+    # a full row with an unselected visible key, and one of its selected slots
+    r = int((reference.visible > inputs.top_k).nonzero()[0])
+    c = int((shuffled[0][r] >= 0).nonzero()[0])
+    chosen = set(shuffled[0][r].tolist())
+    unselected = [j for j in range(int(reference.visible[r])) if j not in chosen]
+    assert unselected
     # a padding slot
     pr, pc = (shuffled[0] < 0).nonzero()[0].tolist()
-    # one score bit flipped: the lowest, then the sign
-    for bit in (1, -0x80000000):
-        ids, scores = _cloned(shuffled)
-        scores.view(torch.int32)[r, c] ^= bit
-        assert not _same_sets((ids, scores), expected), bit
-        verdict = ref.judge(_canonical((ids, scores)), reference, exact_bits=True)
-        assert not verdict.passed, bit
-    # the scores of two ids of one row swapped
-    ids, scores = _cloned(shuffled)
-    bits = scores.view(torch.int32)
-    a, b = int(bits[r, c]), int(bits[r, c2])
-    bits[r, c], bits[r, c2] = b, a
-    assert torch.equal(_valid_counts(ids), _valid_counts(expected[0]))
-    assert not _same_sets((ids, scores), expected)
-    assert not ref.judge(_canonical((ids, scores)), reference, exact_bits=True).passed
+    # a selected key swapped for an unselected one, with its exact score
+    ids, scores = naive.cloned(shuffled)
+    ids[r, c] = unselected[0]
+    scores[r, c] = ref.score_pairs(inputs, torch.tensor([r]), torch.tensor([unselected[0]]))[1][0]
+    assert not naive.same_ids((ids, scores), expected)
+    failures = naive.exact_failures((ids, scores), inputs, reference, ordered=False)
+    assert any(f.startswith("indices:") for f in failures), failures
     # a padding slot with a finite score, and a padding id other than -1
     for pad_id, pad_score in ((-1, 0.0), (-2, float("-inf"))):
-        ids, scores = _cloned(shuffled)
+        ids, scores = naive.cloned(shuffled)
         ids[pr, pc], scores[pr, pc] = pad_id, pad_score
         assert torch.equal(_valid_counts(ids), _valid_counts(expected[0]))
-        assert not _same_sets((ids, scores), expected), pad_id
-        assert ref.structure_failures(inputs, *_canonical((ids, scores))), pad_id
+        assert ref.structure_failures(inputs, *naive.canonical((ids, scores))), pad_id
+        assert naive.exact_failures((ids, scores), inputs, reference, ordered=False), pad_id
     # one id duplicated within its row
-    ids, scores = _cloned(shuffled)
+    ids, scores = naive.cloned(shuffled)
     others = [j for j in range(inputs.top_k) if j != c and int(ids[r, j]) >= 0]
     ids[r, others[0]], scores[r, others[0]] = ids[r, c], scores[r, c]
-    assert not _same_sets((ids, scores), expected)
-    assert ref.structure_failures(inputs, *_canonical((ids, scores)))
-    # one entry dropped to padding
-    ids, scores = _cloned(shuffled)
+    assert not naive.same_ids((ids, scores), expected)
+    assert ref.structure_failures(inputs, *naive.canonical((ids, scores)))
+    assert naive.exact_failures((ids, scores), inputs, reference, ordered=False)
+    # one entry dropped to padding (a full row: the structure checks see the padding in a valid slot)
+    ids, scores = naive.cloned(shuffled)
     ids[r, c], scores[r, c] = -1, float("-inf")
     assert not torch.equal(_valid_counts(ids), _valid_counts(expected[0]))
-    assert not _same_sets((ids, scores), expected)
-    assert ref.structure_failures(inputs, *_canonical((ids, scores)))
+    assert not naive.same_ids((ids, scores), expected)
+    assert ref.structure_failures(inputs, *naive.canonical((ids, scores)))
+    assert naive.exact_failures((ids, scores), inputs, reference, ordered=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1666,18 +1623,18 @@ def test_workspace_bound_never_consults_torch_deterministic_mode(warn_only):
 
 @pytest.mark.parametrize("name", list(ref.EXACT_CASES))
 def test_exact_semantics(name):
+    """The exactly representable cases (fixed patterns: one input each, held to the exact contract): the exact
+    selection's ids and counts per row in any slot order, and the oracle's padding."""
     _require_program()
     inputs = ref.make_exact_case(name, "cuda")
-    reference = ref.select_reference(inputs, order="sequential")
-    verdict = _judge_ok(_run(inputs), reference, exact_bits=True)
-    assert verdict.rows_identical == inputs.num_queries
+    naive.assert_exact(_run(inputs), inputs, ordered=False)
 
 
 def test_signed_zero_bits_follow_the_documented_policy():
     _require_program()
     inputs = ref.make_exact_case("signed_zeros", "cuda")
-    indices, scores = _canonical(_run(inputs))
-    reference = ref.select_reference(inputs, order="sequential")
+    indices, scores = naive.canonical(_run(inputs))
+    reference = ref.exact_selection(inputs)
     assert torch.equal(
         indices, reference.indices
     )  # +0.0 == -0.0 for ranking: the id rule decides inside the zero group
@@ -1694,43 +1651,65 @@ def test_signed_zero_bits_follow_the_documented_policy():
 
 
 @pytest.mark.parametrize("name", list(ref.PACKED_GEOMETRIES))
-def test_packed_causality(name):
+def test_packed_causality(name, record_property):
+    """Every packed geometry over 32 integer draws: the exact selection's ids and counts in any slot order (visibility
+    and segment membership checked once more from the scalar rule in Python on draw 0), the scores judged against the
+    naive tier."""
     _require_program()
-    inputs = ref.make_packed_inputs(name, "cuda")
-    reference = ref.select_reference(inputs)
-    out = _run(inputs)
-    _independent_membership_check(inputs, out)
-    _judge_ok(out, reference)
+
+    def check(j, inputs, result, reference):
+        if j == 0:
+            _independent_membership_check(inputs, result)
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_packed_inputs(name, "cuda", seed=s),
+        _run,
+        seed=100,
+        ordered=False,
+        check=check,
+    )
 
 
 @pytest.mark.parametrize("seed,peaked", [(1, False), (2, False), (3, True)])
-def test_random_accuracy_within_bound(seed, peaked):
+def test_random_rows_meet_the_naive_tier(seed, peaked, record_property):
+    """Three segments (a causal block, a long key range, a short block), top_k 2048, 32 draws of integer inputs (the
+    exact selection's ids and counts in any slot order, the scores judged) and 32 Gaussian draws (the scores judged at
+    the kernel's own keys); ``peaked`` makes a few keys per segment dominate most rows."""
     _require_program()
-    inputs = ref.make_random_inputs(
-        [1100, 900, 1000],
-        [1100, 20000, 1000],
+    geometry = dict(
+        seg_q_len=[1100, 900, 1000],
+        seg_k_len=[1100, 20000, 1000],
         top_k=2048,
-        seed=seed,
         device="cuda",
         peaked=peaked,
     )
-    reference = ref.select_reference(inputs)
-    verdict = _judge_ok(_run(inputs), reference)
-    assert (
-        verdict.max_fp32_error_over_bound <= 1.0
-        and verdict.max_fp64_error_over_bound <= 1.0
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_inputs(seed=s, **geometry),
+        _run,
+        seed=seed,
+        ordered=False,
+    )
+    naive.judge_gaussian(
+        record_property,
+        lambda s: ref.make_random_inputs(seed=s, **geometry),
+        _run,
+        seed=seed,
+        ordered=False,
     )
 
 
 def _duplicated_key_inputs(lq: int, n_distinct: int, reps: int, seed: int):
-    """One causal segment of ``lq`` queries over ``n_distinct * reps`` keys, each distinct key replicated ``reps`` times
-    at random positions; returns the inputs and the replica group of every key."""
+    """One causal segment of ``lq`` queries over ``n_distinct * reps`` keys of integer inputs, each distinct key
+    replicated ``reps`` times at random positions (the order drawn from ``seed``); returns the inputs and the replica
+    group of every key."""
     K = 2048
-    base = ref.make_random_inputs([lq], [n_distinct], top_k=K, seed=seed, device="cuda")
+    base = ref.make_integer_inputs([lq], [n_distinct], top_k=K, seed=seed, device="cuda")
     lk = n_distinct * reps
     group = (
         torch.randperm(
-            lk, generator=torch.Generator(device="cuda").manual_seed(5), device="cuda"
+            lk, generator=torch.Generator(device="cuda").manual_seed(seed + 5), device="cuda"
         )
         % n_distinct
     )
@@ -1752,7 +1731,7 @@ def _assert_cut_groups_keep_the_larger_ids(inputs, out, group) -> int:
     """Where the cutoff of a row splits a replica group (bit-identical scores), the row keeps the group's largest
     ids; returns the number of such cut groups."""
     K = inputs.top_k
-    ids = _canonical(out)[0].cpu()
+    ids = naive.canonical(out)[0].cpu()
     group_cpu = group.cpu()
     visible = ref.visible_rows(inputs, device="cpu")
     cut = 0
@@ -1773,31 +1752,41 @@ def _assert_cut_groups_keep_the_larger_ids(inputs, out, group) -> int:
     return cut
 
 
-def test_near_tie_duplicated_keys_prefer_larger_ids():
-    """Replicated keys give bit-identical scores under any scheme of a fixed reduction: the larger id must win."""
+def test_near_tie_duplicated_keys_prefer_larger_ids(record_property):
+    """Replicated keys give bit-identical scores under any scheme of a fixed reduction: the larger id must win.  32
+    draws of integer inputs whose 300 distinct keys are each replicated 8 times in a random order: the exact
+    selection's ids (which keep the larger ids of a cut replica group), and the replica-group rule checked directly on
+    draw 0."""
     _require_program()
-    inputs, group = _duplicated_key_inputs(48, 300, 8, seed=21)
-    reference = ref.select_reference(inputs, order="sequential")
-    out = _run(inputs)
-    _judge_ok(out, reference)
-    _assert_cut_groups_keep_the_larger_ids(inputs, out, group)
+    groups = {}
+
+    def make(s):
+        inputs, group = _duplicated_key_inputs(48, 300, 8, seed=s)
+        groups[id(inputs)] = group
+        return inputs
+
+    def check(j, inputs, out, reference):
+        if j == 0:
+            _assert_cut_groups_keep_the_larger_ids(inputs, out, groups[id(inputs)])
+
+    naive.judge_exact(record_property, make, _run, seed=21, ordered=False, check=check)
 
 
-def test_near_tie_perturbed_keys_disagree_only_within_uncertainty():
+def test_near_tie_perturbed_keys_select_the_exact_top_k(record_property):
+    """Keys 3000..5999 copy keys 0..2999 with one dimension moved by one (the smallest step of the integer inputs), so
+    most rows hold many pairs of keys whose scores differ by one step or tie: 32 draws, the exact selection's ids and
+    counts in any slot order, the scores judged."""
     _require_program()
-    inputs = ref.make_random_inputs([64], [6000], top_k=2048, seed=22, device="cuda")
-    k = inputs.k
-    src = torch.arange(0, 3000, device="cuda")
-    k[src + 3000] = k[src]
-    col = k[src + 3000, 0].contiguous()
-    k[src + 3000, 0] = (col.view(torch.int16) + 1).view(
-        torch.bfloat16
-    )  # one BF16 ulp on one dimension
-    reference = ref.select_reference(inputs)
-    verdict = _judge_ok(_run(inputs), reference)
-    assert (
-        verdict.rows_identical + verdict.rows_within_uncertainty == inputs.num_queries
-    )
+
+    def make(s):
+        inputs = ref.make_integer_inputs([64], [6000], top_k=2048, seed=s, device="cuda")
+        k = inputs.k
+        src = torch.arange(0, 3000, device="cuda")
+        k[src + 3000] = k[src]
+        k[src + 3000, 0] = k[src + 3000, 0] + 1
+        return inputs
+
+    naive.judge_exact(record_property, make, _run, seed=22, ordered=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1817,7 +1806,7 @@ def _recorded_inputs(name: str):
         seg_k = list(
             seg_q
         )  # keys per segment = queries per segment keeps the FP64 reference to seconds
-    return ref.make_random_inputs(
+    return ref.make_integer_inputs(
         seg_q, seg_k, top_k=2048, seed=7571, device="cuda", label=name
     )
 
@@ -1827,8 +1816,7 @@ def test_recorded_token_counts(name):
     _require_program()
     inputs = _recorded_inputs(name)
     assert inputs.num_queries in (16231, P2_T)
-    reference = ref.select_reference(inputs)
-    _judge_ok(_run(inputs), reference)
+    naive.assert_exact(_run(inputs), inputs, ordered=False)
 
 
 _BOUNDARY = [
@@ -1882,10 +1870,29 @@ _BOUNDARY += [
 
 
 @pytest.mark.parametrize("lq,lk,top_k", _BOUNDARY)
-def test_tile_boundary_neighbours(lq, lk, top_k):
+def test_tile_boundary_neighbours(lq, lk, top_k, record_property):
+    """32 integer draws per geometry: the exact selection's ids and counts, the scores judged.  One query over one
+    key keeps a single score, which the integer inputs repeat between draws (a few hundred likely values); there the
+    ids are held to the exact contract on one integer draw and the score is judged over 32 Gaussian draws."""
     _require_program()
-    inputs = ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda")
-    _judge_ok(_run(inputs), ref.select_reference(inputs))
+    if (lq, lk) == (1, 1):
+        inputs = ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda")
+        naive.assert_exact(_run(inputs), inputs, ordered=False)
+        naive.judge_gaussian(
+            record_property,
+            lambda s: ref.make_random_inputs([lq], [lk], top_k=top_k, seed=s, device="cuda"),
+            _run,
+            seed=7,
+            ordered=False,
+        )
+        return
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda", seed=s),
+        _run,
+        seed=7,
+        ordered=False,
+    )
 
 
 # Geometries that reach the host dispatch's program kinds (which kind a geometry takes depends on the
@@ -1916,7 +1923,7 @@ _DISPATCH_ROWS = [
 @pytest.mark.parametrize("seg_q,seg_k,top_k", _DISPATCH_ROWS)
 def test_dispatch_rows_are_exact_and_plan_matches_runner(seg_q, seg_k, top_k):
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=90 + top_k % 7, device="cuda"
     )
     bound = max(inputs.seg_k_len)  # the caller's bound on every key segment
@@ -1934,9 +1941,8 @@ def test_dispatch_rows_are_exact_and_plan_matches_runner(seg_q, seg_k, top_k):
         for role, key in zip(runner.stages, plan.keys, strict=True)
     }
     assert runner.workspace_bytes == plan.workspace_bytes
-    expected = _cloned(runner())
-    _judge_ok(expected, ref.select_reference(inputs))
-    _assert_sets_repeat(runner, expected)
+    reference = naive.assert_exact(_cloned(runner()), inputs, ordered=False)
+    _assert_exact_calls(runner, inputs, reference)
     if seg_q == [64]:
         assert plan.split and plan.n_split >= 2
 
@@ -1954,26 +1960,33 @@ POOLED_ROWS = {
 
 
 @pytest.mark.parametrize("name", list(POOLED_ROWS))
-def test_ratio4_pooled_top512_rows(name):
+def test_ratio4_pooled_top512_rows(name, record_property):
+    """32 integer draws of each pooled geometry: the exact selection's ids and counts in any slot order, the scores
+    judged; on draw 0 five further calls each hold the exact contract."""
     _require_program()
     seg_q, seg_k, offsets = POOLED_ROWS[name]
-    inputs = ref.make_random_inputs(
-        seg_q,
-        seg_k,
-        top_k=512,
-        ratio=4,
-        q_causal_offsets=offsets,
+
+    def check(j, inputs, out, reference):
+        if j == 0:
+            _assert_exact_calls(lambda: _run(inputs), inputs, reference)
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_inputs(
+            seg_q,
+            seg_k,
+            top_k=512,
+            ratio=4,
+            q_causal_offsets=offsets,
+            seed=s,
+            device="cuda",
+            label=f"pooled_{name}",
+        ),
+        _run,
         seed=7604,
-        device="cuda",
-        label=f"pooled_{name}",
+        ordered=False,
+        check=check,
     )
-    out = _cloned(_run(inputs))
-    verdict = _judge_ok(out, ref.select_reference(inputs))
-    assert (
-        verdict.max_fp32_error_over_bound <= 1.0
-        and verdict.max_fp64_error_over_bound <= 1.0
-    )
-    _assert_sets_repeat(lambda: _run(inputs), out)
 
 
 def test_changing_shapes_in_sequence():
@@ -1986,17 +1999,17 @@ def test_changing_shapes_in_sequence():
         ([129], [129], 1),
     ]
     for i, (lq, lk, k) in enumerate(sequence):
-        inputs = ref.make_random_inputs(lq, lk, top_k=k, seed=30 + i, device="cuda")
-        _judge_ok(_run(inputs), ref.select_reference(inputs))
+        inputs = ref.make_integer_inputs(lq, lk, top_k=k, seed=30 + i, device="cuda")
+        naive.assert_exact(_run(inputs), inputs, ordered=False)
 
 
 def test_max_seqlen_k_bound_changes_the_program_never_the_set():
     """The caller's bound on every key segment tells the dispatch a packed call of equal key segments, which runs the
     scan program without the longest-first segment order where the architecture ships that copy (of the decided
-    program); the selected sets are the same with the bound, with a looser bound and without it, and a bound that
-    cannot hold every segment is rejected."""
+    program); the selected sets are the exact selection with the bound, with a looser bound and without it (integer
+    inputs), and a bound that cannot hold every segment is rejected."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [300] * 4, [9000] * 4, top_k=2048, seed=37, device="cuda"
     )
     tight = max(inputs.seg_k_len)
@@ -2016,10 +2029,9 @@ def test_max_seqlen_k_bound_changes_the_program_never_the_set():
     else:
         # no copy of the decided program (sm_107a registers those of its l6 ticket programs only)
         assert plan_none == dataclasses.replace(plan_tight, max_seqlen_k=None)
-    base = _run(inputs)
-    _judge_ok(base, ref.select_reference(inputs))
-    assert _same_sets(base, _run(inputs, max_seqlen_k=tight))
-    assert _same_sets(base, _run(inputs, max_seqlen_k=inputs.num_keys))
+    reference = naive.assert_exact(_run(inputs), inputs, ordered=False)
+    naive.assert_exact(_run(inputs, max_seqlen_k=tight), inputs, reference, ordered=False)
+    naive.assert_exact(_run(inputs, max_seqlen_k=inputs.num_keys), inputs, reference, ordered=False)
     for bad in (tight - 1, inputs.num_keys + 1):
         with pytest.raises(ValueError, match="max_seqlen_k"):
             _run(inputs, max_seqlen_k=bad)
@@ -2034,13 +2046,13 @@ _REPEAT_GEOMETRIES = (
 
 
 @pytest.mark.parametrize("seg_q,seg_k,top_k,peaked,split", _REPEAT_GEOMETRIES)
-def test_repeatability_as_sets(seg_q, seg_k, top_k, peaked, split):
-    """Five eager calls and five runs of one prepared runner: every row's sorted (id, score bits) pairs and its valid
-    count repeat bit for bit, and the count is ``min(top_k, visible)``.  The slot order of a row may change between
-    calls, so no call is compared with another slot by slot; the first is judged against the reference.  The split
-    geometry runs on a grid asserted (on the host plan) to split its key ranges."""
+def test_every_call_selects_the_exact_set(seg_q, seg_k, top_k, peaked, split):
+    """Five eager calls and five runs of one prepared runner on integer inputs: every call holds the exact contract
+    (the exact selection's ids and the count ``min(top_k, visible)`` per row, in any slot order).  The slot order of a
+    row may change between calls, so no call is compared with another slot by slot.  The split geometry runs on a grid
+    asserted (on the host plan) to split its key ranges."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=40, device="cuda", peaked=peaked
     )
     extra = {}
@@ -2052,26 +2064,21 @@ def test_repeatability_as_sets(seg_q, seg_k, top_k, peaked, split):
     runner = _prepare(inputs, **extra)
     if split:
         assert runner.stages == ("scan", "merge")
-    runs = [_cloned(_run(inputs, **extra)) for _ in range(5)]
-    runs += [_cloned(runner()) for _ in range(5)]
-    first = runs[0]
-    _judge_ok(first, ref.select_reference(inputs))
-    counts = _valid_counts(first[0])
-    assert torch.equal(counts, ref.visible_rows(inputs).clamp(max=top_k))
-    pairs = _row_pairs(first)
-    for i, out in enumerate(runs[1:], start=1):
-        assert torch.equal(_valid_counts(out[0]), counts), i
-        assert torch.equal(_row_pairs(out), pairs), i
+    reference = ref.exact_selection(inputs)
+    assert torch.equal(reference.selected_count, ref.visible_rows(inputs).clamp(max=top_k).to(reference.selected_count))
+    _assert_exact_calls(lambda: _run(inputs, **extra), inputs, reference)
+    _assert_exact_calls(runner, inputs, reference)
 
 
 def test_forced_split_and_unsplit_plans_select_the_same_sets():
     """The key-range split is forced through the persistent grid, which enters the split rule
     (``DispatchPolicy.n_split_for``): for 64 queries over 32768 keys a grid of many CTAs per query unit splits the key
     ranges and a small grid does not.  Both grids are found and asserted on the host plan before anything runs; the
-    split runner launches the scan and the plain merge, the unsplit one the scan alone, and both select the reference's
-    set per row (as does the eager entry on the split grid and on the device's own grid)."""
+    split runner launches the scan and the plain merge, the unsplit one the scan alone, and both select the exact
+    selection's set per row on integer inputs (as does the eager entry on the split grid and on the device's own
+    grid)."""
     _require_program()
-    inputs = ref.make_random_inputs([64], [32768], top_k=2048, seed=120, device="cuda")
+    inputs = ref.make_integer_inputs([64], [32768], top_k=2048, seed=120, device="cuda")
     grids = _split_grids(inputs)
     assert set(grids) == {"split", "unsplit"}, grids
     plans = {form: _plan(inputs, grid_ctas=grid) for form, grid in grids.items()}
@@ -2083,12 +2090,12 @@ def test_forced_split_and_unsplit_plans_select_the_same_sets():
         assert runner.choice == plans[form]
         assert runner.stages == (("scan", "merge") if form == "split" else ("scan",))
         runs[form] = _cloned(runner())
-    reference = ref.select_reference(inputs)
+    reference = ref.exact_selection(inputs)
     for out in runs.values():
-        _judge_ok(out, reference)
-    assert _same_sets(runs["split"], runs["unsplit"])
-    assert _same_sets(_run(inputs, grid_ctas=grids["split"]), runs["unsplit"])
-    assert _same_sets(_run(inputs), runs["unsplit"])
+        naive.assert_exact(out, inputs, reference, ordered=False)
+    assert naive.same_ids(runs["split"], runs["unsplit"])
+    assert naive.same_ids(_run(inputs, grid_ctas=grids["split"]), runs["unsplit"])
+    assert naive.same_ids(_run(inputs), runs["unsplit"])
 
 
 # split calls whose rows include padded ones (visible < top_k): a short second packed segment, and a causal offset
@@ -2103,11 +2110,12 @@ _SENTINEL_ID, _SENTINEL_SCORE = 12345678, 7.0
 @pytest.mark.parametrize("name", list(_PADDED_SPLIT_GEOMETRIES))
 def test_forced_split_writes_every_slot_of_padded_rows(name):
     """On a grid asserted to split the key ranges, a call with padded rows writes every slot of caller-owned outputs
-    pre-filled with sentinels: valid slots hold the reference's set, every other slot exactly ``(-1, -inf)``.  Five
-    runs of the prepared runner and an eager call, each over fresh sentinels, select the same sets."""
+    pre-filled with sentinels: valid slots hold the exact selection's set (integer inputs), every other slot exactly
+    ``(-1, -inf)``.  Five runs of the prepared runner and an eager call, each over fresh sentinels, select the same
+    ids."""
     _require_program()
     geometry = _PADDED_SPLIT_GEOMETRIES[name]
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         geometry["seg_q"],
         geometry["seg_k"],
         top_k=2048,
@@ -2141,28 +2149,27 @@ def test_forced_split_writes_every_slot_of_padded_rows(name):
         return out
 
     first = fresh(runner)
-    _judge_ok(first, ref.select_reference(inputs))
+    naive.assert_exact(first, inputs, ordered=False)
     for step in range(4):
-        assert _same_sets(fresh(runner), first), step
+        assert naive.same_ids(fresh(runner), first), step
     eager = fresh(lambda: _run(inputs, grid_ctas=grid, indices=indices, scores=scores))
-    assert _same_sets(eager, first)
+    assert naive.same_ids(eager, first)
 
 
 def test_forced_split_keeps_the_larger_ids_of_a_cut_tie_group():
     """Replicated keys (bit-identical scores) through a forced key-range split: 64 queries over 4681 distinct keys
-    replicated 7 times (32767 keys; 2048 is not a multiple of 7, so the cutoff cuts replica groups).  The split call
-    is judged against the sequential reference, and every cut group keeps its largest ids, as on the unsplit call."""
+    of integer inputs replicated 7 times (32767 keys; 2048 is not a multiple of 7, so the cutoff cuts replica groups).
+    The split call holds the exact contract, and every cut group keeps its largest ids, as on the unsplit call."""
     _require_program()
     inputs, group = _duplicated_key_inputs(64, 4681, 7, seed=122)
     grids = _split_grids(inputs)
     assert set(grids) == {"split", "unsplit"}, grids
     assert _plan(inputs, grid_ctas=grids["split"]).n_split > 1
-    reference = ref.select_reference(inputs, order="sequential")
     split = _cloned(_run(inputs, grid_ctas=grids["split"]))
-    _judge_ok(split, reference)
+    naive.assert_exact(split, inputs, ordered=False)
     assert _assert_cut_groups_keep_the_larger_ids(inputs, split, group) > 0
     unsplit = _run(inputs, grid_ctas=grids["unsplit"])
-    assert _same_sets(split, unsplit)
+    assert naive.same_ids(split, unsplit)
 
 
 PARTITION_KNOBS = (
@@ -2181,18 +2188,16 @@ PARTITION_KNOBS = (
 )
 def test_partition_knobs_do_not_change_the_sets(knobs):
     _require_program()
-    inputs = ref.make_random_inputs(
-        [1500, 600], [1500, 30000], top_k=2048, seed=41, device="cuda"
+    inputs = ref.make_integer_inputs(
+        [1500, 600], [1500, 30000], top_k=2048, seed=41, device="cuda", label=f"knobs {knobs}"
     )
-    base = _run(inputs)
-    _judge_ok(base, ref.select_reference(inputs))
-    other = _run(inputs, **knobs)
-    assert _same_sets(base, other), f"partition knob {knobs} changed the selected sets"
+    reference = naive.assert_exact(_run(inputs), inputs, ordered=False)
+    naive.assert_exact(_run(inputs, **knobs), inputs, reference, ordered=False)
 
 
 # The exact cases (cutoff ties, signed zeros, large tie groups, ...) under the partition and sampling knobs: the
-# id rule (a tied score keeps the larger id) and the zero rule (+0.0 == -0.0) select the same keys with the same
-# score bits however the keys are split across CTAs, buffered, checked or sampled.
+# id rule (a tied score keeps the larger id) and the zero rule (+0.0 == -0.0) select the exact selection's keys
+# however the keys are split across CTAs, buffered, checked or sampled.
 EXACT_CASE_KNOBS = PARTITION_KNOBS
 
 
@@ -2200,19 +2205,18 @@ EXACT_CASE_KNOBS = PARTITION_KNOBS
 def test_exact_cases_are_knob_invariant(name):
     _require_program()
     inputs = ref.make_exact_case(name, "cuda")
-    reference = ref.select_reference(inputs, order="sequential")
-    base = _run(inputs)
-    _judge_ok(base, reference, exact_bits=True)
+    reference = naive.assert_exact(_run(inputs), inputs, ordered=False)
     for knobs in EXACT_CASE_KNOBS:
-        other = _run(inputs, **knobs)
-        assert _same_sets(base, other), f"{name}: knob {knobs} changed the sets"
+        failures = naive.exact_failures(_run(inputs, **knobs), inputs, reference, ordered=False)
+        assert not failures, f"{name}: knob {knobs}:\n" + "\n".join(failures[:20])
 
 
 # -- the attention-sink + local-band distribution -----------------------------------------------------------------
 # Small context-parallel geometries whose long units overflow the candidate buffer and run the sampled first
 # threshold (the attention-sink regime: the nearest key tile of every unit -- the diagonal -- holds a hot band of top-k
-# keys), judged like the random rows against the FP64 / FP32 reference under both settings of the far-sample
-# switch and compared as sets with the sampled threshold switched off and with the forced re-stream.
+# keys), judged like the random rows under both settings of the far-sample switch (integer sink inputs: the exact
+# selection, with the sampled threshold switched off and with the forced re-stream too; Gaussian sink inputs: the
+# scores at the kernel's own keys).
 SINK_GEOMETRIES = {
     "cp16_16k": dict(seg_q_len=[512, 512], seg_k_len=[512, 16384], top_k=256),
     "tail_30848": dict(seg_q_len=[512], seg_k_len=[30848], top_k=256),
@@ -2230,41 +2234,55 @@ def _longest_unit_samples(inputs, plan) -> bool:
 
 @pytest.mark.parametrize("far_sample", [0, 1])
 @pytest.mark.parametrize("name", list(SINK_GEOMETRIES))
-def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample):
+def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample, record_property):
+    """The attention-sink geometries: 32 draws of the integer sink inputs (the exact selection's ids and counts in any
+    slot order, the scores judged); on draw 0 most rows select key 0, five further calls, the call with the sampled
+    threshold switched off and the forced re-stream each hold the exact contract.  32 draws of the Gaussian sink inputs
+    judge the scores at the kernel's own keys."""
     _require_program()
-    inputs = ref.make_sink_inputs(
-        **SINK_GEOMETRIES[name], seed=ref.SINK_SEED, device="cuda", label=name
+
+    def check(j, inputs, out, reference):
+        if j:
+            return
+        plan = _plan(inputs, far_sample=far_sample)
+        assert plan.sample_tiles_max > 0 and _longest_unit_samples(inputs, plan), plan
+        assert plan.far_sample == far_sample
+        # the sink: most rows select key 0 (an iid row selects it with probability ~ top_k / visible)
+        assert float((out[0] == 0).any(dim=1).float().mean()) > 0.5
+        _assert_exact_calls(lambda: _run(inputs, far_sample=far_sample), inputs, reference)
+        nosample = naive.exact_failures(_run(inputs, sample_tiles_max=0), inputs, reference, ordered=False)
+        assert not nosample, "sample_tiles_max=0 on the sink distribution:\n" + "\n".join(nosample[:20])
+        restream = naive.exact_failures(
+            _run(inputs, sample_shift_permille=-500), inputs, reference, ordered=False
+        )
+        assert not restream, "the forced re-stream on the sink distribution:\n" + "\n".join(restream[:20])
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_sink_inputs(
+            **SINK_GEOMETRIES[name], seed=s, device="cuda", label=name
+        ),
+        lambda inputs: _run(inputs, far_sample=far_sample),
+        seed=ref.SINK_SEED,
+        ordered=False,
+        check=check,
     )
-    plan = _plan(inputs, far_sample=far_sample)
-    assert plan.sample_tiles_max > 0 and _longest_unit_samples(inputs, plan), plan
-    assert plan.far_sample == far_sample
-    base = _run(inputs, far_sample=far_sample)
-    verdict = _judge_ok(base, ref.select_reference(inputs))
-    assert (
-        verdict.max_fp32_error_over_bound <= 1.0
-        and verdict.max_fp64_error_over_bound <= 1.0
-    )
-    # the sink: most rows select key 0 (94-100 % on the recorded statistics; an iid row selects it with probability
-    # ~ top_k / visible)
-    assert float((base[0] == 0).any(dim=1).float().mean()) > 0.5
-    _assert_sets_repeat(lambda: _run(inputs, far_sample=far_sample), base)
-    nosample = _run(inputs, sample_tiles_max=0)
-    assert _same_sets(base, nosample), (
-        "sample_tiles_max=0 changed the sets on the sink distribution"
-    )
-    restream = _run(inputs, sample_shift_permille=-500)
-    assert _same_sets(base, restream), (
-        "the forced re-stream changed the sets on the sink distribution"
+    naive.judge_gaussian(
+        record_property,
+        lambda s: ref.make_sink_inputs(**SINK_GEOMETRIES[name], seed=s, device="cuda", label=name),
+        lambda inputs: _run(inputs, far_sample=far_sample),
+        seed=ref.SINK_SEED,
+        ordered=False,
     )
 
 
 def test_sink_issue_geometry_full():
     """The recorded long-context call: one 262144-token document, CP16 zigzag rank 0, top-k 2048, ``max_seqlen_k`` 262144.
-    ``CAKE_PPLX_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the matmul-order reference (minutes)."""
+    ``CAKE_PPLX_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the exact selection (integer sink inputs)."""
     _require_program()
     if not FULL:
         pytest.skip("set CAKE_PPLX_DSA_INDEXER_FULL=1 for the 262k sink geometry")
-    inputs = ref.make_sink_inputs(
+    inputs = ref.make_integer_sink_inputs(
         [8192, 8192],
         [8192, 262144],
         top_k=2048,
@@ -2278,14 +2296,13 @@ def test_sink_issue_geometry_full():
     assert plan.n_split == 1 and _longest_unit_samples(inputs, plan), plan
     assert plan.sample_tiles_max == 32 and plan.cand_cap == 16384, plan
     assert plan.check_period == 32, plan
-    base = _run(inputs, max_seqlen_k=262144)
-    _judge_ok(base, ref.select_reference(inputs))
+    reference = naive.assert_exact(_run(inputs, max_seqlen_k=262144), inputs, ordered=False)
     nosample = _run(inputs, max_seqlen_k=262144, sample_tiles_max=0)
-    assert _same_sets(base, nosample)
+    naive.assert_exact(nosample, inputs, reference, ordered=False)
     far = _run(inputs, max_seqlen_k=262144, far_sample=1)
-    assert _same_sets(base, far)
+    naive.assert_exact(far, inputs, reference, ordered=False)
     unbounded = _run(inputs)
-    assert _same_sets(base, unbounded)
+    naive.assert_exact(unbounded, inputs, reference, ordered=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2297,7 +2314,7 @@ def test_strided_k_view_matches_contiguous_sets():
     _require_program()
     seg_q = [max(1, v // 16) for v in _lengths(P1_CU_SEQLENS_Q)]
     seg_k = [max(1, v // 16) for v in _lengths(P1_CU_SEQLENS_K)]
-    strided = ref.make_random_inputs(
+    strided = ref.make_integer_inputs(
         seg_q,
         seg_k,
         top_k=256,
@@ -2319,8 +2336,8 @@ def test_strided_k_view_matches_contiguous_sets():
         softmax_scale=strided.softmax_scale,
     )
     a, b = _run(strided), _run(contiguous)
-    assert _same_sets(a, b)
-    _judge_ok(a, ref.select_reference(contiguous))
+    reference = naive.assert_exact(a, contiguous, ordered=False)
+    naive.assert_exact(b, contiguous, reference, ordered=False)
 
 
 def test_nonfinite_inputs_return_with_intact_structure():
@@ -2336,8 +2353,11 @@ def test_nonfinite_inputs_return_with_intact_structure():
         tuple(scores.shape) == (inputs.num_queries, inputs.top_k)
         and scores.dtype == torch.float32
     )
-    reference = ref.select_reference(inputs)
-    _judge_ok((indices, scores), reference, rows=ref.clean_rows(inputs))
+    rows = ref.clean_rows(inputs)  # the finite segment, a problem of its own: exact
+    clean = ref.clean_segment(inputs)
+    reference = naive.assert_exact(
+        (indices.index_select(0, rows), scores.index_select(0, rows)), clean, ordered=False
+    )
     visible = ref.visible_rows(inputs)
     # the non-finite rows, as sets: unique visible ids (in any slot order)
     for t in ref.dirty_rows(inputs).tolist():
@@ -2350,16 +2370,19 @@ def test_nonfinite_inputs_return_with_intact_structure():
     padding = indices < 0
     assert bool((indices[padding] == -1).all())
     assert bool(torch.isneginf(scores[padding]).all())
-    # the sets of every row, the non-finite ones included, repeat over five more calls
-    _assert_sets_repeat(lambda: _run(inputs), (indices, scores))
+    # five more calls: the finite segment holds the exact contract on each
+    _assert_exact_calls(
+        lambda: tuple(x.index_select(0, rows) for x in _run(inputs)), clean, reference
+    )
 
 
 def test_prepared_runner_graph_capture_and_replay():
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=50, device="cuda"
     )
     eager = _run(inputs)
+    naive.assert_exact(eager, inputs, ordered=False)
     runner = _prepare(inputs)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
@@ -2375,12 +2398,12 @@ def test_prepared_runner_graph_capture_and_replay():
     graph.replay()
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    assert _same_sets(captured, eager)
+    assert naive.same_ids(captured, eager)
     for _ in range(2):
         graph.replay()
         torch.cuda.synchronize()
-        assert _same_sets(captured, eager)
-    fresh = ref.make_random_inputs(
+        assert naive.same_ids(captured, eager)
+    fresh = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=51, device="cuda"
     )
     inputs.q.copy_(fresh.q)
@@ -2389,8 +2412,8 @@ def test_prepared_runner_graph_capture_and_replay():
     graph.replay()
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok(_cloned(captured), ref.select_reference(inputs))
-    assert _same_sets(captured, _run(fresh))
+    naive.assert_exact(_cloned(captured), inputs, ordered=False)
+    assert naive.same_ids(captured, _run(fresh))
 
 
 # the first 16 int64 of the ticket tail: the ticket word and its padding; the rest of the tail holds the
@@ -2419,7 +2442,7 @@ def test_prepared_runner_ticket_tail_is_zero_at_prepare_after_runs_and_after_a_f
     """Backend-owned workspace: the tail is zeroed once at prepare, no memset in run(); a run that raised
     while launching marks it dirty and the next run restores it."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=52, device="cuda"
     )
     runner = _prepare(inputs)
@@ -2434,6 +2457,7 @@ def test_prepared_runner_ticket_tail_is_zero_at_prepare_after_runs_and_after_a_f
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)  # zeroed once, at prepare
     expected = _cloned(runner())
+    naive.assert_exact(expected, inputs, ordered=False)
     torch.cuda.synchronize()
     # left at 0 by the scan, no memset in run() on this path
     _assert_ticket_tail_zero(runner)
@@ -2453,7 +2477,7 @@ def test_prepared_runner_ticket_tail_is_zero_at_prepare_after_runs_and_after_a_f
     torch.cuda.synchronize()
     assert not runner._tail_dirty
     _assert_ticket_tail_zero(runner)
-    assert _same_sets(out, expected)
+    assert naive.same_ids(out, expected)
 
 
 def _workspace_bytes(inputs: ref.IndexerInputs, device: torch.device) -> int:
@@ -2502,12 +2526,12 @@ def test_caller_owned_workspace_shared_by_two_geometries_keeps_every_set():
     runner that ran reads 0 afterwards.  The eager entry reuses the same buffer across calls of both geometries."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs_a = ref.make_random_inputs(
+    inputs_a = ref.make_integer_inputs(
         [300, 200], [300, 6000], top_k=256, seed=70, device="cuda"
     )
     # top_k 4096: where the candidate capacity has a floor (sm_107a: 8192 slots), top_k 256 and 2048 both sit on it, and
     # with the same unit the two bounds would be equal
-    inputs_b = ref.make_random_inputs(
+    inputs_b = ref.make_integer_inputs(
         [900, 300], [900, 7000], top_k=4096, seed=71, device="cuda"
     )
     bytes_a = _workspace_bytes(inputs_a, device)
@@ -2516,8 +2540,8 @@ def test_caller_owned_workspace_shared_by_two_geometries_keeps_every_set():
     assert bytes_b > bytes_a + TICKET_TAIL_BYTES, (bytes_a, bytes_b)
     expected_a = _cloned(_run(inputs_a))  # exclusive, backend-owned workspaces
     expected_b = _cloned(_run(inputs_b))
-    _judge_ok(expected_a, ref.select_reference(inputs_a))
-    _judge_ok(expected_b, ref.select_reference(inputs_b))
+    naive.assert_exact(expected_a, inputs_a, ordered=False)
+    naive.assert_exact(expected_b, inputs_b, ordered=False)
     shared = torch.empty(bytes_b, dtype=torch.uint8, device=device)
     runner_a = _caller_owned_runner(inputs_a, shared)
     runner_b = _caller_owned_runner(inputs_b, shared)
@@ -2533,14 +2557,14 @@ def test_caller_owned_workspace_shared_by_two_geometries_keeps_every_set():
     ):
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), step
+        assert naive.same_ids(out, expected), step
         _assert_ticket_tail_zero(runner)
     for step, (inputs, expected) in enumerate(
         [(inputs_a, expected_a), (inputs_b, expected_b)] * 2
     ):
         out = _run(inputs, workspace_buffer=shared)
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), step
+        assert naive.same_ids(out, expected), step
 
 
 def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the_next_run():
@@ -2549,7 +2573,7 @@ def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the
     reads 0 after."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=72, device="cuda"
     )
     workspace = torch.empty(
@@ -2562,7 +2586,7 @@ def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the
     expected = _cloned(runner())
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     for fill in (7, 0xFF, 1):
         # what another kernel could leave in a shared buffer; not a failed launch,
         # so the scan binding's zero_region alone restores it
@@ -2570,7 +2594,7 @@ def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the
         assert not runner._tail_dirty
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), fill
+        assert naive.same_ids(out, expected), fill
         _assert_ticket_tail_zero(runner)
 
 
@@ -2580,13 +2604,14 @@ def test_eager_entry_zeroes_a_caller_owned_tail_once_per_call(monkeypatch):
     before the call is restored, so every call selects the same sets and leaves the word 0."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=75, device="cuda"
     )
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
     expected = _cloned(_run(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     runners, host_memsets = [], []
     prepare = cake_backend._prepare_runner
 
@@ -2607,7 +2632,7 @@ def test_eager_entry_zeroes_a_caller_owned_tail_once_per_call(monkeypatch):
         )  # what another kernel could leave in the buffer, the tail included
         out = _run(inputs, workspace_buffer=workspace)
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), fill
+        assert naive.same_ids(out, expected), fill
         _assert_ticket_tail_zero(runners[-1])
     if runners[-1].ticket_block is not None:
         # a program that reads its TicketWord: the one launch draws from the tail's first bytes, its scan binding
@@ -2635,7 +2660,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
     between replays leaves every replay's sets unchanged and the tail 0 afterwards."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=73, device="cuda"
     )
     workspace = torch.empty(
@@ -2645,6 +2670,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
     # the call draws tickets: the graph carries the memset node
     assert not runner._tail_static
     eager = _cloned(_run(inputs))
+    naive.assert_exact(eager, inputs, ordered=False)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -2661,8 +2687,8 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
         graph.replay()
         torch.cuda.synchronize()
         _assert_ticket_tail_zero(runner)
-        assert _same_sets(captured, eager), fill
-    fresh = ref.make_random_inputs(
+        assert naive.same_ids(captured, eager), fill
+    fresh = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=74, device="cuda"
     )
     inputs.q.copy_(fresh.q)
@@ -2672,7 +2698,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
     graph.replay()
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok(_cloned(captured), ref.select_reference(inputs))
+    naive.assert_exact(_cloned(captured), inputs, ordered=False)
 
 
 def test_static_scan_kind_runner_has_no_ticket_tail_and_keeps_its_sets_on_a_poisoned_workspace():
@@ -2713,11 +2739,12 @@ def test_static_scan_kind_runner_has_no_ticket_tail_and_keeps_its_sets_on_a_pois
         "no geometry runs a drawing scan program with more units than CTAs"
     )
     for static, (T, Tkv, S, sample) in sorted(found.items()):
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             [T // S] * S, [Tkv // S] * S, top_k=2048, seed=78, device="cuda"
         )
         extra = {} if sample is None else {"sample_tiles_max": sample}
         expected = _cloned(_run(inputs, **extra))
+        naive.assert_exact(expected, inputs, ordered=False)
         shared = torch.empty(
             _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
         )
@@ -2732,7 +2759,7 @@ def test_static_scan_kind_runner_has_no_ticket_tail_and_keeps_its_sets_on_a_pois
         for _ in range(2):
             out = runner()
             torch.cuda.synchronize()
-            assert _same_sets(out, expected), runner.choice.scan_key
+            assert naive.same_ids(out, expected), runner.choice.scan_key
         _assert_ticket_tail_zero(runner)
 
 
@@ -2744,12 +2771,14 @@ def test_static_call_skips_the_tail_memset_and_never_touches_the_ticket_word():
     marks the static runner's tail dirty, so its next run restores it."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs_s = ref.make_random_inputs([4], [22018], top_k=2048, seed=76, device="cuda")
-    inputs_d = ref.make_random_inputs(
+    inputs_s = ref.make_integer_inputs([4], [22018], top_k=2048, seed=76, device="cuda")
+    inputs_d = ref.make_integer_inputs(
         [2048, 2048], [2048, 16384], top_k=1024, seed=77, device="cuda"
     )
     expected_s = _cloned(_run(inputs_s))
+    naive.assert_exact(expected_s, inputs_s, ordered=False)
     expected_d = _cloned(_run(inputs_d))
+    naive.assert_exact(expected_d, inputs_d, ordered=False)
     shared = torch.empty(
         max(_workspace_bytes(inputs_s, device), _workspace_bytes(inputs_d, device)),
         dtype=torch.uint8,
@@ -2769,23 +2798,23 @@ def test_static_call_skips_the_tail_memset_and_never_touches_the_ticket_word():
         runner.ticket_tail.fill_(fill)
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected_s), fill
+        assert naive.same_ids(out, expected_s), fill
         assert (word == fill).all(), fill  # untouched by the scan
     assert not memsets
     out = _run(inputs_s, workspace_buffer=shared)
     torch.cuda.synchronize()
     # the eager entry: no memset either
-    assert _same_sets(out, expected_s) and (word == 1).all()
+    assert naive.same_ids(out, expected_s) and (word == 1).all()
     drawing = _caller_owned_runner(inputs_d, shared)
     assert not drawing._tail_static
     drawing.ticket_tail.fill_(7)
     out = drawing()
     torch.cuda.synchronize()
-    assert _same_sets(out, expected_d)
+    assert naive.same_ids(out, expected_d)
     _assert_ticket_tail_zero(drawing)  # zeroed by its scan binding, left 0 by its scan
     out = runner()  # the static runner after the drawing one wrote the buffer
     torch.cuda.synchronize()
-    assert _same_sets(out, expected_s) and not memsets
+    assert naive.same_ids(out, expected_s) and not memsets
     launches = runner.launches
 
     def failing() -> None:
@@ -2799,7 +2828,7 @@ def test_static_call_skips_the_tail_memset_and_never_touches_the_ticket_word():
     out = runner()
     torch.cuda.synchronize()
     assert memsets == [1] and not runner._tail_dirty and not word.any()
-    assert _same_sets(out, expected_s)
+    assert naive.same_ids(out, expected_s)
 
 
 # ---------------------------------------------------------------------------
@@ -2834,7 +2863,7 @@ def _ticket_word_inputs(seed: int):
             f"no scan program reads its TicketWord on {arch}: they draw from the workspace's tail"
         )
     for seg_q, seg_k, top_k in _TICKET_GEOMETRIES:
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             seg_q, seg_k, top_k=top_k, seed=seed, device="cuda"
         )
         runner = _prepare(inputs)
@@ -2856,7 +2885,7 @@ def test_ticket_word_runner_owns_its_block_and_ignores_a_poisoned_caller_workspa
     expected = _cloned(own())
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(own)
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -2884,7 +2913,7 @@ def test_ticket_word_runner_owns_its_block_and_ignores_a_poisoned_caller_workspa
     for step in range(6):
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), step
+        assert naive.same_ids(out, expected), step
         _assert_ticket_tail_zero(runner)
         # what another kernel could leave in the shared buffer: random bytes, a random tail word
         workspace.copy_(
@@ -2926,7 +2955,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
         )
     assert set(cake_jit.PROGRAM_KEYS[arch]) >= _SM107_LSF_COPIES
     seg_q, seg_k, top_k, key = _SM107_LSF_GEOMETRIES[geometry]
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=88 + geometry, device="cuda"
     )
     own = _prepare(inputs)
@@ -2935,7 +2964,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
     )
     expected = _cloned(own())
     torch.cuda.synchronize()
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -2950,7 +2979,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
     for step in range(4):
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), step
+        assert naive.same_ids(out, expected), step
         workspace.copy_(
             torch.randint(
                 0,
@@ -2969,6 +2998,7 @@ def test_ticket_word_runner_restores_its_word_after_a_failed_launch():
     inputs = _ticket_word_inputs(82)
     runner = _prepare(inputs)
     expected = _cloned(runner())
+    naive.assert_exact(expected, inputs, ordered=False)
     torch.cuda.synchronize()
     restore = runner._ticket_restore
     assert (
@@ -3002,11 +3032,11 @@ def test_ticket_word_runner_restores_its_word_after_a_failed_launch():
     out = runner()  # the restoring launch zeroes the word on this stream
     torch.cuda.synchronize()
     assert used == [1] and not runner._tail_dirty
-    assert _same_sets(out, expected)
+    assert naive.same_ids(out, expected)
     _assert_ticket_tail_zero(runner)
     out = runner()
     torch.cuda.synchronize()
-    assert used == [1] and _same_sets(out, expected)
+    assert used == [1] and naive.same_ids(out, expected)
 
 
 def test_ticket_word_runners_sharing_a_workspace_keep_their_own_blocks():
@@ -3014,11 +3044,13 @@ def test_ticket_word_runners_sharing_a_workspace_keep_their_own_blocks():
     block, so every run selects the sets of the same geometry's backend-owned run."""
     inputs_a = _ticket_word_inputs(83)
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs_b = ref.make_random_inputs(
+    inputs_b = ref.make_integer_inputs(
         [900, 300], [900, 7000], top_k=4096, seed=84, device="cuda"
     )
     expected_a = _cloned(_prepare(inputs_a)())
+    naive.assert_exact(expected_a, inputs_a, ordered=False)
     expected_b = _cloned(_prepare(inputs_b)())
+    naive.assert_exact(expected_b, inputs_b, ordered=False)
     shared = torch.empty(
         max(_workspace_bytes(inputs_a, device), _workspace_bytes(inputs_b, device)),
         dtype=torch.uint8,
@@ -3035,7 +3067,7 @@ def test_ticket_word_runners_sharing_a_workspace_keep_their_own_blocks():
     ):
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), step
+        assert naive.same_ids(out, expected), step
         _assert_ticket_tail_zero(runner)
 
 
@@ -3044,6 +3076,7 @@ def test_ticket_word_runner_prepared_on_one_stream_runs_on_another():
     draws from a zero word."""
     inputs = _ticket_word_inputs(85)
     expected = _cloned(_prepare(inputs)())
+    naive.assert_exact(expected, inputs, ordered=False)
     stream_a, stream_b = torch.cuda.Stream(), torch.cuda.Stream()
     stream_a.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream_a):
@@ -3055,7 +3088,7 @@ def test_ticket_word_runner_prepared_on_one_stream_runs_on_another():
         again = _cloned(runner())
     torch.cuda.current_stream().wait_stream(stream_b)
     torch.cuda.synchronize()
-    assert _same_sets(out, expected) and _same_sets(again, expected)
+    assert naive.same_ids(out, expected) and naive.same_ids(again, expected)
     _assert_ticket_tail_zero(runner)
 
 
@@ -3066,6 +3099,7 @@ def test_ticket_word_runner_graph_capture_before_and_after_first_use(warm):
     inputs = _ticket_word_inputs(86)
     device = torch.device("cuda", torch.cuda.current_device())
     expected = _cloned(_prepare(inputs)())
+    naive.assert_exact(expected, inputs, ordered=False)
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -3087,7 +3121,7 @@ def test_ticket_word_runner_graph_capture_before_and_after_first_use(warm):
         torch.cuda.synchronize()
         graph.replay()
         torch.cuda.synchronize()
-        assert _same_sets(captured, expected), fill
+        assert naive.same_ids(captured, expected), fill
         _assert_ticket_tail_zero(runner)
 
 
@@ -3096,7 +3130,7 @@ def test_static_ticket_word_calls_get_the_placeholder_and_shape_alone_decides():
     placeholder as its TicketWord and gets no block; the decision is the shape's alone, so the same shapes with other
     segment contents decide the same way."""
     _require_program()
-    inputs = ref.make_random_inputs([4], [22018], top_k=2048, seed=88, device="cuda")
+    inputs = ref.make_integer_inputs([4], [22018], top_k=2048, seed=88, device="cuda")
     runner = _prepare(inputs)
     assert cake_policy.ticket_static_path(runner.choice)
     assert runner.ticket_block is None and runner._ticket_restore is None
@@ -3104,6 +3138,7 @@ def test_static_ticket_word_calls_get_the_placeholder_and_shape_alone_decides():
         runner.device_index
     )
     expected = _cloned(runner())
+    naive.assert_exact(expected, inputs, ordered=False)
     torch.cuda.synchronize()
     placeholder = torch.from_dlpack(
         cake_backend._ticket_placeholder(runner.device_index)
@@ -3113,13 +3148,13 @@ def test_static_ticket_word_calls_get_the_placeholder_and_shape_alone_decides():
         == cake_backend.TICKET_BLOCK_BYTES
     )
     a = _prepare(
-        ref.make_random_inputs(
+        ref.make_integer_inputs(
             [2048, 2048], [2048, 16384], top_k=1024, seed=89, device="cuda"
         )
     )
     # the same T, Tkv and S with other segment lengths and values
     b = _prepare(
-        ref.make_random_inputs(
+        ref.make_integer_inputs(
             [3000, 1096], [9000, 9384], top_k=1024, seed=90, device="cuda"
         )
     )
@@ -3143,7 +3178,7 @@ def test_static_ticket_word_calls_get_the_placeholder_and_shape_alone_decides():
             assert _scan_ticket_word(r) is cake_backend._ticket_placeholder(
                 r.device_index
             )
-    assert _same_sets(runner(), expected)
+    assert naive.same_ids(runner(), expected)
     torch.cuda.synchronize()
     assert not placeholder.view(torch.uint8).any()  # no launch writes it
 
@@ -3154,7 +3189,8 @@ def test_ticket_word_eager_entry_draws_from_the_tail_word_it_zeroes():
     inputs = _ticket_word_inputs(87)
     device = torch.device("cuda", torch.cuda.current_device())
     expected = _cloned(_prepare(inputs)())
-    assert _same_sets(_cloned(_run(inputs)), expected)  # backend-owned workspace
+    naive.assert_exact(expected, inputs, ordered=False)
+    assert naive.same_ids(_cloned(_run(inputs)), expected)  # backend-owned workspace
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -3163,7 +3199,7 @@ def test_ticket_word_eager_entry_draws_from_the_tail_word_it_zeroes():
         workspace.fill_(fill)
         out = _run(inputs, workspace_buffer=workspace)
         torch.cuda.synchronize()
-        assert _same_sets(out, expected), fill
+        assert naive.same_ids(out, expected), fill
         assert not workspace[
             tail_at : tail_at + cake_backend.TICKET_WORD_ZERO_BYTES
         ].any(), fill
@@ -3173,7 +3209,7 @@ def test_workspace_bound_is_respected():
     """The bound of the call's geometry suffices: a prepared runner on caller-owned workspace and outputs launches
     without an allocation, writes the caller's outputs, and a buffer one int64 short is refused before anything runs."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [900, 300], [900, 7000], top_k=2048, seed=60, device="cuda"
     )
     device = torch.device("cuda", torch.cuda.current_device())
@@ -3213,7 +3249,7 @@ def test_workspace_bound_is_respected():
         out[0].data_ptr() == indices.data_ptr()
         and out[1].data_ptr() == scores.data_ptr()
     )
-    _judge_ok(out, ref.select_reference(inputs))
+    naive.assert_exact(out, inputs, ordered=False)
     short = workspace[: plan.workspace_bytes - 8]
     for call in (
         lambda: _prepare(inputs, workspace_buffer=short),
@@ -3229,7 +3265,7 @@ def test_workspace_checks_precede_the_deterministic_alert(warn_only):
     eager entry and from prepare, also under ``torch.use_deterministic_algorithms(True)``: the buffer is checked
     before the eager entry's alert, so the caller sees the argument error rather than PyTorch's ``RuntimeError``."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [900, 300], [900, 7000], top_k=2048, seed=61, device="cuda"
     )
     device = torch.device("cuda", torch.cuda.current_device())
@@ -3268,10 +3304,10 @@ def test_empty_rows_and_no_keys_are_all_padding():
         q, k, w, cu, cu_k, top_k=8
     )
     assert tuple(indices.shape) == (0, 8) and tuple(scores.shape) == (0, 8)
-    inputs = ref.make_random_inputs([3, 4], [0, 0], top_k=8, seed=1, device="cuda")
+    inputs = ref.make_integer_inputs([3, 4], [0, 0], top_k=8, seed=1, device="cuda")
     indices, scores = _run(inputs)
     assert bool((indices == -1).all()) and bool(torch.isneginf(scores).all())
-    _judge_ok((indices, scores), ref.select_reference(inputs))
+    naive.assert_exact((indices, scores), inputs, ordered=False)
     with _torch_deterministic(warn_only=False):
         indices, scores = cake_backend.cake_dsa_indexer_nondet_train_topk(
             q, k, w, cu, cu_k, top_k=8
@@ -3324,10 +3360,11 @@ def test_device_facts_are_queried_once_per_device(monkeypatch):
 def test_prepared_calls_perform_no_device_queries_after_warm_up(monkeypatch):
     """After the first call on a device the eager and the prepared paths run without a device-property query."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [200, 300], [200, 2500], top_k=128, seed=70, device="cuda"
     )
     expected = _cloned(_run(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     boom = mock.Mock(side_effect=AssertionError("device query on the hot path"))
     monkeypatch.setattr(torch.cuda, "get_device_properties", boom)
     monkeypatch.setattr(torch.cuda, "get_device_capability", boom)
@@ -3335,7 +3372,7 @@ def test_prepared_calls_perform_no_device_queries_after_warm_up(monkeypatch):
     captured = _prepare(inputs)()
     torch.cuda.synchronize()
     assert boom.call_count == 0
-    assert _same_sets(again, expected) and _same_sets(captured, expected)
+    assert naive.same_ids(again, expected) and naive.same_ids(captured, expected)
 
 
 @pytest.mark.parametrize("split", [False, True])
@@ -3345,18 +3382,19 @@ def test_eager_call_and_prepared_run_do_not_synchronize_with_the_host(split):
     splits its key ranges (the plain merge).  Both select the warm-up's sets."""
     _require_program()
     if split:
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             [64], [32768], top_k=2048, seed=131, device="cuda"
         )
         grid = _split_grids(inputs).get("split")
         assert grid is not None, "no grid splits the key ranges"
         extra = {"grid_ctas": grid}
     else:
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             [600, 400], [600, 12000], top_k=1024, seed=130, device="cuda"
         )
         extra = {}
     expected = _cloned(_run(inputs, **extra))
+    naive.assert_exact(expected, inputs, ordered=False)
     runner = _prepare(inputs, **extra)
     if split:
         assert runner.stages == ("scan", "merge")
@@ -3370,7 +3408,7 @@ def test_eager_call_and_prepared_run_do_not_synchronize_with_the_host(split):
     finally:
         torch.cuda.set_sync_debug_mode(previous)
     torch.cuda.synchronize()
-    assert _same_sets(eager, expected) and _same_sets(prepared, expected)
+    assert naive.same_ids(eager, expected) and naive.same_ids(prepared, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -3462,11 +3500,12 @@ def test_torch_deterministic_mode_eager_entry_raises_before_the_first_allocation
     device activity, the caller's outputs and workspace untouched.  Outside the mode the same call runs."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=110, device="cuda"
     )
     # loads the programs and makes the device's placeholders
     expected = _cloned(_run(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     workspace, indices, scores = _sentinel_storage(inputs, device)
     ops, allocated = _strict_alerts(
         (
@@ -3485,7 +3524,7 @@ def test_torch_deterministic_mode_eager_entry_raises_before_the_first_allocation
     assert allocated == 0, "the eager entry allocated before its alert"
     assert _untouched(workspace, indices, scores)
     out = _run(inputs, workspace_buffer=workspace, indices=indices, scores=scores)
-    assert _same_sets(out, expected)
+    assert naive.same_ids(out, expected)
 
 
 def test_torch_deterministic_mode_prepares_and_every_run_raises_before_its_first_launch(
@@ -3498,10 +3537,11 @@ def test_torch_deterministic_mode_prepares_and_every_run_raises_before_its_first
     marked dirty.  A runner prepared outside the mode raises the same once the mode is on; both run once it is off."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=113, device="cuda"
     )
     expected = _cloned(_run(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     workspace, indices, scores = _sentinel_storage(inputs, device)
     with _torch_deterministic(warn_only=False), warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -3524,7 +3564,7 @@ def test_torch_deterministic_mode_prepares_and_every_run_raises_before_its_first
     for runner in (caller, own):
         out = runner()
         torch.cuda.synchronize()
-        assert _same_sets(out, expected)
+        assert naive.same_ids(out, expected)
 
 
 def _ours(record, entry: str) -> list:
@@ -3543,7 +3583,7 @@ def test_torch_deterministic_warn_only_warns_once_per_call_and_runs():
     runs: the selected sets are those outside the mode.  Preparing a runner and the workspace bound never warn."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=111, device="cuda"
     )
     expected = _cloned(_run(inputs))
@@ -3570,8 +3610,8 @@ def test_torch_deterministic_warn_only_warns_once_per_call_and_runs():
             assert _points_at_this_file(alerts[0]), alerts[0].filename
     torch.cuda.synchronize()
     for i, out in enumerate(outs):
-        assert _same_sets(out, expected), i
-    _judge_ok(outs[-1], ref.select_reference(inputs))
+        assert naive.same_ids(out, expected), i
+    naive.assert_exact(outs[-1], inputs, ordered=False)
 
 
 def test_torch_deterministic_mode_graph_replay_is_host_free():
@@ -3579,10 +3619,11 @@ def test_torch_deterministic_mode_graph_replay_is_host_free():
     under ``torch.use_deterministic_algorithms(True)`` neither raises nor warns and selects the eager call's sets,
     while a direct run of the same runner under the mode raises."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=112, device="cuda"
     )
     expected = _cloned(_run(inputs))
+    naive.assert_exact(expected, inputs, ordered=False)
     runner = _prepare(inputs)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
@@ -3602,7 +3643,7 @@ def test_torch_deterministic_mode_graph_replay_is_host_free():
         with pytest.raises(RuntimeError, match=_alert_match(RUN_ENTRY)):
             runner()
     _assert_ticket_tail_zero(runner)
-    assert _same_sets(captured, expected)
+    assert naive.same_ids(captured, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -3669,7 +3710,7 @@ def test_offsets_placeholder_is_one_never_written_tensor_per_device():
     assert scales.dtype == torch.float32 and scales.numel() == 1
     before = holder.clone()
     for n, (seg_q, seg_k, top_k) in enumerate(_EAGER_GEOMETRIES):
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             seg_q, seg_k, top_k=top_k, seed=93 + n, device="cuda"
         )
         assert inputs.q_causal_offsets is None
@@ -3678,10 +3719,10 @@ def test_offsets_placeholder_is_one_never_written_tensor_per_device():
         assert runner.tensors["K_scale"] is scales
         expected = _cloned(runner())
         for _ in range(2):
-            assert _same_sets(runner(), expected)
-            assert _same_sets(_run(inputs), expected)
+            assert naive.same_ids(runner(), expected)
+            assert naive.same_ids(_run(inputs), expected)
         torch.cuda.synchronize()
-        _judge_ok(expected, ref.select_reference(inputs))
+        naive.assert_exact(expected, inputs, ordered=False)
     assert torch.equal(holder, before)
 
 
@@ -3692,11 +3733,12 @@ def test_eager_entry_launches_nothing_before_its_scan(monkeypatch, tmp_path, geo
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
     seg_q, seg_k, top_k = _EAGER_GEOMETRIES[geometry]
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=95 + geometry, device="cuda"
     )
     call = _EagerCall(monkeypatch, inputs, device)
     expected = _cloned(call())  # loads the programs and makes the device's placeholders
+    naive.assert_exact(expected, inputs, ordered=False)
     ops = _device_ops(call, tmp_path, f"eager{geometry}")
     runner = call.runners[-1]
     assert ops == _expected_ops(runner), (ops, runner.stages)
@@ -3706,7 +3748,7 @@ def test_eager_entry_launches_nothing_before_its_scan(monkeypatch, tmp_path, geo
     assert runner.tensors["q_offsets"] is cake_backend._offsets_placeholder(
         device.index
     )
-    assert _same_sets((call.indices, call.scores), expected)
+    assert naive.same_ids((call.indices, call.scores), expected)
 
 
 @pytest.mark.parametrize("first_use", ["before_capture", "in_capture"])
@@ -3719,9 +3761,10 @@ def test_eager_entry_graph_capture_holds_only_the_runner_launches(
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
     seg_q, seg_k, top_k = _EAGER_GEOMETRIES[0]
-    inputs = ref.make_random_inputs(seg_q, seg_k, top_k=top_k, seed=97, device="cuda")
+    inputs = ref.make_integer_inputs(seg_q, seg_k, top_k=top_k, seed=97, device="cuda")
     call = _EagerCall(monkeypatch, inputs, device)
     expected = _cloned(call())  # loads the programs and makes the device's placeholders
+    naive.assert_exact(expected, inputs, ordered=False)
     kept = cake_backend._offsets_placeholder(device.index)
     if first_use == "in_capture":
         monkeypatch.setattr(cake_backend, "_UNREAD_PLACEHOLDERS", {})
@@ -3738,15 +3781,15 @@ def test_eager_entry_graph_capture_holds_only_the_runner_launches(
         assert runner.tensors["q_offsets"] is kept
     ops = _device_ops(graph.replay, tmp_path, f"graph_{first_use}")
     assert ops == _expected_ops(runner), (ops, runner.stages)
-    assert _same_sets(captured, expected)
-    fresh = ref.make_random_inputs(seg_q, seg_k, top_k=top_k, seed=98, device="cuda")
+    assert naive.same_ids(captured, expected)
+    fresh = ref.make_integer_inputs(seg_q, seg_k, top_k=top_k, seed=98, device="cuda")
     inputs.q.copy_(fresh.q)
     inputs.k.copy_(fresh.k)
     inputs.w.copy_(fresh.w)
     graph.replay()
     torch.cuda.synchronize()
     replayed = _cloned(captured)
-    assert _same_sets(replayed, _run(fresh))
-    assert _same_sets(call(), replayed)
+    assert naive.same_ids(replayed, _run(fresh))
+    assert naive.same_ids(call(), replayed)
     torch.cuda.synchronize()
-    _judge_ok(replayed, ref.select_reference(inputs))
+    naive.assert_exact(replayed, inputs, ordered=False)

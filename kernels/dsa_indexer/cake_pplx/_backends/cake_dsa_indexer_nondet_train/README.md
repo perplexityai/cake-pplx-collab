@@ -10,11 +10,9 @@ top-k 2048.
 This package runs the deterministic package's BF16 scan programs and its plain
 split merge unchanged.  It leaves out the ordering pass, which is the
 deterministic package's finalize / rank finalize that sorts every row into
-ascending id order.  The scores are the same, and each row holds the same
-selected set in a different slot order.  The package implements the
-set-equality semantics: per row,
-the set of selected `(id, score bits)` pairs repeats bit for bit, but the slot
-order does not.
+ascending id order.  The package implements the set-equality semantics: a
+row's selected ids are a set, written in no specified slot order.  No output
+is promised to repeat bit for bit between calls.
 
 The entry points of `cake_pplx.cake_dsa_indexer_nondet_train` are stable
 APIs.  This backend package under `cake_pplx/_backends/` is
@@ -31,7 +29,7 @@ this package").
 Every public name carries the mode word `nondet`, and no entry point takes a
 `deterministic=` keyword.  The deterministic package is
 `cake_pplx.cake_dsa_indexer_det_train`.  It runs the same scan programs and
-returns the same set per row in ascending id order.  The backend's own names
+writes every row in ascending id order.  The backend's own names
 also carry the mode word (`prepare_dsa_indexer_nondet_topk`,
 `DSAIndexerNondetRunner`, `plan_dsa_indexer_nondet_topk`,
 `validate_dsa_indexer_nondet_inputs`).  The generated programs are named
@@ -112,19 +110,14 @@ padding.
 
 ## Outputs
 
-The "repeats" column holds for identical inputs and configuration: the same
-device, the same SM count and the same arguments.
+| output | contents | not specified |
+|---|---|---|
+| `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids, unique within the row, and `-1` in every other slot | the slot order of the selected ids and the positions of the `-1` slots; both may vary between calls |
+| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot, with its computed FP32 bits (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | the slot order, which follows `indices` |
 
-| output | contents | repeats bit for bit | not specified |
-|---|---|---|---|
-| `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids, unique within the row, and `-1` in every other slot | the set of selected ids of every row, and with it the row's count of valid (non-`-1`) slots | the slot order of the selected ids and the positions of the `-1` slots; both may vary between calls |
-| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot, with its computed FP32 bits (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | each selected id's score bits, so the set of `(id, score bits)` pairs of every row | the slot order, which follows `indices` |
-
-* A row holds the same ids and score bits that the deterministic package
-  returns for it, because both packages run the same scan programs.  Only the
-  slot order differs.  A caller that needs ascending id order can sort the row
-  or use the deterministic package.  The following rearranges every row into
-  the deterministic package's layout (ascending ids, padding last):
+* A caller that needs ascending id order can sort the row or use the
+  deterministic package.  The following rearranges every row into ascending
+  ids, padding last:
 
   ```python
   key = indices.masked_fill(indices < 0, torch.iinfo(torch.int32).max)
@@ -145,7 +138,7 @@ s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])
 Products, accumulation and score arithmetic are FP32.  There is no BF16
 intermediate rounding and no fast-math (IEEE round-to-nearest, no
 flush-to-zero).  The scan programs are the deterministic package's BF16 scan
-programs, so a pair's score bits are that package's bits.  Every program
+programs.  Every program
 evaluates the score in one fixed sequence.  The score of a pair therefore
 depends only on `(q[t], k[j], w[t], softmax_scale)`, not on which program,
 CTA, tile or warp evaluates it:
@@ -165,9 +158,7 @@ CTA, tile or warp evaluates it:
 Every head term therefore sees at most 11 roundings after the MMA.  Two
 independent FP32 evaluations of one score differ by at most `gamma_n * A`,
 with `n = 2D + 4H + 4 = 388`, `gamma_n = n u / (1 - n u)`, `u = 2 ** -24` and
-`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|`.  The deterministic
-package's tests enforce this bound against an independent FP64 / FP32
-reference, and this package's score bits are the same.
+`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|`.
 
 **Signed zeros.**  Every chain accumulator starts at `+0.0` and the FMA order
 is fixed.  Because `fma(+0, w', +0) = +0` for either sign of `w'`, a row whose
@@ -175,10 +166,11 @@ head terms are all zero yields `+0.0`.  A `-0.0` score cannot come from this
 reduction (registry field `NUMERICS["zero_sign_policy"] =
 "positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, and
 an equal-score tie goes to the larger key id.  The written score keeps the
-computed bits and is never canonicalized.  The reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` follows the same reduction
-model, so the bit-exact test cases compare like with like after each row is
-canonicalized (see "Tests and benchmark").
+computed bits and is never canonicalized.  The tests hold the signed-zero
+cases to the exact selection of
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` after each row
+is canonicalized, and check that every zero score is `+0.0` (see "Tests and
+benchmark").
 
 ## Visibility
 
@@ -452,23 +444,29 @@ There are four test files:
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_names.py`: the
   naming rules.
 
-They share the independent FP64 / FP32 reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` with the deterministic
-package.  Results are compared after each row is canonicalized: valid slots
-sorted by id with their score bits, padding last.  The comparisons therefore
-check sets, not slot order.  Coverage:
+They share the reference in
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and the
+naive-tier judge in `tests/experimental/test_helpers/cake_dsa_indexer_naive.py`
+(on `tests/cake_naive.py`) with the deterministic package.  Results are
+compared after each row is canonicalized: valid slots sorted by id with their
+scores, padding last.  The comparisons therefore check sets, not slot order.
+On integer inputs every score is exact in FP32, so every call must return the
+exact selection's ids and valid counts.  Over 32 draws the scores are judged
+against their FP64 values beside the naive tier's (the same scores in torch
+BF16), on integer inputs and, at the kernel's own keys, on Gaussian inputs.
+No test compares the score bits of two calls.  Coverage:
 
 * registry and policy host tests: no ordering, rank or FP8 keys; a split plan
   runs the scan, then the merge; an unsplit plan runs the scan only;
 * validation;
-* accuracy against the reference for the exact semantic cases;
+* the exact semantic cases, held to the exact selection;
 * packed causality;
-* random inputs;
+* random rows, judged against the naive tier;
 * near ties;
 * the recorded token counts;
 * the ratio-4 pooled top-512 selection;
 * `top_k = 4096`;
-* set repeatability over five calls (the pairs and the valid count);
+* five eager calls and five prepared runs, each holding the exact selection;
 * split versus unsplit set equality, a forced split whose rows hold padding
   and a forced split that cuts a tie group;
 * non-finite inputs;
@@ -476,10 +474,9 @@ check sets, not slot order.  Coverage:
 * CUDA graphs and the absence of host synchronization;
 * the deterministic-algorithms guard.
 
-The comparison file checks that every row equals the deterministic package's
-row in another slot order (ids, score bits, valid count and padding), and
-that the registry keys, policy records and host plans of BF16 calls are the
-deterministic package's.
+The comparison file checks that the registry keys, policy records and host
+plans of BF16 calls are the deterministic package's, on the host and at the
+device's grid.  It does not compare the outputs of the two packages.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
 package against the deterministic package on the same rows.  It compares their

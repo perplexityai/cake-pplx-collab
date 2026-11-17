@@ -28,12 +28,13 @@ limitations under the License.
 #   (``_OWN_SAMPLING``: its ``sample_class_rule`` and the ``sample_long_rule`` the deterministic record has no field
 #   for), so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.  Whether a
 #   call samples, and every other decision, stays the deterministic one;
-# * every row on a device is the deterministic row in another slot order: the valid slots in ascending id order
-#   (``_canonical``) are bit-identical to the deterministic row, ids, score bits, valid count and tail padding.
+# * on a device, the calls of a list of operator geometries (random, packed, forced split, pooled, sink, exact cases,
+#   the recorded token counts) plan those decisions at the device's own grid.
 #
-# The host tests run without a GPU; the device tests need a compute capability 10.0 / 10.3 / 10.7 device with the
-# generated programs of both packages registered and skip otherwise.  Both packages are named through
-# ``tests.cake.test_helpers.cake_package``, as their own suites do.
+# The outputs of the two packages are not compared: each package's rows are held to the exact contract and judged
+# against the naive tier by its own suite.  The host tests run without a GPU; the device plan tests need a compute
+# capability 10.0 / 10.3 / 10.7 device with the generated programs of both packages registered and skip otherwise.
+# Both packages are named through ``tests.cake.test_helpers.cake_package``, as their own suites do.
 
 import dataclasses
 import itertools
@@ -63,8 +64,6 @@ _PLAN_FIELDS = tuple(
     for f in dataclasses.fields(cake_policy.ProgramChoice)
     if f.name != "merge_key"
 )
-# sorts after every int32 id: the padding of a row goes behind its valid slots
-_PAD_SORT_KEY = 1 << 32
 
 P1_CU_SEQLENS_Q = (0, 1777, 3532, 5655, 7765, 9888, 11998, 14121, 16231)
 P1_CU_SEQLENS_K = (0, 1777, 58619, 60742, 128665, 130788, 198711, 200834, 268757)
@@ -114,40 +113,6 @@ def _require_programs():
         pytest.skip("generated non-deterministic programs not registered")
     if not det_backend.generated_program_available(device):
         pytest.skip("generated deterministic programs not registered")
-
-
-# ---------------------------------------------------------------------------
-# Rows as sets
-# ---------------------------------------------------------------------------
-
-
-def _row_pairs(result) -> torch.Tensor:
-    """int64 ``[T, K]``: every slot as ``id << 32 | score bits``, each row sorted."""
-    ids, scores = result
-    bits = scores.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    return ((ids.to(torch.int64) << 32) | bits).sort(dim=1).values
-
-
-def _same_sets(a, b) -> bool:
-    """Per row the same valid count and the same (id, score bits) pairs; slot order and padding positions free."""
-    if tuple(a[0].shape) != tuple(b[0].shape) or tuple(a[1].shape) != tuple(b[1].shape):
-        return False
-    return bool(torch.equal((a[0] >= 0).sum(dim=1), (b[0] >= 0).sum(dim=1))) and bool(
-        torch.equal(_row_pairs(a), _row_pairs(b))
-    )
-
-
-def _canonical(result) -> tuple[torch.Tensor, torch.Tensor]:
-    """``result`` with every row in the deterministic package's slot order: the valid slots by ascending id with their
-    scores, then the padding (a stable per-row permutation)."""
-    ids, scores = result
-    key = torch.where(ids >= 0, ids.to(torch.int64), _PAD_SORT_KEY)
-    order = key.sort(dim=1, stable=True).indices
-    return ids.gather(1, order), scores.gather(1, order)
-
-
-def _cloned(out) -> tuple[torch.Tensor, torch.Tensor]:
-    return out[0].clone(), out[1].clone()
 
 
 # ---------------------------------------------------------------------------
@@ -340,30 +305,8 @@ def test_host_plans_under_the_partition_knobs_are_the_deterministic_plans():
 
 
 # ---------------------------------------------------------------------------
-# Device: rows
+# Device: plans at the device's grid
 # ---------------------------------------------------------------------------
-
-
-def _run(backend_entry, inputs: ref.IndexerInputs, **extra):
-    out = backend_entry(
-        inputs.q,
-        inputs.k,
-        inputs.w,
-        inputs.cu_seqlens_q,
-        inputs.cu_seqlens_k,
-        **inputs.kwargs(),
-        **extra,
-    )
-    assert isinstance(out, tuple) and len(out) == 2
-    return _cloned(out)
-
-
-def _run_both(inputs: ref.IndexerInputs, **extra):
-    """``(non-deterministic, deterministic)`` results of one call (eager entries, the same knobs)."""
-    nondet = _run(cake_backend.cake_dsa_indexer_nondet_train_topk, inputs, **extra)
-    det = _run(det_backend.cake_dsa_indexer_det_train_topk, inputs, **extra)
-    torch.cuda.synchronize()
-    return nondet, det
 
 
 def _device_plans(inputs: ref.IndexerInputs, **extra):
@@ -441,8 +384,8 @@ _P1_Q, _P1_K = _lengths(P1_CU_SEQLENS_Q), _lengths(P1_CU_SEQLENS_K)
 # name -> build() -> (inputs, knobs).  Random rows (iid, peaked, causal offsets on both sides, ratio 2), the packed
 # causality geometries of the reference (offsets, ratio 2, empty segments, singletons, short rows, top_k 1 and 4096),
 # forced split and unsplit calls (padded rows included), the ratio-4 pooled top-512 rows, top_k 4096, the
-# attention-sink rows under both far-sample settings, the exact semantic cases (cutoff ties, signed zeros, all-equal scores, ...) and the two
-# recorded token counts at their full key counts (no reference is computed here).
+# attention-sink rows under both far-sample settings, the exact semantic cases (cutoff ties, signed zeros, all-equal
+# scores, ...) and the two recorded token counts at their full key counts (only their plans are compared).
 _PARITY_CASES = {
     "random": _random([1100, 900, 1000], [1100, 20000, 1000], 2048, 1),
     "random_peaked": _random(
@@ -473,34 +416,15 @@ _PARITY_CASES = {
 
 
 @pytest.mark.parametrize("case", list(_PARITY_CASES))
-def test_rows_are_the_deterministic_rows_in_another_slot_order(case):
-    """On identical inputs and knobs, both packages plan the same scan program and split, and every row of this
-    package, its valid slots put in ascending id order, is bit-identical to the deterministic row: ids, score bits,
-    valid count and tail padding."""
+def test_device_plans_are_the_deterministic_plans(case):
+    """On identical inputs and knobs, at the device's own grid, the plan of this package has every decision of the
+    deterministic plan (``_assert_same_decisions``: scan program and its identity, split, grid, unit, capacity, check
+    period, sampling, segment order, pair, staging and workspace bytes, ticket decisions).  No program runs."""
     _require_programs()
     inputs, extra = _PARITY_CASES[case]()
     plan, det_plan = _device_plans(inputs, **extra)
-    assert (plan.scan_key, plan.n_split) == (det_plan.scan_key, det_plan.n_split)
+    _assert_same_decisions(cake_backend.arch_for(inputs.device), plan, det_plan, case)
     if case.startswith("forced_"):
         assert (plan.n_split > 1) == ("unsplit" not in case), plan.n_split
     if case == "forced_split_padded":
         assert bool((ref.visible_rows(inputs) < inputs.top_k).any())
-    nondet, det = _run_both(inputs, **extra)
-    assert ref.same_bits(_canonical(nondet), det), case
-
-
-def test_nonfinite_rows_are_the_deterministic_rows():
-    """NaN queries, infinite keys and overflowing products (``ref.make_nonfinite_inputs``): the finite segment's rows
-    are bit-identical to the deterministic rows in ascending id order, and every row, the non-finite ones included, has
-    the deterministic row's (id, score bits) pairs and valid count.  The non-finite rows are compared as sets: the
-    deterministic contract for them is unique visible ids in ascending order, with no reference that judges them, so
-    this comparison does not depend on where their padding sits."""
-    _require_programs()
-    inputs = ref.make_nonfinite_inputs("cuda")
-    nondet, det = _run_both(inputs)
-    clean = ref.clean_rows(inputs)
-    canonical = _canonical(nondet)
-    assert ref.same_bits(
-        (canonical[0][clean], canonical[1][clean]), (det[0][clean], det[1][clean])
-    )
-    assert _same_sets(nondet, det)

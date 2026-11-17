@@ -89,9 +89,12 @@ Every row is measured in three paired phases -- the arms in the given order
 (``IL``) -- and the medians of each phase and of all samples are reported
 together with the wrapper-inclusive wall time, the peak extra device memory
 beyond inputs / outputs / workspace, and the explicit workspace bytes of the
-``cake`` arm.  ``--verify`` judges every arm against the FP64 / FP32
-reference of ``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
-only; the reference scores every visible pair).
+``cake`` arm.  ``--verify`` compares every arm with the FP64 selection of
+``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
+only; the reference scores every visible pair): the structure checks, and the
+number of rows whose ids equal the FP64 selection's, as information (on
+Gaussian inputs the FP32 rounding may reorder keys whose FP64 scores are
+near-tied).
 
 FP8 mode (``--form fp8``): the inputs are float8_e4m3fn ``q`` / ``k`` with
 per-key FP32 ``k_scale`` (``ref.make_fp8_inputs``: amax scaling per (query,
@@ -1198,8 +1201,12 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
             data = arm_inputs[arm_name]
             if id(data) not in references:
                 references[id(data)] = ref.select_reference(data)
-            verdict = ref.judge(out, references[id(data)])
-            result["arms"][arm_name]["verdict"] = str(verdict).splitlines()[0]
+            failures, rows, same = ref.compare_selection(out, references[id(data)])
+            result["arms"][arm_name]["verdict"] = (
+                f"structure {failures[0]}"
+                if failures
+                else f"{same}/{rows} rows hold the FP64 selection's ids"
+            )
     if (
         len(row["seg_q"]) == 1
         and row["seg_q"][0] == row["seg_k"][0]
@@ -1293,7 +1300,7 @@ def main():
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="judge every arm against the FP64 / FP32 reference (small rows)",
+        help="compare every arm with the FP64 selection: structure, rows identical (small rows)",
     )
     parser.add_argument(
         "--main-package",

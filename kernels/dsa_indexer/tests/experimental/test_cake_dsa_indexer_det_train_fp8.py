@@ -24,6 +24,13 @@ limitations under the License.
 #
 # Like ``test_cake_dsa_indexer_det_train.py`` this suite names the package once, through
 # ``tests.cake.test_helpers.cake_package``, and imports nothing else from cake_pplx.
+#
+# Accuracy (``tests/experimental/test_helpers/cake_dsa_indexer_naive.py``): on integer e4m3 inputs with per-key scales
+# that are not powers of two (``ref.make_integer_fp8_inputs``) every head sum is exact and the scale multiply rounds
+# once, so the ids and counts equal the exact selection; the scores are judged over 32 draws against their FP64
+# values beside the naive tier's (the same scores in torch BF16 from the e4m3 values), on those inputs and at the
+# kernel's own keys on a serving stack's amax-quantized inputs (``ref.make_fp8_inputs``).  Bitwise checks: a call
+# repeats bit for bit and the dispatched FP8 program never changes a result.
 
 import copy
 import importlib.util
@@ -32,6 +39,7 @@ import itertools
 import pytest
 import torch
 
+from tests.experimental.test_helpers import cake_dsa_indexer_naive as naive
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -973,12 +981,6 @@ def _cloned(out):
     return out[0].clone(), out[1].clone()
 
 
-def _judge_ok(result, reference) -> ref.Judgement:
-    verdict = ref.judge(result, reference)
-    assert verdict.passed, str(verdict)
-    return verdict
-
-
 def _scan_argument(runner, name: str):
     (scan,) = [launch for launch in runner.launches if launch.role == "scan"]
     plan = cake_backend.ARG_PLANS["scan"]
@@ -1024,19 +1026,35 @@ _ACCURACY = {
 
 
 @pytest.mark.parametrize("name", sorted(_ACCURACY))
-def test_fp8_random_accuracy_within_bound(name):
-    """FP8 rows against the FP64 score of the e4m3 inputs: every returned score within ``gamma_n * A`` and the
-    selected ids exact up to near ties; repeated calls are bitwise identical."""
+def test_fp8_random_rows_meet_the_naive_tier(name, record_property):
+    """FP8 rows over 32 draws of integer e4m3 inputs (the exact selection's ids and counts, the scores judged against
+    the naive tier) and 32 draws of amax-quantized Gaussian e4m3 inputs (the scores judged at the kernel's own keys);
+    the plan is the FP8 form's, and a second call on the first draw of each kind repeats bit for bit."""
     _require_fp8_program()
-    inputs = ref.make_fp8_inputs(seed=31, device="cuda", label=name, **_ACCURACY[name])
-    plan = _plan(inputs)
+    probe = ref.make_integer_fp8_inputs(seed=31, device="cuda", label=name, **_ACCURACY[name])
+    plan = _plan(probe)
     assert scan_key_form(plan.scan_key) == FP8 and not plan.pair
     if _ACCURACY[name] is _S1:
         _assert_fp8_wide_on_wide_arches(plan)
-    out = _cloned(_run(inputs))
-    torch.cuda.synchronize()
-    _judge_ok(out, ref.select_reference(inputs))
-    assert ref.same_bits(_run(inputs), out)
+
+    def repeat(j, inputs, out, reference):
+        if j == 0:
+            assert ref.same_bits(_run(inputs), out)
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_fp8_inputs(seed=s, device="cuda", label=name, **_ACCURACY[name]),
+        _run,
+        seed=31,
+        check=repeat,
+    )
+    naive.judge_gaussian(
+        record_property,
+        lambda s: ref.make_fp8_inputs(seed=s, device="cuda", label=name, **_ACCURACY[name]),
+        _run,
+        seed=31,
+        check=repeat,
+    )
 
 
 def test_fp8_empty_rows_and_no_keys_are_all_padding():
@@ -1052,15 +1070,16 @@ def test_fp8_empty_rows_and_no_keys_are_all_padding():
 # two segments of unequal key length, each with more units than CTAs: the longest-first order and the ticket draws
 # that continue into the shorter segment differ from the plain order's
 _UNEQUAL2 = dict(seg_q_len=[4096, 4096], seg_k_len=[200000, 20000], top_k=2048)
-# the rows of ``_UNEQUAL2`` judged against the reference, (segment, first row in the segment, rows): the first and the
+# the rows of ``_UNEQUAL2`` held to the exact selection, (segment, first row in the segment, rows): the first and the
 # last rows of each segment
 _UNEQUAL2_JUDGED = [(0, 0, 64), (0, 4032, 64), (1, 0, 64), (1, 4032, 64)]
 
 
 def _row_blocks_reference(inputs, blocks):
     """The positions in ``inputs`` of the rows ``blocks`` (segment, first row in the segment, rows) and their
-    reference: every block is one segment of a smaller problem over its segment's keys, with the causal offset
-    moved by the block's first row, so each row sees the keys it sees in ``inputs``."""
+    exact selection (integer inputs, ``ref.exact_selection``): every block is one segment of a smaller problem over
+    its segment's keys, with the causal offset moved by the block's first row, so each row sees the keys it sees in
+    ``inputs``.  Returns ``(rows, sub-problem, its exact selection)``."""
     q_starts, k_starts = inputs.query_starts(), inputs.key_starts()
     offsets = inputs.offsets()
     rows = torch.cat(
@@ -1084,7 +1103,7 @@ def _row_blocks_reference(inputs, blocks):
         ratio=inputs.ratio,
         k_scale=torch.cat([inputs.k_scale[a:b] for a, b in keys]),
     )
-    return rows, ref.select_reference(sub)
+    return rows, sub, ref.exact_selection(sub)
 
 
 @pytest.mark.parametrize(
@@ -1099,8 +1118,9 @@ def _row_blocks_reference(inputs, blocks):
 def test_fp8_dispatch_invariance_over_every_registered_program(monkeypatch, shape):
     """Every FP8 program of the device's architecture, forced on the same call (the planned capacity, check period,
     sampling and finalize; the split and unit geometry of the forced key), returns the dispatched program's ids and
-    score bits: within one architecture the dispatched FP8 program never changes a result.  The packed call is judged
-    against the reference, ``_UNEQUAL2`` on the rows of ``_UNEQUAL2_JUDGED``; on ``_S1`` and ``_UNEQUAL2`` every unit
+    score bits: within one architecture the dispatched FP8 program never changes a result.  Checked on amax-quantized
+    Gaussian inputs (whose FP32 sums round) and on integer inputs; on the integer inputs the packed call is held to the
+    exact selection, ``_UNEQUAL2`` on the rows of ``_UNEQUAL2_JUDGED``; on ``_S1`` and ``_UNEQUAL2`` every unit
     kind outnumbers the CTAs, so a drawing program draws tickets, and on ``_UNEQUAL2`` the draws cross from one segment
     into the other in both segment orders."""
     _require_fp8_program()
@@ -1109,41 +1129,41 @@ def test_fp8_dispatch_invariance_over_every_registered_program(monkeypatch, shap
     keys = sorted(
         key for key in cake_jit.PROGRAM_KEYS.get(arch, {}) if scan_key_form(key) == FP8
     )
-    inputs = ref.make_fp8_inputs(seed=41, device="cuda", **shape)
-    rows, reference = None, None
-    if shape is _UNEQUAL2:
-        rows, reference = _row_blocks_reference(inputs, _UNEQUAL2_JUDGED)
-    elif shape is not _S1:
-        reference = ref.select_reference(inputs)
     original = cake_backend.plan_dsa_indexer_det_topk
-    for sample in (None, 0):
-        extra = {} if sample is None else {"sample_tiles_max": sample}
-        expected = _cloned(_run(inputs, **extra))
-        torch.cuda.synchronize()
-        if rows is not None:
-            _judge_ok(tuple(x.index_select(0, rows) for x in expected), reference)
-        elif reference is not None:
-            _judge_ok(expected, reference)
-        for key in keys:
-
-            def forced(*args, _key=key, **kwargs):
-                return fp8_program_choice(policy, original(*args, **kwargs), _key)
-
-            monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", forced)
-            runner = _prepare(inputs, **extra)
-            assert runner.choice.scan_key == key and runner.form == FP8
-            assert runner.programs["scan"] == cake_jit.PROGRAM_KEYS[arch][key]
-            got = _cloned(runner())
+    for make in (ref.make_fp8_inputs, ref.make_integer_fp8_inputs):
+        inputs = make(seed=41, device="cuda", **shape)
+        exact = make is ref.make_integer_fp8_inputs
+        rows = sub = reference = None
+        if exact and shape is _UNEQUAL2:
+            rows, sub, reference = _row_blocks_reference(inputs, _UNEQUAL2_JUDGED)
+        for sample in (None, 0):
+            extra = {} if sample is None else {"sample_tiles_max": sample}
+            expected = _cloned(_run(inputs, **extra))
             torch.cuda.synchronize()
-            assert ref.same_bits(got, expected), (arch, key, sample)
-            monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", original)
+            if rows is not None:
+                naive.assert_exact(tuple(x.index_select(0, rows) for x in expected), sub, reference)
+            elif exact and shape is not _S1:
+                naive.assert_exact(expected, inputs)
+            for key in keys:
+
+                def forced(*args, _key=key, **kwargs):
+                    return fp8_program_choice(policy, original(*args, **kwargs), _key)
+
+                monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", forced)
+                runner = _prepare(inputs, **extra)
+                assert runner.choice.scan_key == key and runner.form == FP8
+                assert runner.programs["scan"] == cake_jit.PROGRAM_KEYS[arch][key]
+                got = _cloned(runner())
+                torch.cuda.synchronize()
+                assert ref.same_bits(got, expected), (arch, key, sample, make.__name__)
+                monkeypatch.setattr(cake_backend, "plan_dsa_indexer_det_topk", original)
 
 
 def test_fp8_prepared_runner_binds_k_scale():
     """The runner binds ``k_scale`` with ``q`` / ``k``: values written into it are read by the next run (doubling every
     scale doubles every score exactly and keeps the ids); a BF16 runner binds the never-read placeholder."""
     _require_fp8_program()
-    inputs = ref.make_fp8_inputs(
+    inputs = ref.make_integer_fp8_inputs(
         [300, 200], [3000, 6000], top_k=512, seed=43, device="cuda"
     )
     runner = _prepare(inputs)
@@ -1155,7 +1175,7 @@ def test_fp8_prepared_runner_binds_k_scale():
     )
     first = _cloned(runner())
     torch.cuda.synchronize()
-    _judge_ok(first, ref.select_reference(inputs))
+    naive.assert_exact(first, inputs)
     inputs.k_scale.mul_(2.0)
     second = _cloned(runner())
     torch.cuda.synchronize()
@@ -1237,7 +1257,7 @@ def test_fp8_ticket_decision_is_per_form_and_exact_on_a_poisoned_workspace():
 def test_fp8_workspace_bound_is_respected(shape):
     _require_fp8_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_fp8_inputs(seed=53, device="cuda", **shape)
+    inputs = ref.make_integer_fp8_inputs(seed=53, device="cuda", **shape)
     if shape is _S1:
         _assert_fp8_wide_on_wide_arches(_plan(inputs))
     nbytes = cake_dsa_indexer_det_train_topk_workspace_size(
@@ -1261,7 +1281,7 @@ def test_fp8_workspace_bound_is_respected(shape):
     out = runner()
     torch.cuda.synchronize()
     assert torch.cuda.memory_stats()["allocation.all.allocated"] == before
-    _judge_ok(out, ref.select_reference(inputs))
+    naive.assert_exact(out, inputs)
     with pytest.raises(ValueError, match="workspace_buffer needs"):
         _prepare(inputs, workspace_buffer=workspace[: runner.workspace_bytes - 8])
 

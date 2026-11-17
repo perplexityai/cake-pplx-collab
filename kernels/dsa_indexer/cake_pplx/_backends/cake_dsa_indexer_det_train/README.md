@@ -106,8 +106,7 @@ on which program, CTA, tile or warp evaluates it:
 Every head term therefore sees at most 11 roundings after the MMA, and two
 independent FP32 evaluations of one score differ by at most `gamma_n * A`
 with `n = 2D + 4H + 4 = 388`, `gamma_n = n u / (1 - n u)`, `u = 2 ** -24` and
-`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|` (the bound the tests
-enforce against an independent FP64 / FP32 reference).
+`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|`.
 
 **Signed zeros.**  Every chain accumulator is initialised to `+0.0` and the
 FMA order is fixed, and `fma(+0, w', +0) = +0` for either sign of `w'`, so a
@@ -115,9 +114,10 @@ row whose head terms are all zero yields `+0.0`; a `-0.0` score cannot arise
 from this reduction (registry field `NUMERICS["zero_sign_policy"] =
 "positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, an
 equal-score tie goes to the larger key id, and the written score keeps the
-computed bits -- it is never canonicalised.  The reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` follows the same reduction
-model, so the bit-exact test cases compare like with like.
+computed bits -- it is never canonicalised.  The tests hold the signed-zero
+cases to the exact selection of
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and check that
+every zero score is `+0.0`.
 
 ## FP8 form
 
@@ -140,9 +140,9 @@ s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j, d])
   programs reproduce bit for bit; two K = 64 steps on `sm_107a`, whose logits
   can differ from DeepGEMM's in the last bits.
 * **Head reduction**: the sum over the heads of `w[t, h] * relu(logit)` and
-  its product with `k_scale[j]` are FP32; the tests bound the score like the
-  BF16 form (`gamma_n * A` against an FP64 score of the e4m3 inputs, `A`
-  scaled by `|k_scale[j]|`).
+  its product with `k_scale[j]` are FP32; the tests judge the score like the
+  BF16 form (against its FP64 value from the e4m3 inputs, beside the naive
+  tier's).
 * **Invariance**: every FP8 program of one architecture computes the same ids
   and score bits (program-dispatch invariance holds per form and
   architecture).  FP8 results are not BF16 results of the dequantized
@@ -412,23 +412,30 @@ imports the package only through `tests/cake/test_helpers/cake_package.py`),
 `tests/experimental/test_cake_dsa_indexer_det_train_api.py` (the
 `cake_pplx.cake_dsa_indexer_det_train` entry points) and
 `tests/experimental/test_cake_dsa_indexer_det_train_names.py` (the naming
-rules), with the independent
-FP64 / FP32 reference in `tests/experimental/test_helpers/cake_dsa_indexer_reference.py`
-(exact semantic cases incl. cutoff ties, all-equal scores, mixed signed zeros
-at the boundary with bit checks, negative scores and a few winners over a
-large tie; packed causality incl. explicit positive and negative offsets,
-`ratio = 2`, empty and singleton segments, short rows, `top_k = 1` and
-`4096`; random-input accuracy under the `gamma_n A` bound; near ties; both
-recorded token counts; tile-boundary neighbours; changing shapes; bitwise
+rules), with the reference in
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and the
+naive-tier judge in `tests/experimental/test_helpers/cake_dsa_indexer_naive.py`
+(on `tests/cake_naive.py`).  On integer inputs every score is exact in FP32,
+so the ids and valid counts must equal the exact selection.  Over 32 draws
+the scores are judged against their FP64 values beside the naive tier's (the
+same scores in torch BF16), on integer inputs and, at the kernel's own keys,
+on Gaussian inputs.  Coverage: exact semantic cases incl. cutoff ties,
+all-equal scores, mixed signed zeros at the boundary with bit checks,
+negative scores and a few winners over a large tie; packed causality incl.
+explicit positive and negative offsets, `ratio = 2`, empty and singleton
+segments, short rows, `top_k = 1` and `4096`; random rows judged against the
+naive tier; near ties; both recorded token counts; tile-boundary neighbours;
+changing shapes; bitwise
 repeatability, partition-knob and program-dispatch invariance; strided `k`;
-non-finite inputs; CUDA-graph capture; the workspace bound).  The host-only
+non-finite inputs; CUDA-graph capture; the workspace bound.  The host-only
 tests (registry shape, dispatch policy, validation, binding, the reference
 itself) run without a GPU.  The FP8 form has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_fp8.py`: host-only key grammar,
 FP8 record, kind mapping and reachability of every registered FP8 key,
-validation and BF16 plan / workspace identity; on the GPU, accuracy against
-an FP64 reference of the e4m3 inputs under the `gamma_n A` bound with exact
-ids up to near ties, bitwise program-dispatch invariance over every
+validation and BF16 plan / workspace identity; on the GPU, the exact
+selection's ids and counts on integer e4m3 inputs and the scores judged
+against the naive tier (integer and amax-quantized Gaussian e4m3 inputs),
+bitwise program-dispatch invariance over every
 registered FP8 key, the prepared runner's `k_scale` binding, the per-form
 ticket decision and, where `deep_gemm` imports on `sm_100a` / `sm_103a`, a
 bitwise comparison of the logits with `deep_gemm.fp8_mqa_logits`.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
