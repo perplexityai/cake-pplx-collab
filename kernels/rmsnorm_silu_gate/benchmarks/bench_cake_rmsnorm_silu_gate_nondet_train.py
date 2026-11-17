@@ -39,7 +39,7 @@ Every row times, for both modes, on identical generated inputs:
 
 Each package picks its kernels from the rows and the SM count.  The
 non-deterministic forward of packed rows (the benchmark's inputs) runs its tiny
-forward up to 38 rows per SM on SM100, 36 on SM103 and 65 on SM107 and past
+forward up to 36 rows per SM on SM100 and SM103 and 65 on SM107 and past
 that its mid, long, extra-long or pipelined forward (its copy of the
 deterministic forward) by bands of rows per SM (``cake_jit.FORWARD_BANDS``).
 Its backward runs one cluster of 16 CTAs for few rows, else one kernel by bands

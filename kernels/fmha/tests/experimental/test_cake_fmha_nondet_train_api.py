@@ -30,9 +30,10 @@ every documented ``ValueError`` (dtype, device, layout, rank, shapes, head dimen
 lengths, grid and index limits, a non-finite scale, a base not 16-byte aligned); under
 ``torch.use_deterministic_algorithms`` the alert (a ``RuntimeError``; with ``warn_only=True`` one ``UserWarning``,
 then the results meet the tier); an empty batch returns empty gradients and alerts nothing; the launches run on the
-current stream without synchronizing; a device outside the exported architectures is a ``RuntimeError``; with two
-devices, operands on the device that is not current give results there that meet the tier, and operands on two devices
-are a ``ValueError``.  The package promises no bits: no test compares two runs bit for bit. """
+current stream without synchronizing; a call captured in a CUDA graph replays to results that meet the tier; a device
+outside the exported architectures is a ``RuntimeError``; with two devices, operands on the device that is not current
+give results there that meet the tier, and operands on two devices are a ``ValueError``.  The package promises no bits:
+no test compares two runs bit for bit. """
 
 from __future__ import annotations
 
@@ -458,6 +459,28 @@ def test_runs_on_the_current_stream_without_synchronizing() -> None:
     side.synchronize()
     assert pending, "the call synchronized: the sleep kernel queued before it had finished"
     assert_backward_contract("on a side stream", x, _grads(*got))
+
+
+def test_a_call_captured_in_a_cuda_graph_replays(record_property) -> None:
+    """A call captured in a CUDA graph (its launches go to the capture stream): after its gradients are filled with
+    NaN, the replay writes every element and the results meet the tier."""
+    device = _device_or_skip()
+    x = make_inputs(Case(2, 3, 256, 384), 128, causal=False, seed=31, device=device)
+    api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)  # loads the libraries before a capture
+
+    def draw(seed: int):
+        x = make_inputs(Case(2, 3, 256, 384), 128, causal=False, seed=seed, device=device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+        for t in got:
+            t.fill_(math.nan)
+        graph.replay()
+        torch.cuda.synchronize(device)
+        assert_backward_contract("replayed", x, _grads(*got))
+        return judged_backward(x, {"replayed": _grads(*got)})
+
+    judge_draws(record_property, draw)
 
 
 def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:

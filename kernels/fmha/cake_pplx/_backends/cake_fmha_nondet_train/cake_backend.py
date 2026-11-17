@@ -58,7 +58,6 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 import torch
-import tvm_ffi
 
 from . import cake_build, cake_jit
 
@@ -207,13 +206,54 @@ def _launch(stage: str, name: str, values: Mapping[str, Any], dims: Mapping[str,
         except KeyError:
             raise ValueError(f"record {name} needs argument {key!r}") from None
     grid = cake_jit.grid(stage, dims["B"], dims["H"], dims["Sq"], dims["Skv"])
-    with torch.cuda.device(index), tvm_ffi.use_torch_stream():
-        _entry(name, arch)(*args, int(grid[0]), int(grid[1]), int(grid[2]))
+    # tvm-ffi runs the call on the current torch stream of the device of its first CUDA tensor argument (every
+    # buffer is on ``device``), and the binding makes that device current for the launch.
+    _entry(name, arch)(*args, int(grid[0]), int(grid[1]), int(grid[2]))
 
 
 def _fp32(value: float) -> float:
     """``value`` rounded to FP32 (round to nearest even), as a Python float."""
     return struct.unpack("f", struct.pack("f", value))[0]
+
+
+# The kernel parameters of each stage in the order its stage launcher passes them positionally (``_positional``).
+_POSITIONAL = {
+    "bwd_pre": ("O", "dO", "LSE", "LSE_log2", "dPsum", "dQ_accum", "seqlen_q", "num_heads"),
+    "bwd_main": (
+        "dQ_accum",
+        "LSE_log2_gmem",
+        "dPsum_gmem",
+        "dK_gmem",
+        "dV_gmem",
+        "Q",
+        "K",
+        "V",
+        "dO",
+        "dK",
+        "dV",
+        "seqlen_q",
+        "seqlen_kv",
+        "softmax_scale",
+        "softmax_scale_log2",
+        "num_m_blocks",
+        "num_heads",
+    ),
+    "bwd_post": ("dQ_accum", "dQ", "seqlen_q", "softmax_scale", "num_heads"),
+}
+
+
+@functools.cache
+def _positional(name: str, stage: str) -> bool:
+    """Whether record ``name`` serves ``stage``, takes the parameters of ``_POSITIONAL[stage]`` in that order and
+    :func:`.cake_jit.grid` gives ``stage`` the grid ``(S / BLOCK, H, B)``; its stage launcher then passes the
+    arguments positionally to the FFI entry, and otherwise launches through :func:`_launch`.  An unknown record is
+    the ``KeyError`` of :func:`record`."""
+    if record(name)["stage"] != stage or parameters(name) != _POSITIONAL[stage]:
+        return False
+    # Distinct sizes, each one row past a multiple of BLOCK: a swapped axis, another tile size or a rounded-up tile
+    # count gives another grid than the stage launchers' (S // BLOCK, H, B).
+    rows = 11 if stage == "bwd_main" else 7
+    return tuple(cake_jit.grid(stage, 3, 5, 7 * BLOCK + 1, 11 * BLOCK + 1)) == (rows, 5, 3)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -235,6 +275,9 @@ def launch_bwd_pre(
     ``lse`` is ``-inf``), FP32 ``[B*H, Sq]`` (row ``b*H + h``), and clears ``dq_accum`` (FP32, ``B*H*Sq*D``
     elements)."""
     B, Sq, H, _ = out.shape
+    if _positional(name, "bwd_pre"):
+        _entry(name, device_arch(out.device.index))(out, dout, lse, lse_log2, dpsum, dq_accum, Sq, H, Sq // BLOCK, H, B)
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Sq)}
     values = {
         "O": out,
@@ -270,6 +313,31 @@ def launch_bwd_main(
     B, Sq, H, _ = q.shape
     Skv = k.shape[1]
     scale = float(softmax_scale)
+    if _positional(name, "bwd_main"):
+        # The parameters of _POSITIONAL["bwd_main"] in order, then the grid (Skv // BLOCK, H, B).
+        _entry(name, device_arch(q.device.index))(
+            dq_accum,
+            lse_log2,
+            dpsum,
+            dk,
+            dv,
+            q,
+            k,
+            v,
+            dout,
+            dk,
+            dv,
+            Sq,
+            Skv,
+            scale,
+            _fp32(scale * LOG2_E),
+            Sq // BLOCK,
+            H,
+            Skv // BLOCK,
+            H,
+            B,
+        )
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Skv)}
     values = {
         "dQ_accum": dq_accum,
@@ -303,6 +371,9 @@ def launch_bwd_post(
     """Launch the postprocess record ``name``: it writes ``dq = bf16(dq_accum * softmax_scale)``, BF16
     ``[B, Sq, H, D]``, from the FP32 accumulator of the main stage."""
     B, Sq, H, _ = dq.shape
+    if _positional(name, "bwd_post"):
+        _entry(name, device_arch(dq.device.index))(dq_accum, dq, Sq, float(softmax_scale), H, Sq // BLOCK, H, B)
+        return
     dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Sq)}
     values = {
         "dQ_accum": dq_accum,
@@ -378,7 +449,8 @@ def _check(
     causal: bool,
 ) -> tuple[dict[str, int], float]:
     """The sizes ``B``, ``H``, ``Sq``, ``Skv``, ``D`` of a valid call and its ``softmax_scale``; ``ValueError``
-    otherwise.  The device check comes before anything that touches CUDA."""
+    otherwise.  The device check comes before anything that touches CUDA.  :func:`_accepted` repeats these checks
+    for the hot path: a change here needs the same change there."""
     operands = (("q", q), ("k", k), ("v", v), ("out", out), ("lse", lse), ("dout", dout))
     for name, t in operands:
         if not isinstance(t, torch.Tensor):
@@ -438,6 +510,80 @@ def _check(
     return {"B": B, "H": H, "Sq": Sq, "Skv": Skv, "D": D}, scale
 
 
+def _accepted(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    softmax_scale: Optional[float],
+    causal: bool,
+) -> Optional[tuple[int, int, int, int, int, float]]:
+    """``(B, H, Sq, Skv, D, softmax_scale)`` of a call that passes every check of :func:`_check`, found with the
+    cheapest tests in one pass; ``None`` when any of them fails (or an operand is a ``torch.Tensor`` subclass), and then
+    :func:`_check` runs and raises its error.  The backward also runs :func:`_check` when this function raises, so an
+    invalid call gets the error of :func:`_check` in every case."""
+    tensor = torch.Tensor
+    if not (
+        type(q) is tensor
+        and type(k) is tensor
+        and type(v) is tensor
+        and type(out) is tensor
+        and type(lse) is tensor
+        and type(dout) is tensor
+    ):
+        return None
+    bf16 = torch.bfloat16
+    if not (
+        q.dtype is bf16
+        and k.dtype is bf16
+        and v.dtype is bf16
+        and out.dtype is bf16
+        and dout.dtype is bf16
+        and lse.dtype is torch.float32
+    ):
+        return None
+    if not (q.is_cuda and k.is_cuda and v.is_cuda and out.is_cuda and lse.is_cuda and dout.is_cuda):
+        return None
+    index = q.get_device()
+    if not (
+        k.get_device() == index
+        and v.get_device() == index
+        and out.get_device() == index
+        and lse.get_device() == index
+        and dout.get_device() == index
+    ):
+        return None
+    shape = q.shape
+    kv_shape = k.shape
+    if len(shape) != 4 or len(kv_shape) != 4 or out.shape != shape or dout.shape != shape or v.shape != kv_shape:
+        return None
+    B, Sq, H, D = shape
+    Skv = kv_shape[1]
+    if kv_shape[0] != B or kv_shape[2] != H or kv_shape[3] != D or lse.shape != (B, H, Sq):
+        return None
+    if not (
+        q.is_contiguous()
+        and k.is_contiguous()
+        and v.is_contiguous()
+        and out.is_contiguous()
+        and lse.is_contiguous()
+        and dout.is_contiguous()
+    ):
+        return None
+    if D not in HEAD_DIMS or H < 1 or Sq < BLOCK or Sq % BLOCK or Skv < BLOCK or Skv % BLOCK:
+        return None
+    if (causal and Sq != Skv) or B > _MAX_GRID_YZ or H > _MAX_GRID_YZ or B * H * max(Sq, Skv) * D >= _MAX_ELEMENTS:
+        return None
+    if (q.data_ptr() | k.data_ptr() | v.data_ptr() | out.data_ptr() | dout.data_ptr()) % 16 or lse.data_ptr() % 4:
+        return None
+    scale = D**-0.5 if softmax_scale is None else float(softmax_scale)
+    if not math.isfinite(scale):
+        return None
+    return B, H, Sq, Skv, D, scale
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Backward
 
@@ -468,8 +614,16 @@ def cake_fmha_nondet_train_backward(
     (``warn_only=True``: one ``UserWarning``, then it runs).  An empty batch returns empty gradients without an
     alert.  The kernels run on the current stream of the operands' device; nothing synchronizes.
     """
-    dims, scale = _check(q, k, v, out, lse, dout, softmax_scale, bool(causal))
-    B, H, Sq, Skv, D = dims["B"], dims["H"], dims["Sq"], dims["Skv"], dims["D"]
+    causal = bool(causal)
+    try:
+        accepted = _accepted(q, k, v, out, lse, dout, softmax_scale, causal)
+    except Exception:  # an operand the one-pass check cannot read (a nested tensor's shape): _check gives the error
+        accepted = None
+    if accepted is None:
+        dims, scale = _check(q, k, v, out, lse, dout, softmax_scale, causal)
+        B, H, Sq, Skv, D = dims["B"], dims["H"], dims["Sq"], dims["Skv"], dims["D"]
+    else:
+        B, H, Sq, Skv, D, scale = accepted
     device = q.device
     if B == 0:
         # No query row: nothing to launch and nothing to alert.

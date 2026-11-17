@@ -29,8 +29,8 @@ rows).  Arms per row:
   which).  On a delegated row (a row the planners leave to the deterministic program) the arm shows that the
   dispatch costs nothing.
 * ``atomic_p1``: the control of the split lever, on the rows the ``atomic`` arm runs this package's program with
-  more than one split: the same program at one split (K1: the planner's tile width, ``splits=1``; router: one unit
-  per tile).
+  more than one split: the same program at one split (K1: the planner's tile width and promotion, ``splits=1``;
+  router: one unit per tile).
 * ``atomic_shim``: the package path -- the public entry point of the row's operation through the
   ``cake_pplx.cake_dense_gemm_nondet_train`` module (``..._projection_forward`` / ``..._projection_dgrad`` /
   ``..._projection_wgrad``, the generic ``..._projection`` for the MLA head batch, ``..._router_forward`` /
@@ -478,7 +478,8 @@ def prepare_det(spec, inp, out):
 
 
 def prepare_atomic(spec, inp, out, **knobs):
-    """This package's prepared launch of the row (``knobs``: ``splits`` / ``block_n``, the control arm)."""
+    """This package's prepared launch of the row (``knobs``: ``splits`` / ``block_n`` / ``promote``, the control
+    arm)."""
     if spec["family"] == "router":
         return cake_backend.cake_dense_gemm_nondet_train_router_prepare(
             inp["A"], inp["B"], out, **knobs
@@ -1436,7 +1437,10 @@ def build_arms(spec, inp, args, libs, entry):
     entry["atomic_plan"] = plan_record(p)
     control = None
     if isinstance(p, cake_backend.CakeDenseGemmNondetProjectionLaunch) and p.splits > 1:
-        control = dict(splits=1, block_n=p.plan.block_n)
+        # the main arm's promotion too: the control varies the split count only
+        control = dict(
+            splits=1, block_n=p.plan.block_n, promote=bool(p.plan.promote_blocks)
+        )
     elif (
         isinstance(p, cake_backend.CakeDenseGemmNondetRouterLaunch)
         and p.plan.units != p.plan.tiles

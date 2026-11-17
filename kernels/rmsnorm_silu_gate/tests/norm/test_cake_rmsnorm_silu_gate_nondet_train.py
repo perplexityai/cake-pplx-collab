@@ -2335,7 +2335,7 @@ def test_repeatable_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
 # other layouts); the backward's are ``BACKWARD_BANDS``.
 FORWARD_BANDS = {
     "sm_100a": (
-        (38, "fwd_tiny"),
+        (36, "fwd_tiny"),
         (85, "fwd_pipe"),
         (160, "fwd_mid"),
         (400, "fwd_long"),
@@ -2579,7 +2579,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 want = _tier_module(arch, role, rows, sm_count, packed=False)
                 got = loader.module_for_rows(arch, role, rows, sm_count, packed=False)
                 assert got == want, (arch, role, rows, "strided")
-    # the forward on sm_100a: packed rows the tiny forward up to 38 rows per
+    # the forward on sm_100a: packed rows the tiny forward up to 36 rows per
     # SM, the pipelined forward up to 85, the mid forward up to 160, the long
     # forward up to 400, the extra-long forward up to 520, the pipelined
     # forward up to 6500, the mid forward past it; other layouts the short
@@ -2591,8 +2591,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (1, "fwd_tiny", "fwd_short"),
         (12 * sm_count, "fwd_tiny", "fwd_short"),
         (12 * sm_count + 1, "fwd_tiny", "fwd_mid"),
-        (38 * sm_count, "fwd_tiny", "fwd_mid"),
-        (38 * sm_count + 1, "fwd_pipe", "fwd_mid"),
+        (36 * sm_count, "fwd_tiny", "fwd_mid"),
+        (36 * sm_count + 1, "fwd_pipe", "fwd_mid"),
         (85 * sm_count, "fwd_pipe", "fwd_mid"),
         (85 * sm_count + 1, "fwd_mid", "fwd_mid"),
         (140 * sm_count + 1, "fwd_mid", "fwd_long"),
@@ -3240,7 +3240,7 @@ def test_mid_forward_grid_is_whole_waves_of_at_most_two_blocks_a_cta(
 # CTAs walk at most 2 blocks, never more CTAs than blocks.
 PIPE_FORWARD_GRIDS = [
     (1, 148, 1),
-    (38 * 148 + 1, 148, 352),  # B200 first pipelined band's first row
+    (36 * 148 + 1, 148, 334),  # B200 first pipelined band's first row
     (85 * 148, 148, 787),  # its last row: 787 blocks
     (520 * 148 + 1, 148, 4811),  # B200 second pipelined band's first row
     (6500 * 148, 148, 60125),  # its last row: 60125 blocks
