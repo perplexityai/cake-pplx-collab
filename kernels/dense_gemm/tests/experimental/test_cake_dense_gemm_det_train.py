@@ -29,7 +29,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
-from tests.cake.test_helpers.naive_gemm import judge_gemm, nan_fill  # noqa: F401
+from tests.cake.test_helpers.naive_gemm import judge_gemm, nan_fill
 
 # Backend suite: the package is named once, through ``cake_package``; nothing else
 # of cake_pplx is imported here.
@@ -101,16 +101,9 @@ wave_working_set_cgrp = cake_backend.wave_working_set_cgrp
 wgrad_swapped = cake_backend.wgrad_swapped
 wgrad_views = cake_backend.wgrad_views
 
-# Accuracy gates against the FP64 reference of the exact BF16 operands.
-# BF16 output: elementwise |out - ref| <= atol + rtol * |ref|, zero violations.
-BF16_ATOL = BF16_RTOL = 1e-2
-# FP32 output of K1: the tensor-core accumulation error scales with the reference, so both
-# bounds are scale-relative (never an absolute atol).
-F32_REL_FRO_MAX = 5e-5
-F32_MAX_ABS_OVER_REF_ABSMAX = 1e-3
-# K2 (FP32 router through split-BF16x3 emulation): FP32-class, bit-exact reruns.
-ROUTER_REL_FRO_MAX = 2e-6
-
+# Accuracy: a GPU test judges each GEMM output with ``judge_gemm`` against the FP64 oracle beside the naive BF16 tier
+# (PyTorch's BF16 matmul of the same operands) over 32 draws.  Bitwise checks cover reruns and the entry points of one
+# plan, and the exact BF16x3 split.
 SEED = 20260930
 
 # GLM-5.2 projection rows: label -> (K = in features, N = out features).
@@ -9089,7 +9082,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
 
 # The GB T-exact forward / input-gradient rules: (arch, B MN-major, N, K) -> (the T of the exact keys, the program).
 # Each key applies at its T alone and plans the per-tile K partitions of the row's plan without it (whole K per output
-# tile on both), so every output is bitwise equal to that plan's.  Round 2 adds the q_b 2048 x 16384 input gradient (the
+# tile on both), and both are judged against the naive BF16 tier.  Round 2 adds the q_b 2048 x 16384 input gradient (the
 # ragged rule's overlapped half-tail program with the column-grouped raster); round 4 adds the 5120 -> 17408 input
 # gradient (the overlapped half-tail program with the column-grouped raster in place of the ragged rule's row-half
 # program), with the bf16 tiles through the one-slot TMA store; round 5 adds the sm_100a 12288 -> 4096 forward (the
@@ -9634,7 +9627,7 @@ def test_gb_t_exact_kser_rows_match_fp64_and_repeat_bitwise(
 # keys' rule of the row; round 11: the sm_103a 5120 -> 17408 and 17408 -> 5120 weight gradients at T 16172 with the
 # rule of their T 16231 / 16384 keys): ROW_RULES key -> the program it plans at its T (K = T, in the direct
 # orientation the row plans without it, G[T, M].T @ X[T, N]), with the per-tile K partitions of the row's plan without it
-# (whole K per output tile on both), so every output is bitwise equal to that plan's.  The two sm_103a keys at T 16172
+# (whole K per output tile on both), and both are judged against the naive BF16 tier.  The two sm_103a keys at T 16172
 # carry ht_min_tail 16: on 148 SMs their 14-tile tail stays whole (sk_units 0, not 28 half items), on 152 / 160 SMs
 # they plan as before (test_gb_t_exact_wgrad_ht_min_tail_keeps_the_148_sm_tail_whole).
 GB_T_EXACT_WGRAD_ROWS = {
@@ -9754,7 +9747,8 @@ GB_T_EXACT_WGRAD_ROWS = {
 # key -> the program it plans at its T (K = T, in the direct orientation), the ragged rule's exact 16-way stream-K
 # program with the tail-first order: the same program, tiles and stream-K units as the row's plan without it, in
 # 2-row raster groups in place of the default 16.  The raster changes which output tiles take the stream-K tail, so
-# the K partitions of those tiles (and their bits) differ from that plan's; each plan is deterministic run to run.
+# the K partitions of those tiles differ from that plan's; both plans are judged against the naive BF16 tier and are
+# deterministic run to run.
 GB_T_EXACT_RASTER_WGRAD_ROWS = {
     (
         "sm_100a",
@@ -9960,8 +9954,8 @@ def test_gb_t_exact_wgrad_rows_and_their_plan_without_the_key_match_fp64(
 # The GB T-exact weight-gradient rules of round 3 (round 13: the sm_103a key at T 16384): ROW_RULES key -> the program
 # it plans at its T (K = T, in the direct orientation the row plans without it), the ragged rule's synchronised
 # two-partial stream-K plan with its bf16 tiles through the one-slot TMA store: the same per-tile K partitions (the same
-# stream-K units, slabs and two-addend fixup) as the row's plan without it, so every output is bitwise equal to that
-# plan's.
+# stream-K units, slabs and two-addend fixup) as the row's plan without it, and both are judged against the naive BF16
+# tier.
 GB_T_EXACT_SKS_WGRAD_ROWS = {
     (
         "sm_100a",
@@ -10798,24 +10792,6 @@ def _make_inputs(family, row, op, out_dtype, T, seed, device="cuda"):
         v["buf"].fill_(float("nan"))  # the rope part of the slot must keep its sentinel
         v["untouched"] = v["buf"][..., MLA_ROWS[row]["D_in"] :]
     return v
-
-
-def _check(actual, expected_f64, *, untouched=None):
-    diff = (actual.double() - expected_f64).abs()
-    assert bool(torch.isfinite(actual).all())
-    if actual.dtype == torch.bfloat16:
-        violations = int((diff > BF16_ATOL + BF16_RTOL * expected_f64.abs()).sum())
-        assert violations == 0, (
-            f"{violations} bf16 elements outside atol=rtol=1e-2 (max abs {float(diff.max()):.4g})"
-        )
-    else:
-        tiny = torch.finfo(torch.float64).tiny
-        rel_fro = float(diff.norm() / max(float(expected_f64.norm()), tiny))
-        max_abs_ratio = float(diff.max()) / max(float(expected_f64.abs().max()), tiny)
-        assert rel_fro <= F32_REL_FRO_MAX, rel_fro
-        assert max_abs_ratio <= F32_MAX_ABS_OVER_REF_ABSMAX, max_abs_ratio
-    if untouched is not None:
-        assert bool(torch.isnan(untouched.float()).all())
 
 
 def _plan_template(v, **knobs):
@@ -12232,8 +12208,8 @@ def test_sm107a_212_tranche_rules_plan_their_programs(monkeypatch, key):
     """The ragged keys of the sm_107a 212-SM tranche plan their measured programs at the measured token counts on the
     212- and 216-SM parts: registered, no fallback flag, the weight gradients in their direct orientation, and another
     plan than the row's without the key.  The half-tail and column-grouped forward / input-gradient rows keep the per-tile
-    K partitions of the row's plan without the key (every output bitwise equal to that plan's); the weight-gradient rows
-    split the tail tiles' K (3 parts, or the synchronised stream-K tail)."""
+    K partitions of the row's plan without the key; the weight-gradient rows split the tail tiles' K (3 parts, or the
+    synchronised stream-K tail)."""
     rule, K, N, op, out_dtype, program = SM107A_212_TRANCHE[key]
     assert ROW_RULES[key] == rule
     registered = _registered("sm_107a")
