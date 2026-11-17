@@ -85,6 +85,9 @@ BLOCK_TOKENS = 8192
 #: The judge's draws and the token count of its case (each hidden size of the run).
 JUDGE_DRAWS = 32
 JUDGE_TOKENS = 1024
+# DeepGEMM 2.8.2 dispatches tf32_hc_prenorm_gemm to SM90 / SM100 kernels by major version; on sm_107a the SM100 kernel
+# is built without cute's TMA support and asserts on the device.
+DEEPGEMM_CAPABILITIES = ((9, 0), (10, 0), (10, 3))
 FORWARD_OUTPUTS = ("U", "Y")
 BACKWARD_OUTPUTS = ("dX", "dfn", "dscale", "dbase", "dB")
 OUTPUTS = FORWARD_OUTPUTS + BACKWARD_OUTPUTS
@@ -580,6 +583,12 @@ class TileKernels(Arm):
 
             note = f"tile-kernels {dist_version('tile-kernels')}, tilelang {dist_version('tilelang')}"
             if self.gemm == "deepgemm":
+                cap = tuple(torch.cuda.get_device_capability(device))
+                if cap not in DEEPGEMM_CAPABILITIES:
+                    # The device assertion would leave the CUDA context unusable for every other arm of the process.
+                    return False, (f"DeepGEMM {dist_version('deep_gemm') or dist_version('deep-gemm')} has no working "
+                                   f"kernel for sm_{cap[0]}{cap[1]}a (device assertion: TMA descriptor prefetch "
+                                   "without CUTE_ARCH_TMA_SM90_ENABLED)")
                 import deep_gemm
 
                 note += f", deep-gemm {getattr(deep_gemm, '__version__', '?')}"

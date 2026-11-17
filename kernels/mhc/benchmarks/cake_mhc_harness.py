@@ -37,8 +37,9 @@ is the noise band of the row.
 
 Timing.  Each call runs on an idle GPU after a cold L2 (a buffer of twice the L2 size is zeroed, then the device is
 synchronized; neither is timed).  The GPU activity records of the call (kernels, memsets and copies) come from CUPTI:
-``cupti-python``, the records matched to the call's own runtime / driver API calls by correlation id, or, without
-it, ``torch.profiler`` with one-cycle spin kernels marking the calls.  Per call three times are recorded: ``active``
+``cupti-python`` (attached once for the whole run: the kernels of a CUDA graph instantiated while CUPTI is detached
+are not traced), the records matched to the call's own runtime / driver API calls by correlation id, or, without it,
+``torch.profiler`` with one-cycle spin kernels marking the calls.  Per call three times are recorded: ``active``
 (the union of the records' intervals: GPU busy time, the statistic of the tables), ``span`` (first start to last
 end, the gaps between launches included) and ``sum`` (the records' durations added).  Modes (``--modes``): ``eager``
 (the call launched each time) and ``graph`` (the call captured once in a CUDA graph on a side stream and replayed).
@@ -63,6 +64,7 @@ protocol and every row.
 from __future__ import annotations
 
 import argparse
+import atexit
 import bisect
 import collections
 import datetime
@@ -137,6 +139,47 @@ class Timer:
         if backend not in ("cupti", "profiler"):
             raise ValueError(backend)
         self.backend = backend
+        self._cupti = None
+        if backend == "cupti":
+            self._start_cupti()
+
+    def _start_cupti(self) -> None:
+        """Attach CUPTI once, before any CUDA graph of the run is instantiated, and keep it attached: the kernels of a
+        graph instantiated while CUPTI is detached produce no activity records.  Records arriving outside a timed
+        window are dropped."""
+        from cupti import cupti
+
+        self._spans: dict = collections.defaultdict(list)
+        self._launches: list = []
+        self._collecting = False
+        self._gpu_kinds = (cupti.ActivityKind.CONCURRENT_KERNEL, cupti.ActivityKind.MEMSET, cupti.ActivityKind.MEMCPY)
+        self._api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
+
+        def requested():
+            return 8 * 1024 * 1024, 0
+
+        def completed(activities):
+            if not self._collecting:
+                return
+            for activity in activities:
+                if activity.kind in self._gpu_kinds:
+                    self._spans[activity.correlation_id].append((activity.start, activity.end))
+                elif activity.kind in self._api_kinds:
+                    self._launches.append((activity.start, activity.correlation_id))
+
+        cupti.activity_register_callbacks(requested, completed)
+        for kind in self._api_kinds + self._gpu_kinds:
+            cupti.activity_enable(kind)
+        self._cupti = cupti
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        cupti, self._cupti = self._cupti, None
+        if cupti is None:
+            return
+        for kind in self._api_kinds + self._gpu_kinds:
+            cupti.activity_disable(kind)
+        cupti.finalize()
 
     def times(self, run: Callable[[], object], calls: Optional[int] = None, dry: Optional[int] = None) -> list:
         calls = calls or self.default_calls
@@ -149,27 +192,12 @@ class Timer:
         return self._profiler(run, calls)
 
     def _cupti(self, run, calls: int) -> list:
-        from cupti import cupti
-
-        launches = []
-        spans = collections.defaultdict(list)
-        gpu_kinds = (cupti.ActivityKind.CONCURRENT_KERNEL, cupti.ActivityKind.MEMSET, cupti.ActivityKind.MEMCPY)
-        api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
-
-        def requested():
-            return 8 * 1024 * 1024, 0
-
-        def completed(activities):
-            for activity in activities:
-                if activity.kind in gpu_kinds:
-                    spans[activity.correlation_id].append((activity.start, activity.end))
-                elif activity.kind in api_kinds:
-                    launches.append((activity.start, activity.correlation_id))
-
-        kinds = api_kinds + gpu_kinds
-        for kind in kinds:
-            cupti.activity_enable(kind)
-        cupti.activity_register_callbacks(requested, completed)
+        cupti = self._cupti
+        torch.cuda.synchronize(self.device)
+        cupti.activity_flush_all(0)  # earlier records (dry calls, untimed work) are dropped
+        self._spans.clear()
+        self._launches.clear()
+        self._collecting = True
         stamps = []
         try:
             for _ in range(calls):
@@ -182,10 +210,11 @@ class Timer:
             torch.cuda.synchronize(self.device)
             cupti.activity_flush_all(0)
         finally:
-            for kind in kinds:
-                cupti.activity_disable(kind)
-            cupti.finalize()
-        launches.sort()
+            self._collecting = False
+        launches = sorted(self._launches)
+        spans = dict(self._spans)
+        self._spans.clear()
+        self._launches.clear()
         starts = [s for s, _ in launches]
         out = []
         for begin, end in stamps:
@@ -484,7 +513,9 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
             _free()
     names = list(runs)
     samples = {n: [] for n in names}
-    for g in range(args.groups if names else 0):
+    for g in range(args.groups):
+        if not names:
+            break
         k = g % len(names)
         order = names[k:] + names[:k]
         if g % 2:
@@ -493,7 +524,7 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
             try:
                 samples[n].append(timer.times(runs[n], args.calls, args.dry))
             except Exception as exc:  # noqa: BLE001
-                result[n] = {"error": f"group {g}: " + _err(exc)}
+                result[n] = {"error": f"group {g}: " + _err(exc), "trace": traceback.format_exc(limit=4)[-1500:]}
                 runs.pop(n, None)
         names = [n for n in names if n in runs]
     for n, groups in samples.items():
