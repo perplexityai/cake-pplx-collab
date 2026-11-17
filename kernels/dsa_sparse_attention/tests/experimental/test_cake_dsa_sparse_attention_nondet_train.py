@@ -448,6 +448,104 @@ def test_plan_dkv_direct_rule_and_env():
     assert cake_backend.DkvDirectPolicy.from_record({}) is None
 
 
+def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
+    """``dkv_direct.rules`` maps an architecture to exactly the rule fields with a positive integer count; an
+    architecture without a rule, or ``None``, takes the base; anything else in the record is refused loudly
+    (``ValueError``) instead of falling back to the base."""
+    parse = cake_backend.DkvDirectPolicy.from_record
+    arches = ("sm_100a", "sm_103a", "sm_107a", None)
+    policy = parse(
+        {
+            "dkv_direct": {
+                "min_keys_per_query": 4,
+                "rules": {"sm_107a": {"min_keys_per_query": 20}},
+            }
+        }
+    )
+    assert policy.min_keys_per_query == 4 and policy.rules == (("sm_107a", 20),)
+    assert [policy.min_keys_for(a) for a in arches] == [4, 4, 20, 4]
+    # no arch (or one without a rule): the base
+    assert policy.wants(1000, 4000) and policy.wants(1000, 4000, "sm_103a")
+    assert policy.wants(1000, 20000, "sm_107a")
+    assert not policy.wants(1000, 19999, "sm_107a")
+    # a rule may also lower the base on its target
+    lower = parse(
+        {
+            "dkv_direct": {
+                "min_keys_per_query": 4,
+                "rules": {"sm_100a": {"min_keys_per_query": 1}},
+            }
+        }
+    )
+    assert lower.wants(1000, 1000, "sm_100a") and not lower.wants(1000, 1000, "sm_107a")
+    # no rules (absent, None or empty): the base everywhere
+    for rules in ({}, {"rules": None}, {"rules": {}}):
+        flat = parse({"dkv_direct": {"min_keys_per_query": 4, **rules}})
+        assert flat.rules == ()
+        assert {flat.min_keys_for(a) for a in arches} == {4}
+    # a record without rules plans the base on every architecture (the planner's arch reaches it unchanged)
+    record = {"dkv_direct": dict(_DIRECT_POLICY), "key_pass_policy": dict(_POLICY)}
+    for arch in arches:
+        assert cake_backend.plan_dkv_direct(
+            record, _DIRECT_STAGES, 1000, 4000, accumulate=True, arch=arch
+        )
+        assert not cake_backend.plan_dkv_direct(
+            record, _DIRECT_STAGES, 1000, 3999, accumulate=True, arch=arch
+        )
+    bad_records = [
+        # (dkv_direct value, message)
+        ([("min_keys_per_query", 4)], "dkv_direct must be a dict"),
+        ({"min_keys_per_query": 4, "rule": {}}, "unknown fields"),
+        (
+            {"min_keys_per_query": 4, "rules": [("sm_107a", 20)]},
+            "must map architectures",
+        ),
+        ({"min_keys_per_query": 4, "rules": {"sm_107a": 20}}, "must map exactly"),
+        ({"min_keys_per_query": 4, "rules": {"sm_107a": {}}}, "must map exactly"),
+        (
+            {
+                "min_keys_per_query": 4,
+                "rules": {"sm_107a": {"min_keys_per_query": 20, "extra": 1}},
+            },
+            "must map exactly",
+        ),
+        (
+            {"min_keys_per_query": 4, "rules": {"sm_107": {"min_keys_per_query": 20}}},
+            "names 'sm_107'",
+        ),
+        (
+            {"min_keys_per_query": 4, "rules": {None: {"min_keys_per_query": 20}}},
+            "names None",
+        ),
+    ]
+    for value in (0, -20, True, False, 2.5, 20.0, "20", None):
+        bad_records.append(
+            (
+                {
+                    "min_keys_per_query": 4,
+                    "rules": {"sm_107a": {"min_keys_per_query": value}},
+                },
+                "positive integer",
+            )
+        )
+        bad_records.append(({"min_keys_per_query": value}, "positive integer"))
+    for raw, match in bad_records:
+        with pytest.raises(ValueError, match=match):
+            parse({"dkv_direct": raw})
+    # the planner refuses a malformed record the same way (no silent base)
+    broken = {
+        "dkv_direct": {
+            "min_keys_per_query": 4,
+            "rules": {"sm_107a": {"min_keys_per_query": 0}},
+        },
+        "key_pass_policy": dict(_POLICY),
+    }
+    with pytest.raises(ValueError, match="positive integer"):
+        cake_backend.plan_dkv_direct(
+            broken, _DIRECT_STAGES, 1000, 4000, accumulate=True, arch="sm_100a"
+        )
+
+
 def test_main_accumulator_constants_and_direct_bound_values():
     """A direct plan binds the caller's packed rows to the main stage's accumulator operands (``dkv_f32`` /
     ``dkr_f32`` addressed through ``dkv_stride`` / ``dkr_stride`` / ``dkr_col0`` / ``dkv_dst_map`` / ``dkv_has_map``)

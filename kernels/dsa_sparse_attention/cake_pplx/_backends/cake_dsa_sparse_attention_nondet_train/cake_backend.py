@@ -40,8 +40,9 @@ limitations under the License.
 #   (the autograd entry does so; no separate derivation launch).
 # * A program registering the natural-layout main stages (``bwd_main_natural``,
 #   ``bwd_main_pass_natural``) adds the dK/dV gradients of a ``dkv_acc`` binding
-#   straight into the caller's packed rows when the record's size rule selects
-#   it (``plan_dkv_direct``): no FP32 accumulators, no zero fill, no cast launch.
+#   straight into the caller's packed rows when the record's size rule of the
+#   device's architecture selects it (``plan_dkv_direct``): no FP32
+#   accumulators, no zero fill, no cast launch.
 # * Every launch goes through ``cake_launch`` (generated next to the registry:
 #   one positional launcher per stage over the kernel's own argument names)
 #   with a grid computed in Python; the bindings encode the tensor maps by
@@ -388,35 +389,98 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # record carries (``dkv_direct``: ``min_keys_per_query``; direct iff
 # S >= min_keys_per_query * T) whenever the caller passes ``dkv_acc``; the
 # ``dkv_direct`` keyword of the entry points forces (``True``) or disables
-# (``False``) it (``None``, the default, = the rule).  Without the natural
-# stages every ``dkv_acc`` call takes the cast's accumulate path.  Both paths
-# add the same FP32 contributions into the same rows (another summation order).
+# (``False``) it (``None``, the default, = the rule).  Like ``key_pass_policy``
+# the rule may differ per architecture: ``dkv_direct.rules[arch]`` (exactly the
+# fields below) replaces the base value on that target, and an architecture
+# without a rule (or ``None``, no CUDA device) takes the base.  The registered
+# records carry one for ``sm_107a``, whose natural-layout drain is slower (20
+# keys per query in both programs; see the README).  The planners pass the
+# device's architecture (``arch_for``).  Without the natural stages every
+# ``dkv_acc`` call takes the cast's accumulate path.  Both paths add the same
+# FP32 contributions into the same rows (another summation order).
 DKV_DIRECT_POLICY_FIELDS = ("min_keys_per_query",)
+DKV_DIRECT_RECORD_FIELDS = DKV_DIRECT_POLICY_FIELDS + ("rules",)
+
+
+def _dkv_direct_count(value: Any, where: str) -> int:
+    """``value`` as a ``min_keys_per_query`` count: a positive integer (``bool`` and fractions refused)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"registry record: {where} must be a positive integer, got {value!r}"
+        )
+    return int(value)
 
 
 @dataclass(frozen=True)
 class DkvDirectPolicy:
     """The record's direct-accumulation size rule (see the comment above)."""
 
-    min_keys_per_query: int  # direct iff num_kv >= min_keys_per_query * num_queries (4)
+    # the base: direct iff num_kv >= min_keys_per_query * num_queries (4 RoPE, 1 NoPE)
+    min_keys_per_query: int
+    # the per-target rules: ((arch, min_keys_per_query), ...) (sm_107a: 20)
+    rules: tuple[tuple[str, int], ...] = ()
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Optional["DkvDirectPolicy"]:
         raw = record.get("dkv_direct")
         if raw is None:
             return None
+        if not isinstance(raw, dict):
+            raise ValueError(f"registry record: dkv_direct must be a dict, got {raw!r}")
         missing = [name for name in DKV_DIRECT_POLICY_FIELDS if name not in raw]
         if missing:
             raise ValueError(f"registry record: dkv_direct lacks {missing}")
-        values = {name: int(raw[name]) for name in DKV_DIRECT_POLICY_FIELDS}
-        if any(v <= 0 for v in values.values()):
+        unknown = sorted(set(raw) - set(DKV_DIRECT_RECORD_FIELDS))
+        if unknown:
             raise ValueError(
-                f"registry record: dkv_direct needs positive values, got {raw}"
+                f"registry record: dkv_direct has unknown fields {unknown} "
+                f"(known: {DKV_DIRECT_RECORD_FIELDS})"
             )
-        return cls(**values)
+        values = {
+            name: _dkv_direct_count(raw[name], f"dkv_direct.{name}")
+            for name in DKV_DIRECT_POLICY_FIELDS
+        }
+        raw_rules = raw.get("rules")
+        if raw_rules is None:
+            raw_rules = {}
+        if not isinstance(raw_rules, dict):
+            raise ValueError(
+                f"registry record: dkv_direct.rules must map architectures to rules, got {raw_rules!r}"
+            )
+        known_arches = set(SUPPORTED_COMPUTE_CAPABILITIES.values())
+        rules = []
+        for arch, rule in raw_rules.items():
+            if arch not in known_arches:
+                raise ValueError(
+                    f"registry record: dkv_direct.rules names {arch!r}, not one of {sorted(known_arches)}"
+                )
+            if not isinstance(rule, dict) or set(rule) != set(DKV_DIRECT_POLICY_FIELDS):
+                raise ValueError(
+                    f"registry record: dkv_direct.rules[{arch!r}] must map exactly "
+                    f"{DKV_DIRECT_POLICY_FIELDS}, got {rule!r}"
+                )
+            rules.append(
+                (
+                    arch,
+                    _dkv_direct_count(
+                        rule["min_keys_per_query"],
+                        f"dkv_direct.rules[{arch!r}].min_keys_per_query",
+                    ),
+                )
+            )
+        return cls(**values, rules=tuple(rules))
 
-    def wants(self, num_queries: int, num_kv: int) -> bool:
-        return int(num_kv) >= self.min_keys_per_query * int(num_queries)
+    def min_keys_for(self, arch: Optional[str]) -> int:
+        """``min_keys_per_query`` of ``arch`` (an architecture without a rule, or ``None``: the base)."""
+        for name, count in self.rules:
+            if name == arch:
+                return count
+        return self.min_keys_per_query
+
+    def wants(self, num_queries: int, num_kv: int, arch: Optional[str] = None) -> bool:
+        """Direct accumulation for ``num_queries`` query tokens over ``num_kv`` keys on ``arch``:
+        ``num_kv >= min_keys_for(arch) * num_queries``."""
+        return int(num_kv) >= self.min_keys_for(arch) * int(num_queries)
 
 
 def record_direct_stages(
@@ -458,17 +522,20 @@ def plan_dkv_direct(
     accumulate: bool,
     dkv_direct: Optional[bool] = None,
     program: str = cake_jit.PROGRAM,
+    arch: Optional[str] = None,
 ) -> bool:
     """Does this backward binding add ``dkv_acc`` directly from the main stage?  Only with ``dkv_acc``
     (``accumulate``) and a program registering the natural stages; then ``dkv_direct`` decides: ``None`` (the
-    default) applies the record's size rule, ``True`` takes the direct path, ``False`` the cast's accumulate path.
-    Any other value raises ``ValueError``.  ``program`` names the stages (see :func:`record_direct_stages`)."""
+    default) applies the record's size rule of ``arch`` (:meth:`DkvDirectPolicy.wants`; ``None``, the default, =
+    the base rule -- the planners pass the device's architecture), ``True`` takes the direct path, ``False`` the
+    cast's accumulate path.  Any other value raises ``ValueError``.  ``program`` names the stages (see
+    :func:`record_direct_stages`)."""
     if dkv_direct is not None and not isinstance(dkv_direct, bool):
         raise ValueError(f"dkv_direct must be None, True or False, got {dkv_direct!r}")
     if not accumulate or not record_direct_stages(record, stages, program):
         return False
     if dkv_direct is None:
-        return DkvDirectPolicy.from_record(record).wants(num_queries, num_kv)
+        return DkvDirectPolicy.from_record(record).wants(num_queries, num_kv, arch)
     return dkv_direct
 
 
@@ -1129,6 +1196,7 @@ def dsa_train_workspace_size(
         num_kv,
         accumulate=bool(dkv_acc),
         dkv_direct=dkv_direct,
+        arch=arch,
     )
     passes = (
         plan_key_passes(
@@ -1163,16 +1231,20 @@ def _plan_nope_direct(
     num_queries: int,
     num_kv: int,
     dkv_direct: Optional[bool],
+    *,
+    arch: Optional[str] = None,
 ) -> bool:
     """Does a NoPE backward add its dK + dV straight into the natural FP32 buffer from the main stage?
 
     Every NoPE backward accumulates into a natural-layout FP32 ``[S_dst, >= 512]`` buffer -- the caller's
-    ``dkv_acc`` or the fresh ``dkv`` the backend allocates and zero-fills -- so the record's rule (and the
-    ``dkv_direct`` keyword) applies to both forms: :func:`plan_dkv_direct` with ``accumulate=True``.  The NoPE
-    record's rule (``min_keys_per_query`` 1) takes the natural stage whenever the row has at least one key per
-    query (every packed causal problem; measured faster than the permuted accumulator plus cast on every row);
-    a problem with more query rows than keys, or ``dkv_direct=False``, uses the permuted accumulator and the cast.
-    Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.
+    ``dkv_acc`` or the fresh ``dkv`` the backend allocates and zero-fills -- so the record's rule of ``arch``
+    (and the ``dkv_direct`` keyword) applies to both forms: :func:`plan_dkv_direct` with ``accumulate=True``.
+    The NoPE record's base rule (``min_keys_per_query`` 1, ``sm_100a`` / ``sm_103a``) takes the natural stage
+    whenever the row has at least one key per query (every packed causal problem; measured faster than the
+    permuted accumulator plus cast on every row there); its ``sm_107a`` rule from 20 keys per query on (the
+    natural-layout drain is slower on that target).  A problem below the threshold, or ``dkv_direct=False``,
+    uses the permuted accumulator and the cast.  Without the natural-layout stages the kernels' permuted
+    accumulator and the cast serve both forms.
     """
     return plan_dkv_direct(
         record,
@@ -1182,6 +1254,7 @@ def _plan_nope_direct(
         accumulate=True,
         dkv_direct=dkv_direct,
         program=cake_jit.NOPE_PROGRAM,
+        arch=arch,
     )
 
 
@@ -1209,7 +1282,7 @@ def dsa_nope_train_workspace_size(
     arch = arch_for(device)
     stages = cake_jit.registered_stages(program)
     direct = bool(backward) and _plan_nope_direct(
-        record, stages, num_queries, num_kv, dkv_direct
+        record, stages, num_queries, num_kv, dkv_direct, arch=arch
     )
     passes = (
         plan_key_passes(
@@ -1761,6 +1834,7 @@ def _plan(
         num_kv,
         accumulate=accumulate,
         dkv_direct=dkv_direct,
+        arch=arch,
     )
     if softmax_scale is None:
         softmax_scale = default_softmax_scale()
@@ -2196,8 +2270,9 @@ def prepare_dsa_train(
     default; repeated rows sum) -- and return ``None`` for ``dkv_latent`` /
     ``dk_rope``; the caller owns zeroing.  It excludes ``dkv_fp32``.  A program
     registering the natural-layout main stages accumulates directly from the
-    main stage when the record's size rule selects it (:func:`plan_dkv_direct`:
-    no FP32 accumulators, no cast launch); otherwise the cast adds the
+    main stage when the record's size rule of the device's architecture selects
+    it (:func:`plan_dkv_direct`: no FP32 accumulators, no cast launch;
+    ``min_keys_per_query`` 4, 20 on ``sm_107a``); otherwise the cast adds the
     gradients.  ``dkv_direct`` overrides that rule: ``None`` (default) applies
     it, ``True`` takes the direct path whenever the program registers the
     natural stages, ``False`` always takes the cast's accumulate path.
@@ -3672,7 +3747,7 @@ def _plan_nope(
     # the natural-layout main stage adds into it when the record's size rule (or ``dkv_direct``) selects it,
     # otherwise the permuted accumulator and the cast serve it
     direct = bool(backward) and _plan_nope_direct(
-        record, stages, num_queries, num_kv, dkv_direct
+        record, stages, num_queries, num_kv, dkv_direct, arch=arch
     )
     scale = NOPE_SOFTMAX_SCALE if softmax_scale is None else float(softmax_scale)
     passes = (
@@ -4016,8 +4091,9 @@ def prepare_dsa_nope_train(
     ``[S]``; identity by default; repeated rows sum) and returns ``None`` for ``dkv``; the caller owns the zeroing
     of ``dkv_acc``.  ``key_passes`` / ``num_segments`` as in :func:`prepare_dsa_train` (the NoPE record's policy:
     2048 B per key).  The natural-layout main stage adds straight into the FP32 buffer (``dkv_acc`` or the fresh
-    ``dkv``, which the runner zero-fills per backward) when the record's size rule selects it, otherwise the
-    permuted accumulator and the cast serve the same rows; ``dkv_direct`` overrides the rule (``None`` = the rule,
+    ``dkv``, which the runner zero-fills per backward) when the record's size rule of the device's architecture
+    selects it (see :func:`_plan_nope_direct`), otherwise the permuted accumulator and the cast serve the same
+    rows; ``dkv_direct`` overrides the rule (``None`` = the rule,
     ``True`` / ``False`` = force / disable the direct path).  ``check_dst_map``, ``derive_topk_length`` and the row
     length semantics as in :func:`prepare_dsa_train`.
     """
@@ -4557,10 +4633,10 @@ def backward_nope(
     ``dout`` may be a head-major view (strides ``[512, T * 512, 1]``) or any strided ``[T, 64, 512]`` view the
     layout rules admit: it is read in place (no host copy; the delta stage takes its token / head strides).
     ``key_passes`` / ``num_segments`` as in :func:`backward` (the NoPE record's policy plans one pass; an explicit
-    ``key_passes`` forces the pass form); ``dkv_direct`` (default ``None`` = the record's rule, the natural-layout
-    main stage adding straight into the FP32 buffer -- fresh or ``dkv_acc`` alike -- whenever the row has at least
-    one key per query; ``True`` / ``False`` = force / disable it) and ``check_dst_map`` as in
-    :func:`prepare_dsa_nope_train`.
+    ``key_passes`` forces the pass form); ``dkv_direct`` (default ``None`` = the record's rule of the device's
+    architecture, the natural-layout main stage adding straight into the FP32 buffer -- fresh or ``dkv_acc`` alike
+    -- whenever the row has at least one key per query, 20 on ``sm_107a`` (see :func:`_plan_nope_direct`);
+    ``True`` / ``False`` = force / disable it) and ``check_dst_map`` as in :func:`prepare_dsa_nope_train`.
     A call without query rows returns an empty ``dq`` and a zero ``dkv`` (``None`` with ``dkv_acc``) without
     launching.
     """
