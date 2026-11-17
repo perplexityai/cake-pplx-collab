@@ -108,6 +108,23 @@ __device__ __forceinline__ float max_noftz(float a, float b) {
     float c;
     asm("max.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b));
     return c;
+#if __CUDA_ARCH__ == 1000
+#else
+}
+
+
+
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
+
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+#endif
 }
 
 
@@ -262,35 +279,74 @@ kernel_cake_lm_head_loss_b246af8af132e0fdeb23(__nv_bfloat16* __restrict__ W, __n
                 for (int t_2 = 0; t_2 < 1; t_2++) {
                     #pragma unroll
                     for (int r_1 = 0; r_1 < 4; r_1++) {
+#if __CUDA_ARCH__ == 1000
                         float acc = 0.0f;
+#else
+                        float2 acc2 = make_float2(0.0f, 0.0f);
+#endif
                         #pragma unroll
                         for (int q = 0; q < 12; q++) {
+#if __CUDA_ARCH__ == 1000
                             acc = __fmaf_rn(__uint_as_float(wpk[r_1 * 3 * 4 + q] << 16), xf[t_2 * 3 * 8 + 2 * q], acc);
                             acc = __fmaf_rn(__uint_as_float(wpk[r_1 * 3 * 4 + q] & 4294901760u), xf[t_2 * 3 * 8 + 2 * q + 1], acc);
+#else
+                            acc2 = fma_f32x2_rn_noftz(make_float2(__uint_as_float(wpk[r_1 * 3 * 4 + q] << 16), __uint_as_float(wpk[r_1 * 3 * 4 + q] & 4294901760u)), make_float2(xf[t_2 * 3 * 8 + 2 * q], xf[t_2 * 3 * 8 + 2 * q + 1]), acc2);
+#endif
                         }
+#if __CUDA_ARCH__ == 1000
                         pd[t_2 * 4 + r_1] = acc;
+#else
+                        float _add_3;
+                        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_3) : "f"(acc2.x), "f"(acc2.y));
+                        pd[t_2 * 4 + r_1] = _add_3;
+#endif
                     }
                 }
                 bool upper_0 = (lane & 16) != 0;
                 float send_0 = ((upper_0) ? pd[0] : pd[2]);
                 float keep_0 = ((upper_0) ? pd[2] : pd[0]);
+#if __CUDA_ARCH__ == 1000
                 float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, send_0, 16);
                 pd[0] = keep_0 + _shfl_xor_sync_3;
+#else
+                float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, send_0, 16);
+                pd[0] = keep_0 + _shfl_xor_sync_4;
+#endif
                 float send_1 = ((upper_0) ? pd[1] : pd[3]);
                 float keep_1 = ((upper_0) ? pd[3] : pd[1]);
+#if __CUDA_ARCH__ == 1000
                 float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, send_1, 16);
                 pd[1] = keep_1 + _shfl_xor_sync_4;
+#else
+                float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, send_1, 16);
+                pd[1] = keep_1 + _shfl_xor_sync_5;
+#endif
                 bool upper_1 = (lane & 8) != 0;
                 float send_2 = ((upper_1) ? pd[0] : pd[1]);
                 float keep_2 = ((upper_1) ? pd[1] : pd[0]);
+#if __CUDA_ARCH__ == 1000
                 float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, send_2, 8);
                 pd[0] = keep_2 + _shfl_xor_sync_5;
                 float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 4);
                 pd[0] = pd[0] + _shfl_xor_sync_6;
                 float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 2);
+#else
+                float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, send_2, 8);
+                pd[0] = keep_2 + _shfl_xor_sync_6;
+                float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 4);
+#endif
                 pd[0] = pd[0] + _shfl_xor_sync_7;
+#if __CUDA_ARCH__ == 1000
                 float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 1);
+#else
+                float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 2);
+#endif
                 pd[0] = pd[0] + _shfl_xor_sync_8;
+#if __CUDA_ARCH__ == 1000
+#else
+                float _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, pd[0], 1);
+                pd[0] = pd[0] + _shfl_xor_sync_9;
+#endif
                 if (lane % 8 == 0) {
                     red[(buf * 8 + cw) * 4 + lane / 8] = pd[0];
                 }
@@ -327,16 +383,26 @@ kernel_cake_lm_head_loss_b246af8af132e0fdeb23(__nv_bfloat16* __restrict__ W, __n
                     }
                     float sc = 1.0f;
                     if (mx != m_old) {
+#if __CUDA_ARCH__ == 1000
                         float _exp_9 = expf(m_old - mx);
                         sc = _exp_9;
+#else
+                        float _exp_10 = expf(m_old - mx);
+                        sc = _exp_10;
+#endif
                     }
                     float ps = 0.0f;
                     #pragma unroll
                     for (int r_3 = 0; r_3 < 4; r_3++) {
                         float p = 0.0f;
                         if (r_3 < nr_1) {
+#if __CUDA_ARCH__ == 1000
                             float _exp_10 = expf(tot[t_3 * 4 + r_3] - mx);
                             p = _exp_10;
+#else
+                            float _exp_11 = expf(tot[t_3 * 4 + r_3] - mx);
+                            p = _exp_11;
+#endif
                         }
                         tot[t_3 * 4 + r_3] = p;
                         ps = ps + p;

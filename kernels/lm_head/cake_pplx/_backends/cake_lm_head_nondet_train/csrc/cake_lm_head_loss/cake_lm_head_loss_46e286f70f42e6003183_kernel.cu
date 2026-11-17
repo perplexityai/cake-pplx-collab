@@ -144,7 +144,7 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 extern "C" {
 
 __global__ __launch_bounds__(320) void
-kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMap W, const __grid_constant__ CUtensorMap X, __nv_bfloat16* __restrict__ z, int* __restrict__ ids, int* __restrict__ offsets, int M, int T, int V, int H)
+kernel_cake_lm_head_loss_46e286f70f42e6003183(const __grid_constant__ CUtensorMap W, const __grid_constant__ CUtensorMap X, __nv_bfloat16* __restrict__ z, int* __restrict__ ids, int* __restrict__ offsets, int M, int T, int V, int H)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -595,79 +595,161 @@ kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMa
                 int key[4];
                 int vid[4];
                 int row[4];
+                long long _min_1 = (((long long)tile_2 * (long long)chunk) < (last) ? ((long long)tile_2 * (long long)chunk) : (last));
+                int k_lo = (int)_min_1;
+                long long _min_2_1 = (((long long)tile_2 * (long long)chunk + 127ll) < (last) ? ((long long)tile_2 * (long long)chunk + 127ll) : (last));
+                int k_hi = (int)_min_2_1;
+                int lo0 = 0;
+                int hi0 = T;
+                int lo1 = 0;
+                int hi1 = T;
+                int step = T;
+                step = (step + 31) / 32;
+                int j0_0 = lo0 + (lane + 1) * step;
+                int j1_0 = lo1 + (lane + 1) * step;
+                int _max_4 = ((j0_0) > (0) ? (j0_0) : (0));
+                int _min_3 = ((_max_4) < (T - 1) ? (_max_4) : (T - 1));
+                int e0_0 = offsets[_min_3];
+                int _max_6 = ((j1_0) > (0) ? (j1_0) : (0));
+                int _min_5 = ((_max_6) < (T - 1) ? (_max_6) : (T - 1));
+                int e1_0 = offsets[_min_5];
+                unsigned int _warp_vote_7 = __ballot_sync(0xFFFFFFFF, j0_0 < hi0 && e0_0 <= k_lo);
+                lo0 = lo0 + step * (int)(unsigned int)__popc(_warp_vote_7);
+                unsigned int _warp_vote_8 = __ballot_sync(0xFFFFFFFF, j1_0 < hi1 && e1_0 <= k_hi);
+                lo1 = lo1 + step * (int)(unsigned int)__popc(_warp_vote_8);
+                int _min_9 = ((hi0) < (lo0 + step) ? (hi0) : (lo0 + step));
+                hi0 = _min_9;
+                int _min_10 = ((hi1) < (lo1 + step) ? (hi1) : (lo1 + step));
+                hi1 = _min_10;
+                step = (step + 31) / 32;
+                int j0_1 = lo0 + (lane + 1) * step;
+                int j1_1 = lo1 + (lane + 1) * step;
+                int _max_12 = ((j0_1) > (0) ? (j0_1) : (0));
+                int _min_11 = ((_max_12) < (T - 1) ? (_max_12) : (T - 1));
+                int e0_1 = offsets[_min_11];
+                int _max_14 = ((j1_1) > (0) ? (j1_1) : (0));
+                int _min_13 = ((_max_14) < (T - 1) ? (_max_14) : (T - 1));
+                int e1_1 = offsets[_min_13];
+                unsigned int _warp_vote_15 = __ballot_sync(0xFFFFFFFF, j0_1 < hi0 && e0_1 <= k_lo);
+                lo0 = lo0 + step * (int)(unsigned int)__popc(_warp_vote_15);
+                unsigned int _warp_vote_16 = __ballot_sync(0xFFFFFFFF, j1_1 < hi1 && e1_1 <= k_hi);
+                lo1 = lo1 + step * (int)(unsigned int)__popc(_warp_vote_16);
+                int _min_17 = ((hi0) < (lo0 + step) ? (hi0) : (lo0 + step));
+                hi0 = _min_17;
+                int _min_18 = ((hi1) < (lo1 + step) ? (hi1) : (lo1 + step));
+                hi1 = _min_18;
+                step = (step + 31) / 32;
+                int j0_2 = lo0 + (lane + 1) * step;
+                int j1_2 = lo1 + (lane + 1) * step;
+                int _max_20 = ((j0_2) > (0) ? (j0_2) : (0));
+                int _min_19 = ((_max_20) < (T - 1) ? (_max_20) : (T - 1));
+                int e0_2 = offsets[_min_19];
+                int _max_22 = ((j1_2) > (0) ? (j1_2) : (0));
+                int _min_21 = ((_max_22) < (T - 1) ? (_max_22) : (T - 1));
+                int e1_2 = offsets[_min_21];
+                unsigned int _warp_vote_23 = __ballot_sync(0xFFFFFFFF, j0_2 < hi0 && e0_2 <= k_lo);
+                lo0 = lo0 + step * (int)(unsigned int)__popc(_warp_vote_23);
+                unsigned int _warp_vote_24 = __ballot_sync(0xFFFFFFFF, j1_2 < hi1 && e1_2 <= k_hi);
+                lo1 = lo1 + step * (int)(unsigned int)__popc(_warp_vote_24);
+                int _min_25 = ((hi0) < (lo0 + step) ? (hi0) : (lo0 + step));
+                hi0 = _min_25;
+                int _min_26 = ((hi1) < (lo1 + step) ? (hi1) : (lo1 + step));
+                hi1 = _min_26;
+                int r_lo = lo0;
+                int r_lo_hi = hi0 - 1;
+                while (r_lo < r_lo_hi) {
+                    int mid = r_lo + r_lo_hi + 1 >> 1;
+                    if (k_lo >= offsets[mid]) {
+                        r_lo = mid;
+                    } else {
+                        r_lo_hi = mid - 1;
+                    }
+                }
+                int _table_search_27 = lo1;
+                int _table_search_27_hi = hi1 - 1;
+                while (_table_search_27 < _table_search_27_hi) {
+                    int mid_1 = _table_search_27 + _table_search_27_hi + 1 >> 1;
+                    if (k_hi >= offsets[mid_1]) {
+                        _table_search_27 = mid_1;
+                    } else {
+                        _table_search_27_hi = mid_1 - 1;
+                    }
+                }
+                int r_hi = _table_search_27 + 1;
                 long long pair_0 = (long long)tile_2 * (long long)chunk + (long long)lane;
-                long long _min_1 = ((pair_0) < (last) ? (pair_0) : (last));
-                key[0] = (int)_min_1;
-                int _max_3_1 = ((ids[key[0]]) > (0) ? (ids[key[0]]) : (0));
-                int _min_2_1 = ((_max_3_1) < (V - 1) ? (_max_3_1) : (V - 1));
-                vid[0] = _min_2_1;
-                int const _table_search_4_value = key[0];
-                int _table_search_4 = 0;
-                int _table_search_4_hi = T - 1;
-                while (_table_search_4 < _table_search_4_hi) {
-                    int mid = _table_search_4 + _table_search_4_hi + 1 >> 1;
-                    if (_table_search_4_value >= offsets[mid]) {
-                        _table_search_4 = mid;
+                long long _min_28 = ((pair_0) < (last) ? (pair_0) : (last));
+                key[0] = (int)_min_28;
+                int _max_30 = ((ids[key[0]]) > (0) ? (ids[key[0]]) : (0));
+                int _min_29 = ((_max_30) < (V - 1) ? (_max_30) : (V - 1));
+                vid[0] = _min_29;
+                int const _table_search_31_value = key[0];
+                int _table_search_31 = r_lo;
+                int _table_search_31_hi = r_hi - 1;
+                while (_table_search_31 < _table_search_31_hi) {
+                    int mid_2 = _table_search_31 + _table_search_31_hi + 1 >> 1;
+                    if (_table_search_31_value >= offsets[mid_2]) {
+                        _table_search_31 = mid_2;
                     } else {
-                        _table_search_4_hi = mid - 1;
+                        _table_search_31_hi = mid_2 - 1;
                     }
                 }
-                row[0] = _table_search_4;
+                row[0] = _table_search_31;
                 long long pair_1 = (long long)tile_2 * (long long)chunk + (long long)(32 + lane);
-                long long _min_5 = ((pair_1) < (last) ? (pair_1) : (last));
-                key[1] = (int)_min_5;
-                int _max_7 = ((ids[key[1]]) > (0) ? (ids[key[1]]) : (0));
-                int _min_6 = ((_max_7) < (V - 1) ? (_max_7) : (V - 1));
-                vid[1] = _min_6;
-                int const _table_search_8_value = key[1];
-                int _table_search_8 = 0;
-                int _table_search_8_hi = T - 1;
-                while (_table_search_8 < _table_search_8_hi) {
-                    int mid_1 = _table_search_8 + _table_search_8_hi + 1 >> 1;
-                    if (_table_search_8_value >= offsets[mid_1]) {
-                        _table_search_8 = mid_1;
+                long long _min_32 = ((pair_1) < (last) ? (pair_1) : (last));
+                key[1] = (int)_min_32;
+                int _max_34 = ((ids[key[1]]) > (0) ? (ids[key[1]]) : (0));
+                int _min_33 = ((_max_34) < (V - 1) ? (_max_34) : (V - 1));
+                vid[1] = _min_33;
+                int const _table_search_35_value = key[1];
+                int _table_search_35 = r_lo;
+                int _table_search_35_hi = r_hi - 1;
+                while (_table_search_35 < _table_search_35_hi) {
+                    int mid_3 = _table_search_35 + _table_search_35_hi + 1 >> 1;
+                    if (_table_search_35_value >= offsets[mid_3]) {
+                        _table_search_35 = mid_3;
                     } else {
-                        _table_search_8_hi = mid_1 - 1;
+                        _table_search_35_hi = mid_3 - 1;
                     }
                 }
-                row[1] = _table_search_8;
+                row[1] = _table_search_35;
                 long long pair_2 = (long long)tile_2 * (long long)chunk + (long long)(64 + lane);
-                long long _min_9 = ((pair_2) < (last) ? (pair_2) : (last));
-                key[2] = (int)_min_9;
-                int _max_11 = ((ids[key[2]]) > (0) ? (ids[key[2]]) : (0));
-                int _min_10 = ((_max_11) < (V - 1) ? (_max_11) : (V - 1));
-                vid[2] = _min_10;
-                int const _table_search_12_value = key[2];
-                int _table_search_12 = 0;
-                int _table_search_12_hi = T - 1;
-                while (_table_search_12 < _table_search_12_hi) {
-                    int mid_2 = _table_search_12 + _table_search_12_hi + 1 >> 1;
-                    if (_table_search_12_value >= offsets[mid_2]) {
-                        _table_search_12 = mid_2;
+                long long _min_36 = ((pair_2) < (last) ? (pair_2) : (last));
+                key[2] = (int)_min_36;
+                int _max_38 = ((ids[key[2]]) > (0) ? (ids[key[2]]) : (0));
+                int _min_37 = ((_max_38) < (V - 1) ? (_max_38) : (V - 1));
+                vid[2] = _min_37;
+                int const _table_search_39_value = key[2];
+                int _table_search_39 = r_lo;
+                int _table_search_39_hi = r_hi - 1;
+                while (_table_search_39 < _table_search_39_hi) {
+                    int mid_4 = _table_search_39 + _table_search_39_hi + 1 >> 1;
+                    if (_table_search_39_value >= offsets[mid_4]) {
+                        _table_search_39 = mid_4;
                     } else {
-                        _table_search_12_hi = mid_2 - 1;
+                        _table_search_39_hi = mid_4 - 1;
                     }
                 }
-                row[2] = _table_search_12;
+                row[2] = _table_search_39;
                 long long pair_3 = (long long)tile_2 * (long long)chunk + (long long)(96 + lane);
-                long long _min_13 = ((pair_3) < (last) ? (pair_3) : (last));
-                key[3] = (int)_min_13;
-                int _max_15 = ((ids[key[3]]) > (0) ? (ids[key[3]]) : (0));
-                int _min_14 = ((_max_15) < (V - 1) ? (_max_15) : (V - 1));
-                vid[3] = _min_14;
-                int const _table_search_16_value = key[3];
-                int _table_search_16 = 0;
-                int _table_search_16_hi = T - 1;
-                while (_table_search_16 < _table_search_16_hi) {
-                    int mid_3 = _table_search_16 + _table_search_16_hi + 1 >> 1;
-                    if (_table_search_16_value >= offsets[mid_3]) {
-                        _table_search_16 = mid_3;
+                long long _min_40 = ((pair_3) < (last) ? (pair_3) : (last));
+                key[3] = (int)_min_40;
+                int _max_42 = ((ids[key[3]]) > (0) ? (ids[key[3]]) : (0));
+                int _min_41 = ((_max_42) < (V - 1) ? (_max_42) : (V - 1));
+                vid[3] = _min_41;
+                int const _table_search_43_value = key[3];
+                int _table_search_43 = r_lo;
+                int _table_search_43_hi = r_hi - 1;
+                while (_table_search_43 < _table_search_43_hi) {
+                    int mid_5 = _table_search_43 + _table_search_43_hi + 1 >> 1;
+                    if (_table_search_43_value >= offsets[mid_5]) {
+                        _table_search_43 = mid_5;
                     } else {
-                        _table_search_16_hi = mid_3 - 1;
+                        _table_search_43_hi = mid_5 - 1;
                     }
                 }
-                row[3] = _table_search_16;
+                row[3] = _table_search_43;
                 int col[4];
+                int slot_2[4];
                 int head[4];
                 int n_tok_1 = 0;
                 int prev_last = -1;
@@ -675,47 +757,59 @@ kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMa
                 int prev_0 = ((lane == 0) ? prev_last : up_0);
                 unsigned int heads_0 = __ballot_sync(0xFFFFFFFF, row[0] != prev_0);
                 head[0] = ((row[0] != prev_0) ? 1 : 0);
-                int _max_18 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
-                int _min_17 = ((_max_18) < (127) ? (_max_18) : (127));
-                col[0] = _min_17;
+                int _max_45 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below)) : (0));
+                int _min_44 = ((_max_45) < (127) ? (_max_45) : (127));
+                slot_2[0] = _min_44;
+                int _max_47 = ((n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_0 & lanes_below) + head[0] - 1) : (0));
+                int _min_46 = ((_max_47) < (127) ? (_max_47) : (127));
+                col[0] = _min_46;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_0);
-                int _shfl_sync_19 = __shfl_sync(0xFFFFFFFF, row[0], 31);
-                prev_last = _shfl_sync_19;
+                int _shfl_sync_48 = __shfl_sync(0xFFFFFFFF, row[0], 31);
+                prev_last = _shfl_sync_48;
                 int up_1 = __shfl_up_sync(0xFFFFFFFF, row[1], 1, 32);
                 int prev_1 = ((lane == 0) ? prev_last : up_1);
                 unsigned int heads_1 = __ballot_sync(0xFFFFFFFF, row[1] != prev_1);
                 head[1] = ((row[1] != prev_1) ? 1 : 0);
-                int _max_21 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
-                int _min_20 = ((_max_21) < (127) ? (_max_21) : (127));
-                col[1] = _min_20;
+                int _max_50 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below)) : (0));
+                int _min_49 = ((_max_50) < (127) ? (_max_50) : (127));
+                slot_2[1] = _min_49;
+                int _max_52 = ((n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_1 & lanes_below) + head[1] - 1) : (0));
+                int _min_51 = ((_max_52) < (127) ? (_max_52) : (127));
+                col[1] = _min_51;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_1);
-                int _shfl_sync_22 = __shfl_sync(0xFFFFFFFF, row[1], 31);
-                prev_last = _shfl_sync_22;
+                int _shfl_sync_53 = __shfl_sync(0xFFFFFFFF, row[1], 31);
+                prev_last = _shfl_sync_53;
                 int up_2 = __shfl_up_sync(0xFFFFFFFF, row[2], 1, 32);
                 int prev_2 = ((lane == 0) ? prev_last : up_2);
                 unsigned int heads_2 = __ballot_sync(0xFFFFFFFF, row[2] != prev_2);
                 head[2] = ((row[2] != prev_2) ? 1 : 0);
-                int _max_24 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
-                int _min_23 = ((_max_24) < (127) ? (_max_24) : (127));
-                col[2] = _min_23;
+                int _max_55 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below)) : (0));
+                int _min_54 = ((_max_55) < (127) ? (_max_55) : (127));
+                slot_2[2] = _min_54;
+                int _max_57 = ((n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_2 & lanes_below) + head[2] - 1) : (0));
+                int _min_56 = ((_max_57) < (127) ? (_max_57) : (127));
+                col[2] = _min_56;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_2);
-                int _shfl_sync_25 = __shfl_sync(0xFFFFFFFF, row[2], 31);
-                prev_last = _shfl_sync_25;
+                int _shfl_sync_58 = __shfl_sync(0xFFFFFFFF, row[2], 31);
+                prev_last = _shfl_sync_58;
                 int up_3 = __shfl_up_sync(0xFFFFFFFF, row[3], 1, 32);
                 int prev_3 = ((lane == 0) ? prev_last : up_3);
                 unsigned int heads_3 = __ballot_sync(0xFFFFFFFF, row[3] != prev_3);
                 head[3] = ((row[3] != prev_3) ? 1 : 0);
-                int _max_27 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
-                int _min_26 = ((_max_27) < (127) ? (_max_27) : (127));
-                col[3] = _min_26;
+                int _max_60 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below)) : (0));
+                int _min_59 = ((_max_60) < (127) ? (_max_60) : (127));
+                slot_2[3] = _min_59;
+                int _max_62 = ((n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) > (0) ? (n_tok_1 + (int)(unsigned int)__popc(heads_3 & lanes_below) + head[3] - 1) : (0));
+                int _min_61 = ((_max_62) < (127) ? (_max_62) : (127));
+                col[3] = _min_61;
                 n_tok_1 = n_tok_1 + (int)(unsigned int)__popc(heads_3);
-                int _shfl_sync_28 = __shfl_sync(0xFFFFFFFF, row[3], 31);
-                prev_last = _shfl_sync_28;
+                int _shfl_sync_63 = __shfl_sync(0xFFFFFFFF, row[3], 31);
+                prev_last = _shfl_sync_63;
                 mbarrier_wait(meta_empty_addr + (ms_1) * 8, _phase_meta_empty);
                 meta_ids[ms_1 * 128 + lane] = vid[0];
                 meta_col[ms_1 * 128 + lane] = col[0];
                 if (head[0] != 0) {
-                    meta_tok[ms_1 * 128 + col[0]] = row[0];
+                    meta_tok[ms_1 * 128 + slot_2[0]] = row[0];
                 }
                 if (lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + lane] = prev_last;
@@ -723,7 +817,7 @@ kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (32 + lane)] = vid[1];
                 meta_col[ms_1 * 128 + (32 + lane)] = col[1];
                 if (head[1] != 0) {
-                    meta_tok[ms_1 * 128 + col[1]] = row[1];
+                    meta_tok[ms_1 * 128 + slot_2[1]] = row[1];
                 }
                 if (32 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (32 + lane)] = prev_last;
@@ -731,7 +825,7 @@ kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (64 + lane)] = vid[2];
                 meta_col[ms_1 * 128 + (64 + lane)] = col[2];
                 if (head[2] != 0) {
-                    meta_tok[ms_1 * 128 + col[2]] = row[2];
+                    meta_tok[ms_1 * 128 + slot_2[2]] = row[2];
                 }
                 if (64 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (64 + lane)] = prev_last;
@@ -739,7 +833,7 @@ kernel_cake_lm_head_loss_8271cac097e47014444b(const __grid_constant__ CUtensorMa
                 meta_ids[ms_1 * 128 + (96 + lane)] = vid[3];
                 meta_col[ms_1 * 128 + (96 + lane)] = col[3];
                 if (head[3] != 0) {
-                    meta_tok[ms_1 * 128 + col[3]] = row[3];
+                    meta_tok[ms_1 * 128 + slot_2[3]] = row[3];
                 }
                 if (96 + lane >= n_tok_1) {
                     meta_tok[ms_1 * 128 + (96 + lane)] = prev_last;
