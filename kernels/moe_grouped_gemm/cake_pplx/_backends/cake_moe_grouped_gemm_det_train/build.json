@@ -62,7 +62,7 @@
   "libraries": [
     {
       "arch": "sm_107a",
-      "closure_sha256": "1c15fe0e03ca2e9a50728bb46865465587b4f05d89275189e5f579e7eaac8901",
+      "closure_sha256": "bda765c83f93bf382e7dd5f7fa8d4a3423f8e359c7f975968d751436184d6ab0",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
@@ -71,8 +71,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_sm_107a.so",
       "sha256": {
-        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_binding.cu": "88519c1f207c073f6c6ecc1c30ef3abe146e010d323b9c70493c805855eb2345",
-        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu": "3824dd73924117c1a2b3c98545d668c930e48fc6970645110f8e62b827ba3ffd"
+        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_binding.cu": "1feaf430dc71d85fe770d9d4615a75cb5817f66ee90e732b3ff36b7cdecd6ca4",
+        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu": "6a6c5e33d1ec5b525deb9c276efe6213f1b880938491b626afaf5af2e158c359"
       },
       "sources": [
         "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu",
@@ -81,7 +81,7 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "cc9f0e15f9e0a1183d342853d92644d7dce359a4379bf757f9c95c872c72e217",
+      "closure_sha256": "ef8c1c21cd2ecdf99a743c8db2e39ab4f04e918d8365635a2c922c2f7c07ccc1",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
@@ -93,8 +93,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_wgrad_out32_sm_107a.so",
       "sha256": {
-        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu": "3824dd73924117c1a2b3c98545d668c930e48fc6970645110f8e62b827ba3ffd",
-        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_wgrad_out32_binding.cu": "4e6f215db06e71ee884ffafa232bd0eba0d0a4d9e03d0bb4b4bc7b392dd77902"
+        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu": "6a6c5e33d1ec5b525deb9c276efe6213f1b880938491b626afaf5af2e158c359",
+        "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_wgrad_out32_binding.cu": "65ae71934a1ceb3b03cfefa9db88d8d23ba881dcaa3a2a58c3842322f9adcff3"
       },
       "sources": [
         "csrc/cake_moe_grouped_det_gemm/cake_moe_grouped_det_gemm_09a336207c15c131f5dc_kernel.cu",

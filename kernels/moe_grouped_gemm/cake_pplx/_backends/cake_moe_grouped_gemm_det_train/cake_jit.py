@@ -120,6 +120,8 @@ PROGRAMS: dict[str, dict[str, Any]] = {
             ["parameter", "stride_e"],
             ["buffer", "A_rows"],
             ["buffer", "B_rows"],
+            ["parameter", "lda"],
+            ["parameter", "ldb"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
