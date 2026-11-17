@@ -42,7 +42,10 @@ The module selects the mode: no entry point takes a mode argument.  Every entry 
   :data:`K1_PARITY_RANGES_BY_SM` (sm_107a parts of 208, 212, 216 and more SMs)
   run two, four or eight chains of one split by the parity of their number of K blocks, the one-split rows store
   whole tiles, and the rows of
-  :data:`K1_WGRAD_DET_RULES_BY_SM` run another fixed-order program of the deterministic package;
+  :data:`K1_WGRAD_DET_RULES_BY_SM` run another fixed-order program of the deterministic package.  A one-chain
+  BF16 transposed-store plan whose largest split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks runs the
+  promoted program (:func:`k1_promote_blocks`): the same splits and split sum, each split's K blocks summed in chunks
+  of at most that many, added in order;
 * the K1 weight gradient of the FP32 rows of :data:`K1_DSM_RANGES_BY_SM` (thin ``d_out`` on 148-SM and 152-SM
   ``sm_100a``, 152-SM ``sm_103a`` and 212-SM ``sm_107a`` parts, in that table's token ranges; the odd numbers of K
   blocks of :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM` take that table's 64-wide four-CTA tile), before every other K1
@@ -347,6 +350,15 @@ K1_ROW_MAJOR_BLOCK_N: tuple[int, ...] = (192,)
 #: :data:`K1_CHAIN_RANGES_BY_SM`, three-chain programs (templates ``..._c3``); the two- and four-chain programs of
 #: :data:`K1_ORDERED_RANGES_BY_SM` (templates ``..._c2``, ``..._c4``) are the planner's only, not a ``chains`` choice.
 K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
+#: The K blocks of one promoted chunk of a K1 program (templates ``..._kc128``): one FP32 accumulator that adds a
+#: split's whole long token range is less accurate than the reference, so the promoted program cuts each item's ``n``
+#: K blocks into ``ceil(n / K1_PROMOTE_BLOCKS)`` balanced contiguous chunks of at most this many blocks, each summed in
+#: an accumulator of its own, and adds the chunk sums in FP32 registers in chunk order.  The split sum, its order, the
+#: workspace and the launch arguments are those of the program without promotion; at one chunk (``n <= 128``) its bits
+#: are that program's.  :func:`plan_atomic_gemm` runs it where :func:`k1_promote_blocks` names it (one chain, BF16
+#: out, the transposed store, more than this many K blocks in the largest split).  Not the TMA L2 promotion of
+#: :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
+K1_PROMOTE_BLOCKS = 128
 
 # ---------------------------------------------------------------------------
 # K1 planner: the measured verdicts
@@ -2556,12 +2568,17 @@ def k1_wgrad_det_knobs(
 
 
 def atomic_k1_template(
-    block_n: int, out_f32: bool, chains: int = 1, split_order: str = "arrival"
+    block_n: int,
+    out_f32: bool,
+    chains: int = 1,
+    split_order: str = "arrival",
+    promote_blocks: int = 0,
 ) -> str:
     """The registry template of this package's K1 program (both operands MN-major): the transposed-store program of
     the tile width, or the row-major-store one for a width of :data:`K1_ROW_MAJOR_BLOCK_N`; ``_c<chains>`` for more
     than one accumulation chain; ``_<split_order>`` for a split order of :data:`K1_SPLIT_ORDERS` other than
-    ``"arrival"``."""
+    ``"arrival"``; ``_kc<promote_blocks>`` for promoted chunks of at most that many K blocks (above 0,
+    :data:`K1_PROMOTE_BLOCKS`)."""
     if split_order not in K1_SPLIT_ORDERS:
         raise ValueError(
             f"split_order is one of {K1_SPLIT_ORDERS}, got {split_order!r}"
@@ -2572,7 +2589,52 @@ def atomic_k1_template(
         + ("" if int(block_n) in K1_ROW_MAJOR_BLOCK_N else "_t")
         + (f"_c{int(chains)}" if int(chains) > 1 else "")
         + ("" if split_order == "arrival" else f"_{split_order}")
+        + (f"_kc{int(promote_blocks)}" if int(promote_blocks) > 0 else "")
     )
+
+
+def _k1_promote_refusal(
+    arch: str, block_n: int, chains: int, out_f32: bool, split_order: str
+) -> str:
+    """Why a CTA-pair plan of these knobs has no promoted program on ``arch`` (:data:`K1_PROMOTE_BLOCKS`): more than
+    one chain, FP32 out, the row-major store, or a template this checkout does not register; ``""`` when it has
+    one."""
+    if int(chains) > 1:
+        return f"{int(chains)} accumulation chains (a promoted program runs one)"
+    if out_f32:
+        return "FP32 out (the promoted programs store BF16)"
+    if int(block_n) in K1_ROW_MAJOR_BLOCK_N:
+        return (
+            f"the row-major-store program of block_n {int(block_n)} (the promoted "
+            "programs store transposed)"
+        )
+    template = atomic_k1_template(
+        block_n, out_f32, chains, split_order, K1_PROMOTE_BLOCKS
+    )
+    if template not in cake_jit.KERNELS.get(arch, {}):
+        return f"{template} is not registered for {arch}"
+    return ""
+
+
+def k1_promote_blocks(
+    *,
+    arch: str,
+    K: int,
+    block_n: int,
+    splits: int,
+    chains: int,
+    out_f32: bool,
+    split_order: str = "arrival",
+) -> int:
+    """The promoted chunk of a CTA-pair plan of this package on ``arch``: :data:`K1_PROMOTE_BLOCKS` where the plan
+    runs one chain into a BF16 ``out`` with the transposed store (``block_n`` not in :data:`K1_ROW_MAJOR_BLOCK_N`), its
+    largest split holds more than :data:`K1_PROMOTE_BLOCKS` 64-element K blocks (``ceil(ceil(K / 64) / splits)``)
+    and this checkout registers the promoted template for ``arch``; else ``0`` (the program without promotion).  The
+    rule reads the split's length only, no row or token-count table."""
+    if _k1_promote_refusal(arch, block_n, chains, out_f32, split_order):
+        return 0
+    blocks = _ceil_div(_ceil_div(K, K1_BLOCK_K), splits)
+    return K1_PROMOTE_BLOCKS if blocks > K1_PROMOTE_BLOCKS else 0
 
 
 def dsm_k1_template(block_n: int, splits: int) -> str:
@@ -2598,7 +2660,10 @@ class CakeDenseGemmNondetProjectionPlan:
     ``128 x block_n``, each one cluster of ``splits`` CTAs (a K range each, the partials summed in the cluster's
     shared memory), ``splits`` CTAs per tile and no workspace.  ``M`` and ``N`` are the launch's.
     ``transposed_out`` is the caller's: the launch takes the caller's
-    operands exchanged (``swapped``) when its store form differs from the caller's output layout."""
+    operands exchanged (``swapped``) when its store form differs from the caller's output layout.  ``promote_blocks``
+    above 0 (:data:`K1_PROMOTE_BLOCKS`, :func:`k1_promote_blocks`) runs the promoted program (template ``..._kc<n>``):
+    each item's K blocks in chunks of at most that many, each summed in an accumulator of its own and added in order;
+    the splits, their sum and its order, the workspace and the launch arguments stay those of the plan without it."""
 
     L: int
     M: int
@@ -2616,6 +2681,7 @@ class CakeDenseGemmNondetProjectionPlan:
     chains: int = 1
     dsm: bool = False
     split_order: str = "arrival"
+    promote_blocks: int = 0
 
     @property
     def swapped(self) -> bool:
@@ -2634,7 +2700,8 @@ class CakeDenseGemmNondetProjectionPlan:
         """Whether the result repeats bit for bit: one split stores whole tiles (its chains added in order), two add
         ``own + other`` (one add of two values), the cluster program (``dsm``) adds its splits in cluster-rank order,
         and a fixed split order (``split_order`` other than ``"arrival"``) adds them in one order; three or more splits
-        of the CTA-pair program in the arrival order add the partials in the order the splits finish."""
+        of the CTA-pair program in the arrival order add the partials in the order the splits finish.  Promoted chunks
+        (``promote_blocks``) are added in order within a split and change none of this."""
         return self.dsm or self.splits <= 2 or self.split_order != "arrival"
 
     @property
@@ -2689,6 +2756,7 @@ def plan_atomic_gemm(
     splits: Optional[int] = None,
     block_n: Optional[int] = None,
     chains: Optional[int] = None,
+    promote: Optional[bool] = None,
 ) -> tuple[Optional[CakeDenseGemmNondetProjectionPlan], Any, Any, Any, str]:
     """Plan this package's K1 GEMM ``out = A @ B`` (``A [L, M, K]`` with unit stride on ``m``, ``B [L, K, N]`` with
     unit stride on ``n``; ``out [L, M, N]``, or ``[L, N, M]`` with ``transposed_out``).
@@ -2710,8 +2778,13 @@ def plan_atomic_gemm(
     :func:`k1_plan`'s, with :func:`k1_chain_plan`'s
     accumulation chains where it has them; an explicit choice runs one chain unless ``chains`` (one of :data:`K1_CHAINS_CHOICES`) names
     more, at one split, in the arrival order, and never the cluster program.
-    Raises ``ValueError`` for inconsistent shapes (as the deterministic planner does) and for an explicit choice the
-    program cannot run."""
+    Once the tile width, splits, chains and split order are settled (by the planner or explicitly), a CTA-pair plan
+    runs the promoted program of :func:`k1_promote_blocks` (``promote_blocks``, template ``..._kc<n>``) where that rule
+    names one; ``promote=False`` never runs it, ``promote=True`` runs it at any length.  ``promote`` does not choose
+    between this package's program and the deterministic one.
+    Raises ``ValueError`` for inconsistent shapes (as the deterministic planner does), for an explicit choice the
+    program cannot run, and for ``promote=True`` on a plan without a promoted program (more than one chain, FP32 out,
+    the row-major store or the cluster program, or a template this checkout does not register)."""
     det = deterministic_backend()
     A3, B3, O3 = (
         det.as_batched(A, "A"),
@@ -2777,6 +2850,12 @@ def plan_atomic_gemm(
                 dsm, odd = odd, None
         if dsm is not None and odd is None:
             bn, p = dsm
+            if promote:
+                raise ValueError(
+                    "cake_dense_gemm_nondet_train_projection: promote=True, but the "
+                    "row runs the cluster program (FP32 out), which has no promoted "
+                    "program"
+                )
             template = dsm_k1_template(bn, p)
             if template not in cake_jit.KERNELS.get(arch, {}):
                 return (*none, f"{template} is not registered for {arch}")
@@ -2850,7 +2929,27 @@ def plan_atomic_gemm(
                 f"cake_dense_gemm_nondet_train_projection: splits must be in [1, {_ceil_div(K, K1_BLOCK_K)}] (the 64-element K blocks "
                 f"of K={K}), got {p}"
             )
-    template = atomic_k1_template(bn, out_f32, c, order)
+    if promote is None:
+        kc = k1_promote_blocks(
+            arch=arch,
+            K=K,
+            block_n=bn,
+            splits=p,
+            chains=c,
+            out_f32=out_f32,
+            split_order=order,
+        )
+    elif promote:
+        refusal = _k1_promote_refusal(arch, bn, c, out_f32, order)
+        if refusal:
+            raise ValueError(
+                "cake_dense_gemm_nondet_train_projection: promote=True, but the plan "
+                f"has no promoted program: {refusal}"
+            )
+        kc = K1_PROMOTE_BLOCKS
+    else:
+        kc = 0
+    template = atomic_k1_template(bn, out_f32, c, order, kc)
     if template not in cake_jit.KERNELS.get(arch, {}):
         return (*none, f"{template} is not registered for {arch}")
     out_t = bn not in K1_ROW_MAJOR_BLOCK_N
@@ -2873,6 +2972,7 @@ def plan_atomic_gemm(
         out_t=out_t,
         chains=c,
         split_order=order,
+        promote_blocks=kc,
     )
     return plan, a_launch, b_launch, O3, ""
 
@@ -4802,13 +4902,19 @@ def _device_and_arch(A, B, out) -> tuple[torch.device, str, int]:
 
 #: The K1 knobs of this package's planner (the others are the deterministic planner's, applied when a row runs the
 #: deterministic program).
-_K1_OWN_KNOBS = ("splits", "block_n", "chains")
+_K1_OWN_KNOBS = ("splits", "block_n", "chains", "promote")
 
 
 def _split_knobs(knobs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     knobs = dict(knobs)
     own = {k: knobs.pop(k) for k in _K1_OWN_KNOBS if k in knobs}
     return own, knobs
+
+
+def _routing_knobs(knobs: dict[str, Any]) -> dict[str, Any]:
+    """``knobs`` without a ``promote`` of ``None`` or ``False``: these choose no program (the automatic rule, no
+    promoted program), so they neither skip the program tables nor reach the deterministic package."""
+    return {k: v for k, v in knobs.items() if k != "promote" or v}
 
 
 def _prepare_atomic_k1(
@@ -4884,7 +4990,7 @@ def _atomic_k1(
 ) -> Any:
     """This package's K1 GEMM ``out = A @ B`` (both MN-major): ``op`` is ``"plan"`` (returns the plan),
     ``"prepare"`` (the prepared launch) or ``"launch"`` (the convenience path, returns ``out``); ``own`` holds this
-    package's knobs (``splits``, ``block_n``, ``chains``).  A plan or a prepared launch of a row
+    package's knobs (``splits``, ``block_n``, ``chains``, ``promote``).  A plan or a prepared launch of a row
     :func:`plan_atomic_gemm` keeps on the deterministic program returns ``det_call()``: the deterministic package's
     object of the entry point and ``op``, with its knobs; a launch of such a row runs the deterministic package's
     convenience call ``det_args()`` through this package's binding (:func:`_launch_cached_atomic_k1`; ``det_knobs``:
@@ -6969,6 +7075,7 @@ def cake_dense_gemm_nondet_train_projection_plan(
     *,
     splits: Optional[int] = _UNSET,
     chains: Optional[int] = _UNSET,
+    promote: Optional[bool] = _UNSET,
     sm_count: int = _UNSET,
     l2_bytes: int = _UNSET,
     transposed_out: bool = _UNSET,
@@ -7012,18 +7119,20 @@ def cake_dense_gemm_nondet_train_projection_plan(
     arch: str = _UNSET,
 ) -> Any:
     """Validate the views and plan the K1 launch: a weight-gradient layout (both operands MN-major) is planned for
-    this package's split-K program (:class:`CakeDenseGemmNondetProjectionPlan`; ``splits``, ``block_n`` and ``chains``
-    are this package's knobs).  A row the planner keeps on the deterministic program, and every other layout, returns
+    this package's split-K program (:class:`CakeDenseGemmNondetProjectionPlan`; ``splits``, ``block_n``, ``chains``
+    and ``promote`` are this package's knobs, as for :func:`plan_atomic_gemm`).  A row the planner keeps on the
+    deterministic program, and every other layout, returns
     the deterministic package's plan (``cake_dense_gemm_det_train_projection_plan``, a
     ``CakeDenseGemmDetProjectionPlan``).  The other keyword-only knobs are the deterministic planner's public ones
     (``sm_count`` and ``l2_bytes`` included): a knob the caller gives reaches that planner as given, and
     ``transposed_out``, ``arch`` and ``sm_count`` also apply to this package's plan; a knob the caller does not give
-    takes the deterministic planner's default."""
+    takes the deterministic planner's default.  ``promote=None`` or ``False`` never reaches the deterministic planner
+    (:func:`_routing_knobs`)."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
     if _route(_k1_layout(A, B)) == "det":
         return deterministic_backend().cake_dense_gemm_det_train_projection_plan(
-            A, B, out, **knobs
+            A, B, out, **_routing_knobs(knobs)
         )
     own, det_knobs = _split_knobs(knobs)
     return _atomic_k1(
@@ -7048,6 +7157,7 @@ def cake_dense_gemm_nondet_train_projection_prepare(
     *,
     splits: Optional[int] = _UNSET,
     chains: Optional[int] = _UNSET,
+    promote: Optional[bool] = _UNSET,
     transposed_out: bool = _UNSET,
     sk: bool | str = _UNSET,
     block_n: Optional[int] = _UNSET,
@@ -7086,9 +7196,10 @@ def cake_dense_gemm_nondet_train_projection_prepare(
 ) -> Any:
     """Validate one K1 binding, plan it for the device and prepare its allocation-free launch: a weight-gradient
     layout prepares this package's split-K program (:class:`CakeDenseGemmNondetProjectionLaunch`; its workspace is
-    owned by the prepared object; ``splits``, ``block_n`` and ``chains`` as for
+    owned by the prepared object; ``splits``, ``block_n``, ``chains`` and ``promote`` as for
     :func:`cake_dense_gemm_nondet_train_projection_plan`).  Without other knobs than ``transposed_out`` and
-    ``enable_pdl``, a row of a program table of the device -- the forward, input-gradient and stream-K
+    ``enable_pdl`` (``promote=None`` or ``False`` counts as none, :func:`_routing_knobs`), a row of a program table of
+    the device -- the forward, input-gradient and stream-K
     weight-gradient tables (:func:`_k1_table_call`) -- prepares the program the convenience entry point of its
     operation runs (:class:`CakeDenseGemmNondetProgramLaunch`, the same program and bits).  A row the planner keeps on
     the deterministic program, and every other layout, prepares the deterministic package's
@@ -7097,7 +7208,8 @@ def cake_dense_gemm_nondet_train_projection_prepare(
     programmatic dependent launch."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
-    if not set(knobs) - {"transposed_out", "enable_pdl"}:
+    routed = _routing_knobs(knobs)
+    if not set(routed) - {"transposed_out", "enable_pdl"}:
         program = _k1_program_prepare(
             A,
             B,
@@ -7109,7 +7221,7 @@ def cake_dense_gemm_nondet_train_projection_prepare(
             return program
     if _route(_k1_layout(A, B)) == "det":
         return deterministic_backend().cake_dense_gemm_det_train_projection_prepare(
-            A, B, out, **knobs
+            A, B, out, **routed
         )
     own, det_knobs = _split_knobs(knobs)
     return _atomic_k1(

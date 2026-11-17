@@ -3162,6 +3162,339 @@ def test_k1_chain_programs_are_registered():
             assert chained["launch"] == single["launch"]
 
 
+#: The promoted programs this package ships (:data:`K1_PROMOTE_BLOCKS`): the one-chain BF16 transposed-store programs
+#: of 64-, 128- and 256-wide tiles with chunks of at most 128 K blocks, on sm_100a, sm_103a and sm_107a.
+K1_PROMOTED_TEMPLATES = tuple(
+    f"dense_proj_gemm_atomic_nn_n{bn}_t_kc128" for bn in (64, 128, 256)
+)
+
+
+def _k1_template_at(arch, block_n, f32, T, splits, chains=1, order="arrival"):
+    """``(template, promote_blocks)`` of this package's CTA-pair plan of ``block_n`` / ``splits`` / ``chains`` at ``T``
+    tokens on ``arch``, by the rule of :data:`K1_PROMOTE_BLOCKS` restated here: the promoted program where the plan
+    has one chain, BF16 out and the transposed store, its largest split holds more than 128 K blocks of 64 tokens and
+    this checkout registers the promoted template for ``arch``; else the program without promotion."""
+    kc = cake_backend.K1_PROMOTE_BLOCKS
+    promoted = cake_backend.atomic_k1_template(block_n, f32, chains, order, kc)
+    if (
+        chains == 1
+        and not f32
+        and block_n not in cake_backend.K1_ROW_MAJOR_BLOCK_N
+        and -(-_k1_blocks(T) // splits) > kc
+        and promoted in cake_jit.KERNELS.get(arch, {})
+    ):
+        return promoted, kc
+    return cake_backend.atomic_k1_template(block_n, f32, chains, order), 0
+
+
+def _wgrad_views(T, d_in, d_out, out_dtype=torch.bfloat16):
+    """``(X.T, G, out)`` of the weight gradient ``out[d_out, d_in] = G[T, d_out].T @ X[T, d_in]`` as the weight-gradient
+    entry point launches it (``transposed_out=True``), on CPU tensors (never written: nothing is launched)."""
+    G = torch.empty(T, d_out, dtype=torch.bfloat16)
+    X = torch.empty(T, d_in, dtype=torch.bfloat16)
+    return X.t(), G, torch.empty(d_out, d_in, dtype=out_dtype)
+
+
+def test_k1_promote_template_and_rule(monkeypatch):
+    """A promoted chunk holds 128 K blocks (:data:`K1_PROMOTE_BLOCKS`); the promoted template ends in ``_kc128``, after
+    the chain and split-order parts.  :func:`k1_promote_blocks` names it (128) for one chain, BF16 out and the
+    transposed store when the largest split, ``ceil(ceil(K / 64) / splits)``, holds more than 128 K blocks and the
+    template is registered for the architecture, and gives 0 otherwise: at 128 blocks or fewer, at more than one
+    chain, for FP32 out, for the row-major store (each also with such a template registered) and without the template.
+    The rule reads the split's length only: the same answer on every architecture, whatever the row."""
+    assert cake_backend.K1_PROMOTE_BLOCKS == 128
+    template = cake_backend.atomic_k1_template
+    assert template(64, False, 1, "arrival", 128) == (
+        "dense_proj_gemm_atomic_nn_n64_t_kc128"
+    )
+    assert template(64, False, 1, "arrival", 0) == "dense_proj_gemm_atomic_nn_n64_t"
+    assert template(256, True, 2, "mirror", 128) == (
+        "dense_proj_gemm_atomic_nn_n256_f32_t_c2_mirror_kc128"
+    )
+    assert template(192, False, 1, "arrival", 128) == (
+        "dense_proj_gemm_atomic_nn_n192_kc128"
+    )
+    for arch in ("sm_100a", "sm_103a", "sm_107a"):
+        _register(
+            monkeypatch,
+            arch,
+            *K1_PROMOTED_TEMPLATES,
+            "dense_proj_gemm_atomic_nn_n64_f32_t_kc128",
+            "dense_proj_gemm_atomic_nn_n64_t_c2_kc128",
+            "dense_proj_gemm_atomic_nn_n192_kc128",
+        )
+
+        def rule(K, block_n=64, splits=2, chains=1, f32=False, arch=arch):
+            return cake_backend.k1_promote_blocks(
+                arch=arch,
+                K=K,
+                block_n=block_n,
+                splits=splits,
+                chains=chains,
+                out_f32=f32,
+            )
+
+        for bn in (64, 128, 256):
+            # two splits: 256 K blocks are 128 per split; 257 make 129 in the larger one
+            assert (rule(16384, bn), rule(16385, bn), rule(65535, bn)) == (0, 128, 128)
+            # one split: 128 and 129 K blocks
+            assert (rule(8192, bn, 1), rule(8193, bn, 1)) == (0, 128)
+            assert (rule(1, bn, 1), rule(65535 * 4, bn, 4)) == (0, 128)
+        assert rule(65535, chains=2) == 0
+        assert rule(65535, f32=True) == 0
+        assert rule(65535, block_n=192, splits=1) == 0
+    table = dict(cake_jit.KERNELS["sm_100a"])
+    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc128")
+    monkeypatch.setitem(cake_jit.KERNELS, "sm_100a", table)
+    assert (
+        cake_backend.k1_promote_blocks(
+            arch="sm_100a", K=65535, block_n=64, splits=2, chains=1, out_f32=False
+        )
+        == 0
+    )
+
+
+def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
+    """A one-chain BF16 transposed-store plan whose largest split holds more than 128 K blocks of 64 tokens runs the
+    promoted program (``promote_blocks`` 128, template ``..._kc128``), as the planner's choice and as an explicit one:
+    the 148-SM sm_100a weight gradient ``4096 -> 64`` BF16 at 65535 tokens (``G [65535, 64]``, ``X [65535, 4096]``:
+    two splits of 64-wide tiles, 512 K blocks each), where one accumulator per split missed the naive BF16 tier; the
+    plan is the one without promotion but for the template.  At 16384 tokens (128 blocks per split) the row keeps the
+    program without promotion, at 16385 (129) it promotes.  FP32 out (the planner's two-split plan and an explicit
+    one), more than one chain (the 148-SM BF16 ``4096 -> 1024`` two-chain program, 256 K blocks in one split, and an
+    explicit three in BF16 and in FP32) and the row-major store never promote, with the promoted template of each
+    registered.
+    ``promote=False`` keeps the program without promotion; ``promote=True`` runs the promoted program at any length
+    and raises ``ValueError`` on a plan without one (FP32 out, more than one chain, the row-major store, the cluster
+    program, an unregistered template); a row the planner keeps on the deterministic program stays there.  A
+    checkout that does not register the promoted template keeps the program without promotion."""
+    arch = "sm_100a"
+    _register_k1(monkeypatch, arch)
+    _register(
+        monkeypatch,
+        arch,
+        *K1_PROMOTED_TEMPLATES,
+        "dense_proj_gemm_atomic_nn_n256_t_c2",
+        "dense_proj_gemm_atomic_nn_n128_t_c3",
+        "dense_proj_gemm_atomic_nn_n128_f32_t_c3",
+        # the promoted templates of plans that never promote: the rule, not the registry, refuses them
+        "dense_proj_gemm_atomic_nn_n64_f32_t_kc128",
+        "dense_proj_gemm_atomic_nn_n256_t_c2_kc128",
+        "dense_proj_gemm_atomic_nn_n128_t_c3_kc128",
+        "dense_proj_gemm_atomic_nn_n192_kc128",
+    )
+    kw = dict(transposed_out=True, arch=arch, sm_count=148)
+
+    def plan_of(views, **knobs):
+        plan, *_, reason = cake_backend.plan_atomic_gemm(*views, **kw, **knobs)
+        assert plan is not None and reason == "", reason
+        return plan
+
+    def fields(plan):
+        return (
+            plan.template,
+            plan.block_n,
+            plan.splits,
+            plan.chains,
+            plan.promote_blocks,
+        )
+
+    row = _wgrad_views(65535, 4096, 64)
+    plan = plan_of(row)
+    assert fields(plan) == ("dense_proj_gemm_atomic_nn_n64_t_kc128", 64, 2, 1, 128)
+    assert plan.out_t and not plan.dsm and plan.reproducible
+    assert (plan.M, plan.N, plan.K, plan.split_order) == (4096, 64, 65535, "arrival")
+    assert plan.workspace and plan.ws_f32_elems == 16 * 2 * 256 * 64
+    plain = plan_of(row, promote=False)
+    assert fields(plain) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
+    assert dataclasses.replace(plan, template=plain.template, promote_blocks=0) == plain
+    # the same knobs given explicitly promote alike; promote=True names the same program
+    assert plan_of(row, splits=2, block_n=64) == plan
+    assert plan_of(row, promote=True) == plan
+    # 128 K blocks per split: the program without promotion (promote=True: the promoted one, one chunk per split)
+    short = _wgrad_views(16384, 4096, 64)
+    assert fields(plan_of(short)) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
+    assert fields(plan_of(short, promote=True)) == (
+        "dense_proj_gemm_atomic_nn_n64_t_kc128",
+        64,
+        2,
+        1,
+        128,
+    )
+    assert fields(plan_of(_wgrad_views(16385, 4096, 64))) == (
+        "dense_proj_gemm_atomic_nn_n64_t_kc128",
+        64,
+        2,
+        1,
+        128,
+    )
+    # one split of 256-wide tiles at 129 K blocks, given explicitly
+    assert fields(plan_of(_wgrad_views(8193, 4096, 1024), splits=1, block_n=256)) == (
+        "dense_proj_gemm_atomic_nn_n256_t_kc128",
+        256,
+        1,
+        1,
+        128,
+    )
+    # FP32 out never promotes
+    row32 = _wgrad_views(65535, 4096, 64, torch.float32)
+    assert fields(plan_of(row32)) == (
+        "dense_proj_gemm_atomic_nn_n64_f32_t",
+        64,
+        2,
+        1,
+        0,
+    )
+    assert plan_of(row32, splits=2, block_n=64) == plan_of(row32)
+    with pytest.raises(ValueError, match="FP32 out"):
+        cake_backend.plan_atomic_gemm(*row32, splits=2, block_n=64, promote=True, **kw)
+    # more than one chain never promotes: two chains of one split of 256 K blocks, and an explicit three (BF16, FP32)
+    chained = _wgrad_views(16384, 4096, 1024)
+    assert fields(plan_of(chained)) == (
+        "dense_proj_gemm_atomic_nn_n256_t_c2",
+        256,
+        1,
+        2,
+        0,
+    )
+    with pytest.raises(ValueError, match="accumulation chains"):
+        cake_backend.plan_atomic_gemm(*chained, promote=True, **kw)
+    three = _wgrad_views(65535, 4096, 512)
+    assert fields(plan_of(three, chains=3, block_n=128)) == (
+        "dense_proj_gemm_atomic_nn_n128_t_c3",
+        128,
+        1,
+        3,
+        0,
+    )
+    three = _wgrad_views(65535, 4096, 512, torch.float32)
+    assert fields(plan_of(three, chains=3, block_n=128)) == (
+        "dense_proj_gemm_atomic_nn_n128_f32_t_c3",
+        128,
+        1,
+        3,
+        0,
+    )
+    # the row-major store and the cluster program have no promoted program
+    assert fields(plan_of(row, block_n=192, splits=1)) == (
+        "dense_proj_gemm_atomic_nn_n192",
+        192,
+        1,
+        1,
+        0,
+    )
+    with pytest.raises(ValueError, match="row-major"):
+        cake_backend.plan_atomic_gemm(*row, block_n=192, splits=1, promote=True, **kw)
+    cluster = _wgrad_views(4096, 4096, 32, torch.float32)
+    assert plan_of(cluster).dsm
+    with pytest.raises(ValueError, match="cluster program"):
+        cake_backend.plan_atomic_gemm(*cluster, promote=True, **kw)
+    # a token count the planner keeps on the deterministic program (65536 tokens on 148 SMs) stays there
+    for promote in (None, True, False):
+        kept, *_, reason = cake_backend.plan_atomic_gemm(
+            *_wgrad_views(65536, 4096, 64), promote=promote, **kw
+        )
+        assert kept is None and "deterministic" in reason, promote
+    # a checkout that does not register the promoted program: the program without promotion
+    table = dict(cake_jit.KERNELS[arch])
+    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc128")
+    monkeypatch.setitem(cake_jit.KERNELS, arch, table)
+    assert fields(plan_of(row)) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
+    with pytest.raises(ValueError, match="not registered"):
+        cake_backend.plan_atomic_gemm(*row, promote=True, **kw)
+
+
+def test_k1_promote_reaches_the_planner_from_the_plan_and_prepare_entries(
+    monkeypatch,
+):
+    """``promote`` is this package's knob of the projection plan / prepare entries: a weight-gradient layout hands it
+    to this package's planner with the other own knobs, and the deterministic package's call never receives it."""
+    for name in (
+        "cake_dense_gemm_nondet_train_projection_plan",
+        "cake_dense_gemm_nondet_train_projection_prepare",
+    ):
+        det = _patch_det(monkeypatch, name)
+        atomic = Recorder()
+        monkeypatch.setattr(cake_backend, "_atomic_k1", atomic)
+        A, B, out = _k1_views("nn")
+        entry = getattr(cake_backend, name)
+        assert entry(A, B, out, promote=False, splits=2) is atomic.result
+        ((args, kwargs),) = atomic.calls
+        assert args[0] == ("plan" if name.endswith("_plan") else "prepare")
+        assert kwargs["own"] == {"promote": False, "splits": 2}
+        assert kwargs["det_call"]() is det.result
+        assert det.calls == [((A, B, out), {})]
+
+
+def test_k1_promote_off_keeps_the_route(monkeypatch):
+    """``promote=None`` (the automatic rule) and ``promote=False`` (no promoted program) choose no program: the
+    prepare entry still prepares a row of a program table of the device, as without the knob, and a layout of the
+    deterministic program reaches the deterministic package's plan / prepare without the knob.  ``promote=True``
+    skips the program tables, as this package's other knobs do."""
+    tables, table = [], object()
+
+    def program(*args):
+        tables.append(args)
+        return table
+
+    monkeypatch.setattr(cake_backend, "_k1_program_prepare", program)
+    atomic = Recorder()
+    monkeypatch.setattr(cake_backend, "_atomic_k1", atomic)
+    prepare = cake_backend.cake_dense_gemm_nondet_train_projection_prepare
+    A, B, out = _k1_views("nn")
+    for promote in (None, False):
+        tables.clear()
+        assert prepare(A, B, out, transposed_out=True, promote=promote) is table
+        assert tables == [(A, B, out, True, None)], promote
+    assert not atomic.calls
+    tables.clear()
+    assert prepare(A, B, out, promote=True) is atomic.result
+    assert not tables
+    ((args, kwargs),) = atomic.calls
+    assert args[0] == "prepare" and kwargs["own"] == {"promote": True}
+    # a layout of the deterministic program (no program-table row here)
+    monkeypatch.setattr(cake_backend, "_k1_program_prepare", lambda *args: None)
+    for name in (
+        "cake_dense_gemm_nondet_train_projection_plan",
+        "cake_dense_gemm_nondet_train_projection_prepare",
+    ):
+        det = _patch_det(monkeypatch, name)
+        entry = getattr(cake_backend, name)
+        A, B, out = _k1_views("kk")
+        for promote in (None, False):
+            assert entry(A, B, out, transposed_out=False, promote=promote) is det.result
+        assert det.calls == [((A, B, out), {"transposed_out": False})] * 2, name
+
+
+def test_k1_promoted_programs_are_registered():
+    """The promoted programs (:data:`K1_PROMOTE_BLOCKS`) ship on sm_100a, sm_103a and sm_107a and no other promoted
+    program does: each is the build of the one-chain BF16 transposed-store program of its tile width with
+    ``promote_blocks`` 128 (``split_order`` at its default, "arrival", whether the record names it or not), with that
+    program's argument plan and launch geometry, so a plan binds and launches it as it does that program."""
+    arches = ("sm_100a", "sm_103a", "sm_107a")
+    got = {}
+    for arch, kernels in cake_jit.KERNELS.items():
+        for template in kernels:
+            if re.search(r"_kc[0-9]+$", template):
+                got.setdefault(template, []).append(arch)
+    assert {t: tuple(sorted(a)) for t, a in got.items()} == dict.fromkeys(
+        K1_PROMOTED_TEMPLATES, arches
+    )
+    for template in K1_PROMOTED_TEMPLATES:
+        one = template[: -len("_kc128")]
+        for arch in arches:
+            promoted = cake_jit.MODULES[cake_jit.KERNELS[arch][template]]
+            single = cake_jit.MODULES[cake_jit.KERNELS[arch][one]]
+            assert promoted["build"]["module"] == single["build"]["module"]
+            assert {"split_order": "arrival", **promoted["build"]["kwargs"]} == {
+                "split_order": "arrival",
+                **single["build"]["kwargs"],
+                "promote_blocks": 128,
+            }
+            assert promoted["arg_plan"] == single["arg_plan"]
+            assert promoted["launch"] == single["launch"]
+
+
 def test_k1_plan_is_the_transposed_store_launch(monkeypatch):
     """The thin weight gradient ``out[32, 4096] = G.T @ X``: either orientation of the caller's views gives the same
     launch -- ``A = X`` ``[L, T, d_in]``, ``B = G`` ``[L, T, d_out]``, ``M = d_in``, ``N = d_out`` -- the planner's
@@ -9690,8 +10023,9 @@ def test_registry_is_disjoint_from_the_deterministic_package():
 def test_registered_templates_are_the_ones_the_planners_name():
     """Every template this checkout registers is one the host plans: the K1 programs of each tile width
     (``dense_proj_gemm_atomic_nn_n<64|128|256>[_f32]_t`` and the row-major ``dense_proj_gemm_atomic_nn_n192[_f32]``)
-    and their FP32 programs of several accumulation chains (``..._c<chains>``, :data:`K1_CHAINS_CHOICES`), the K1
-    cluster programs the ranges of :data:`K1_DSM_RANGES_BY_SM` name (each registered for the architecture of its
+    and their FP32 programs of several accumulation chains (``..._c<chains>``, :data:`K1_CHAINS_CHOICES`), the
+    promoted programs of the one-chain BF16 transposed-store programs (``..._t_kc128``, :func:`k1_promote_blocks`),
+    the K1 cluster programs the ranges of :data:`K1_DSM_RANGES_BY_SM` name (each registered for the architecture of its
     table, and for no other: ``dense_proj_gemm_dsm_nn_n<block_n>_f32_t_s<splits>``; also the cluster tiles of
     :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`; the three-CTA programs stay registered where no range names them: the ranges
     that ran them run two CTAs), the two router classes, the weight gradient's head/tail programs (of the architecture
@@ -9713,6 +10047,13 @@ def test_registered_templates_are_the_ones_the_planners_name():
         cake_backend.atomic_k1_template(bn, True, chains)
         for bn in cake_backend.K1_BLOCK_N_CHOICES
         for chains in cake_backend.K1_CHAINS_CHOICES
+    }
+    wanted |= {
+        cake_backend.atomic_k1_template(
+            bn, False, 1, "arrival", cake_backend.K1_PROMOTE_BLOCKS
+        )
+        for bn in cake_backend.K1_BLOCK_N_CHOICES
+        if bn not in cake_backend.K1_ROW_MAJOR_BLOCK_N
     }
     # the programs of K1_ORDERED_RANGES_BY_SM and K1_PARITY_RANGES_BY_SM and the programs the forward /
     # input-gradient (this package's and the nvjet program on the deterministic plan) / stream-K weight-gradient
@@ -10095,7 +10436,9 @@ def _k1_prepare(G, X, out, arch, splits, block_n=None):
 
 
 def _force_k1_rule(monkeypatch, G, X, out, splits, block_n=None):
-    """The force of :func:`k1_rule` through ``monkeypatch``; returns the template."""
+    """The force of :func:`k1_rule` through ``monkeypatch``; returns the template the planner runs at the token count
+    of ``G`` (the promoted program where a split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks,
+    :func:`_k1_template_at`)."""
     arch = det_backend.arch_for(out.device)
     N, K = int(G.shape[1]), int(X.shape[1])
     block_n = block_n or cake_backend.k1_block_n(N)
@@ -10118,7 +10461,7 @@ def _force_k1_rule(monkeypatch, G, X, out, splits, block_n=None):
     monkeypatch.setattr(cake_backend, "K1_ONE_SPLIT_RANGES_BY_SM", {})
     monkeypatch.setattr(cake_backend, "K1_DSM_RANGES_BY_SM", {})
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-    return cake_backend.atomic_k1_template(block_n, f32)
+    return _k1_template_at(arch, block_n, f32, int(G.shape[0]), splits)[0]
 
 
 @pytest.fixture
@@ -12367,7 +12710,10 @@ def test_gpu_k1_sm_count_overrides_run_their_programs(record_property):
                 prepared, cake_backend.CakeDenseGemmNondetProjectionLaunch
             ), (key, T)
             assert (prepared.plan.block_n, prepared.plan.splits) == want
-            assert prepared.template == cake_backend.atomic_k1_template(block_n, f32)
+            assert (
+                prepared.template,
+                prepared.plan.promote_blocks,
+            ) == _k1_template_at(arch, block_n, f32, T, splits), (key, T)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
             what = f"{M} {N} {dt} {T}"
@@ -12662,7 +13008,8 @@ def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(
     :data:`K1_TWO_SPLIT_RANGES_BY_SM` (``sm_107a``: 212 SMs; ``sm_100a`` / ``sm_103a``: 152 SMs): at the first and the
     last token count of every range of a row, and one token past the first token count of a two-split range (an odd
     number of K blocks), the prepared launch runs the program of the part's table in :data:`K1_SPLIT_RULES_BY_SM` (of
-    the range, for an override or two-split range) and its output meets the naive BF16 tier against FP64
+    the range, for an override or two-split range; its promoted program where a split holds more than
+    :data:`K1_PROMOTE_BLOCKS` K blocks, :func:`_k1_template_at`) and its output meets the naive BF16 tier against FP64
     (:func:`judge_gemm`); one token outside a range (and outside the window) the row takes the deterministic program's
     route (the planner gives no plan, and the prepared launch is not this package's split-K launch).  On a part of
     exactly the SM count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` (148-SM ``sm_100a`` / ``sm_103a``
@@ -12701,9 +13048,11 @@ def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(
             ), (key, T)
             assert (prepared.plan.block_n, prepared.plan.splits) == plan, (key, T)
             assert prepared.plan.chains == chains, (key, T)
-            assert prepared.template == cake_backend.atomic_k1_template(
-                plan[0], f32, chains
-            ), (key, T)
+            # the promoted program where the split holds more than K1_PROMOTE_BLOCKS K blocks
+            assert (
+                prepared.template,
+                prepared.plan.promote_blocks,
+            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains), (key, T)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
             ran += 1
@@ -12732,7 +13081,8 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
     :data:`K1_SPLIT_RULES_BY_SM_TOKEN_RANGES`, :data:`K1_SPLIT_RANGE_OVERRIDES_BY_SM` or
     :data:`K1_TWO_SPLIT_RANGES_BY_SM` (``sm_107a``: 212 SMs; ``sm_100a`` / ``sm_103a``: 152 SMs): the
     convenience path binds the part's program
-    (the range's, for an override or two-split range) at the first and the last token count of every range of a row
+    (the range's, for an override or two-split range; its promoted program where a split holds more than
+    :data:`K1_PROMOTE_BLOCKS` K blocks) at the first and the last token count of every range of a row
     (its :data:`_K1_ATOMIC_CACHE` entry), the tickets zero after; one token outside a range, and one token past the
     first token count of a two-split range, it binds the deterministic package's plan.  On a part of exactly the SM
     count of a table of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` the reverse.  An edge inside a range of
@@ -12772,6 +13122,10 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
             assert plan == want_plan, (key, T)
             assert (entry.plan.block_n, entry.plan.splits) == plan, (key, T)
             assert entry.plan.chains == chains, (key, T)
+            assert (
+                entry.plan.template,
+                entry.plan.promote_blocks,
+            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains), (key, T)
         else:
             assert entry.plan is None and entry.det_plan is not None, (key, T)
         what = f"{M} {N} {dt} {T}"
@@ -12864,9 +13218,10 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(
                 ), what
                 assert (prepared.plan.block_n, prepared.plan.splits) == plan, what
                 assert prepared.plan.chains == 1, what
-                assert prepared.template == cake_backend.atomic_k1_template(
-                    block_n, f32
-                ), what
+                assert (
+                    prepared.template,
+                    prepared.plan.promote_blocks,
+                ) == _k1_template_at(arch, block_n, f32, T, 1), what
                 _assert_ran(prepared.launch, prepared.module_name)
                 torch.cuda.synchronize()
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
@@ -15915,7 +16270,8 @@ def test_no_default_plan_varies_run_to_run(monkeypatch):
     row (:data:`ROUTER_RULES`, :data:`ROUTER_RULES_BY_SM`: the forward, the input gradient and the weight gradient), at
     the edges of every range and window of the row and at the bench token counts, plans no launch that is not
     ``reproducible`` (the K1 CTA-pair program at three or more splits in the arrival order, a K2 partition of more than
-    two partials per element), with every template registered.  The forward and input-gradient program tables name
+    two partials per element), with every template registered; the walk plans promoted programs too
+    (:func:`k1_promote_blocks`).  The forward and input-gradient program tables name
     programs that add each element's whole K in one chain (the deterministic plan's bits), the stream-K table one that
     sums a split tile in unit order: no plan of theirs varies."""
     for arch in ("sm_100a", "sm_103a", "sm_107a"):
@@ -15935,7 +16291,7 @@ def test_no_default_plan_varies_run_to_run(monkeypatch):
         for (arch, _), part_rows in getattr(cake_backend, name).items():
             for d_in, d_out, T, dt in part_rows:
                 rows.setdefault((arch, 1, d_in, d_out, dt), set()).add(T)
-    seen = {"dsm": 0, "fixed": 0, "pair": 0, "plans": 0}
+    seen = {"dsm": 0, "fixed": 0, "pair": 0, "plans": 0, "promoted": 0}
     for (arch, L, d_in, d_out, dt), tokens in sorted(rows.items()):
         Ts = sorted(tokens | common)
         Tmax = max(Ts)
@@ -15963,6 +16319,7 @@ def test_no_default_plan_varies_run_to_run(monkeypatch):
                 seen["dsm"] += plan.dsm
                 seen["fixed"] += plan.split_order != "arrival"
                 seen["pair"] += not plan.dsm and plan.splits <= 2
+                seen["promoted"] += plan.promote_blocks > 0
     assert all(seen.values()), seen
     # router rows (fp32 views, 256 experts or the row's own)
     router_rows: dict = {}
