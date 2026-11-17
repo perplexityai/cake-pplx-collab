@@ -62,6 +62,28 @@ int64_t NumelAbove(const TensorView& t, int trailing) {
   return product;
 }
 
+[[noreturn]] void NoInt64(int64_t a, const char* op, int64_t b) {
+  TVM_FFI_THROW(ValueError) << KERNEL_NAME << ": " << a << " " << op << " " << b
+                            << " has no int64 value in a host check";
+}
+
+int64_t CheckedSub(int64_t a, int64_t b) {
+  int64_t difference;
+  if (__builtin_sub_overflow(a, b, &difference)) NoInt64(a, "-", b);
+  return difference;
+}
+
+int64_t CheckedMul(int64_t a, int64_t b) {
+  int64_t product;
+  if (__builtin_mul_overflow(a, b, &product)) NoInt64(a, "*", b);
+  return product;
+}
+
+int64_t CMod(int64_t a, int64_t b) {
+  if (b == 0) NoInt64(a, "%", b);
+  return b == -1 ? 0 : a % b;
+}
+
 cuuint64_t Extent(int64_t value, const char* descriptor) {
   TVM_FFI_CHECK(value > 0, ValueError)
       << KERNEL_NAME << ": an extent of descriptor '" << descriptor << "' resolves to " << value;
@@ -177,6 +199,24 @@ void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_dy, Tenso
   check_same_device(a_partial, a_x, "partial", "x");
   check_same_device(a_x_map, a_x, "x_map", "x");
   check_same_device(a_dy_map, a_x, "dy_map", "x");
+  TVM_FFI_CHECK((a_ct_vec >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (ct_vec >= 1)";
+  TVM_FFI_CHECK((a_ct_vec <= 128LL), ValueError)
+      << KERNEL_NAME << ": requires (ct_vec <= 128)";
+  TVM_FFI_CHECK((a_n_sub >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (n_sub >= 1)";
+  TVM_FFI_CHECK((CheckedMul(a_n_sub, a_ct_vec) <= 128LL), ValueError)
+      << KERNEL_NAME << ": requires ((n_sub * ct_vec) <= 128)";
+  TVM_FFI_CHECK((a_n_ch_tiles >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (n_ch_tiles >= 1)";
+  TVM_FFI_CHECK((a_n_ch_tiles <= 65536LL), ValueError)
+      << KERNEL_NAME << ": requires (n_ch_tiles <= 65536)";
+  TVM_FFI_CHECK((a_C >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (C >= 1)";
+  TVM_FFI_CHECK((CMod(a_C, 8LL) == 0LL), ValueError)
+      << KERNEL_NAME << ": requires (CMod(C, 8) == 0)";
+  TVM_FFI_CHECK((CheckedMul(CheckedMul(CheckedSub(a_n_ch_tiles, 1LL), a_ct_vec), 8LL) < a_C), ValueError)
+      << KERNEL_NAME << ": requires ((((n_ch_tiles - 1) * ct_vec) * 8) < C)";
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
