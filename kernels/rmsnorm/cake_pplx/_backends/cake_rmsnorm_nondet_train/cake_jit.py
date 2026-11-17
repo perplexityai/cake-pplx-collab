@@ -5133,7 +5133,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 98304,
         },
     },
-    # sm_100a H2048 bf16 weight: (12, 64] the single kernel 518cf16a (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H2048 bf16 weight: (12, 64] the column-task kernel 518cf16a (64 column tasks).
     "cake_rmsnorm_train_518cf16a7bf8e88042ee__12_64": {
         "arches": [
             "sm_100a",
@@ -5201,7 +5201,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (14, 64] the single kernel c2f08c95 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H2048 f32 weight: (14, 64] the column-task kernel c2f08c95 (64 column tasks).
     "cake_rmsnorm_train_c2f08c957d4b0f17dddd__14_64": {
         "arches": [
             "sm_100a",
@@ -5269,7 +5269,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (12, 64] the single kernel 82b84544 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H4096 bf16 weight: (12, 64] the column-task kernel 82b84544 (128 column tasks).
     "cake_rmsnorm_train_82b84544dba8e2b70bc1__12_64": {
         "arches": [
             "sm_100a",
@@ -5337,7 +5337,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (14, 64] the single kernel cdef0b34 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H4096 f32 weight: (14, 64] the column-task kernel cdef0b34 (128 column tasks).
     "cake_rmsnorm_train_cdef0b34f5080dbc61d1__14_64": {
         "arches": [
             "sm_100a",
@@ -5405,7 +5405,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 bf16 weight: (4, 64] the single kernel 29bcbde1 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H5120 bf16 weight: (4, 64] the column-task kernel 29bcbde1 (80 column tasks).
     "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_64": {
         "arches": [
             "sm_100a",
@@ -5473,7 +5473,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (4, 64] the single kernel e6475d8f (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H6144 bf16 weight: (4, 64] the column-task kernel e6475d8f (96 column tasks).
     "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__4_64": {
         "arches": [
             "sm_100a",
@@ -5541,7 +5541,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 f32 weight: (4, 64] the single kernel f4d41a09 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H6144 f32 weight: (4, 64] the column-task kernel f4d41a09 (96 column tasks).
     "cake_rmsnorm_train_f4d41a0991647b82ac21__4_64": {
         "arches": [
             "sm_100a",
@@ -5609,7 +5609,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (2, 64] the single kernel 3a55646d (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H6144 residual bf16 weight: (2, 64] the column-task kernel 3a55646d (96 column tasks).
     "cake_rmsnorm_train_3a55646d574035bfa271__2_64": {
         "arches": [
             "sm_100a",
@@ -5677,7 +5677,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual f32 weight: (4, 64] the single kernel 6e0d06ab (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H6144 residual f32 weight: (4, 64] the column-task kernel 6e0d06ab (96 column tasks).
     "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__4_64": {
         "arches": [
             "sm_100a",
@@ -6173,7 +6173,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 40960,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (6, 31] the single kernel 3a55646d (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 residual bf16 weight: (6, 31] the column-task kernel 3a55646d (96 column tasks).
     "cake_rmsnorm_train_3a55646d574035bfa271__6_31": {
         "arches": [
             "sm_103a",
@@ -6241,7 +6241,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (32, 48] the single kernel 3a55646d (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 residual bf16 weight: (32, 48] the column-task kernel 3a55646d (96 column tasks).
     "cake_rmsnorm_train_3a55646d574035bfa271__32_48": {
         "arches": [
             "sm_103a",
@@ -9097,7 +9097,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H512 bf16 weight: (16, 227] the single kernel 931757c8 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H512 bf16 weight: (16, 227] the column-task kernel 931757c8 (32 column tasks).
     "cake_rmsnorm_train_931757c844a9d257c08b__16_227": {
         "arches": [
             "sm_100a",
@@ -9131,7 +9131,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (64, 384] the single kernel e83ee45f (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H1536 f32 weight: (64, 384] the column-task kernel e83ee45f (96 column tasks).
     "cake_rmsnorm_train_e83ee45f66352eaef755__64_384": {
         "arches": [
             "sm_100a",
@@ -9165,7 +9165,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 f32 weight: (64, 1792] the single kernel 139d162a (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H5120 f32 weight: (64, 1792] the column-task kernel 139d162a (80 column tasks).
     "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_1792": {
         "arches": [
             "sm_100a",
@@ -9233,7 +9233,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 bf16 weight: (2, 64] the single kernel 02e761bc (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H1536 bf16 weight: (2, 64] the column-task kernel 02e761bc (96 column tasks).
     "cake_rmsnorm_train_02e761bcf94053af6fc3__2_64": {
         "arches": [
             "sm_100a",
@@ -9267,7 +9267,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (2, 64] the single kernel 166e288c (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H1536 f32 weight: (2, 64] the column-task kernel 166e288c (96 column tasks).
     "cake_rmsnorm_train_166e288c9192be6b994c__2_64": {
         "arches": [
             "sm_100a",
@@ -9301,7 +9301,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 f32 weight: (4, 64] the single kernel cb653957 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H5120 f32 weight: (4, 64] the column-task kernel cb653957 (80 column tasks).
     "cake_rmsnorm_train_cb6539573725ac861f94__4_64": {
         "arches": [
             "sm_100a",
@@ -9335,7 +9335,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (5, 64] the single kernel 02e761bc (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H1536 bf16 weight: (5, 64] the column-task kernel 02e761bc (96 column tasks).
     "cake_rmsnorm_train_02e761bcf94053af6fc3__0_64_103": {
         "arches": [
             "sm_103a",
@@ -9369,7 +9369,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 bf16 weight: (16, 63] the single kernel 518cf16a (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H2048 bf16 weight: (16, 63] the column-task kernel 518cf16a (64 column tasks).
     "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_63": {
         "arches": [
             "sm_103a",
@@ -9469,7 +9469,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H5120 bf16 weight: (4, 16] the single kernel 29bcbde1 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H5120 bf16 weight: (4, 16] the column-task kernel 29bcbde1 (80 column tasks).
     "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_16": {
         "arches": [
             "sm_103a",
@@ -9503,7 +9503,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (6, 64] the single kernel 166e288c (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H1536 f32 weight: (6, 64] the column-task kernel 166e288c (96 column tasks).
     "cake_rmsnorm_train_166e288c9192be6b994c__0_64_103": {
         "arches": [
             "sm_103a",
@@ -9571,7 +9571,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 f32 weight: (16, 64] the single kernel c2f08c95 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H2048 f32 weight: (16, 64] the column-task kernel c2f08c95 (64 column tasks).
     "cake_rmsnorm_train_c2f08c957d4b0f17dddd__0_64_103": {
         "arches": [
             "sm_103a",
@@ -9637,7 +9637,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (16, 32] the single kernel 8274f36f (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H4096 f32 weight: (16, 32] the column-task kernel 8274f36f (128 column tasks).
     "cake_rmsnorm_train_8274f36f6fd2f50dd508__16_32": {
         "arches": [
             "sm_103a",
@@ -9671,7 +9671,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H5120 f32 weight: (5, 16] the single kernel cb653957 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H5120 f32 weight: (5, 16] the column-task kernel cb653957 (80 column tasks).
     "cake_rmsnorm_train_cb6539573725ac861f94__5_16": {
         "arches": [
             "sm_103a",
@@ -9705,7 +9705,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 f32 weight: (12, 16] the single kernel f4d41a09 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 f32 weight: (12, 16] the column-task kernel f4d41a09 (96 column tasks).
     "cake_rmsnorm_train_f4d41a0991647b82ac21__12_16": {
         "arches": [
             "sm_103a",
@@ -9739,7 +9739,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (10, 31] the single kernel 6e0d06ab (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 residual f32 weight: (10, 31] the column-task kernel 6e0d06ab (96 column tasks).
     "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__10_31": {
         "arches": [
             "sm_103a",
@@ -9807,7 +9807,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (32, 48] the single kernel 6e0d06ab (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 residual f32 weight: (32, 48] the column-task kernel 6e0d06ab (96 column tasks).
     "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__32_48": {
         "arches": [
             "sm_103a",
@@ -9875,7 +9875,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 bf16 weight: (16, 31] the single kernel 518cf16a (FP32 dw sums added in FP32 in no fixed order).
+    # sm_107a H2048 bf16 weight: (16, 31] the column-task kernel 518cf16a (64 column tasks).
     "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_31": {
         "arches": [
             "sm_107a",
@@ -10064,7 +10064,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (1664, 2304] the single kernel b3e6531e (FP32 dw sums added in FP32 in no fixed order).
+    # sm_107a H6144 f32 weight: (1664, 2304] the column-task kernel b3e6531e (96 column tasks).
     "cake_rmsnorm_train_b3e6531e46667901ab91__1664_2304": {
         "arches": [
             "sm_107a",
@@ -10268,7 +10268,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H4096 bf16 weight: (16, 32] the single kernel dc7ed206 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H4096 bf16 weight: (16, 32] the column-task kernel dc7ed206 (128 column tasks).
     "cake_rmsnorm_train_dc7ed206fba49ab22d1d__16_32": {
         "arches": [
             "sm_103a",
@@ -10302,7 +10302,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 bf16 weight: (6, 16] the single kernel e6475d8f (FP32 dw sums added in FP32 in no fixed order).
+    # sm_103a H6144 bf16 weight: (6, 16] the column-task kernel e6475d8f (96 column tasks).
     "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__6_16": {
         "arches": [
             "sm_103a",
@@ -10640,7 +10640,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 122880,
         },
     },
-    # sm_100a H512 f32 weight: (16, 227] the single kernel 404c8f54 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_100a H512 f32 weight: (16, 227] the column-task kernel 404c8f54 (32 column tasks).
     "cake_rmsnorm_train_404c8f54ab3129877350__16_227": {
         "arches": [
             "sm_100a",
@@ -10707,7 +10707,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 8192,
         },
     },
-    # sm_107a H5120 bf16 weight: (12, 31] the single kernel 29bcbde1 (FP32 dw sums added in FP32 in no fixed order).
+    # sm_107a H5120 bf16 weight: (12, 31] the column-task kernel 29bcbde1 (80 column tasks).
     "cake_rmsnorm_train_29bcbde1d271ea989fa8__12_31": {
         "arches": [
             "sm_107a",
