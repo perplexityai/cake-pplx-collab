@@ -729,7 +729,8 @@ def test_cake_dense_backward_orders_have_the_same_bits(
 ):
     """The dense backward forced chunk-outer and forced block-outer (:func:`cake_support._dense_order`) gives the same
     bits on the outputs, dX and dW: both orders run the same launches and add every FP32 element in the same order.
-    With ignored labels, empty rows and rows no upstream reaches; the rule's own order equals both.
+    With ignored labels, empty rows and rows no upstream reaches.  The rule picks one of the two orders, and its call
+    holds its contract (its bits are not compared with the forced calls': no repeated call is held to the same bits).
     Every shape here is outside the dense dX rule's cells (one K slice per block).  ``form`` ``(2, 0)`` forces two K
     slices on every block (blocks of 4 or 8 K steps): the ordered slab sums -- storing at a chunk's first block,
     accumulating at a later one (``vocab_block`` 256: two blocks) -- give the same bits in both orders too."""
@@ -756,9 +757,16 @@ def test_cake_dense_backward_orders_have_the_same_bits(
     else:
         assert forms and all(s == form[0] for s, _ in forms), forms
     assert_same(runs["chunk"], runs["block"])
-    monkeypatch.setattr(cake_support, "_dense_order", rule)
+    picked = []
+
+    def recorded(*args):
+        picked.append(rule(*args))
+        return picked[-1]
+
+    monkeypatch.setattr(cake_support, "_dense_order", recorded)
     res = run_support(inp, outputs, upstream=up, need_dx=need_dx, need_dw=need_dw, **kw)
-    assert_same(res, runs["chunk"])
+    assert picked and set(picked) <= {"chunk", "block"}, picked
+    contract_support(res, inp, outputs=outputs)
     if up is not None:
         # the rows no upstream reaches: dX exactly 0 in both orders
         counts = inp.support_offsets[1:] - inp.support_offsets[:-1]
