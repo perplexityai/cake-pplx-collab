@@ -11871,6 +11871,7 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
                         )
                         is out
                     )
+                    torch.cuda.synchronize()
                 assert not isinstance(prepared, atomic), (hidden, T)
                 continue
             assert isinstance(prepared, atomic), (hidden, T)
