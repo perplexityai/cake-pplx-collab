@@ -263,26 +263,26 @@ kernel_cake_dsa_h64_det_train_84376fdd68bed4f727cf(__nv_bfloat16* __restrict__ k
         ss_0 = __fmaf_rn(kv8_1[6], kv8_1[6], ss_0);
         ss_0 = __fmaf_rn(kv8_1[7], kv8_1[7], ss_0);
 #endif
-        float total_0 = ss_0;
+        float total = ss_0;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
-            total_0 += __shfl_xor_sync(0xFFFFFFFF, total_0, offset);
-        float kn_0;
-        asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(kn_0) : "f"(total_0));
+            total += __shfl_xor_sync(0xFFFFFFFF, total, offset);
+        float kn;
+        asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(kn) : "f"(total));
         if (lane_1 == 0) {
 #if __CUDA_ARCH__ == 1070
-            knorm[unit_u_0] = kn_0;
+            knorm[unit_u_0] = kn;
 #else
-            knorm[unit_0] = kn_0;
+            knorm[unit_0] = kn;
 #endif
         }
-        unsigned int kbits_0 = __as_u32(kn_0) & 2147483647;
-        if (kbits_0 < 2139095040) {
+        unsigned int kbits = __as_u32(kn) & 2147483647;
+        if (kbits < 2139095040) {
 #if __CUDA_ARCH__ == 1070
-            unsigned int _max_4 = ((kmax) > (kbits_0) ? (kmax) : (kbits_0));
+            unsigned int _max_4 = ((kmax) > (kbits) ? (kmax) : (kbits));
             kmax = _max_4;
 #else
-            unsigned int _max_2 = ((kmax) > (kbits_0) ? (kmax) : (kbits_0));
+            unsigned int _max_2 = ((kmax) > (kbits) ? (kmax) : (kbits));
             kmax = _max_2;
 #endif
         }

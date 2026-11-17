@@ -38,9 +38,8 @@ as BF16) and ``bwd_dq`` (dQ = dS K over the workspace into the FP32
 accumulator; the range that finishes a Q tile writes ``dQ = bf16(acc *
 softmax_scale)`` instead), then ``bwd_fold`` (row-map destinations only: the
 FP32 window rows added into their destination rows in ascending window order).
-Every sum has one fixed order, so every output is bitwise reproducible run to
-run for one shape, one ``max_seqlen_k``, one workspace budget and the same host
-boundaries.  Every launch is a plain stream-ordered launch: nothing
+Nothing adds with atomics; the package does not promise that an output
+repeats bit for bit.  Every launch is a plain stream-ordered launch: nothing
 cooperative, no PDL.
 """
 
@@ -350,7 +349,8 @@ SCRATCH_ALIGN = 256
 # Default bound of the dS^T workspace of one backward call.  A smaller budget
 # splits the call into more chunks (KV heads first, then key-block ranges);
 # the key-block split re-reads and rewrites the FP32 dQ accumulator once per
-# extra chunk, and moves the dQ rounding (the bits, not the accuracy).
+# extra chunk.  The budget can move the rounding of the outputs, not their
+# accuracy.
 DEFAULT_WORKSPACE_BUDGET = 16 << 30
 
 

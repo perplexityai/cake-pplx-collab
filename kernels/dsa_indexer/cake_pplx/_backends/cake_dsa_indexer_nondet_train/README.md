@@ -7,20 +7,20 @@ pipeline scores every visible key and selects the exact top-k with aligned
 scores.  The target geometry is 32 indexer heads, head dimension 128 and
 top-k 2048.
 
-This package runs the deterministic package's BF16 scan programs and its plain
-split merge unchanged.  It leaves out the ordering pass, which is the
+This package runs the deterministic package's scan programs of both input
+forms (BF16 and the opt-in FP8 form) and its plain split merge unchanged.  It leaves out the ordering pass, which is the
 deterministic package's finalize / rank finalize that sorts every row into
-ascending id order.  The scores are the same, and each row holds the same
-selected set in a different slot order.  The package implements the
-set-equality semantics: per row,
-the set of selected `(id, score bits)` pairs repeats bit for bit, but the slot
-order does not.
+ascending id order.  The package implements the set-equality semantics: a
+row's selected ids are a set, written in no specified slot order.  No output
+is promised to repeat bit for bit between calls.
 
 The entry points of `cake_pplx.cake_dsa_indexer_nondet_train` are stable
 APIs.  This backend package under `cake_pplx/_backends/` is
 experimental and has no compatibility guarantee of its own.  SM107 (Rubin) is
 the primary target of the request.  SM100 (B200 / GB200) is the comparison
-architecture and SM103 (B300 / GB300) is the third target.  The feature does
+architecture and SM103 (B300 / GB300) is the third target.  The `sm_107a`
+libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
+entries).  The feature does
 not take part in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when the package ships them.
 Otherwise the package's JIT shim builds them from `build.json` (see "Layout of
@@ -31,7 +31,7 @@ this package").
 Every public name carries the mode word `nondet`, and no entry point takes a
 `deterministic=` keyword.  The deterministic package is
 `cake_pplx.cake_dsa_indexer_det_train`.  It runs the same scan programs and
-returns the same set per row in ascending id order.  The backend's own names
+writes every row in ascending id order.  The backend's own names
 also carry the mode word (`prepare_dsa_indexer_nondet_topk`,
 `DSAIndexerNondetRunner`, `plan_dsa_indexer_nondet_topk`,
 `validate_dsa_indexer_nondet_inputs`).  The generated programs are named
@@ -69,9 +69,13 @@ indices, scores = cake_dsa_indexer_nondet_train_topk(q, k, w, cu_seqlens_q, cu_s
                                                      top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1,
                                                      max_seqlen_q=None, max_seqlen_k=None,
                                                      workspace_buffer=None, indices=None, scores=None,
-                                                     return_scores=True)
+                                                     return_scores=True, k_scale=None)
 nbytes = cake_dsa_indexer_nondet_train_topk_workspace_size(num_queries, num_keys, num_segments,
                                                            top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)
+
+# the FP8 form (opt-in): float8_e4m3fn q / k, per-key FP32 k_scale, every other scale folded into w
+indices, scores = cake_dsa_indexer_nondet_train_topk(q_fp8, k_fp8, w, cu_seqlens_q, cu_seqlens_k, k_scale=k_scale)
+nbytes = cake_dsa_indexer_nondet_train_topk_workspace_size(T, Tkv, S, device=q.device, dtype=torch.float8_e4m3fn)
 
 # indices only: None is returned in place of the scores (they are still computed internally)
 indices, _ = cake_dsa_indexer_nondet_train_topk(q, k, w, cu_seqlens_q, cu_seqlens_k, return_scores=False)
@@ -88,22 +92,21 @@ keyword-only.
 | `cu_seqlens_q`, `cu_seqlens_k` | `[S + 1]` int32, contiguous, device | independent query and key segment boundaries (`cu_seqlens_q[-1] == T`, `cu_seqlens_k[-1] == Tkv`; not read on the host) |
 | `q_causal_offsets` | optional `[S]` int64, contiguous, device | per-segment query offsets |
 | `top_k` | int, `1 <= top_k <= 4096` | output slots per query (default 2048) |
-| `softmax_scale` | positive finite float | logit scale (default `128 ** -0.5`) |
+| `softmax_scale` | positive finite float | logit scale (default `128 ** -0.5`); `None` for the FP8 form |
+| `k_scale` | optional `[Tkv]` FP32, contiguous | the FP8 form's per-key scales (see "FP8 form"); BF16 calls take none |
 | `ratio` | int, `>= 1` | key compression ratio (normally 1) |
 | `max_seqlen_q` | optional int | host mirror of the longest query segment; accepted, not read by any launch decision |
 | `max_seqlen_k` | optional int | the caller's bound on every key segment (`max(cu_seqlens_k[1:] - cu_seqlens_k[:-1])`); read only by the segment-order rule (a packed call of equal key segments runs its scan without the longest-first order); the selected sets are identical with and without it; a value above `Tkv` or below `ceil(Tkv / S)` is rejected |
-| `workspace_buffer` | optional uint8 tensor | at least `cake_dsa_indexer_nondet_train_topk_workspace_size(T, Tkv, S, top_k=..., ratio=..., device=...)` bytes, 8-byte aligned; allocated through the caching allocator when omitted |
+| `workspace_buffer` | optional uint8 tensor | at least `cake_dsa_indexer_nondet_train_topk_workspace_size(T, Tkv, S, top_k=..., ratio=..., device=..., dtype=q.dtype)` bytes, 8-byte aligned; allocated through the caching allocator when omitted |
 | `indices`, `scores` (outputs) | `[T, top_k]` int32 and FP32, contiguous, on the device of `q` | caller-owned outputs, allocated when omitted; see "Outputs"; `scores` must be omitted with `return_scores=False` |
 | `return_scores` | bool | `False`: `None` is returned in place of the scores (default `True`) |
 
-This package offers the BF16 form only, and there is no `k_scale` argument.
-Float8_e4m3fn `q` / `k` raise `ValueError`.  The message says that this
-package offers the BF16 form only and that the float8_e4m3fn form is the
-opt-in FP8 form of `cake_pplx.cake_dsa_indexer_det_train`.
-`cake_dsa_indexer_nondet_train_topk_workspace_size(..., dtype=torch.float8_e4m3fn)`
-raises the same way.  Every other non-BF16 dtype raises `ValueError`.  A
-device other than compute capability 10.0, 10.3 or 10.7 raises `ValueError`.
-An architecture without registered programs raises `NotImplementedError`.
+The `q` / `k` dtype selects the input form: BF16 (the default) or the opt-in
+FP8 form (both `torch.float8_e4m3fn`, see "FP8 form").  Mixed `q` / `k`
+dtypes, `float8_e5m2` and every other dtype raise `ValueError`.  A device
+other than compute capability 10.0, 10.3 or 10.7 raises `ValueError`.  An
+architecture without registered programs of the call's form raises
+`NotImplementedError`.
 
 `T`, `Tkv`, the segment lengths and the last tile are arbitrary.  The recorded
 training calls have `T = 16231` and `16172`.  Nothing needs caller-side
@@ -112,19 +115,14 @@ padding.
 
 ## Outputs
 
-The "repeats" column holds for identical inputs and configuration: the same
-device, the same SM count and the same arguments.
+| output | contents | not specified |
+|---|---|---|
+| `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids, unique within the row, and `-1` in every other slot | the slot order of the selected ids and the positions of the `-1` slots; both may vary between calls |
+| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot; `-inf` in every padding slot; `None` with `return_scores=False` | the slot order, which follows `indices` |
 
-| output | contents | repeats bit for bit | not specified |
-|---|---|---|---|
-| `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids, unique within the row, and `-1` in every other slot | the set of selected ids of every row, and with it the row's count of valid (non-`-1`) slots | the slot order of the selected ids and the positions of the `-1` slots; both may vary between calls |
-| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the score of the id in the same slot, with its computed FP32 bits (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | each selected id's score bits, so the set of `(id, score bits)` pairs of every row | the slot order, which follows `indices` |
-
-* A row holds the same ids and score bits that the deterministic package
-  returns for it, because both packages run the same scan programs.  Only the
-  slot order differs.  A caller that needs ascending id order can sort the row
-  or use the deterministic package.  The following rearranges every row into
-  the deterministic package's layout (ascending ids, padding last):
+* A caller that needs ascending id order can sort the row or use the
+  deterministic package.  The following rearranges every row into ascending
+  ids, padding last:
 
   ```python
   key = indices.masked_fill(indices < 0, torch.iinfo(torch.int32).max)
@@ -145,10 +143,8 @@ s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])
 Products, accumulation and score arithmetic are FP32.  There is no BF16
 intermediate rounding and no fast-math (IEEE round-to-nearest, no
 flush-to-zero).  The scan programs are the deterministic package's BF16 scan
-programs, so a pair's score bits are that package's bits.  Every program
-evaluates the score in one fixed sequence.  The score of a pair therefore
-depends only on `(q[t], k[j], w[t], softmax_scale)`, not on which program,
-CTA, tile or warp evaluates it:
+programs.  Every program
+evaluates the score in this sequence:
 
 1. **Dot product**: one tensor-core MMA of a fixed shape (128 keys x (queries
    of the unit x 32 heads) x K = 16).  It accumulates the 128 products of a
@@ -162,23 +158,82 @@ CTA, tile or warp evaluates it:
 3. **Weights**: `w'_h = fl(w_h * softmax_scale)` once per query block
    (`relu(scale * x) = scale * relu(x)` for `scale > 0`).
 
-Every head term therefore sees at most 11 roundings after the MMA.  Two
-independent FP32 evaluations of one score differ by at most `gamma_n * A`,
-with `n = 2D + 4H + 4 = 388`, `gamma_n = n u / (1 - n u)`, `u = 2 ** -24` and
-`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|`.  The deterministic
-package's tests enforce this bound against an independent FP64 / FP32
-reference, and this package's score bits are the same.
+Every head term therefore sees at most 11 roundings after the MMA.
 
-**Signed zeros.**  Every chain accumulator starts at `+0.0` and the FMA order
-is fixed.  Because `fma(+0, w', +0) = +0` for either sign of `w'`, a row whose
-head terms are all zero yields `+0.0`.  A `-0.0` score cannot come from this
-reduction (registry field `NUMERICS["zero_sign_policy"] =
-"positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, and
-an equal-score tie goes to the larger key id.  The written score keeps the
-computed bits and is never canonicalized.  The reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` follows the same reduction
-model, so the bit-exact test cases compare like with like after each row is
-canonicalized (see "Tests and benchmark").
+**Signed zeros.**  `+0.0` and `-0.0` compare equal for ranking, and an
+equal-score tie goes to the larger key id.  The tests hold the signed-zero
+cases to the ids and valid counts of the exact selection of
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` after each row
+is canonicalized (see "Tests and benchmark").
+
+## FP8 form
+
+The FP8 form is opt-in and selected by the input dtype: `q [T, 32, 128]` and
+`k [Tkv, 128]` both `torch.float8_e4m3fn` (the same layout rules as BF16; a
+row stride that is a multiple of 16 elements), `k_scale [Tkv]` FP32
+(contiguous, on the device of `q`), `w [T, 32]` FP32 carrying every other
+scale (the query scale, the softmax scale and the head weights), and
+`softmax_scale=None` (the programs take 1.0).  Mixed q / k dtypes,
+`float8_e5m2` and `q_scale` are rejected; a BF16 call keeps its default
+behaviour and rejects `k_scale`.  The score is
+
+```
+s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j, d])
+```
+
+* **Programs**: the FP8 scan programs are the deterministic package's FP8
+  scan programs under this package's prefix, and a split call runs the same
+  plain split merge as BF16.  `sm_100a` / `sm_103a` register the `narrow`,
+  `l6`, `split_narrow` and `split_l6` scan programs, each with its
+  longest-first segment order copy (`:lsf`), and the unpaired `wide` program
+  (8 queries per unit, tile unroll 2) with its `:lsf` copy; `sm_107a`
+  registers `narrow`, `l6` with its snake unit order copy, `split_narrow` and
+  the unpaired `wide` program (tile unroll 2), without `:lsf` copies.  Keys
+  carry the form tag before the order suffix:
+  `scan:<kind>:u<n>:s<0|1>:f1:fp8[:lsf]`, `s1` only for the `sm_107a` `l6`
+  snake program.  Launches are non-PDL and non-cooperative, like BF16.
+* **Dot product**: the e4m3 x e4m3 products are exact and accumulate in FP32
+  on the tensor cores: four K = 32 steps over `d = 0 .. 127` on `sm_100a` /
+  `sm_103a` (the order of DeepGEMM's `fp8_mqa_logits`), two K = 64 steps on
+  `sm_107a`.
+* **Head reduction**: the sum over the heads of `w[t, h] * relu(logit)` and
+  its product with `k_scale[j]` are FP32; the tests judge the score like the
+  BF16 form (against its FP64 value from the e4m3 inputs, beside the naive
+  tier's).
+* **Sets**: every FP8 program of one architecture selects the same set per
+  row, in no specified slot order, like BF16.  FP8 results are not BF16
+  results of the dequantized inputs.
+* **Dispatch**: the architecture's FP8 record is its BF16 `POLICY` record with
+  the fields of `cake_jit.POLICY_FP8[arch]` replaced
+  (`cake_policy.fp8_policy_record`); `POLICY_FP8` names every architecture's
+  FP8 `static_scan_kinds` itself, and the record is the deterministic
+  package's FP8 record.  On `sm_100a` and `sm_103a` `POLICY_FP8` also sets
+  `wide_wave_rule`, so the FP8 form chooses its wide unit by waves of the
+  persistent grid (the unit geometry rule in "Host dispatch").
+  `cake_policy.select_fp8_program` runs the BF16
+  decision procedure under it and maps the decided kind to a registered FP8
+  kind: its own where an FP8 program of it is registered, else its fallback
+  (`FP8_KIND_FALLBACK`: `wide` / `pair_wide` / `pair_l6` -> `l6`,
+  `pair_narrow` -> `narrow`, `split_wide` -> `split_narrow`, and `split_l6`
+  -> `split_narrow` where no FP8 `split_l6` program is registered).  The
+  program runs without a CTA pair, in its sampled-fit form, in the snake
+  order only where the FP8 record's `snake_cap_rule` admits it and the snake
+  copy is registered, and in the longest-first order where the BF16 rule
+  picks it and an FP8 copy exists, or for one document of the `wide` unit
+  within the FP8 record's `lsf_single_rule`.  A fallback kind takes its own
+  sampling class and check period (`cake_policy.fallback_knobs`); explicit
+  knobs stay.  On `sm_107a` every FP8 kind keeps the static unit enumeration
+  (`static_scan_kinds`): no ticket tail, nothing zeroed.  An architecture
+  without FP8 programs raises `NotImplementedError`.  A call therefore gets
+  the FP8 scan program, candidate capacity, check period and split count that
+  the deterministic package picks for it.
+* **Workspace**: `cake_dsa_indexer_nondet_train_topk_workspace_size(...,
+  dtype=torch.float8_e4m3fn)` bounds the FP8 programs' workspace; the
+  default `dtype=torch.bfloat16` returns the BF16 bound.  The FP8 bound can
+  differ from the BF16 bound of the same geometry (other units, no CTA pair),
+  so size an FP8 buffer with this function and the FP8 dtype.
+* **Prepared runners** bind `k_scale` with `q` / `k`: new values written into
+  it are read by the next run.
 
 ## Visibility
 
@@ -206,7 +261,7 @@ defined: the row is all padding.
   equal-score tie).  `+0.0 == -0.0`.
 * Output: no specified slot order (see "Outputs").  Ids are unique.  Every slot
   that does not hold a selected entry holds `id = -1`, `score = -inf`.
-* The following never change the selected set of a row, only its slot order:
+* The following never change the selected ids of a row:
   * the program the host dispatches for a geometry: unit geometry, key-range
     split, CTA pair, tile-loop unroll, unit order, segment order, descending
     walk and sampled first threshold;
@@ -261,18 +316,23 @@ from host-known integers only: `T`, `Tkv`, `S`, `ratio`, `top_k`, the optional
 compute capability and SM count are read once per device index and reused.
 The choice goes through the registry's per-architecture `POLICY` record
 (`cake_policy.DispatchPolicy`, `cake_policy.select_program`,
-`cake_backend.plan_dsa_indexer_nondet_topk`).  These rules are the
-deterministic package's rules without its finalize, rank and FP8 rules.  A
-call therefore gets the same scan program, candidate capacity, check period,
+`cake_backend.plan_dsa_indexer_nondet_topk`; the FP8 form's record and
+mapping are described in "FP8 form").  These rules are the deterministic
+package's rules without its finalize and rank rules.  A BF16 call therefore
+gets the same scan program, candidate capacity, check period,
 split count, CTA pair and ticket plan that the deterministic package picks for
-it.  One exception is on `sm_107a`: the sampled tile count and rank
-shift follow this package's own `sample_class_rule` and `sample_long_rule`
-(whether a call samples does not change).  Most rules use one estimate, the
+it.  One exception is on `sm_107a`: both packages' records carry the same
+`sample_class_rule` and `sample_long_rule`, but on a non-wide program of the
+tiny dispatch class whose mean unit holds at most the class rule's tile
+count, this package's `cake_policy.sample_class_for` takes the class rule's
+rank shift and keeps the tile count, where the deterministic package skips
+the class rule.  So the sampled rank shift can differ (whether a call samples
+does not change).  Most rules use one estimate, the
 mean key tiles per work unit: `(Tkv - T / (2 ratio)) / S / 128`.
 
 | decision | rule (record fields) |
 |---|---|
-| unit geometry | `block_q_wide` queries per unit first where the record sets `wide_first_rule` (sm_103a: `[512.0]`), the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it; no record of this package sets it |
+| unit geometry | `block_q_wide` queries per unit first where the record sets `wide_first_rule` (sm_103a: `[512.0]`), the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it.  No BF16 record sets it; the FP8 records of `sm_100a` and `sm_103a` do (`POLICY_FP8`), so the FP8 form chooses its wide unit by waves of the persistent grid |
 | key-range split | `n_split = max(1, min(grid // units, mean tiles // split_min_range_tiles, split_max))`.  Where `n_split` is 1, a record with `split_wave_rule` splits in two when the units are long (at least `split_wave_rule[0]` and `2 x split_min_range_tiles` mean tiles) and the split raises the share of busy CTAs over the call's rounds by at least `split_wave_rule[1]`.  Where the record sets `split_wave_scope` (sm_107a: `[["narrow"], 1, true]`), that two-way split applies only to its unit geometries, on calls of at most its segment count, and with its third item on sampled calls only.  Only a unit geometry of `split_units` (the units whose split program the architecture registers) splits; any other unit runs unsplit.  A call that this rule splits takes `split_resident_rule` (sm_100a, sm_103a): `min(grid // units, 49152 // top_k, 32, max(8, n_fit if n_fit x top_k <= 32768 else 32))` splits, at least 2.  Here `n_fit = ceil(mean unit keys / top_k)`, rounded up to whole 4096-entry merge chunks, so the merge keeps its staged entries in shared memory.  Elsewhere `split_fit_rule` raises the count to `n_fit` where that fits `split_max` and the grid |
 | CTA pair | the two-CTA multicast program when the mean unit tiles lie in `pair_rule[0..1]`, `top_k >= pair_rule[2]`, the grid has at least two CTAs, the call is not split (grid made even) and the unit geometry is one of `pair_units` (the units whose pair program the architecture registers) |
 | unpaired wide unit | where the record sets `wide_pair_snake_only` (sm_107a), a sampled call keeps the CTA pair of the wide unit only where the pair program walks the snake order; elsewhere it runs the unpaired wide program when that program is registered |
@@ -331,8 +391,9 @@ before the record is frozen.
   fills) instead of launching.
 * **Ticket tail**.  On all three architectures (`TICKET_TAIL_ARCHES`), the
   scan programs draw every work unit from a ticket word.  A record's
-  `static_scan_kinds` would name the kinds whose programs keep the static
-  unit enumeration and get no tail; no record names one.  So a call that
+  `static_scan_kinds` names the kinds whose programs keep the static unit
+  enumeration and get no tail; no BF16 record names one, and the FP8 record
+  of `sm_107a` names every FP8 kind (see "FP8 form").  So a BF16 call that
   shares the GPU with another stream slows with the SMs that stream holds,
   not by a whole extra wave of work units.
   Every completed scan launch leaves the word at 0.  How the word is reset
@@ -372,7 +433,7 @@ before the record is frozen.
 
 The Cake exporter produces the kernel and launcher sources under `csrc/`, the
 registry `cake_jit.py` and `build.json`.  Every program is one of the
-deterministic package's BF16 scan programs or its plain split merge.  It is
+deterministic package's BF16 or FP8 scan programs or its plain split merge.  It is
 exported under this package's prefix as `cake_dsa_indexer_nondet_topk_<20 hex>`
 and keeps the twenty-hex identity of the deterministic program it comes from.
 Programs that differ only in a few constants share one kernel translation
@@ -385,17 +446,17 @@ host-shim namespace and the launch constants share one binding.  Each
 * `cake_jit.py` is the registry.  It holds:
   * the stage roles `scan` and `merge` only (`STAGES`) and their argument
     plans (`ARG_PLANS`, the deterministic package's, under
-    `ABI = "dsa_indexer_v5"`).  The scan's `K_scale` slot holds the
-    deterministic package's FP8 per-key scales; here it gets a placeholder
-    that no program of this package reads;
+    `ABI = "dsa_indexer_v5"`).  The scan's `K_scale` slot holds the FP8
+    form's per-key scales; a BF16 call gets a placeholder that no BF16
+    program reads;
   * one record per program (`PROGRAMS`: role, the architecture-free `library`
     stem, architectures, and `ticket_arg_arches` where a scan program draws
     from its ticket block);
   * the program of every dispatch key per architecture (`PROGRAM_KEYS`):
-    `scan:<kind>:u<unroll>:s<snake>:f<sampled fit>[:lsf]` and `merge`, with
-    no finalize, rank or FP8 keys;
-  * the per-architecture dispatch policy (`POLICY`), `NUMERICS` and
-    `TICKET_TAIL_ARCHES`;
+    `scan:<kind>:u<unroll>:s<snake>:f<sampled fit>[:fp8][:lsf]` and `merge`,
+    with no finalize or rank keys;
+  * the per-architecture dispatch policy (`POLICY`), the FP8 form's record
+    (`POLICY_FP8`), `NUMERICS` and `TICKET_TAIL_ARCHES`;
   * the loader glue: `library_name(program, arch)` gives the `build.json`
     entry `<library>_<arch>`, and `load_program(program, arch)` loads it
     through `cake_build.load_library`.
@@ -427,8 +488,8 @@ host-shim namespace and the launch constants share one binding.  Each
   translation units:
   * one kernel per program, or per group of programs that differ only in
     their constants (a scan lever-twin group);
-  * one binding per launcher text: the 59 scan programs share
-    6 bindings, and the merge program has its own.
+  * one binding per launcher text: the 86 scan programs share
+    9 bindings, and the merge program has its own.
 
   A shared kernel source names its kernel `CAKE_PROGRAM_KERNEL` and reads its
   constants (tile unroll and snake order) from
@@ -441,10 +502,12 @@ host-shim namespace and the launch constants share one binding.  Each
 
 ## Tests and benchmark
 
-There are four test files:
+There are five test files:
 
 * `tests/experimental/test_cake_dsa_indexer_nondet_train.py`: the backend
   suite;
+* `tests/experimental/test_cake_dsa_indexer_nondet_train_fp8.py`: the FP8
+  form;
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_vs_det.py`: the
   comparison with the deterministic package;
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_api.py`: the
@@ -452,23 +515,29 @@ There are four test files:
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_names.py`: the
   naming rules.
 
-They share the independent FP64 / FP32 reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` with the deterministic
-package.  Results are compared after each row is canonicalized: valid slots
-sorted by id with their score bits, padding last.  The comparisons therefore
-check sets, not slot order.  Coverage:
+They share the reference in
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and the
+naive-tier judge in `tests/experimental/test_helpers/cake_dsa_indexer_naive.py`
+(on `tests/cake_naive.py`) with the deterministic package.  Results are
+compared after each row is canonicalized: valid slots sorted by id with their
+scores, padding last.  The comparisons therefore check sets, not slot order.
+On integer inputs every score is exact in FP32, so every call must return the
+exact selection's ids and valid counts.  Over 32 draws the scores are judged
+against their FP64 values beside the naive tier's (the same scores in torch
+BF16), on integer inputs and, at the kernel's own keys, on Gaussian inputs.
+No test compares the score bits of two calls.  Coverage:
 
-* registry and policy host tests: no ordering, rank or FP8 keys; a split plan
+* registry and policy host tests: no ordering or rank keys; a split plan
   runs the scan, then the merge; an unsplit plan runs the scan only;
 * validation;
-* accuracy against the reference for the exact semantic cases;
+* the exact semantic cases, held to the exact selection;
 * packed causality;
-* random inputs;
+* random rows, judged against the naive tier;
 * near ties;
 * the recorded token counts;
 * the ratio-4 pooled top-512 selection;
 * `top_k = 4096`;
-* set repeatability over five calls (the pairs and the valid count);
+* five eager calls and five prepared runs, each holding the exact selection;
 * split versus unsplit set equality, a forced split whose rows hold padding
   and a forced split that cuts a tie group;
 * non-finite inputs;
@@ -476,11 +545,23 @@ check sets, not slot order.  Coverage:
 * CUDA graphs and the absence of host synchronization;
 * the deterministic-algorithms guard.
 
-The comparison file checks that every row equals the deterministic package's
-row in another slot order (ids, score bits, valid count and padding), and
-that the registry keys, policy records and host plans of BF16 calls are the
-deterministic package's.
+The FP8 suite covers the host-only key grammar, the FP8 record, the kind
+mapping and the reachability of every registered FP8 key, validation and BF16
+plan / workspace identity; on the GPU, the exact selection's ids and counts
+on integer e4m3 inputs and the scores judged against the naive tier (integer
+and amax-quantized Gaussian e4m3 inputs), the same sets from every registered
+FP8 program forced on one call, the prepared runner's `k_scale` binding, the
+per-form ticket decision on a poisoned workspace, the workspace bound, CUDA
+graphs and, on `sm_100a` / `sm_103a` where `deep_gemm` imports, the sets
+against the top-k of DeepGEMM's FP8 MQA logits.
+
+The comparison file checks that the registry keys, policy records and host
+plans of BF16 and FP8 calls are the deterministic package's, on the host, and
+those of BF16 calls at the device's grid.  It does not compare the outputs of
+the two packages.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
-package against the deterministic package on the same rows.  It compares their
-sets, not slot-by-slot bits, and fails on any set mismatch.
+package against the deterministic package on the same rows, in the BF16 form
+or, with `--form fp8`, in the FP8 form on the FP8 shape set.  It checks each
+package's output on its own (the structure checks, `min(top_k, visible)` valid
+slots per row) and does not compare the outputs of the two packages.

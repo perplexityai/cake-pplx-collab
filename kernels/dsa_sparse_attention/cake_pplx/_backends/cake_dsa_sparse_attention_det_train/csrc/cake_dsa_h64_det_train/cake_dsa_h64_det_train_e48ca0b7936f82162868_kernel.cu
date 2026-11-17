@@ -188,7 +188,7 @@ kernel_cake_dsa_h64_det_train_e48ca0b7936f82162868(unsigned long long* __restric
             if (lane_1 < 16) {
                 e_r = e_rope[row];
                 {
-                    const int4* _ivptr_16 = reinterpret_cast<const int4*>(dkr_acc + ((long long)row * (long long)dkr_stride + (long long)(dkr_col0 + lane_1 * 4)) + 0);
+                    const int4* _ivptr_16 = reinterpret_cast<const int4*>(dkr_acc + ((long long)row * (long long)dkv_stride + (long long)(dkr_col0 + lane_1 * 4)) + 0);
                     int4 _ivld_16;
                     _ivld_16 = *_ivptr_16;
                     n[16 + 0] = _ivld_16.x;
@@ -257,7 +257,7 @@ kernel_cake_dsa_h64_det_train_e48ca0b7936f82162868(unsigned long long* __restric
                 *reinterpret_cast<int4*>(dkv_acc + lbase + (long long)(384 + lane_1 * 4)) = _iv4;
             }
             if (lane_1 < 16) {
-                long long rbase = (long long)row * (long long)dkr_stride + (long long)dkr_col0;
+                long long rbase = (long long)row * (long long)dkv_stride + (long long)dkr_col0;
                 {
                     int4 _iv4 = make_int4(zero4[0 + 0], zero4[0 + 1], zero4[0 + 2], zero4[0 + 3]);
                     *reinterpret_cast<int4*>(dkr_acc + rbase + (long long)(lane_1 * 4)) = _iv4;
