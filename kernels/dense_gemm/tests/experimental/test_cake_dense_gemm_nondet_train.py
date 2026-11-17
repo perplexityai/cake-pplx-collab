@@ -13478,6 +13478,9 @@ def test_gpu_router_deterministic_program_through_the_binding(record_property):
         check(1000, SEED + 72, label=" on another stream")
     torch.cuda.synchronize()
     assert stream.cuda_stream in {key[1] for key in cake_backend._ATOMIC_ARENAS}
+    # every call above, the larger row and the other stream included, ran the deterministic program: none planned
+    # this package's program
+    assert not cake_backend._K2_ATOMIC_CACHE
     # a binding the deterministic package refuses: its error
     X, W, G = _router_inputs(1001, device, SEED + 73, K=hidden)
     storage = torch.empty(1001 * hidden + 4, device=device)
