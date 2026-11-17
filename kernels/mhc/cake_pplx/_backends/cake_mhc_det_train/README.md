@@ -147,7 +147,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 - The mapping GEMM has FP32 quality. `fn` is split exactly into three BF16 pieces, and the products accumulate in FP32. TF32 is not used.
 - `dX` sums the mapping, collapse and residual-mix contributions in FP32 and rounds to BF16 once.
 - `dB` is the BF16 rounding of the complete FP32 sum over the streams, with one rounding.
-- The coefficients, their gradients and the parameter reductions are all FP32.
+- The coefficients, their gradients and the parameter reductions are all FP32. Every reduction sums in one plain FP32 word in a fixed order, with no FP64 arithmetic and no compensation word.
 - The sigmoid tails keep their gradients where the FP32 forward sigmoid rounds to 1.
 - The tests in `tests/mhc/test_cake_mhc_det_train*.py` validate `Y`, `U`, `dX`, `dB`, `dfn`, `dscale` and `dbase` against an FP64 reference. They check activation errors and parameter-gradient errors separately. Coverage includes cancellation, saturated sigmoid tails, empty, small, large and irregular `T`, checkpoint replay, and repeated gradient accumulation.
 

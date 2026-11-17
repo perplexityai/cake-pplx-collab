@@ -10767,6 +10767,8 @@ FWD_COEF_REGIMES = {"sm_100a": "round7", "sm_103a": "round5", "sm_107a": "round9
 # param_ctas=27, dfn_threads=64; block 64, grid 1563 = 1536 dfn CTAs + 27) for T < 4096 and "pt32" (dfn_threads=32;
 # block 32, grid 3099 = 3072 + 27) for T >= 4096 -- the smallest band T from which pt32 wins beyond the paired spreads
 # at every larger band T in both sessions; both bitwise the production form.
+# These forms, bands and part maps were timed when the reduction summed in FP64; every form now sums each output in
+# one plain FP32 word (the same part and chunk order), so the maps choose the speed only.
 # BWD_TOKEN_PROGRAM: the token-owner program per architecture outside every regime of BWD_TOKEN_REGIMES and every band
 # of BWD_TOKEN_BANDS. sm_107a: "dot_ao8_l2l" (dot_ao8 +
 # ring_l2=evict_last; CONFIGS 23) -- vs dot_ao8 s1 0.9506..0.9804 / s2 0.9531..0.9750 on the ten rows
@@ -10822,7 +10824,7 @@ BWD_TOKEN_BANDS = {
 # owner and the final reduction run their group-row forms: the token owner runs the "_trows_dyn" form of its program
 # (one 32-float parameter row per 8-token group, the groups after the first wave claimed first-come from the backward
 # workspace's self-resetting ticket word 32) and the reduction the "_trows" form of its program (the 27 parameter CTAs
-# fold the group rows as compensated FP32 columns). The two run together: the parameter region of the backward
+# fold the group rows as FP32 columns). The two run together: the parameter region of the backward
 # workspace then holds the group rows [32, ceil(T / 8)] instead of the per-CTA partials [G6, 32]. dX, dfn, dzp and
 # tokp are bitwise the per-CTA forms'; dscale and dbase sum the same terms in another fixed order (8-token groups,
 # one FP32 word per column), deterministic and
@@ -11004,8 +11006,8 @@ BWD_REDUCE_GRID = {
 # sessions the checkpoint path reads 1.000 / 0.997 at 14928, 0.999 / 1.002 at 15566, 1.016 / 0.997 at 15590, 0.990 /
 # 1.001 at 16164 and 0.996 / 0.999 / 1.005 / 0.998 at 16263 (16114: identical-program control void in both) -> the
 # band is 4096-8192 tokens on sm_100a; above it the plain forms (15288, 16132 and 16165, measured faster, would each
-# be a single-token band). sm_103a: the reduction is FP64-bound (74 % of its time), the hint does not shorten it ->
-# no band.
+# be a single-token band). sm_103a: the reduction was FP64-bound when measured (74 % of its time), the hint did
+# not shorten it -> no band.
 BWD_DPL_BANDS = {
     "sm_100a": ((4095, 8192),),
     "sm_103a": (),

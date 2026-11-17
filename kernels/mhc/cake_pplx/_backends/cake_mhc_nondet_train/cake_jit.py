@@ -46,33 +46,30 @@ The deterministic column-slab records (``bwd_slab``) and final-reduction records
   The grid completes only after its last CTA's wait, so the column-slab pass,
   which waits for this grid, still follows the token-owner pass;
 * ``cake_mhc_train_bwd_slab_fold__dynr`` (every architecture): the
-  deterministic dynamic-schedule column-slab form ``dynr`` (``dX`` bit for
-  bit), which stores the compensated ``dfn`` sums of every (column slab, token
-  chunk) unit, the deterministic partials of that unit, into its chunk's slots
-  of the backward workspace (``dfn_slot`` as ``[P, 24, 4H]``; units without
+  deterministic dynamic-schedule column-slab form ``dynr``, which stores the
+  FP32 ``dfn`` sums of every (column slab, token chunk) unit into its chunk's
+  slots of the backward workspace (``dfn_slot`` as ``[P, 24, 4H]``; units without
   tokens store nothing).  It draws every unit
   from the ticket, so only a running CTA holds a unit.  Each CTA adds its unit
   count to the first ``slab_cnt`` word once, after its last unit, and waits
   until the grid's count reaches every unit; the second word counts the CTAs
   done with their fold, and the last of them leaves both words zero.  The CTAs
   fold ``dfn`` element ranges in parallel: per element the slots of the chunks
-  that hold tokens in ascending chunk order as a compensated FP32 sum
-  (TwoSum), the entry value last under ``accumulate``, one rounding.  The
-  order of every addition depends on the chunk geometry alone, never on the
-  schedule or the grid.  One warp
+  that hold tokens in ascending chunk order as one FP32 sum from +0.0, the
+  entry value last under ``accumulate``.  The order of every addition depends
+  on the chunk geometry alone, never on the schedule or the grid.  One warp
   of each of the first 27 CTAs folds the parameter gradients ``dscale`` /
   ``dbase`` from the token-owner pass's rows (``prow``): the per-CTA partials
-  in the deterministic reduction's per-CTA sequence (an FP64 chain in
-  ascending order), or inside ``BWD_ROW_BANDS`` the group rows of the token
-  owner's ``_trows_dyn`` form in the deterministic group-row reduction's
-  compensated order; the carried-in value last, one rounding.  So they are
-  bitwise the deterministic package's ``dscale`` / ``dbase``;
+  in the deterministic reduction's per-CTA sequence, or inside
+  ``BWD_ROW_BANDS`` the group rows of the token owner's ``_trows_dyn`` form in
+  the deterministic group-row reduction's order; each sum one FP32 word, the
+  carried-in value last;
 * ``cake_mhc_train_bwd_slab_fold__dynr_os`` (every architecture): the same
   dynamic form with the units drawn slab-fastest (``order="slab"``: unit ``u``
   is column slab ``u % (H / 64)`` of token chunk ``u / (H / 64)``, instead of
   slab ``u / P`` of chunk ``u % P``).  The units and the kernel parameters are
   the same; only the order in which the units run changes, so every output is
-  the same bits.  :func:`bwd_slab_atomic_program` appends
+  the same bits as ``dynr``'s.  :func:`bwd_slab_atomic_program` appends
   ``_os`` to the form it picks where :func:`bwd_slab_order` (the token-count
   bands of ``BWD_SLAB_ORDER`` per hidden size and architecture, or of the
   board's cell of ``BWD_SLAB_ORDER_OVERRIDES``) names ``"slab"``.
@@ -111,18 +108,15 @@ arrival counts (``slab_cnt``) right after the ticket region and its per-chunk
 ``dfn`` slots (``dfn_slot``, FP32 ``[min(32, ceil(T / 64)), 24, 4H]``) in place
 of the deterministic per-chunk partials (``dfn_part``).  Every
 output repeats bit for bit from run to run on one device: each sum runs in an
-order fixed by the token count and the device.  ``dX`` and every other route's
-outputs are the deterministic package's bits, and so are ``dscale`` and
-``dbase`` (the same parameter rows folded in the same order).  ``dfn`` is the
-compensated fold of at most ``P`` per-chunk slots ``x_p`` (``P <= 32``: the
-chunk count of :func:`k7_chunks`) and the entry value ``in`` under
-``accumulate``: within one FP32 rounding of ``in + sum x_p`` plus
-``O(P^2 u^2) (|in| + sum |x_p|)`` (``u = 2^-24``); no addition flushes a
-subnormal.  The chunks are the deterministic column slab's, and each slot is
-the deterministic partial of the same unit, bit for bit.  The deterministic
-package sums those partials in FP64 and rounds once, so ``dfn`` is the
-deterministic ``dfn`` except where the exact sum lies within that last term of
-an FP32 rounding boundary.
+order fixed by the token count and the device.  ``dscale`` and ``dbase`` fold
+the token-owner pass's parameter rows in a fixed order.  ``dfn`` is the FP32
+sum of at most ``P`` per-chunk slots ``x_p`` (``P <= 32``: the chunk count of
+:func:`k7_chunks`, the deterministic column slab's chunks) in ascending chunk
+order and the entry value ``in`` last under ``accumulate``: within
+``gamma_n (|in| + sum |x_p|)`` of ``in + sum x_p`` (``n`` the additions,
+``gamma_n = n u / (1 - n u)``, ``u = 2^-24``); no addition flushes a
+subnormal.  Every sum is one plain FP32 word: no FP64 arithmetic and no
+compensation word.
 The deterministic package's backward fn splits (``fn_split__tv128__t``,
 ``fn_split__tv128_t128__t``, ``fn_split__tv128__h<H>__t``) have no copy here:
 the atomic fn splits replace them.  The deterministic package's
@@ -7323,7 +7317,7 @@ PARAM_LAYOUT: dict[str, tuple[int, int]] = {
 # FP32 ``dfn`` slots (``dfn_slot``, ``slot_parts x 24 x n`` with ``slot_parts =
 # min(32, ceil(T / 64))``, at least the token-holding chunks of either
 # column-slab geometry; a launch of ``P`` chunks uses its first ``P x 24 x n``
-# values as ``[P, 24, n]``: the units' compensated sums), which the grid folds
+# values as ``[P, 24, n]``: the units' FP32 sums), which the grid folds
 # into ``dfn`` once every unit has stored its slots.  The slot region depends on
 # the token count alone, never on the two-size screen, so the workspace envelope
 # never runs that screen.  A deterministic backward workspace does not serve
@@ -7741,8 +7735,8 @@ BWD_TOKEN_BANDS = {
 # first wave claimed first-come from the backward workspace's self-resetting ticket word 32) and the column slab folds
 # those group rows (``prow = 1``): the parameter region of the backward workspace then holds the group rows
 # [32, ceil(T / 8)] instead of the per-CTA partials [G6, 32], and the column slab sums them in the deterministic
-# reduction's group-row order (8-token groups, compensated columns), so dscale and dbase are bitwise the deterministic
-# package's in the bands as outside them. dX, dfn, dzp and tokp are the per-CTA forms' bits. The deterministic package's
+# reduction's group-row order (8-token groups, one FP32 word per column). dX, dfn, dzp and tokp are the per-CTA
+# forms' bits. The deterministic package's
 # bands verbatim: sm_100a and sm_103a above 14927 tokens; sm_107a runs none. A call at a run-time Sinkhorn count runs
 # the per-CTA run-time-count token owner, so its column slab folds per-CTA rows (``prow = 0``).
 BWD_ROW_BANDS = {

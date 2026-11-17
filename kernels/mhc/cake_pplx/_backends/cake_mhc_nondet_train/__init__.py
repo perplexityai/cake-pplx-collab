@@ -26,27 +26,22 @@ here.
 
 Numerical contract: every output repeats bit for bit from run to run on one
 device (each sum runs in an order fixed by the token count and the device).
-Against the deterministic package: the forward, the statistics replay, the
-residual mixing and ``backward_prepare`` run copies of the deterministic
-programs (the same bits).  ``backward_finish`` runs the deterministic
-token-owner pass, the atomic fn split (beside the token-owner pass, as its
-programmatic dependent) and the column slab (see :mod:`.cake_jit`; its
-dynamic-schedule form over the deterministic package's token chunks: the
-host rule's two-size tail schedule is calibrated for no device) and no final
-reduction kernel.  ``dX`` is the deterministic package's bits, and so are
-``dscale`` and ``dbase``: the column slab folds the token-owner pass's
-parameter rows in the deterministic reduction's order.  The column slab stores
-the compensated ``dfn`` sum of every (column slab, token chunk) unit, the
-deterministic package's FP32 partial of that unit bit for bit, in its chunk's
-slots of the backward workspace, and once every unit has stored its sums the
-grid folds each element's ``P <= 32`` partials ``x_p`` into ``dfn`` in
-ascending chunk order as a compensated FP32 sum, the caller's ``dfn`` last
-under ``accumulate=True``, with one rounding: within one FP32 rounding of the
-exact sum plus ``O(P^2 u^2) (|start| + sum |x_p|)`` (``u = 2^-24``), no
-addition flushing a subnormal.  The deterministic package sums the same
-partials in FP64 and rounds once, so ``dfn`` is the deterministic package's
-``dfn`` except where the exact sum lies within that last term of an FP32
-rounding boundary.
+The forward, the statistics replay, the residual mixing and
+``backward_prepare`` run copies of the deterministic package's programs.
+``backward_finish`` runs a copy of the deterministic token-owner pass, the
+atomic fn split (beside the token-owner pass, as its programmatic dependent)
+and the column slab (see :mod:`.cake_jit`; its dynamic-schedule form over the
+deterministic package's token chunks: the host rule's two-size tail schedule
+is calibrated for no device) and no final reduction kernel.  The column slab
+folds ``dscale`` and ``dbase`` from the token-owner pass's parameter rows in a
+fixed order.  It stores the FP32 ``dfn`` sum of every (column slab, token
+chunk) unit in its chunk's slots of the backward workspace, and once every
+unit has stored its sums the grid adds each element's ``P <= 32`` partials
+``x_p`` in ascending chunk order as one FP32 sum from +0.0, the caller's
+``dfn`` last under ``accumulate=True``: within ``gamma_n (|start| + sum
+|x_p|)`` of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
+``u = 2^-24``), no addition flushing a subnormal.  Every sum is one plain
+FP32 word: no FP64 arithmetic and no compensation word.
 
 Mode: the names keep the package's own prefix (``cake_mhc_nondet_train_*``,
 ``CakeMHCNondet*Function``); no entry point takes a ``deterministic`` keyword
@@ -1271,7 +1266,7 @@ def cake_mhc_nondet_train_forward_prepare(
     ``(U, stats)``: BF16 ``U[t, d] = BF16(sum_i pre[t, i] X[t, i, d])`` and the
     FP32 ``[T, 64]`` per-token record ``r | z[24] | pre[4] | post[4] | C[16] | pad[15]``
     (256 bytes per token) that ``forward_finish``, ``backward_prepare`` and
-    ``backward_finish`` consume, bitwise the deterministic package's.  No
+    ``backward_finish`` consume.  No
     ``[T, 4H]`` or ``[T, 4, H]`` FP32 temporary is produced.
 
     The launches run on the current torch stream of the tensors' device.
@@ -1683,8 +1678,8 @@ def cake_mhc_nondet_train_backward_finish(
     accumulate : bool
         ``False`` (default): ``dfn``, ``dscale`` and ``dbase`` are written.
         ``True``: the caller passes all three; each fold adds the current value
-        last and rounds once (``dfn``: after its compensated sum of the chunk
-        slots; ``dscale`` / ``dbase``: in the deterministic package's order).
+        last (``dfn``: after its FP32 sum of the chunk slots; ``dscale`` /
+        ``dbase``: after the fixed-order FP32 sums of the parameter rows).
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from :func:`cake_mhc_nondet_train_backward_workspace`
         (sized for this ``H``: ``hidden=X.shape[2]``); a per-device default
@@ -1699,21 +1694,16 @@ def cake_mhc_nondet_train_backward_finish(
     -------
     ``(dX, dfn, dscale, dbase)``, each the same bits on every run on one
     device: the BF16 ``dX`` sums the mapping, collapse and residual-mixing
-    contributions in FP32 and rounds once, bitwise the deterministic package's
-    ``dX``.  ``dscale`` / ``dbase`` fold the token-owner pass's parameter rows
-    in the deterministic package's fixed order (per-CTA rows as an FP64 chain,
-    or 8-token group rows as compensated FP32 columns where that package runs
-    them: hidden 4096 above 14927 tokens on sm_100a and sm_103a; see
-    :mod:`.cake_jit`), rounded once, bitwise the deterministic package's.
-    ``dfn`` folds the per-chunk FP32 partials ``x_p`` (bitwise the
-    deterministic package's) of at most ``P <= 32`` token chunks (the
-    deterministic package's chunks per token count and device) per element in
-    ascending chunk order as a compensated FP32 sum, the caller's ``dfn`` last
-    under ``accumulate=True``, rounded once: within one FP32 rounding of the
-    exact sum plus ``O(P^2 u^2) (|start| + sum |x_p|)`` (``u = 2^-24``).
-    It is the deterministic package's ``dfn`` (an FP64 sum of the same
-    partials, rounded once) except where the exact sum lies within that last
-    term of an FP32 rounding boundary.
+    contributions in FP32 and rounds once.  ``dscale`` / ``dbase`` fold the
+    token-owner pass's parameter rows in a fixed order (per-CTA rows, or
+    8-token group rows where the deterministic package runs them: hidden 4096
+    above 14927 tokens on sm_100a and sm_103a; see :mod:`.cake_jit`), each sum
+    one FP32 word.  ``dfn`` adds the per-chunk FP32 partials ``x_p`` of at
+    most ``P <= 32`` token chunks (the deterministic package's chunks per
+    token count and device) per element in ascending chunk order as one FP32
+    sum from +0.0, the caller's ``dfn`` last under ``accumulate=True``: within
+    ``gamma_n (|start| + sum |x_p|)`` of the exact sum (``n`` the additions,
+    ``gamma_n = n u / (1 - n u)``, ``u = 2^-24``).
     With ``T == 0`` nothing is launched: ``dX`` is empty and the parameter
     gradients are zeroed (``accumulate=False``) or left untouched
     (``accumulate=True``).
@@ -1872,7 +1862,7 @@ def _backward_finish(
     # "slab"; no two-size lpt record ships)
     # describes the ``[T, 4, H]`` tensors as ``[T, 4H]``, reads the first
     # ``T`` rows of the padded ``dz'`` record, draws its work units from the
-    # workspace's self-resetting ticket word, stores each unit's compensated
+    # workspace's self-resetting ticket word, stores each unit's FP32
     # dfn sums in its chunk's slots, folds the slots into dfn across the grid once
     # every unit is done (the self-resetting slab_cnt words count the units and
     # the CTAs) and folds dscale / dbase from the token owner's rows.
