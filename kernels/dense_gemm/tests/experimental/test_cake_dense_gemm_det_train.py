@@ -12668,8 +12668,8 @@ def test_swapped_forward_default_waits_for_an_early_producer_writing_b(
     completes: a long planner GEMM on a few CTAs (K = 65536) that triggers its dependents at entry writes the weights
     the swapped forward reads next, and the forward sees every weight it wrote: both outputs are judged against the
     naive BF16 tier over 32 draws, three chains on the first, the forward on the weights the producer wrote.  (The
-    ``weights_static`` programs
-    read the NaN the weights were poisoned with in this chain: that is what the keyword states cannot happen.)"""
+    ``weights_static`` programs read the NaN the weights were poisoned with in this chain: that is what the keyword
+    states cannot happen.)"""
     _require_swap()
     G, D, R, Kp = 2, 256, 256, 65536
 

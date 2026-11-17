@@ -11802,7 +11802,7 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
     sm_count = det_backend.device_facts(device).sm_count
     rules, holds = cake_backend.router_rules(arch, sm_count)
     atomic = cake_backend.CakeDenseGemmNondetRouterLaunch
-    ran = 0
+    ran = outside = 0
     for (rule_arch, layout, hidden, experts), rule in sorted(
         rules.items(), key=lambda kv: kv[0]
     ):
@@ -11856,6 +11856,7 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
                     launches=2,
                     poison=lambda v: (v.out,),
                 )
+                outside += 1
                 continue
             assert isinstance(prepared, atomic), (hidden, T)
             assert tuple(prepared.plan.simt) == tile, (hidden, T)
@@ -11880,8 +11881,9 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
             ran += 1
     print(
         f"ROUTER_DGRAD_WINDOW_EDGES {arch} sm_count={sm_count}: {ran} token counts ran"
+        f" in a window, {outside} outside"
     )
-    if not ran:
+    if not ran and not outside:
         pytest.skip(
             f"no input-gradient SIMT window of {arch} applies on {sm_count} SMs"
         )

@@ -75,8 +75,11 @@ def judge_gemm(
 
     Draw ``j`` uses the seed :func:`~tests.cake_naive.draw_seed` of ``seed`` and ``j``; :func:`seed_all` seeds the
     global random state with it too.  The Python, torch CPU and every CUDA device's random state are restored after
-    the last draw.  ``record_property`` (pytest's fixture, or None) records each output's verdict.  Fails with every
-    contract and judge failure.  Returns the last draw's inputs, so the test can run its other checks on them."""
+    the last draw.  ``after_launch`` forms the oracle and the naive tier after each launch, from the operands that
+    launch left (a chain's intermediate output); with ``launches`` above 1 the tier of the first launch stands for
+    the draw, so the earlier GEMMs of the chain must write the same bits on every launch (a deterministic program).
+    ``record_property`` (pytest's fixture, or None) records each output's verdict.  Fails with every contract and
+    judge failure.  Returns the last draw's inputs, so the test can run its other checks on them."""
     if launches < 1:
         raise ValueError(f"launches is at least 1, got {launches}")
     judge = TierJudge(draws)
