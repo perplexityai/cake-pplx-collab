@@ -411,9 +411,12 @@ SM103a or SM107a device):
 - `tests/experimental/test_mok_accuracy.py`: accuracy of the fused BF16 and
   MXFP8 outputs against an FP64 oracle, judged against a PyTorch naive
   implementation of the same operation (`tests/cake_naive.py`).
-- `tests/experimental/test_mok_distributed.py`: EP4 runs (toy, unequal and
-  empty ranks, adapter guards, training features). The test starts its own
-  four processes when one process sees four GPUs of one NVLink domain.
+- `tests/experimental/test_mok_distributed.py`: EP1 and EP4 runs (the
+  complete training step eager and under CUDA Graph replay, unequal and empty
+  ranks, adapter guards, training features), each judged for accuracy over the
+  whole group. A test starts its own processes, one per GPU, when one process
+  sees enough GPUs of one NVLink domain; run it with the `SLURM_*` task
+  variables unset.
 - `tests/experimental/test_cake_mok_det_train_api.py`: the
   `cake_pplx.cake_mok_det_train` facade (signatures, re-exports and argument
   forwarding).
