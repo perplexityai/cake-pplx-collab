@@ -215,7 +215,34 @@ FINISH_LIBRARY = {
     "r2": "cake_mhc_det_train_fwd_finish__r2",
 }
 # Library -> the architectures whose routes name a record of it (generated from the records).
+# The two-word programs of the opt-in accumulation="fp32x2" (ACC_WORDS_PROGRAMS, hidden 4096): one record per library,
+# in no route (only that mode selects them), on the architectures of their program table.  A record keeps the
+# selection rule of the one-word library it stands beside (PAIR_RULE_OF; inert, since no route names the record).
+PAIR_LIBRARY = {
+    "cake_mhc_det_train_fwd_map__pair": ("sm_100a", "sm_103a", "sm_107a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": ("sm_107a",),
+    "cake_mhc_det_train_bwd_slab__dynr_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_slab__dynl_pair": ("sm_107a",),
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": ("sm_100a", "sm_107a"),
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": ("sm_103a",),
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": ("sm_103a",),
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": ("sm_100a",),
+}
+PAIR_RULE_OF = {
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": "cake_mhc_det_train_bwd_token__dot_ao8",
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn",
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": "cake_mhc_det_train_bwd_token__dot_ao8_l2l",
+    "cake_mhc_det_train_bwd_slab__dynr_pair": "cake_mhc_det_train_bwd_slab__dynr",
+    "cake_mhc_det_train_bwd_slab__dynl_pair": "cake_mhc_det_train_bwd_slab__dynl",
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": "cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl",
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": "cake_mhc_det_train_bwd_reduce__pt64",
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": "cake_mhc_det_train_bwd_reduce__pt64",
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows",
+}
 LIBRARY_ARCHES = {
+    **PAIR_LIBRARY,
     "cake_mhc_det_train_bwd_prepare": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_bwd_prepare__t128": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_bwd_reduce__pt32": ("sm_103a",),
@@ -355,7 +382,7 @@ MULTI_RECORDS = {
         "cake_mhc_det_train_bwd_token__dot_ao8__a3",
     ],
 }
-N_RECORDS, N_LIBRARIES = 85, 67
+N_RECORDS, N_LIBRARIES = 95, 77
 # the tail forms each architecture routes beside their X-hint forms (FWD_MAP_XNRM)
 XN_KEPT_TAILS = {"sm_100a": ("ns96_g2_ol2l_ct",), "sm_103a": ("nsx_ct",)}
 RECORD_SCALARS = {
@@ -1338,8 +1365,21 @@ LAUNCH_FACTS = {
     "cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_trows": ((256, 1, 1), 128, 1),
     "cake_mhc_det_train_bwd_reduce__s27_wcvt_spred": ((256, 1, 1), 4224, 1),
     "cake_mhc_det_train_bwd_reduce__wpu4": ((256, 1, 1), 4224, 1),
+    # the two-word programs: the launch of the one-word form they are built from (the mapping pass's production
+    # form, dot_ao8 (trows_dyn: 2048 B more), dynr / dynl, s27_wcvt, pt64, wpu4_fadd_trows)
+    "cake_mhc_det_train_fwd_map__pair": ((192, 1, 1), 115712, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": ((256, 1, 1), 91136, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": ((256, 1, 1), 93184, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": ((256, 1, 1), 91136, 2),
+    "cake_mhc_det_train_bwd_slab__dynr_pair": ((384, 1, 1), 228480, 1),
+    "cake_mhc_det_train_bwd_slab__dynl_pair": ((384, 1, 1), 228480, 1),
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": ((256, 1, 1), 4224, 1),
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": ((64, 1, 1), 2688, 1),
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": ((64, 1, 1), 2688, 1),
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": ((256, 1, 1), 128, 1),
 }
 RECORD_ARCHES = {
+    **PAIR_LIBRARY,
     "cake_mhc_det_train_fn_split": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_fn_split__tv128__t": ("sm_100a", "sm_103a"),
     "cake_mhc_det_train_fn_split__tv128_t128__t": ("sm_107a",),
@@ -2124,7 +2164,7 @@ def test_records_are_consistent() -> None:
     assert set(libraries) == {
         *SPLIT_LIBRARY.values(), *MAP_LIBRARY.values(), *COEF_LIBRARY.values(), *TOKEN_LIBRARY.values(),
         *SLAB_LIBRARY.values(), *REDUCE_LIBRARY.values(), *FINISH_LIBRARY.values(), *EVERYWHERE,
-        *K5_FORM_LIBRARY.values(), *RUN_TIME_ITERS,
+        *K5_FORM_LIBRARY.values(), *RUN_TIME_ITERS, *PAIR_LIBRARY,
     }  # fmt: skip
     for library, names in MULTI_RECORDS.items():
         # several records, or one record not named after its library (the `__hi` / `__t` records)
@@ -2136,7 +2176,8 @@ def test_records_are_consistent() -> None:
         assert [
             name for name, record in modules.items() if record["library"] == library
         ] == [library], library
-    # the checkpoint carry's dual-layout fn split is named by FN_SPLIT_CARRY, not by a route
+    # the checkpoint carry's dual-layout fn split is named by FN_SPLIT_CARRY, not by a route; the two-word programs by
+    # the two-word table (ACC_WORDS_PROGRAMS), not by a route
     routed = {
         arch: {name for names in H4096_ROUTES[arch].values() for name in names}
         | {
@@ -2144,8 +2185,21 @@ def test_records_are_consistent() -> None:
             for carry_arch, entry in loader.FN_SPLIT_CARRY.items()
             if carry_arch == arch
         }
+        | {
+            name
+            for by_arch in loader.ACC_WORDS_PROGRAMS.values()
+            for pair_arch, name in by_arch.items()
+            if pair_arch == arch
+        }
         for arch in loader.ARCHES
     }
+    on_routes = {
+        name
+        for routes in H4096_ROUTES.values()
+        for names in routes.values()
+        for name in names
+    }
+    assert set(PAIR_LIBRARY) <= set(modules) and not set(PAIR_LIBRARY) & on_routes
     for name, record in modules.items():
         assert record["kernel"] == record["library"], name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
@@ -2221,10 +2275,9 @@ def test_records_are_consistent() -> None:
                 ), name
                 kernel = next(p for p in PROGRAM_RULE_KERNELS if _is(name, p))
                 table, rule_name = PROGRAM_RULE_KERNELS[kernel]
-                assert (
-                    rule["rule"] == rule_name
-                    and table[rule["program"]] == record["library"]
-                ), name
+                assert rule["rule"] == rule_name and table[
+                    rule["program"]
+                ] == PAIR_RULE_OF.get(name, record["library"]), name
                 # the K1 and K7 records are the plain ones; a K6 / K8 program record takes the architecture suffix
                 # (`__a3` sm_100a, `__a7` sm_107a) where the plain name is another architecture's record under another
                 # rule (sm_100a's token-owner forms beside sm_103a's R-range records; sm_107a's beside both)
