@@ -71,6 +71,7 @@ from cake_pplx._backends.cake_moe_grouped_gemm_nondet_train import (
 from cake_pplx._backends.cake_moe_grouped_gemm_nondet_train import (
     cake_backend as cb,
 )
+from tests.cake.test_helpers.cake_moe_judge import judge_draws
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "cake_moe_grouped_gemm_nondet_train"
@@ -721,14 +722,14 @@ def _assert_split_ordered_tail(launch):
     assert not launch.order_varying, plan
 
 
-def test_prepared_split_tail_wgrad_never_alerts():
+def test_prepared_split_tail_wgrad_never_alerts(record_property):
     """A 512-wide k tile weight gradient whose tail is split (the ordered one-launch
     tail: ``plan["ordered_tail"]`` and ``plan["tail_splits"] > 1``, not
     ``order_varying``), prepared with torch's deterministic mode off, launches under the
     strict and the ``warn_only`` mode with no alert (no ``RuntimeError``, no
-    ``UserWarning``) and gives the bits of its launch with the mode off (within the
-    budget of the fp64 reference), ``out`` NaN-filled and the stream's tail slots
-    garbage-filled before every launch; so does
+    ``UserWarning``) and gives the bits of its launch with the mode off (judged against
+    the naive BF16 tier over ``cake_naive.DRAWS`` inputs), ``out`` NaN-filled and the
+    stream's tail slots garbage-filled before every launch; so does
     ``cake_moe_grouped_gemm_nondet_train_wgrad`` (the package's and the module's) on
     that shape.  The 256-wide k tile (two-launch ordered tail reduce) and a forward
     launch never alert either, and give the bits of a launch with the mode off."""
@@ -740,7 +741,6 @@ def test_prepared_split_tail_wgrad_never_alerts():
     _assert_split_ordered_tail(launch)
     ref = launch.launch().clone()
     torch.cuda.synchronize()
-    base._assert_wgrad_close(ref, base._reference("wgrad", g, x, sizes))
     calls = {
         "launch": launch.launch,
         "package": lambda: pkg.cake_moe_grouped_gemm_nondet_train_wgrad(g, x, offs),
@@ -761,6 +761,14 @@ def test_prepared_split_tail_wgrad_never_alerts():
             assert _user_warnings(rec) == [], (what, [str(r.message) for r in rec])
             base._assert_same_bits(out, ref, what)
     base._assert_tail_at_rest(device)
+
+    def draw(d):
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x.copy_(nx)
+        g.copy_(ng)
+        d.op("dW", launch.launch(), "wgrad", g, x, sizes)
+
+    judge_draws(record_property, draw, seed=60)
 
     sizes = base.RAGGED_E4
     x, w, g, offs = base._inputs(sizes, 512, 256, device, seed=61)
@@ -785,14 +793,14 @@ def test_prepared_split_tail_wgrad_never_alerts():
         base._assert_same_bits(y, y_ref, f"Y warn_only={warn_only}")
 
 
-def test_autograd_backward_never_alerts():
+def test_autograd_backward_never_alerts(record_property):
     """Under torch's deterministic mode (strict and ``warn_only``) the backward of the
     package's ``CakeMoEGroupedGemmNondetFunction`` (through the package and through the
     module; no fallback) never alerts or warns, on a 512-wide k tile shape whose weight
     gradient splits its ordered one-launch tail and on a 256-wide k tile shape, with
     ``dW`` needed or not, and its gradients have the bits of a run with the mode off
-    (the stream's tail slots garbage-filled before every run; ``dW`` within the budget
-    of the fp64 reference)."""
+    (the stream's tail slots garbage-filled before every run); the mode-off ``dX`` and
+    ``dW`` of each shape are judged against the naive BF16 tier over the draws."""
     base = _base()
     device = base._require_autograd_programs()
     entries = {
@@ -823,7 +831,6 @@ def test_autograd_backward_never_alerts():
             assert planned.plan["tile_k"] == 256, planned.plan
             assert not planned.order_varying, planned.plan
         want = run(entries["package"], x0, w0, g, offs)
-        base._assert_wgrad_close(want[1], base._reference("wgrad", g, x0, sizes))
         for warn_only in (False, True):
             for via, entry in entries.items():
                 with (
@@ -839,6 +846,17 @@ def test_autograd_backward_never_alerts():
                 base._assert_same_bits(dw, want[1], f"dW {what}")
                 assert no_dw is None, what
                 base._assert_same_bits(dx_only, want[0], f"dX alone {what}")
+
+        def draw(d, sizes=sizes, n=n, k=k, x0=x0, w0=w0, g=g, offs=offs, tile=tile):
+            nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+            x0.copy_(nx)
+            w0.copy_(nw)
+            g.copy_(ng)
+            dx, dw = run(entries["package"], x0, w0, g, offs)
+            d.op(f"dX_{tile}", dx, "dgrad", g, w0, sizes)
+            d.op(f"dW_{tile}", dw, "wgrad", g, x0, sizes)
+
+        judge_draws(record_property, draw, seed=seed)
 
 
 @pytest.mark.parametrize(

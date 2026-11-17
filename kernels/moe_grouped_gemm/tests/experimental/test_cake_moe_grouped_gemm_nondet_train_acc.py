@@ -31,9 +31,11 @@ alert (only before an order-varying launch, whatever the route: a split tail pla
 under ``unordered_tail_archs``, which the shipped constants leave empty, so no shipped
 plan varies), the signatures, the facade's handoff (no deterministic route) and the
 autograd flag's refusals.  On a GPU: the fused route against its bitwise oracles
-(``out0.add_(dW32)`` on the groups with rows, split ordered tails included) and the
-fp64 reference, on forced forms and on the benchmark rows as planned, bitwise run to run
-with the stream's tail slots garbage-filled before every launch, the composed route
+(``out0.add_(dW32)`` on the groups with rows, split ordered tails included) and judged
+against the naive BF16 tier over ``cake_naive.DRAWS`` inputs
+(``tests/cake/test_helpers/cake_moe_judge.py``), on forced forms and on the benchmark
+rows as planned, bitwise run to run with the stream's tail slots garbage-filled before
+every launch, the composed route
 against ``out.add_``, empty groups, padding, ``sum_m == 0``, short groups, concurrent
 streams and graph replay (bitwise an isolated eager launch), allocations, the version
 counter, the autograd flag, and a fused split-tail backward under torch's deterministic
@@ -62,6 +64,13 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
+from tests.cake.test_helpers.cake_moe_judge import (
+    judge_draws,
+    naive_sum,
+    oracle_sum,
+    product,
+)
+from tests.cake.test_helpers.cake_naive import DRAWS, draw_seed
 from tests.experimental import test_cake_moe_grouped_gemm_nondet_train as base
 
 pkg = base.pkg
@@ -106,7 +115,6 @@ EMPTY_TAIL_SIZES = (
     [4099] * 4 + [0, 0] + [130] * 2,
 )
 INT_VIEW = {torch.float32: torch.int32, torch.bfloat16: torch.int16}
-FP32_SUBNORMAL = 1e-40
 prepare_wgrad = base.prepare_wgrad
 
 
@@ -1508,9 +1516,11 @@ def _padded_out(e, n, k, dtype, device, fill_bits):
 
 def _out0(kind, dw, sizes, dtype, gen):
     """The starting ``out`` of a case: ``"zeros"``, ``"randn"`` (randn x rms(dW)),
-    ``"absorb"`` (randn x 2^12 x rms(dW)) or ``"specials"`` (randn x rms(dW) with -0.0,
-    NaN and +-max/2^8 at tile and group boundaries); empty groups hold random bits with
-    -0.0, a NaN payload and a subnormal in every case."""
+    ``"absorb"`` (randn x 2^12 x rms(dW)) or ``"specials"`` (randn x rms(dW) with -0.0
+    and NaN at tile and group boundaries); empty groups hold random BF16 words (an fp32
+    ``out``: in the high half, the low half zero) with -0.0 and a NaN payload in every
+    case.  No subnormal or extreme value is planted (the owner's rule: no subnormal /
+    extreme-value tests)."""
     e, n, k = dw.shape
     scale = _rms(dw)
     if kind == "zeros":
@@ -1521,31 +1531,28 @@ def _out0(kind, dw, sizes, dtype, gen):
             out0 *= 2.0**12
     out0 = out0.to(dtype)
     if kind == "specials":
-        big = torch.finfo(dtype).max / 2.0**8
         for group, rows in enumerate(sizes):
             if not rows:
                 continue
             for (r, c), value in (
                 ((0, 0), -0.0),
                 ((0, 2), float("nan")),
-                ((127, 128), big),
-                ((128, 127), -big),
                 ((255, 256), float("nan")),
                 ((n - 1, k - 1), -0.0),
             ):
                 out0[group, r, c] = value
     nan_bits = 0x7FC01234 if dtype == torch.float32 else 0x7FC1
-    subnormal = torch.tensor(FP32_SUBNORMAL, dtype=dtype)
     for group, rows in enumerate(sizes):
         if rows:
             continue
         noise = torch.randint(
             -(1 << 15), 1 << 15, (n, k), generator=gen, device=dw.device
         )
+        if dtype == torch.float32:
+            noise = noise << 16
         _bits(out0[group]).copy_(noise.to(INT_VIEW[dtype]))
         out0[group, 0, 0] = -0.0
         _bits(out0[group])[0, 1] = nan_bits - (1 << 32 if nan_bits >= 1 << 31 else 0)
-        out0[group, 1, 0] = subnormal
     return out0
 
 
@@ -1569,77 +1576,57 @@ def _fused_oracle(out0, dw32):
     return out0.clone().add_(dw32)
 
 
-def _expected(out0, g, x, sizes, times=1):
-    """``(ref, scale)``: ``out0 + times * sum_e G[e].T X[e]`` in fp64 (as fp32), and the
-    operands' magnitude ``|out0| + times * |dW|`` the bf16 budget scales with."""
-    dw64 = base._reference("wgrad", g, x, sizes).double()
-    start = out0.double()
-    ref = (start + times * dw64).float()
-    scale = (start.abs() + times * dw64.abs()).float()
-    return ref, scale
+def _judge_accumulate(
+    record_property,
+    launch,
+    out,
+    x,
+    g,
+    offs,
+    sizes,
+    *,
+    seed,
+    gen_seed,
+    kind="randn",
+    adds=(1,),
+    make_out0=None,
+    before=None,
+    name="out",
+):
+    """Judge the accumulate ``launch`` (prepared on ``g``, ``x``, ``offs`` and ``out``)
+    against the naive BF16 tier of ``out0 + count x dW`` over ``cake_naive.DRAWS`` inputs
+    (``tests/cake/test_helpers/cake_moe_judge.py``).  Draw ``j`` writes the inputs of
+    ``draw_seed(seed, j)`` (``base._inputs``) into ``x`` and ``g`` (a prepared launch
+    stays valid when its operands are rewritten in place) and makes its ``out0`` with
+    ``make_out0(gen, g, x)``, ``gen`` seeded ``draw_seed(gen_seed, j)`` (default: the
+    ``_out0`` of ``kind`` scaled by the fp32 overwrite of the same plan).  For each
+    ``count`` of ``adds`` it copies ``out0`` into ``out``, calls ``before()`` (if given),
+    launches ``count`` times and reports ``out`` (as ``name``, or ``<name>_x<count>``).
+    Draw 0, the last, is the case's own inputs and ``out0``."""
+    n, k = out.shape[1:]
+    if make_out0 is None:
+        overwrite = prepare_wgrad(g, x, offs, out_dtype=torch.float32)
 
+        def make_out0(gen, g, x):
+            return _out0(kind, overwrite.launch().float(), sizes, out.dtype, gen)
 
-def _assert_within_budget(out, expected, mask=None):
-    """The package's budget of ``out``'s dtype against ``expected`` (:func:`_expected`)
-    over ``mask`` (default all).  fp32: rel-L2 against the fp64 reference.  bf16: every
-    element within ``1e-2 + 1e-2 * (|out0| + n |dW|)`` of it, the overwrite budget applied
-    per term of the sum (an accumulate's rounding scales with its operands, not with a
-    possibly cancelled result: AccumulateGrad itself misses a result-scaled budget)."""
-    ref, scale = expected
-    if mask is not None:
-        out, ref, scale = out[mask], ref[mask], scale[mask]
-    if out.dtype == torch.bfloat16:
-        assert bool(torch.isfinite(out).all()), "a non-finite bf16 result"
-        err = (out.double() - ref.double()).abs()
-        bound = base.ATOL + base.RTOL * scale.double()
-        bad = int((err > bound).sum())
-        assert bad == 0, (
-            f"bf16: {bad} elements beyond 1e-2 + 1e-2 (|out0| + n |dW|), worst "
-            f"{float((err - bound).max()):.3e} over"
-        )
-        return
-    rel_l2 = float(
-        (out.double() - ref.double()).norm() / ref.double().norm().clamp_min(1e-30)
-    )
-    assert rel_l2 <= base.FP32_REL_L2, f"fp32 rel-L2 {rel_l2:.3e}"
+    def draw(d):
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, x.device, seed=draw_seed(seed, d.index))
+        x.copy_(nx)
+        g.copy_(ng)
+        gen = torch.Generator(device=x.device).manual_seed(draw_seed(gen_seed, d.index))
+        out0 = make_out0(gen, g, x)
+        for count in adds:
+            out.copy_(out0)
+            if before is not None:
+                before()
+            for _ in range(count):
+                launch.launch()
+            torch.cuda.synchronize()
+            label = name if count == 1 else f"{name}_x{count}"
+            d.op(label, out, "wgrad", g, x, sizes, start=out0, adds=count)
 
-
-def _assert_no_lost_update(out, out0, dw32, sizes):
-    """fp32: every 128 x 128 block of a group with rows added its tile (``out - out0`` is
-    ``dW`` within 2^-6 of the block's largest ``|dW|``), so no tile update was lost or
-    applied twice."""
-    e, n, k = out.shape
-    delta = (out.double() - out0.double()).reshape(e, n // 128, 128, k // 128, 128)
-    want = dw32.double().reshape(delta.shape)
-    scale = want.abs().amax(dim=(2, 4), keepdim=True)
-    finite = torch.isfinite(delta) & (out0.double().reshape(delta.shape).abs() < 1e30)
-    bad = (
-        (((delta - want).abs() > scale * 2.0**-6 + 1e-6) & finite).any(dim=4).any(dim=2)
-    )
-    for group, rows in enumerate(sizes):
-        if not rows:
-            bad[group] = False
-    assert not bool(bad.any()), (
-        f"lost or doubled tile updates at {bad.nonzero()[:4].tolist()}"
-    )
-
-
-def _special_mask(out0, sizes):
-    """Elements of groups with rows whose ``out0`` is ordinary (no NaN, no +-max/2^8)."""
-    mask = torch.isfinite(out0) & (out0.abs() < torch.finfo(out0.dtype).max / 2.0**9)
-    for group, rows in enumerate(sizes):
-        if not rows:
-            mask[group] = False
-    return mask
-
-
-def _inputs_with_zero_columns(sizes, n, k, device, seed):
-    """``base._inputs`` with x's columns 1 and k - 2 zero, so ``dW[:, :, 1]`` and
-    ``dW[:, :, k - 2]`` are exact zeros (a subnormal ``out0`` there must be kept)."""
-    x, w, g, offs = base._inputs(sizes, n, k, device, seed=seed)
-    x[:, 1] = 0
-    x[:, k - 2] = 0
-    return x, w, g, offs
+    judge_draws(record_property, draw, seed=seed)
 
 
 # ---------------------------------------------------------------------------
@@ -1650,13 +1637,15 @@ def _inputs_with_zero_columns(sizes, n, k, device, seed):
 @pytest.mark.parametrize("kind", ["zeros", "randn", "absorb", "specials"])
 @pytest.mark.parametrize("out_dtype", FUSED_DTYPES)
 @pytest.mark.parametrize("form", TWIN_FORMS)
-def test_fused_accumulate_matches_its_oracles(form, out_dtype, kind, monkeypatch):
+def test_fused_accumulate_matches_its_oracles(
+    form, out_dtype, kind, monkeypatch, record_property
+):
     """The fused route of every accumulate build the device's architecture ships, on an
     unsplit tail into a row- and expert-padded ``out``: bitwise ``out0.add_(dW32)`` with
-    the overwrite of the same plan (README numerical contract; NaN payloads aside), within
-    the budget of the fp64 ``out0 + dW`` on the ordinary elements, no lost tile update,
-    subnormal ``out0`` kept where ``dW`` is zero, empty groups and the padding bitwise
-    untouched, the same bits on a second run, and four accumulates within the budget of
+    the overwrite of the same plan (README numerical contract; NaN payloads aside), empty
+    groups and the padding bitwise untouched, the same bits on a second run; judged
+    against the naive BF16 tier of ``out0 + dW`` over the draws (each draw its own inputs
+    and ``out0``), and for ``"randn"`` four accumulates against the tier of
     ``out0 + 4 dW``."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
@@ -1664,14 +1653,10 @@ def test_fused_accumulate_matches_its_oracles(form, out_dtype, kind, monkeypatch
     shape = _shape_with_splits(device, ACC_SIZES, base._form_ks(form), split=False)
     assert shape is not None, f"no candidate shape leaves the {form} tail unsplit"
     n, k = shape
-    x, _w, g, offs = _inputs_with_zero_columns(ACC_SIZES, n, k, device, seed=31)
+    x, _w, g, offs = base._inputs(ACC_SIZES, n, k, device, seed=31)
     dw32 = _overwrites(g, x, offs, out_dtype)[0]
     gen = torch.Generator(device=device).manual_seed(32)
     out0 = _out0(kind, dw32, ACC_SIZES, out_dtype, gen)
-    if kind == "specials":
-        for group, rows in enumerate(ACC_SIZES):
-            if rows:
-                out0[group, :, 1] = FP32_SUBNORMAL
     out, buffer = _padded_out(len(ACC_SIZES), n, k, out_dtype, device, 0x7FA5A5A5)
     out.copy_(out0)
     padding = _bits(buffer).clone()
@@ -1690,13 +1675,6 @@ def test_fused_accumulate_matches_its_oracles(form, out_dtype, kind, monkeypatch
     rest = _bits(buffer).clone()
     rest[:, :n, :k] = 0
     assert torch.equal(rest, padding), "the padding was written"
-    mask = _special_mask(out0, ACC_SIZES)
-    _assert_within_budget(out, _expected(out0, g, x, ACC_SIZES), mask)
-    if kind != "specials":
-        _assert_no_lost_update(out, out0, dw32, ACC_SIZES)
-    if kind == "specials":
-        kept = out[:, :, 1][rows]
-        assert bool((kept != 0).all()), "a subnormal out0 was flushed"
     first = out.clone()
     out.copy_(out0)
     launch.launch()
@@ -1704,25 +1682,33 @@ def test_fused_accumulate_matches_its_oracles(form, out_dtype, kind, monkeypatch
     assert torch.equal(_bits(out), _bits(first)), (
         "an unsplit fused accumulate changed run to run"
     )
-    if kind == "randn":
-        out.copy_(out0)
-        for _ in range(4):
-            launch.launch()
-        torch.cuda.synchronize()
-        _assert_within_budget(out, _expected(out0, g, x, ACC_SIZES, times=4), mask)
+    _judge_accumulate(
+        record_property,
+        launch,
+        out,
+        x,
+        g,
+        offs,
+        ACC_SIZES,
+        seed=31,
+        gen_seed=32,
+        kind=kind,
+        adds=(1, 4) if kind == "randn" else (1,),
+    )
     print(f"FUSED form={form} dtype={out_dtype} kind={kind} n={n} k={k}")
 
 
 @pytest.mark.parametrize("out_dtype", FUSED_DTYPES)
 @pytest.mark.parametrize("form", TWIN_FORMS)
-def test_fused_split_tail_matches_its_oracles(form, out_dtype, monkeypatch):
+def test_fused_split_tail_matches_its_oracles(
+    form, out_dtype, monkeypatch, record_property
+):
     """The fused route with a split tail (the ordered one-launch tail: not
     ``order_varying``): every repeat (reset by ``copy_``, the stream's tail slots
     garbage-filled first) is bitwise ``out0.add_(dW32)`` with the overwrite of the same
     plan on the groups with rows, split tail tiles included, and leaves the empty groups
-    bitwise untouched, so every repeat has the same bits; the result is within the
-    budget of the fp64 ``out0 + dW`` with no tile update lost, and the stream's tail
-    tickets rest at zero."""
+    bitwise untouched, so every repeat has the same bits; the stream's tail tickets rest
+    at zero; judged against the naive BF16 tier of ``out0 + dW`` over the draws."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     _require_fused(device, form, out_dtype, monkeypatch)
@@ -1751,8 +1737,9 @@ def test_fused_split_tail_matches_its_oracles(form, out_dtype, monkeypatch):
             if not count:
                 assert torch.equal(_bits(out[group]), _bits(out0[group])), group
         base._assert_tail_at_rest(device)
-    _assert_within_budget(out, _expected(out0, g, x, sizes), _special_mask(out0, sizes))
-    _assert_no_lost_update(out, out0, dw32, sizes)
+    _judge_accumulate(
+        record_property, launch, out, x, g, offs, sizes, seed=33, gen_seed=34
+    )
 
 
 # (case, out dtype) of the composed route: the 256-wide k tile, the forced ``main`` /
@@ -1774,11 +1761,14 @@ COMPOSED_CASES = (
     COMPOSED_CASES,
     ids=[f"{c}-{DTYPE_NAMES[d]}" for c, d in COMPOSED_CASES],
 )
-def test_composed_accumulate_is_the_overwrite_plus_add(case, out_dtype, monkeypatch):
+def test_composed_accumulate_is_the_overwrite_plus_add(
+    case, out_dtype, monkeypatch, record_property
+):
     """The composed route: the overwrite of the same plan into the launch's scratch, then
     ``out.add_``: bitwise ``out0.add_(dW)`` with the overwrite in ``out``'s dtype on an
-    unsplit plan (for a bf16 ``out``, AccumulateGrad's bits), within the budget of the
-    fp64 ``out0 + dW``; empty groups keep their values (``out.add_`` semantics).  The
+    unsplit plan (for a bf16 ``out``, AccumulateGrad's bits), judged against the naive
+    BF16 tier of ``out0 + dW`` over the draws; empty groups keep their values
+    (``out.add_`` semantics).  The
     reason is the first condition of the fused route that fails: ``"tile_k"``,
     ``"stage"`` (the forced forms; every half-release form of a dtype without accumulate
     builds, misaligned or not), ``"min_cuda"`` or ``"alignment"``."""
@@ -1825,14 +1815,29 @@ def test_composed_accumulate_is_the_overwrite_plus_add(case, out_dtype, monkeypa
     launch.launch()
     torch.cuda.synchronize()
     _assert_bitwise(out, out0.clone().add_(dw), f"composed {case}")
-    mask = _special_mask(out0, sizes)
-    _assert_within_budget(out, _expected(out0, g, x, sizes), mask)
     for group, rows in enumerate(sizes):
         if not rows:
             same = (out[group] == out0[group]) | (
                 torch.isnan(out[group]) & torch.isnan(out0[group])
             )
             assert bool(same.all()), group
+    overwrite = prepare_wgrad(g, x, offs, out_dtype=out_dtype)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        _judge_accumulate(
+            record_property,
+            launch,
+            out,
+            x,
+            g,
+            offs,
+            sizes,
+            seed=35,
+            gen_seed=36,
+            make_out0=lambda gen, g, x: _out0(
+                "randn", overwrite.launch().float(), sizes, out_dtype, gen
+            ),
+        )
 
 
 def _differing_tiles(out, oracle, tile_k, sizes):
@@ -1858,15 +1863,18 @@ BENCH_ROWS = [
 @pytest.mark.parametrize(
     "label,sizes,proj", BENCH_ROWS, ids=[f"{lab}-{p}" for lab, _s, p in BENCH_ROWS]
 )
-def test_fused_accumulate_on_the_benchmark_rows(label, sizes, proj, monkeypatch):
+def test_fused_accumulate_on_the_benchmark_rows(
+    label, sizes, proj, monkeypatch, record_property
+):
     """Every benchmark weight-gradient row (E4 balanced / skewed / one-empty at two token
     counts, E8 / E16 / E32 at 131072 rows) of both projections into an fp32 ``out``, as the
     planner plans it (no forced form): the call is fused (``plan["accumulate"] ==
     "fused"``, a shipped half-release accumulate build, with the ordered one-launch
-    tail), within the fp64 budget of ``out0 + dW``, no tile update lost, an empty group
-    bitwise untouched, and bitwise ``out0.add_(dW32)`` (the overwrite of the same plan)
-    on every tile of the groups with rows, split tail tiles included (the stream's tail
-    slots garbage-filled before the launch, its tickets at rest after it)."""
+    tail), an empty group bitwise untouched, and bitwise ``out0.add_(dW32)`` (the
+    overwrite of the same plan) on every tile of the groups with rows, split tail tiles
+    included (the stream's tail slots garbage-filled before the launch, its tickets at
+    rest after it); judged against the naive BF16 tier of ``out0 + dW`` over the draws
+    (sampled rows: ``cake_moe_judge.FULL_ORACLE_MACS``)."""
     out_dtype = torch.float32
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
@@ -1905,10 +1913,10 @@ def test_fused_accumulate_on_the_benchmark_rows(label, sizes, proj, monkeypatch)
     )
     if split:
         base._assert_tail_at_rest(device)
-    _assert_no_lost_update(out, out0, dw32, sizes)
     del dw32
-    mask = _special_mask(out0, sizes)
-    _assert_within_budget(out, _expected(out0, g, x, sizes), mask)
+    _judge_accumulate(
+        record_property, launch, out, x, g, offs, sizes, seed=61, gen_seed=62
+    )
     print(
         f"BENCHROW {label} {proj} {arch} stage={launch.stages[0]} "
         f"splits={plan['tail_splits']} num_tail={plan['num_tail']} differing_tiles={len(tiles)}"
@@ -1919,19 +1927,19 @@ def test_fused_accumulate_on_the_benchmark_rows(label, sizes, proj, monkeypatch)
     "label,sizes,proj", BENCH_ROWS, ids=[f"{lab}-{p}" for lab, _s, p in BENCH_ROWS]
 )
 def test_composed_bf16_accumulate_on_the_benchmark_rows(
-    label, sizes, proj, monkeypatch
+    label, sizes, proj, monkeypatch, record_property
 ):
     """The same rows into a bf16 ``out``: the call composes (``"stage"``: no bf16
-    accumulate build ships) with the overwrite's plan, and the result is within the
-    operand-scaled bf16 budget of the fp64 ``out0 + dW``; an empty group keeps its
-    values."""
+    accumulate build ships) with the overwrite's plan; an empty group keeps its values;
+    judged against the naive BF16 tier of ``out0 + dW`` over the draws (sampled rows:
+    ``cake_moe_judge.FULL_ORACLE_MACS``)."""
     out_dtype = torch.bfloat16
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     n, k = base.BENCH_PROJ[proj]
     x, _w, g, offs = base._inputs(sizes, n, k, device, seed=63)
     gen = torch.Generator(device=device).manual_seed(64)
-    scale = _rms(base._reference("wgrad", g[:4096], x[:4096], [4096]))
+    scale = _rms(product("wgrad", g[:4096], x[:4096], [4096], torch.float64))
     out0 = (torch.randn(len(sizes), n, k, generator=gen, device=device) * scale).to(
         out_dtype
     )
@@ -1946,7 +1954,24 @@ def test_composed_bf16_accumulate_on_the_benchmark_rows(
     for group, rows in enumerate(sizes):
         if not rows:
             assert torch.equal(out[group], out0[group]), group
-    _assert_within_budget(out, _expected(out0, g, x, sizes), _special_mask(out0, sizes))
+
+    def make_out0(gen, g, x):
+        rms = _rms(product("wgrad", g[:4096], x[:4096], [4096], torch.float64))
+        out0 = torch.randn(len(sizes), n, k, generator=gen, device=device) * rms
+        return out0.to(out_dtype)
+
+    _judge_accumulate(
+        record_property,
+        launch,
+        out,
+        x,
+        g,
+        offs,
+        sizes,
+        seed=63,
+        gen_seed=64,
+        make_out0=make_out0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1957,13 +1982,15 @@ def test_composed_bf16_accumulate_on_the_benchmark_rows(
 @pytest.mark.parametrize("sizes", EMPTY_TAIL_SIZES, ids=["planned", "split_tail"])
 @pytest.mark.parametrize("out_dtype", FUSED_DTYPES)
 @pytest.mark.parametrize("form", TWIN_FORMS)
-def test_fused_leaves_empty_groups_untouched(form, out_dtype, sizes, monkeypatch):
+def test_fused_leaves_empty_groups_untouched(
+    form, out_dtype, sizes, monkeypatch, record_property
+):
     """Empty groups placed where the k512 order puts them (the tail: planned walk engaged,
     split tail where a candidate shape splits it, the k256-tail halves) keep their bits
-    on the fused route: random bits, -0.0, a NaN payload and a subnormal, compared as
-    integers; the groups with rows are bitwise ``out0.add_(dW32)`` at every repeat (the
-    stream's tail slots garbage-filled before each; the tickets at rest after a split
-    tail) and within the budget."""
+    on the fused route: random BF16 words, -0.0 and a NaN payload, compared as integers;
+    the groups with rows are bitwise ``out0.add_(dW32)`` at every repeat (the stream's
+    tail slots garbage-filled before each; the tickets at rest after a split tail);
+    judged against the naive BF16 tier of ``out0 + dW`` over the draws."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     _require_fused(device, form, out_dtype, monkeypatch)
@@ -1999,7 +2026,9 @@ def test_fused_leaves_empty_groups_untouched(form, out_dtype, sizes, monkeypatch
         )
         if split:
             base._assert_tail_at_rest(device)
-    _assert_within_budget(out, _expected(out0, g, x, sizes), _special_mask(out0, sizes))
+    _judge_accumulate(
+        record_property, launch, out, x, g, offs, sizes, seed=37, gen_seed=38
+    )
     print(
         f"EMPTY form={form} sizes={sizes} n={n} k={k} splits={launch.plan['tail_splits']}"
     )
@@ -2064,12 +2093,16 @@ SHORT_ACC_CASES = [("short", None)] + [
 @pytest.mark.parametrize(
     "groups,form", SHORT_ACC_CASES, ids=[f"{g}-{f}" for g, f in SHORT_ACC_CASES]
 )
-def test_short_groups_accumulate_their_own_rows(groups, form, out_dtype, monkeypatch):
+def test_short_groups_accumulate_their_own_rows(
+    groups, form, out_dtype, monkeypatch, record_property
+):
     """#6570 in accumulate mode: groups shorter than one k-step, alone or beside long ones
-    with a split ordered tail, over ``SMALL_GROUP_LAUNCHES`` launches of one prepared
-    call (each reset by ``copy_``, the descriptor slots filled with garbage first and the
-    stream's tail slots before every launch): every 128 x 128 block of ``out - out0`` is
-    the group's own ``dW``, and every launch has the bits of the first."""
+    with a split ordered tail, over at least ``SMALL_GROUP_LAUNCHES`` launches of one
+    prepared call spread over the draws (each reset by ``copy_``, the descriptor slots
+    filled with garbage first and the stream's tail slots before every launch): each
+    draw's first launch is judged against the naive BF16 tier of ``out0 + dW`` (a group
+    that added the next group's rows misses it), and every later launch of the draw has
+    the bits of its first."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     launch, out0, sizes, g, x, _ = _short_accumulate(
@@ -2082,51 +2115,52 @@ def test_short_groups_accumulate_their_own_rows(groups, form, out_dtype, monkeyp
         assert split, plan
     launch.workspaces[0].fill_(0xFF)
     e, n, k = out0.shape
-    ref = torch.stack(
-        [g[s:t].float().T @ x[s:t].float() for s, t in base._bounds(sizes)]
-    )
-    blocks = ref.view(e, n // 128, 128, k // 128, 128)
-    scale = blocks.abs().amax(dim=(2, 4), keepdim=True)
-    tol = 2.0**-6 if out_dtype == torch.float32 else 2.0**-4
-    wrong, changed, poisoned = [], [], 0
-    first = None
-    for call in range(base.SMALL_GROUP_LAUNCHES):
-        launch.out.copy_(out0)
-        poisoned += base._poison_tail_sums(device)
-        got = launch.launch()
-        out = got.float() - out0.float()
-        bad = (
-            ((out.view_as(blocks) - blocks).abs() > scale * tol + 2.0**-6)
-            .any(dim=4)
-            .any(dim=2)
-        )
-        if bool(bad.any()):
-            wrong.append((call, bad.nonzero()[:4].tolist()))
-        if first is None:
-            first = got.clone()
-        elif not torch.equal(_bits(got), _bits(first)):
-            changed.append(call)
-    assert not wrong, f"{len(wrong)} launches have wrong blocks: {wrong[:3]}"
+    per_draw = -(-base.SMALL_GROUP_LAUNCHES // DRAWS)
+    changed, poisoned = [], 0
+
+    def draw(d):
+        nonlocal poisoned
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x.copy_(nx)
+        g.copy_(ng)
+        gen = torch.Generator(device=device).manual_seed(d.seed)
+        start = torch.randn(e, n, k, generator=gen, device=device).to(out_dtype)
+        first = None
+        for call in range(per_draw):
+            launch.out.copy_(start)
+            poisoned += base._poison_tail_sums(device)
+            got = launch.launch()
+            if first is None:
+                torch.cuda.synchronize()
+                d.op("out", got, "wgrad", g, x, sizes, start=start)
+                first = got.clone()
+            elif not torch.equal(_bits(got), _bits(first)):
+                changed.append((d.index, call))
+
+    judge_draws(record_property, draw, seed=39)
     assert not changed, (
-        f"{len(changed)} launches differ from the first in some bit: {changed[:8]}"
+        f"{len(changed)} launches differ from their draw's first in some bit: {changed[:8]}"
     )
     if split:
         # Every launch after the first found the stream's kept slots to poison.
-        assert poisoned == base.SMALL_GROUP_LAUNCHES - 1, poisoned
+        assert poisoned == DRAWS * per_draw - 1, poisoned
         torch.cuda.synchronize()
         base._assert_tail_at_rest(device)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("form", TWIN_FORMS)
-def test_accumulate_on_two_concurrent_streams(form, out_dtype, monkeypatch):
+def test_accumulate_on_two_concurrent_streams(
+    form, out_dtype, monkeypatch, record_property
+):
     """Two prepared accumulates (fused where the release ships the form's accumulate build
     for the dtype, else composed) of the mixed short / long groups (split ordered tail)
     into separate outputs, launched interleaved on two streams (each stream's tail slots
     garbage-filled before every launch) while a kernel stays resident on a third and
     copies and GEMMs run on a fourth: every result has the bits of an isolated launch on
-    the quiet current stream, which is within the budget of ``out0 + dW``; each stream
-    keeps its own tail slots and tickets, and the tickets rest at zero."""
+    the quiet current stream; each stream keeps its own tail slots and tickets, and the
+    tickets rest at zero; the isolated launch is judged against the naive BF16 tier of
+    ``out0 + dW`` over the draws."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     launch, out0, sizes, g, x, offs = _short_accumulate(
@@ -2142,9 +2176,6 @@ def test_accumulate_on_two_concurrent_streams(form, out_dtype, monkeypatch):
     launch.out.copy_(out0)
     isolated = launch.launch().clone()
     torch.cuda.synchronize()
-    _assert_within_budget(
-        isolated, _expected(out0, g, x, sizes), _special_mask(out0, sizes)
-    )
     streams = [torch.cuda.Stream(device) for _ in range(4)]
     main = torch.cuda.current_stream(device)
     for stream in streams:
@@ -2175,16 +2206,31 @@ def test_accumulate_on_two_concurrent_streams(form, out_dtype, monkeypatch):
         base._assert_tail_at_rest(device, stream)
     kept = [cb.stream_workspace("tail_sums", device, stream) for stream in streams[:2]]
     assert kept[0].data_ptr() != kept[1].data_ptr(), "two streams share tail slots"
+    _judge_accumulate(
+        record_property,
+        launch,
+        launch.out,
+        x,
+        g,
+        offs,
+        sizes,
+        seed=41,
+        gen_seed=41,
+        make_out0=lambda gen, g, x: torch.randn(
+            out0.shape, generator=gen, device=device
+        ).to(out_dtype),
+    )
 
 
 @pytest.mark.parametrize("route", ["fused", "composed"])
-def test_graph_replay_accumulates_at_every_replay(route, monkeypatch):
+def test_graph_replay_accumulates_at_every_replay(route, monkeypatch, record_property):
     """A captured accumulate launch adds at every replay: two replays without a reset
     have the bits of two eager launches of the same prepared call from ``out0`` (the
     fused route on a split ordered tail, the eager stream's tail slots garbage-filled
-    first) and are within the budget of ``out0 + 2 dW``, also after new group boundaries
-    are written into ``offs`` (the same ``sum_m``) and after the first ones are written
-    back; the composed route's add is captured with its kernel."""
+    first), also after new group boundaries are written into ``offs`` (the same
+    ``sum_m``) and after the first ones are written back; the composed route's add is
+    captured with its kernel.  Two replays are judged against the naive BF16 tier of
+    ``out0 + 2 dW`` over the draws, on both group layouts."""
     out_dtype = torch.float32
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
@@ -2232,7 +2278,25 @@ def test_graph_replay_accumulates_at_every_replay(route, monkeypatch):
         base._assert_same_bits(
             replayed, out, f"{route} layout {index}: replay vs eager"
         )
-        _assert_within_budget(replayed, _expected(out0, g, x, layout, times=2))
+    replay = types.SimpleNamespace(launch=graph.replay)
+    for index, layout in enumerate((sizes, second)):
+        offs.copy_(base._offs(layout, device))
+        _judge_accumulate(
+            record_property,
+            replay,
+            out,
+            x,
+            g,
+            offs,
+            layout,
+            seed=43,
+            gen_seed=44,
+            adds=(2,),
+            name=f"out_layout{index}",
+            make_out0=lambda gen, g, x: torch.randn(
+                out0.shape, generator=gen, device=device
+            ),
+        )
 
 
 @pytest.mark.parametrize("route", ["fused", "composed"])
@@ -2275,10 +2339,11 @@ def test_prepared_accumulate_allocates_nothing_after_the_first_launch(
 
 
 @pytest.mark.parametrize("route", ["fused", "composed"])
-def test_accumulate_bumps_the_version_counter(route, monkeypatch):
+def test_accumulate_bumps_the_version_counter(route, monkeypatch, record_property):
     """Every accumulate launch bumps ``out._version`` once (the fused route through
     ``torch.autograd.graph.increment_version``, the composed one through ``out.add_``);
-    an inference tensor is accumulated into without an error."""
+    an inference tensor is accumulated into without an error, its ``0 + dW`` judged
+    against the naive BF16 tier over the draws."""
     out_dtype = torch.float32
     device = base._require_program("wgrad", out_dtype)
     if route == "fused":
@@ -2298,9 +2363,18 @@ def test_accumulate_bumps_the_version_counter(route, monkeypatch):
         frozen = torch.zeros(len(sizes), n, k, device=device)
     assert frozen.is_inference()
     inference = prepare_wgrad(g, x, offs, out=frozen, accumulate=True)
-    inference.launch()
-    torch.cuda.synchronize()
-    _assert_within_budget(frozen, _expected(torch.zeros_like(frozen), g, x, sizes))
+
+    def draw(d):
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x.copy_(nx)
+        g.copy_(ng)
+        with torch.inference_mode():
+            frozen.zero_()
+        inference.launch()
+        torch.cuda.synchronize()
+        d.op("frozen", frozen, "wgrad", g, x, sizes)
+
+    judge_draws(record_property, draw, seed=46)
 
 
 # ---------------------------------------------------------------------------
@@ -2380,13 +2454,15 @@ def _run_micro_steps(fn, x0, w0, mg0, grads, ckpt, early_stop, attribute=None):
 )
 @pytest.mark.parametrize("ckpt", [None, "non_reentrant", "nested"])
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
-def test_autograd_accumulates_into_main_grad(out_dtype, ckpt, early_stop, monkeypatch):
+def test_autograd_accumulates_into_main_grad(
+    out_dtype, ckpt, early_stop, monkeypatch, record_property
+):
     """Two micro-steps with ``fuse_wgrad_accumulation=True`` (plain, non-reentrant and
     nested checkpoints, early stop on and off) leave ``main_grad == mg0 + dW1 + dW2``:
     bitwise the composed adds on this unsplit shape (the fused fp32 route; a bf16
-    ``main_grad`` composes, AccumulateGrad's bits), within the budget of the fp64 sum;
-    ``x.grad`` is bitwise the default mode's and ``w.grad`` stays None (no
-    ``grad_added_to_main_grad``)."""
+    ``main_grad`` composes, AccumulateGrad's bits), judged against the naive BF16 tier of
+    ``mg0 + dW1 + dW2`` over the draws; ``x.grad`` is bitwise the default mode's and
+    ``w.grad`` stays None (no ``grad_added_to_main_grad``)."""
     device, sizes, x0, w0, g1, g2, offs = _autograd_case(out_dtype, monkeypatch)
     gen = torch.Generator(device=device).manual_seed(53)
     mg0 = torch.randn(w0.shape, generator=gen, device=device).to(out_dtype)
@@ -2396,13 +2472,27 @@ def test_autograd_accumulates_into_main_grad(out_dtype, ckpt, early_stop, monkey
     assert w.grad is None
     want = _composed_main_grad(mg0, (g1, g2), x0, offs)
     _assert_bitwise(w.main_grad, want, "main_grad")
-    dws = [base._reference("wgrad", g, x0, sizes).double() for g in (g1, g2)]
-    start = mg0.double()
-    expected = (
-        (start + dws[0] + dws[1]).float(),
-        (start.abs() + dws[0].abs() + dws[1].abs()).float(),
-    )
-    _assert_within_budget(w.main_grad, expected)
+    n, k = w0.shape[1:]
+
+    def draw(d):
+        nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=draw_seed(51, d.index))
+        x0.copy_(nx)
+        w0.copy_(nw)
+        g1.copy_(ng)
+        g2.copy_(base._inputs(sizes, n, k, device, seed=draw_seed(52, d.index))[2])
+        gen_draw = torch.Generator(device=device).manual_seed(draw_seed(53, d.index))
+        start = torch.randn(w0.shape, generator=gen_draw, device=device).to(out_dtype)
+        got, _ = _run_micro_steps(
+            _fused_gemm(offs), x0, w0, start, (g1, g2), ckpt, early_stop
+        )
+        dws64 = [product("wgrad", g, x0, sizes, torch.float64) for g in (g1, g2)]
+        dws16 = [product("wgrad", g, x0, sizes, torch.bfloat16) for g in (g1, g2)]
+        d.output(
+            "main_grad", got.main_grad, oracle_sum(start, dws64), naive_sum(start, dws16)
+        )
+
+    # draw 0 (the last) restores the case's own inputs for the check below
+    judge_draws(record_property, draw, seed=51)
     _, default_dxs = _run_micro_steps(
         lambda a, b: pkg.cake_moe_grouped_gemm_nondet(a, b, offs),
         x0,
@@ -2532,15 +2622,16 @@ def test_autograd_flag_errors_and_side_effects(monkeypatch):
 
 
 @pytest.mark.parametrize("form", TWIN_FORMS)
-def test_autograd_fuse_never_alerts_on_a_split_tail(form, monkeypatch):
+def test_autograd_fuse_never_alerts_on_a_split_tail(form, monkeypatch, record_property):
     """With ``fuse_wgrad_accumulation=True`` on a shape whose ``form`` splits its tail
     (the ordered one-launch tail, fused: not ``order_varying``), the forward and the
     backward under torch's strict and ``warn_only`` deterministic modes raise no alert
     and warn nothing, set the placeholder flag and leave ``main_grad`` and ``x.grad``
     with the bits of the run with the mode off (the stream's tail slots garbage-filled
     before every backward); that ``main_grad`` is bitwise the composed add
-    (``mg0.add_(dW32)``) on the groups with rows, keeps ``mg0``'s bits on the empty
-    groups and is within the budget of the fp64 sum."""
+    (``mg0.add_(dW32)``) on the groups with rows and keeps ``mg0``'s bits on the empty
+    groups; the mode-off ``main_grad`` is judged against the naive BF16 tier of
+    ``mg0 + dW`` over the draws."""
     base._require_program("fwd")
     base._require_program("dgrad")
     device = base._require_program("wgrad", torch.float32)
@@ -2590,12 +2681,19 @@ def test_autograd_fuse_never_alerts_on_a_split_tail(form, monkeypatch):
     for group, count in enumerate(sizes):
         if not count:
             assert torch.equal(_bits(want[0][group]), _bits(mg0[group])), group
-    dw = base._reference("wgrad", g, x0, sizes).double()
-    expected = (
-        (mg0.double() + dw).float(),
-        (mg0.double().abs() + dw.abs()).float(),
-    )
-    _assert_within_budget(want[0], expected)
+
+    def draw(d):
+        nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x0.copy_(nx)
+        w0.copy_(nw)
+        g.copy_(ng)
+        gen_draw = torch.Generator(device=device).manual_seed(draw_seed(59, d.index))
+        mg0.copy_(torch.randn(w0.shape, generator=gen_draw, device=device))
+        start = mg0.clone()
+        main_grad, _dx = run(contextlib.nullcontext())
+        d.op("main_grad", main_grad, "wgrad", g, x0, sizes, start=start)
+
+    judge_draws(record_property, draw, seed=58)
 
 
 # ---------------------------------------------------------------------------
@@ -2605,8 +2703,10 @@ def test_autograd_fuse_never_alerts_on_a_split_tail(form, monkeypatch):
 
 def _sanitize():
     """One small accumulate launch of every accumulate build this release ships for the
-    device's architecture, with an unsplit and a split tail, checked within the budget;
-    fails when such a build is missing or cannot load."""
+    device's architecture, with an unsplit and a split tail, checked bitwise against
+    ``out0.add_(dW32)`` with the overwrite of the same plan on the groups with rows (the
+    README numerical contract) and untouched on the empty groups; fails when such a build
+    is missing or cannot load."""
     device = torch.device("cuda", 0)
     arch = base._arch(device)
     ran, missing = 0, []
@@ -2648,9 +2748,13 @@ def _sanitize():
                     assert (launch.plan["tail_splits"] > 1) == split, launch.plan
                     launch.launch()
                     torch.cuda.synchronize()
-                    _assert_within_budget(
-                        out, _expected(out0, g, x, sizes), _special_mask(out0, sizes)
-                    )
+                    dw32 = _overwrites(g, x, offs, out_dtype)[0]
+                    oracle = _fused_oracle(out0, dw32)
+                    for group, rows in enumerate(sizes):
+                        if rows:
+                            _assert_bitwise(out[group], oracle[group], f"sanitize {form}")
+                        else:
+                            assert torch.equal(_bits(out[group]), _bits(out0[group]))
                     ran += 1
                     print(
                         f"SANITIZE {arch} {form}{ACC} {out_dtype} n={n} k={k} "

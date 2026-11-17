@@ -23,6 +23,8 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
+from tests.cake.test_helpers.cake_moe_judge import judge_draws
+from tests.cake.test_helpers.cake_naive import DRAWS
 from tests.cake.test_helpers.cake_package import cake_package
 
 # Backend suite: the package is named once, through ``cake_package``; nothing else
@@ -49,9 +51,6 @@ cake_moe_grouped_gemm_det_train_prepare_wgrad = (
 HOST_PLAN_CONSTANTS = cake_jit.HOST_PLAN_CONSTANTS
 PROGRAMS = cake_jit.PROGRAMS
 ROUTES = cake_jit.ROUTES
-
-ATOL = RTOL = 1e-2  # bf16 outputs
-FP32_REL_L2 = 1e-4  # fp32 weight gradient vs the fp64 reference
 
 # Group size lists: an empty group, a one-row group, sizes that are not tile
 # multiples, and a long-reduction case that can select the 512 k tile.
@@ -142,31 +141,59 @@ def _bounds(sizes):
     return list(zip([0] + ends[:-1], ends, strict=True))
 
 
-def _reference(op, a, b, sizes):
-    """Per-group fp64 reference in fp32: fwd (x, w), dgrad (g, w), wgrad (g, x)."""
-    if op == "fwd":
-        out = torch.zeros(a.shape[0], b.shape[1], dtype=torch.float32, device=a.device)
-        for e, (s, t) in enumerate(_bounds(sizes)):
-            if t > s:
-                out[s:t] = (a[s:t].double() @ b[e].double().T).float()
-    elif op == "dgrad":
-        out = torch.zeros(a.shape[0], b.shape[2], dtype=torch.float32, device=a.device)
-        for e, (s, t) in enumerate(_bounds(sizes)):
-            if t > s:
-                out[s:t] = (a[s:t].double() @ b[e].double()).float()
-    else:
-        out = torch.zeros(
-            len(sizes), a.shape[1], b.shape[1], dtype=torch.float32, device=a.device
-        )
-        for e, (s, t) in enumerate(_bounds(sizes)):
-            if t > s:
-                out[e] = (a[s:t].double().T @ b[s:t].double()).float()
-    return out
+# Accuracy: every output a GPU test checks is judged over ``cake_naive.DRAWS`` independent
+# inputs against the naive BF16 tier (``tests/cake/test_helpers/cake_moe_judge.py``): its
+# error against the per-group float64 product, in the L2 and the max norm, median and
+# largest over the draws, at most ``NEAR_TIE`` times torch's BF16 matmul's, with no
+# tolerance.  Draw ``j`` of a case of seed ``seed`` takes ``_inputs(..., seed=draw_seed(seed,
+# j))``; draw 0, the case's own inputs, is judged last.
+
+# The output each op's launch writes, as the TIER lines name it.
+OUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
 
 
-def _assert_bf16_close(out, ref):
-    assert out.dtype == torch.bfloat16
-    torch.testing.assert_close(out.float(), ref, atol=ATOL, rtol=RTOL)
+def _operands(op, x, w, g):
+    """The operands of ``op``: fwd (x, w), dgrad (g, w), wgrad (g, x)."""
+    return {"fwd": (x, w), "dgrad": (g, w), "wgrad": (g, x)}[op]
+
+
+class _Case:
+    """The inputs of a prepared launch, ``_inputs(sizes, n, k, device, seed)``; a draw writes
+    its own inputs into the same tensors (:meth:`refill`), which the launch reads at every
+    launch."""
+
+    def __init__(self, sizes, n, k, device, seed=0):
+        self.sizes, self.n, self.k, self.device, self.seed = sizes, n, k, device, seed
+        self.x, self.w, self.g, self.offs = _inputs(sizes, n, k, device, seed=seed)
+
+    def refill(self, seed):
+        x, w, g, _ = _inputs(self.sizes, self.n, self.k, self.device, seed=seed)
+        self.x.copy_(x)
+        self.w.copy_(w)
+        self.g.copy_(g)
+
+    def operands(self, op):
+        return _operands(op, self.x, self.w, self.g)
+
+
+def _judge_launch(record_property, op, launch, case, *, launches=1, name=None):
+    """Judge the prepared ``launch`` of ``op`` on ``case`` over the draws of ``case.seed``:
+    each draw refills the inputs, then ``launches`` launches into an output refilled with
+    NaN each judge it and give the bits of the draw's first launch (run to run)."""
+
+    def draw(d):
+        case.refill(d.seed)
+        first = None
+        for call in range(launches):
+            launch.out.fill_(float("nan"))
+            out = launch.launch()
+            d.op(name or OUT_NAMES[op], out, op, *case.operands(op), case.sizes)
+            if first is None:
+                first = out.clone()
+            else:
+                assert torch.equal(out, first), f"draw {d.index} launch {call}"
+
+    judge_draws(record_property, draw, seed=case.seed)
 
 
 def _fresh_stream_workspaces(monkeypatch):
@@ -893,111 +920,123 @@ def test_k256_wave_build_launches_only_on_its_wave_archs():
 @pytest.mark.parametrize(
     "sizes,n,k", [(RAGGED_E4, 512, 256), (RAGGED_E6, 1024, 512), (TINY_E5, 256, 64)]
 )
-def test_fwd_matches_reference(sizes, n, k):
+def test_fwd_matches_reference(sizes, n, k, record_property):
     device = _require_program("fwd")
-    x, w, _g, offs = _inputs(sizes, n, k, device)
-    out = cake_moe_grouped_gemm_det_train_forward(x, w, offs)
-    assert out.shape == (sum(sizes), n)
-    _assert_bf16_close(out, _reference("fwd", x, w, sizes))
+
+    def draw(d):
+        x, w, _g, offs = _inputs(sizes, n, k, device, seed=d.seed)
+        out = cake_moe_grouped_gemm_det_train_forward(x, w, offs)
+        assert out.shape == (sum(sizes), n)
+        d.op("Y", out, "fwd", x, w, sizes)
+
+    judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize(
     "sizes,n,k", [(RAGGED_E4, 256, 512), (RAGGED_E6, 1024, 512), (TINY_E5, 64, 256)]
 )
-def test_dgrad_matches_reference(sizes, n, k):
+def test_dgrad_matches_reference(sizes, n, k, record_property):
     device = _require_program("dgrad")
-    _x, w, g, offs = _inputs(sizes, n, k, device)
-    out = cake_moe_grouped_gemm_det_train_dgrad(g, w, offs)
-    assert out.shape == (sum(sizes), k)
-    _assert_bf16_close(out, _reference("dgrad", g, w, sizes))
+
+    def draw(d):
+        _x, w, g, offs = _inputs(sizes, n, k, device, seed=d.seed)
+        out = cake_moe_grouped_gemm_det_train_dgrad(g, w, offs)
+        assert out.shape == (sum(sizes), k)
+        d.op("dX", out, "dgrad", g, w, sizes)
+
+    judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(
     "sizes,n,k", [(RAGGED_E4, 512, 256), (RAGGED_E6, 512, 256), (TINY_E5, 256, 512)]
 )
-def test_wgrad_matches_reference(sizes, n, k, out_dtype):
+def test_wgrad_matches_reference(sizes, n, k, out_dtype, record_property):
     device = _require_program("wgrad", out_dtype)
-    x, _w, g, offs = _inputs(sizes, n, k, device)
+    case = _Case(sizes, n, k, device)
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
+        case.g, case.x, case.offs, out_dtype=out_dtype
     )
-    out = launch.launch()
-    assert out.shape == (len(sizes), n, k) and out.dtype == out_dtype
-    ref = _reference("wgrad", g, x, sizes)
-    if out_dtype == torch.bfloat16:
-        _assert_bf16_close(out, ref)
-    else:
-        rel_l2 = (out - ref).norm() / ref.norm()
-        assert rel_l2.item() <= FP32_REL_L2, (
-            f"fp32 weight gradient rel-L2 {rel_l2.item():.3e}"
-        )
-    for e, (s, t) in enumerate(_bounds(sizes)):
-        if t == s:
-            assert torch.equal(out[e], torch.zeros_like(out[e])), (
-                f"empty group {e} must be exact zeros"
-            )
-    # Deterministic: a second launch into the same output is bitwise identical.
-    first = out.clone()
-    out.fill_(float("nan"))
-    launch.launch()
-    torch.cuda.synchronize()
-    assert torch.equal(out, first)
+
+    def draw(d):
+        case.refill(d.seed)
+        out = launch.launch()
+        assert out.shape == (len(sizes), n, k) and out.dtype == out_dtype
+        d.op("dW", out, "wgrad", case.g, case.x, sizes)
+        for e, (s, t) in enumerate(_bounds(sizes)):
+            if t == s:
+                d.exact(f"dW[{e}] (empty group)", out[e], torch.zeros_like(out[e]))
+        # Deterministic: a second launch into the same output is bitwise identical.
+        first = out.clone()
+        out.fill_(float("nan"))
+        launch.launch()
+        torch.cuda.synchronize()
+        assert torch.equal(out, first)
+
+    judge_draws(record_property, draw, seed=0)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_wgrad_long_reduction_selects_a_valid_tile(out_dtype):
+def test_wgrad_long_reduction_selects_a_valid_tile(out_dtype, record_property):
     device = _require_program("wgrad", out_dtype)
     n, k = 512 if out_dtype == torch.bfloat16 else 256, 1024
-    x, _w, g, offs = _inputs(LONG_E3, n, k, device, seed=3)
+    case = _Case(LONG_E3, n, k, device, seed=3)
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
+        case.g, case.x, case.offs, out_dtype=out_dtype
     )
     assert launch.plan["tile_k"] in (256, 512) and k % launch.plan["tile_k"] == 0
-    out = launch.launch()
-    ref = _reference("wgrad", g, x, LONG_E3)
-    if out_dtype == torch.bfloat16:
-        _assert_bf16_close(out, ref)
-    else:
-        assert ((out - ref).norm() / ref.norm()).item() <= FP32_REL_L2
-    assert torch.equal(out[1], torch.zeros_like(out[1]))
+
+    def draw(d):
+        case.refill(d.seed)
+        out = launch.launch()
+        d.op("dW", out, "wgrad", case.g, case.x, LONG_E3)
+        d.exact("dW[1] (empty group)", out[1], torch.zeros_like(out[1]))
+
+    judge_draws(record_property, draw, seed=case.seed)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_wgrad_short_groups_never_include_the_next_group(out_dtype):
+def test_wgrad_short_groups_never_include_the_next_group(out_dtype, record_property):
     """A tile of a group shorter than one k-step must not add the rows of the group
-    the same CTA reduces next (#6570). Repeated launches of one prepared call,
-    checked block by block against the per-group reference."""
+    the same CTA reduces next (#6570).  At least SMALL_GROUP_LAUNCHES launches of one
+    prepared call, spread over the draws: every launch is judged (the draw keeps its
+    largest error) and gives the bits of its draw's first launch."""
     device = _require_program("wgrad", out_dtype)
     n, k = 512, 3072
-    x, _w, g, offs = _inputs(SMALL_E512, n, k, device, seed=6)
+    case = _Case(SMALL_E512, n, k, device, seed=6)
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
+        case.g, case.x, case.offs, out_dtype=out_dtype
     )
-    ref = torch.stack(
-        [g[s:t].float().T @ x[s:t].float() for s, t in _bounds(SMALL_E512)]
-    )
-    blocks = ref.view(len(SMALL_E512), n // 128, 128, k // 128, 128)
-    scale = blocks.abs().amax(dim=(2, 4), keepdim=True)
-    wrong = []
-    for call in range(SMALL_GROUP_LAUNCHES):
-        out = launch.launch().float().view_as(blocks)
-        bad = ((out - blocks).abs() > scale * 2.0**-6 + 1e-6).any(dim=4).any(dim=2)
-        if bool(bad.any()):
-            wrong.append((call, bad.nonzero()[:4].tolist()))
-    assert not wrong, (
-        f"{len(wrong)} of {SMALL_GROUP_LAUNCHES} launches have wrong 128 x 128 blocks "
-        f"(call, [group, n block, k block]): {wrong[:3]}"
+    per_draw = -(-SMALL_GROUP_LAUNCHES // DRAWS)
+    differ = []
+
+    def draw(d):
+        case.refill(d.seed)
+        first = None
+        for call in range(per_draw):
+            out = launch.launch()
+            d.op("dW", out, "wgrad", case.g, case.x, SMALL_E512)
+            if first is None:
+                first = out.clone()
+            elif not torch.equal(out, first):
+                differ.append((d.index, call, int((out != first).sum())))
+
+    judge_draws(record_property, draw, seed=case.seed)
+    assert not differ, (
+        f"{len(differ)} of {DRAWS * (per_draw - 1)} relaunches differ from their draw's "
+        f"first launch (draw, launch, elements): {differ[:3]}"
     )
 
 
-def test_prepared_launch_reuses_buffers_without_allocation():
+def test_prepared_launch_reuses_buffers_without_allocation(record_property):
     device = _require_program("fwd")
-    x, w, _g, offs = _inputs(RAGGED_E6, 1024, 512, device)
+    case = _Case(RAGGED_E6, 1024, 512, device)
     out = torch.full(
         (sum(RAGGED_E6), 1024), float("nan"), dtype=torch.bfloat16, device=device
     )
-    launch = cake_moe_grouped_gemm_det_train_prepare_forward(x, w, offs, out=out)
+    launch = cake_moe_grouped_gemm_det_train_prepare_forward(
+        case.x, case.w, case.offs, out=out
+    )
     assert launch.launch() is out
     torch.cuda.synchronize()
     before = torch.cuda.memory_stats(device)
@@ -1005,7 +1044,7 @@ def test_prepared_launch_reuses_buffers_without_allocation():
     torch.cuda.synchronize()
     after = torch.cuda.memory_stats(device)
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
-    _assert_bf16_close(out, _reference("fwd", x, w, RAGGED_E6))
+    _judge_launch(record_property, "fwd", launch, case)
 
 
 def _u32_words(tensor):
@@ -1018,18 +1057,19 @@ def _workspace_kinds(launch):
 
 
 def _prepare_row_op(op, sizes, n, k, device, out=None):
-    x, w, g, offs = _inputs(sizes, n, k, device)
+    """A prepared ``fwd`` / ``dgrad`` launch on the inputs of seed 0, and its :class:`_Case`."""
+    case = _Case(sizes, n, k, device)
     if op == "fwd":
         return cake_moe_grouped_gemm_det_train_prepare_forward(
-            x, w, offs, out=out
-        ), _reference("fwd", x, w, sizes)
+            case.x, case.w, case.offs, out=out
+        ), case
     return cake_moe_grouped_gemm_det_train_prepare_dgrad(
-        g, w, offs, out=out
-    ), _reference("dgrad", g, w, sizes)
+        case.g, case.w, case.offs, out=out
+    ), case
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
-def test_scheduler_workspace_rests_after_every_launch(op, monkeypatch):
+def test_scheduler_workspace_rests_after_every_launch(op, monkeypatch, record_property):
     """The kernels re-arm ``sched`` at the end of every launch: repeated launches of
     one prepared call on one stream each compute every tile (the output is refilled
     with NaN before each), and the stream's workspace is at its rest words.  Where the
@@ -1037,15 +1077,13 @@ def test_scheduler_workspace_rests_after_every_launch(op, monkeypatch):
     and the later launches pass the probed split."""
     device = _require_program(op)
     _fresh_stream_workspaces(monkeypatch)
-    launch, ref = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
+    launch, case = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
     if "sched" not in _workspace_kinds(launch):
         pytest.skip(
             f"the {op} program bound on this device takes no scheduler workspace"
         )
     c = HOST_PLAN_CONSTANTS
-    for _ in range(4):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, op, launch, case, launches=4)
     torch.cuda.synchronize()
     sched = cb.stream_workspace("sched", device)
     assert sched is not None and sched.dtype == torch.uint32
@@ -1057,7 +1095,7 @@ def test_scheduler_workspace_rests_after_every_launch(op, monkeypatch):
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_wgrad_wave_sync_route_and_rest_state(out_dtype, monkeypatch):
+def test_wgrad_wave_sync_route_and_rest_state(out_dtype, monkeypatch, record_property):
     """From ``wave_sync_min_k`` on, an architecture ``wave_sync_archs`` lists for the
     k tile, whose route has a ``main_wave`` stage, launches the wave build with
     its ``wave_sync_mode`` as ``wave_mode``; it leaves its counters at zero and
@@ -1066,7 +1104,8 @@ def test_wgrad_wave_sync_route_and_rest_state(out_dtype, monkeypatch):
     c = HOST_PLAN_CONSTANTS
     arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
     n, k = 256, int(c["wave_sync_min_k"])
-    x, _w, g, offs = _inputs(RAGGED_E4, n, k, device, seed=7)
+    case = _Case(RAGGED_E4, n, k, device, seed=7)
+    x, g, offs = case.x, case.g, case.offs
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
         g, x, offs, out_dtype=out_dtype
     )
@@ -1077,14 +1116,8 @@ def test_wgrad_wave_sync_route_and_rest_state(out_dtype, monkeypatch):
     assert launch.stages[0] == ("main_wave" if wave else "main")
     assert launch.plan["wave_mode"] == (int(c["wave_sync_mode"][arch]) if wave else 0)
     assert ("wave_sync" in _workspace_kinds(launch)) == wave
-    ref = _reference("wgrad", g, x, RAGGED_E4)
-    for _ in range(3):
-        launch.out.fill_(float("nan"))
-        out = launch.launch()
-        if out_dtype == torch.bfloat16:
-            _assert_bf16_close(out, ref)
-        else:
-            assert ((out - ref).norm() / ref.norm()).item() <= FP32_REL_L2
+    _judge_launch(record_property, "wgrad", launch, case, launches=3)
+    out = launch.out
     torch.cuda.synchronize()
     if wave:
         counters = cb.stream_workspace("wave_sync", device)
@@ -1148,7 +1181,7 @@ def test_wgrad_wave_sync_takes_row_padded_operands(out_dtype):
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
-def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch):
+def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch, record_property):
     """On an architecture of ``wide_fwd_archs`` / ``wide_dgrad_archs`` an output
     width that is a multiple of ``wide_block_n`` launches the 512-column tile; it
     leaves ``sched`` at rest and gives the 256-column tile's output bits (both
@@ -1157,7 +1190,7 @@ def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch):
     c = HOST_PLAN_CONSTANTS
     arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
     n, k = (1536, 512) if op == "fwd" else (512, 1536)
-    launch, ref = _prepare_row_op(op, RAGGED_E6, n, k, device)
+    launch, case = _prepare_row_op(op, RAGGED_E6, n, k, device)
     wide = arch in c[f"wide_{op}_archs"] and cake_jit.stage_served(
         launch.record_name, "main_wide", arch
     )
@@ -1183,9 +1216,7 @@ def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch):
         else "main"
     )
     assert launch.plan["tile_n"] == int(c["wide_block_n" if wide else "block_n"])
-    for _ in range(3):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, op, launch, case, launches=3)
     torch.cuda.synchronize()
     if not wide:
         pytest.skip(f"no 512-column {op} tile on {arch}")
@@ -1201,7 +1232,7 @@ def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch):
     assert torch.equal(narrow.launch(), launch.out)
 
 
-def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch):
+def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property):
     """Where ``dgrad_evict_first`` holds, the data gradient launches the evict-first
     twin of its wide tile (``main_wide_ef``).  The cache policy changes no arithmetic:
     the output bits are those of the wide tile and of the 256-column tile."""
@@ -1213,7 +1244,7 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch):
     assert sum(sizes) // len(sizes) >= max(
         int(v) for v in c["dgrad_evict_first_min_rows"].values()
     )
-    launch, ref = _prepare_row_op("dgrad", sizes, n, k, device)
+    launch, case = _prepare_row_op("dgrad", sizes, n, k, device)
     name = launch.record_name
     ef = arch in c["dgrad_evict_first_archs"] and cake_jit.stage_served(
         name, "main_wide_ef", arch
@@ -1236,9 +1267,7 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch):
         if wide
         else "main"
     )
-    for _ in range(2):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, "dgrad", launch, case, launches=2)
     torch.cuda.synchronize()
     if not ef:
         pytest.skip(f"no evict-first data-gradient tile on {arch}")
@@ -1260,7 +1289,7 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch):
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
-def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch):
+def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch, record_property):
     """Where ``fwd_wide_ts33`` / ``dgrad_wide_ts33`` holds, the forward pass / data
     gradient launches the twin of its wide tile with three head and three tail k steps
     around the release of the accumulator's halves (``main_wide_ts33``).  Every element
@@ -1275,7 +1304,7 @@ def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch):
     else:  # the down projection over many small groups
         n, k = 2 * int(c["wide_block_n"]), int(c["fwd_wide_ts33_max_k"])
         sizes = RAGGED_E6
-    launch, ref = _prepare_row_op(op, sizes, n, k, device)
+    launch, case = _prepare_row_op(op, sizes, n, k, device)
     name = launch.record_name
     ef = _evict_first(op, k, arch, sum(sizes), len(sizes), c) and cake_jit.stage_served(
         name, "main_wide_ef", arch
@@ -1298,9 +1327,7 @@ def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch):
         if wide
         else "main"
     )
-    for _ in range(3):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, op, launch, case, launches=3)
     torch.cuda.synchronize()
     if not ts33:
         pytest.skip(f"no 3 / 3 head / tail {op} tile on {arch}")
@@ -1337,7 +1364,7 @@ def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch):
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
-def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch):
+def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch, record_property):
     """On the architectures of ``domain_split_archs`` a launch of an op in
     ``domain_split_ops`` whose weight has at most ``domain_split_max_weight_elems``
     elements probes its stream's scheduler workspace at its first launch there and
@@ -1349,7 +1376,7 @@ def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch):
     device = _require_program(op)
     _fresh_stream_workspaces(monkeypatch)
     c = HOST_PLAN_CONSTANTS
-    launch, ref = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
+    launch, case = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
     if "sched" not in _workspace_kinds(launch):
         pytest.skip(
             f"the {op} program bound on this device takes no scheduler workspace"
@@ -1372,8 +1399,11 @@ def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch):
             assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
         main.wait_stream(stream)
     torch.cuda.synchronize()
-    _assert_bf16_close(outs[0], ref)
     assert all(torch.equal(out, outs[0]) for out in outs)
+    # The launches of both streams now pass the probed split (where the launch probes):
+    # judge it over the draws, then the even split's bits on the case's own inputs.
+    _judge_launch(record_property, op, launch, case)
+    assert torch.equal(launch.out, outs[0])
     if not probed:
         assert splits == [None] * len(splits)
         pytest.skip(f"no probed queue split for {op} on this device")
@@ -1392,7 +1422,7 @@ def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch):
 
 
 @pytest.mark.parametrize("probe", ["no_compiler", "no_sm_seen"])
-def test_queue_split_stays_even_without_a_probe(probe, monkeypatch):
+def test_queue_split_stays_even_without_a_probe(probe, monkeypatch, record_property):
     """Where the queue probe cannot be built (no CUDA compiler) or does not see every
     SM (here: a probe that records nothing), a probed launch keeps passing the even
     split, with the same bits."""
@@ -1408,16 +1438,14 @@ def test_queue_split_stays_even_without_a_probe(probe, monkeypatch):
 
     module = None if probe == "no_compiler" else _NoRecord()
     monkeypatch.setattr(cb, "_queue_probe_module", lambda capability: module)
-    launch, ref = _prepare_row_op("dgrad", RAGGED_E6, 1024, 512, device)
+    launch, case = _prepare_row_op("dgrad", RAGGED_E6, 1024, 512, device)
     assert launch.plan["queue_split"] == "probed"
-    for _ in range(3):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, "dgrad", launch, case, launches=3)
     torch.cuda.synchronize()
     assert cb.stream_queue_split(device) is None
 
 
-def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch):
+def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch, record_property):
     """Where ``fwd_lwh_ef`` holds (a short reduction, the down projection), the forward
     pass launches the twin of its wide tile that releases the last wave in halves and
     stores Y evict-first (``main_wide_ef``).  Neither changes the arithmetic: the
@@ -1427,7 +1455,7 @@ def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch):
     arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
     n, k = 2 * int(c["wide_block_n"]), int(c["fwd_lwh_ef_max_k"])
     sizes = EVICT_FIRST_E2
-    launch, ref = _prepare_row_op("fwd", sizes, n, k, device)
+    launch, case = _prepare_row_op("fwd", sizes, n, k, device)
     name = launch.record_name
     ef = arch in c["fwd_lwh_ef_archs"] and cake_jit.stage_served(
         name, "main_wide_ef", arch
@@ -1450,9 +1478,7 @@ def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch):
         if wide
         else "main"
     )
-    for _ in range(2):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
+    _judge_launch(record_property, "fwd", launch, case, launches=2)
     torch.cuda.synchronize()
     if not ef:
         pytest.skip(f"no last-wave-halves forward tile on {arch}")
@@ -1470,7 +1496,7 @@ def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch):
 
 
 @pytest.mark.parametrize("sizes", [RAGGED_E6, EVICT_FIRST_E2], ids=["ragged", "long"])
-def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch):
+def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch, record_property):
     """Where ``fwd_evict_first`` holds (a long reduction, the gate/up projection), the
     forward pass launches the twin of its wide tile that loads X and stores Y with the
     L2 evict-first policy (``main_wide_ef``), whatever the group sizes (an empty group
@@ -1481,7 +1507,7 @@ def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch):
     c = HOST_PLAN_CONSTANTS
     arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
     n, k = 2 * int(c["wide_block_n"]), int(c["fwd_evict_first_min_k"])
-    launch, ref = _prepare_row_op("fwd", sizes, n, k, device)
+    launch, case = _prepare_row_op("fwd", sizes, n, k, device)
     name = launch.record_name
     wide = arch in c["wide_fwd_archs"] and cake_jit.stage_served(
         name, "main_wide", arch
@@ -1508,14 +1534,8 @@ def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch):
         if wide
         else "main"
     )
-    first = None
-    for _ in range(5):
-        launch.out.fill_(float("nan"))
-        _assert_bf16_close(launch.launch(), ref)
-        bits = launch.out.view(torch.int16).clone()
-        if first is None:
-            first = bits
-        assert torch.equal(bits, first)
+    _judge_launch(record_property, "fwd", launch, case, launches=5)
+    first = launch.out.view(torch.int16).clone()
     torch.cuda.synchronize()
     if not ef:
         pytest.skip(f"no X / Y evict-first forward tile on {arch}")
@@ -1541,7 +1561,9 @@ def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch):
 
 @pytest.mark.parametrize("wave", [False, True])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_wgrad_k512_halves_gives_the_drain_build_bits(out_dtype, wave, monkeypatch):
+def test_wgrad_k512_halves_gives_the_drain_build_bits(
+    out_dtype, wave, monkeypatch, record_property
+):
     """With the 512-wide k tile on an architecture of ``k512_release_archs`` the
     weight gradient launches the twin of its build that releases the accumulator in
     two halves (``main_halves``; ``main_wave_halves`` from ``wave_sync_min_k``).  The
@@ -1552,7 +1574,8 @@ def test_wgrad_k512_halves_gives_the_drain_build_bits(out_dtype, wave, monkeypat
     monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k256_tail_archs", [])
     arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
     n, k = 256, (int(c["wave_sync_min_k"]) if wave else 1024)
-    x, _w, g, offs = _inputs(K512_E2, n, k, device, seed=10)
+    case = _Case(K512_E2, n, k, device, seed=10)
+    x, g, offs = case.x, case.g, case.offs
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
         g, x, offs, out_dtype=out_dtype
     )
@@ -1568,14 +1591,8 @@ def test_wgrad_k512_halves_gives_the_drain_build_bits(out_dtype, wave, monkeypat
     )
     halves = arch in c["k512_release_archs"]
     assert launch.stages[0] == (f"{base}_halves" if halves else base)
-    ref = _reference("wgrad", g, x, K512_E2)
-    for _ in range(2):
-        launch.out.fill_(float("nan"))
-        out = launch.launch()
-        if out_dtype == torch.bfloat16:
-            _assert_bf16_close(out, ref)
-        else:
-            assert ((out - ref).norm() / ref.norm()).item() <= FP32_REL_L2
+    _judge_launch(record_property, "wgrad", launch, case, launches=2)
+    out = launch.out
     torch.cuda.synchronize()
     if base == "main_wave":
         counters = cb.stream_workspace("wave_sync", device)
@@ -1593,7 +1610,7 @@ def test_wgrad_k512_halves_gives_the_drain_build_bits(out_dtype, wave, monkeypat
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch):
+def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch, record_property):
     """Where ``wgrad_k256_tail`` holds, the half-release 512-wide k tile launches its
     twin that runs the tiles left after its full waves as 256-column half tiles
     (``main_halves_k256t``): n-major, the last partial wave of them split as the
@@ -1609,7 +1626,8 @@ def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch):
     sizes = K512_E2
     n, k = 4096, int(c["k256_tail_max_k"])
     assert sum(sizes) // len(sizes) >= int(c["k256_tail_min_rows"])
-    x, _w, g, offs = _inputs(sizes, n, k, device, seed=11)
+    case = _Case(sizes, n, k, device, seed=11)
+    x, g, offs = case.x, case.g, case.offs
     launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
         g, x, offs, out_dtype=out_dtype
     )
@@ -1622,17 +1640,9 @@ def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch):
     assert plan["raster_rows"] == 0
     tail = ("tail_reduce",) if plan["tail_splits"] > 1 else ()
     assert launch.stages == ("main_halves_k256t", *tail)
-    outs = []
-    for _ in range(2):
-        launch.out.fill_(float("nan"))
-        outs.append(launch.launch().clone())
+    _judge_launch(record_property, "wgrad", launch, case, launches=2)
+    outs = [launch.out.clone()]
     torch.cuda.synchronize()
-    assert torch.equal(outs[0], outs[1])
-    ref = _reference("wgrad", g, x, sizes)
-    if out_dtype == torch.bfloat16:
-        _assert_bf16_close(outs[0], ref)
-    else:
-        assert ((outs[0] - ref).norm() / ref.norm()).item() <= FP32_REL_L2
     monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k512_archs", [])
     k256 = cake_moe_grouped_gemm_det_train_prepare_wgrad(
         g, x, offs, out_dtype=out_dtype
@@ -1645,17 +1655,17 @@ def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch):
     assert torch.equal(k256.launch(), outs[0])
 
 
-def test_two_streams_take_separate_workspaces(monkeypatch):
+def test_two_streams_take_separate_workspaces(monkeypatch, record_property):
     """Launches on two streams in flight together never share a workspace; each
     stream keeps its own buffer at rest, and both results are exact.  Where a launch
     probes the queue split (the data gradient), its stream's workspace has a probe of
     its own; the forward's stream has none."""
     device = _require_program("fwd")
     _fresh_stream_workspaces(monkeypatch)
-    first, ref = _prepare_row_op("fwd", RAGGED_E6, 1024, 512, device)
+    first, case = _prepare_row_op("fwd", RAGGED_E6, 1024, 512, device)
     if "sched" not in _workspace_kinds(first):
         pytest.skip("the fwd program bound on this device takes no scheduler workspace")
-    second, ref2 = _prepare_row_op("dgrad", RAGGED_E4, 256, 512, device)
+    second, case2 = _prepare_row_op("dgrad", RAGGED_E4, 256, 512, device)
     streams = [torch.cuda.Stream(device), torch.cuda.Stream(device)]
     main = torch.cuda.current_stream(device)
     for stream in streams:
@@ -1666,15 +1676,25 @@ def test_two_streams_take_separate_workspaces(monkeypatch):
         with torch.cuda.stream(stream):
             launch.launch()
         stream.synchronize()
-    for _ in range(8):
-        for stream, launch in zip(streams, (first, second), strict=True):
-            with torch.cuda.stream(stream):
-                launch.launch()
-    for stream in streams:
-        main.wait_stream(stream)
-    torch.cuda.synchronize()
-    _assert_bf16_close(first.out, ref)
-    _assert_bf16_close(second.out, ref2)
+
+    def draw(d):
+        # each draw: both cases refilled, 8 rounds of a launch on each stream in flight
+        # together; the last round's outputs are judged
+        case.refill(d.seed)
+        case2.refill(d.seed)
+        for stream in streams:
+            stream.wait_stream(main)
+        for _ in range(8):
+            for stream, launch in zip(streams, (first, second), strict=True):
+                with torch.cuda.stream(stream):
+                    launch.launch()
+        for stream in streams:
+            main.wait_stream(stream)
+        torch.cuda.synchronize()
+        d.op("Y", first.out, "fwd", *case.operands("fwd"), case.sizes)
+        d.op("dX", second.out, "dgrad", *case2.operands("dgrad"), case2.sizes)
+
+    judge_draws(record_property, draw, seed=0)
     buffers = [cb.stream_workspace("sched", device, stream) for stream in streams]
     assert all(buffer is not None for buffer in buffers)
     assert buffers[0].data_ptr() != buffers[1].data_ptr()
@@ -1694,49 +1714,60 @@ def test_two_streams_take_separate_workspaces(monkeypatch):
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad", "wgrad"])
-def test_cuda_graph_replay(op, monkeypatch):
+def test_cuda_graph_replay(op, monkeypatch, record_property):
     """A captured launch takes workspaces of its own, set to their rest state in the
     graph; every replay computes every tile.  A captured forward or data-gradient
     launch passes the even queue split and starts no probe; its replays give the bits
-    of the eager launches, which pass the probed split where the launch probes it."""
+    of the eager launches, which pass the probed split where the launch probes it.
+    The replays are judged over the draws (each draw writes its inputs into the
+    captured operands)."""
     _fresh_stream_workspaces(monkeypatch)
     if op in ("fwd", "dgrad"):
         device = _require_program(op)
-        launch, ref = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
+        launch, case = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
     else:
         device = _require_program("wgrad", torch.bfloat16)
         k = int(HOST_PLAN_CONSTANTS["wave_sync_min_k"])
-        x, _w, g, offs = _inputs(RAGGED_E4, 256, k, device, seed=8)
-        launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(g, x, offs)
-        ref = _reference("wgrad", g, x, RAGGED_E4)
+        case = _Case(RAGGED_E4, 256, k, device, seed=8)
+        launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            case.g, case.x, case.offs
+        )
     side = torch.cuda.Stream(device)
-    side.wait_stream(torch.cuda.current_stream(device))
-    with torch.cuda.stream(side):
-        launch.launch()
-        side.synchronize()
-        launch.launch()
-    torch.cuda.current_stream(device).wait_stream(side)
-    torch.cuda.synchronize()
-    eager = launch.out.clone()
-    probes = len(cb._queue_splits)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        launch.launch()
-    assert len(cb._queue_splits) == probes
-    for _ in range(3):
-        launch.out.fill_(float("nan"))
-        graph.replay()
+    probes = None
+
+    def draw(d):
+        nonlocal probes
+        case.refill(d.seed)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            launch.launch()
+            side.synchronize()
+            launch.launch()
+        torch.cuda.current_stream(device).wait_stream(side)
         torch.cuda.synchronize()
-        _assert_bf16_close(launch.out, ref)
-        if op != "wgrad":
-            assert torch.equal(launch.out, eager)
+        eager = launch.out.clone()
+        if probes is None:  # the first draw captures the graph
+            probes = len(cb._queue_splits)
+            with torch.cuda.graph(graph):
+                launch.launch()
+            assert len(cb._queue_splits) == probes
+        for _ in range(3):
+            launch.out.fill_(float("nan"))
+            graph.replay()
+            torch.cuda.synchronize()
+            d.op(OUT_NAMES[op], launch.out, op, *case.operands(op), case.sizes)
+            if op != "wgrad":
+                assert torch.equal(launch.out, eager)
+
+    judge_draws(record_property, draw, seed=case.seed)
     if _probes_queue_split(device, op):
         assert launch.plan["queue_split"] == "probed" and probes == 1
         assert cb.stream_queue_split(device, side) is not None
 
 
 @pytest.mark.parametrize("op", ["dgrad", "wgrad"])
-def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch):
+def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch, record_property):
     """After the first launch on a stream (which creates the stream workspaces and
     starts the queue probe where the launch probes one), a prepared launch allocates
     no device memory, also at the launch that takes up the probed split: dgrad, and
@@ -1744,13 +1775,14 @@ def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch):
     _fresh_stream_workspaces(monkeypatch)
     if op == "dgrad":
         device = _require_program("dgrad")
-        launch, ref = _prepare_row_op("dgrad", RAGGED_E6, 1024, 512, device)
+        launch, case = _prepare_row_op("dgrad", RAGGED_E6, 1024, 512, device)
     else:
         device = _require_program("wgrad", torch.bfloat16)
         k = int(HOST_PLAN_CONSTANTS["wave_sync_min_k"])
-        x, _w, g, offs = _inputs(RAGGED_E4, 256, k, device, seed=9)
-        launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(g, x, offs)
-        ref = _reference("wgrad", g, x, RAGGED_E4)
+        case = _Case(RAGGED_E4, 256, k, device, seed=9)
+        launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            case.g, case.x, case.offs
+        )
     launch.launch()
     torch.cuda.synchronize()
     before = torch.cuda.memory_stats(device)
@@ -1759,40 +1791,49 @@ def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch):
     torch.cuda.synchronize()
     after = torch.cuda.memory_stats(device)
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
-    _assert_bf16_close(launch.out, ref)
+    _judge_launch(record_property, op, launch, case)
     if _probes_queue_split(device, op):
         assert launch.plan["queue_split"] == "probed"
         assert cb.stream_queue_split(device) is not None
 
 
-def test_prepared_launch_follows_new_offsets():
+def test_prepared_launch_follows_new_offsets(record_property):
     """The same prepared launch serves new group boundaries written into offs."""
     device = _require_program("dgrad")
     first, second = [300, 0, 1, 700], [1, 500, 250, 250]
-    _x, w, g, offs = _inputs(first, 256, 512, device)
-    launch = cake_moe_grouped_gemm_det_train_prepare_dgrad(g, w, offs)
-    _assert_bf16_close(launch.launch(), _reference("dgrad", g, w, first))
-    offs.copy_(_offs(second, device))
-    _assert_bf16_close(launch.launch(), _reference("dgrad", g, w, second))
+    case = _Case(first, 256, 512, device)
+    launch = cake_moe_grouped_gemm_det_train_prepare_dgrad(case.g, case.w, case.offs)
+
+    def draw(d):
+        case.refill(d.seed)
+        for label, sizes in (("first", first), ("second", second)):
+            case.offs.copy_(_offs(sizes, device))
+            d.op(f"dX({label})", launch.launch(), "dgrad", case.g, case.w, sizes)
+
+    judge_draws(record_property, draw, seed=case.seed)
 
 
-def test_padded_outputs_leave_the_padding_untouched():
+def test_padded_outputs_leave_the_padding_untouched(record_property):
     device = _require_program("fwd")
     device = _require_program("wgrad", torch.bfloat16)
-    x, w, g, offs = _inputs(RAGGED_E4, 512, 256, device)
     sum_m, n, k = sum(RAGGED_E4), 512, 256
-    padded = torch.full(
-        (sum_m, n + 64), float("nan"), dtype=torch.bfloat16, device=device
-    )
-    out = cake_moe_grouped_gemm_det_train_forward(x, w, offs, out=padded[:, :n])
-    _assert_bf16_close(out, _reference("fwd", x, w, RAGGED_E4))
-    assert torch.isnan(padded[:, n:]).all()
-    padded = torch.full(
-        (len(RAGGED_E4), n, k + 32), float("nan"), dtype=torch.bfloat16, device=device
-    )
-    out = cake_moe_grouped_gemm_det_train_wgrad(g, x, offs, out=padded[:, :, :k])
-    _assert_bf16_close(out, _reference("wgrad", g, x, RAGGED_E4))
-    assert torch.isnan(padded[:, :, k:]).all()
+
+    def draw(d):
+        x, w, g, offs = _inputs(RAGGED_E4, n, k, device, seed=d.seed)
+        padded = torch.full(
+            (sum_m, n + 64), float("nan"), dtype=torch.bfloat16, device=device
+        )
+        out = cake_moe_grouped_gemm_det_train_forward(x, w, offs, out=padded[:, :n])
+        d.op("Y", out, "fwd", x, w, RAGGED_E4)
+        assert torch.isnan(padded[:, n:]).all()
+        padded = torch.full(
+            (len(RAGGED_E4), n, k + 32), float("nan"), dtype=torch.bfloat16, device=device
+        )
+        out = cake_moe_grouped_gemm_det_train_wgrad(g, x, offs, out=padded[:, :, :k])
+        d.op("dW", out, "wgrad", g, x, RAGGED_E4)
+        assert torch.isnan(padded[:, :, k:]).all()
+
+    judge_draws(record_property, draw, seed=0)
 
 
 def test_empty_batch():
@@ -1852,27 +1893,31 @@ def test_m_indptr_form_matches_offs_form():
         )
 
 
-def test_autograd_wrapper_matches_reference_and_is_deterministic():
+def test_autograd_wrapper_matches_reference_and_is_deterministic(record_property):
     device = _require_program("fwd")
     device = _require_program("dgrad")
     device = _require_program("wgrad", torch.bfloat16)
     cake_moe_grouped_gemm_det = pkg.cake_moe_grouped_gemm_det
+    kept = {}
 
-    x, w, g, offs = _inputs(RAGGED_E6, 512, 256, device)
-    x = x.clone().requires_grad_(True)
-    w = w.clone().requires_grad_(True)
-    y = cake_moe_grouped_gemm_det(x, w, offs)
-    assert y.shape == (sum(RAGGED_E6), 512) and y.dtype == torch.bfloat16
-    _assert_bf16_close(y.detach(), _reference("fwd", x.detach(), w.detach(), RAGGED_E6))
-    y.backward(g)
-    assert x.grad.dtype == torch.bfloat16 and w.grad.dtype == torch.bfloat16
-    _assert_bf16_close(x.grad, _reference("dgrad", g, w.detach(), RAGGED_E6))
-    _assert_bf16_close(w.grad, _reference("wgrad", g, x.detach(), RAGGED_E6))
-    for e, (s, t) in enumerate(_bounds(RAGGED_E6)):
-        if t == s:
-            assert torch.equal(w.grad[e], torch.zeros_like(w.grad[e])), (
-                f"empty group {e} must receive an exactly zero weight gradient"
-            )
+    def draw(d):
+        x, w, g, offs = _inputs(RAGGED_E6, 512, 256, device, seed=d.seed)
+        x = x.clone().requires_grad_(True)
+        w = w.clone().requires_grad_(True)
+        y = cake_moe_grouped_gemm_det(x, w, offs)
+        assert y.shape == (sum(RAGGED_E6), 512) and y.dtype == torch.bfloat16
+        d.op("Y", y.detach(), "fwd", x.detach(), w.detach(), RAGGED_E6)
+        y.backward(g)
+        assert x.grad.dtype == torch.bfloat16 and w.grad.dtype == torch.bfloat16
+        d.op("dX", x.grad, "dgrad", g, w.detach(), RAGGED_E6)
+        d.op("dW", w.grad, "wgrad", g, x.detach(), RAGGED_E6)
+        for e, (s, t) in enumerate(_bounds(RAGGED_E6)):
+            if t == s:
+                d.exact(f"dW[{e}] (empty group)", w.grad[e], torch.zeros_like(w.grad[e]))
+        kept.update(x=x, w=w, g=g, offs=offs)
+
+    judge_draws(record_property, draw, seed=0)
+    x, w, g, offs = kept["x"], kept["w"], kept["g"], kept["offs"]
     dx, dw = x.grad.clone(), w.grad.clone()
     x.grad = None
     w.grad = None
@@ -2108,22 +2153,32 @@ def test_wrapper_saves_inputs_before_the_forward_launch(sizes, monkeypatch):
 @pytest.mark.parametrize(
     "early_stop", [True, False], ids=["early_stop", "no_early_stop"]
 )
-def test_checkpoint_early_stop_skips_the_forward_launch(early_stop, case, monkeypatch):
+def test_checkpoint_early_stop_skips_the_forward_launch(
+    early_stop, case, monkeypatch, record_property
+):
     """Under ``torch.utils.checkpoint`` (non-reentrant) the wrapper launches the forward
     once with the early stop on (torch's default: the recomputation stops at the third
     saved input, before the launch) and twice with it off; the control arm (direct
     ``apply``) twice either way.  ``Y``, ``dX`` and ``dW`` are bitwise the plain step's
-    in both arms, which are within the budget of the fp64 reference."""
+    in both arms.  The plain step's outputs are judged over the draws."""
     device = _require_autograd_programs()
     sizes, (n, k) = AUTOGRAD_CASES[case]
-    x0, w0, g, offs = _inputs(sizes, n, k, device, seed=13)
     calls = _count_launches(monkeypatch)
-    plain = _step(_wrapper(offs), _leaves(x0, w0), (g,))
-    assert calls["fwd"] == [(n, k)]
-    (y,), (dx, dw) = plain
-    _assert_bf16_close(y, _reference("fwd", x0, w0, sizes))
-    _assert_bf16_close(dx, _reference("dgrad", g, w0, sizes))
-    _assert_bf16_close(dw, _reference("wgrad", g, x0, sizes))
+    kept = {}
+
+    def draw(d):
+        x0, w0, g, offs = _inputs(sizes, n, k, device, seed=d.seed)
+        calls["fwd"].clear()
+        plain = _step(_wrapper(offs), _leaves(x0, w0), (g,))
+        assert calls["fwd"] == [(n, k)]
+        (y,), (dx, dw) = plain
+        d.op("Y", y, "fwd", x0, w0, sizes)
+        d.op("dX", dx, "dgrad", g, w0, sizes)
+        d.op("dW", dw, "wgrad", g, x0, sizes)
+        kept.update(x0=x0, w0=w0, g=g, offs=offs, plain=plain)
+
+    judge_draws(record_property, draw, seed=13)
+    x0, w0, g, offs, plain = (kept[key] for key in ("x0", "w0", "g", "offs", "plain"))
     for arm, gemm, forwards in (
         ("wrapper", _wrapper(offs), 1 if early_stop else 2),
         ("control", _in_forward(offs), 2),
@@ -2366,7 +2421,7 @@ def test_checkpoint_with_a_frozen_operand(frozen, monkeypatch):
 
 
 @pytest.mark.parametrize("grad", [True, False], ids=["grad", "no_grad"])
-def test_wrapper_forward_cuda_graph_replay(grad):
+def test_wrapper_forward_cuda_graph_replay(grad, record_property):
     """A CUDA graph captured around ``cake_moe_grouped_gemm_det`` (with leaves that require
     grad and grad mode on, or under ``no_grad``) replays the forward launch the wrapper
     makes after ``apply``: after new group boundaries (same ``sum_m``) are written into
@@ -2388,14 +2443,23 @@ def test_wrapper_forward_cuda_graph_replay(grad):
     with grad_mode(), torch.cuda.graph(graph):
         y = wrapper(x, w)
     assert (y.grad_fn is not None) == grad
-    for sizes in (first, second, first):
-        offs.copy_(_offs(sizes, device))
-        y.detach().fill_(float("nan"))
-        graph.replay()
-        eager = pkg.cake_moe_grouped_gemm_det(x0, w0, offs)
-        torch.cuda.synchronize()
-        assert torch.equal(y.detach(), eager), sizes
-        _assert_bf16_close(y.detach(), _reference("fwd", x0, w0, sizes))
+
+    def draw(d):
+        # the draw's inputs, written into the captured leaves (and their sources)
+        x1, w1, _g1, _ = _inputs(first, *SMALL_SHAPE, device, seed=d.seed)
+        with torch.no_grad():
+            for dst, src in ((x0, x1), (w0, w1), (x, x1), (w, w1)):
+                dst.copy_(src)
+        for label, sizes in (("first", first), ("second", second), ("first", first)):
+            offs.copy_(_offs(sizes, device))
+            y.detach().fill_(float("nan"))
+            graph.replay()
+            eager = pkg.cake_moe_grouped_gemm_det(x0, w0, offs)
+            torch.cuda.synchronize()
+            assert torch.equal(y.detach(), eager), sizes
+            d.op(f"Y({label})", y.detach(), "fwd", x0, w0, sizes)
+
+    judge_draws(record_property, draw, seed=48)
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
