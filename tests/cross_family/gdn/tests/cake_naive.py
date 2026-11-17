@@ -26,10 +26,15 @@ output: an FP32 output gets the BF16 result widened exactly.
 On each draw, the error of the output and of the tier is taken in the L2 and
 in the max norm over the elements where the oracle is finite: the absolute
 error ``||value - oracle||``, not divided by the oracle's norm.  The output meets
-the tier when, in both norms, the median of its errors over the draws is at most
+the tier when, in the L2 norm, the median of its errors over the draws is at most
 :data:`NEAR_TIE` (1.005) times the tier's median and its largest error at most
-:data:`NEAR_TIE` times the tier's largest, and its error is 0 on every draw where
-the tier's error is 0.  It passes
+:data:`NEAR_TIE` times the tier's largest; in the max norm (:data:`PAIRED_NORMS`,
+one element per draw), its error is at most :data:`NEAR_TIE` times the tier's on
+at least half of the draws; and its error is 0 on every draw where the tier's
+error is 0.  An output whose oracle holds at most :data:`PAIRED_EFFECTIVE`
+distinct nonzero finite value on every draw (one effective element: a single
+token's scalar, one value repeated over heads) is judged draw by draw in the L2
+norm too.  It passes
 when it meets the tier and fails when it misses it.  A tier whose naive value
 is not finite where the oracle is finite is not met.  Each test records every
 output's verdict with pytest's ``record_property``
@@ -77,10 +82,18 @@ TIERS = ("bf16",)
 TIER_DTYPES = {"bf16": torch.bfloat16}
 #: The independent random inputs each case is judged over, at least.
 DRAWS = 32
-#: How far an output's error may exceed the naive tier's and still meet it: in each norm, its median and its largest
-#: error over the draws at most this times the tier's (the owner's ruling). A near tie, never a tolerance:
-#: where the tier's error is 0 the bound stays 0, and every draw where the tier's error is 0 still needs 0.
+#: How far an output's error may exceed the naive tier's and still meet it: in the L2 norm, its median and its largest
+#: error over the draws at most this times the tier's; in a norm of :data:`PAIRED_NORMS`, its error at most this
+#: times the tier's on at least half of the draws (the owner's rulings). A near tie, never a tolerance: where the
+#: tier's error is 0 the bound stays 0, and every draw where the tier's error is 0 still needs 0.
 NEAR_TIE = 1.005
+#: The norms every output is judged in draw by draw: the max norm reads one element per draw, so its median and
+#: largest over the draws only say how a few roundings fell (the owner's ruling).
+PAIRED_NORMS = ("max",)
+#: The most distinct nonzero finite values the oracle of an output may hold on every draw for the output to be judged
+#: draw by draw in every norm (:func:`effective_elements`): one effective element, whose median and largest error
+#: only say how one rounding fell on each draw (the owner's ruling).
+PAIRED_EFFECTIVE = 1
 #: The seed of draw ``j`` of a case of seed ``base`` is ``base + j * DRAW_SEED_STRIDE``.
 DRAW_SEED_STRIDE = 1_000_003
 
@@ -209,6 +222,22 @@ def _pair(errors: list[float] | None) -> str:
     return "none (not finite)" if errors is None else f"{errors[0]:.6g} / {errors[1]:.6g}"
 
 
+def effective_elements(expected: torch.Tensor) -> int:
+    """How many distinct nonzero finite values ``expected`` holds, counted up
+    to 2: 0, 1, or 2 for two or more."""
+    first = None
+    for _, (e,) in _blocks(expected):
+        e = e.to(torch.float64)
+        values = e[e.isfinite() & (e != 0)]
+        if not values.numel():
+            continue
+        if first is None:
+            first = values[0]
+        if bool((values != first).any()):
+            return 2
+    return 0 if first is None else 1
+
+
 class TierJudge:
     """The accuracy of a case's floating outputs over ``draws`` independent
     inputs, judged against the naive BF16 tier.
@@ -224,6 +253,8 @@ class TierJudge:
         # (output, norm) -> draw -> {"ours": error, tier: error or None}
         self.errors: dict[tuple[str, str], dict[int, dict[str, float | None]]] = {}
         self.prints: dict[int, dict[str, tuple[float, float]]] = {}
+        # output -> draw -> the oracle's distinct nonzero finite values, counted up to 2 (effective_elements)
+        self.effective: dict[str, dict[int, int]] = {}
 
     def add(
         self,
@@ -270,13 +301,15 @@ class TierJudge:
                 }
             else:
                 entry["ours"] = max(entry["ours"], ours)
+        self.effective.setdefault(name, {})[draw] = effective_elements(expected)
         self.prints.setdefault(draw, {})[name] = _fingerprint(expected)
 
     def verdicts(self) -> dict[str, dict]:
         """Each output's verdict: the tier when it meets it (None when it
         misses it), the number of draws, per norm the median and largest error
-        of the output and of the tier, and the draws where the tier was exact
-        and the output was not."""
+        of the output and of the tier, the draws where the tier was exact and
+        the output was not, per norm the draws within :data:`NEAR_TIE` of the
+        tier (``wins``), and the norms judged draw by draw (``by_draw``)."""
         found = {}
         (tier,) = TIERS
         for name in dict.fromkeys(name for name, _ in self.errors):
@@ -294,15 +327,37 @@ class TierJudge:
                 for draw, entry in sorted(self.errors[(name, norm)].items()):
                     if entry.get(tier) == 0 and entry["ours"] > 0 and draw not in zero[tier]:
                         zero[tier].append(draw)
+            draws = len(self.errors[(name, NORMS[0])])
+            wins = {
+                norm: sum(
+                    1
+                    for entry in self.errors[(name, norm)].values()
+                    if entry.get(tier) is not None and entry["ours"] <= NEAR_TIE * entry[tier]
+                )
+                for norm in NORMS
+            }
+            paired = max(self.effective[name].values()) <= PAIRED_EFFECTIVE
+            by_draw = NORMS if paired else tuple(n for n in NORMS if n in PAIRED_NORMS)
             meets = not zero[tier] and all(
                 (bound := norms[norm][tier]) is not None
-                and norms[norm]["ours"][0] <= NEAR_TIE * bound[0]
-                and norms[norm]["ours"][1] <= NEAR_TIE * bound[1]
+                and (
+                    2 * wins[norm] >= draws
+                    if norm in by_draw
+                    else norms[norm]["ours"][0] <= NEAR_TIE * bound[0]
+                    and norms[norm]["ours"][1] <= NEAR_TIE * bound[1]
+                )
                 for norm in NORMS
             )
             met = tier if meets else None
-            draws = len(self.errors[(name, NORMS[0])])
-            found[name] = {"output": name, "tier": met, "draws": draws, "norms": norms, "zero": zero}
+            found[name] = {
+                "output": name,
+                "tier": met,
+                "draws": draws,
+                "norms": norms,
+                "zero": zero,
+                "wins": wins,
+                "by_draw": by_draw,
+            }
         return found
 
     def failures(self) -> list[str]:
@@ -326,9 +381,12 @@ class TierJudge:
                 for tier, draws in verdict["zero"].items()
                 if draws
             ]
+            counts = ", ".join(f"{norm} {verdict['wins'][norm]}" for norm in verdict["by_draw"])
             found.append(
-                f"{name}: misses the naive tier over {verdict['draws']} inputs (error "
-                "against the oracle, median / largest): "
+                f"{name}: misses the naive tier over {verdict['draws']} inputs (draw by draw: "
+                f"ours within {NEAR_TIE} x the tier on {counts} of {verdict['draws']} draws, "
+                f"at least {-(-verdict['draws'] // 2)} needed; error against the oracle, "
+                "median / largest): "
                 + "; ".join(parts)
             )
         seen: dict[tuple, int] = {}
@@ -355,13 +413,18 @@ class TierJudge:
 
 
 def tier_line(test_id: str, verdict: Mapping) -> str:
-    """``TIER <test> <output> bf16|FAIL``, the number of draws, and per
-    norm the median and largest error of the output and of the tier."""
+    """``TIER <test> <output> bf16|FAIL``, the number of draws, per norm
+    judged draw by draw the draws within :data:`NEAR_TIE` of the tier
+    (``paired max <n>/<draws> |``), and per norm the median and largest error
+    of the output and of the tier."""
     norms = " | ".join(
         f"{norm} ours {_pair(errors['ours'])} "
         + " ".join(f"{tier} {_pair(errors[tier])}" for tier in TIERS)
         for norm, errors in verdict["norms"].items()
     )
+    if by_draw := verdict.get("by_draw"):
+        wins = " ".join(f"{norm} {verdict['wins'][norm]}/{verdict['draws']}" for norm in by_draw)
+        norms = f"paired {wins} | {norms}"
     return (
         f"TIER {test_id} {verdict['output']} {verdict['tier'] or 'FAIL'} "
         f"draws={verdict['draws']} {norms}"
