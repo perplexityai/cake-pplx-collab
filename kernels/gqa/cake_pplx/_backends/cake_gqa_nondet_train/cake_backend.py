@@ -37,11 +37,10 @@ the device, ``cu[0] == 0``, non-decreasing, ``cu_q[-1] == T_q``,
 ``cu_k[-1] == T_k``) are read by the kernels only.
 
 The package is the non-deterministic one of its family (``nondet``; the name
-keeps the mode word), yet every sum of the forward and the backward has one
-fixed order: ``out``, ``lse``, dQ and every dK / dV form are bitwise
-reproducible run to run for one shape, one ``max_seqlen_k``, one workspace
-budget and the same host boundaries (the budget and the optional host copies
-of the boundaries set the chunks and with them the dQ rounding).
+keeps the mode word).  It does not promise that an output repeats bit for
+bit, from run to run or across workspace budgets, host boundaries, streams or
+kernels running beside it; the budget and the optional host copies of the
+boundaries set the chunks and with them the rounding, not the accuracy.
 The backward main kernel stores dS^T into a workspace and computes dK and dV
 in tensor memory; dQ is a GEMM over the workspace.  Nothing adds with
 atomics, so the package raises no PyTorch determinism alert.  The row-map
@@ -362,9 +361,9 @@ class CakeGQANondetWorkspace:
     then key-block ranges).  The dS^T workspace and the row-map window gradients are allocated per call from
     PyTorch's caching allocator on the current stream and freed when the call returns; the workspace does not hold
     them.  The chunks depend on the shape, ``max_seqlen_k``, the budget and the host boundaries a call passes (given
-    or not) only, so one budget gives the same bits on every run; a different budget may round dQ differently.  One workspace serves one stream at a time: two
-    launches running concurrently on different streams need two workspaces.  Autograd keeps only a weak reference
-    to it, so a checkpointed forward retains nothing through it.
+    or not) only; the budget can move the rounding of the outputs, not their accuracy.  One workspace serves one
+    stream at a time: two launches running concurrently on different streams need two workspaces.  Autograd keeps
+    only a weak reference to it, so a checkpointed forward retains nothing through it.
     """
 
     def __init__(
@@ -629,7 +628,7 @@ def cake_gqa_nondet_train_backward(
     cu_seqlens_q_host: Optional[HostBoundaries] = None,
     cu_seqlens_k_host: Optional[HostBoundaries] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """Backward: ``(dq, dk, dv)``, bitwise reproducible run to run.  ``dq`` is BF16 ``[T_q, H_q, 256]``.  dK / dV
+    """Backward: ``(dq, dk, dv)``.  ``dq`` is BF16 ``[T_q, H_q, 256]``.  dK / dV
     are summed over the query heads of each key head in FP32 and leave the kernels as:
 
     - ``dkv_dtype=torch.bfloat16`` (default): BF16 ``[T_k, H_kv, 256]``, rounded once;
@@ -637,8 +636,8 @@ def cake_gqa_nondet_train_backward(
       when given);
     - ``row_map`` given: FP32 adds into the caller's ``dk_acc`` / ``dv_acc`` ``[N_dst, H_kv, 256]``: window row ``j``
       adds into destination row ``row_map[j]`` (int32 ``[T_k]``, rows may repeat; out-of-range rows are not
-      checked); a destination row becomes ``((dst + w_j1) + w_j2) + ...`` over its window rows in ascending ``j``,
-      and the destinations are returned as ``dk`` / ``dv``.
+      checked); destination row ``r`` becomes ``dst`` plus the FP32 window rows ``j`` with ``row_map[j] = r``, and
+      the destinations are returned as ``dk`` / ``dv``.
 
     ``max_seqlen_k`` (host int, optional) must be at least every segment's key count (the caller's contract, as
     FlashAttention's ``max_seqlen_k``: a smaller value leaves key blocks out); it sizes the backward grids and the
@@ -649,15 +648,15 @@ def cake_gqa_nondet_train_backward(
     ints or 1-D CPU tensors; never copied to the device).  With them the workspace chunks follow each key block's
     exact dS^T tile count (:func:`.cake_jit.exact_tiles`): fewer, fuller chunks and a dS^T workspace of the exact
     size.  The key blocks come from the longest host key segment.  The kernels still read the device boundaries:
-    host boundaries that disagree only move the chunks (and the dQ rounding) as long as every device key segment fits
-    the key blocks and every chunk holds its device tiles; otherwise a device-side assert fires before the main kernel
-    runs (reported at the next synchronization; the CUDA context is unusable after it).
+    host boundaries that disagree only move the chunks (and with them the rounding, not the accuracy) as long as every
+    device key segment fits the key blocks and every chunk holds its device tiles; otherwise a device-side assert fires
+    before the main kernel runs (reported at the next synchronization; the CUDA context is unusable after it).
 
-    Every sum has one fixed order: dS^T goes to the workspace, dK and dV are summed in tensor memory by the CTA pair
-    that owns their key block, dQ is a GEMM over the workspace with each output tile summed in one order by one CTA
-    pair, and the row-map destinations are folded in window order.  The bits depend on the shape, ``max_seqlen_k``,
-    the workspace's ``budget_bytes`` and the host boundaries (given or not, and their values) only; no PyTorch
-    determinism alert is raised.
+    dS^T goes to the workspace, dK and dV are summed in tensor memory by the CTA pair that owns their key block, dQ is
+    a GEMM over the workspace with each output tile summed by one CTA pair, and the row-map destinations are folded in
+    window order; nothing adds with atomics and no PyTorch determinism alert is raised.  The package does not promise
+    that the outputs repeat bit for bit: the workspace's ``budget_bytes`` and the host boundaries can move their
+    rounding, not their accuracy.
     """
     dims = _check_operands(q, k, v, cu_seqlens_q, cu_seqlens_k)
     if max_seqlen_k is not None and int(max_seqlen_k) < 0:
@@ -958,8 +957,8 @@ def _check_ranges(
     key block ``n``).  Past it the main kernel would write beyond its chunk: the assert fires first, and the process's
     CUDA context is unusable after it (PyTorch reports it at the next synchronization).  The counts come from
     :func:`_range_marks`, exact past 2^31 tiles: a range past ``tile_stride`` fails the check instead of wrapping
-    into it.  With :func:`_check_keys`, host boundaries within both bounds give the device boundaries' gradients (only
-    the chunks, and with them the dQ rounding, may differ)."""
+    into it.  With :func:`_check_keys`, host boundaries within both bounds give the device boundaries' gradients to the
+    same accuracy (the chunks, and with them the rounding, may differ)."""
     ranges = plan["ranges"]
     marks = _range_marks(tile_base, segments, total_q, plan["key_blocks"])
     if len(ranges) == 1:  # one range: one subtraction (fewer kernels in the chain)
@@ -1239,8 +1238,8 @@ def cake_gqa_nondet(
     backward; it returns ``(dk_acc, dv_acc, row_map)`` (FP32 adds into the destinations) or ``(dk_win, dv_win)`` (FP32
     window gradients stored into them), and ``k`` / ``v`` then get no gradient.  ``max_seqlen_k`` and the host
     boundaries ``cu_seqlens_q_host`` / ``cu_seqlens_k_host`` (checked here, kept as lists for the backward): see
-    :func:`cake_gqa_nondet_train_backward`.  Both halves are bitwise reproducible run to run and raise no PyTorch
-    determinism alert.
+    :func:`cake_gqa_nondet_train_backward`.  Both halves raise no PyTorch determinism alert; the package does not
+    promise that their outputs repeat bit for bit.
     """
     if not causal:
         raise NotImplementedError(

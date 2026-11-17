@@ -19,8 +19,9 @@ packed-varlen GQA training attention (head dimension 256).
 Without a device: no entry point is an experimental API (no ``ExperimentalWarning``), importing the module imports no
 backend, the re-exported classes and types are the backend's objects (resolved on first access), the module reads no
 environment variable, and every keyword of an entry point is the backend's keyword of the same name.  On SM100 /
-SM103 / SM107: the entry points return the backend's results, the workspace helpers, and autograd with each
-``dkv_acc`` form, without an ``ExperimentalWarning``.
+SM103 / SM107: the entry points return results that hold the contract, the workspace helpers, and autograd with
+each ``dkv_acc`` form, without an ``ExperimentalWarning``, its outputs meeting the naive BF16 tier against an FP64
+oracle (``tests/cake_naive.py``).  The package promises no bits: no test compares two runs bit for bit.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ import pytest
 import torch
 
 import cake_pplx.cake_gqa_nondet_train as api
+from tests.cake.test_helpers.cake_gqa_naive import assert_contract, judge_draws, judged
 
 BACKEND = "cake_pplx._backends.cake_gqa_nondet_train"
 ENTRY_POINTS = (
@@ -136,8 +138,8 @@ def _device_or_skip() -> torch.device:
     return torch.device("cuda:0")
 
 
-def _inputs(q_lens, k_lens, device, h_q=24, h_kv=4):
-    g = torch.Generator(device=device).manual_seed(0)
+def _inputs(q_lens, k_lens, device, h_q=24, h_kv=4, seed=0):
+    g = torch.Generator(device=device).manual_seed(seed)
 
     def randn(*shape):
         return torch.randn(*shape, generator=g, device=device).to(torch.bfloat16)
@@ -161,15 +163,12 @@ def test_entry_points_return_the_backend_results() -> None:
     from cake_pplx._backends.cake_gqa_nondet_train import cake_backend
 
     q, k, v, dout, cu_q, cu_k = _inputs((300, 77), (1000, 0), device)
+    x = {"q": q, "k": k, "cq": cu_q.tolist(), "ck": cu_k.tolist()}
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         out, lse = api.cake_gqa_nondet_train_forward(
             q, k, v, cu_q, cu_k, softmax_scale=SCALE
         )
-        ref_out, ref_lse = cake_backend.cake_gqa_nondet_train_forward(
-            q, k, v, cu_q, cu_k, softmax_scale=SCALE
-        )
-        assert torch.equal(out, ref_out) and torch.equal(lse, ref_lse)
         assert bool((lse[:, 300:] == -math.inf).all())
         dq, dk, dv = api.cake_gqa_nondet_train_backward(
             q,
@@ -183,23 +182,11 @@ def test_entry_points_return_the_backend_results() -> None:
             softmax_scale=SCALE,
             dkv_dtype=torch.float32,
         )
-        rdq, rdk, rdv = cake_backend.cake_gqa_nondet_train_backward(
-            q,
-            k,
-            v,
-            out,
-            lse,
-            dout,
-            cu_q,
-            cu_k,
-            softmax_scale=SCALE,
-            dkv_dtype=torch.float32,
-        )
-        assert (
-            dk.dtype == torch.float32 and torch.equal(dk, rdk) and torch.equal(dv, rdv)
-        )
+        torch.cuda.synchronize()
+        assert dk.dtype == torch.float32
         assert dq.dtype == torch.bfloat16 and dq.shape == q.shape
-        assert torch.equal(dq, rdq)
+        got = {"out": out, "lse": lse, "dq": dq, "dk": dk, "dv": dv}
+        assert_contract("facade", x, "fp32", got)
         ws = api.cake_gqa_nondet_train_workspace(device)
         assert isinstance(ws, api.CakeGQANondetWorkspace) and ws.nbytes == 0
         api.cake_gqa_nondet(q, k, v, cu_q, cu_k, workspace=ws)
@@ -221,58 +208,60 @@ def test_entry_points_return_the_backend_results() -> None:
 
 
 @pytest.mark.parametrize("form", ("none", "window", "rowmap"))
-def test_autograd_dkv_forms(form) -> None:
+def test_autograd_dkv_forms(form, record_property) -> None:
+    """Autograd with each ``dkv_acc`` form (BF16 leaves, the FP32 window, row-map adds into non-zero destinations
+    with repeated rows): every output meets the naive BF16 tier against the FP64 oracle over the judge's draws."""
     device = _device_or_skip()
-    q, k, v, dout, cu_q, cu_k = _inputs((257, 129), (513, 129), device)
+    q_lens, k_lens = (257, 129), (513, 129)
+    # Window rows 0..512 to destination rows 0..512, then 513..641 again to rows 0..128 (repeated rows).
     row_map = torch.cat([torch.arange(513), torch.arange(129)]).to(
         device=device, dtype=torch.int32
     )
-    holder = {}
+    dst_init = tuple(torch.ones(513, 4, D, device=device) for _ in range(2))
 
-    def dkv_acc():
+    def case(seed):
+        q, k, v, dout, cu_q, cu_k = _inputs(q_lens, k_lens, device, seed=seed)
+        holder = {}
+
+        def dkv_acc():
+            if form == "window":
+                holder["k"] = torch.empty(k.shape, dtype=torch.float32, device=device)
+                holder["v"] = torch.empty(v.shape, dtype=torch.float32, device=device)
+                return holder["k"], holder["v"]
+            holder["k"] = dst_init[0].clone()
+            holder["v"] = dst_init[1].clone()
+            return holder["k"], holder["v"], row_map
+
+        leaves = [t.clone().requires_grad_() for t in (q, k, v)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = api.cake_gqa_nondet(
+                *leaves,
+                cu_q,
+                cu_k,
+                softmax_scale=SCALE,
+                dkv_acc=None if form == "none" else dkv_acc,
+            )
+            out.backward(dout)
+        torch.cuda.synchronize()
+        assert leaves[0].grad is not None and leaves[0].grad.dtype == torch.bfloat16
+        x = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "dout": dout,
+            "cq": cu_q.tolist(),
+            "ck": cu_k.tolist(),
+        }
+        got = {"out": out.detach(), "dq": leaves[0].grad}
+        if form == "none":
+            assert leaves[1].grad.dtype == torch.bfloat16
+            got.update(dk=leaves[1].grad, dv=leaves[2].grad)
+            return judged(x, {form: ("bf16", got)})
+        assert leaves[1].grad is None and leaves[2].grad is None
+        got.update(dk=holder["k"], dv=holder["v"])
         if form == "window":
-            holder["k"] = torch.empty(k.shape, dtype=torch.float32, device=device)
-            holder["v"] = torch.empty(v.shape, dtype=torch.float32, device=device)
-            return holder["k"], holder["v"]
-        holder["k"] = torch.ones(513, 4, D, device=device)
-        holder["v"] = torch.ones(513, 4, D, device=device)
-        return holder["k"], holder["v"], row_map
+            return judged(x, {form: ("fp32", got)})
+        return judged(x, {form: ("rowmap", got)}, dst_init, row_map)
 
-    leaves = [t.clone().requires_grad_() for t in (q, k, v)]
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        out = api.cake_gqa_nondet(
-            *leaves,
-            cu_q,
-            cu_k,
-            softmax_scale=SCALE,
-            dkv_acc=None if form == "none" else dkv_acc,
-        )
-        out.backward(dout)
-        _, rdk, rdv = api.cake_gqa_nondet_train_backward(
-            q,
-            k,
-            v,
-            *api.cake_gqa_nondet_train_forward(
-                q, k, v, cu_q, cu_k, softmax_scale=SCALE
-            ),
-            dout,
-            cu_q,
-            cu_k,
-            softmax_scale=SCALE,
-            dkv_dtype=torch.float32,
-        )
-    torch.cuda.synchronize()
-    assert leaves[0].grad is not None and leaves[0].grad.dtype == torch.bfloat16
-    if form == "none":
-        assert leaves[1].grad.dtype == torch.bfloat16
-        torch.testing.assert_close(leaves[1].grad.float(), rdk, rtol=2**-8, atol=0)
-        return
-    assert leaves[1].grad is None and leaves[2].grad is None
-    if form == "window":
-        assert torch.equal(holder["k"], rdk) and torch.equal(holder["v"], rdv)
-    else:
-        expected = torch.ones(513, 4, D, device=device).index_add(
-            0, row_map.long(), rdk
-        )
-        torch.testing.assert_close(holder["k"], expected, rtol=1e-6, atol=1e-6)
+    judge_draws(record_property, case)

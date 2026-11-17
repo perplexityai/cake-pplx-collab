@@ -29,7 +29,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gdn | Fixed order today, with no run-to-run promise. Within det budgets but not bitwise det. | Runs unchanged |
 | mhc | `dfn` differs from det only near an FP32 rounding boundary; everything else is bitwise det. Repeats run to run. | Not stated |
 | mhc_head | Same kernels as det | No alert |
-| gqa | Fixed order and bitwise reproducible, no atomics | No alert |
+| gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
 | dsa_indexer | The per-row set of (id, score) repeats, but slot order varies | Raises before launch |
 | dsa_sparse_attention | Forward and `dq` use a fixed order. `dkv` uses atomics. | Backward raises |
@@ -851,7 +851,7 @@ cake_mhc_head_det(Xg).backward(dY)                  # autograd; Xg.grad == grad 
 - The forward returns BF16 `out` and the FP32 natural-log LSE.
 - The backward's main kernel sums `dK`/`dV` per key block in tensor memory, stores `dS^T` in a workspace, and computes `dQ` as a GEMM over it. `dK`/`dV` are returned as BF16, as FP32 window gradients, or as FP32 row-map adds into caller destinations.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.4 for `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
 
 **Inputs.**
 
@@ -864,7 +864,7 @@ cake_mhc_head_det(Xg).backward(dY)                  # autograd; Xg.grad == grad 
 
 ### `cake_pplx.cake_gqa_det_train`
 
-Every sum in the forward and backward has one fixed order. `out`, `lse`, `dQ` and every `dK`/`dV` form repeat bit for bit run to run for one shape, one `max_seqlen_k`, one workspace budget and the same host boundaries. No alert. Source: [`kernels/gqa/cake_pplx/cake_gqa_det_train.py`](../kernels/gqa/cake_pplx/cake_gqa_det_train.py).
+Every sum in the forward and backward has one fixed order. `out`, `lse`, `dQ` and every `dK`/`dV` form repeat bit for bit run to run for one shape, one `max_seqlen_k`, one workspace budget and the same host boundaries. A different budget or other host boundaries can move the last bits of `dQ` (not its accuracy); `out`, `lse`, `dK` and `dV` depend on neither. No alert. Source: [`kernels/gqa/cake_pplx/cake_gqa_det_train.py`](../kernels/gqa/cake_pplx/cake_gqa_det_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -878,19 +878,19 @@ Other public names: `CakeGQADetFunction`, `CakeGQADetWorkspace`, `CakeGQADetDkvA
 
 ### `cake_pplx.cake_gqa_nondet_train`
 
-Nondet by name. Per its docstrings, every sum still has one fixed order, and outputs and gradients repeat bit for bit under the same conditions as det. The CTA pair that owns a key block sums `dK`/`dV`, and nothing is added with atomics. No alert. Source: [`kernels/gqa/cake_pplx/cake_gqa_nondet_train.py`](../kernels/gqa/cake_pplx/cake_gqa_nondet_train.py).
+Nondet by name. The package does not promise that an output repeats bit for bit, from run to run or across workspace budgets, host boundaries, streams or kernels running beside it. The CTA pair that owns a key block sums `dK`/`dV`, and nothing is added with atomics. No alert. Source: [`kernels/gqa/cake_pplx/cake_gqa_nondet_train.py`](../kernels/gqa/cake_pplx/cake_gqa_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_gqa_nondet` | Same as `cake_gqa_det` | As det. `max_seqlen_k` also sizes the `dS^T` chunks. `workspace=None` uses a per-stream default workspace with a 16 GiB budget. | Autograd (`CakeGQANondetFunction`). Same gradient forms as det. |
 | `cake_gqa_nondet_train_forward` | Same as det forward | As det | Returns `(out, lse)`. Never alerts. |
-| `cake_gqa_nondet_train_backward` | Same as det backward | As det | Returns `(dq, dk, dv)`. A row-map destination row becomes `((dst + w_j1) + w_j2) + ...` in ascending window order. A different budget or different host boundaries may change the last bits of `dQ`. |
+| `cake_gqa_nondet_train_backward` | Same as det backward | As det | Returns `(dq, dk, dv)`. A row-map destination row `r` becomes `dst` plus the FP32 window rows `j` with `row_map[j] = r`. The budget and the host boundaries can move the rounding of the outputs, not their accuracy. |
 | `cake_gqa_nondet_train_workspace` | `(device=None, *, budget_bytes=None)` | As det | Returns `CakeGQANondetWorkspace`. The `dS^T` workspace and row-map window gradients are allocated per call from PyTorch's caching allocator. |
 | `cake_gqa_nondet_train_workspace_bytes` | `(total_q, num_heads_q, num_segments, *, total_k=0, num_heads_kv=0, max_seqlen_k=None, row_map=False, budget_bytes=None, cu_seqlens_q_host=None, cu_seqlens_k_host=None)` | The defaults are 0, where det's are `None` | Same formula as det. |
 
 Other public names: `CakeGQANondetFunction`, `CakeGQANondetWorkspace`, `CakeGQANondetDkvAccSource`.
 
-**Options and environment.** Every switch is a keyword argument, and the facades read no environment variable. The `cu_seqlens_*_host` arguments enable exact chunk planning, and the `dQ` bits depend on them.
+**Options and environment.** Every switch is a keyword argument, and the facades read no environment variable. The `cu_seqlens_*_host` arguments enable exact chunk planning; in det, the `dQ` bits depend on them.
 
 **Cross-family.** None.
 
@@ -921,7 +921,7 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 - `cu_seqlens` values are read on the device only. Host copies that disagree with the device values beyond the plan fire a device-side assert, which leaves the CUDA context unusable.
 - A `max_seqlen_k` smaller than a segment's key count silently leaves key blocks out. Providing a correct value is the caller's responsibility.
 - Autograd holds the workspace by weak reference.
-- The result bits depend on the shape, `max_seqlen_k`, the workspace `budget_bytes` and the host boundaries.
+- In det, the bits of `out`, `lse`, `dK` and `dV` depend only on the shape and `max_seqlen_k`; the bits of `dQ` also depend on the workspace `budget_bytes` and the host boundaries. Nondet makes no bit promise.
 - The autograd entries are named without `_train` (`cake_gqa_det`, `cake_gqa_nondet`). The non-autograd steps and workspace helpers include `_train`.
 
 ---

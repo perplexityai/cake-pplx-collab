@@ -22,13 +22,14 @@ no environment read, the workspace chunk plan and the launch grids against the e
 layouts (every KV head and key block in exactly one chunk, every chunk's tiles within its stride, every Q-tile pair
 in the dQ grid), the device tile numbering against the same counts, and the scratch layout.
 
-On SM100 / SM103 / SM107: the output, the LSE and every gradient against an FP64 reference of the same BF16 inputs on
-packed layouts (unequal lengths, tails that are no multiple of a tile, keys fewer than queries, empty segments) in
-the three dK / dV forms, under the accuracy budget declared below; rows that see no key exactly (``out = 0``,
-``lse = -inf``, zero gradients); every output repeating bit for bit run to run (repeated row-map destination rows
-into non-zero destinations included), beside resident kernels on other streams and through any workspace; small
-workspace budgets (KV-head and key-block chunks) under the same accuracy budget, bitwise reproducible, with the
-dK / dV bits of the unchunked call; the row-map adds equal, bit for bit, to the ordered FP32 fold of the FP32 window
+On SM100 / SM103 / SM107: the output, the LSE and every gradient judged against the naive BF16 tier
+(``tests/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32 independent draws, in the L2
+and the max norm, median and largest, beside the error of the same math in BF16) on packed layouts (unequal lengths,
+tails that are no multiple of a tile, keys fewer than queries, empty segments) in the three dK / dV forms; rows that
+see no key exactly (``out = 0``, ``lse = -inf``, zero gradients); every output repeating bit for bit run to run
+(repeated row-map destination rows into non-zero destinations included), beside resident kernels on other streams
+and through any workspace; small workspace budgets (KV-head and key-block chunks) judged the same way, bitwise
+reproducible, with the dK / dV bits of the unchunked call; the row-map adds equal, bit for bit, to the ordered FP32 fold of the FP32 window
 gradients; document isolation (bitwise); dynamic shapes through one reused workspace; launches on the operands'
 device and stream while another device is current, and on the current side stream; non-reentrant checkpointing
 (no byte retained, gradients bitwise equal to the saved-set run); no device synchronization in steady state and no
@@ -52,7 +53,6 @@ import gc
 import hashlib
 import itertools
 import json
-import math
 import random
 import re
 import statistics
@@ -66,6 +66,7 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from tests.cake.test_helpers.cake_gqa_naive import assert_contract, judge_draws, judged
 from tests.cake.test_helpers.cake_package import cake_package
 
 pkg = cake_package("cake.cake_gqa_det_train")
@@ -80,20 +81,12 @@ D = 256
 SCALE = 0.0625
 MIB = 2**20
 
-# Accuracy budget (declared before the first run; the non-deterministic package's, unchanged): per layout and tensor,
-# the relative L2 error against the FP64 reference of the same BF16 inputs is at most 1.10 times FlashAttention CuTe's
-# (98c1cee0, its dedicated head-dim-256 backward) on B300 against the same reference: out 2.3e-3, lse 1.5e-7,
-# dq 2.6e-3, dk 2.6e-3, dv 2.4e-3 (the largest of its calibration layouts).  FP32 window gradients and destinations are
-# compared in FP32.
-FA4_REL_L2 = {"out": 2.3e-3, "lse": 1.5e-7, "dq": 2.6e-3, "dk": 2.6e-3, "dv": 2.4e-3}
-BUDGET = 1.10
-# Run to run every output is compared bitwise.  Two workspace budgets split the backward into different key-block
-# chunks, so the FP32 dQ accumulator adds the chunks' partials in another association before its one BF16 rounding:
-# dQ of two budgets is compared as two dQ of one input in the non-deterministic suite, one BF16 rounding step
-# (DQ_RTOL) plus an absolute floor for the FP32 reassociation error, DQ_ATOL_FRACTION of the tensor's largest magnitude
-# (2^9 times below one BF16 step there).  O, LSE, dK and dV of two budgets are compared bitwise.
-DQ_RTOL = 2**-7
-DQ_ATOL_FRACTION = 2**-16
+# Accuracy: every floating output is judged against the naive BF16 tier (``tests/cake_naive.py``, through
+# ``tests/cake/test_helpers/cake_gqa_naive.py``), FP32 window gradients and destinations included; no tolerance.
+# Run to run every output is compared bitwise.  Two workspace budgets, or host boundaries, split the backward into
+# other key-block chunks, so the FP32 dQ accumulator adds the chunks' partials in another association before its one
+# BF16 rounding: the dQ of each is judged; O, LSE, dK and dV of two budgets, and with and without host boundaries, are
+# compared bitwise.
 # Checkpointing: device bytes requested and still held after a checkpointed forward, less the output storage.
 CKPT_RETAINED_BYTES = 0
 # Beside a resident side-stream kernel: busy over alone within MAX_RATIO or at most MAX_EXTRA_MS above it.
@@ -765,7 +758,7 @@ def test_scratch_layout_is_aligned_and_sized() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The FP64 reference
+# Inputs and calls (the FP64 oracle and the naive tier: tests/cake/test_helpers/cake_gqa_naive.py)
 
 
 def _inputs(q_lens, k_lens, h_q, h_kv, device, seed=0):
@@ -787,65 +780,6 @@ def _inputs(q_lens, k_lens, h_q, h_kv, device, seed=0):
         "cq": _cu(q_lens),
         "ck": _cu(k_lens),
     }
-
-
-def _reference(x, scale=SCALE):
-    """FP64 out, lse and gradients of the same BF16 inputs (bottom-right causal per segment)."""
-    q = x["q"].double().requires_grad_()
-    k = x["k"].double().requires_grad_()
-    v = x["v"].double().requires_grad_()
-    group = q.shape[1] // k.shape[1]
-    outs, lses = [], []
-    for b in range(len(x["cq"]) - 1):
-        q0, q1, k0, k1 = x["cq"][b], x["cq"][b + 1], x["ck"][b], x["ck"][b + 1]
-        ql, kl = q1 - q0, k1 - k0
-        qs = q[q0:q1]
-        ks = k[k0:k1].repeat_interleave(group, dim=1)
-        vs = v[k0:k1].repeat_interleave(group, dim=1)
-        s = torch.einsum("qhd,khd->hqk", qs, ks) * scale
-        seen = torch.arange(kl, device=q.device)[None, :] <= torch.arange(
-            ql, device=q.device
-        )[:, None] + (kl - ql)
-        has_key = seen.any(dim=-1)
-        # Rows without a key take finite dummy scores (no NaN reaches the gradients) and a zero P.
-        s = s.masked_fill(~seen, -math.inf).masked_fill(~has_key[None, :, None], 0.0)
-        lse = torch.logsumexp(s, dim=-1)
-        p = torch.exp(s - lse[..., None]) * seen
-        outs.append(torch.einsum("hqk,khd->qhd", p, vs))
-        lses.append(lse.detach().masked_fill(~has_key[None, :], -math.inf))
-    out = torch.cat(outs)
-    lse = torch.cat(lses, dim=1)
-    out.backward(x["dout"].double())
-    return {
-        "out": out.detach(),
-        "lse": lse.detach(),
-        "dq": q.grad,
-        "dk": k.grad,
-        "dv": v.grad,
-    }
-
-
-def _assert_dq_close(got: torch.Tensor, ref: torch.Tensor) -> None:
-    """Two dQ of one input under two workspace budgets (see DQ_RTOL / DQ_ATOL_FRACTION)."""
-    floor = DQ_ATOL_FRACTION * float(ref.float().abs().max()) if ref.numel() else 0.0
-    torch.testing.assert_close(got, ref, rtol=DQ_RTOL, atol=floor)
-
-
-def _rel_l2(got: torch.Tensor, ref: torch.Tensor) -> float:
-    got, ref = got.double(), ref.double()
-    finite = torch.isfinite(ref)
-    num = torch.linalg.vector_norm((got - ref)[finite])
-    den = torch.linalg.vector_norm(ref[finite])
-    return float(num / den) if den > 0 else float(num)
-
-
-def _no_key_rows(x):
-    """Mask ``[T_q]`` of the query rows that see no key (``i + k_len - q_len < 0``)."""
-    rows = []
-    for b in range(len(x["cq"]) - 1):
-        ql, kl = x["cq"][b + 1] - x["cq"][b], x["ck"][b + 1] - x["ck"][b]
-        rows += [i + kl - ql < 0 for i in range(ql)]
-    return torch.tensor(rows, dtype=torch.bool, device=x["q"].device)
 
 
 def _longest_k(x) -> int:
@@ -986,47 +920,6 @@ def _ordered_fold(dst: torch.Tensor, window: torch.Tensor, row_map: torch.Tensor
     return out
 
 
-def _assert_matches_reference(label, x, form, got, ref, dst_init=None, row_map=None):
-    """``got`` within the accuracy budget of the FP64 reference ``ref``; rows that see no key and keys no query
-    sees exactly; untouched row-map destination rows unchanged."""
-    got, ref = dict(got), dict(ref)
-    device = x["q"].device
-    if form == "rowmap":
-        rm = row_map.long()
-        for t, init in (("dk", dst_init[0]), ("dv", dst_init[1])):
-            expected = init.double().index_add(0, rm, ref[t])
-            touched = torch.zeros(init.shape[0], dtype=torch.bool, device=device)
-            touched[rm] = True
-            _assert_same_bits(
-                got[t][~touched], init[~touched], f"{label}: untouched {t} rows"
-            )
-            ref[t] = expected - init.double()
-            got[t] = got[t].double() - init.double()
-    no_key = _no_key_rows(x)
-    errors = {}
-    for t in OUTPUTS:
-        assert torch.isfinite(got[t][torch.isfinite(ref[t])]).all(), (
-            f"{label}: non-finite {t}"
-        )
-        errors[t] = _rel_l2(got[t], ref[t])
-    print(f"REL_L2 {label} " + " ".join(f"{t}={e:.3e}" for t, e in errors.items()))
-    for t, e in errors.items():
-        assert e <= BUDGET * FA4_REL_L2[t], (
-            f"{label}: {t} rel-L2 {e:.3e} > {BUDGET} x {FA4_REL_L2[t]:.1e}"
-        )
-    # Rows that see no key: out 0, lse -inf, dq 0, exactly.
-    assert torch.equal(got["out"][no_key], torch.zeros_like(got["out"][no_key]))
-    assert bool((got["lse"][:, no_key] == -math.inf).all())
-    assert bool((got["lse"][:, ~no_key] > -math.inf).all())
-    assert torch.equal(got["dq"][no_key], torch.zeros_like(got["dq"][no_key]))
-    if form != "rowmap":
-        # Keys no query sees (a segment without queries) get exactly zero gradients.
-        unseen = ref["dk"].abs().amax(dim=(1, 2)) == 0
-        unseen &= ref["dv"].abs().amax(dim=(1, 2)) == 0
-        assert torch.equal(got["dk"][unseen], torch.zeros_like(got["dk"][unseen]))
-        assert torch.equal(got["dv"][unseen], torch.zeros_like(got["dv"][unseen]))
-
-
 # ----------------------------------------------------------------------------------------------------------------
 # On SM100 / SM103 / SM107
 
@@ -1099,47 +992,53 @@ def test_the_plan_kernel_writes_the_pytorch_tables(device, monkeypatch) -> None:
 
 @pytest.mark.parametrize("form", DKV_FORMS)
 @pytest.mark.parametrize("layout", LAYOUTS, ids=LAYOUT_IDS)
-def test_matches_the_fp64_reference(layout, form, device) -> None:
+def test_matches_the_fp64_reference(layout, form, device, record_property) -> None:
+    """Every output of the form meets the naive BF16 tier against the FP64 oracle over the judge's draws, and holds
+    its contract on each draw (the exact zeros of rows that see no key and of keys no query sees, the untouched
+    row-map destination rows)."""
     name, q_lens, k_lens, h_q, h_kv = layout
-    x = _inputs(q_lens, k_lens, h_q, h_kv, device)
-    ref = _reference(x)
-    dst_init = row_map = None
-    if form == "rowmap":
-        row_map, n_dst = _window_row_map(x)
-        dst_init = _destinations(n_dst, h_kv, device)
-    got = _run(x, form, dst_init=dst_init, row_map=row_map)
-    torch.cuda.synchronize()
-    _assert_matches_reference(f"{name} {form}", x, form, got, ref, dst_init, row_map)
+
+    def case(seed):
+        x = _inputs(q_lens, k_lens, h_q, h_kv, device, seed=seed)
+        dst_init = row_map = None
+        if form == "rowmap":
+            row_map, n_dst = _window_row_map(x)
+            dst_init = _destinations(n_dst, h_kv, device, seed=seed + 1)
+        got = _run(x, form, dst_init=dst_init, row_map=row_map)
+        torch.cuda.synchronize()
+        return judged(x, {f"{name} {form}": (form, got)}, dst_init, row_map)
+
+    judge_draws(record_property, case)
 
 
 @pytest.mark.parametrize(
     "h_q, h_kv", ((24, 4), (4, 2), (8, 1)), ids=("group_6", "group_2", "group_8")
 )
-def test_the_forward_of_every_group_matches_the_reference(h_q, h_kv, device) -> None:
-    """Forward tiles of two query heads of one key head match the FP64 reference for several groups and repeat bit
-    for bit, also into a caller's ``out`` 16 bytes past a 32-byte boundary."""
+def test_the_forward_of_every_group_matches_the_reference(
+    h_q, h_kv, device, record_property
+) -> None:
+    """Forward tiles of two query heads of one key head meet the naive BF16 tier against the FP64 oracle for several
+    groups and repeat bit for bit, also into a caller's ``out`` 16 bytes past a 32-byte boundary."""
     q_lens, k_lens = (77, 300, 1, 129, 0, 40), (77, 700, 1000, 129, 50, 0)
-    x = _inputs(q_lens, k_lens, h_q, h_kv, device)
-    ref = _reference(x)
-    args = (x["q"], x["k"], x["v"], x["cu_q"], x["cu_k"])
-    out, lse = cake_backend.cake_gqa_det_train_forward(*args)
-    again, lse_again = cake_backend.cake_gqa_det_train_forward(*args)
-    buf = torch.empty(out.numel() + 8, dtype=torch.bfloat16, device=device)
-    off = buf[8:].view(out.shape)
-    assert off.data_ptr() % 32 == 16
-    off_lse = torch.empty_like(lse)
-    cake_backend.cake_gqa_det_train_forward(*args, out=off, lse=off_lse)
-    torch.cuda.synchronize()
-    for t, got in (("out", out), ("lse", lse)):
-        e = _rel_l2(got, ref[t])
-        assert e <= BUDGET * FA4_REL_L2[t], f"{t} rel-L2 {e:.3e}"
-    no_key = _no_key_rows(x)
-    assert torch.equal(out[no_key], torch.zeros_like(out[no_key]))
-    assert bool((lse[:, no_key] == -math.inf).all())
-    _assert_same_bits(again, out, "out")
-    _assert_same_bits(lse_again, lse, "lse")
-    _assert_same_bits(off, out, "out off a 32-byte boundary")
-    _assert_same_bits(off_lse, lse, "lse beside it")
+
+    def case(seed):
+        x = _inputs(q_lens, k_lens, h_q, h_kv, device, seed=seed)
+        args = (x["q"], x["k"], x["v"], x["cu_q"], x["cu_k"])
+        out, lse = cake_backend.cake_gqa_det_train_forward(*args)
+        again, lse_again = cake_backend.cake_gqa_det_train_forward(*args)
+        buf = torch.empty(out.numel() + 8, dtype=torch.bfloat16, device=device)
+        off = buf[8:].view(out.shape)
+        assert off.data_ptr() % 32 == 16
+        off_lse = torch.empty_like(lse)
+        cake_backend.cake_gqa_det_train_forward(*args, out=off, lse=off_lse)
+        torch.cuda.synchronize()
+        _assert_same_bits(again, out, "out")
+        _assert_same_bits(lse_again, lse, "lse")
+        _assert_same_bits(off, out, "out off a 32-byte boundary")
+        _assert_same_bits(off_lse, lse, "lse beside it")
+        return judged(x, {"forward": ("bf16", {"out": out, "lse": lse})})
+
+    judge_draws(record_property, case)
 
 
 @pytest.mark.parametrize("layout", LAYOUTS, ids=LAYOUT_IDS)
@@ -1301,7 +1200,8 @@ def test_the_issue_shapes_repeat_bit_for_bit(name, device) -> None:
     """At the issue's rows (the benchmark's layouts, H_q 24, H_kv 4), ``REPEATS`` runs of every form alone and
     ``REPEATS`` beside a kernel resident on another stream for the whole forward and backward give the bits of the
     first run: out, lse, dq and dK / dV (BF16, FP32 window, and row-map adds into non-zero destinations, the two
-    segments of each document adding into the same destination rows)."""
+    segments of each document adding into the same destination rows).  The first run holds the contract (finite
+    outputs, the exact zeros, untouched destination rows); the accuracy is judged at the smaller layouts."""
     q_lens, k_lens, starts, n_dst = _issue_layout(name)
     x = _inputs(q_lens, k_lens, 24, 4, device, seed=11)
     rows = [
@@ -1318,6 +1218,7 @@ def test_the_issue_shapes_repeat_bit_for_bit(name, device) -> None:
             return _run(x, form, workspace=ws, dst_init=dst_init, row_map=row_map)
 
         first = _timed(call)[1]
+        assert_contract(f"{name} {form}", x, form, first, dst_init, row_map)
         alone_ms = 0.0
         for i in range(1, REPEATS):
             ms, got = _timed(call)
@@ -1365,10 +1266,12 @@ def _budget_plan(kind, x, h_q, h_kv):
 
 @pytest.mark.parametrize("kind", BUDGET_KINDS)
 @pytest.mark.parametrize("layout", LAYOUTS, ids=LAYOUT_IDS)
-def test_a_small_budget_matches_the_reference_and_repeats(layout, kind, device) -> None:
+def test_a_small_budget_matches_the_reference_and_repeats(
+    layout, kind, device, record_property
+) -> None:
     """A budget that splits the backward into KV-head chunks, key-block chunks or the minimum chunks: every form
-    within the accuracy budget of the FP64 reference, bitwise reproducible, and out, lse, dK and dV with the bits
-    of the unchunked call (only the dQ rounding may move)."""
+    meets the naive BF16 tier against the FP64 oracle over the judge's draws, is bitwise reproducible, and gives out,
+    lse, dK and dV with the bits of the unchunked call (only the dQ rounding may move), on every draw."""
     name, q_lens, k_lens, h_q, h_kv = layout
     x = _inputs(q_lens, k_lens, h_q, h_kv, device)
     budget, (h_chunk, n_chunk), default = _budget_plan(kind, x, h_q, h_kv)
@@ -1386,34 +1289,38 @@ def test_a_small_budget_matches_the_reference_and_repeats(layout, kind, device) 
         h_chunk,
         min(n_chunk, plan["key_blocks"]),
     ), (kind, plan)
-    ref = _reference(x)
     row_map, n_dst = _window_row_map(x)
-    dst_init = _destinations(n_dst, h_kv, device)
     whole = cake_backend.CakeGQADetWorkspace(device)
     small = cake_backend.CakeGQADetWorkspace(device, budget_bytes=budget)
     assert small.budget_bytes == budget
     max_k = _longest_k(x)
-    for form in DKV_FORMS:
-        label = f"{name} {form} budget={kind}"
-        runs = [
-            _run(
-                x,
-                form,
-                workspace=ws,
-                dst_init=dst_init,
-                row_map=row_map,
-                max_seqlen_k=max_k,
+
+    def case(seed):
+        x = _inputs(q_lens, k_lens, h_q, h_kv, device, seed=seed)
+        dst_init = _destinations(n_dst, h_kv, device, seed=seed + 1)
+        runs = {}
+        for form in DKV_FORMS:
+            label = f"{name} {form} budget={kind}"
+            base, got, again = (
+                _run(
+                    x,
+                    form,
+                    workspace=ws,
+                    dst_init=dst_init,
+                    row_map=row_map,
+                    max_seqlen_k=max_k,
+                )
+                for ws in (whole, small, small)
             )
-            for ws in (whole, small, small)
-        ]
-        torch.cuda.synchronize()
-        base, got, again = runs
-        _assert_outputs_same_bits(again, got, f"{label}: repeat")
-        _assert_outputs_same_bits(
-            got, base, f"{label}: vs one chunk", ("out", "lse", "dk", "dv")
-        )
-        _assert_dq_close(got["dq"], base["dq"])
-        _assert_matches_reference(label, x, form, got, ref, dst_init, row_map)
+            torch.cuda.synchronize()
+            _assert_outputs_same_bits(again, got, f"{label}: repeat")
+            _assert_outputs_same_bits(
+                got, base, f"{label}: vs one chunk", ("out", "lse", "dk", "dv")
+            )
+            runs[form] = (form, got)
+        return judged(x, runs, dst_init, row_map)
+
+    judge_draws(record_property, case)
 
 
 @pytest.mark.parametrize("kind", BUDGET_KINDS)
@@ -1516,27 +1423,29 @@ def _host_budget(kind, x, h_q, h_kv) -> int:
 
 @pytest.mark.parametrize("kind", HOST_BUDGETS)
 @pytest.mark.parametrize("layout", LAYOUTS, ids=LAYOUT_IDS)
-def test_host_boundaries_match_the_reference_and_repeat(layout, kind, device) -> None:
+def test_host_boundaries_match_the_reference_and_repeat(
+    layout, kind, device, record_property
+) -> None:
     """Host boundaries (the exact plan) at the default budget, at a budget of about three key-block ranges and at
-    the minimum: every form within the accuracy budget of the FP64 reference, bitwise reproducible, out, lse, dK and
-    dV with the bits of the call without them (only the dQ rounding may move), and the workspace bytes of the exact
-    plan."""
-    _check_host_boundaries(layout, kind, device)
+    the minimum: every form meets the naive BF16 tier against the FP64 oracle over the judge's draws, is bitwise
+    reproducible, gives out, lse, dK and dV with the bits of the call without them (only the dQ rounding may move),
+    and the workspace bytes of the exact plan."""
+    _check_host_boundaries(layout, kind, device, record_property)
 
 
 @pytest.mark.parametrize("kind", ("default", "minimum"))
 @pytest.mark.parametrize("layout", LAYOUTS, ids=LAYOUT_IDS)
 def test_host_boundaries_without_the_plan_kernel_match_the_reference_and_repeat(
-    layout, kind, device, monkeypatch
+    layout, kind, device, monkeypatch, record_property
 ) -> None:
     """The same past ``PLAN_MAX_PAIRS`` pair positions (0 here, so every call is past it): the PyTorch ops of
     ``_tile_plan`` build the tile tables, both host-boundary checks run on the current stream and the row-map fold
     order on the first side stream."""
     monkeypatch.setattr(cake_jit, "PLAN_MAX_PAIRS", 0)
-    _check_host_boundaries(layout, kind, device)
+    _check_host_boundaries(layout, kind, device, record_property)
 
 
-def _check_host_boundaries(layout, kind, device) -> None:
+def _check_host_boundaries(layout, kind, device, record_property) -> None:
     """The checks of :func:`test_host_boundaries_match_the_reference_and_repeat` on ``layout`` at budget ``kind``."""
     name, q_lens, k_lens, h_q, h_kv = layout
     x = _inputs(q_lens, k_lens, h_q, h_kv, device)
@@ -1570,23 +1479,30 @@ def _check_host_boundaries(layout, kind, device) -> None:
             )
             == want
         )
-    ref = _reference(x)
     row_map, n_dst = _window_row_map(x)
-    dst_init = _destinations(n_dst, h_kv, device)
     ws = cake_backend.CakeGQADetWorkspace(device, budget_bytes=budget)
-    for form in DKV_FORMS:
-        label = f"{name} {form} host budget={kind}"
-        base, got, again = (
-            _run(x, form, workspace=ws, dst_init=dst_init, row_map=row_map, host=host)
-            for host in (False, True, True)
-        )
-        torch.cuda.synchronize()
-        _assert_outputs_same_bits(again, got, f"{label}: repeat")
-        _assert_outputs_same_bits(
-            got, base, f"{label}: vs no host boundaries", ("out", "lse", "dk", "dv")
-        )
-        _assert_dq_close(got["dq"], base["dq"])
-        _assert_matches_reference(label, x, form, got, ref, dst_init, row_map)
+
+    def case(seed):
+        x = _inputs(q_lens, k_lens, h_q, h_kv, device, seed=seed)
+        dst_init = _destinations(n_dst, h_kv, device, seed=seed + 1)
+        runs = {}
+        for form in DKV_FORMS:
+            label = f"{name} {form} host budget={kind}"
+            base, got, again = (
+                _run(
+                    x, form, workspace=ws, dst_init=dst_init, row_map=row_map, host=host
+                )
+                for host in (False, True, True)
+            )
+            torch.cuda.synchronize()
+            _assert_outputs_same_bits(again, got, f"{label}: repeat")
+            _assert_outputs_same_bits(
+                got, base, f"{label}: vs no host boundaries", ("out", "lse", "dk", "dv")
+            )
+            runs[form] = (form, got)
+        return judged(x, runs, dst_init, row_map)
+
+    judge_draws(record_property, case)
 
 
 def _child_backward(
@@ -1624,9 +1540,12 @@ def _child_backward(
     )
 
 
-def test_host_boundaries_that_disagree_past_the_plan_stop_the_call(device) -> None:
+def test_host_boundaries_that_disagree_past_the_plan_stop_the_call(
+    device, record_property
+) -> None:
     """Host boundaries that disagree with the device ones: within the plan (the same tiles per key block) the call
-    runs and gives out, lse, dK and dV of the device boundaries; a device key segment longer than the plan's key
+    runs, gives out, lse, dK and dV with the bits of the device boundaries, and every output meets the naive BF16 tier
+    against the FP64 oracle of the device boundaries over the judge's draws; a device key segment longer than the plan's key
     blocks, or device tiles that overfill a range, fire the device-side assert before the main kernel writes (each in
     a child process, with the tile tables of the plan kernel and of the PyTorch ops)."""
     h_q, h_kv = 24, 4
@@ -1663,14 +1582,20 @@ def test_host_boundaries_that_disagree_past_the_plan_stop_the_call(device) -> No
     assert one["ranges"] == [(0, one["key_blocks"])], one["ranges"]
     # The device numbering overfills that one range too.
     assert sum(counts[: one["key_blocks"]]) > one["tile_stride"], one
-    x = _inputs(*device_lens, h_q, h_kv, device)
     ws = cake_backend.CakeGQADetWorkspace(device, budget_bytes=1)
-    base = _run(x, "bf16", workspace=ws)
-    within = dict(x, cq=_cu(swapped[0]), ck=_cu(swapped[1]))
-    got = _run(within, "bf16", workspace=ws, host=True)
-    torch.cuda.synchronize()
-    _assert_outputs_same_bits(got, base, "within the plan", ("out", "lse", "dk", "dv"))
-    _assert_dq_close(got["dq"], base["dq"])
+
+    def case(seed):
+        x = _inputs(*device_lens, h_q, h_kv, device, seed=seed)
+        base = _run(x, "bf16", workspace=ws)
+        within = dict(x, cq=_cu(swapped[0]), ck=_cu(swapped[1]))
+        got = _run(within, "bf16", workspace=ws, host=True)
+        torch.cuda.synchronize()
+        _assert_outputs_same_bits(
+            got, base, "within the plan", ("out", "lse", "dk", "dv")
+        )
+        return judged(x, {"within the plan": ("bf16", got)})
+
+    judge_draws(record_property, case)
     dev = (_cu(device_lens[0]), _cu(device_lens[1]))
     cases = {
         "keys past the key blocks": (
