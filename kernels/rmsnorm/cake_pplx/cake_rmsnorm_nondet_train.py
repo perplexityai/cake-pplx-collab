@@ -79,8 +79,10 @@ inputs whose leading dimensions collapse into rows (for example a
 ``[T, heads, 256]`` per-head view sharing one ``w[256]``) and an FP32 weight
 on the routes that ship the FP32-weight programs.
 
-All kernels use FP32 statistics and accumulation, one FP32 word per sum
-(no FP64 and no compensated sums), with IEEE division and square root (no
+All kernels use FP32 statistics and accumulation, one FP32 word per sum and
+no FP64, except the FP32-pair det pairs the backward notes name, which add
+each block of rows into an FP32 pair (a sum and its compensation word); all
+kernels use IEEE division and square root (no
 fast-math).  Inputs and outputs are BF16; ``rstd`` and ``dw``
 are FP32.  Row-strided inputs (``x``, ``residual``, ``g``, ``g_residual``)
 are accepted when ``stride(1) == 1``, ``stride(0)`` is a multiple of eight
