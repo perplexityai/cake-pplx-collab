@@ -29,6 +29,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake.test_helpers.naive_gemm import judge_gemm, nan_fill  # noqa: F401
 
 # Backend suite: the package is named once, through ``cake_package``; nothing else
 # of cake_pplx is imported here.
