@@ -13610,9 +13610,10 @@ def _n4_router_copy(X, W, G, seed):
 def test_gpu_router_partials_sum_eager_graph_and_recompute(record_property):
     """The deterministic router program through this package's binding with its partial sum (a row without a router
     verdict: the forward's four splits, the weight gradient's six), eagerly, again when recomputed (a checkpointed
-    forward runs it twice) and from a CUDA graph that captured the calls: on every draw (written in place into the
-    captured inputs) the eager call and the replay, each into NaN-filled outputs, are judged against the naive BF16
-    tier; the first draw runs them three times."""
+    forward runs it twice) and from a CUDA graph that captured the calls after the first eager call: on every draw
+    (written in place into the captured inputs) the eager call and the replay, each into NaN-filled outputs, are judged
+    against the naive BF16 tier; the first draw runs them three times (its first eager call binds the launches, the
+    later ones are recomputes)."""
     device, arch = _atomic_device_or_skip()
     _require_template(arch, cake_backend.PARTIALS_SUM_TEMPLATE)
     hidden, T = 6144, 4096  # no router verdict at 4096 tokens on any architecture
@@ -13626,30 +13627,29 @@ def test_gpu_router_partials_sum_eager_graph_and_recompute(record_property):
         cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, Y)
         cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, dW)
 
-    stream.wait_stream(torch.cuda.current_stream(device))
-    with torch.cuda.stream(stream):
-        step()
-    stream.synchronize()
-    entries = [
-        e
-        for key, e in cake_backend._K2_SPLITK_CACHE.items()
-        if key[1] == stream.cuda_stream
-    ]
-    assert sorted(e.plan.splits for e in entries) == [4, 6]
-    assert all(e.sum_entry is not None for e in entries)
-    assert not cake_backend._K2_ATOMIC_CACHE
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
-        step()
+    graph = None
 
     def launch(_):
+        nonlocal graph
         nan_fill((Y, dW))
-        # the fill runs on the current stream: the eager stores (the recompute) must come after it
+        # the fill runs on the current stream: the eager stores must come after it
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
-            step()
+            step()  # the first call binds the launches, every later one is a recompute
         stream.synchronize()
         eager = {"Y eager": Y.clone(), "dW eager": dW.clone()}
+        if graph is None:
+            entries = [
+                e
+                for key, e in cake_backend._K2_SPLITK_CACHE.items()
+                if key[1] == stream.cuda_stream
+            ]
+            assert sorted(e.plan.splits for e in entries) == [4, 6]
+            assert all(e.sum_entry is not None for e in entries)
+            assert not cake_backend._K2_ATOMIC_CACHE
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                step()
         nan_fill((Y, dW))
         graph.replay()
         torch.cuda.synchronize()
@@ -13790,9 +13790,9 @@ def test_gpu_cached_router_launch_runs_the_head_tail_windows_at_their_edges(
 ):
     """Unforced (no split count): at the first and the last token count of every head/tail
     window of this device's router table (``router_rules`` of its architecture and SM count), the convenience path's
-    cached launch (its bound arguments, ``_K2Binding``) runs the prepared launch's plan and program; on every draw
-    (written in place into the prepared launch's operands) the outputs of both, NaN-filled first, are judged against
-    the naive BF16 tier, and the later calls of the key reuse the binding of its first call.
+    cached launch (its bound arguments, ``_K2Binding``) runs the prepared launch's plan and program (its first call by
+    kernel name); on every draw (written in place into the prepared launch's operands) the outputs of both, NaN-filled
+    first, are judged against the naive BF16 tier, and the later calls of the key reuse the binding of its first call.
     The shipped tables hold no head/tail window (those windows varied from run to run and missed the accuracy check);
     the former hidden-5120 window at 16172 to 16384 tokens (``"H0.5x4"`` on ``sm_107a``, ``"H0.5x3"`` elsewhere) is
     set here in the device's table in place of the device's own windows over those token counts (on 212-SM
@@ -13820,10 +13820,27 @@ def test_gpu_cached_router_launch_runs_the_head_tail_windows_at_their_edges(
                 edges += [(hidden, first), (hidden, last)]
 
     def judge(inputs, A, B, out, pout, prepared, what):
+        """Judge the prepared launch and the cached call over the draws; returns the key's entry and its binding after
+        the key's first call (the first draw's)."""
+        first = []
+
+        def cached():
+            assert cake_backend.cake_dense_gemm_nondet_train_router(A, B, out) is out
+
         def launch(_):
             nan_fill((pout, out))
             prepared.launch()
-            assert cake_backend.cake_dense_gemm_nondet_train_router(A, B, out) is out
+            if first:
+                cached()
+            else:
+                # the first call binds the key's launch: the prepared launch's plan and program
+                _assert_ran(cached, prepared.module_name)
+                (entry,) = cake_backend._K2_ATOMIC_CACHE.values()
+                assert entry.plan == prepared.plan, what
+                assert entry.module_name == prepared.module_name, what
+                bound = entry.k2
+                assert bound is not None and bound.version == entry.arena.version
+                first.append((entry, bound))
             torch.cuda.synchronize()
             return {f"{what} prepared": pout, f"{what} cached": out}
 
@@ -13838,6 +13855,7 @@ def test_gpu_cached_router_launch_runs_the_head_tail_windows_at_their_edges(
             launch=launch,
             product=product,
         )
+        return first[0]
 
     ran = 0
     for hidden, T in edges:
@@ -13850,21 +13868,9 @@ def test_gpu_cached_router_launch_runs_the_head_tail_windows_at_their_edges(
             T,
         )
         assert prepared.plan.head_spans > 0, (hidden, T)
-        # the first cached call (draw 0) binds the key's launch, every later call reuses it
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        judge((X, W, G), A, B, out, pout, prepared, f"H{hidden} T{T}")
-        (entry,) = cake_backend._K2_ATOMIC_CACHE.values()
-        assert entry.plan == prepared.plan, (hidden, T)
-        assert entry.module_name == prepared.module_name, (hidden, T)
-        bound = entry.k2
-        assert bound is not None and bound.version == entry.arena.version
-        _assert_ran(
-            lambda A=A, B=B, out=out: cake_backend.cake_dense_gemm_nondet_train_router(
-                A, B, out
-            ),
-            prepared.module_name,
-        )
-        torch.cuda.synchronize()
+        entry, bound = judge((X, W, G), A, B, out, pout, prepared, f"H{hidden} T{T}")
+        # every later call of the key reuses the binding of its first call
         (again,) = cake_backend._K2_ATOMIC_CACHE.values()
         assert again is entry and again.k2 is bound, (hidden, T)
         ran += 1
@@ -14653,6 +14659,7 @@ def test_gpu_k1_wgrad_padded_out_runs_the_nondet_program(
             path()
             torch.cuda.synchronize()
             assert bool((storage[:, K:] == 7.0).all()), what
+            assert all(p.counters_are_zero() for p in prepared_launches), what
             got[what] = out.clone()
         return got
 
@@ -14667,7 +14674,6 @@ def test_gpu_k1_wgrad_padded_out_runs_the_nondet_program(
         product=product,
         launches=3,
     )
-    assert all(prepared.counters_are_zero() for prepared in prepared_launches)
     assert _arena_tickets_zero()
 
 
@@ -14710,8 +14716,9 @@ def test_gpu_k1_strided_views_and_storage_offsets(T, k1_rule, record_property):
         W.copy_(_bf16((N + 16, K), device, g, K**-0.5)[16:])
         G.copy_(_bf16((T, N + 64), device, g)[:, 8 : 8 + N])
 
-    def judge(paths):
-        """Judge ``paths``: name -> (launch, buffer, cols, out, its GEMM ``"fwd"`` / ``"dgrad"`` / ``"wgrad"``)."""
+    def judge(paths, tickets=False):
+        """Judge ``paths``: name -> (launch, buffer, cols, out, its GEMM ``"fwd"`` / ``"dgrad"`` / ``"wgrad"``); with
+        ``tickets`` the tickets are zero after every launch."""
 
         def launch(_):
             got = {}
@@ -14720,6 +14727,7 @@ def test_gpu_k1_strided_views_and_storage_offsets(T, k1_rule, record_property):
                 assert path() is out, name
                 torch.cuda.synchronize()
                 assert _outside_untouched(buf, cols), name
+                assert not tickets or _arena_tickets_zero(), name
                 got[name] = out.clone()
             return got
 
@@ -14783,7 +14791,7 @@ def test_gpu_k1_strided_views_and_storage_offsets(T, k1_rule, record_property):
         )
         _assert_ran(wgrad, module_name)
         paths[f"wgrad with a verdict {dtype}"] = (wgrad, buf, K, out, "wgrad")
-    judge(paths)
+    judge(paths, tickets=True)
     assert _arena_tickets_zero()
 
 
