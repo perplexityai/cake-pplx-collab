@@ -303,6 +303,15 @@ def _check_placement(
         raise ValueError(f"{name} must be contiguous")
 
 
+# The largest token count ``S`` a call takes.  The kernels split a channel
+# tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
+# streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
+# few thousand on any supported device and far below MAX_TOKEN_STREAMS, so
+# ``S <= INT32_MAX - MAX_TOKEN_STREAMS + 1`` keeps that sum in range.
+MAX_TOKEN_STREAMS = 1 << 16
+MAX_TOKENS = INT32_MAX - MAX_TOKEN_STREAMS + 1
+
+
 def _tokens(
     tensor: object,
     name: str,
@@ -316,7 +325,7 @@ def _tokens(
     against ``x``).  Both kernels read the packed rows as 16-byte vectors of eight
     channels, so ``C`` is a multiple of eight; ``S`` and ``C`` are 32-bit kernel
     scalars (``S x C`` itself may exceed 2^31: the kernels address with 64-bit
-    offsets).
+    offsets), and ``S`` is at most :data:`MAX_TOKENS`.
     """
 
     t = _require_tensor(tensor, name)
@@ -336,9 +345,11 @@ def _tokens(
             f"{name} must have a channel count C that is a positive multiple of "
             f"{CHANNEL_MULTIPLE}, got C={C}"
         )
-    if S > INT32_MAX or C > INT32_MAX:
+    if S > MAX_TOKENS or C > INT32_MAX:
         raise ValueError(
-            f"{name}: S={S} and C={C} must each fit a 32-bit kernel scalar"
+            f"{name}: S={S} must be at most {MAX_TOKENS} and C={C} must fit a "
+            "32-bit kernel scalar (the kernels split S over at most "
+            f"{MAX_TOKEN_STREAMS} token streams with the 32-bit S + streams - 1)"
         )
     return S, C, t.view(S, C)
 

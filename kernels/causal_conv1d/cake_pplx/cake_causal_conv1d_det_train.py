@@ -66,7 +66,8 @@ buffer per (device, current stream), and a call inside a CUDA Graph capture
 allocates a zeroed buffer of its own.  Two launches that may run at once need
 two buffers.
 
-Inputs and outputs are contiguous (``C`` a multiple of 8); ``dweight`` and
+Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
+``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and
 ``dbias`` are FP32 or BF16 (the parameter's dtype when not preallocated).
 ``S``, ``C`` and the document count are runtime scalars: they may change
 between calls, the host never reads ``cu_seqlens`` (no synchronization), ``S
