@@ -18,13 +18,16 @@ Tests of the opt-in FP32 (hi, lo) pair ``dweight`` / ``dbias`` sums of the deter
 
 Every floating output is judged as in ``test_cake_causal_conv1d_det_train.py``: against the naive BF16 tier over 32
 independent random inputs, by its error against the float64 oracle in the L2 and the max norm (median and largest
-error at most 1.005 times the tier's).  The pair routes are deterministic: ``dx``, ``dweight`` and ``dbias`` are
-bitwise equal over repeated launches, a NaN-poisoned workspace and a fresh one.  ``dx`` is the twin route's (the pair
-programs change the ``dweight`` / ``dbias`` sums only).  The suite also covers the program a call selects (the pair
-of the program the twin route selects, on the twin's launch plan), the opt-in ``bwd_grid_mult``, CUDA Graph capture
-and replay, the autograd entry and the refusals: ``"fp32_pair"`` without ``silu_grad_preactivation="fp32"`` and an
-unknown ``dweight_sum`` raise ``ValueError`` before any launch.  The default (``dweight_sum="fp32"``) never selects a
-pair route.
+error at most 1.005 times the tier's).  Beside the twin routes' dtypes, the no-bias pair route runs with BF16 taps and
+a BF16 ``dweight`` out, and the bias pair route with FP32 or BF16 taps, an FP32 or BF16 bias and its ``dweight`` /
+``dbias`` in the parameters' dtypes or in the other dtype (each call first checked to launch the bias pair route's
+program and its reduce program).  The pair routes are deterministic: ``dx``, ``dweight`` and ``dbias`` are bitwise
+equal over repeated launches, a NaN-poisoned workspace and a fresh one, on the bias pair route with BF16 taps and a
+BF16 bias too.  ``dx`` is the twin route's (the pair programs change the ``dweight`` / ``dbias`` sums only).  The
+suite also covers the program a call selects (the pair of the program the twin route selects, on the twin's launch
+plan), the opt-in ``bwd_grid_mult``, CUDA Graph capture and replay, the autograd entry and the refusals:
+``"fp32_pair"`` without ``silu_grad_preactivation="fp32"`` and an unknown ``dweight_sum`` raise ``ValueError`` before
+any launch.  The default (``dweight_sum="fp32"``) never selects a pair route.
 """
 
 from __future__ import annotations
@@ -59,6 +62,27 @@ from tests.norm.test_cake_causal_conv1d_det_train import (
 PAIR_KINDS = {"bwd_fp32g_pair": "bwd_fp32g", "bwd_bias_fp32g_pair": "bwd_bias_fp32g"}
 PAIR = "fp32_pair"
 GRAPH_REPLAYS = 3
+BIAS_PAIR = "bwd_bias_fp32g_pair"
+_OTHER_DTYPE = {F32: BF16, BF16: F32}
+# The bias pair route's dtypes (taps, bias, dweight out, dbias out; an out ``None``: the call allocates the gradient
+# in its parameter's dtype): FP32 or BF16 taps and bias, the gradients in the parameters' dtypes and both in the other
+# dtype, as ``test_bias_routes`` runs the bias routes.
+BIAS_PAIR_COMBOS = tuple(
+    combo
+    for weight_dtype in (F32, BF16)
+    for bias_dtype in (F32, BF16)
+    for combo in (
+        (weight_dtype, bias_dtype, None, None),
+        (weight_dtype, bias_dtype, _OTHER_DTYPE[weight_dtype], _OTHER_DTYPE[bias_dtype]),
+    )
+)
+# The run-to-run bitwise rows (pair route, taps dtype, bias dtype; the gradients in the parameters' dtypes): each pair
+# route in its twin's dtypes, and the bias pair route with BF16 taps and a BF16 bias.
+BITWISE_ROWS = (
+    ("bwd_fp32g_pair", F32, None),
+    (BIAS_PAIR, F32, F32),
+    (BIAS_PAIR, BF16, BF16),
+)
 
 pytestmark = pytest.mark.skipif(
     not _supported(),
@@ -97,28 +121,85 @@ def _backward(x, w, cu, dy, b, policy, **kwargs):
     return grads[0], grads[1], (grads[2] if b is not None else None)
 
 
-def _judge(S: int, C: int, docs, kind: str, *, weight_dtype=None, dweight_dtype=None, label: str = "", **kwargs):
-    """``y`` and the pair route's gradients of one problem, judged over the draws."""
+def _pair_route(w, b, dweight=None) -> str:
+    """The backward route of a ``dweight_sum="fp32_pair"`` call under the FP32 SiLU' policy with taps ``w``, bias ``b``
+    and ``dweight`` out (``None``: the taps' dtype)."""
+
+    return loader.backward_route(
+        bias=b is not None,
+        fp32_grad=True,
+        bf16_taps=w.dtype == BF16,
+        bf16_dweight=(w.dtype if dweight is None else dweight.dtype) == BF16,
+        pair=True,
+    )
+
+
+def _launched(monkeypatch, call) -> list[str]:
+    """The programs ``call()`` launches through ``run_modules``, in order (every launch still runs)."""
+
+    launched: list[str] = []
+    run = pkg.run_modules
+
+    def record(launches, values, *, device_index):
+        launched.extend(name for name, _ in launches)
+        return run(launches, values, device_index=device_index)
+
+    with monkeypatch.context() as m:
+        m.setattr(pkg, "run_modules", record)
+        call()
+    return launched
+
+
+def _combo_id(combo) -> str:
+    return "-".join(f"{name}{_dtype_id(dtype)}" for name, dtype in zip(("w", "b", "dw", "db"), combo, strict=True))
+
+
+def _judge(
+    S: int,
+    C: int,
+    docs,
+    kind: str,
+    *,
+    weight_dtype=None,
+    bias_dtype=None,
+    dweight_dtype=None,
+    dbias_dtype=None,
+    label: str = "",
+    **kwargs,
+):
+    """``y`` and the pair route's gradients of one problem, judged over the draws (``weight_dtype`` / ``bias_dtype``
+    replace the twin route's taps / bias dtypes; ``dweight_dtype`` / ``dbias_dtype`` preallocate gradient outs in that
+    dtype)."""
 
     settings = dict(_settings(kind))
     if weight_dtype is not None:
         settings["weight_dtype"] = weight_dtype
+    if bias_dtype is not None:
+        assert settings["bias_dtype"] is not None, f"{kind} takes no bias"
+        settings["bias_dtype"] = bias_dtype
+    label = label or f"{kind} S={S} C={C} docs={docs} {kwargs}"
 
     def launch(_draw: int, seed: int):
         x, w, cu, dy = _inputs(S, C, docs, weight_dtype=settings["weight_dtype"], seed=seed)
         b = None if settings["bias_dtype"] is None else _bias_input(C, settings["bias_dtype"], seed=seed)
         y = pkg.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
         dw_out = None if dweight_dtype is None else torch.empty(C, WIDTH, dtype=dweight_dtype, device=_device())
-        dx, dw, db = _backward(x, w, cu, dy, b, settings["policy"], dweight=dw_out, dweight_sum=PAIR, **kwargs)
-        assert dx.dtype == BF16 and tuple(dx.shape) == tuple(x.shape)
-        assert dw.dtype == (dweight_dtype or w.dtype) and tuple(dw.shape) == (C, WIDTH)
+        db_out = None if dbias_dtype is None else torch.empty(C, dtype=dbias_dtype, device=_device())
+        assert _pair_route(w, b, dw_out) == kind, label
+        dx, dw, db = _backward(
+            x, w, cu, dy, b, settings["policy"], dweight=dw_out, dbias=db_out, dweight_sum=PAIR, **kwargs
+        )
+        assert dx.dtype == BF16 and tuple(dx.shape) == tuple(x.shape), label
+        assert dw.dtype == (dweight_dtype or w.dtype) and tuple(dw.shape) == (C, WIDTH), label
+        assert dw_out is None or dw is dw_out, label
         outputs = {"y": y, "dx": dx, "dweight": dw}
         if db is not None:
-            assert db.dtype == b.dtype and tuple(db.shape) == (C,)
+            assert db.dtype == (dbias_dtype or b.dtype) and tuple(db.shape) == (C,), label
+            assert db_out is None or db is db_out, label
             outputs["dbias"] = db
         return outputs, problem(x, w, cu, b, dy)
 
-    assert_judged(launch, seed=SEED, label=label or f"{kind} S={S} C={C} docs={docs} {kwargs}")
+    assert_judged(launch, seed=SEED, label=label)
 
 
 @pytest.mark.parametrize("kind", tuple(PAIR_KINDS))
@@ -138,6 +219,40 @@ def test_pair_route_with_bf16_taps_and_bf16_dweight(case, weight_dtype) -> None:
 
     _require_pair("bwd_fp32g_pair")
     _judge(*case, "bwd_fp32g_pair", weight_dtype=weight_dtype, dweight_dtype=BF16)
+
+
+@pytest.mark.parametrize("combo", BIAS_PAIR_COMBOS, ids=_combo_id)
+@pytest.mark.parametrize("case", ROUTE_CASES[:3], ids=_case_id)
+def test_bias_pair_route_dtypes(case, combo, monkeypatch) -> None:
+    """The bias pair route reads the tap, bias and gradient dtypes from ``flags`` like its twin: with FP32 or BF16 taps
+    and bias and the gradients in the parameters' dtypes or in the other dtype, the call launches the route's program
+    for ``C`` then its reduce program, and ``y``, ``dx``, ``dweight`` and ``dbias`` are judged against the naive
+    tier."""
+
+    _require_pair(BIAS_PAIR)
+    S, C, docs = case
+    weight_dtype, bias_dtype, dweight_dtype, dbias_dtype = combo
+    x, w, cu, dy = _inputs(S, C, docs, weight_dtype=weight_dtype)
+    b = _bias_input(C, bias_dtype)
+    dw = None if dweight_dtype is None else torch.empty(C, WIDTH, dtype=dweight_dtype, device=_device())
+    db = None if dbias_dtype is None else torch.empty(C, dtype=dbias_dtype, device=_device())
+    assert _pair_route(w, b, dw) == BIAS_PAIR
+    launched = _launched(
+        monkeypatch, lambda: _backward(x, w, cu, dy, b, "fp32", dweight=dw, dbias=db, dweight_sum=PAIR)
+    )
+    main = loader.selected_modules(_arch(), BIAS_PAIR, C=C, S=S)[0]
+    assert launched == [main, loader.MODULES[main]["reduce"]], (case, launched)
+    _judge(
+        S,
+        C,
+        docs,
+        BIAS_PAIR,
+        weight_dtype=weight_dtype,
+        bias_dtype=bias_dtype,
+        dweight_dtype=dweight_dtype,
+        dbias_dtype=dbias_dtype,
+        label=f"{BIAS_PAIR} {_combo_id(combo)} S={S} C={C} docs={docs}",
+    )
 
 
 @pytest.mark.parametrize("case", PRECISION_CASES, ids=_case_id)
@@ -178,14 +293,22 @@ def test_pair_routes_at_bwd_grid_mult(kind, bwd_grid_mult) -> None:
                     assert torch.equal(got, expected), (kind, S, C, bwd_grid_mult)
 
 
-@pytest.mark.parametrize("kind", tuple(PAIR_KINDS))
-def test_pair_gradients_are_bitwise_reproducible(kind) -> None:
+@pytest.mark.parametrize(
+    "kind, weight_dtype, bias_dtype",
+    BITWISE_ROWS,
+    ids=[f"{kind}-w{_dtype_id(w)}-b{_dtype_id(b)}" for kind, w, b in BITWISE_ROWS],
+)
+def test_pair_gradients_are_bitwise_reproducible(kind, weight_dtype, bias_dtype) -> None:
     """Three launches on a NaN-poisoned workspace and one on a fresh workspace give bitwise equal ``dx``,
-    ``dweight`` and ``dbias``; ``dx`` is the twin route's bits."""
+    ``dweight`` and ``dbias`` (in the parameters' dtypes, BF16 with BF16 taps and bias); ``dx`` is the twin route's
+    bits."""
 
     _require_pair(kind)
+    policy = _settings(kind)["policy"]
     for S, C, docs in (*ROUTE_CASES, (65536, 576, "perf")):
-        x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
+        x, w, cu, dy = _inputs(S, C, docs, weight_dtype=weight_dtype)
+        b = None if bias_dtype is None else _bias_input(C, bias_dtype)
+        assert _pair_route(w, b) == kind
         ws = pkg.cake_causal_conv1d_det_train_backward_workspace(S, C, _device())
         runs = []
         for _ in range(3):
@@ -197,6 +320,7 @@ def test_pair_gradients_are_bitwise_reproducible(kind) -> None:
                 if expected is not None:
                     assert torch.isfinite(got.float()).all(), (kind, S, C, name)
                     assert torch.equal(got, expected), (kind, S, C, name)
+        assert runs[0][1].dtype == w.dtype and (b is None or runs[0][2].dtype == b.dtype), (kind, S, C)
         twin_dx = _backward(x, w, cu, dy, b, policy)[0]
         assert torch.equal(runs[0][0], twin_dx), (kind, S, C, "dx is not the twin route's")
 

@@ -18,8 +18,12 @@ causal convolution + SiLU training kernels (SM100 / SM103 / SM107): the
 ``cake_pplx.cake_causal_conv1d_det_train`` facade.  The facade's three entry points are
 pass-throughs to ``cake_pplx._backends.cake_causal_conv1d_det_train``; this module
 checks that identity (same objects on the facade, the backend's exact
-signatures, same bits as the backend) and leaves the numerical contract to
-``test_cake_causal_conv1d_det_train.py``, which imports only the backend package.
+signatures, same bits as the backend), that the opt-in
+``dweight_sum="fp32_pair"`` reaches the pair program through the facade, and
+that it raises ``ValueError`` before any launch under the ``"bf16"`` policy.  It
+leaves the numerical contract to ``test_cake_causal_conv1d_det_train.py`` and
+``test_cake_causal_conv1d_det_train_pair.py``, which import only the backend
+package.
 """
 
 from __future__ import annotations
@@ -44,10 +48,35 @@ from cake_pplx.cake_causal_conv1d_det_train import (
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 SEED = 2033
+PAIR = "fp32_pair"
+loader = backend.cake_jit
 
 
 def _device() -> torch.device:
     return torch.device("cuda:0")
+
+
+def _inputs(S: int, C: int, *, bias: bool = False):
+    """``(x, w, cu, dy, b)``: BF16 ``x`` / ``dy`` of N(0, 1), FP32 taps of N(0, 0.25),
+    four documents and, with ``bias``, an FP32 bias of N(0, 0.25) (``None`` without)."""
+
+    generator = torch.Generator(device=_device()).manual_seed(SEED)
+    x = torch.randn(
+        S, C, dtype=torch.float32, device=_device(), generator=generator
+    ).to(torch.bfloat16)
+    dy = torch.randn(
+        S, C, dtype=torch.float32, device=_device(), generator=generator
+    ).to(torch.bfloat16)
+    w = 0.5 * torch.randn(
+        C, 4, dtype=torch.float32, device=_device(), generator=generator
+    )
+    b = None
+    if bias:
+        b = 0.5 * torch.randn(
+            C, dtype=torch.float32, device=_device(), generator=generator
+        )
+    cu = torch.tensor([0, 369, 659, 868, S], dtype=torch.int32, device=_device())
+    return x, w, cu, dy, b
 
 
 def _supported() -> bool:
@@ -134,17 +163,7 @@ def test_facade_entry_points_match_the_backend() -> None:
     entry points return the same bits as the backend package's."""
 
     S, C = 1000, 512
-    generator = torch.Generator(device=_device()).manual_seed(SEED)
-    x = torch.randn(
-        S, C, dtype=torch.float32, device=_device(), generator=generator
-    ).to(torch.bfloat16)
-    dy = torch.randn(
-        S, C, dtype=torch.float32, device=_device(), generator=generator
-    ).to(torch.bfloat16)
-    w = 0.5 * torch.randn(
-        C, 4, dtype=torch.float32, device=_device(), generator=generator
-    )
-    cu = torch.tensor([0, 369, 659, 868, S], dtype=torch.int32, device=_device())
+    x, w, cu, dy, _ = _inputs(S, C)
     y = cake_causal_conv1d_det_train_forward(x, w, cu)
     assert torch.equal(y, backend.cake_causal_conv1d_det_train_forward(x, w, cu))
     workspace = cake_causal_conv1d_det_train_forward_workspace(S, C, _device())
@@ -164,3 +183,77 @@ def test_facade_entry_points_match_the_backend() -> None:
     assert torch.equal(
         cake_causal_conv1d_det(x, w, cu), backend.cake_causal_conv1d_det(x, w, cu)
     )
+
+
+def test_facade_pair_sum_launches_the_pair_program(monkeypatch) -> None:
+    """``dweight_sum="fp32_pair"`` with ``silu_grad_preactivation="fp32"`` passes
+    through the facade: its backward and autograd entry points launch the pair
+    route's program for ``C`` then its reduce program, return finite outputs of
+    the right shapes and dtypes, and give the same bits as the backend."""
+
+    S, C = 1000, 512
+    arch = loader.arch_for_capability(torch.cuda.get_device_capability(_device()))
+    launched: list[str] = []
+    run = backend.run_modules
+
+    def record(launches, values, *, device_index):
+        launched.extend(name for name, _ in launches)
+        return run(launches, values, device_index=device_index)
+
+    monkeypatch.setattr(backend, "run_modules", record)
+    for bias, kind in ((False, "bwd_fp32g_pair"), (True, "bwd_bias_fp32g_pair")):
+        x, w, cu, dy, b = _inputs(S, C, bias=bias)
+        main = loader.selected_modules(arch, kind, C=C, S=S)[0]
+        pair_launches = [main, loader.MODULES[main]["reduce"]]
+        launched.clear()
+        grads = cake_causal_conv1d_det_train_backward(
+            x, w, cu, dy, bias=b, silu_grad_preactivation="fp32", dweight_sum=PAIR
+        )
+        assert launched == pair_launches, (kind, launched)
+        expected = [(torch.bfloat16, tuple(x.shape)), (w.dtype, (C, 4))]
+        if b is not None:
+            expected.append((b.dtype, (C,)))
+        assert len(grads) == len(expected), kind
+        for grad, (dtype, shape) in zip(grads, expected):
+            assert grad.dtype == dtype and tuple(grad.shape) == shape, kind
+            assert torch.isfinite(grad.float()).all(), kind
+        backend_grads = backend.cake_causal_conv1d_det_train_backward(
+            x, w, cu, dy, bias=b, silu_grad_preactivation="fp32", dweight_sum=PAIR
+        )
+        for got, expected_bits in zip(grads, backend_grads):
+            assert torch.equal(got, expected_bits), kind
+        xg = x.clone().requires_grad_(True)
+        wg = w.clone().requires_grad_(True)
+        bg = None if b is None else b.clone().requires_grad_(True)
+        y = cake_causal_conv1d_det(
+            xg, wg, cu, bg, silu_grad_preactivation="fp32", dweight_sum=PAIR
+        )
+        assert y.dtype == torch.bfloat16 and tuple(y.shape) == tuple(x.shape), kind
+        assert torch.isfinite(y.detach().float()).all(), kind
+        launched.clear()
+        y.backward(dy)
+        assert launched == pair_launches, (kind, launched)
+        assert torch.equal(xg.grad, grads[0]) and torch.equal(wg.grad, grads[1]), kind
+        if bg is not None:
+            assert torch.equal(bg.grad, grads[2]), kind
+
+
+def test_facade_pair_sum_needs_the_fp32_policy(monkeypatch) -> None:
+    """``dweight_sum="fp32_pair"`` under the ``"bf16"`` policy (passed or by
+    default) raises ``ValueError`` on the facade's backward and autograd entry
+    points, with and without a bias, before any launch."""
+
+    S, C = 1000, 512
+    launches = []
+    monkeypatch.setattr(backend, "run_modules", lambda *a, **k: launches.append(a))
+    monkeypatch.setattr(backend, "run_module", lambda *a, **k: launches.append(a))
+    for bias in (False, True):
+        x, w, cu, dy, b = _inputs(S, C, bias=bias)
+        for policy in ({"silu_grad_preactivation": "bf16"}, {}):
+            with pytest.raises(ValueError, match='needs silu_grad_preactivation="fp32"'):
+                cake_causal_conv1d_det_train_backward(
+                    x, w, cu, dy, bias=b, dweight_sum=PAIR, **policy
+                )
+            with pytest.raises(ValueError, match='needs silu_grad_preactivation="fp32"'):
+                cake_causal_conv1d_det(x, w, cu, b, dweight_sum=PAIR, **policy)
+    assert launches == []
