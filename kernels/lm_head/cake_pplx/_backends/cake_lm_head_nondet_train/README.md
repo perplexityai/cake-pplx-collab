@@ -853,7 +853,8 @@ times the tier's and its error is 0 on every input where the tier's is 0;
 every input is also held to the output's contract (shape, dtype, finite
 values, exact zeros on the ignored rows).  A test that launches a call several
 times on one input keeps each output's largest error.  The reference backend
-is judged at H 256, V 512 on any device; the cake backend at H 6144, V 8192
+is judged at H 256, V 512 on the CPU, or on a compute capability 10.0 / 10.3 /
+10.7 GPU (on another GPU the host tests run on the CPU); the cake backend at H 6144, V 8192
 (other vocabularies where a test's route needs them: V 256, V 65536 for the
 one-chunk explicit-budget case, and a few short calls and one call per entry at
 the production vocabulary of 154880) and the candidate-support

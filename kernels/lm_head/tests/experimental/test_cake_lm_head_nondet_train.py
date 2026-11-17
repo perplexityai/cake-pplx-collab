@@ -38,8 +38,8 @@ tests report as xfailed), where a new miss or a listed output that meets the tie
 log-probability backward of more than one chunk runs vocabulary-major by default
 (``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` meet the same tier; the tests of the chunk loop's own
 machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword, PyTorch's
-deterministic-algorithms alert, the reference backend) runs anywhere; the device tests need an SM100 / SM103 / SM107
-GPU and the package's rendered programs.
+deterministic-algorithms alert, the reference backend) runs on the CPU, or on the GPU when it is an SM100 / SM103 /
+SM107 device (``DEV``); the device tests need such a GPU and the package's rendered programs.
 """
 
 import ast
@@ -101,7 +101,13 @@ det_backend = cake_package("cake.cake_lm_head_det_train", "cake_backend")
 det_opt_in = cake_package("cake.cake_lm_head_det_train", "cake_backend_opt_in")
 
 PACKAGE_DIR = Path(pkg.__file__).resolve().parent
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# The host layer's device (the reference backend): the GPU when it is a supported target, else the CPU -- on another
+# GPU the host tests run on the CPU, whose known misses the registry lists (it lists the CPU and the targets only).
+DEV = torch.device(
+    "cuda"
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0) in cake_backend.SUPPORTED_COMPUTE_CAPABILITIES
+    else "cpu"
+)
 CUDA = torch.device("cuda")
 SEED = 20261031
 # Host-layer shapes (the reference backend runs at any multiple of 256).
@@ -397,7 +403,7 @@ def _same_bits(a, b) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Host layer (any device; the reference backend)
+# Host layer (the reference backend on ``DEV``: the CPU, or a supported GPU)
 # ---------------------------------------------------------------------------
 
 

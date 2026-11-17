@@ -101,7 +101,13 @@ validate_lm_head_det_inputs = cake_backend.validate_lm_head_det_inputs
 wave_efficiency = cake_backend.wave_efficiency
 workspace_layout = cake_backend.workspace_layout
 
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# The host layer's device (the reference backend): the GPU when it is a supported target, else the CPU -- on another
+# GPU the host tests run on the CPU, whose known misses the registry lists (it lists the CPU and the targets only).
+DEV = torch.device(
+    "cuda"
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0) in SUPPORTED_COMPUTE_CAPABILITIES
+    else "cpu"
+)
 SEED = 20260930
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
@@ -322,7 +328,7 @@ def _judge(
 
 
 # ---------------------------------------------------------------------------
-# Host layer (any device; the reference backend)
+# Host layer (the reference backend on ``DEV``: the CPU, or a supported GPU)
 # ---------------------------------------------------------------------------
 
 

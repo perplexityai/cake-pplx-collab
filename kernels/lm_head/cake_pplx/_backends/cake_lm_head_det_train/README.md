@@ -1378,8 +1378,9 @@ on a registered device).
 
 Tests: `tests/experimental/test_cake_lm_head_det_train.py` and the public-API suite
 `tests/experimental/test_cake_lm_head_det_train_api.py` (the host-layer tests
-run on any device through the reference path; the device tests skip without a
-registered program or a compute capability 10.0 / 10.3 / 10.7 device), and the
+run the reference path on the CPU, or on the GPU when it is a compute capability
+10.0 / 10.3 / 10.7 device; the device tests skip without a registered program or
+such a device), and the
 CPU-only `tests/experimental/test_cake_lm_head_det_train_standalone.py` (a copy of
 the package imports in an isolated interpreter and raises its host-side errors;
 `scripts/check_cake_build_manifests.py --vendored-gate` builds and loads the
@@ -1394,7 +1395,8 @@ in both norms, the median and the largest of its errors are at most 1.005
 times the tier's and its error is 0 on every input where the tier's is 0;
 every input is also held to the output's contract (shape, dtype, finite
 values, exact zeros on the ignored rows).  The reference backend is judged at
-H 256, V 512 on any device; the cake backend at H 6144, V 8192 (other
+H 256, V 512 on the CPU, or on a compute capability 10.0 / 10.3 / 10.7 GPU (on
+another GPU the host tests run on the CPU); the cake backend at H 6144, V 8192 (other
 vocabularies where a test's route needs them, and one call per entry at T
 4097 at the production head, H 6144, V 154880) and the candidate-support
 entries at their own shapes.  Calls at the production shape keep their

@@ -1422,10 +1422,17 @@ def _expect_device_assert(script, what):
     assert _DEVICE_ASSERT_TEXT[what] in proc.stderr, log
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+@pytest.mark.skipif(
+    not (
+        torch.cuda.is_available()
+        and torch.cuda.get_device_capability(0) in cake_backend.SUPPORTED_COMPUTE_CAPABILITIES
+    ),
+    reason="requires a compute capability 10.0 / 10.3 / 10.7 device (the known misses list no other GPU)",
+)
 @pytest.mark.parametrize("outputs", [("packed", "kl"), ("selected",)], ids="+".join)
 def test_device_reference_matches_oracle(outputs, record_property):
-    """The reference backend on the device: every output and both gradients meet the naive tier."""
+    """The reference backend on a supported GPU: every output and both gradients are judged against the naive tier
+    (on another GPU the host tests judge the reference backend on the CPU)."""
     T = 257
     mk = dict(k_cap=32, kind="heavy", labels=True, teacher=True, tau_form="hetero")
     judge_entry(
