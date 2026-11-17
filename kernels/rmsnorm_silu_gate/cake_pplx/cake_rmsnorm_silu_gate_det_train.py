@@ -39,9 +39,15 @@ from the correctly rounded FP32 formula by one BF16 unit in the last place
 where that value lies within a few FP32 units in the last place of a BF16
 rounding boundary; for finite ``z`` below about ``-87.3`` the gate is ``-0``.  The
 backward computes them with the same approximate instructions but keeps the
-subnormal sigmoid down to about ``-88.72``, so ``dx`` and ``dz`` lie within one
-BF16 unit in the last place of the correctly rounded FP32 formulas plus 1/64 of
-a unit of the row's largest term.  The forward's CTAs each walk at most two
+subnormal sigmoid down to about ``-88.72``.  The tests hold ``y``, ``dx``,
+``dz`` and the weight gradient (BF16 or FP32, accumulated or not) to the
+PyTorch BF16 naive implementation of the same operation (every op in BF16,
+the gradients from PyTorch autograd), each against a float64 reference
+computed from the BF16 inputs: over 32 random inputs of a case, in the L2 and
+in the max norm of the error, the median and the largest error of each output
+are at most 1.005 times the naive implementation's, and 0 on every input
+where the naive implementation's is 0.  No output has an error budget of its
+own.  The forward's CTAs each walk at most two
 blocks of 16 rows, and the backward's CTAs, past one wave, claim chunks of row
 blocks from a counter, so a CTA that becomes resident late takes only the
 blocks left.  No kernel waits for another CTA or grid.  Beside a kernel on
@@ -295,9 +301,7 @@ def cake_rmsnorm_silu_gate_det_train_backward(
 
     in FP32, the statistics and the gate recomputed from ``x`` and ``z`` with
     the approximate reciprocal square root, base-2 exponential and reciprocal:
-    ``dx`` and ``dz`` lie within one BF16 unit in the last place of these
-    formulas in correctly rounded FP32 plus 1/64 of a unit of the row's
-    largest term, the same bits at every call.
+    ``dx`` and ``dz`` are the same bits at every call.
     ``dw`` is summed in FP32 runs of at most 16 rows into plain FP32 words of
     each chunk, the words added exactly in fixed point whatever the order of
     the CTAs, and the sum rounded once to FP32 (then to BF16

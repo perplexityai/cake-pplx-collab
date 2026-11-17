@@ -63,17 +63,22 @@ the repeatable backward.  The kernels are those of the standalone package
   blocks and, for other layouts past 700 rows per SM on SM100 and SM103 (480
   on SM107), a forward with 8 threads to a row and one CTA per 8-row block.
   Each forward program's arithmetic is fixed, but the programs
-  associate a row's sum of squares differently (the 16-thread forwards:
-  8-term FMA chains of 16 lanes folded by XOR shuffles 1, 2, 4, 8; the SM107
-  pipelined forward: four 4-term chains of 8 lanes added in pairs, then
-  folded by 1, 2, 4; the others: 16-term chains of 8 lanes folded by 1, 2, 4;
-  the row count, the SM count and the layout pick the program), so ``y``'s bits can
+  associate a row's sum of squares differently, on FP32 FMA chains (the
+  lanes of ``.f32x2`` FMA chains where a program runs two or four: the
+  16-thread forwards four 2-term chains of 16 lanes added in pairs, then
+  folded by XOR shuffles 1, 2, 4, 8; the mid forward, the extra-long forward
+  but on SM100 and the SM107 pipelined forward four 4-term chains of 8 lanes
+  added in pairs, then folded by 1, 2, 4; the plain forward and the
+  pipelined forward on SM100 and SM103 two 8-term chains of 8 lanes, the
+  even and the odd elements, added, then folded by 1, 2, 4; the long
+  forward, and the extra-long forward on SM100, 16-term chains of 8 lanes
+  folded by 1, 2, 4; the row count, the SM count and the layout pick the
+  program), so ``y``'s bits can
   differ between bands while each program repeats them for the same inputs
   on the same device.
 - The backward is one kernel; ``dx`` and ``dz`` are one row arithmetic in
-  every band but the fused and the repeatable ones, within one BF16 unit in
-  the last place of the FP64 value plus 1/64 of a unit of the tensor's largest
-  finite magnitude (the deterministic package's backward need not give these
+  every band but the fused and the repeatable ones (the deterministic
+  package's backward need not give these
   bits; the repeatable band gives its bits, and the fused band does on
   SM100).  A call of few rows
   runs one thread-block cluster of 16 CTAs, which adds the weight-gradient
@@ -133,13 +138,21 @@ the repeatable backward.  The kernels are those of the standalone package
   each chunk's weight-gradient terms added exactly into fixed-point digits in
   the workspace and the sum rounded once by the CTA that arrives last.  Its
   ``dx``, ``dz`` and weight gradient are the deterministic package's bits,
-  the same for the rows and the SM count: ``dx`` and ``dz`` within the bound
-  above, the weight gradient not the sum of the chunk partials of the
-  deterministic backward at 2e989556 (within that package's
-  budget).  Packed rows (``grad_out``, ``x`` and ``z`` each with head stride
+  the same for the rows and the SM count (the weight gradient not the sum of
+  the chunk partials of the deterministic backward at 2e989556).  Packed rows (``grad_out``, ``x`` and ``z`` each with head stride
   128 and token stride ``H * 128``) run its copy of the deterministic
   package's look-ahead program, the same build, from 2560 rows per SM on
   SM100 and SM103 and from 1536 on SM107, with the same bits.
+
+Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
+either weight gradient, accumulated or not) to the PyTorch BF16 naive
+implementation of the same operation (every op in BF16, the gradients from
+PyTorch autograd), each against a float64 reference computed from the BF16
+inputs: over 32 random inputs of a case, in the L2 and in the max norm of the
+error, the median and the largest error of the output are each at most 1.005
+times the naive implementation's, and 0 on every input where the naive
+implementation's is 0.  No output has an error budget of its own, and the
+tests compare no output of this package with the deterministic package's.
 
 Mode and dispatch rules:
 
@@ -465,9 +478,7 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     the dtype of ``dw`` pick it; see the module): ``dx`` and ``dz`` are one
     row arithmetic in every band but the fused and the repeatable ones (there
     the deterministic package's row arithmetic: in the repeatable band its
-    bits, in the fused band its bits on SM100), within one BF16 ulp of the
-    FP64 value plus 1/64 ulp of the tensor's largest finite magnitude (in
-    every band).  A
+    bits, in the fused band its bits on SM100).  A
     chunked backward (an FP32 ``dw``) runs over the chunks of rows of the
     deterministic backward at 2e989556: each chunk's FP32
     weight-gradient partial is that backward's, and the partials are added

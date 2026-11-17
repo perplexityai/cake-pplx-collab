@@ -41,14 +41,12 @@ The forward computes ``rstd`` with ``rsqrt.approx`` and the SiLU gate with
 the reciprocal of a scaled ``1 + e``, a nonzero sigmoid down to where
 ``ex2.approx`` overflows, ``z`` about -88.72), rounding ``y`` to BF16 once;
 its bits are the deterministic package's only from the pipelined forwards
-where that package's gate does not flush, and its error against an FP64
-reference stays within the family's budget.  Each forward program's arithmetic is fixed,
+where that package's gate does not flush.  Each forward program's arithmetic is fixed,
 but the programs may associate a row's sum of squares differently (the row
 count and the SM count pick the program), so ``y`` repeats bit for bit for the
 same inputs on the same device.  The backward writes ``dx`` and ``dz``
 with one row arithmetic in every band but the fused and the repeatable ones
-(within one BF16 ulp of the FP64 value plus 1/64 ulp of the tensor's largest
-finite magnitude; the deterministic package's backward need not give these
+(the deterministic package's backward need not give these
 bits; in the repeatable band they are the deterministic package's bits, and
 in the fused band they are on sm_100a) and
 computes the FP32 partial of
@@ -94,9 +92,8 @@ claiming the blocks in chunks whose rows are fixed by the row count and the
 grid, each chunk's weight-gradient terms added exactly into fixed-point
 digits in the workspace and the sum rounded once by the CTA that arrives
 last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
-the same for the rows and the SM count: ``dx`` and ``dz`` within the bound
-above, ``dw`` not the sum of the chunk partials of the deterministic backward
-at ``2e989556`` (within that package's budget).
+the same for the rows and the SM count (``dw`` not the sum of the chunk
+partials of the deterministic backward at ``2e989556``).
 On sm_100a and sm_103a the row-claims backwards (``bwd_bf16_rc``,
 ``bwd_bf16_rc_mid``: 256-thread CTAs of 16-row blocks, the CTAs past one
 wave claiming blocks from the workspace's claim counter) give ``dx`` and
@@ -104,6 +101,16 @@ wave claiming blocks from the workspace's claim counter) give ``dx`` and
 each CTA's FP32 column sums added into 4 FP32 replicas in the workspace with
 FP32 atomic adds, which the CTA that arrives last sums in FP32 (no FP64), so
 the sum's order, and the last bits of ``dw``, depend on scheduling.
+
+Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
+either weight gradient, accumulated or not) to the PyTorch BF16 naive
+implementation of the same operation (every op in BF16, the gradients from
+PyTorch autograd), each against a float64 reference computed from the BF16
+inputs: over 32 random inputs of a case, in the L2 and in the max norm of the
+error, the median and the largest error of the output are each at most
+1.005 times the naive implementation's, and 0 on every input where the
+naive implementation's is 0 (``tests/cake/test_helpers/cake_naive.py``).
+No output has an error budget of its own.
 
 Mode: the mode is part of the name (``nondet``).  No entry point takes a
 ``deterministic`` keyword (passing one is a ``TypeError``), and no call of this
@@ -221,12 +228,17 @@ Host design (the input layout rules are the deterministic package's):
   past it; on sm_103a the mid forward up to 250, the extra-long forward up to
   700 and the plain forward past it; on sm_107a the mid forward up to 480 and
   the plain forward past it.  The forward programs
-  associate a row's sum of squares differently (the tiny and the short
-  forward: 8-term FMA chains of 16 lanes folded by XOR shuffles 1, 2, 4, 8;
-  the sm_107a pipelined forward: four 4-term chains of 8 lanes added in pairs,
-  then folded by 1, 2, 4; the others: 16-term chains of 8 lanes folded by 1,
-  2, 4), so ``y``'s bits can differ between bands while each program repeats
-  them.  The static and the claimed
+  associate a row's sum of squares differently, on FP32 FMA chains (the
+  lanes of ``.f32x2`` FMA chains where a program runs two or four): the tiny
+  and the short forward four 2-term chains of 16 lanes added in pairs, then
+  folded by XOR shuffles 1, 2, 4, 8; the mid forward, the extra-long forward
+  but on sm_100a and the sm_107a pipelined forward four 4-term chains of 8
+  lanes added in pairs, then folded by 1, 2, 4; the plain forward and the
+  pipelined forward on sm_100a and sm_103a two 8-term chains of 8 lanes (the
+  even and the odd elements) added, then folded by 1, 2, 4; the long forward,
+  and the extra-long forward on sm_100a, 16-term chains of 8 lanes folded by
+  1, 2, 4.  So ``y``'s bits can differ between bands while each program
+  repeats them.  The static and the claimed
   backward run 128-thread CTAs of 8-row blocks in the deterministic
   backward's chunks (``cake_jit.backward_chunks``) and launch
   ``cake_jit.backward_ctas`` ``G = min(chunks, ctas_per_sm * SMs)`` CTAs (8
@@ -1066,9 +1078,8 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     rows of the deterministic backward at ``2e989556`` (a static
     backward, CTA ``b`` running the chunks ``b``, ``b + grid``, ..., or, in
     the last band, the claimed backward, whose CTAs claim runs of chunks from
-    the workspace's claim counter): ``dx`` and ``dz`` are one row arithmetic
-    (within one BF16 ulp of FP64 plus 1/64 ulp of the tensor's largest finite
-    magnitude), each chunk's FP32 weight-gradient partial is that backward's,
+    the workspace's claim counter): ``dx`` and ``dz`` are one row arithmetic,
+    each chunk's FP32 weight-gradient partial is that backward's,
     and the partials are added
     exactly as 64-bit integer windows in the workspace; the CTA that arrives
     last rounds the exact sum once into ``dw`` (adding ``grad_weight``'s value

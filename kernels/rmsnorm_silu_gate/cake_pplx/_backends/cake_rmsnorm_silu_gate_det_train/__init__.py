@@ -39,8 +39,10 @@ Host design (every control is a keyword; no environment variable):
   on SM107 a second one for packed rows (``x`` and ``z`` both read as
   contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
   with the same FP32 operations in the same order, so the layout changes no
-  bits.  The sum of squares runs in one fixed order per architecture (on
-  SM107 as four interleaved chains).  ``rstd`` comes from the approximate FP32
+  bits.  The sum of squares runs in one fixed order per architecture: on
+  SM100 and SM103 as two FMA chains (the even and the odd elements, the two
+  lanes of one ``.f32x2`` FMA chain) added before the lanes' XOR shuffles, on
+  SM107 as four interleaved chains.  ``rstd`` comes from the approximate FP32
   reciprocal square root, and ``silu(z) = z * (1 / (1 + 2^(-z * log2(e))))`` from the
   approximate FP32 base-2 exponential and reciprocal (each a few FP32 units in
   the last place from the exact value), then one rounding to BF16.  So ``y``
@@ -66,11 +68,7 @@ Host design (every control is a keyword; no environment variable):
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
   the 15-bit head of ``log2(e)`` (the remaining bits applied to first order)
-  and the approximate reciprocal, on every element alike: each lies within one
-  BF16 unit in the last place of the same formula in correctly rounded FP32
-  plus 1/64 of a unit of its row's scale (for ``dz`` the row's largest
-  ``|dy * x * rstd * w|``, for ``dx`` the sum of the largest magnitudes of its
-  two terms; rows whose sums reach ``2^127`` aside).  Like the FP32 sigmoid,
+  and the approximate reciprocal, on every element alike.  Like the FP32 sigmoid,
   ``s`` is subnormal for ``z`` from about ``-87.34`` to ``-88.72`` and 0 below
   that (the gate ``z * s`` is then ``-0``).  For the weight gradient each thread
   sums its rows' terms ``a * n`` of a chunk in FP32 runs of at most 16 rows
@@ -88,6 +86,15 @@ Host design (every control is a keyword; no environment variable):
   count.  Every term, run and word is one plain FP32 word (no FP64 and no
   two-word sums); the digits sum the chunks' words exactly and the CTA that
   arrives last rounds that sum once.
+- Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
+  either weight gradient, accumulated or not) to the PyTorch BF16 naive
+  implementation of the same operation (every op in BF16, the gradients from
+  PyTorch autograd), each against a float64 reference computed from the BF16
+  inputs: over 32 random inputs of a case, in the L2 and in the max norm of
+  the error, the median and the largest error of the output are each at most
+  1.005 times the naive implementation's, and 0 on every input where the
+  naive implementation's is 0 (``tests/cake/test_helpers/cake_naive.py``).
+  No output has an error budget of its own.
 - Workspace: ``cake_jit.workspace_elements`` FP32 elements (18952 bytes): the
   digit counters (``2 * 9 * 128`` 64-bit words, read as ``uint64``), one
   32-bit flag word a column (infinite and ``NaN`` sums), and two 32-bit words,
@@ -702,11 +709,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
 
     in FP32, the statistics and the gate recomputed from ``x`` and ``z`` with
     the approximate reciprocal square root, base-2 exponential and reciprocal
-    (see the module): ``dx`` and ``dz`` lie within one BF16 unit in the last
-    place of these formulas in correctly rounded FP32 plus 1/64 of a unit of
-    the row's largest term, the same bits at every call.  ``dw`` is summed in
-    FP32 runs of at most 16 rows, added exactly in fixed point in an
-    order-independent way, and rounded once to FP32 (then to BF16 for a BF16
+    (see the module): ``dx`` and ``dz`` are the same bits at every call.
+    ``dw`` is summed in FP32 runs of at most 16 rows into plain FP32 words of
+    each chunk, the words added exactly in fixed point in an
+    order-independent way, and the sum rounded once to FP32 (then to BF16 for a BF16
     gradient; see the module): the same row count on a device with the same SM
     count gives the same bits.
 
