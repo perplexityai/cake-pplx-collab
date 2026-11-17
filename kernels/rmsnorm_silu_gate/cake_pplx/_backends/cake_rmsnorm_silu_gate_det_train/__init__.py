@@ -39,8 +39,10 @@ Host design (every control is a keyword; no environment variable):
   on SM107 a second one for packed rows (``x`` and ``z`` both read as
   contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
   with the same FP32 operations in the same order, so the layout changes no
-  bits.  The sum of squares runs in one fixed order per architecture (on
-  SM107 as four interleaved chains).  ``rstd`` comes from the approximate FP32
+  bits.  The sum of squares runs in one fixed order per architecture: on
+  SM100 and SM103 as two FMA chains (the even and the odd elements, the two
+  lanes of one ``.f32x2`` FMA chain) added before the lanes' XOR shuffles, on
+  SM107 as four interleaved chains.  ``rstd`` comes from the approximate FP32
   reciprocal square root, and ``silu(z) = z * (1 / (1 + 2^(-z * log2(e))))`` from the
   approximate FP32 base-2 exponential and reciprocal (each a few FP32 units in
   the last place from the exact value), then one rounding to BF16.  So ``y``
@@ -66,27 +68,33 @@ Host design (every control is a keyword; no environment variable):
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
   the 15-bit head of ``log2(e)`` (the remaining bits applied to first order)
-  and the approximate reciprocal, on every element alike: each lies within one
-  BF16 unit in the last place of the same formula in correctly rounded FP32
-  plus 1/64 of a unit of its row's scale (for ``dz`` the row's largest
-  ``|dy * x * rstd * w|``, for ``dx`` the sum of the largest magnitudes of its
-  two terms; rows whose sums reach ``2^127`` aside).  Like the FP32 sigmoid,
+  and the approximate reciprocal, on every element alike.  Like the FP32 sigmoid,
   ``s`` is subnormal for ``z`` from about ``-87.34`` to ``-88.72`` and 0 below
   that (the gate ``z * s`` is then ``-0``).  For the weight gradient each thread
   sums its rows' terms ``a * n`` of a chunk in FP32 runs of at most 16 rows
-  and folds each run into an FP32 two-sum pair (a sum and its exact error
-  term); each CTA adds its pairs exactly into 64-bit fixed-point digit
-  counters and adds those to the workspace with integer atomics, which are
-  exact in any order.  The CTA that arrives last adds ``grad_weight``'s value
+  and adds each run into its FP32 word of the chunk (one FP32 add); each CTA
+  sums a column's words of its row groups in a fixed order in FP32, adds
+  that FP32 word exactly into 64-bit fixed-point digit counters and adds
+  those to the workspace with integer atomics, which are exact in any
+  order.  The CTA that arrives last adds ``grad_weight``'s value
   exactly as digits when accumulating, rounds each column's exact sum once to
   FP32 (round to nearest even, in integer arithmetic), stores it (a BF16
   ``grad_weight`` takes that FP32 value rounded to BF16, as an FP32 sum cast
   to BF16) and zeroes the workspace.  A chunk's runs follow from the row count
   and ``G`` alone, whichever CTA takes it, so the weight gradient is the same
   bits at every call with the same row count on a device with the same SM
-  count; each run errs by at most about ``2^-20`` of its terms' magnitude (the
-  approximate gate and ``rstd`` put each term within a few FP32 units in the
-  last place of the FP32 formula's term) and the digits sum exactly.
+  count.  Every term, run and word is one plain FP32 word (no FP64 and no
+  two-word sums); the digits sum the chunks' words exactly and the CTA that
+  arrives last rounds that sum once.
+- Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
+  either weight gradient, accumulated or not) to the PyTorch BF16 naive
+  implementation of the same operation (every op in BF16, the gradients from
+  PyTorch autograd), each against a float64 reference computed from the BF16
+  inputs: over 32 random inputs of a case, in the L2 and in the max norm of
+  the error, the median and the largest error of the output are each at most
+  1.005 times the naive implementation's, and 0 on every input where the
+  naive implementation's is 0 (``tests/cake/test_helpers/cake_naive.py``).
+  No output has an error budget of its own.
 - Workspace: ``cake_jit.workspace_elements`` FP32 elements (18952 bytes): the
   digit counters (``2 * 9 * 128`` 64-bit words, read as ``uint64``), one
   32-bit flag word a column (infinite and ``NaN`` sums), and two 32-bit words,
@@ -107,7 +115,7 @@ Host design (every control is a keyword; no environment variable):
   that ran a backward).  Such eager calls also keep a reserve of zero-filled
   workspaces per device, filled outside any capture in allocations of 64
   (about 1.2 MiB each) whenever fewer than 32 are ready, up to 1024 per
-  process (about 18.75 MiB), from which a call during CUDA Graph capture takes
+  device (about 18.75 MiB per device), from which a call during CUDA Graph capture takes
   the workspace of its capture and capture stream for good, so a replay
   launches no fill kernel (see ``_RESERVES``; with none ready, the graph
   zero-fills one of its own).
@@ -123,8 +131,8 @@ Host design (every control is a keyword; no environment variable):
   whose order does not change it), so ``torch.use_deterministic_algorithms``
   does not affect any call.  The
   backward refuses a workspace of the non-deterministic package
-  (``cake_pplx.cake_rmsnorm_silu_gate_nondet_train``; an FP64 or ``uint8``
-  tensor) with a ``ValueError``, also in a call with no rows.
+  (``cake_pplx.cake_rmsnorm_silu_gate_nondet_train``; a ``uint8`` tensor)
+  with a ``ValueError``, also in a call with no rows.
 """
 
 from __future__ import annotations
@@ -621,10 +629,10 @@ def _stream_workspace_views(
 
 
 def _refuse_nondeterministic_workspace(workspace: Optional[torch.Tensor]) -> None:
-    """Refuse a workspace of the non-deterministic package (an FP64 or uint8
-    tensor), naming both modes' workspaces."""
+    """Refuse a workspace of the non-deterministic package (a uint8 tensor),
+    naming both modes' workspaces."""
 
-    names = {torch.float64: "FP64", torch.uint8: "uint8"}
+    names = {torch.uint8: "uint8"}
     if isinstance(workspace, torch.Tensor) and workspace.dtype in names:
         raise ValueError(
             f"workspace is {names[workspace.dtype]}, a workspace of the "
@@ -701,11 +709,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
 
     in FP32, the statistics and the gate recomputed from ``x`` and ``z`` with
     the approximate reciprocal square root, base-2 exponential and reciprocal
-    (see the module): ``dx`` and ``dz`` lie within one BF16 unit in the last
-    place of these formulas in correctly rounded FP32 plus 1/64 of a unit of
-    the row's largest term, the same bits at every call.  ``dw`` is summed in
-    FP32 runs of at most 16 rows, added exactly in fixed point in an
-    order-independent way, and rounded once to FP32 (then to BF16 for a BF16
+    (see the module): ``dx`` and ``dz`` are the same bits at every call.
+    ``dw`` is summed in FP32 runs of at most 16 rows into plain FP32 words of
+    each chunk, the words added exactly in fixed point in an
+    order-independent way, and the sum rounded once to FP32 (then to BF16 for a BF16
     gradient; see the module): the same row count on a device with the same SM
     count gives the same bits.
 

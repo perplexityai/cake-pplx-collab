@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 14 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 15 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -16,6 +16,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | mhc | `cake-pplx-mhc` | `cake_mhc_{det,nondet}_train` | Four-stream mHC hyper-connection layer | [API](docs/API.md#mhc) |
 | mhc_head | `cake-pplx-mhc-head` | `cake_mhc_head_{det,nondet}_train` | Stream mean at the mHC model head | [API](docs/API.md#mhc_head) |
 | gqa | `cake-pplx-gqa` | `cake_gqa_{det,nondet}_train` | Packed-varlen causal GQA attention, head dim 256 | [API](docs/API.md#gqa) |
+| fmha | `cake-pplx-fmha` | `cake_fmha_nondet_train` | Dense multi-head attention, head dim 64/128 (backward only) | [API](docs/API.md#fmha) |
 | dsa_indexer | `cake-pplx-dsa-indexer` | `cake_dsa_indexer_{det,nondet}_train` | DSA indexer scores + exact top-k (forward only) | [API](docs/API.md#dsa_indexer) |
 | dsa_sparse_attention | `cake-pplx-dsa-sparse-attention` | `cake_dsa_sparse_attention_{det,nondet}_train` | Top-k sparse MLA attention, 64 heads | [API](docs/API.md#dsa_sparse_attention) |
 | dense_gemm | `cake-pplx-dense-gemm` | `cake_dense_gemm_{det,nondet}_train` | BF16 projection GEMM, FP32 router GEMM | [API](docs/API.md#dense_gemm) |
@@ -67,7 +68,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for dense_gemm, gdn and lm_head). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for dense_gemm, fmha, gdn, gqa, lm_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
@@ -104,6 +105,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 |---|---|
 | Validated | NVIDIA GB300 (`sm_103a`), driver 580.159.03, CUDA 13.4.92, torch 2.14.1+cu130, apache-tvm-ffi 0.1.15 |
 | Supported by the code, not yet validated here | `sm_100a`, `sm_107a` |
+| fmha | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 

@@ -119,7 +119,7 @@ __device__ __forceinline__ unsigned int __as_u32(int v) {
 extern "C" {
 
 __global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restrict__ dy, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ z, __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dz, double* __restrict__ dw_sums, unsigned int* __restrict__ dw_done, __nv_bfloat16* __restrict__ dw, int rows, CakeFastDivmod heads, long long dy_tok, long long dy_head, long long x_tok, long long x_head, long long z_tok, long long z_head, float eps, int accumulate, int weight_grad)
+kernel_cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8(__nv_bfloat16* __restrict__ dy, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ z, __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dz, float* __restrict__ dw_sums, unsigned int* __restrict__ dw_done, __nv_bfloat16* __restrict__ dw, int rows, CakeFastDivmod heads, long long dy_tok, long long dy_head, long long x_tok, long long x_head, long long z_tok, long long z_head, float eps, int accumulate, int weight_grad)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -140,16 +140,16 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
     const int cta_rank = 0;
 
     // Prologue
-    double* fold = reinterpret_cast<double*>(smem_raw + 0);
+    float* fold = reinterpret_cast<float*>(smem_raw + 0);
     const int fold_addr = smem + 0;
-    int* cell = reinterpret_cast<int*>(smem_raw + 16384);
-    const int cell_addr = smem + 16384;
-    int* flag = reinterpret_cast<int*>(smem_raw + 16400);
-    const int flag_addr = smem + 16400;
-    int* tab = reinterpret_cast<int*>(smem_raw + 16416);
-    const int tab_addr = smem + 16416;
-    float* fold32 = reinterpret_cast<float*>(smem_raw + 16544);
-    const int fold32_addr = smem + 16544;
+    int* cell = reinterpret_cast<int*>(smem_raw + 8192);
+    const int cell_addr = smem + 8192;
+    int* flag = reinterpret_cast<int*>(smem_raw + 8208);
+    const int flag_addr = smem + 8208;
+    int* tab = reinterpret_cast<int*>(smem_raw + 8224);
+    const int tab_addr = smem + 8224;
+    float* fold32 = reinterpret_cast<float*>(smem_raw + 8352);
+    const int fold32_addr = smem + 8352;
 
     // === Task calls (declaration order) ===
     int group = tid >> 4;
@@ -376,6 +376,14 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     : "r"(wbits[3 + _pair]));
             }
             float total_0 = 0.0f;
+#if __CUDA_ARCH__ == 1030
+            float2 dx2_acc = make_float2(0.0f, 0.0f);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xs_0[0], xs_0[1]), make_float2(xs_0[0], xs_0[1]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xs_0[2], xs_0[3]), make_float2(xs_0[2], xs_0[3]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xs_0[4], xs_0[5]), make_float2(xs_0[4], xs_0[5]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xs_0[6], xs_0[7]), make_float2(xs_0[6], xs_0[7]), dx2_acc);
+            total_0 = dx2_acc.x + dx2_acc.y;
+#else
             total_0 = __fmaf_rn(xs_0[0], xs_0[0], total_0);
             total_0 = __fmaf_rn(xs_0[1], xs_0[1], total_0);
             total_0 = __fmaf_rn(xs_0[2], xs_0[2], total_0);
@@ -384,6 +392,7 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
             total_0 = __fmaf_rn(xs_0[5], xs_0[5], total_0);
             total_0 = __fmaf_rn(xs_0[6], xs_0[6], total_0);
             total_0 = __fmaf_rn(xs_0[7], xs_0[7], total_0);
+#endif
             float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, total_0, 1);
             total_0 = total_0 + _shfl_xor_sync_7;
             float _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, total_0, 2);
@@ -725,6 +734,8 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 zs_0[7] = dz2_3.y;
                 gs_0[6] = dn2_3.x;
                 gs_0[7] = dn2_3.y;
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(gs_0[0], xs_0[0], dot_0);
                 dot_0 = __fmaf_rn(gs_0[1], xs_0[1], dot_0);
                 dot_0 = __fmaf_rn(gs_0[2], xs_0[2], dot_0);
@@ -733,6 +744,7 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 dot_0 = __fmaf_rn(gs_0[5], xs_0[5], dot_0);
                 dot_0 = __fmaf_rn(gs_0[6], xs_0[6], dot_0);
                 dot_0 = __fmaf_rn(gs_0[7], xs_0[7], dot_0);
+#endif
             } else {
                 float _exp_97 = __nv_expf(zs_0[0] * -1.0f);
                 float den_0 = 1.0f + _exp_97;
@@ -742,7 +754,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_0 = gs_0[0] * gate_0;
                 float dzj_0 = gs_0[0] * (nj_0 * wv[0]) * sig_0 * __fmaf_rn(zs_0[0], 1.0f - sig_0, 1.0f);
                 float dnj_0 = aj_0 * wv[0];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_0, xs_0[0], dot_0);
+#endif
                 acc[0] = __fmaf_rn(__uint_as_float(__as_u32(aj_0) & keep_0), __uint_as_float(__as_u32(nj_0) & keep_0), acc[0]);
                 zs_0[0] = dzj_0;
                 gs_0[0] = dnj_0;
@@ -754,7 +769,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_1 = gs_0[1] * gate_1;
                 float dzj_1 = gs_0[1] * (nj_1 * wv[1]) * sig_1 * __fmaf_rn(zs_0[1], 1.0f - sig_1, 1.0f);
                 float dnj_1 = aj_1 * wv[1];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_1, xs_0[1], dot_0);
+#endif
                 acc[1] = __fmaf_rn(__uint_as_float(__as_u32(aj_1) & keep_0), __uint_as_float(__as_u32(nj_1) & keep_0), acc[1]);
                 zs_0[1] = dzj_1;
                 gs_0[1] = dnj_1;
@@ -766,7 +784,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_2 = gs_0[2] * gate_2;
                 float dzj_2 = gs_0[2] * (nj_2 * wv[2]) * sig_2 * __fmaf_rn(zs_0[2], 1.0f - sig_2, 1.0f);
                 float dnj_2 = aj_2 * wv[2];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_2, xs_0[2], dot_0);
+#endif
                 acc[2] = __fmaf_rn(__uint_as_float(__as_u32(aj_2) & keep_0), __uint_as_float(__as_u32(nj_2) & keep_0), acc[2]);
                 zs_0[2] = dzj_2;
                 gs_0[2] = dnj_2;
@@ -778,7 +799,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_3 = gs_0[3] * gate_3;
                 float dzj_3 = gs_0[3] * (nj_3 * wv[3]) * sig_3 * __fmaf_rn(zs_0[3], 1.0f - sig_3, 1.0f);
                 float dnj_3 = aj_3 * wv[3];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_3, xs_0[3], dot_0);
+#endif
                 acc[3] = __fmaf_rn(__uint_as_float(__as_u32(aj_3) & keep_0), __uint_as_float(__as_u32(nj_3) & keep_0), acc[3]);
                 zs_0[3] = dzj_3;
                 gs_0[3] = dnj_3;
@@ -790,7 +814,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_4 = gs_0[4] * gate_4;
                 float dzj_4 = gs_0[4] * (nj_4 * wv[4]) * sig_4 * __fmaf_rn(zs_0[4], 1.0f - sig_4, 1.0f);
                 float dnj_4 = aj_4 * wv[4];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_4, xs_0[4], dot_0);
+#endif
                 acc[4] = __fmaf_rn(__uint_as_float(__as_u32(aj_4) & keep_0), __uint_as_float(__as_u32(nj_4) & keep_0), acc[4]);
                 zs_0[4] = dzj_4;
                 gs_0[4] = dnj_4;
@@ -802,7 +829,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_5 = gs_0[5] * gate_5;
                 float dzj_5 = gs_0[5] * (nj_5 * wv[5]) * sig_5 * __fmaf_rn(zs_0[5], 1.0f - sig_5, 1.0f);
                 float dnj_5 = aj_5 * wv[5];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_5, xs_0[5], dot_0);
+#endif
                 acc[5] = __fmaf_rn(__uint_as_float(__as_u32(aj_5) & keep_0), __uint_as_float(__as_u32(nj_5) & keep_0), acc[5]);
                 zs_0[5] = dzj_5;
                 gs_0[5] = dnj_5;
@@ -814,7 +844,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_6 = gs_0[6] * gate_6;
                 float dzj_6 = gs_0[6] * (nj_6 * wv[6]) * sig_6 * __fmaf_rn(zs_0[6], 1.0f - sig_6, 1.0f);
                 float dnj_6 = aj_6 * wv[6];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_6, xs_0[6], dot_0);
+#endif
                 acc[6] = __fmaf_rn(__uint_as_float(__as_u32(aj_6) & keep_0), __uint_as_float(__as_u32(nj_6) & keep_0), acc[6]);
                 zs_0[6] = dzj_6;
                 gs_0[6] = dnj_6;
@@ -826,11 +859,22 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 float aj_7 = gs_0[7] * gate_7;
                 float dzj_7 = gs_0[7] * (nj_7 * wv[7]) * sig_7 * __fmaf_rn(zs_0[7], 1.0f - sig_7, 1.0f);
                 float dnj_7 = aj_7 * wv[7];
+#if __CUDA_ARCH__ == 1030
+#else
                 dot_0 = __fmaf_rn(dnj_7, xs_0[7], dot_0);
+#endif
                 acc[7] = __fmaf_rn(__uint_as_float(__as_u32(aj_7) & keep_0), __uint_as_float(__as_u32(nj_7) & keep_0), acc[7]);
                 zs_0[7] = dzj_7;
                 gs_0[7] = dnj_7;
             }
+#if __CUDA_ARCH__ == 1030
+            float2 dx2_acc_0 = make_float2(0.0f, 0.0f);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gs_0[0], gs_0[1]), make_float2(xs_0[0], xs_0[1]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gs_0[2], gs_0[3]), make_float2(xs_0[2], xs_0[3]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gs_0[4], gs_0[5]), make_float2(xs_0[4], xs_0[5]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gs_0[6], gs_0[7]), make_float2(xs_0[6], xs_0[7]), dx2_acc_0);
+            dot_0 = dx2_acc_0.x + dx2_acc_0.y;
+#endif
             float _shfl_xor_sync_105 = __shfl_xor_sync(0xFFFFFFFF, dot_0, 1);
             dot_0 = dot_0 + _shfl_xor_sync_105;
             float _shfl_xor_sync_106 = __shfl_xor_sync(0xFFFFFFFF, dot_0, 2);
@@ -904,38 +948,38 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
             run = run + 1;
             if (run == 16) {
                 if (folded != 0) {
-                    fold[group * 128 + col] = fold[group * 128 + col] + (double)acc[0];
+                    fold[group * 128 + col] = fold[group * 128 + col] + acc[0];
                     acc[0] = 0.0f;
-                    fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + (double)acc[1];
+                    fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + acc[1];
                     acc[1] = 0.0f;
-                    fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + (double)acc[2];
+                    fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + acc[2];
                     acc[2] = 0.0f;
-                    fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + (double)acc[3];
+                    fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + acc[3];
                     acc[3] = 0.0f;
-                    fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + (double)acc[4];
+                    fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + acc[4];
                     acc[4] = 0.0f;
-                    fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + (double)acc[5];
+                    fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + acc[5];
                     acc[5] = 0.0f;
-                    fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + (double)acc[6];
+                    fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + acc[6];
                     acc[6] = 0.0f;
-                    fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + (double)acc[7];
+                    fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + acc[7];
                     acc[7] = 0.0f;
                 } else {
-                    fold[group * 128 + col] = (double)acc[0];
+                    fold[group * 128 + col] = acc[0];
                     acc[0] = 0.0f;
-                    fold[group * 128 + col + 1] = (double)acc[1];
+                    fold[group * 128 + col + 1] = acc[1];
                     acc[1] = 0.0f;
-                    fold[group * 128 + col + 2] = (double)acc[2];
+                    fold[group * 128 + col + 2] = acc[2];
                     acc[2] = 0.0f;
-                    fold[group * 128 + col + 3] = (double)acc[3];
+                    fold[group * 128 + col + 3] = acc[3];
                     acc[3] = 0.0f;
-                    fold[group * 128 + col + 4] = (double)acc[4];
+                    fold[group * 128 + col + 4] = acc[4];
                     acc[4] = 0.0f;
-                    fold[group * 128 + col + 5] = (double)acc[5];
+                    fold[group * 128 + col + 5] = acc[5];
                     acc[5] = 0.0f;
-                    fold[group * 128 + col + 6] = (double)acc[6];
+                    fold[group * 128 + col + 6] = acc[6];
                     acc[6] = 0.0f;
-                    fold[group * 128 + col + 7] = (double)acc[7];
+                    fold[group * 128 + col + 7] = acc[7];
                     acc[7] = 0.0f;
                 }
                 folded = 1;
@@ -1129,6 +1173,14 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     }
                 }
                 float total_1 = 0.0f;
+#if __CUDA_ARCH__ == 1030
+                float2 dx2_acc_1 = make_float2(0.0f, 0.0f);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xs_1[0], xs_1[1]), make_float2(xs_1[0], xs_1[1]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xs_1[2], xs_1[3]), make_float2(xs_1[2], xs_1[3]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xs_1[4], xs_1[5]), make_float2(xs_1[4], xs_1[5]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xs_1[6], xs_1[7]), make_float2(xs_1[6], xs_1[7]), dx2_acc_1);
+                total_1 = dx2_acc_1.x + dx2_acc_1.y;
+#else
                 total_1 = __fmaf_rn(xs_1[0], xs_1[0], total_1);
                 total_1 = __fmaf_rn(xs_1[1], xs_1[1], total_1);
                 total_1 = __fmaf_rn(xs_1[2], xs_1[2], total_1);
@@ -1137,6 +1189,7 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 total_1 = __fmaf_rn(xs_1[5], xs_1[5], total_1);
                 total_1 = __fmaf_rn(xs_1[6], xs_1[6], total_1);
                 total_1 = __fmaf_rn(xs_1[7], xs_1[7], total_1);
+#endif
                 float _shfl_xor_sync_115 = __shfl_xor_sync(0xFFFFFFFF, total_1, 1);
                 total_1 = total_1 + _shfl_xor_sync_115;
                 float _shfl_xor_sync_116 = __shfl_xor_sync(0xFFFFFFFF, total_1, 2);
@@ -1478,6 +1531,8 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     zs_1[7] = dz2_7.y;
                     gs_1[6] = dn2_7.x;
                     gs_1[7] = dn2_7.y;
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(gs_1[0], xs_1[0], dot_1);
                     dot_1 = __fmaf_rn(gs_1[1], xs_1[1], dot_1);
                     dot_1 = __fmaf_rn(gs_1[2], xs_1[2], dot_1);
@@ -1486,6 +1541,7 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     dot_1 = __fmaf_rn(gs_1[5], xs_1[5], dot_1);
                     dot_1 = __fmaf_rn(gs_1[6], xs_1[6], dot_1);
                     dot_1 = __fmaf_rn(gs_1[7], xs_1[7], dot_1);
+#endif
                 } else {
                     float _exp_205 = __nv_expf(zs_1[0] * -1.0f);
                     float den_8 = 1.0f + _exp_205;
@@ -1495,7 +1551,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_8 = gs_1[0] * gate_8;
                     float dzj_8 = gs_1[0] * (nj_8 * wclaim[0]) * sig_8 * __fmaf_rn(zs_1[0], 1.0f - sig_8, 1.0f);
                     float dnj_8 = aj_8 * wclaim[0];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_8, xs_1[0], dot_1);
+#endif
                     acc[0] = __fmaf_rn(__uint_as_float(__as_u32(aj_8) & keep_1), __uint_as_float(__as_u32(nj_8) & keep_1), acc[0]);
                     zs_1[0] = dzj_8;
                     gs_1[0] = dnj_8;
@@ -1507,7 +1566,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_9 = gs_1[1] * gate_9;
                     float dzj_9 = gs_1[1] * (nj_9 * wclaim[1]) * sig_9 * __fmaf_rn(zs_1[1], 1.0f - sig_9, 1.0f);
                     float dnj_9 = aj_9 * wclaim[1];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_9, xs_1[1], dot_1);
+#endif
                     acc[1] = __fmaf_rn(__uint_as_float(__as_u32(aj_9) & keep_1), __uint_as_float(__as_u32(nj_9) & keep_1), acc[1]);
                     zs_1[1] = dzj_9;
                     gs_1[1] = dnj_9;
@@ -1519,7 +1581,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_10 = gs_1[2] * gate_10;
                     float dzj_10 = gs_1[2] * (nj_10 * wclaim[2]) * sig_10 * __fmaf_rn(zs_1[2], 1.0f - sig_10, 1.0f);
                     float dnj_10 = aj_10 * wclaim[2];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_10, xs_1[2], dot_1);
+#endif
                     acc[2] = __fmaf_rn(__uint_as_float(__as_u32(aj_10) & keep_1), __uint_as_float(__as_u32(nj_10) & keep_1), acc[2]);
                     zs_1[2] = dzj_10;
                     gs_1[2] = dnj_10;
@@ -1531,7 +1596,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_11 = gs_1[3] * gate_11;
                     float dzj_11 = gs_1[3] * (nj_11 * wclaim[3]) * sig_11 * __fmaf_rn(zs_1[3], 1.0f - sig_11, 1.0f);
                     float dnj_11 = aj_11 * wclaim[3];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_11, xs_1[3], dot_1);
+#endif
                     acc[3] = __fmaf_rn(__uint_as_float(__as_u32(aj_11) & keep_1), __uint_as_float(__as_u32(nj_11) & keep_1), acc[3]);
                     zs_1[3] = dzj_11;
                     gs_1[3] = dnj_11;
@@ -1543,7 +1611,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_12 = gs_1[4] * gate_12;
                     float dzj_12 = gs_1[4] * (nj_12 * wclaim[4]) * sig_12 * __fmaf_rn(zs_1[4], 1.0f - sig_12, 1.0f);
                     float dnj_12 = aj_12 * wclaim[4];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_12, xs_1[4], dot_1);
+#endif
                     acc[4] = __fmaf_rn(__uint_as_float(__as_u32(aj_12) & keep_1), __uint_as_float(__as_u32(nj_12) & keep_1), acc[4]);
                     zs_1[4] = dzj_12;
                     gs_1[4] = dnj_12;
@@ -1555,7 +1626,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_13 = gs_1[5] * gate_13;
                     float dzj_13 = gs_1[5] * (nj_13 * wclaim[5]) * sig_13 * __fmaf_rn(zs_1[5], 1.0f - sig_13, 1.0f);
                     float dnj_13 = aj_13 * wclaim[5];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_13, xs_1[5], dot_1);
+#endif
                     acc[5] = __fmaf_rn(__uint_as_float(__as_u32(aj_13) & keep_1), __uint_as_float(__as_u32(nj_13) & keep_1), acc[5]);
                     zs_1[5] = dzj_13;
                     gs_1[5] = dnj_13;
@@ -1567,7 +1641,10 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_14 = gs_1[6] * gate_14;
                     float dzj_14 = gs_1[6] * (nj_14 * wclaim[6]) * sig_14 * __fmaf_rn(zs_1[6], 1.0f - sig_14, 1.0f);
                     float dnj_14 = aj_14 * wclaim[6];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_14, xs_1[6], dot_1);
+#endif
                     acc[6] = __fmaf_rn(__uint_as_float(__as_u32(aj_14) & keep_1), __uint_as_float(__as_u32(nj_14) & keep_1), acc[6]);
                     zs_1[6] = dzj_14;
                     gs_1[6] = dnj_14;
@@ -1579,11 +1656,22 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                     float aj_15 = gs_1[7] * gate_15;
                     float dzj_15 = gs_1[7] * (nj_15 * wclaim[7]) * sig_15 * __fmaf_rn(zs_1[7], 1.0f - sig_15, 1.0f);
                     float dnj_15 = aj_15 * wclaim[7];
+#if __CUDA_ARCH__ == 1030
+#else
                     dot_1 = __fmaf_rn(dnj_15, xs_1[7], dot_1);
+#endif
                     acc[7] = __fmaf_rn(__uint_as_float(__as_u32(aj_15) & keep_1), __uint_as_float(__as_u32(nj_15) & keep_1), acc[7]);
                     zs_1[7] = dzj_15;
                     gs_1[7] = dnj_15;
                 }
+#if __CUDA_ARCH__ == 1030
+                float2 dx2_acc_1_1 = make_float2(0.0f, 0.0f);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gs_1[0], gs_1[1]), make_float2(xs_1[0], xs_1[1]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gs_1[2], gs_1[3]), make_float2(xs_1[2], xs_1[3]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gs_1[4], gs_1[5]), make_float2(xs_1[4], xs_1[5]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gs_1[6], gs_1[7]), make_float2(xs_1[6], xs_1[7]), dx2_acc_1_1);
+                dot_1 = dx2_acc_1_1.x + dx2_acc_1_1.y;
+#endif
                 float _shfl_xor_sync_213 = __shfl_xor_sync(0xFFFFFFFF, dot_1, 1);
                 dot_1 = dot_1 + _shfl_xor_sync_213;
                 float _shfl_xor_sync_214 = __shfl_xor_sync(0xFFFFFFFF, dot_1, 2);
@@ -1657,38 +1745,38 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 run = run + 1;
                 if (run == 16) {
                     if (folded != 0) {
-                        fold[group * 128 + col] = fold[group * 128 + col] + (double)acc[0];
+                        fold[group * 128 + col] = fold[group * 128 + col] + acc[0];
                         acc[0] = 0.0f;
-                        fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + (double)acc[1];
+                        fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + acc[1];
                         acc[1] = 0.0f;
-                        fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + (double)acc[2];
+                        fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + acc[2];
                         acc[2] = 0.0f;
-                        fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + (double)acc[3];
+                        fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + acc[3];
                         acc[3] = 0.0f;
-                        fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + (double)acc[4];
+                        fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + acc[4];
                         acc[4] = 0.0f;
-                        fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + (double)acc[5];
+                        fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + acc[5];
                         acc[5] = 0.0f;
-                        fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + (double)acc[6];
+                        fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + acc[6];
                         acc[6] = 0.0f;
-                        fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + (double)acc[7];
+                        fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + acc[7];
                         acc[7] = 0.0f;
                     } else {
-                        fold[group * 128 + col] = (double)acc[0];
+                        fold[group * 128 + col] = acc[0];
                         acc[0] = 0.0f;
-                        fold[group * 128 + col + 1] = (double)acc[1];
+                        fold[group * 128 + col + 1] = acc[1];
                         acc[1] = 0.0f;
-                        fold[group * 128 + col + 2] = (double)acc[2];
+                        fold[group * 128 + col + 2] = acc[2];
                         acc[2] = 0.0f;
-                        fold[group * 128 + col + 3] = (double)acc[3];
+                        fold[group * 128 + col + 3] = acc[3];
                         acc[3] = 0.0f;
-                        fold[group * 128 + col + 4] = (double)acc[4];
+                        fold[group * 128 + col + 4] = acc[4];
                         acc[4] = 0.0f;
-                        fold[group * 128 + col + 5] = (double)acc[5];
+                        fold[group * 128 + col + 5] = acc[5];
                         acc[5] = 0.0f;
-                        fold[group * 128 + col + 6] = (double)acc[6];
+                        fold[group * 128 + col + 6] = acc[6];
                         acc[6] = 0.0f;
-                        fold[group * 128 + col + 7] = (double)acc[7];
+                        fold[group * 128 + col + 7] = acc[7];
                         acc[7] = 0.0f;
                     }
                     folded = 1;
@@ -1748,44 +1836,44 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
             fold32[(tid >> 5) * 128 + col + 7] = part32[7];
         }
     } else if (folded != 0) {
-        fold[group * 128 + col] = fold[group * 128 + col] + (double)acc[0];
+        fold[group * 128 + col] = fold[group * 128 + col] + acc[0];
         acc[0] = 0.0f;
-        fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + (double)acc[1];
+        fold[group * 128 + col + 1] = fold[group * 128 + col + 1] + acc[1];
         acc[1] = 0.0f;
-        fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + (double)acc[2];
+        fold[group * 128 + col + 2] = fold[group * 128 + col + 2] + acc[2];
         acc[2] = 0.0f;
-        fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + (double)acc[3];
+        fold[group * 128 + col + 3] = fold[group * 128 + col + 3] + acc[3];
         acc[3] = 0.0f;
-        fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + (double)acc[4];
+        fold[group * 128 + col + 4] = fold[group * 128 + col + 4] + acc[4];
         acc[4] = 0.0f;
-        fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + (double)acc[5];
+        fold[group * 128 + col + 5] = fold[group * 128 + col + 5] + acc[5];
         acc[5] = 0.0f;
-        fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + (double)acc[6];
+        fold[group * 128 + col + 6] = fold[group * 128 + col + 6] + acc[6];
         acc[6] = 0.0f;
-        fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + (double)acc[7];
+        fold[group * 128 + col + 7] = fold[group * 128 + col + 7] + acc[7];
         acc[7] = 0.0f;
     } else {
-        fold[group * 128 + col] = (double)acc[0];
+        fold[group * 128 + col] = acc[0];
         acc[0] = 0.0f;
-        fold[group * 128 + col + 1] = (double)acc[1];
+        fold[group * 128 + col + 1] = acc[1];
         acc[1] = 0.0f;
-        fold[group * 128 + col + 2] = (double)acc[2];
+        fold[group * 128 + col + 2] = acc[2];
         acc[2] = 0.0f;
-        fold[group * 128 + col + 3] = (double)acc[3];
+        fold[group * 128 + col + 3] = acc[3];
         acc[3] = 0.0f;
-        fold[group * 128 + col + 4] = (double)acc[4];
+        fold[group * 128 + col + 4] = acc[4];
         acc[4] = 0.0f;
-        fold[group * 128 + col + 5] = (double)acc[5];
+        fold[group * 128 + col + 5] = acc[5];
         acc[5] = 0.0f;
-        fold[group * 128 + col + 6] = (double)acc[6];
+        fold[group * 128 + col + 6] = acc[6];
         acc[6] = 0.0f;
-        fold[group * 128 + col + 7] = (double)acc[7];
+        fold[group * 128 + col + 7] = acc[7];
         acc[7] = 0.0f;
     }
     __syncthreads();
     if (weight_grad != 0) {
         if (tid < 128) {
-            double colsum = 0.0;
+            float hs = 0.0f;
             if (short_ != 0) {
                 float w32[8];
                 w32[0] = fold32[tid];
@@ -1803,15 +1891,16 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
                 w32[0] = w32[0] + w32[2];
                 w32[4] = w32[4] + w32[6];
                 w32[0] = w32[0] + w32[4];
-                colsum = (double)w32[0];
+                hs = w32[0];
             } else {
+                hs = fold[tid];
                 #pragma unroll
-                for (int g = 0; g < 16; g++) {
-                    colsum = colsum + fold[g * 128 + tid];
+                for (int g = 1; g < 16; g++) {
+                    hs = hs + fold[g * 128 + tid];
                 }
             }
-            if (colsum != 0.0) {
-                atomicAdd(&dw_sums[(bid & 3) * 128 + tid], colsum);
+            if (hs != 0.0f) {
+                atomicAdd(&dw_sums[(bid & 3) * 128 + tid], hs);
             }
         }
     }
@@ -1832,25 +1921,36 @@ kernel_cake_rmsnorm_silu_gate_train_615c6fae07a6a89f3a45(__nv_bfloat16* __restri
     asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&flag_word[0])) : "r"(flag_addr));
     if (flag_word[0] != 0) {
         if (weight_grad != 0) {
-            if (tid < 128) {
-                double dw_total = 0.0;
-                double part_0 = atomicAdd(&dw_sums[tid], -0.0);
-                dw_total = dw_total + part_0;
-                dw_sums[tid] = 0.0;
-                double part_1 = atomicAdd(&dw_sums[128 + tid], -0.0);
-                dw_total = dw_total + part_1;
-                dw_sums[128 + tid] = 0.0;
-                double part_2 = atomicAdd(&dw_sums[256 + tid], -0.0);
-                dw_total = dw_total + part_2;
-                dw_sums[256 + tid] = 0.0;
-                double part_3 = atomicAdd(&dw_sums[384 + tid], -0.0);
-                dw_total = dw_total + part_3;
-                dw_sums[384 + tid] = 0.0;
+            int rcol = tid >> 1;
+            int rl = tid & 1;
+            float total = 0.0f;
+            float pr[2];
+            pr[0] = 0.0f;
+            if (rl < 4) {
+                float _atomic_fetch_add_225 = atomicAdd(&dw_sums[rl * 128 + rcol], -0.0f);
+                pr[0] = _atomic_fetch_add_225;
+            }
+            pr[1] = 0.0f;
+            if (rl + 2 < 4) {
+                float _atomic_fetch_add_226 = atomicAdd(&dw_sums[(rl + 2) * 128 + rcol], -0.0f);
+                pr[1] = _atomic_fetch_add_226;
+            }
+            total = total + pr[0];
+            if (rl < 4) {
+                dw_sums[rl * 128 + rcol] = 0.0f;
+            }
+            total = total + pr[1];
+            if (rl + 2 < 4) {
+                dw_sums[(rl + 2) * 128 + rcol] = 0.0f;
+            }
+            float _shfl_xor_sync_227 = __shfl_xor_sync(0xFFFFFFFF, total, 1);
+            total = total + _shfl_xor_sync_227;
+            if (rl == 0) {
                 if (accumulate != 0) {
-                    __nv_bfloat16 prev = atomicAdd(&dw[tid], -0.0f);
-                    dw_total = dw_total + (double)(float)prev;
+                    __nv_bfloat16 prev = atomicAdd(&dw[rcol], -0.0f);
+                    total = total + (float)prev;
                 }
-                dw[tid] = (__nv_bfloat16)(float)dw_total;
+                dw[rcol] = (__nv_bfloat16)total;
             }
         }
     }

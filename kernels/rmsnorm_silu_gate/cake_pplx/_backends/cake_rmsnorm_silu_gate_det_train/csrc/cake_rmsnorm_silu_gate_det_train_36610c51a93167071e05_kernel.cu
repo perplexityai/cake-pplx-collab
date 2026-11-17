@@ -79,6 +79,16 @@ __device__ __forceinline__ float2 mul_f32x2_noftz(float2 a, float2 b) {
 
 // ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
 
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(128, LAUNCH_MIN_BLOCKS) void
@@ -349,22 +359,16 @@ kernel_cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05(__nv_bfloat16* __re
         float _rcp_39 = approx_rcp(1.0f + _exp2_40);
         gs[15] = zs[15] * _rcp_39;
         float total = 0.0f;
-        total = __fmaf_rn(xs[0], xs[0], total);
-        total = __fmaf_rn(xs[1], xs[1], total);
-        total = __fmaf_rn(xs[2], xs[2], total);
-        total = __fmaf_rn(xs[3], xs[3], total);
-        total = __fmaf_rn(xs[4], xs[4], total);
-        total = __fmaf_rn(xs[5], xs[5], total);
-        total = __fmaf_rn(xs[6], xs[6], total);
-        total = __fmaf_rn(xs[7], xs[7], total);
-        total = __fmaf_rn(xs[8], xs[8], total);
-        total = __fmaf_rn(xs[9], xs[9], total);
-        total = __fmaf_rn(xs[10], xs[10], total);
-        total = __fmaf_rn(xs[11], xs[11], total);
-        total = __fmaf_rn(xs[12], xs[12], total);
-        total = __fmaf_rn(xs[13], xs[13], total);
-        total = __fmaf_rn(xs[14], xs[14], total);
-        total = __fmaf_rn(xs[15], xs[15], total);
+        float2 dx2_acc = make_float2(0.0f, 0.0f);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[0], xs[1]), make_float2(xs[0], xs[1]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[2], xs[3]), make_float2(xs[2], xs[3]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[4], xs[5]), make_float2(xs[4], xs[5]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[6], xs[7]), make_float2(xs[6], xs[7]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[8], xs[9]), make_float2(xs[8], xs[9]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[10], xs[11]), make_float2(xs[10], xs[11]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[12], xs[13]), make_float2(xs[12], xs[13]), dx2_acc);
+        dx2_acc = fma_f32x2_rn_noftz(make_float2(xs[14], xs[15]), make_float2(xs[14], xs[15]), dx2_acc);
+        total = dx2_acc.x + dx2_acc.y;
         float _shfl_xor_sync_41 = __shfl_xor_sync(0xFFFFFFFF, total, 1);
         total = total + _shfl_xor_sync_41;
         float _shfl_xor_sync_42 = __shfl_xor_sync(0xFFFFFFFF, total, 2);
