@@ -226,12 +226,12 @@ repeatable backward's ``dw`` among them); every
 is; the fused and the row-claims backwards' ``dw`` is checked so only: the
 order of its FP32 atomic adds follows the blocks each CTA claimed; the
 backend suite judges every band's ``dw`` against the PyTorch BF16 naive
-implementation), the small-row backward's ``dx`` and ``dz`` are bitwise
-those of the backward it replaces (where that is the fused or the
-repeatable backward, those of this package's own backward of the role at
-the same rows instead, the role's static backward where the architecture
-routes one, else the row-claims backward), and the workspace is zero after
-every call.  PyTorch's deterministic algorithms are
+implementation), and the workspace is zero after every call.  The
+small-row backward's ``dx`` and ``dz`` are not compared with another
+program's: each backward program sums a row's squares and dot on the FMA
+chains its kernel takes on the architecture, so two programs' last bits may
+differ (the backend suite judges every band's ``dx`` and ``dz`` against the
+PyTorch BF16 naive implementation).  PyTorch's deterministic algorithms are
 off in every test (the fused and the row-claims backwards raise PyTorch's
 alert under them).
 """
@@ -733,15 +733,14 @@ def _rep(name: str) -> bool:
     (``bwd_bf16_rep``) or its long role (``bwd_bf16_rep_long``, packed rows
     from ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on): the deterministic
     package's BF16 backward program or its look-ahead program of the same
-    bits, whose ``dx``, ``dz`` and ``dw`` are that package's bits."""
+    bits."""
     return loader.MODULES[name]["role"] in ("bwd_bf16_rep", "bwd_bf16_rep_long")
 
 
 def _fused(name: str) -> bool:
     """Whether the backward module ``name`` is the fused backward
-    (``bwd_bf16_fused``), whose row arithmetic is the deterministic package's
-    BF16 backward program's, so that its ``dx`` and ``dz`` are that
-    package's bits."""
+    (``bwd_bf16_fused``), the deterministic package's fused backward's
+    schedule and row arithmetic."""
     return loader.MODULES[name]["role"] == "bwd_bf16_fused"
 
 
@@ -779,41 +778,6 @@ def _check_outputs(
             assert torch.equal(out[2], first[2]), f"dw tokens={tokens} {out[2].dtype}"
         message = contract(f"dw tokens={tokens} {out[2].dtype}", out[2], dw_reference)
         assert message is None, message
-
-
-def _check_replaced_rows(
-    tokens: int, alone, replaced_alone, replaced: str, inputs, dw_dtype
-) -> None:
-    """``dx`` and ``dz`` of the small-row backward's first call alone bitwise
-    those of the backward it replaces, the module ``replaced`` (the same row
-    arithmetic; their weight gradients sum different partials and are each
-    checked by :func:`_check_outputs`).  Where ``replaced`` is the fused
-    backward (:func:`_fused`) or the repeatable backward (:func:`_rep`, which
-    replaces the small-row backwards on sm_107a), whose row arithmetic is
-    another program's, the small-row backward's ``dx`` and ``dz`` are
-    instead bitwise those of this package's own backward of ``inputs``
-    (``x``, ``z``, ``w``, ``dy``) into a ``dw_dtype`` weight gradient of the
-    role at the same rows (the role's static backward ``ROUTES[arch][role]``
-    where the architecture routes one, else its row-claims backward
-    ``<role>_rc``: the row arithmetic the small-row backward shares), which
-    leaves its workspace zero."""
-    first, rep = alone[0][1], replaced_alone[0][1]
-    if not (_fused(replaced) or _rep(replaced)):
-        assert torch.equal(rep[0], first[0]), f"dx tokens={tokens} (replaced)"
-        assert torch.equal(rep[1], first[1]), f"dz tokens={tokens} (replaced)"
-        return
-    x, z, w, dy = inputs
-    arch, _sms = _device()
-    role = _backward_role(dw_dtype)
-    routes = loader.ROUTES[arch]
-    own = routes[role] if role in routes else routes[f"{role}_rc"]
-    assert not (_fused(own) or _rep(own)), (arch, own)
-    workspace = workspace_for(tokens * H, x.device)
-    dw = torch.empty(D, dtype=dw_dtype, device=x.device)
-    same = _backward_with(own, dy, x, z, w, dw, workspace)
-    assert torch.equal(same[0], first[0]), f"dx tokens={tokens} (own backward)"
-    assert torch.equal(same[1], first[1]), f"dz tokens={tokens} (own backward)"
-    assert not bool(workspace.any()), f"tokens={tokens}: the workspace is not zero"
 
 
 @pytest.mark.parametrize("tokens", ALL_SM_TOKENS)
@@ -1983,9 +1947,6 @@ def test_short_backward_beside_an_all_sm_kernel_with_a_small_carveout(
             _dw_reference(dy, x, z),
             module=replaced,
         )
-        _check_replaced_rows(
-            tokens, alone, rep_alone, replaced, (x, z, w, dy), dw_dtype
-        )
         assert not bool(workspace.any()), f"tokens={tokens}: the workspace is not zero"
         assert busy_ms - rep_busy_ms <= MAX_ALL_SM_EXTRA_MS, (
             f"tokens={tokens}: beside an all-SM kernel with the {label} carveout "
@@ -2046,13 +2007,10 @@ def test_short_backward_ends_no_later_than_the_backward_beside_held_sms(
             f"alone_spread={spread:.3f} attempt={attempt}/{attempts} "
             f"counts={int(counts)}"
         )
-        # each module's outputs repeat their own bits; dx and dz match across them
+        # each module's outputs repeat their own bits
         _check_outputs("backward", tokens, alone, busy, dw_reference, module=name)
         _check_outputs(
             "backward", tokens, rep_alone, rep_busy, dw_reference, module=replaced
-        )
-        _check_replaced_rows(
-            tokens, alone, rep_alone, replaced, (x, z, w, dy), dw_dtype
         )
         assert not bool(workspace.any()), f"tokens={tokens}: the workspace is not zero"
         if counts:
