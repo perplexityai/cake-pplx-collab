@@ -7271,7 +7271,7 @@ GSTATS_COLS = 32
 TOKP_COLS = 24
 DZP_COLS = 96  # three BF16 pieces of dz' = dz * r, 32 columns each
 PARAM_COLS = 32
-PARAM_ROW_COLS = 56  # a group row: PARAM_COLS plus the low parts of the 24 dbase sums
+PARAM_ROW_COLS = PARAM_COLS  # a group row: one FP32 word per parameter column, as a per-CTA row
 TOKEN_GROUP = 8  # tokens per group row
 TICKET_WORDS = 64  # one 256-byte region of uint32 per workspace, zero on first use; the opt-in ticket schedule of the mapping pass (forward) and the column-slab forms (backward) draw their units from word 0, the group-row token owner (backward) its groups after the first wave from word 32, and each leaves its word 0 again; the static forms leave them unread
 SLAB_CNT_WORDS = 128  # the column slab's arrival counts: word 0 counts the grid's finished units, word 1 the CTAs past the wait for them; zero on first use, and the last CTA of every launch leaves both 0 again
@@ -7318,7 +7318,7 @@ PARAM_LAYOUT: dict[str, tuple[int, int]] = {
 # backward buffer hold every word a call must find zero and leaves zero.  The
 # deterministic package's regions follow (``fnTp``, ``dzp``, ``tokp`` and the
 # parameter region ``param_partial``: the per-CTA partials ``[G6, 32]``, or the
-# group rows ``[56, ceil(T / 8)]`` inside ``BWD_ROW_BANDS``), each 512 bytes
+# group rows ``[32, ceil(T / 8)]`` inside ``BWD_ROW_BANDS``), each 512 bytes
 # past its deterministic offset; the last region is the column slab's per-chunk
 # FP32 ``dfn`` slots (``dfn_slot``, ``slot_parts x 24 x n`` with ``slot_parts =
 # min(32, ceil(T / 64))``, at least the token-holding chunks of either
@@ -7737,10 +7737,10 @@ BWD_TOKEN_BANDS = {
     ),
 }
 # BWD_ROW_BANDS: the token-count bands per architecture ((above, at_most), at_most None = unbounded) in which the token
-# owner runs the "_trows_dyn" form of its program (one 56-float parameter row per 8-token group, the groups after the
+# owner runs the "_trows_dyn" form of its program (one 32-float parameter row per 8-token group, the groups after the
 # first wave claimed first-come from the backward workspace's self-resetting ticket word 32) and the column slab folds
 # those group rows (``prow = 1``): the parameter region of the backward workspace then holds the group rows
-# [56, ceil(T / 8)] instead of the per-CTA partials [G6, 32], and the column slab sums them in the deterministic
+# [32, ceil(T / 8)] instead of the per-CTA partials [G6, 32], and the column slab sums them in the deterministic
 # reduction's group-row order (8-token groups, compensated columns), so dscale and dbase are bitwise the deterministic
 # package's in the bands as outside them. dX, dfn, dzp and tokp are the per-CTA forms' bits. The deterministic package's
 # bands verbatim: sm_100a and sm_103a above 14927 tokens; sm_107a runs none. A call at a run-time Sinkhorn count runs
@@ -8672,7 +8672,7 @@ def host_plan(
         "rows_per_cta": r6,
         "groups": groups,
         "group_rows": group_rows,
-        # the parameter region: the group rows [56, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
+        # the parameter region: the group rows [32, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
         # per-CTA partials [G6, 32]
         "param_dim0": PARAM_ROW_COLS if group_rows else g6,
         "param_dim1": groups if group_rows else PARAM_COLS,

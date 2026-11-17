@@ -10333,7 +10333,7 @@ GSTATS_COLS = 32
 TOKP_COLS = 24
 DZP_COLS = 96  # three BF16 pieces of dz' = dz * r, 32 columns each
 PARAM_COLS = 32
-PARAM_ROW_COLS = 56  # a group row: PARAM_COLS plus the low parts of the 24 dbase sums
+PARAM_ROW_COLS = PARAM_COLS  # a group row: one FP32 word per parameter column, as a per-CTA row
 TOKEN_GROUP = 8  # tokens per group row
 TICKET_WORDS = 64  # one 256-byte region of uint32 per workspace, zero on first use; the opt-in ticket schedule of the mapping pass (forward) and the dynamic-schedule column-slab form (backward) draw their units from word 0 and leave it 0 again; the static forms leave it unread
 STATS_LAYOUT: dict[str, tuple[int, int]] = {
@@ -10820,12 +10820,12 @@ BWD_TOKEN_BANDS = {
 }
 # BWD_ROW_BANDS: the token-count bands per architecture ((above, at_most), at_most None = unbounded) in which the token
 # owner and the final reduction run their group-row forms: the token owner runs the "_trows_dyn" form of its program
-# (one 56-float parameter row per 8-token group, the groups after the first wave claimed first-come from the backward
+# (one 32-float parameter row per 8-token group, the groups after the first wave claimed first-come from the backward
 # workspace's self-resetting ticket word 32) and the reduction the "_trows" form of its program (the 27 parameter CTAs
 # fold the group rows as compensated FP32 columns). The two run together: the parameter region of the backward
-# workspace then holds the group rows [56, ceil(T / 8)] instead of the per-CTA partials [G6, 32]. dX, dfn, dzp and
+# workspace then holds the group rows [32, ceil(T / 8)] instead of the per-CTA partials [G6, 32]. dX, dfn, dzp and
 # tokp are bitwise the per-CTA forms'; dscale and dbase sum the same terms in another fixed order (8-token groups,
-# compensated columns, each group's dbase low parts and each token's exact dscale product), deterministic and
+# one FP32 word per column), deterministic and
 # independent of the schedule, the grid and the SM count. sm_100a and sm_103a run them above 14927 tokens; sm_107a
 # runs none. A call at a run-time Sinkhorn count runs the per-CTA run-time-count token owner, so its reduction keeps
 # the per-CTA form (_selects).
@@ -11824,7 +11824,7 @@ def host_plan(
         "rows_per_cta": r6,
         "groups": groups,
         "group_rows": group_rows,
-        # the parameter region: the group rows [56, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
+        # the parameter region: the group rows [32, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
         # per-CTA partials [G6, 32]
         "param_dim0": PARAM_ROW_COLS if group_rows else g6,
         "param_dim1": groups if group_rows else PARAM_COLS,
