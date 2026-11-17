@@ -62,7 +62,6 @@ import json
 import os
 import statistics
 import subprocess
-import sys
 import time
 import traceback
 from pathlib import Path
@@ -364,9 +363,10 @@ def summarize(paths: list[str], old: str, new: str) -> int:
             record["cake_labels"] = list(header["cake_labels"]) if header else [old, new]
             for r in table_rows(record, old, new):
                 sota = "-" if r["sota"] is None else f"{r['sota']} ({r['sota_library']})"
-                new = f"{_us(r['new_us'])}{'' if r['new_gate'] else ' (gate FAIL)'}"
+                new_cell = f"{_us(r['new_us'])}{'' if r['new_gate'] else ' (gate FAIL)'}"
                 print(
-                    f"| {r['S']} | {r['C']} | {r['kind']} | {r['phase']} | {r['mode']} | {_us(r['old_us'])} | {new} "
+                    f"| {r['S']} | {r['C']} | {r['kind']} | {r['phase']} | {r['mode']} | {_us(r['old_us'])} "
+                    f"| {new_cell} "
                     f"| {_fmt(r['old_over_new'])} | {sota} | {_us(r['sota_us'])} | {_fmt(r['sota_over_new'])} "
                     f"| {_us(r.get('det_us'))} | {_fmt(r.get('det_over_nondet'))} |"
                 )
@@ -489,7 +489,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(
                         f"  {r['kind']:6s} {r['phase']:4s} {r['mode']:5s} new {r['new_us']:9.2f} "
                         f"old/new {_fmt(r['old_over_new'])} best {r['sota']} "
-                        f"{'-' if r['sota_us'] is None else round(r['sota_us'], 2)} sota/new {_fmt(r['sota_over_new'])}",
+                        f"{'-' if r['sota_us'] is None else round(r['sota_us'], 2)} "
+                        f"sota/new {_fmt(r['sota_over_new'])}",
                         flush=True,
                     )
     finally:
