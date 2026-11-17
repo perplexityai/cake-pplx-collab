@@ -25,8 +25,9 @@ shared by every token and head)::
 This is ``RMSNorm(x) * weight * SiLU(z)``, not ``SiLU(RMSNorm(x))``.  The
 backward recomputes the statistics and the gate from ``x`` and ``z`` and
 returns BF16 ``dx`` and ``dz`` and the weight
-gradient summed over every token and head (FP32 runs of at most 16 rows, added
-exactly in fixed point, rounded once to FP32), so repeated calls with the same row
+gradient summed over every token and head (FP32 runs of at most 16 rows summed
+into plain FP32 words of each chunk, the words added exactly in fixed point,
+the sum rounded once to FP32), so repeated calls with the same row
 count on a device with the same SM count return the same bits.  The autograd
 function saves only its inputs, which keeps
 ``torch.utils.checkpoint(..., use_reentrant=False)`` free of FP32 temporaries.
@@ -297,8 +298,9 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     ``dx`` and ``dz`` lie within one BF16 unit in the last place of these
     formulas in correctly rounded FP32 plus 1/64 of a unit of the row's
     largest term, the same bits at every call.
-    ``dw`` is summed in FP32 runs of at most 16 rows, added exactly in fixed
-    point whatever the order of the CTAs, and rounded once to FP32 (then to BF16
+    ``dw`` is summed in FP32 runs of at most 16 rows into plain FP32 words of
+    each chunk, the words added exactly in fixed point whatever the order of
+    the CTAs, and the sum rounded once to FP32 (then to BF16
     for a BF16 gradient): the same row count on a device with the same SM count
     gives the same bits.
 

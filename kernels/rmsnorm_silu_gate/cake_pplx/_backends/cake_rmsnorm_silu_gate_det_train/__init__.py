@@ -74,19 +74,20 @@ Host design (every control is a keyword; no environment variable):
   ``s`` is subnormal for ``z`` from about ``-87.34`` to ``-88.72`` and 0 below
   that (the gate ``z * s`` is then ``-0``).  For the weight gradient each thread
   sums its rows' terms ``a * n`` of a chunk in FP32 runs of at most 16 rows
-  and folds each run into an FP32 two-sum pair (a sum and its exact error
-  term); each CTA adds its pairs exactly into 64-bit fixed-point digit
-  counters and adds those to the workspace with integer atomics, which are
-  exact in any order.  The CTA that arrives last adds ``grad_weight``'s value
+  and adds each run into its FP32 word of the chunk (one FP32 add); each CTA
+  sums a column's words of its row groups in a fixed order in FP32, adds
+  that FP32 word exactly into 64-bit fixed-point digit counters and adds
+  those to the workspace with integer atomics, which are exact in any
+  order.  The CTA that arrives last adds ``grad_weight``'s value
   exactly as digits when accumulating, rounds each column's exact sum once to
   FP32 (round to nearest even, in integer arithmetic), stores it (a BF16
   ``grad_weight`` takes that FP32 value rounded to BF16, as an FP32 sum cast
   to BF16) and zeroes the workspace.  A chunk's runs follow from the row count
   and ``G`` alone, whichever CTA takes it, so the weight gradient is the same
   bits at every call with the same row count on a device with the same SM
-  count; each run errs by at most about ``2^-20`` of its terms' magnitude (the
-  approximate gate and ``rstd`` put each term within a few FP32 units in the
-  last place of the FP32 formula's term) and the digits sum exactly.
+  count.  Every term, run and word is one plain FP32 word (no FP64 and no
+  two-word sums); the digits sum the chunks' words exactly and the CTA that
+  arrives last rounds that sum once.
 - Workspace: ``cake_jit.workspace_elements`` FP32 elements (18952 bytes): the
   digit counters (``2 * 9 * 128`` 64-bit words, read as ``uint64``), one
   32-bit flag word a column (infinite and ``NaN`` sums), and two 32-bit words,
