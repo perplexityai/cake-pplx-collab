@@ -110,6 +110,23 @@ of any call: the call runs on the other SMs and slows down by about the share
 of SMs those kernels hold.  The limits and lists above are measured on B200
 (SM100), GB300 (SM103) and R200 (SM107).
 
+Memory beside work on other streams: a call allocates, through PyTorch's
+caching allocator, each output it is not given (``y``, ``rstd`` and ``h_new``;
+``dx`` and ``dw``), the backward workspace when ``workspace`` is omitted, and
+a copy of each input it cannot read in place.  When no cached block fits, the
+allocator calls ``cudaMalloc``, which holds the calling thread, and so the
+launch of the call's kernels, until the driver returns (from under 2 ms to 65
+ms for a few hundred MB on the GB200, GB300 and R200 systems measured).  When
+the allocation would exceed the device memory or the process's limit, the
+allocator first releases its cached blocks with ``cudaFree``, which waits for
+all work on the device, a collective resident on another stream included: the
+call then starts only after that work ends (measured on GB300 and R200 beside
+all-gathers of 37 to 47 ms).  A call given contiguous aligned ``out``,
+``rstd`` and ``residual_out`` (forward) or ``dx``, ``dw`` and ``workspace``
+(backward), with inputs it reads in place, allocates nothing and does not wait
+this way.  :func:`cake_rmsnorm_det` allocates its outputs and its backward
+workspace on every call.
+
 Usage::
 
     y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
