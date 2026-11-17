@@ -747,9 +747,9 @@ def _judge_skip(record_property, monkeypatch, T, C, kind, *, temperature=None, c
     """The skip call (floor 0) at the judged shape (``JUDGE_H``, ``JUDGE_V``, ``T`` rows, chunk ``C``; ``temperature``:
     a form of the inputs' temperature) over the judge's draws: ``logp`` / ``dX`` / ``dW`` of the backward of the
     inputs' ``dlogp`` (``+0`` / ``-0`` on the zero-gradient rows of ``kind``, from a CPU generator seeded ``s +
-    ZERO_SET_OFFSET``) meet the naive BF16 tier against the FP64 oracle.  On every draw the backward runs one partition
-    on a counted plan (the skip's route; with ``counted`` given, the counted temperature dz arm or the mixed plan) and
-    the skipped and ignored rows' ``dX`` rows are exact ``+0``."""
+    ZERO_SET_OFFSET``) are judged against the naive BF16 tier, their errors taken against the FP64 oracle.  On every
+    draw the backward runs one partition on a counted plan (the skip's route; with ``counted`` given, the counted
+    temperature dz arm or the mixed plan) and the skipped and ignored rows' ``dX`` rows are exact ``+0``."""
 
     def make(s):
         base = judge_inputs(T, s, device=CUDA, temperature=temperature)
@@ -796,8 +796,8 @@ def test_device_zero_dlogp_skip_is_deterministic_and_accurate(
     """The skip on the device: ``RUNS`` calls give the same ``logp`` / ``dX`` / ``dW`` bits; ``logp`` is the bits of
     the call without the skip; skipped and ignored rows get exact ``+0`` ``dX`` rows; a live row whose chunk keeps its
     dX slice count gets the bits of the call without the skip, and with no zero-gradient row ``dX`` and ``dW`` are that
-    call's bits.  Accuracy: the skip call at the judged shape meets the naive BF16 tier (:func:`_judge_skip`); every
-    row of zero gradient is held to its contract."""
+    call's bits.  Accuracy: the skip call at the judged shape is judged against the naive BF16 tier
+    (:func:`_judge_skip`); every row of zero gradient is held to its contract."""
     _require_skip()
     base = _device_inputs(T, W=glm_weight)
     zero = _zero_set(base.labels, kind)

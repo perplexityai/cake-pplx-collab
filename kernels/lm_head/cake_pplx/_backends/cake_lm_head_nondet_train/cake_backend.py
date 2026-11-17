@@ -36,7 +36,7 @@ and ``lse`` keep their fixed order (a policy call with zero-weight rows sums
 its loss over fewer rows, see the zero-weight bullet below).  A one-pass
 cross-entropy call (:func:`set_one_pass_rows`; by default a one-row loss call)
 sums ``lse`` and the loss in a fixed order of its own: its ``loss``, ``logp``,
-``lse`` and ``dW`` are not the deterministic package's bits (both meet the
+``lse`` and ``dW`` are not the deterministic package's bits (both are judged against the
 naive tier; see the package README, Tests).  Statements below that two forms give "bitwise the
 same" output compare the same operations within one run.
 
@@ -177,8 +177,8 @@ Contract
   row for the gradients: a non-finite value in its ``X`` row, its logits or its ``infer_logp`` does not reach
   ``loss`` / ``dX`` / ``dW`` (the deterministic package gives NaN there through ``0 * inf``).  Finite inputs: the
   same mathematics; ``dW`` (and the FP32 loss sum) group their additions over different chunk rows, so their bits
-  may differ from the deterministic package's (both meet the naive tier).  Not applied (the plain path runs):
-  ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
+  may differ from the deterministic package's (both are judged against the naive tier).  Not applied (the plain path
+  runs): ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
   (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits
   the rows as here).
 * Non-deterministic mode (the only mode of this package; the mode is in its
@@ -354,10 +354,10 @@ HOST_COUNT_MAX_ROWS = 1024
 # value in an ignored row reaches no output, as on the compacted path that never reads such a row; the staged buffer
 # is what the call saves for its backward.  All rows valid: the same launches and bits as the compacted call (which
 # keeps no index then).  With ignored rows: exact zero contributions of the ignored rows (``loss`` / ``dW`` group their
-# additions over other rows, so their bits may differ; both meet the naive tier).  Every row ignored: zeros through
-# the kernels (no early return: that needs the count).  Not applied: a call the zero-weight split would serve
-# (:func:`zero_weight_split`), an explicit ``compact_rows=False``, the reference backend, CPU tensors, the low-level
-# ``forward_*`` / ``backward_*`` functions and the kept-logits entry (each keeps its own resolution).
+# additions over other rows, so their bits may differ; both are judged against the naive tier).  Every row ignored:
+# zeros through the kernels (no early return: that needs the count).  Not applied: a call the zero-weight split would
+# serve (:func:`zero_weight_split`), an explicit ``compact_rows=False``, the reference backend, CPU tensors, the
+# low-level ``forward_*`` / ``backward_*`` functions and the kept-logits entry (each keeps its own resolution).
 UNCOMPACTED_MAX_ROWS_DEFAULT = 256
 _UNCOMPACTED_MAX_ROWS = {"rows": UNCOMPACTED_MAX_ROWS_DEFAULT}
 # Small-call kept logits (:func:`set_small_t_keep`, default on): the log-probability entry
@@ -367,7 +367,7 @@ _UNCOMPACTED_MAX_ROWS = {"rows": UNCOMPACTED_MAX_ROWS_DEFAULT}
 # held from the forward to the backward, at most 79 MB at ``V = 154880``).  Bitwise the same ``logp``; ``dX`` the same
 # products; bitwise the same ``dW`` for a call of one chunk (``T <= chunk_size``: with more chunks the kept form's one
 # weight-gradient GEMM over every row groups ``dW`` differently from the default Function's chunk loop or
-# vocabulary-major form; both meet the naive tier).
+# vocabulary-major form; both are judged against the naive tier).
 SMALL_T_KEEP_MAX_ROWS = 256
 _SMALL_T_KEEP = {"on": True}
 # Small-call row padding (:func:`small_pad_rows`): a small call of ``T < rows`` rows, when ``rows <=
@@ -12324,7 +12324,7 @@ def backward_logprob_keep(
     view in place -- no logits GEMM; the chunk's ``X`` rows are gathered for the weight gradient only -- then ``dX`` /
     ``dW`` as in its chunk loop (a chunk of more than one dX slice sums its slices in slice order).  ``dW`` / ``dX``
     can round differently from :func:`backward_logprob`'s (another summation order: its vocabulary-major form of the
-    auto rule's calls, its zero-gradient row skip); both meet the naive tier.
+    auto rule's calls, its zero-gradient row skip); both are judged against the naive tier.
     The views serve one backward: this call marks them consumed and a second
     backward on them is a ``ValueError``.  ``row_index`` as in :func:`backward_logprob`
     (the forward's valid-row index, or a recount); the hidden valid-row count and ``logprob_dz`` do not apply.
@@ -13016,8 +13016,8 @@ def _loss_backward_split(ctx, grad_loss):
 # the dX GEMM), and the weight gradient is a plain write.  Bits: ``z`` is the chunked path's (the same FP32 products
 # and BF16 rounding) and ``dz`` / ``dW`` take its per-element operation sequences, but ``lse`` and the loss sum in
 # another fixed order, so ``loss``, ``logp``, ``lse``, ``dz`` and ``dW`` are not the deterministic package's bits;
-# ``dX`` takes the FP32 softmax weights in place of the BF16 ``dz`` -- every output meets the naive tier, and no
-# reduction leaves its order to the launch (a design note, no run-to-run promise).  An ignored row (a
+# ``dX`` takes the FP32 softmax weights in place of the BF16 ``dz`` -- every output is judged against the naive tier,
+# and no reduction leaves its order to the launch (a design note, no run-to-run promise).  An ignored row (a
 # negative label) takes no part: its ``logp``, ``dX`` row and ``dW`` contribution are exact zeros and a non-finite ``X``
 # row never reaches an output; every row ignored streams no ``W``.  Applies on CUDA with ``backend="cake"``, a
 # contiguous BF16 ``W`` of ``ONE_PASS_HIDDEN`` columns, BF16 ``X`` rows with a 16-byte base and pitch, contiguous int64
@@ -14641,12 +14641,12 @@ def cake_lm_head_nondet_train_logprob_keep(
     is :func:`cake_lm_head_nondet_train_logprob` (the label-column forward).  A forward with a trainable input whose
     backward never runs pays the full-logits forward and holds the kept logits until the graph is freed.  Bitwise
     the same ``logp`` as the default entry; ``dW`` / ``dX`` can round differently from the default entry's (another
-    summation order: its vocabulary-major backward of the auto rule's calls, its zero-gradient row skip); both meet
-    the naive tier (a chunk of more than one dX slice sums its slices in slice order, as there).  The kept form (:func:`set_kept_logits_form`; defaults ``tail_fold`` and
-    ``one_pass`` on): the forward keeps its chunks' logits as row slices of one contiguous buffer
-    (``[T_v, V]`` with the valid rows counted on the host, ``[T, V]`` under the hidden count); it folds a last chunk
-    of fewer than ``chunk_size / 2`` rows into the one before it where the default entry folds (:func:`loop_chunks`);
-    the first backward
+    summation order: its vocabulary-major backward of the auto rule's calls, its zero-gradient row skip); both are
+    judged against the naive tier (a chunk of more than one dX slice sums its slices in slice order, as there).  The
+    kept form (:func:`set_kept_logits_form`; defaults ``tail_fold`` and ``one_pass`` on): the forward keeps its chunks'
+    logits as row slices of one contiguous buffer (``[T_v, V]`` with the valid rows counted on the host, ``[T, V]``
+    under the hidden count); it folds a last chunk of fewer than ``chunk_size / 2`` rows into the one before it where
+    the default entry folds (:func:`loop_chunks`); the first backward
     runs ``row_grad`` and dX in the forward's chunks, then the weight gradient as ONE fused-cast GEMM over ``K = T_v``
     rows (no FP32 ``dW`` accumulator; the FP32 dX accumulator is freed first; up to :func:`kept_one_pass_rows` rows,
     above that the forward's chunks).  On a call of two chunks or more that ``dW`` sums the rows in another grouping

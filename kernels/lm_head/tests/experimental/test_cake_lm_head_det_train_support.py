@@ -114,9 +114,10 @@ def judge_entry(record_property, make, outputs, *, seed, upstream=None, forms=No
     """Judge the entry that forms ``outputs`` (:func:`run_support` with ``kw``; with ``forms``, one call per form name
     with ``kw`` updated by ``forms[name]``) over the judge's draws: ``make(s)`` gives the draw's inputs,
     ``upstream(inp)`` (default the inputs' ``g`` / ``d`` / ``e``) the upstream gradients.  Every output and ``dX`` /
-    ``dW`` meet the naive BF16 tier against the masked FP64 oracle (:func:`judge_support`: one oracle and one naive
-    value per draw for every form; the selected ``logp`` of an ignored row and the packed ``logp`` of a
-    single-candidate row exactly 0).  ``rerun``: the first draw's call is repeated and gives the same bits."""
+    ``dW`` are judged against the naive BF16 tier, their errors taken against the masked FP64 oracle
+    (:func:`judge_support`: one oracle and one naive value per draw for every form; the selected ``logp`` of an ignored
+    row and the packed ``logp`` of a single-candidate row exactly 0).  ``rerun``: the first draw's call is repeated and
+    gives the same bits."""
     first = [rerun]
 
     def call(inp, extra):
@@ -1024,8 +1025,9 @@ def _assert_single_candidate_zeros(inp, outputs, res):
 
 @pytest.mark.parametrize("case", sorted(NUMERIC_CASES))
 def test_numerics_against_oracle(case, record_property):
-    """The reference backend: every output and both gradients meet the naive BF16 tier against the masked FP64
-    oracle (:func:`judge_entry`); the cases whose rows have at most one candidate are held to their exact zeros."""
+    """The reference backend: every output and both gradients are judged against the naive BF16 tier, their errors taken
+    against the masked FP64 oracle (:func:`judge_entry`); the cases whose rows have at most one candidate are held to
+    their exact zeros."""
     outputs, mk, kw = NUMERIC_CASES[case]
     if case in SINGLE_CANDIDATE_CASES:
         inp = _case_inputs(case, SEED + mk["T"])
@@ -1499,8 +1501,8 @@ def _numeric_case(case, H=512):
 
 def _judge_cake_case(record_property, case, **knobs):
     """:data:`NUMERIC_CASES` ``case`` on the cake backend with the pass ``knobs`` (``H`` 512): every output and both
-    gradients meet the naive tier and the first draw's rerun is bitwise equal; a case whose rows have at most one
-    candidate is held to its exact zeros and its rerun bits."""
+    gradients are judged against the naive tier and the first draw's rerun is bitwise equal; a case whose rows have at
+    most one candidate is held to its exact zeros and its rerun bits."""
     outputs, mk, kw = NUMERIC_CASES[case]
     kw = dict(kw, backend="cake", **knobs)
     if case in SINGLE_CANDIDATE_CASES:

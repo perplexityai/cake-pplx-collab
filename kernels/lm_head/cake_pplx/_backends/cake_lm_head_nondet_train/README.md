@@ -93,7 +93,7 @@ vocabulary-buffer bound is `1.5 * chunk_size` rows for these calls
 (`memory_report` reports `vocab_rows_max`).  `loss` and `dW` sum the tail's
 rows in the folded chunk, so their bits differ from the deterministic
 package's (and from this package's earlier versions) on these calls; both
-meet the naive tier (see "Tests").  A
+are judged against the naive tier (see "Tests").  A
 log-probability backward of 2 chunks with a short tail runs the
 vocabulary-major backward by default (see "Vocabulary-major log-probability
 backward"), so its backward folds only where that form does not run (the
@@ -108,7 +108,7 @@ three chunks or more (the hidden valid-row count's calls) and the opt-in
 module's own plans (`memory_mode="budget"`, `num_valid_rows`) keep the
 chunks of `chunk_size` rows (`cake_backend.tail_fold_eligible`,
 `cake_backend.plan_chunks`); on a call that folds here, their `loss` and
-`dW` bits can differ from the default path's; both meet the naive tier.
+`dW` bits can differ from the default path's; both are judged against the naive tier.
 
 The package's own entries (`cake_backend.forward_loss`,
 `forward_logprob`, `backward_logprob`, `forward_logprob_keep`,
@@ -219,7 +219,7 @@ reports `2 * T * V` for the hidden valid-row count's `[T, V]` buffer) and
 * `logp` and `lse` are the default path's bits.  `dW` is one FP32 sum per
   element in the GEMMs' fixed order: the one-pass backward sums all `T_v` rows
   in one GEMM, so its bits differ from the default path's chunk sums; every
-  form meets the naive tier.
+  form is judged against the naive tier.
   `one_pass=False` (with `tail_fold` on: the default path's chunks) gives the
   default chunk loop's `dW` bits.  `dX`
   is formed from the same `dz` and the same products in the forward's chunks
@@ -228,7 +228,7 @@ reports `2 * T * V` for the hidden valid-row count's `[T, V]` buffer) and
   path does.  The kept backward never runs the vocabulary-major backward, so its
   `dW` and `dX` can round differently from a default backward that takes it
   (see "Vocabulary-major log-probability backward") or that runs its
-  zero-gradient row skip; both meet the naive tier.
+  zero-gradient row skip; both are judged against the naive tier.
 * The public `cake_lm_head_nondet_train_logprob` passes
   `memory_mode="keep_logits"` unchanged to `cake_backend_opt_in`, with a
   `hidden_count` left at `None` passed as `None` (the kept form decides;
@@ -259,7 +259,7 @@ without a temperature parameter).
   for the same call, and so does `dW` when no valid row has a zero `dlogp`, except a call whose short
   tail folds (above) and a call the vocabulary-major backward runs (2 to 4
   chunks by its rule, below: each `dW` block is one GEMM over every row,
-  another grouping that meets the same naive tier).  `dX` is formed from
+  another grouping that is judged against the same naive tier).  `dX` is formed from
   the same `dz` and the same products; a chunk of more than one dX slice sums
   them in slice order (the slab sum below).
 * The zero-gradient row skip (below) runs with a temperature too: the
@@ -273,7 +273,7 @@ without a temperature parameter).
   `set_zero_dlogp_temperature_dz_counted(False)`, runs `gemm_logits_dz_tau`
   over every row of the chunk instead (a zero `dlogp` gives `dz = 0`).  With
   zero-gradient rows `dW` sums the live rows in the new row order (bits may
-  differ from a call without the skip; both meet the naive tier).
+  differ from a call without the skip; both are judged against the naive tier).
 * `memory_mode="budget"` and `num_valid_rows` take a temperature;
   `memory_mode="keep_logits"` takes none (`ValueError`), and
   `cake_lm_head_nondet_train_loss` has no `temperature` keyword.
@@ -404,9 +404,9 @@ the previous value; an entry call reads them once):
 | `cake_backend.set_gradient_placement` | `"auto"` | where the loss entries (`cake_lm_head_nondet_train_loss` of both modules, every form) run the dX / dW GEMMs. `"auto"`: a call no backward can follow (grad mode off, or neither `X` nor `W` trainable) computes the loss (and `logp`) only; inside a non-reentrant `torch.utils.checkpoint` (its own saved-tensor hooks innermost) the checkpointed forward computes the loss only and saves its inputs, and the recomputation in the backward runs the fused forward and hands the gradient accumulators to the checkpointed call's backward, so a checkpointed step forms them once and keeps no FP32 accumulator from the forward to the backward (paired per checkpoint frame and graph by call order and checked against the inputs' metadata and the call's options; without a handed result the backward runs the fused forward itself, with a `RuntimeWarning`); other hooks innermost (CPU offload), torch's deterministic algorithms, or a torch whose checkpoint lacks those hooks keep the fused forward. Under selective activation checkpointing (`context_fn` of `create_selective_checkpoint_contexts`, whose recomputation replays the checkpointed forward's operators by position) every entry of this package -- the loss, log-probability (default, budget, kept logits, with a temperature) and candidate-support entries -- runs its forward with all active torch dispatch modes popped, the checkpoint's and any user mode on the stack (a `FlopCounterMode` does not see the entry's operators; a tracing mode such as `FakeTensorMode` or a `torch.compile` trace gets real launches on fake inputs and fails loudly), and behaves as in a plain non-reentrant checkpoint; the per-device constant cells and the calling thread's count cells and `arange` constant are formed outside active dispatch modes. `"forward"`: every call with a trainable input forms the gradients in its forward (the previous behavior). The same kernels on the same operands either way (one fixed order; no run-to-run bit promise; the K-sliced dX reduction sums its slices in slice order either way). `cake_lm_head_nondet_train_logprob` (with or without a temperature; not its budget or kept-logits forms, including a call of at most 256 rows without a temperature that `set_small_t_keep` sends to the kept-logits Function, whose checkpointed forward and recomputation each run the logits GEMM) forms no gradient in its forward; under `"auto"` inside a non-reentrant `torch.utils.checkpoint` its checkpointed forward keeps the call's row results (`logp`, the FP32 `lse`, the valid-row index and the compact temperature: O(T) bytes until the backward), and the recomputation in the backward returns a copy of that `logp` and saves those results instead of running the logits GEMMs again, so a checkpointed step runs them once, as an uncheckpointed one (paired per checkpoint frame and graph by call order; taken only for the same input tensors, unchanged since -- version counters -- and the same options, else the recomputation runs the forward). The backward reads those saved row results. |
 | `cake_backend.set_kept_logits_form` | `tail_fold=True, one_pass=True, one_pass_rows=0, dx_one_pass=False, dx_side=False, hidden_count=True` | the kept-logits form of `memory_mode="keep_logits"` (see "Kept log-probability logits"): the short-tail fold, the first backward's one weight-gradient GEMM over the contiguous kept buffer up to `one_pass_rows` rows (`0`: 65535) with dX in the forward's chunks (`dx_side`: on the side stream; `dx_one_pass`: one dX GEMM over every row), and the kept entry's `hidden_count` default (`True`: the hidden count where eligible); `one_pass=False` (with `tail_fold` on) gives the default chunk loop's `dW` bits |
 | `cake_backend.set_uncompacted_max_rows` | `256` | a call of the loss, log-probability or temperature entry on CUDA (`backend="cake"`) of `0 < T <= min(rows, chunk_size)` rows that would compact its valid rows (and that the zero-weight split does not serve) runs the uncompacted path on staged rows: no valid-row count, so no host synchronization. The entry first copies `X` into one buffer with its ignored rows (`labels < 0`) zeroed (policy `infer_logp` / `loss_weights` likewise); the call saves that buffer for its backward, so a non-finite value in an ignored row of `X`, of the policy operands or of the incoming gradient reaches no output (the kernels write `+0` `dz` on ignored rows). A call whose rows are all ignored launches its kernels (zeros out) instead of returning zeros without a launch; an explicit `compact_rows=False`, the kept-logits entry and the low-level `forward_*` / `backward_*` functions keep their own resolution; `0` = off |
-| `cake_backend.set_small_t_keep` | `True` | a log-probability call (`cake_lm_head_nondet_train_logprob`) of at most 256 rows where a backward can follow runs the kept-logits Function (a small call on its staged rows): the backward forms `dz` from the BF16 logits kept from the forward (`2 * T * V` bytes, at most 79 MB at `V = 154880`) instead of recomputing them; the same `logp` bits, `dX` the same products, and the same `dW` bits for a call of one chunk (`T <= chunk_size`; with more chunks the kept form's one weight-gradient GEMM over every row groups `dW` differently from the default Function's; both meet the naive tier); `False` runs the default Function |
+| `cake_backend.set_small_t_keep` | `True` | a log-probability call (`cake_lm_head_nondet_train_logprob`) of at most 256 rows where a backward can follow runs the kept-logits Function (a small call on its staged rows): the backward forms `dz` from the BF16 logits kept from the forward (`2 * T * V` bytes, at most 79 MB at `V = 154880`) instead of recomputing them; the same `logp` bits, `dX` the same products, and the same `dW` bits for a call of one chunk (`T <= chunk_size`; with more chunks the kept form's one weight-gradient GEMM over every row groups `dW` differently from the default Function's; both are judged against the naive tier); `False` runs the default Function |
 | `cake_backend.set_small_pad_rows` | `None`: `16` rows; the log-probability entries (plain and with a temperature) on sm_107a: `256` rows (`SMALL_PAD_ROWS_LOGPROB_BY_ARCH`) | `rows > 0`: a small call (`set_uncompacted_max_rows`) of `T < rows` rows stages `rows` rows when `rows <= min(uncompacted_max_rows, chunk_size)`: its own, then `rows - T` ignored rows (zero `X` rows, label `-100`, zero weights / reference log-probabilities, temperature 1), and returns the first `T` rows of its per-row outputs (the one-row logits GEMMs run well below the bandwidth of the same programs at 16 rows and more; on R200 a log-probability call of 256 rows runs below one of 16 to 64 rows); every staged tensor of a call is a view of one allocation, so a repeated call meets its remembered bindings; the valid rows' outputs are unchanged; an int applies to every entry, `0` = off, `None` = the defaults (`small_pad_rows(entry, device)` reads the value in effect) |
-| `cake_backend.set_one_pass_rows` | `{1}` | a cross-entropy loss entry call (`cake_lm_head_nondet_train_loss`) of a row count in the set (`1`, `2`), `H = 6144`, one chunk, `backend="cake"`, compacted rows and no explicit `gemm_tuning` runs the one-pass programs before any small-call staging: the forward reads `W` once (the kept BF16 logits, the online softmax statistics and the softmax-weighted head-row sums per CTA), a merge forms `lse`, `logp`, the loss and the FP32 `dX` accumulator, and the backward writes `dW` once from the kept logits (no FP32 `dW` accumulator); `z` is the chunked path's; `lse` and the loss sum in another fixed order, so `loss`, `logp`, `lse`, `dz` and `dW` are not the deterministic package's bits (they meet the naive tier); `dX` from the FP32 softmax weights; empty = off |
+| `cake_backend.set_one_pass_rows` | `{1}` | a cross-entropy loss entry call (`cake_lm_head_nondet_train_loss`) of a row count in the set (`1`, `2`), `H = 6144`, one chunk, `backend="cake"`, compacted rows and no explicit `gemm_tuning` runs the one-pass programs before any small-call staging: the forward reads `W` once (the kept BF16 logits, the online softmax statistics and the softmax-weighted head-row sums per CTA), a merge forms `lse`, `logp`, the loss and the FP32 `dX` accumulator, and the backward writes `dW` once from the kept logits (no FP32 `dW` accumulator); `z` is the chunked path's; `lse` and the loss sum in another fixed order, so `loss`, `logp`, `lse`, `dz` and `dW` are not the deterministic package's bits (they are judged against the naive tier); `dX` from the FP32 softmax weights; empty = off |
 
 The side streams, events, pinned count cells and the `arange` constant of the
 hidden valid-row count are per thread (`_THREAD_STATE`): a thread's calls
@@ -469,7 +469,7 @@ row out of the gradient path:
 | --- | --- | --- |
 | zero-weight row, finite inputs | full chunk path; its terms are exact zeros | skipped for the gradients; the same mathematics |
 | `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs) |
-| `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ, both meet the naive tier) |
+| `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ, both are judged against the naive tier) |
 | `logp` of a zero-weight row | loss-path logits GEMM + `row_finalize` | logp-only pass (`return_logp=True`); 0 in the internal output otherwise |
 | non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `loss` / `dX` / `dW` (`0 * inf`) | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |
 | `dX` row of a zero-weight row under a non-finite upstream loss gradient | NaN (`bf16(g * 0)`) | exact 0 (as an ignored row's) |
@@ -521,7 +521,7 @@ it handles these rows on the device, without a host synchronization:
   (or `W`) are non-finite (a `-inf` logit with a finite `lse` and `W` still
   gives `+0`).  `dX` of a live row is the same mathematics as without
   the skip.  `dW` sums the same nonzero products over the live rows in the new
-  row order (FP32 accumulation; bits may differ, both meet the naive tier).
+  row order (FP32 accumulation; bits may differ, both are judged against the naive tier).
 * The skip applies to a compacted backward that reuses the forward's row index
   (the autograd entries), with the dz arm (`logprob_dz`) and, when it forms
   `dX`, the fused dX finalize, on a record that registers the `_dcnt` forms
@@ -580,7 +580,7 @@ Default floors (`ZERO_DLOGP_MIN_ROWS_BY_ARCH`, valid rows of one call):
 The per-architecture floors put one-chunk backwards from the floor (1946 valid
 rows on sm_100a and sm_107a, 3891 on sm_103a) to 4096 valid rows on the skip, which the
 generic 4097 floor keeps off it.  On those calls: the `dW` bits can differ
-from the call without the skip (the new row order; both meet the naive
+from the call without the skip (the new row order; both are judged against the naive
 tier); a
 non-finite `X` row of a zero-gradient row makes `dW` NaN only within the
 63-row window above, as for the skip at 4097 rows and more; and the call holds
@@ -628,7 +628,7 @@ rule, no switch), which keeps no such buffer:
 * The forward, `logp` and `lse` do not change.  `dX` and `dW` are summed in
   one fixed order (no unordered reduction; no run-to-run bit promise); they
   round differently from the chunk loop (other summation groupings under the
-  same FP32 contract) and meet the same naive tier.
+  same FP32 contract) and are judged against the same naive tier.
 * The zero-gradient row skip applies: the partition orders the live rows
   first over one chunk of all rows, the counted forms bound the recompute,
   the dX adds and the weight-gradient K steps by the live-row count, and every
@@ -654,7 +654,7 @@ rule, no switch), which keeps no such buffer:
   budget form runs the opt-in module's chunk loop (chunks of `chunk_size`
   rows, no vocabulary-major backward), so on a call whose default backward
   is vocabulary-major its `dX` / `dW` can round differently from the default
-  entry's; both meet the naive tier.
+  entry's; both are judged against the naive tier.
 
 ## Explicit byte budget of `memory_mode="budget"`
 

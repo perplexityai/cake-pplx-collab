@@ -36,10 +36,10 @@ repeated on the same inputs gives the same bits.  No test compares an output wit
 outputs that miss the tier today are listed per architecture in ``test_helpers/cake_lm_head_known_misses.py`` (their
 tests report as xfailed), where a new miss or a listed output that meets the tier fails the test.  A
 log-probability backward of more than one chunk runs vocabulary-major by default
-(``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` meet the same tier; the tests of the chunk loop's own
-machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword, PyTorch's
-deterministic-algorithms alert, the reference backend) runs on the CPU, or on the GPU when it is an SM100 / SM103 /
-SM107 device (``DEV``); the device tests need such a GPU and the package's rendered programs.
+(``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` are judged against the same tier; the tests of the
+chunk loop's own machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword,
+PyTorch's deterministic-algorithms alert, the reference backend) runs on the CPU, or on the GPU when it is an SM100 /
+SM103 / SM107 device (``DEV``); the device tests need such a GPU and the package's rendered programs.
 """
 
 import ast
@@ -1187,7 +1187,7 @@ def test_paths_without_gradient_gemms_do_not_alert():
 @pytest.mark.parametrize("objective", ["ce", "policy"])
 def test_reference_meets_the_naive_tier(record_property, objective, T, C):
     """The reference backend (PyTorch operators at the kernels' rounding boundaries, fixed order): ``loss`` / ``logp``
-    / ``dX`` / ``dW`` meet the naive tier over the draws."""
+    / ``dX`` / ``dW`` are judged against the naive tier over the draws."""
     _judge_host(record_property, T, lambda inp: _run(inp, C), make_kw=dict(objective=objective))
 
 
@@ -2572,9 +2572,9 @@ def test_device_meets_the_naive_tier(glm_weight, record_property, T, objective, 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_meets_the_naive_tier_at_the_production_head(record_property, entry):
-    """One call of each entry (``T`` 4097, cross-entropy, the default plan) meets the naive tier at the production
-    head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the draws: the case
-    the ``JUDGE_V`` matrix scales down; no draw runs the one-pass launches."""
+    """One call of each entry (``T`` 4097, cross-entropy, the default plan) is judged against the naive tier at the
+    production head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the draws: the
+    case the ``JUDGE_V`` matrix scales down; no draw runs the one-pass launches."""
     _require_program(entry=entry)
 
     def launch(draw):
@@ -2665,7 +2665,7 @@ def test_device_logprob_backward_makes_its_gradient_buffers_behind_the_recompute
     """A remembered log-probability backward binding (plain and with a per-token temperature) makes ``dX_acc``,
     ``dX`` and ``dW`` right before chunk 0's dX GEMM -- behind the row gathers and the recompute launch, the launches
     a call of a few rows waits for on the host -- and the first (prepared) call and the remembered call hold their
-    contract; at ``JUDGE_H`` / ``JUDGE_V`` the remembered call of every draw meets the naive tier."""
+    contract; at ``JUDGE_H`` / ``JUDGE_V`` the remembered call of every draw is judged against the naive tier."""
     if form == "temperature":
         _require_tau_program()
         inp = _tau_inputs(T, W=glm_weight)
@@ -2867,7 +2867,7 @@ def test_device_prepared_runner_and_cuda_graph(glm_weight, record_property, entr
     into the bound tensors, again after its accumulators and chunk buffers were filled with NaN, and holds its contract
     on those values.  At ``JUDGE_H`` / ``JUDGE_V`` a graph captured once replays every draw's ``X`` / labels /
     ``dlogp`` copied into its bound tensors (the weight bound and fixed), again after its accumulators and chunk
-    buffers were filled with NaN, and the outputs of both replays meet the naive tier (``name@replay`` /
+    buffers were filled with NaN, and the outputs of both replays are judged against the naive tier (``name@replay`` /
     ``name@again``).  The shipped chunks (``shipped_chunks``: no short-tail fold; the 4097-row call keeps its 1-row
     tail chunk)."""
     _require_program(entry=entry)
@@ -3288,8 +3288,8 @@ def test_device_one_slice_call_runs_under_strict_deterministic_algorithms(
 ):
     """Under strict ``torch.use_deterministic_algorithms(True)`` a call whose dX chunks all have one slice (pinned; every
     row valid, uncompacted) raises no alert (its launches have one order), binding and from the remembered binding, and
-    both calls hold their contract; at ``JUDGE_H`` / ``JUDGE_V`` two calls per draw raise no alert and meet the naive
-    tier (the judge keeps each output's largest error)."""
+    both calls hold their contract; at ``JUDGE_H`` / ``JUDGE_V`` two calls per draw raise no alert and are judged
+    against the naive tier (the judge keeps each output's largest error)."""
     _require_program(entry=entry)
     inp = _device_inputs(8191, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(gemm_tuning={"dx": {"k_slices": None}}, compact_rows=False)
@@ -5589,7 +5589,7 @@ def test_device_loss_explicit_budget_forms(glm_weight, record_property, objectiv
     budget.  One byte below the smallest peak the call raises ``ValueError`` before its chunk loop, and the next call
     runs.  GLM ``H`` / ``V`` (5 % of the labels ignored); ``count``: the caller's ``num_valid_rows``.  At ``JUDGE_H`` /
     ``JUDGE_V`` (a one-chunk call at ``_ONE_CHUNK_BUDGET_V``) every draw's four budgets (of its own peaks) run their
-    forms and the steps, plain and checkpointed (``name@ckpt_<budget>``), meet the naive tier."""
+    forms and the steps, plain and checkpointed (``name@ckpt_<budget>``), are judged against the naive tier."""
     _require_program(entry="loss")
     inp = make_inputs(
         T,
@@ -5953,8 +5953,8 @@ def test_device_budget_vocab_major_logprob(glm_weight, record_property, monkeypa
     (here 3 and 6 chunks of 4096 rows; the default form takes it for 2 .. 4 chunks only): ``logp`` / ``dX`` / ``dW``
     are the vocabulary-major backward's bits (mode ``"1"`` on the default entry), the outputs hold their contract, and
     the step peaks within the plan's prediction, itself within the budget.  At ``T = 12000`` the vocabulary-major
-    backward (mode ``"1"``, the budget form's bits) runs on every draw at ``JUDGE_H`` / ``JUDGE_V`` and meets the
-    naive tier."""
+    backward (mode ``"1"``, the budget form's bits) runs on every draw at ``JUDGE_H`` / ``JUDGE_V`` and is judged
+    against the naive tier."""
     _require_program(entry="logprob")
     calls = []
     real = cake_backend._backward_logprob_vm
@@ -6333,8 +6333,8 @@ def test_device_every_row_ignored_and_no_rows(glm_weight, entry):
 
 def test_device_upstream_gradient_scale(glm_weight, record_property):
     """A loss upstream gradient other than 1 (``loss * 3``) scales ``dX`` / ``dW`` through the same single cast: the
-    production-shape call holds its contract, and at ``JUDGE_H`` / ``JUDGE_V`` ``dX`` / ``dW`` meet the naive tier
-    against three times the oracle's (the naive tier backpropagates ``loss * 3``)."""
+    production-shape call holds its contract, and at ``JUDGE_H`` / ``JUDGE_V`` ``dX`` / ``dW`` are judged against the
+    naive tier, their errors taken against three times the oracle's (the naive tier backpropagates ``loss * 3``)."""
     _require_program(entry="loss")
     inp = _device_inputs(4097, "ce", W=glm_weight)
     contract_lm_head(_run(inp, 4096, backend="cake", scale=3.0), inp)
@@ -7109,7 +7109,7 @@ def test_device_short_tail_fold(logprob_chunk_loop, glm_weight, record_property,
     under the zero-gradient row skip's counted forms too, its chunk loop pinned: the vocabulary-major auto rule takes
     this two-chunk call otherwise) and, with the fused cast, no FP32 ``dW_acc`` -- and holds its contract, as does a
     second call from the remembered binding; at ``JUDGE_H`` / ``JUDGE_V`` the binding call and the remembered call
-    (``name@first`` / ``name@again``) run one chunk on every draw and meet the naive tier."""
+    (``name@first`` / ``name@again``) run one chunk on every draw and are judged against the naive tier."""
     _require_program(entry=entry)
     inp = _device_inputs(4600, objective, W=glm_weight)
     rows = int((inp.labels >= 0).sum())
@@ -7161,8 +7161,8 @@ def test_device_red_min_rows_keeps_small_chunks_on_the_plain_store(
 ):
     """``set_dx_red_min_rows``: a two-chunk call whose one-row tail falls below the floor runs that chunk with the
     plain store while the 4096-row chunk keeps the reduction (launch record); the call holds its contract, and at
-    ``JUDGE_H`` / ``JUDGE_V`` the same launches on every draw meet the naive tier.  The shipped chunks (no short-tail
-    fold)."""
+    ``JUDGE_H`` / ``JUDGE_V`` the same launches on every draw are judged against the naive tier.  The shipped chunks (no
+    short-tail fold)."""
     _require_program(entry="loss")
     policy = cake_backend.dx_slice_policy()
     if _device_slices(4097, policy, glm_weight)[0] == 1:
@@ -9005,8 +9005,8 @@ def test_device_logprob_keep_meets_the_naive_tier(
     """The kept logits (the chunked kept form, :data:`CHUNKED_KEEP`) of :func:`test_device_logprob_keep_is_bitwise`'s
     calls, whose ``dX`` of a chunk of more than one slice comes from the ordered K-slice reduction (a slab sum in slice
     order): ``logp`` /
-    ``dX`` / ``dW`` of the kept autograd entry meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws, every
-    draw's backward through a kept binding."""
+    ``dX`` / ``dW`` of the kept autograd entry are judged against the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the
+    draws, every draw's backward through a kept binding."""
     _require_program(entry="logprob")
     case = (T, C, ignore, switches, ld_pad)
 
@@ -9614,10 +9614,10 @@ def test_device_logprob_keep_one_pass(glm_weight, record_property, T, C, ignore,
     pinned also the default path's bits); every call holds its contract; the side-stream dX (``dx_side``) gives the
     in-order bits.  The uncheckpointed kept step and a non-reentrant and a reentrant ``torch.utils.checkpoint`` step
     (one dX slice pinned) hold their contract.  At ``JUDGE_H`` / ``JUDGE_V`` the kept call, its second call from the
-    remembered kept bindings, its chunked form (``one_pass=False``), its other dX stream and the three kept steps meet
-    the naive tier over the draws (``name@one_pass`` / ``name@again`` / ``name@chunked`` / ``name@other_side`` /
-    ``name@step`` / ``name@ckpt`` / ``name@ckpt_reentrant``), every draw's weight gradient one pass over
-    ``K = T_v``."""
+    remembered kept bindings, its chunked form (``one_pass=False``), its other dX stream and the three kept steps are
+    judged against the naive tier over the draws (``name@one_pass`` / ``name@again`` / ``name@chunked`` /
+    ``name@other_side`` / ``name@step`` / ``name@ckpt`` / ``name@ckpt_reentrant``), every draw's weight gradient one
+    pass over ``K = T_v``."""
     _require_program(entry="logprob")
     inp = make_inputs(
         T, seed=SEED + 290 + T, device=CUDA, W=glm_weight, ignore_frac=ignore
@@ -10751,10 +10751,10 @@ def _judge_zero_dlogp_skip(
 ):
     """Judge the backward with the zero-gradient row skip (floor 0) of ``T`` rows at ``JUDGE_H`` / ``JUDGE_V`` over the
     draws: each draw's zero rows of ``kind`` come from its own generator (:func:`_draw_zero_dlogp`; ``prepare`` first
-    adjusts the draw), ``logp`` / ``dX`` / ``dW`` of ``call(draw)`` (default :func:`_logprob_call`) meet the naive tier,
-    the zero rows' and the ignored rows' ``dX`` rows are exact ``+0`` (:func:`_zero_dlogp_contract`), and the partition
-    runs on every launch (``one_partition``: once, over the valid rows).  ``repeats``: launches per draw, each after
-    the first from the remembered binding (the judge keeps each output's largest error)."""
+    adjusts the draw), ``logp`` / ``dX`` / ``dW`` of ``call(draw)`` (default :func:`_logprob_call`) are judged against
+    the naive tier, the zero rows' and the ignored rows' ``dX`` rows are exact ``+0`` (:func:`_zero_dlogp_contract`),
+    and the partition runs on every launch (``one_partition``: once, over the valid rows).  ``repeats``: launches per
+    draw, each after the first from the remembered binding (the judge keeps each output's largest error)."""
     calls = _counted_partition(monkeypatch)
     call = _logprob_call if call is None else call
 
@@ -10812,9 +10812,9 @@ def test_device_zero_dlogp_rows_skip(glm_weight, request, monkeypatch, record_pr
     """The zero-gradient row skip on the device against the same backward without it (``set_zero_dlogp_min_rows(None)``):
     ``logp`` the same bits; the zero rows' and the ignored rows' ``dX`` rows exact ``+0``; the call and a second call
     from the remembered binding hold their contract.  Every valid row zero: zero gradients.  Otherwise the skip call
-    meets the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The short-tail
-    fold cases (T 4600 / 6000) run the chunk loop (``logprob_chunk_loop``): by default a call of 2 chunks with a short
-    tail takes the vocabulary-major backward, which never runs the folded chunk."""
+    is judged against the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The
+    short-tail fold cases (T 4600 / 6000) run the chunk loop (``logprob_chunk_loop``): by default a call of 2 chunks
+    with a short tail takes the vocabulary-major backward, which never runs the folded chunk."""
     _require_program(entry="logprob")
     if T in (4600, 6000):
         request.getfixturevalue("logprob_chunk_loop")
@@ -10873,8 +10873,8 @@ def test_device_zero_dlogp_one_chunk_skip(glm_weight, monkeypatch, record_proper
     ignored rows' ``dX`` rows are exact ``+0`` and every call holds its contract.  Without zero rows ``dW`` is bitwise
     the backward without the skip's (the partition keeps the forward's row order); every valid row zero gives zero
     gradients.  Otherwise the skip call of the same rows (one ignored row,
-    no other zero ``dlogp``) and its second call from the remembered binding meet the naive tier at ``JUDGE_H`` /
-    ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`, two launches per draw)."""
+    no other zero ``dlogp``) and its second call from the remembered binding are judged against the naive tier at
+    ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`, two launches per draw)."""
     _require_zero_dlogp_skip()
     # the counted path of the default Function: a call of at most uncompacted_max_rows() rows would run uncompacted
     # (no row skip), one of at most SMALL_T_KEEP_MAX_ROWS rows the kept logits
@@ -11502,8 +11502,8 @@ def test_device_zero_dlogp_short_last_chunk_keeps_the_counted_cast(
     about 650 rows) keeps the skip: the partition runs (binding and remembered binding), the remembered plan casts the
     last chunk through the TMA cast's counted form where the record registers it (else the counted shipped cast);
     ``logp`` keeps the bits of the backward without the skip, the zero and ignored rows' ``dX`` rows are exact ``+0``
-    and both calls hold their contract.  The skip call of two chunks (a short last chunk) meets the naive tier at
-    ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The shipped chunks
+    and both calls hold their contract.  The skip call of two chunks (a short last chunk) is judged against the naive
+    tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The shipped chunks
     (``shipped_chunks``: no short-tail fold)."""
     _require_zero_dlogp_skip()
     _module_name, record = cake_backend.record_for(CUDA)
@@ -11650,8 +11650,8 @@ def test_device_zero_dlogp_raised_dx_slices(
     slice rule's counts; every chunk of more than one slice launches its counted form.
     On the binding and the remembered binding: ``logp`` the bits of the backward without the skip; the zero and
     ignored rows' ``dX`` exact ``+0``; ``dW`` bitwise without zero rows (the forward's row order); the contract.  Every
-    valid row zero: zero gradients.  Otherwise the skip call meets the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the
-    draws, its plan counted with every chunk at the architecture's counted slice count at least
+    valid row zero: zero gradients.  Otherwise the skip call is judged against the naive tier at ``JUDGE_H`` /
+    ``JUDGE_V`` over the draws, its plan counted with every chunk at the architecture's counted slice count at least
     (:func:`_judge_zero_dlogp_skip`)."""
     _require_zero_dlogp_skip()
     _module_name, record = cake_backend.record_for(CUDA)
@@ -12561,8 +12561,8 @@ def test_temperature_scalar_equals_the_constant_tensor(record_property, s):
 )
 def test_temperature_heterogeneous_matches_the_references(record_property, T, C, frac):
     """A heterogeneous per-token temperature (log-uniform in [0.25, 4], some rows exactly 1.0) on irregular ``T``,
-    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` meet the naive tier (with the
-    temperature) over the draws, zeros on ignored rows."""
+    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` are judged against the naive
+    tier (with the temperature) over the draws, zeros on ignored rows."""
     ignore = (T - 1) / T if frac == "all_but_one" else float(frac)
     _judge_host(
         record_property,
@@ -13886,7 +13886,7 @@ def test_device_temperature_heterogeneous_matches_the_references(
 ):
     """A heterogeneous per-token temperature on the generated program (the default dX slices), ``REPEATS`` runs on
     the same inputs (fresh allocator state each time, 0xFF-poisoned): every run holds its contract (zeros on the
-    ignored rows).  At ``JUDGE_H`` / ``JUDGE_V`` three poisoned runs per draw meet
+    ignored rows).  At ``JUDGE_H`` / ``JUDGE_V`` three poisoned runs per draw are judged against
     the naive tier with the temperature (the judge keeps each output's largest error); the cells of 5 % ignored rows
     at ``C = 4096`` and ``T`` 4097 / 16231 also judge the uncompacted call of the draw (``name@compact`` /
     ``name@plain``)."""
@@ -15742,7 +15742,7 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     ``dead`` 0.5) get exact-zero ``dX`` rows, a non-reentrant checkpointed step holds its contract, a frozen ``X``
     gives the plain step's ``dW`` bits, and the kept logits (no temperature) keep their chunk loop: the default
     call's ``logp`` bits -- with no temperature, a scalar and a per-token one.  At ``JUDGE_H`` / ``JUDGE_V`` the same
-    calls of every draw take the same forms and meet the naive tier: the three vocabulary-major runs, the
+    calls of every draw take the same forms and are judged against the naive tier: the three vocabulary-major runs, the
     checkpointed step and the kept call of each ``T`` (``vm_T<rows>``, ``vm_T<rows>_run2`` / ``_run3``,
     ``ckpt_T<rows>`` / ``kept_T<rows>``), the five-chunk call under ``"auto"`` and the two runs under ``"1"``
     (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``)."""
@@ -16259,9 +16259,9 @@ def test_device_small_call_has_no_host_synchronization(glm_weight, entry, ignore
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_small_call_with_ignored_rows_meets_the_naive_tier(glm_weight, record_property, T, entry):
     """Ignored rows in a small call (staged, uncompacted, no count): the production-shape call holds its contract
-    (exact ``+0`` on the ignored rows) and keeps the counted call's ``logp`` bits on every row; the small call meets
-    the naive tier over the draws with a quarter of the rows ignored -- at the production head (``H`` 6144, ``V``
-    154880) for ``T`` 256, at ``JUDGE_H`` / ``JUDGE_V`` for ``T`` 32."""
+    (exact ``+0`` on the ignored rows) and keeps the counted call's ``logp`` bits on every row; the small call is judged
+    against the naive tier over the draws with a quarter of the rows ignored -- at the production head (``H`` 6144,
+    ``V`` 154880) for ``T`` 256, at ``JUDGE_H`` / ``JUDGE_V`` for ``T`` 32."""
     _require_program(entry=entry)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
     with _uncompacted_max_rows(256):

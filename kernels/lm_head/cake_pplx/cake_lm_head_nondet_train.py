@@ -27,14 +27,14 @@ run-to-run bit-equality promise for any output; the deterministic module makes
 it.  Two row skips of this backend also differ from the deterministic
 module: zero-weight policy rows and log-probability rows with a zero ``dlogp``
 leave the gradient GEMMs, so ``loss`` / ``dW`` bits may differ from the
-deterministic module's (both meet the naive tier; see the backend README,
+deterministic module's (both are judged against the naive tier; see the backend README,
 Tests), and a non-finite value in a zero-weight row does not reach ``loss`` /
 ``dX`` / ``dW``.  By default a
 one-row cross-entropy loss call at ``H = 6144`` (BF16 contiguous ``W``, one
 chunk, compacted rows, no explicit ``gemm_tuning``, a registered program; the
 conditions of ``cake_backend.set_one_pass_rows``) runs the backend's one-pass
 programs: its ``loss`` / ``logp`` / ``dW`` are summed in their own fixed order
-and are not the deterministic module's bits (both meet the naive tier).  Any
+and are not the deterministic module's bits (both are judged against the naive tier).  Any
 other one-row call runs the chunked path.  The
 backend README lists the output differences ("Zero-weight policy rows",
 "Zero-gradient rows of the log-probability backward" and the
@@ -295,7 +295,7 @@ def cake_lm_head_nondet_train_logprob(
     deterministic entry's programs in its order, ``dW`` too when no valid row
     has a zero ``dlogp``, except a folded short tail and a call of the
     vocabulary-major backward, by default 2 to 4 chunks: another ``dW``
-    grouping, both meet the naive tier; ``dX`` the same products, a sliced
+    grouping, both are judged against the naive tier; ``dX`` the same products, a sliced
     chunk's summed in slice order).  The zero-gradient row skip runs the dX / dW GEMMs of the rows
     with a nonzero ``dlogp`` only, with or without a temperature.  ``None``
     and a Python number whose FP32 value is 1.0 run the call without a

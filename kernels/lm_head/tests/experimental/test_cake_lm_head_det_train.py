@@ -6149,10 +6149,10 @@ COMPACTION_CASES = [("ce", "loss"), ("policy", "loss"), ("ce", "logprob")]
     "objective, entry", COMPACTION_CASES, ids=["ce", "policy", "logprob"]
 )
 def test_compaction_matches_uncompacted(record_property, objective, entry, frac):
-    """The compacted and uncompacted chunk loops both meet the naive BF16 tier on the same draws (``@compact`` /
-    ``@plain``): the same per-row work over fewer rows -- the reference GEMMs may round differently for another M,
-    and the loss / dW reductions run over different chunk boundaries, so the two forms are not bitwise unless every row
-    is valid (the very same, uncompacted, path)."""
+    """The compacted and uncompacted chunk loops both are judged against the naive BF16 tier on the same draws
+    (``@compact`` / ``@plain``): the same per-row work over fewer rows -- the reference GEMMs may round differently for
+    another M, and the loss / dW reductions run over different chunk boundaries, so the two forms are not bitwise unless
+    every row is valid (the very same, uncompacted, path)."""
     T, C = 37, 16
     ignore = {
         "none": 0.0,
@@ -7579,8 +7579,9 @@ def _judge_device(record_property, T, launch, *, inputs=None, **kw):
 def test_device_forward_backward_matches_reference(
     glm_weight, record_property, objective, T
 ):
-    """The generated program's ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier at the judged shape
-    (``H = JUDGE_H``, ``V = JUDGE_V``) over the judge's draws; one call at the production shape keeps its contract."""
+    """The generated program's ``loss`` / ``logp`` / ``dX`` / ``dW`` are judged against the naive BF16 tier at the
+    judged shape (``H = JUDGE_H``, ``V = JUDGE_V``) over the judge's draws; one call at the production shape keeps its
+    contract."""
     _require_program(entry="loss")
     _judge_device(
         record_property,
@@ -7613,8 +7614,8 @@ _LOGPROB_ENTRY_CASES = (
     ],
 )
 def test_device_logprob_entry(glm_weight, record_property, T, C, ignore, switches):
-    """The log-probability entry's ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier at the judged shape over the
-    judge's draws; one call at the production shape keeps its contract."""
+    """The log-probability entry's ``logp`` / ``dX`` / ``dW`` are judged against the naive BF16 tier at the judged shape
+    over the judge's draws; one call at the production shape keeps its contract."""
     _require_program(entry="logprob")
     _judge_device(
         record_property,
@@ -7631,10 +7632,10 @@ def test_device_logprob_entry(glm_weight, record_property, T, C, ignore, switche
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_meets_the_naive_tier_at_the_production_head(record_property, entry):
-    """One call of each entry (``T`` 4097, cross-entropy, the default plan) meets the naive BF16 tier at the production
-    head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the judge's draws, each
-    draw's ``W`` from its own seed: the case the ``JUDGE_V`` matrix scales down.  Every draw runs the generated
-    program's logits and gradient GEMMs (launch record)."""
+    """One call of each entry (``T`` 4097, cross-entropy, the default plan) is judged against the naive BF16 tier at the
+    production head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the judge's
+    draws, each draw's ``W`` from its own seed: the case the ``JUDGE_V`` matrix scales down.  Every draw runs the
+    generated program's logits and gradient GEMMs (launch record)."""
     _require_program(entry=entry)
 
     def launch(inp):
@@ -11222,8 +11223,9 @@ def test_temperature_scalar_equals_the_constant_tensor(record_property, s):
 )
 def test_temperature_heterogeneous_matches_the_references(record_property, T, C, frac):
     """A heterogeneous per-token temperature (log-uniform in [0.25, 4], some rows exactly 1.0) on irregular ``T``,
-    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier
-    against the FP64 oracle (both with the temperature) over the judge's draws, zeros on ignored rows."""
+    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` are judged against the naive
+    BF16 tier, their errors taken against the FP64 oracle (both with the temperature) over the judge's draws, zeros on
+    ignored rows."""
     ignore = (T - 1) / T if frac == "all_but_one" else float(frac)
     _judge(
         record_property,
@@ -14962,9 +14964,9 @@ def test_device_default_budget_form_is_deterministic(
     whose split the budget rule decides) and the log-probability entry (also with a zero upstream gradient on 30 % of
     the valid rows: the budget form runs without the zero-gradient row skip); each run's plan is a budget form that
     fits.  Against the explicit fast form: the same bits, except ``dX`` / ``dW`` of the zero-weight and zero-gradient
-    cases, which meet the naive BF16 tier instead, judged at ``H = JUDGE_H``, ``V = _AUTO_JUDGE_V`` over the judge's
-    draws with a budget form that fits on every draw.  With fewer chunks than ``_AUTO_MIN_CHUNKS`` the call keeps the
-    fast form: no plan, the fast form's bits."""
+    cases, which are judged against the naive BF16 tier instead, at ``H = JUDGE_H``, ``V = _AUTO_JUDGE_V`` over
+    the judge's draws with a budget form that fits on every draw.  With fewer chunks than ``_AUTO_MIN_CHUNKS`` the call
+    keeps the fast form: no plan, the fast form's bits."""
     entry = "logprob" if case.startswith("logprob") else "loss"
     _require_program(entry=entry)
     _require_recompute()

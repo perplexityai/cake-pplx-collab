@@ -1277,9 +1277,9 @@ ZERO_DEVICE_CASES = [
 
 def _judge_split(record_property, T, kind, C):
     """The split call (exact mode, default switches) at the judged shape (``JUDGE_H``, ``JUDGE_V``, ``T`` rows, chunk
-    ``C``) over the judge's draws: ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier against the FP64
-    oracle; on every draw the chunk loop runs over the gradient rows only (the split's route) and the zero-weight and
-    ignored rows' ``dX`` rows are exact ``+0``."""
+    ``C``) over the judge's draws: ``loss`` / ``logp`` / ``dX`` / ``dW`` are judged against the naive BF16 tier, their
+    errors taken against the FP64 oracle; on every draw the chunk loop runs over the gradient rows only (the split's
+    route) and the zero-weight and ignored rows' ``dX`` rows are exact ``+0``."""
 
     def make(s):
         return _judged_inputs(T, kind, s, H=JUDGE_H, V=JUDGE_V, device=CUDA)

@@ -603,7 +603,7 @@ keyword.
   form, `fuse_dw_cast=False` removes the fused candidates, the hidden count
   changes the chunk-0 buffers and an explicit `k_slices` the dX slabs -- so
   they can change the chosen form.  Bits: the budget forms are bitwise the
-  fast form's (above), with two exceptions, both meeting the naive tier
+  fast form's (above), with two exceptions, both judged against the naive tier
   (see "Tests") and the same on every run: a log-probability backward in a budget form runs
   without the zero-gradient row skip (its `dX` / `dW` bits can differ from
   the fast form's where valid rows have a zero `dlogp`), and a loss call with
@@ -856,8 +856,8 @@ previous mode; `zero_weight_loss_mode()` reads it):
 | `loss`, mode `"exact"` | identical, non-finite values in `Z` rows included (their term is `+-0` either way) |
 | `loss`, mode `"regroup"` | the same FP32 sum over other chunk boundaries: may differ in the last FP32 bits |
 | `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X`, logits or `infer_logp` is not finite) |
-| `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise both meet the naive tier |
-| `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): both meet the naive tier; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
+| `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise both are judged against the naive tier |
+| `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): both are judged against the naive tier; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
 
 Run to run every output is bitwise the same, as everywhere in this package.
 
@@ -892,7 +892,7 @@ split bounds both:
   slices than the largest count of the same call without the split
   (`dx_slices_cap`; a count above it becomes the cap fitted to the K steps).
   A chunk the cap lowers runs another dX slice count than the rule picks, so
-  its `dX` rows can differ in their last bits (both meet the naive tier,
+  its `dX` rows can differ in their last bits (both are judged against the naive tier,
   as any `G` row of another dX form); an explicit `k_slices` knob is the
   same in both calls and is not capped.
 * **The guard.** After the count readback the host predicts both peaks from
@@ -980,9 +980,9 @@ logits or `lse` (or `W`) are non-finite.  A live row's `dX` row is the same
 per-row arithmetic; its chunk
 can change (the live rows move to the front), and with it that chunk's dX
 K-slice count, so its bits can differ from a call without the skip (both
-meet the naive tier).  `dW` sums the same nonzero products over the live
+are judged against the naive tier).  `dW` sums the same nonzero products over the live
 rows in the new row order (FP32), so its bits can differ from a call without
-the skip (both meet the naive tier).  A call with no zero-gradient row keeps
+the skip (both are judged against the naive tier).  A call with no zero-gradient row keeps
 the row order, the chunks and the K steps of the call without the skip:
 `dX` and `dW` are then bit-identical to it.
 
@@ -1032,7 +1032,7 @@ recounts its valid rows (no forward row index), `logprob_dz=False`,
 `dx_finalize=False` with `dX`, the kept logits (`memory_mode="keep_logits"`),
 the opt-in forms (`memory_mode="budget"`, `num_valid_rows`) and a default
 call's backward in a budget form (its automatic form: its `dX` / `dW` bits can
-then differ from the fast form's for rows with `dlogp == 0`; both meet the
+then differ from the fast form's for rows with `dlogp == 0`; both are judged against the
 naive tier, the same on every run), the prepared runner, the reference
 backend and a temperature backward given `temperature_rows` without the
 temperature itself.

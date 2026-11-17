@@ -144,8 +144,8 @@ Contract
   ``loss`` is bitwise the call without the split; ``"regroup"`` reduces the gradient rows' terms over the split's
   own chunks (the same FP32 sum over different chunk boundaries).  ``logp`` / ``lse`` of every row are bitwise the
   plain path's; ``dX`` rows of ``G`` too whenever their chunk runs the same dX form and K-slice count; ``dW`` groups
-  its K reduction over the split's chunk rows (both meet the naive tier, see the package README, Tests; run to run
-  bitwise).  A zero-weight row is
+  its K reduction over the split's chunk rows (both are judged against the naive tier, see the package README, Tests;
+  run to run bitwise).  A zero-weight row is
   treated like an ignored row for the gradients: a non-finite value in its ``X`` row, its logits or its
   ``infer_logp`` does not reach ``dX`` / ``dW`` (the plain path gives NaN there through ``0 * inf``; its loss term is
   ``+-0`` either way).  Not applied (the plain path runs): ``compact_rows=False``, ``objective="ce"``, the
