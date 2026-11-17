@@ -112,9 +112,8 @@ records' ``select`` tables.
 
 Every launch is fixed-order today, so two runs of one call on one device give
 the same bits; the non-deterministic contract does not promise run-to-run bits.
-The results agree with the deterministic package
-(``cake_pplx._backends.cake_gdn_det_train``) to its accuracy budgets, not
-bitwise: the tails of a value-head group of two or more sum the group's FP32
+The results are not bitwise equal to those of the deterministic package
+(``cake_pplx._backends.cake_gdn_det_train``): the tails of a value-head group of two or more sum the group's FP32
 ``dq`` / ``dk`` partials before one BF16 rounding, the tcgen05 adjoint adds the
 FP32 ``dv_local`` to ``dv2`` before its one rounding, and the adjoint table
 priced for ``dhu_tc2`` splits the sequences at other segment boundaries.
@@ -454,8 +453,8 @@ class ChainOptions:
     ``"unfused"`` tail; ``warmup_log2`` overrides the pre-scans' warm-up threshold; ``dhu_scan``
     forces the adjoint scan of a serial plan (``"reg"``: ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2``;
     ``None``: the selection rule) and the pass 2 of a split ``SDT_CONFIG`` plan on a host-built table (``"reg"``:
-    ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2`` after the fused pre-scan; the same bits on ``dhu_tc2``, within
-    the budgets on ``dhu_tc2_dvl32``); ``prep``
+    ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2`` after the fused pre-scan; the same bits on ``dhu_tc2``, other
+    bits on ``dhu_tc2_dvl32``); ``prep``
     forces the prep (``"plain"``: grid (chunks, HV); ``"tma"``: ``prep_tma``,
     grid (chunks, H), where q and k are 16-byte aligned; ``None``: the dispatch rule); ``save_state`` keeps the
     forward state of the architecture's tape level for the backward (``T_full``: ``w`` / ``h`` / ``v_new``,
@@ -5955,8 +5954,8 @@ def cake_gdn_nondet(
     decreasing, to the tokens of ``q``.  The device route trusts the values of ``cu_seqlens`` (reading them would
     synchronize): the same contract, unchecked.
 
-    The package is the non-deterministic route: the outputs and gradients match the deterministic package within its
-    accuracy budgets, not bitwise.  The mode is in the name; there is no ``deterministic`` keyword.  Every launch is
+    The package is the non-deterministic route: the outputs and gradients are not bitwise
+    equal to the deterministic package's.  The mode is in the name; there is no ``deterministic`` keyword.  Every launch is
     fixed-order today, so PyTorch's deterministic algorithms (``torch.use_deterministic_algorithms(True)``, with or
     without ``warn_only``) change nothing: no alert, no warning, no fallback.  The contract does not promise run-to-run
     bits.  ``tail`` pins the backward tail (:class:`ChainOptions`).

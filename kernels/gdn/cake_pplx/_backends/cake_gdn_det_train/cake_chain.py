@@ -71,7 +71,7 @@ gradient row, :class:`CakeGDNDetPackedFunction`), and on those of
 ``DVL32_ARCHS`` its tcgen05 adjoint scan is ``dhu_tc2_dvl32`` (the FP32
 ``dv_local`` values added to ``dv2`` before its one rounding: other ``dk`` /
 ``dv`` / ``dg`` / ``dbeta`` / initial-state-gradient bits than the register
-scan's, within the budgets);
+scan's);
 :func:`fused_tail_stage`, :func:`dhu_tc2_stage`.  A host-built table lists
 the sequences longest first (:func:`lpt_sequence_order`; every chunk keeps its
 token offset, the state rows are gathered into that order and the final state
@@ -401,7 +401,7 @@ class ChainOptions:
     ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2`` after the fused pre-scan).  ``"tc"`` runs the tcgen05
     scan of :func:`dhu_tc2_stage`: on ``dhu_tc2`` it gives the bits of ``"reg"``; on ``dhu_tc2_dvl32`` (a value-head
     group of three on ``DVL32_ARCHS``, dv2 rounded once) o and the final state keep the bits of ``"reg"`` and the
-    gradients take others within the budgets; ``prep``
+    gradients take others; ``prep``
     forces the prep (``"plain"``: grid (chunks, HV); ``"tma"``: ``prep_tma``,
     grid (chunks, H), where q and k are 16-byte aligned; ``None``: the dispatch rule) and with it the prep forward (a
     ``prep``, ``scan_config`` or ``segment_chunks`` pin keeps a call off the forwards on wy_a's A, :func:`fwd_a_route`,
@@ -1406,7 +1406,7 @@ def _dhu_tc_selected(
 # on the ``dhu_tc2`` form the pre-scan is ``dhu_pre_dvl_r64k1``, which computes the ``dv_local`` tiles of the chunks it
 # scans, so no ``dv_local`` stage runs.  Both forms give the same bits at the same segment table on ``dhu_tc2``; on
 # ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`: a value-head group of three on ``DVL32_ARCHS``) dv2 rounds once, so dk / dv
-# / dg / dbeta / dh0 take other bits than the register pass 2's (within the budgets), and this rule, the ``dhu_scan``
+# / dg / dbeta / dh0 take other bits than the register pass 2's, and this rule, the ``dhu_scan``
 # pin and the table route (a device-built table keeps the register pass 2) choose between them.  The rule prices pass
 # 2 the way :func:`dhu_tc_pricing` prices a serial scan: T_tc2 = steps x t(n), steps the makespan of the segment table
 # at one CTA per (segment, value head) and one CTA per SM, n = min(segments x HV, SMs) and t(n) the ``dhu_tc2``

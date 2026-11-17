@@ -5801,7 +5801,7 @@ def _prepare(
 
 
 # The numerical mode is in the name: this is the non-deterministic package.  It keeps the deterministic package's
-# contract and accuracy budgets, and its results need not equal that package's bit for bit (its fixed-order levers,
+# contract, and its results need not equal that package's bit for bit (its fixed-order levers,
 # e.g. the ``fill_small`` segment plan, reassociate FP32 sums).  Every launch of this version is fixed-order today, so
 # no entry raises PyTorch's alert for an operation without a deterministic implementation and
 # ``torch.use_deterministic_algorithms`` changes nothing here; the contract does not promise run-to-run bits.  No entry

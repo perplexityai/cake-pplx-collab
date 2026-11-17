@@ -16,9 +16,8 @@
 - `torch.use_deterministic_algorithms(True)` changes nothing: every launch is
   fixed-order, so no alert is raised and the outputs and gradients are the
   same bits as without it.
-- The non-deterministic route is a separate package.  Its results match this
-  package within this package's accuracy budgets, not bitwise.  Nothing here
-  routes to it.
+- The non-deterministic route is a separate package.  Its results are not
+  bitwise equal to this package's.  Nothing here routes to it.
 - The forward tape carries this package's tag, `"mode": "det"`.
   `cake_gdn_det_train_backward` refuses any other tape with `ValueError`; a
   tape of the non-deterministic package carries `"mode": "nondet"`.
@@ -126,11 +125,11 @@ same bits as on the views.  The tcgen05 adjoint scan of such a call adds the
 FP32 `dv_local` values to `dv2` before its one rounding (`dhu_tc2_dvl32`), on
 serial plans and in the second pass of split ones.
 Both are fixed-order with one writer per element, so the gradients repeat bit
-for bit; they differ from the previous release of this package (within its
-accuracy budgets).  The register adjoint forms still round `dv_local` to BF16
+for bit; they differ from the previous release of this package.  The
+register adjoint forms still round `dv_local` to BF16
 first, so for such a call they give the same `o` and final state as
 `dhu_tc2_dvl32`, but other bits of `dk`, `dv`, `dg`, `dbeta` and the
-initial-state gradient (within the budgets): the cost rules and the `dhu_scan`
+initial-state gradient: the cost rules and the `dhu_scan`
 pin pick the bits, and on a split `(64, 1)` plan the device-table route always
 runs the register pass.  Groups of two keep `tail_g2` and `dhu_tc2`.
 
@@ -163,8 +162,8 @@ in place, or a `g` / `beta` not at a 16-byte aligned base, is copied first.
 Both forwards are fixed-order (no atomic, wave 1 and the maps write disjoint
 segments), so they are bitwise run to run with one or two streams.  Their
 bits differ from the prep forward's, so the outputs and gradients of these
-FP32-`beta` host-table calls change from the previous release of this package
-(within its accuracy budgets).  Every other call (a BF16 `beta`, Q/K not
+FP32-`beta` host-table calls change from the previous release of this package.
+Every other call (a BF16 `beta`, Q/K not
 normalized, the device route, a larger value-head group, a `prep`,
 `scan_config` or `segment_chunks` pin) runs the prep forward with the same
 launches and bits as before.  The other options (`dhu_scan`, `finalize`,

@@ -11,7 +11,7 @@ The mode is in the name: this package is the non-deterministic route, and no
 entry takes a `deterministic` keyword.  Its deterministic counterpart is
 `cake_pplx.cake_gdn_det_train_kcp` (backend
 `cake_pplx._backends.cake_gdn_det_train_kcp`), a separate package.
-This package keeps that package's entry points and accuracy budgets; its
+This package keeps that package's entry points; its
 results are not bitwise equal to that package's.  It also takes the
 `save_mode` value `"light_akk"`, which the deterministic package does not
 take, and runs it by default with `use_qk_l2norm_in_kernel=True` (see
@@ -165,9 +165,9 @@ context-parallel programs carried no `_kcp`).
   package tag and its backward refuses a node of another package;
   `cake_gdn_nondet_train_kcp_backward` refuses a saved set that is not this
   package's (`CakeGDNNondetKcpSaved`).
-* Accuracy: every output stays within the deterministic route's budgets
-  against the FP64 reference (`rel-RMS <= 1e-2`, `max-abs <= 2e-2` of
-  `max|ref|`; the per-tensor KCP budgets of the deterministic tests).  The
+* Accuracy: the tests record each output's error against an FP64 reference
+  beside the BF16 naive implementation's (`kernels/gdn/tests/cake_naive.py`);
+  a miss is recorded and does not fail a test.  The
   precision classes of the summaries, merges and adjoints are those of the
   deterministic route (FP32 / TF32x3; never plain TF32).
 
@@ -189,8 +189,8 @@ context-parallel programs carried no `_kcp`).
   row of `(2 * H_qk + HV) * 128` elements is read in place through its token
   stride (`q` at element 0, `k` at `H_qk * 128`, `v` at `2 * H_qk * 128`).
   `layout="copy"` makes a contiguous copy first; its time is part of the
-  measured module when reported.  Strided and contiguous inputs give the
-  same results within the accuracy budgets.
+  measured module when reported.  Strided and contiguous inputs are not
+  promised the same bits.
 * When `q` / `k` / `v` are head views of one packed row, take them with
   `cake_gdn_nondet_train_kcp_packed_qkv_views` for full backward speed: plain `split` views of the
   row give the same gradients, but torch's split backward concatenates them:
@@ -206,8 +206,8 @@ context-parallel programs carried no `_kcp`).
   element offsets, which are int64.  Steady state is CUDA-graph capturable.
 * Repeated calls on the same inputs, the backward from the saved set, the
   checkpoint replay and the `torch.utils.checkpoint` direct and indirect
-  backward agree within the accuracy budgets (bitwise today, every path
-  being fixed-order; not guaranteed).
+  backward agree (bitwise today, every path being fixed-order; not
+  guaranteed).
   Gradient accumulation (`.backward()` twice) accumulates.
 * No cooperative launch anywhere in the package; every program is a plain
   stream-ordered launch.
@@ -427,8 +427,7 @@ contiguous copies, so the gradients come back as three rows and the split
 concatenates them).  Plain views of the same row
 (`qkv.split((H_qk * 128, H_qk * 128, HV * 128), -1)`, then
 `.view(T, heads, 128)`) run the same programs on the same operands and give
-the same results (within the accuracy budgets; bitwise in every run measured
-below).  The backward writes one packed row only for the outputs of
+the same results (bitwise in every run measured below; not guaranteed).  The backward writes one packed row only for the outputs of
 `cake_gdn_nondet_train_kcp_packed_qkv_views` (or of the deterministic package's
 `cake_gdn_det_train_kcp_packed_qkv_views`), as recorded by the forward.  For plain views,
 column slices and other views it writes three contiguous `dq` / `dk` / `dv`,
@@ -616,15 +615,15 @@ FP32 round-to-nearest); `g` and `beta` are FP32 until the operand tile is
 formed; `dq` / `dk` reduce their value heads in FP32 in a fixed order and
 round once; `dg` / `dbeta` are FP32 throughout.
 
-Differences from the reference, recorded for the precision budget: `Aqk` is a
+Differences from the reference: `Aqk` is a
 BF16 tape with `scale` inside the rounding (the reference rounds `A` with
 `scale` outside) and the backward consumes that tape; `do_g =
 bf16(scale * e^G * do)` is one extra BF16 rounding on the `dh` q-term and
 the `dq` h-term; the backward gate `rowscale * dv` is applied in FP32 to the
 accumulator (one fewer rounding than the reference's BF16 operand); the `dh`
-accumulation order is the template's.  The precision gates compare every
-tensor against an FP64 reference within 1.10 x the larger of the CP = 1 error
-and the reference's own error.
+accumulation order is the template's.  The tests compare every tensor with
+an FP64 reference beside the BF16 naive implementation (recorded, not
+gating).
 
 ## Kernel structure of one training step
 
