@@ -1086,9 +1086,9 @@ def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(record_property):
         assert len(cache) == 3
         moved = cake_backend.forward(*[t.clone() for t in args])
         assert len(cache) == 3
-        # ... nor do other tensor contents of the same geometry: the shared plan serves
-        # them with the results of a freshly prepared, uncached binding (both judged on
-        # the fresh contents)
+        # ... nor do other tensor contents of the same geometry: the call reuses the
+        # shared plan (no new cache entry); its outputs and those of a freshly prepared,
+        # uncached binding are both judged on the fresh contents
         fresh = make_inputs([256], [512], seed=s + 4, topk=128)
         fresh_args = (
             fresh.q_latent,
@@ -9003,21 +9003,11 @@ def _dkv_acc_argument(form, buffer):
     """How the caller's FP32 accumulator reaches an autograd entry: ``"tensor"`` -- the buffer itself (the buffer is
     owned outside the checkpointed region, so the recomputed forward meets the same tensor); ``"callable"`` -- a
     zero-argument callable returning it, the deferred form: the entry resolves the buffer at backward time and
-    keeps no accumulator on ``ctx``.  An entry that does not accept the deferred form raises ``TypeError`` /
-    ``ValueError`` at forward time, which the tests turn into a skip."""
+    keeps no accumulator on ``ctx``."""
     if form == "tensor":
         return buffer
     assert form == "callable"
     return lambda: buffer
-
-
-DEFERRED_FORM_ERRORS = (TypeError, ValueError, AttributeError)
-
-
-def _skip_if_deferred_form_unsupported(exc):
-    pytest.skip(
-        f"the package does not accept a callable dkv_acc (the deferred accumulator form): {exc}"
-    )
 
 
 def _kv_leaf_indices(name):
@@ -9157,12 +9147,7 @@ def test_ckpt_autograd_entries_keep_nothing_alive_after_a_checkpointed_forward(c
     name, form, dst = case
     inp = _ckpt_inputs()
     fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form, dst_map=dst)
-    try:
-        fn(*leaves)  # warm-up: kernels, plans, per-device workspaces
-    except DEFERRED_FORM_ERRORS as exc:
-        if form == "callable":
-            _skip_if_deferred_form_unsupported(exc)
-        raise
+    fn(*leaves)  # warm-up: kernels, plans, per-device workspaces
     torch.cuda.synchronize()
     if acc is not None:
         acc.zero_()
@@ -9185,12 +9170,7 @@ def test_ckpt_outputs_and_gradients_of_the_checkpointed_and_the_eager_pair(
     def draw(s, j):
         inp = _ckpt_inputs(seed=s)
         fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form, dst_map=dst)
-        try:
-            out_e, grads_e, acc_e = _eager_step(fn, leaves, inp.dout, acc)
-        except DEFERRED_FORM_ERRORS as exc:
-            if form == "callable":
-                _skip_if_deferred_form_unsupported(exc)
-            raise
+        out_e, grads_e, acc_e = _eager_step(fn, leaves, inp.dout, acc)
         out_c = checkpoint(fn, *leaves, use_reentrant=False)
         if acc is not None:
             # the trainer's pattern: the accumulator is zero-filled between the forward and the backward (the tensor
@@ -9727,14 +9707,9 @@ def test_autograd_entries_capture_the_first_call_of_a_new_geometry(
         )
         # one eager step on another geometry: the loaded modules, the per-device constants, autograd's device thread
         other_fn, other_leaves, other_acc = _ckpt_entry(name, other, acc_form=form)
-        try:
-            out_o, grads_o, acc_o = _eager_step(
-                other_fn, other_leaves, other.dout, other_acc
-            )
-        except DEFERRED_FORM_ERRORS as exc:
-            if form == "callable":
-                _skip_if_deferred_form_unsupported(exc)
-            raise
+        out_o, grads_o, acc_o = _eager_step(
+            other_fn, other_leaves, other.dout, other_acc
+        )
         warm = len(cache)
         fn, leaves, acc = _ckpt_entry(name, inp, acc_form=form)
         # fresh leaves, first used on the capture stream (a leaf's AccumulateGrad node records the stream of its first

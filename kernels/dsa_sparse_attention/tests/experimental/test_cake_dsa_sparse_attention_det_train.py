@@ -1546,7 +1546,6 @@ def test_key_passes_give_the_bits_of_one_launch(monkeypatch, dkv, redo):
                 assert _same_bits(a, b)
 
 
-
 @pytest.mark.parametrize("passes", [2, 3])
 def test_key_passes_meet_the_naive_tier(passes, record_property):
     """A backward of P key-range passes: the forward's outputs and the gradients meet the naive tier over the
