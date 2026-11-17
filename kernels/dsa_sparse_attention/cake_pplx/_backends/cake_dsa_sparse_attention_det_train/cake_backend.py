@@ -64,9 +64,9 @@ limitations under the License.
 # key-range passes runs ``bwd_compact`` + ``bwd_main_pass`` P times in place of
 # ``bwd_main``, see :func:`plan_key_passes`):
 #
-# * ``bwd_delta``: ``delta = rowsum(dout * (out + o_lo))`` ``[T, 64]`` FP32 (the
-#   non-deterministic package's bits) and the per-query bound terms ``qstat
-#   [T, 4]`` FP32 (from the largest magnitudes and the norms of ``dout``,
+# * ``bwd_delta``: ``delta = rowsum(dout * (out + o_lo))`` ``[T, 64]`` FP32 and
+#   the per-query bound terms ``qstat [T, 4]`` FP32 (from the largest
+#   magnitudes and the norms of ``dout``,
 #   ``delta`` and the query parts, each summed over the heads in a fixed
 #   order); it also zeroes the global words the later stages reduce into.
 # * ``bwd_norm``: the key norms ``||kv_latent[k]||`` ``[S]`` FP32 and their
@@ -231,7 +231,8 @@ def _check_key_passes(key_passes: Optional[int], num_kv: int) -> None:
 # ``indices = key_scratch`` and ``topk_length = pass_counts``).  Its dQ goes through the FP32 partial ``dq_partial``
 # [T, 64 * 576] between passes: ``dq_mode`` 1 stores it, 2 adds and stores, 3 adds and writes the BF16 dQ (0: one
 # launch, :func:`key_pass_dq_mode`).  dK/dV and the overflow counters are integer sums, so they keep the bits of one
-# launch; dQ is the non-deterministic package's dQ of the same passes.  The redo stays one launch over all keys.
+# launch; dQ, summed through the FP32 partial, can differ from the dQ of one launch in the last FP32 places.  The
+# redo stays one launch over all keys.
 # The pass count is the non-deterministic package's policy (the record's ``key_pass_policy``, :class:`KeyPassPolicy`),
 # with one difference: every pass runs all T tokens in one launch (``token_base = 0``), so a row the policy would run
 # in several token chunks (T above :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.
@@ -2607,8 +2608,8 @@ def prepare_dsa_train(
     ``key_passes`` and ``num_segments`` select the key-range passes of the
     backward (:func:`plan_key_passes`: the non-deterministic package's policy
     for a row of one token chunk, ``key_passes`` overriding it); the dK/dV bits
-    do not depend on them, and dQ is the non-deterministic package's dQ of the
-    same passes.  ``dkv_direct`` is accepted for parity with that package and
+    do not depend on them, and dQ is summed through an FP32 partial between
+    passes.  ``dkv_direct`` is accepted for parity with that package and
     validated as there; the accumulation has one form here.
 
     Row lengths: with ``topk_length`` the kernels use the caller's lengths.

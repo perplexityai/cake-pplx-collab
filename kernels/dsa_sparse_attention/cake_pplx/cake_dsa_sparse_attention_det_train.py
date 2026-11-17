@@ -48,7 +48,7 @@ entries; ``key_passes`` and ``dkv_direct`` are accepted there and validated
 here.  The rope backward may split its main stage into key-range passes (as the
 non-deterministic package's policy does, or as ``key_passes`` asks); the NoPE
 backward runs its main stage once over all keys.  Every backward accumulates in
-one form, and its results do not depend on the pass count.
+one form, and its dK / dV do not depend on the pass count.
 
 Usage::
 
@@ -217,8 +217,8 @@ def cake_dsa_sparse_attention_det(
         ``1 <= key_passes <= S``).  ``None`` lets that package's key-pass policy
         choose; a count above 1 runs the backward's main stage as that many
         key-range passes (a compaction and a main pass each, with their scratch
-        in the backward's workspace).  A scheduling choice only: the gradients
-        are bit for bit those of one pass.
+        in the backward's workspace).  dK / dV are bit for bit those of one
+        pass; dQ is summed through an FP32 partial between passes.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -265,8 +265,8 @@ def cake_dsa_sparse_attention_det(
 
     Gradients flow to ``q_latent``, ``q_rope``, ``kv_latent`` and ``k_rope``.
     BF16 operands into the tensor cores, FP32 accumulation; the backward
-    recomputes the scores from the BF16 inputs and forms the exact ``delta``
-    from the saved output residual ``o_lo``.  The dK / dV contributions are
+    recomputes the scores from the BF16 inputs and forms ``delta`` in FP32
+    from the BF16 output and its saved BF16 residual ``o_lo``.  The dK / dV contributions are
     rounded once to the row's integer grid and summed as integers; each
     gradient element is then formed with one more rounding (and, with
     ``dkv_acc``, one FP32 addition).  The backward reuses the storage of the
@@ -363,8 +363,8 @@ def cake_dsa_sparse_attention_det_varlen(
         enforce causality itself.
     key_passes : Optional[int]
         As in :func:`cake_dsa_sparse_attention_det`: the key-range passes of
-        the backward's main stage (``None``: the key-pass policy chooses), a
-        scheduling choice only; the gradients are bit for bit those of one pass.
+        the backward's main stage (``None``: the key-pass policy chooses);
+        dK / dV are bit for bit those of one pass.
     dkv_direct : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`: accepted for parity,
         validated, without effect.

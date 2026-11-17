@@ -22,7 +22,7 @@ limitations under the License.
 #   log over the valid keys; ``-inf`` for a fully masked row, whose ``out`` is
 #   zero) and the BF16 output residual ``o_lo = bf16(fp32(O) - bf16(O))``.
 # * Backward returns ``dq_latent [T, 64, 512]``, ``dq_rope [T, 64, 64]`` BF16
-#   (written once per row: bitwise deterministic) and ``dkv_latent [S, 512]``,
+#   (written once per row) and ``dkv_latent [S, 512]``,
 #   ``dk_rope [S, 64]`` (FP32 ``red.global`` accumulation in the kernels'
 #   internal permuted layout, un-permuted by the cast stage into natural-layout
 #   BF16 or, with ``dkv_fp32=True``, FP32 outputs) -- or, with a caller-owned
@@ -122,7 +122,7 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # ``pass_counts``, and the pass variant of the main stage consumes them,
 # carrying the FP32 dQ / dQ_rope partial of every token in ``dq_partial``
 # between passes (dq_mode 1 store, 2 load-add-store, 3 load-add and BF16
-# output) -- ``dq`` stays bitwise deterministic; the dK/dV reductions are
+# output) -- ``dq`` is still written once per row; the dK/dV reductions are
 # unchanged (a pass only selects which keys a tile carries).  The pass count
 # follows the policy the record carries (``key_pass_policy``, evaluated by
 # ``KeyPassPolicy``): the L2 formula P = ceil(S * key_bytes / l2_budget_bytes)
@@ -1842,7 +1842,7 @@ def _plan(
         scale_log2=scale * LOG2E,
         num_rows=T * NUM_HEADS,  # bwd_delta: (token, head) rows
         # bwd_delta: dout's token / head strides and the pointer's element offset (the strided delta kernel reads
-        # a head-major or any other admissible view in place; with contiguous strides it is bitwise the dense form)
+        # a head-major or any other admissible view in place)
         **_dout_stride_constants(dout),
         latent_groups=S * D_LATENT // 32,  # bwd_cast: permuted 32-element groups
         rope_groups=S * D_ROPE // 32,
@@ -4539,16 +4539,16 @@ def backward_nope(
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """NoPE backward pass from the saved forward outputs: ``(dq, dkv)``.
 
-    ``dq`` is BF16 ``[T, 64, 512]`` (written once per row: bitwise deterministic for one pass plan).  ``dkv`` is
+    ``dq`` is BF16 ``[T, 64, 512]`` (written once per row).  ``dkv`` is
     the combined gradient of the shared latent, ``dK + dV``, natural layout, FP32 ``[S, 512]``, accumulated in
-    FP32 by the kernels' atomics (the summation order is not fixed: run-to-run spread within FP32 rounding):
+    FP32 by the kernels' atomics (the summation order is not fixed):
 
     * fresh (default, ``dkv_acc=None``): a new buffer filled by this call;
     * accumulate (``dkv_acc`` FP32 ``[S_dst, >= 512]``, row stride a multiple of 4 and ``>= 512``, 16-byte base;
       optional int32 ``[S]`` ``dkv_dst_map`` with the destination row of every key row, identity by default,
       repeated rows sum): ``+=`` into columns ``0:512`` of the caller's rows, in FP32, and ``dkv`` is ``None``.
-      The caller owns the zeroing; chunked backward passes of one row sum into one buffer without intermediate
-      rounding.
+      The caller owns the zeroing; chunked backward passes of one row add their FP32 contributions into one FP32
+      buffer (no BF16 cast in between).
 
     ``dout`` may be a head-major view (strides ``[512, T * 512, 1]``) or any strided ``[T, 64, 512]`` view the
     layout rules admit: it is read in place (no host copy; the delta stage takes its token / head strides).

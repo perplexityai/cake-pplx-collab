@@ -19,14 +19,13 @@ non-deterministic package: the stable entry points over the backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train``.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
-mode keyword.  The forward and ``dq`` are fixed-order (``dq`` is written once
-per row: bitwise reproducible run to run for one pass plan).  The backward adds
-the dK / dV contributions of every query row into FP32 accumulators with
-unordered atomics, so ``dkv`` (the ``kv_latent`` / ``k_rope`` or ``kv``
-gradients, or the rows added into ``dkv_acc``) may differ run to run within
-the FP32 reduction spread.  Under ``torch.use_deterministic_algorithms(True)``
-the forward runs and the backward raises PyTorch's ``RuntimeError`` before its
-first backward kernel launch; with ``warn_only=True`` it warns
+mode keyword.  The backward adds the dK / dV contributions of every query row
+into FP32 accumulators with unordered atomics (``dkv``: the ``kv_latent`` /
+``k_rope`` or ``kv`` gradients, or the rows added into ``dkv_acc``), and the
+package does not promise that any output repeats bit for bit.  Under
+``torch.use_deterministic_algorithms(True)`` the forward runs and the backward
+raises PyTorch's ``RuntimeError`` before its first backward kernel launch; with
+``warn_only=True`` it warns
 (``UserWarning``) and runs this package's backward.  Deterministic
 preparation may run before the alert: a copy of a ``dout`` the TMA descriptor
 cannot address; the plan of a new binding, which can JIT-load the backward
@@ -56,7 +55,7 @@ Usage::
     )
 
     out = cake_dsa_sparse_attention_nondet(q_latent, q_rope, kv_latent, k_rope, indices)
-    out.float().square().sum().backward()  # dq fixed-order; dK / dV FP32 atomics
+    out.float().square().sum().backward()  # dK / dV added with FP32 atomics
 """
 
 import functools
@@ -195,8 +194,8 @@ def cake_dsa_sparse_attention_nondet(
     layouts: unit innermost stride; head / token / key-row strides that are
     positive multiples of 8 elements (16 bytes, the TMA descriptor stride
     granule); head stride and key row stride at least the slice width; a
-    16-byte-aligned base address.  Outputs equal the contiguous path bitwise
-    (``out``, ``lse``, ``dq``) or within the FP32 reduction spread (``dkv``).
+    16-byte-aligned base address.  A strided view runs the kernels of the
+    contiguous copy (only descriptor fields and pointer offsets change).
 
     Parameters
     ----------
@@ -236,8 +235,8 @@ def cake_dsa_sparse_attention_nondet(
         otherwise a single pass runs.  ``1`` forces the single pass; a larger
         value forces that many passes (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
-        topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ stays bitwise
-        deterministic and the dK/dV accumulation is unchanged.
+        topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
+        written once per row and the dK/dV accumulation is unchanged.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -291,10 +290,11 @@ def cake_dsa_sparse_attention_nondet(
         Only with ``return_lse=True``.
 
     Gradients flow to ``q_latent``, ``q_rope``, ``kv_latent`` and ``k_rope``
-    (``dq`` bitwise deterministic; ``dkv`` accumulated in FP32 with atomics,
+    (``dq`` written once per row; ``dkv`` accumulated in FP32 with atomics,
     then cast to BF16, or accumulated into ``dkv_acc``).  BF16 operands into the tensor cores, FP32
     accumulation; the backward recomputes the scores from the BF16 inputs and
-    forms the exact ``delta`` from the saved output residual.  The kernels
+    forms ``delta`` in FP32 from the BF16 output and its saved BF16 residual
+    ``o_lo``.  The kernels
     apply no positional mask: the index rows define the key set.
 
     Under ``torch.use_deterministic_algorithms(True)`` the forward runs and the
@@ -504,7 +504,7 @@ def cake_dsa_sparse_attention_nondet_nope(
         accumulator slice sized at 2048 B per key.  The passes carry dQ
         through an FP32 partial in the workspace (``T * 131,072`` B plus
         ``T * (4 * K_slots + 4)`` B, ``T <= 4736`` tokens per chunk at
-        ``K_slots`` 2048 / 2176); dQ stays bitwise deterministic and the
+        ``K_slots`` 2048 / 2176); dQ is still written once per row and the
         dK + dV accumulation is unchanged.
     backend : str
         Only ``"cake"``.
@@ -557,17 +557,17 @@ def cake_dsa_sparse_attention_nondet_nope(
     lse : torch.Tensor
         Only with ``return_lse=True``.
 
-    Gradients flow to ``q`` and ``kv``.  ``dq`` is BF16 and bitwise
-    deterministic.  ``dkv`` is accumulated in FP32 by the kernels' atomics
-    (run-to-run spread within FP32 rounding) and handed over in FP32: through
+    Gradients flow to ``q`` and ``kv``.  ``dq`` is BF16, written once per row.
+    ``dkv`` is accumulated in FP32 by the kernels' atomics (the summation order
+    is not fixed) and handed over in FP32: through
     ``dkv_acc`` when given, otherwise as the ``kv`` gradient -- which the
     autograd engine casts to the dtype of the ``kv`` leaf (BF16 for a BF16
     leaf); call ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train.cake_backend.backward_nope``
     or pass ``dkv_acc`` to keep the FP32 values.  BF16 operands into the tensor
     cores, FP32 accumulation and statistics; the backward recomputes the scores
-    from the BF16 inputs and forms the exact ``delta`` from the saved output
-    residual.  The kernels apply no positional mask: the index rows define the
-    key set.
+    from the BF16 inputs and forms ``delta`` in FP32 from the BF16 output and
+    its saved BF16 residual ``o_lo``.  The kernels apply no positional mask:
+    the index rows define the key set.
 
     Under ``torch.use_deterministic_algorithms(True)`` the forward runs and the
     backward raises PyTorch's ``RuntimeError`` before its first backward

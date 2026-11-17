@@ -126,6 +126,8 @@ def test_backward_stage_order_is_fixed():
     rope = cake_jit.registered_stages(cake_jit.PROGRAM)
     alternates = set(cake_jit.PACK27_STAGES.values())
     alternates |= set(cake_jit.ACCUMULATE_STAGES.values())
+    # the forward's scanner-warp build (in place of fwd on the architectures of its entry's arches)
+    alternates.add(cake_jit.SCAN_STAGES["fwd"])
     extra = [s for s in rope if s not in cake_jit.STAGES and s not in alternates]
     assert extra in ([], list(cake_jit.KEY_PASS_STAGES)), extra
     assert not set(cake_jit.KEY_PASS_STAGES) & set(
