@@ -19,7 +19,7 @@ Triton ``causal_conv1d`` (when installed; the baseline of the kernels' claim)
 and eager FP32 autograd of the document-local formula.
 
 The rows are the kernels' performance matrix: ``C = 512`` over eight packed
-token counts, ``S = 250340`` over eight channel counts (the round-6 tile rows
+token counts, ``S = 250340`` over eight channel counts (the multi-sub-tile rows
 C = 1280 and 1536 included) and C = 1280 / 1536 at ``S = 262144``, each packed
 as four unequal documents of 0.37 / 0.29 / 0.21 / rest of ``S`` tokens (each
 nudged off a multiple of 64).  Every row reports forward, backward (``dx`` and
@@ -86,7 +86,7 @@ from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as loader
 
 WIDTH = 4
 # The performance matrix: P1 (C = 512 over the packed token counts), P2 (S = 250340 over the channel counts,
-# the round-6 tile rows 1280 / 1536 included) and P3 (the tile rows at S = 262144).
+# the multi-sub-tile rows 1280 / 1536 included) and P3 (the tile rows at S = 262144).
 P1_TOKENS = (239718, 245028, 249866, 250340, 258574, 259042, 259584, 261393)
 P1_CHANNELS = 512
 P2_TOKENS = 250340

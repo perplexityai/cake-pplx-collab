@@ -111,7 +111,7 @@ Rows (``--rows``):
   ``W = 1``).  Documents: at ``W = 1`` the production packs (12000 / 9000 / 6000 / 3768 / 2000 tokens; 9000 /
   5000 / 2384); at ``W > 1`` the pack's first document, one long document of ``floor(W / 2)`` ranks' tokens plus a
   third of a rank's, then the pack repeated from its second document up to ``W x tokens per rank`` (the last one cut);
-* ``pr8365`` (``W = 1``): the production single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
+* ``single_gpu`` (``W = 1``): the production single-GPU rows: ``C = 10240`` over 32768 tokens and ``C = 8192`` over
   16384 tokens, single, and ``3 x C = 8192`` multi;
 * ``custom``: ``--channels``, ``--tokens-per-rank``, ``--docs``, ``--tensors`` and ``--layouts``.
 
@@ -126,7 +126,7 @@ Launch: ``torchrun --nproc_per_node W``; one Slurm task per GPU (``SLURM_PROCID`
 
 Example::
 
-    python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --rows pr8365 --json kcp_w1.json
+    python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --rows single_gpu --json kcp_w1.json
     torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --json kcp_w4.json
     MASTER_ADDR=node0 MASTER_PORT=29500 srun -N 2 --ntasks-per-node 4 \\
         python benchmarks/bench_cake_causal_conv1d_det_train_kcp.py --json kcp_w8.json
@@ -274,14 +274,14 @@ def preset_rows(args: argparse.Namespace, world: int) -> list[Row]:
                 for layout in layouts
             ]
         return rows
-    if args.rows == "pr8365":
+    if args.rows == "single_gpu":
         if world != 1:
-            raise SystemExit("--rows pr8365 is the single-GPU preset (W = 1)")
+            raise SystemExit("--rows single_gpu is the single-GPU preset (W = 1)")
         (c1, t1, p1), (c2, t2, p2) = CUSTOMER_SINGLE, CUSTOMER_MULTI
         return [
-            Row("pr8365", c1, 1, t1, p1, "contiguous"),
-            Row("pr8365", c2, 1, t2, p2, "contiguous"),
-            Row("pr8365", c2, MULTI_TENSORS, t2, p2, "contiguous"),
+            Row("single_gpu", c1, 1, t1, p1, "contiguous"),
+            Row("single_gpu", c2, 1, t2, p2, "contiguous"),
+            Row("single_gpu", c2, MULTI_TENSORS, t2, p2, "contiguous"),
         ]
     pack = tuple(args.docs) if args.docs else (args.tokens_per_rank,)
     return [
@@ -1277,7 +1277,9 @@ def bench_row(
         entries[n]["gate"] = verdicts.get(n, {"passed": False, "error": "gate not run (--draws 0)"})
         if n not in CAKE_ARMS:
             entries[n]["eligible"] = bool(entries[n]["precision"]["same_precision"] and entries[n]["gate"]["passed"])
-    checks["accuracy_gate"] = all(entries[a]["gate"].get("passed") for a in CAKE_ARMS if a != "det_split_aa")
+    # The A/A arm is det_split again on its own leaves: the same program, judged once.
+    entries["det_split_aa"]["gate"] = {**entries["det_split"]["gate"], "note": "the verdict of det_split"}
+    checks["accuracy_gate"] = all(entries[a]["gate"].get("passed") for a in CAKE_ARMS)
     checks["ok"] = all(value for key, value in checks.items() if key != "coop_split_dweight_bitwise")
     # Initialization and memory of the two launch forms.
     for name in ("det_coop", "det_split"):
@@ -1631,7 +1633,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--rows", choices=("customer", "pr8365", "custom"), default="customer"
+        "--rows", choices=("customer", "single_gpu", "custom"), default="customer"
     )
     parser.add_argument(
         "--draws",
