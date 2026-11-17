@@ -2452,8 +2452,8 @@ def test_program_args_are_the_registry_logical_names() -> None:
 def test_fwdh_form_rule_follows_the_chain_clause() -> None:
     """#2 runs the vh = 64 form when ``n_walk * HV <= sm_count`` or when the launch's two-CTA grid finishes within
     its longest chain (``walk_vh64_fits``: LPT of ``2 * HV`` CTAs per segment over ``2 * sm_count`` slots), else
-    vh = 128; the test knob ``fwdh_vh`` forces a form (the two forms are within the same accuracy budget; the
-    fake-backend suite checks it)."""
+    vh = 128; the test knob ``fwdh_vh`` forces a form (two work splits of the same walk; the fake-backend suite runs
+    both)."""
     kcp = _mod("cake_kcp")
     assert kcp.FWDH_PROGRAMS == (
         "kcp_fwdh_offset",
@@ -3003,7 +3003,7 @@ def test_dhu_form_rule_follows_the_architecture_recommendation() -> None:
     """#7 runs the vh = 64 two-CTA form for the offset walk always and for the tape walk on ``sm_100a`` / ``sm_103a``
     always (``arch`` ``None``, the fake backend, counts as one of them); on ``sm_107a`` the tape walk runs vh = 64 when
     its grid ``n_walk * HV * 2`` fits two waves at two CTAs per SM (``<= 4 * sm_count``), else vh = 128; the test
-    knob ``dhu_vh`` forces a form (both forms within the same accuracy budget).  ``resolve_launch`` names the record
+    knob ``dhu_vh`` forces a form (two work splits of the same walk).  ``resolve_launch`` names the record
     the registry provides: the ``_vh64`` record where the registry ships it, the full-head record with the grid
     ``n_walk * HV`` where it does not (no error either way)."""
     kcp = _mod("cake_kcp")

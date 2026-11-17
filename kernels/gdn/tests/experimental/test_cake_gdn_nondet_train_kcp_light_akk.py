@@ -31,10 +31,10 @@ CPU tests of ``save_mode="light_akk"`` of the non-deterministic KCP GDN package
   ``torch.utils.checkpoint(use_reentrant=False)`` a ``"light_akk"`` call binds the ``save_mode="light"`` figure.
 
 The bitwise checks here hold on the deterministic fake backend (host plumbing), which is not bitwise the device
-programs.  The device rows (``"light_akk"`` within the budgets of ``"light"`` on NaN-filled allocations with the launch
-census and the saved bytes, ``graph="replay"`` steps, the multi-rank rows; bits recorded as data, never gated) are in
-``test_cake_gdn_nondet_train_kcp_cp1.py`` and ``test_cake_gdn_nondet_train_kcp_dist.py``; the two-rank fake-backend rows in
-``test_cake_gdn_nondet_train_kcp.py``.
+programs.  The device rows (``"light_akk"`` and ``"light"`` each judged against the FP64 oracle with the naive BF16
+tier on NaN-filled allocations, with the launch census and the saved bytes, ``graph="replay"`` steps, the multi-rank
+rows) are in ``test_cake_gdn_nondet_train_kcp_cp1.py`` and ``test_cake_gdn_nondet_train_kcp_dist.py``; the two-rank
+fake-backend rows in ``test_cake_gdn_nondet_train_kcp.py``.
 """
 
 from __future__ import annotations

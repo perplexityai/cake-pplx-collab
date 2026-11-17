@@ -19,11 +19,11 @@ module against ``cake_kda_det_train_kcp.cake_kcp_plan`` (field-identical partiti
 package is imported HERE only, never by the package), the per-rank crossing counts and
 exchange bytes against the rows of record, the table builders (pool addressing, segment lists, chains), head
 ownership incl. the padded ``(HV, W) = (3, 2)`` case, the byte queries, the registry seed, and the fake backend
-against the FP64 reference (bitwise repeatable, saved == replay).
+(bitwise repeatable, saved == replay), whose outputs are judged against the FP64 reference beside the naive BF16
+tier over 32 random draws (``tests/cake_naive.py``).
 
 Environment of the tests (never of the package): ``GDN_ROWS_DIR`` (the step-0 row JSONs; the row tests skip
-without it), ``GDN_EVIDENCE_DIR`` (JSONL evidence records), the FP64 reference ``gdn_reference`` on ``PYTHONPATH``
-(the fake-backend tests skip without it).
+without it), ``GDN_EVIDENCE_DIR`` (JSONL evidence records).
 """
 
 from __future__ import annotations
@@ -46,6 +46,14 @@ import types
 
 import pytest
 import torch
+
+from tests.cake_naive import judge_case
+from tests.experimental.test_helpers.cake_gdn_det_train_kcp_reference import (
+    cut_states,
+    gdn_exact_with_grads,
+    gdn_naive_with_grads,
+    naive_cut_states,
+)
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -82,11 +90,6 @@ gb = _package("cake_bytes")
 gj = _package("cake_jit")
 fake = _package("cake_fake_backend")
 
-try:
-    import gdn_reference  # the FP64 reference of the validation harness
-except ImportError:  # pragma: no cover - optional environment module
-    gdn_reference = None
-
 PACKAGE_DIR = pathlib.Path(gp.__file__).resolve().parent
 ROWS_DIR = os.environ.get("GDN_ROWS_DIR")
 EVIDENCE_DIR = os.environ.get("GDN_EVIDENCE_DIR")
@@ -94,14 +97,12 @@ SM_COUNT = 152  # GB300
 C_CONV = 10_240  # the rows' convolution width (2 * 16 + 48) * 128
 CPU = torch.device("cpu")
 OWNERSHIP = [(HV, W) for HV in (3, 4, 6, 12, 24, 48) for W in (2, 4, 8, 16)]
-FAKE_TOL_REL_RMS = 0.05  # FLA-class (BF16 tapes) against FP64
-FAKE_CU = [
-    0,
-    100,
-    230,
-    307,
-    507,
-]  # four documents, 507 tokens, boundaries inside chunks
+# The judged fake-backend problem: three documents, 230 tokens, boundaries inside chunks (a 100-token document with
+# a partial second chunk, two of 65 tokens); grouped value heads (HV / H_qk = 2); the seed of draw 0.
+FAKE_CU = [0, 100, 165, 230]
+FAKE_HEADS = (2, 4)
+FAKE_SEED = 20261023
+FAKE_NAMES = ("out",) + fake.GRAD_NAMES
 
 
 def _evidence(name: str, record: dict) -> None:
@@ -2165,11 +2166,6 @@ def test_package_imports_no_kda_and_no_environ() -> None:
 
 # --------------------------------------------------------------------------- fake backend vs the FP64 reference
 
-REFERENCE = pytest.mark.skipif(
-    gdn_reference is None,
-    reason="gdn_reference (FP64 reference harness) not on PYTHONPATH",
-)
-
 
 def _inputs(
     cu: list[int], H_qk: int, HV: int, seed: int = 20261023
@@ -2204,146 +2200,137 @@ def _bitwise(a: dict, b: dict, names) -> bool:
     return all(torch.equal(a[n], b[n]) for n in names)
 
 
-@REFERENCE
+def _operands(ops: dict[str, torch.Tensor]) -> list[torch.Tensor]:
+    """``q, k, v, g, beta, dout`` of a pack, in the argument order of the FP64 reference and its naive tier."""
+    return [ops[n] for n in ("q", "k", "v", "g", "beta", "dout")]
+
+
 @pytest.mark.parametrize("layout", ("contiguous", "zigzag"))
-def test_fake_backend_matches_fp64_reference(layout) -> None:
-    """Result 4: the fake backend's forward / backward of a 2-rank C and Z row at (H_qk, HV) = (2, 6), T = 507,
-    matches the FP64 reference within FLA-class error (rel-RMS <= 0.05 per tensor, finite), is bitwise repeatable,
-    and gives bitwise equal gradients for boundary_mode saved / replay, save_transfer on / off and save_mode
-    light / full."""
-    H_qk, HV = 2, 6
+def test_fake_backend_meets_the_naive_tier(layout, record_property) -> None:
+    """Result 4: the fake backend's forward / backward of a 2-rank C and Z row (``FAKE_CU``, (H_qk, HV) =
+    ``FAKE_HEADS``; outputs ``kcp.<name>``) and, in the contiguous case, of the one-rank form without CP (outputs
+    ``single.<name>``), judged against the FP64 reference (``gdn_exact_with_grads``) beside the naive BF16 tier
+    (``gdn_naive_with_grads``) over 32 draws.  On every draw the 2-rank run gives bitwise equal gradients for
+    boundary_mode saved / replay; on draw 0 it is bitwise repeatable and save_transfer off and save_mode full give
+    its bits (same programs, same bits)."""
+    H_qk, HV = FAKE_HEADS
     cu = FAKE_CU
     part = gp.cake_gdn_det_train_kcp_partition(
         torch.tensor(cu, dtype=torch.int64), 2, layout
     )
     assert sum(part.crossing_counts()[0]) >= 1  # the row crosses a rank boundary
-    ops = _inputs(cu, H_qk, HV)
-    res = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
-    assert res["logs"]["forward"] == ["c1", "c2"] and res["logs"]["backward_saved"] == [
-        "b1",
-        "b2",
-    ]
-    assert res["logs"]["backward_replay"] == ["c1", "c2", "b1", "b2"]
-    assert fake.replay_equals_saved(res), "saved and replay gradients differ"
-    ref = gdn_reference.gdn_exact_with_grads(
-        ops["q"],
-        ops["k"],
-        ops["v"],
-        ops["g"],
-        ops["beta"],
-        ops["dout"],
-        cu,
-        scale=fake.SCALE,
-    )
-    metrics = {}
-    for name in ("out",) + fake.GRAD_NAMES:
-        m = gdn_reference.error_metrics(res["saved"][name], ref[name])
-        metrics[name] = {
-            k: m[k]
-            for k in (
-                "rel_rms",
-                "max_abs",
-                "ref_rms",
-                "ref_max_abs",
-                "nonfinite",
-                "numel",
-            )
-        }
-        assert m["nonfinite"] == 0, name
-        assert m["rel_rms"] <= FAKE_TOL_REL_RMS, (name, m["rel_rms"])
-    # repeatability (bitwise) and the other saved-set forms (same programs, same bits)
-    again = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
-    assert _bitwise(res["saved"], again["saved"], ("out",) + fake.GRAD_NAMES), (
-        "a second run differs bitwise"
-    )
-    no_transfer = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_transfer=False)
-    full = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_mode="full")
-    assert fake.replay_equals_saved(no_transfer) and fake.replay_equals_saved(full)
-    assert _bitwise(res["saved"], no_transfer["saved"], ("out",) + fake.GRAD_NAMES), (
-        "save_transfer=False differs"
-    )
-    assert _bitwise(res["saved"], full["saved"], ("out",) + fake.GRAD_NAMES), (
-        "save_mode=full differs"
-    )
-    # the no-CP form (one rank) agrees with the reference too and documents the local error floor
-    single = fake.emulate(
+    # the one-rank form does not depend on the layout: judged once, in the contiguous case
+    single_part = (
         gp.cake_gdn_det_train_kcp_partition(
             torch.tensor(cu, dtype=torch.int64), 1, "contiguous"
-        ),
-        ops,
-        H_qk=H_qk,
-        HV=HV,
+        )
+        if layout == "contiguous"
+        else None
     )
-    local = {
-        name: gdn_reference.error_metrics(single["saved"][name], ref[name])["rel_rms"]
-        for name in ("out",) + fake.GRAD_NAMES
-    }
-    _evidence(
-        "fake_backend",
-        {
-            "layout": layout,
-            "world_size": 2,
-            "H_qk": H_qk,
-            "HV": HV,
-            "cu_seqlens": cu,
-            "T_r": [part.rank_tokens(r) for r in range(2)],
-            "n_in": list(part.crossing_counts()[0]),
-            "n_out": list(part.crossing_counts()[1]),
-            "metrics": metrics,
-            "local_rel_rms": local,
-            "tolerance_rel_rms": FAKE_TOL_REL_RMS,
-            "saved_eq_replay": True,
-            "repeat_bitwise": True,
-            "save_transfer_false_bitwise": True,
-            "save_mode_full_bitwise": True,
-            "pass": True,
-        },
-    )
+    arms = ("kcp", "single") if single_part is not None else ("kcp",)
+    seen = {}
+
+    def run(j, s):
+        ops = _inputs(cu, H_qk, HV, seed=s)
+        seen["ops"] = ops
+        res = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
+        assert fake.replay_equals_saved(res), (
+            f"draw {j}: saved and replay gradients differ"
+        )
+        if j == 0:
+            assert res["logs"]["forward"] == ["c1", "c2"] and res["logs"][
+                "backward_saved"
+            ] == ["b1", "b2"]
+            assert res["logs"]["backward_replay"] == ["c1", "c2", "b1", "b2"]
+            # repeatability (bitwise) and the other saved-set forms (same programs, same bits)
+            again = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
+            assert _bitwise(res["saved"], again["saved"], FAKE_NAMES), (
+                "a second run differs bitwise"
+            )
+            no_transfer = fake.emulate(
+                part, ops, H_qk=H_qk, HV=HV, save_transfer=False
+            )
+            full = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_mode="full")
+            assert fake.replay_equals_saved(no_transfer) and fake.replay_equals_saved(
+                full
+            )
+            assert _bitwise(res["saved"], no_transfer["saved"], FAKE_NAMES), (
+                "save_transfer=False differs"
+            )
+            assert _bitwise(res["saved"], full["saved"], FAKE_NAMES), (
+                "save_mode=full differs"
+            )
+        got = {"kcp": res["saved"]}
+        if single_part is not None:
+            got["single"] = fake.emulate(single_part, ops, H_qk=H_qk, HV=HV)["saved"]
+        ref = gdn_exact_with_grads(*_operands(ops), cu, scale=fake.SCALE)
+        return (
+            {f"{arm}.{n}": got[arm][n] for arm in arms for n in FAKE_NAMES},
+            {f"{arm}.{n}": ref[n] for arm in arms for n in FAKE_NAMES},
+        )
+
+    def naive(j, tier):
+        nv = gdn_naive_with_grads(*_operands(seen["ops"]), cu, scale=fake.SCALE)
+        return {f"{arm}.{n}": nv[n] for arm in arms for n in FAKE_NAMES}
+
+    judge, failures = judge_case(run, naive, seed=FAKE_SEED)
+    judge.record(record_property)
+    assert not failures, failures
 
 
-@REFERENCE
-def test_fake_backend_fragment_state_matches_reference() -> None:
-    """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment equals the FP64
-    state at its cut (``cut_states``) within FLA-class error, and ``S_out = M_f S_in + B_f`` holds for the FP32
-    summaries (the merge's inputs)."""
-    H_qk, HV = 2, 6
+def test_fake_backend_fragment_state_meets_the_naive_tier(record_property) -> None:
+    """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment of the 2-rank Z
+    row (outputs ``s_in.rank<r>.slot<s>``, FP32), judged against the FP64 state at its cut (``cut_states``) beside
+    the naive BF16 tier (``naive_cut_states``) over 32 draws."""
+    H_qk, HV = FAKE_HEADS
     cu = FAKE_CU
     part = gp.cake_gdn_det_train_kcp_partition(
         torch.tensor(cu, dtype=torch.int64), 2, "zigzag"
     )
-    ops = _inputs(cu, H_qk, HV)
-    ranks = fake.build_ranks(
-        part, [fake.slice_local(ops, part, r) for r in range(2)], H_qk=H_qk, HV=HV
-    )
-    _outs, saved = fake.emulate_forward(ranks)
     cuts = sorted(
         {cu[f.doc] + f.off for frs in part.fragments for f in frs if f.crossing_in}
     )
-    states = gdn_reference.cut_states(
-        ops["q"], ops["k"], ops["v"], ops["g"], ops["beta"], cu, cuts, scale=fake.SCALE
-    )
-    worst = 0.0
-    for rk in ranks:
-        pa = rk.wt.pools["s_in"]
-        for f in rk.ctx.fragments:
-            if not f.crossing_in:
-                continue
-            slot = rk.ctx.in_slot[f.slot]
-            S = torch.stack(
-                [
-                    saved.s_in[rk.rank][
-                        pa.elem(slot, h) : pa.elem(slot, h) + gp.TILE
-                    ].view(128, 128)
-                    for h in range(HV)
-                ]
-            )
-            m = gdn_reference.error_metrics(S, states[cu[f.doc] + f.off])
-            worst = max(worst, m["rel_rms"])
-            assert m["rel_rms"] <= FAKE_TOL_REL_RMS, (rk.rank, f.slot, m["rel_rms"])
-    _evidence(
-        "fake_states",
-        {"layout": "zigzag", "cuts": cuts, "worst_rel_rms": worst, "pass": True},
-    )
+    assert cuts  # the row has crossing-in fragments
+    seen = {}
+
+    def run(j, s):
+        ops = _inputs(cu, H_qk, HV, seed=s)
+        seen["ops"] = ops
+        ranks = fake.build_ranks(
+            part, [fake.slice_local(ops, part, r) for r in range(2)], H_qk=H_qk, HV=HV
+        )
+        _outs, saved = fake.emulate_forward(ranks)
+        states = cut_states(*_operands(ops)[:5], cu, cuts, scale=fake.SCALE)
+        got, ref, cut_of = {}, {}, {}
+        for rk in ranks:
+            pa = rk.wt.pools["s_in"]
+            for f in rk.ctx.fragments:
+                if not f.crossing_in:
+                    continue
+                slot = rk.ctx.in_slot[f.slot]
+                name = f"s_in.rank{rk.rank}.slot{f.slot}"
+                got[name] = torch.stack(
+                    [
+                        saved.s_in[rk.rank][
+                            pa.elem(slot, h) : pa.elem(slot, h) + gp.TILE
+                        ].view(128, 128)
+                        for h in range(HV)
+                    ]
+                )
+                cut_of[name] = cu[f.doc] + f.off
+                ref[name] = states[cut_of[name]]
+        seen["cut_of"] = cut_of
+        return got, ref
+
+    def naive(j, tier):
+        states = naive_cut_states(
+            *_operands(seen["ops"])[:5], cu, cuts, scale=fake.SCALE
+        )
+        return {name: states[cut] for name, cut in seen["cut_of"].items()}
+
+    judge, failures = judge_case(run, naive, seed=FAKE_SEED)
+    judge.record(record_property)
+    assert not failures, failures
 
 
 def test_fake_backend_run_module_contract() -> None:

@@ -12,22 +12,29 @@ limitations under the License.
 
 Cross-family rows of the non-deterministic context-parallel (KCP) packed GDN training package
 (``cake_pplx._backends.cake_gdn_nondet_train_kcp``): the rows that also need the causal_conv1d family
-(``cake-pplx-causal-conv1d``), moved here unchanged from ``kernels/gdn/tests/experimental/
+(``cake-pplx-causal-conv1d``), moved here from ``kernels/gdn/tests/experimental/
 test_cake_gdn_nondet_train_kcp_dist.py`` (the in-family rows stay there).
 
 * ``test_conv_halo_row`` (C7): the conv package's ``cake_causal_conv1d_det_kcp`` with THIS package's context;
 * ``test_layer_checkpoint_rows`` (L4 / L8 / L8r): KCP convolution + caller L2 norm + ``cake_gdn_nondet_kcp`` in one
-  checkpointed region with one ``CakeGDNNondetKcpRecomputeHandle`` (the recompute exchanges nothing; out / dx /
-  dweight / dg / dbeta within the budget constants of the plain checkpoint and the direct pass and within the
-  correctness clause of the FP64 layer oracle; the backward's collectives are the deterministic layer's);
+  checkpointed region with one ``CakeGDNNondetKcpRecomputeHandle`` (the recompute exchanges nothing; the original
+  forward and the backward exchange as the plain checkpoint does; the backward of every form issues exactly the
+  fixed collective list ``LAYER_BWD_COLLECTIVES``; no parameter reduction); out / dx / dweight / dg / dbeta of the
+  direct pass, the plain checkpoint and the handle checkpoint, each judged against the FP64 layer oracle;
 * ``test_l2n_layer_checkpoint_rows``: the same layer with ``use_qk_l2norm_in_kernel=True`` on the raw convolution
-  output views.
+  output views, judged against the FP64 oracle of the in-kernel norm (``gdn_exact_l2n_with_grads``: the raw rows
+  normalized in FP64; only its naive tier normalizes in BF16).
+
+Accuracy is the naive BF16 tier of ``tests/cake_naive.py``: every floating output's error against the FP64 oracle
+beside the error of a PyTorch BF16 implementation of the same ops on the same inputs, median and largest over
+``DRAWS`` (32) independent draws of the operands, L2 and max norm.  Each row runs its 32 draws inside one process
+group; rank 0 gathers every draw's outputs, judges them and records one ``naive_tier`` verdict per output.
 
 All of them run under Slurm (one process per task: ``SLURM_PROCID`` / ``SLURM_NTASKS``; the WORLD group is initialised
 once per process and every row runs on a sub-group of its ``W`` lowest ranks).  Environment: ``KCP_TEST_BACKEND``
 (``kernels`` | ``fake``), ``KCP_TEST_RESULT_DIR`` (one JSON per row and rank), ``KCP_TEST_PORT_DIR`` (the Slurm
-rendezvous port file).  The suite imports this package, the deterministic GDN package and the causal-convolution
-package through ``tests/cake/test_helpers/cake_package.py``; a missing distribution fails the row, never skips.
+rendezvous port file).  The suite imports this package and the causal-convolution package through
+``tests/cake/test_helpers/cake_package.py``; a missing distribution fails the row, never skips.
 """
 
 from __future__ import annotations
@@ -38,7 +45,6 @@ import datetime as _dt
 import importlib
 import inspect
 import json
-import math
 import os
 import re
 import socket
@@ -52,6 +58,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 from tests.experimental.test_helpers.kcp_collective_shims import (
     CollectiveCounter,
     RecomputePhase,
@@ -83,14 +90,6 @@ def _mod(sub: str | None = None):
     return cake_package("cake_gdn_nondet_train_kcp", sub)
 
 
-def _det_mod(sub: str | None = None):
-    """A module of the deterministic package through the test-helper registry (its entries and its ``LAST_CALL`` for
-    the collective comparison)."""
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    return cake_package("cake_gdn_det_train_kcp", sub)
-
-
 def _conv_mod(sub: str | None = None):
     """The deterministic causal-convolution package (or its ``kcp`` module) through the test-helper registry: the
     entries ``cake_causal_conv1d_det`` / ``is_cake_causal_conv1d_det_train_supported`` and
@@ -103,26 +102,25 @@ def _conv_mod(sub: str | None = None):
 kcp = _mod("cake_kcp")
 plan = _mod("cake_kcp_plan")
 PACKAGE_DIR = Path(kcp.__file__).resolve().parent
-TENSORS = ("out", "dq", "dk", "dv", "dg", "dbeta")
 LAYER_TENSORS = ("out", "dx", "dw", "dg", "dbeta")
-ATOL = RTOL = 1e-2
 WORLD_TIMEOUT_S = 300  # NCCL / rendezvous timeout of the WORLD group (printed at init)
 SCALE = kcp.SCALE
 F64 = torch.float64
 # (b) collectives that would reduce parameters across the group: never issued by the route
 PARAM_REDUCTIONS = ("all_reduce", "reduce_scatter_tensor")
+# (b) the collectives of the layer's backward by torch.distributed name, the same on every rank and in every form
+# (direct, plain checkpoint, recompute handle: the handle removes the recompute's exchanges only), for a partition
+# with a document across ranks (every layer row): the GDN backward's two all_to_all_single exchanges (b1: the adjoint
+# offsets and maps to the head owners; b2: the boundary adjoints back) and the convolution backward's halo exchange
+# (one all_to_all_single); nothing else
+LAYER_BWD_COLLECTIVES = {"all_to_all_single": 3}
 
 
 def _reference():
-    """The FP64 reference: the in-tree test helper (read only), else the session harness on PYTHONPATH."""
-    try:
-        from tests.experimental.test_helpers import (
-            cake_gdn_det_train_kcp_reference as ref,
-        )  # type: ignore[attr-defined]
+    """The FP64 oracle and its naive BF16 tier (the in-tree test helper, read only)."""
+    from tests.experimental.test_helpers import cake_gdn_det_train_kcp_reference as ref
 
-        return ref
-    except ImportError:
-        return importlib.import_module("gdn_reference")
+    return ref
 
 
 def _inputs():
@@ -142,197 +140,58 @@ def _inputs():
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# the distributed judge: every rank compares its local tokens, the partial sums combine over the group
+# the judge (rank 0): every floating output against the FP64 oracle beside the naive BF16 tier (tests/cake_naive.py)
 
 
-def _partial(ref_mod, cand: torch.Tensor, ref: torch.Tensor) -> dict:
-    """This rank's share of one comparison: the reference module's error metrics and elementwise count on the local
-    elements (FP64), as sums that combine across ranks."""
-    m = ref_mod.error_metrics(cand, ref)
-    e = ref_mod.elementwise_mismatch(cand, ref, ATOL, RTOL)
-    n = int(m["numel"])
-    return {
-        "n": n,
-        "sq_err": float(m["rms"]) ** 2 * n,
-        "sq_ref": float(m["ref_rms"]) ** 2 * n,
-        "max_abs": float(m["max_abs"]),
-        "ref_max_abs": float(m["ref_max_abs"]),
-        "nonfinite": int(m["nonfinite"]),
-        "mismatch": int(e["mismatch"]),
-        "worst": m["worst"],
-    }
+def _judge_add(
+    judge: TierJudge,
+    failures: list[str],
+    name: str,
+    j: int,
+    actual: torch.Tensor,
+    oracle: torch.Tensor,
+    naive: torch.Tensor,
+) -> None:
+    """Draw ``j`` of output ``name``: held to its contract against the oracle and added to the judge with the naive
+    tier's value.  The oracle and the naive value are laid out as ``actual`` (the reassembled candidate) when they
+    hold as many elements; a shape mismatch is a contract failure and is not judged."""
+    if oracle.numel() == actual.numel():
+        oracle = oracle.reshape(actual.shape)
+        naive = naive.reshape(actual.shape)
+    if (m := contract(name, actual, oracle)) is not None:
+        failures.append(f"draw {j}: {m}")
+        if actual.shape != oracle.shape:
+            return
+    judge.add(name, j, actual, oracle, {"bf16": naive})
 
 
-def _combine(parts: list) -> dict:
-    """The metrics of the whole tensor from the ranks' partials (``error_metrics`` keys; ``worst`` carries its rank)."""
-    ps = [p for p in parts if p is not None]
-    n = sum(p["n"] for p in ps)
-    sq_err = sum(p["sq_err"] for p in ps)
-    sq_ref = sum(p["sq_ref"] for p in ps)
-    rms = math.sqrt(sq_err / n) if n else 0.0
-    ref_rms = math.sqrt(sq_ref / n) if n else 0.0
-    worst = None
-    for r, p in enumerate(parts):
-        w = None if p is None else p["worst"]
-        if w is None:
-            continue
-        if worst is None or math.isnan(w["err"]) or w["err"] > worst["err"]:
-            worst = {**w, "rank": r}
-    return {
-        "rel_rms": rms / ref_rms if ref_rms > 0 else (math.inf if rms > 0 else 0.0),
-        "max_abs": max((p["max_abs"] for p in ps), default=0.0),
-        "rms": rms,
-        "ref_rms": ref_rms,
-        "ref_max_abs": max((p["ref_max_abs"] for p in ps), default=0.0),
-        "numel": n,
-        "nonfinite": sum(p["nonfinite"] for p in ps),
-        "mismatch": sum(p["mismatch"] for p in ps),
-        "worst": worst,
-    }
+def _judge_report(report: dict, judge: TierJudge | None, failures: list[str]) -> None:
+    """Rank 0: the row's verdicts (``naive_tier``, one per judged output) and its failures (contracts, then the
+    judge's), folded into ``report["pass"]``."""
+    if judge is None:
+        return
+    failures = failures + judge.failures()
+    report["naive_tier"] = list(judge.verdicts().values())
+    report["failures"] = failures
+    report["pass"] &= not failures
+    if failures:
+        report["failing"].append("naive_tier")
 
 
-def _verdict(row: Row, name: str, met: dict, budget, ref_mod) -> dict:
-    """The verdict of one combined comparison.  Correctness rows (regime ``normal``): the elementwise clause, zero
-    elements beyond ``ATOL + RTOL |ref|``.  Accuracy rows: the row's budget cell (``_budget_cell``): rel-RMS within the
-    budget and max-abs within the budget plus one storage ulp of |ref| at the worst element (the reference module's
-    ``judge_tensor``); the elementwise count is recorded.  Finiteness gates every row; an accuracy row without a
-    budget cell cannot pass.  The same rule judges a comparison against FP64 and one between two arms (the partner arm
-    in the place of the reference)."""
-    v = {
-        k: met[k]
-        for k in ("rel_rms", "max_abs", "ref_rms", "numel", "nonfinite", "mismatch")
-    }
-    v["worst"] = met["worst"]
-    if met["numel"] == 0:
-        v["verdict"] = "empty"
-        ok = True
-    elif row.regime == "normal":
-        v["verdict"] = "elementwise"
-        ok = met["nonfinite"] == 0 and met["mismatch"] == 0
-    elif budget is None or name not in budget[0]["tensors"]:
-        v["verdict"] = "budget"
-        v["budget"] = None
-        ok = False
-    else:
-        cell, cp = budget
-        b = cell["tensors"][name]
-        j = ref_mod.judge_tensor(
-            met, b["budget_rel_rms"], b["budget_max_abs"], b["storage"]
-        )
-        j["cp_of_cell"] = cp
-        v["verdict"] = "budget"
-        v["budget"] = j
-        ok = met["nonfinite"] == 0 and bool(j["pass_u1"])
-    v["ok"] = bool(ok)
-    return v
+def _record_verdicts(report: dict | None, record_property) -> None:
+    """The test process records rank 0's verdicts (pytest ``record_property``, read by the conftest's ``TIER``
+    lines)."""
+    for verdict in (report or {}).get("naive_tier", []):
+        record_property("naive_tier", verdict)
 
 
-def _rel_rms_verdict(met: dict, max_rel_rms: float) -> dict:
-    """Finite and rel-RMS <= ``max_rel_rms``; the elementwise count (``ATOL + RTOL |ref|``) and the worst element are
-    recorded, not judged."""
-    v = {
-        k: met[k]
-        for k in ("rel_rms", "max_abs", "ref_rms", "numel", "nonfinite", "mismatch")
-    }
-    v["worst"] = met["worst"]
-    v["verdict"] = "empty" if met["numel"] == 0 else "rel_rms"
-    v["rel_rms_max"] = max_rel_rms
-    v["ok"] = bool(
-        met["numel"] == 0 or (met["nonfinite"] == 0 and met["rel_rms"] <= max_rel_rms)
-    )
-    return v
-
-
-class _Judge:
-    """FP64 and cross-arm comparisons of one row: each ``fp64`` / ``cross`` call adds this rank's partials at once
-    (the arm's tensors can go), ``finish`` gathers them once over the group and every rank derives the same verdicts.
-    Keys: ``fp64:<arm>:<tensor>`` and ``cross:<arm>:<tensor>``.  A comparison added with ``forced=True`` (an arm at
-    the forced ``P = 2``) is judged by ``p2_budget`` (:func:`_p2_budget_cell`), every other one by ``budget``; each
-    verdict names its cell (``"cell"``: ``"p2"`` or ``"g1"``)."""
-
-    def __init__(
-        self, row: Row, ref_mod, budget, fp64_rel_rms=None, p2_budget=None
-    ) -> None:
-        """``fp64_rel_rms``: ``{tensor: max}``, the ``fp64`` comparisons of these tensors judged by finiteness and
-        rel-RMS alone (the elementwise count and the worst element recorded).  ``p2_budget``: the cell of the
-        ``forced`` comparisons."""
-        self.row, self.ref_mod, self.budget = row, ref_mod, budget
-        self.p2_budget = p2_budget
-        self.fp64_rel_rms = dict(fp64_rel_rms or {})
-        self.parts: dict[str, dict] = {}
-        self.gated: dict[str, bool] = {}
-        self.forced: dict[str, bool] = {}
-
-    def _add(
-        self,
-        key: str,
-        cand: torch.Tensor,
-        ref: torch.Tensor,
-        gate: bool,
-        forced: bool,
-    ):
-        self.parts[key] = _partial(self.ref_mod, cand, ref)
-        self.gated[key] = bool(gate)
-        self.forced[key] = bool(forced)
-
-    def fp64(
-        self,
-        arm: str,
-        res: dict,
-        refs: dict,
-        names=TENSORS,
-        *,
-        half=False,
-        gate=True,
-        forced=False,
-    ):
-        """``res`` against the FP64 reference; ``half``: half of an accumulated (two-backward) gradient, exact in
-        every float format, against the FP64 gradient; ``forced``: an arm at the forced ``P = 2``."""
-        for n in names:
-            cand = res[n].detach().to(F64) * 0.5 if half else res[n]
-            self._add(f"fp64:{arm}:{n}", cand, refs[n], gate, forced)
-
-    def cross(
-        self, arm: str, a: dict, b: dict, names=TENSORS, *, gate=True, forced=False
-    ):
-        """Arm ``a`` against its partner ``b`` within the same budget constants (``b`` in the reference's place;
-        ``forced``: both arms at the forced ``P = 2``)."""
-        for n in names:
-            self._add(f"cross:{arm}:{n}", a[n], b[n], gate, forced)
-
-    def finish(self, group, W: int) -> dict[str, dict]:
-        mine = dict(self.parts)
-        if W > 1:
-            every: list = [None] * W
-            dist.all_gather_object(every, (mine, self.gated, self.forced), group=group)
-        else:
-            every = [(mine, self.gated, self.forced)]
-        keys: list[str] = []
-        gated: dict[str, bool] = {}
-        forced: dict[str, bool] = {}
-        for p, gt, fc in every:
-            for key in p:
-                if key not in gated:
-                    keys.append(key)
-                gated[key] = gated.get(key, True) and gt[key]
-                forced[key] = forced.get(key, False) or fc[key]
-        out: dict[str, dict] = {}
-        for key in keys:
-            met = _combine([p.get(key) for p, _, _ in every])
-            name = key.rsplit(":", 1)[1]
-            budget = self.p2_budget if forced[key] else self.budget
-            if key.startswith("fp64:") and name in self.fp64_rel_rms:
-                v = _rel_rms_verdict(met, self.fp64_rel_rms[name])
-            else:
-                v = _verdict(self.row, name, met, budget, self.ref_mod)
-            v["cell"] = "p2" if forced[key] else "g1"
-            v["gated"] = gated[key]
-            # a key missing on a rank: that rank skipped the comparison (fails the verdict)
-            v["ranks"] = sum(1 for p, _, _ in every if key in p)
-            if v["ranks"] != len(every):
-                v["ok"] = False
-            out[key] = v
-        return out
+def _gather(obj, W: int, group) -> list:
+    """``obj`` of every rank of the group in rank order (``all_gather_object``; ``[obj]`` at ``W = 1``)."""
+    if W == 1:
+        return [obj]
+    objs: list = [None] * W
+    dist.all_gather_object(objs, obj, group=group)
+    return objs
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -544,9 +403,9 @@ def _ragged(cu: list[int], t_r: list[int]) -> list[list[tuple[int, int, int]]]:
     return nested
 
 
-def _partition_with(fn, row: Row):
-    """``fn(cu, W, layout=... | fragments=...)``: this package's ``cake_gdn_nondet_train_kcp_partition`` or the deterministic route's
-    ``cake_gdn_det_train_kcp_partition`` (the same partition of the row)."""
+def _partition(row: Row):
+    """The row's partition (``cake_gdn_nondet_train_kcp_partition``) and its global ``cu_seqlens``."""
+    fn = plan.cake_gdn_nondet_train_kcp_partition
     cu = _cu(row.lengths)
     if row.layout.startswith("ragged:"):
         t_r = [int(x) for x in row.layout.split(":")[1].split(",")]
@@ -557,10 +416,6 @@ def _partition_with(fn, row: Row):
         assert tuple(lengths) == tuple(row.lengths)
         return fn(cu, row.W, fragments=make()), cu
     return fn(cu, row.W, layout=row.layout), cu
-
-
-def _partition(row: Row):
-    return _partition_with(plan.cake_gdn_nondet_train_kcp_partition, row)
 
 
 def _programs_exported() -> bool:
@@ -659,13 +514,12 @@ def _local_to_global(part, cu: list[int], rank: int) -> torch.Tensor:
 def _fold(
     report: dict,
     flag_list: list,
-    verdicts: dict,
     *,
     backend: str = "kernels",
     kernel_only=(),
     info_only=(),
 ) -> None:
-    """Fold the ranks' exact flags (all ranks must hold) and the judged verdicts into ``report["pass"]``."""
+    """Fold the ranks' exact flags (all ranks must hold) into ``report["pass"]``."""
     keys: list[str] = []
     for fl in flag_list:
         for key in fl:
@@ -681,14 +535,6 @@ def _fold(
             report["pass"] &= ok
             if not ok:
                 report["failing"].append(key)
-    report["judged"] = verdicts
-    for key, v in verdicts.items():
-        if v["gated"]:
-            report["pass"] &= bool(v["ok"])
-            if not v["ok"]:
-                report["failing"].append(key)
-        else:
-            report["reported"].append(key)
 
 
 def _expand_hostlist(s: str) -> list[str]:
@@ -820,9 +666,10 @@ def slurm():
     _SLURM.close()
 
 
-def _slurm_row(row, slurm, backend: str, body) -> None:
-    """One row (or poison pair) under Slurm: sub-group of the row's ranks; the verdict is WORLD-wide, so every rank
-    (member or not) passes or fails the same row and ``-x`` and the session teardown keep the collectives aligned."""
+def _slurm_row(row, slurm, backend: str, body, record_property) -> None:
+    """One row under Slurm: sub-group of the row's ranks; the verdict is WORLD-wide, so every rank (member or not)
+    passes or fails the same row and ``-x`` and the session teardown keep the collectives aligned.  Rank 0 records
+    the row's naive-tier verdicts with ``record_property`` before the verdict is asserted."""
     W = row.W
     if slurm.world < W:
         pytest.skip(f"row needs {W} ranks, the step has {slurm.world}")
@@ -860,8 +707,10 @@ def _slurm_row(row, slurm, backend: str, body) -> None:
         if not ok:
             pytest.fail(f"rank {slurm.rank}: row failed on its {W} member ranks")
         pytest.skip(f"rank {slurm.rank} is not part of the row's {W}-rank group")
+    _record_verdicts(report, record_property)
     assert ok, json.dumps(
-        {k: v for k, v in report.items() if k != "info_by_rank"}, default=str
+        {k: v for k, v in report.items() if k not in ("info_by_rank", "naive_tier")},
+        default=str,
     )[:6000]
 
 
@@ -875,11 +724,8 @@ def _slurm_row(row, slurm, backend: str, body) -> None:
 
 CONV_C = 10240
 CONV_WIDTH = 4
-CONV_Y_ATOL, CONV_Y_RTOL = (
-    1e-3,
-    2.0**-7,
-)  # one BF16 ulp, no element outside (the conv package's own gate)
-CONV_DW_ATOL, CONV_DW_RTOL = 5e-2, 1e-4  # FP32 dweight against the FP64 oracle
+# the seed of the C7 operands: draw 0; draw j at draw_seed(CONV_SEED, j)
+CONV_SEED = 43567
 
 
 def _c7_fragments() -> list[list[tuple[int, int, int]]]:
@@ -890,21 +736,21 @@ EXPLICIT["c7"] = (_c7_fragments, (303, 200))
 C7_ROW = Row("C7", (303, 200), (2, 6), 4, "explicit:c7", stage="conv")
 
 
-def _conv_reference(
-    x: torch.Tensor,
-    w: torch.Tensor,
-    cu: list[int],
-    dy: torch.Tensor,
-    *,
-    round_dx: bool = True,
-):
-    """FP64 oracle of the unpartitioned width-4 depthwise causal convolution + SiLU with the conv package's KCP
-    semantics (``weight[c, 3]`` multiplies the current token; zero history at a document start; the SiLU
-    derivative on the unrounded preactivation): BF16 ``y``, ``dx`` (BF16, one rounding; FP64 without
-    ``round_dx``), FP64 ``dpre`` and the taps for the per-rank ``dweight`` partials."""
-    S, _ = x.shape
-    xf, wd = x.double(), w.double()
-    doc = torch.zeros(S, dtype=torch.int64, device=x.device)
+def _to_global(part, rank_tensors: list[torch.Tensor], cu: list[int]) -> torch.Tensor:
+    """The ranks' local tensors (fragment order) reassembled to the global token order (on the first's device)."""
+    ref = rank_tensors[0]
+    out = torch.zeros(
+        (cu[-1],) + tuple(ref.shape[1:]), dtype=ref.dtype, device=ref.device
+    )
+    for r, t in enumerate(rank_tensors):
+        out[_local_to_global(part, cu, r).to(ref.device)] = t.to(ref.device)
+    return out
+
+
+def _doc_shifts(cu: list[int], S: int, device):
+    """``shifted(t, k)`` (``t[i - k]`` of the same document, else 0) and ``shifted_up(t, k)`` (``t[i + k]`` of the
+    same document, else 0) over the ``S`` packed tokens of ``cu``: exact copies in the dtype of ``t``."""
+    doc = torch.zeros(S, dtype=torch.int64, device=device)
     for i in range(len(cu) - 1):
         doc[cu[i] : cu[i + 1]] = i
 
@@ -928,33 +774,98 @@ def _conv_reference(
             out[: S - k] = torch.where(same[:, None], t[k:], torch.zeros_like(t[k:]))
         return out
 
+    return shifted, shifted_up
+
+
+def _conv_reference(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.Tensor):
+    """FP64 oracle of the unpartitioned width-4 depthwise causal convolution + SiLU with the conv package's KCP
+    semantics (``weight[c, 3]`` multiplies the current token; zero history at a document start; the SiLU
+    derivative on the unrounded preactivation): FP64 ``y``, ``dx`` and ``dpre``, and the taps for the per-rank
+    ``dweight`` partials."""
+    shifted, shifted_up = _doc_shifts(cu, x.shape[0], x.device)
+    xf, wd = x.double(), w.double()
     halo = CONV_WIDTH - 1
     pre = sum(wd[:, k][None, :] * shifted(xf, halo - k) for k in range(CONV_WIDTH))
     s = torch.sigmoid(pre)
-    y = (pre * s).to(torch.bfloat16)
+    y = pre * s
     dpre = dy.double() * s * (1 + pre * (1 - s))
     dx = sum(wd[:, k][None, :] * shifted_up(dpre, halo - k) for k in range(CONV_WIDTH))
-    if round_dx:
-        dx = dx.to(torch.bfloat16)
     taps = [shifted(xf, halo - k) for k in range(CONV_WIDTH)]
     return y, dx, dpre, taps
 
 
-def _outside(
-    actual: torch.Tensor, expected: torch.Tensor, *, atol: float, rtol: float
-) -> dict:
-    """Elements of ``actual`` beyond ``atol + rtol |expected|`` and the comparison's statistics."""
-    a = actual.detach().reshape(-1).double()
-    b = expected.detach().reshape(-1).double()
-    if a.numel() == 0:
-        return {"count_outside": 0, "max_abs_diff": 0.0, "finite": True, "n": 0}
-    diff = (a - b).abs()
-    return {
-        "count_outside": int((diff > atol + rtol * b.abs()).sum().item()),
-        "max_abs_diff": float(diff.max().item()),
-        "finite": bool(torch.isfinite(a).all().item()),
-        "n": int(a.numel()),
-    }
+def _stored(t: torch.Tensor) -> torch.Tensor:
+    """``t`` as the naive BF16 tier reads it: BF16 when stored no wider, else as stored (the FP32 weight)."""
+    return t.to(torch.bfloat16) if t.dtype.itemsize <= 2 else t
+
+
+def _conv_naive(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.Tensor):
+    """The naive tier of :func:`_conv_reference`: the same ops on the same inputs in PyTorch BF16 -- ``x`` and ``dy``
+    read as BF16, the FP32 weight as stored (its products with BF16 rows run in FP32 by torch's type promotion) --
+    with ``y`` and ``dx`` rounded to BF16; ``dpre`` and the BF16 taps for the per-rank ``dweight`` partials (rounded
+    to BF16 by :func:`_dw_partials`)."""
+    shifted, shifted_up = _doc_shifts(cu, x.shape[0], x.device)
+    xb, wb, dyb = _stored(x), _stored(w), _stored(dy)
+    halo = CONV_WIDTH - 1
+    pre = sum(wb[:, k][None, :] * shifted(xb, halo - k) for k in range(CONV_WIDTH))
+    s = torch.sigmoid(pre)
+    y = (pre * s).to(torch.bfloat16)
+    dpre = dyb * s * (1 + pre * (1 - s))
+    dx = sum(
+        wb[:, k][None, :] * shifted_up(dpre, halo - k) for k in range(CONV_WIDTH)
+    ).to(torch.bfloat16)
+    taps = [shifted(xb, halo - k) for k in range(CONV_WIDTH)]
+    return y, dx, dpre, taps
+
+
+def _dw_partials(dpre, taps, sels, dtype=None) -> list[torch.Tensor]:
+    """Every rank's ``dweight`` partial ``[C, 4]`` (the framework reduces the ranks): the sum over the rank's
+    tokens ``sel`` of ``dpre`` times each tap, rounded to ``dtype`` when given (the naive tier)."""
+    out = []
+    for sel in sels:
+        dw = torch.stack([(dpre[sel] * tap[sel]).sum(0) for tap in taps], dim=1)
+        out.append(dw if dtype is None else dw.to(dtype))
+    return out
+
+
+def _conv_operands(seed: int, total: int, C: int = CONV_C):
+    """The convolution operands of one draw (CPU, the same on every rank): ``x`` and ``dy`` ``[total, C]`` BF16 and
+    the FP32 weight ``[C, 4]``."""
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    x_all = (torch.randn(total, C, generator=gen) * 0.5).to(torch.bfloat16)
+    w = (torch.randn(C, CONV_WIDTH, generator=gen) * 0.5).float()
+    dy_all = (torch.randn(total, C, generator=gen) * 0.5).to(torch.bfloat16)
+    return x_all, w, dy_all
+
+
+def _judge_conv_draw(
+    judge: TierJudge,
+    failures: list[str],
+    j: int,
+    part,
+    cu: list[int],
+    W: int,
+    device,
+    x_all: torch.Tensor,
+    w: torch.Tensor,
+    dy_all: torch.Tensor,
+    got: list[dict],
+) -> None:
+    """Rank 0, draw ``j`` of C7: ``y`` / ``dx`` reassembled to the global order and every rank's ``dweight`` partial
+    (``dw.r<rank>``) against the FP64 oracle of the whole pack beside its naive BF16 tier."""
+    x, wd, dy = x_all.to(device), w.to(device), dy_all.to(device)
+    y_ref, dx_ref, dpre, taps = _conv_reference(x, wd, cu, dy)
+    y_nv, dx_nv, dpre_nv, taps_nv = _conv_naive(x, wd, cu, dy)
+    for n, ref, nv in (("y", y_ref, y_nv), ("dx", dx_ref, dx_nv)):
+        cand = _to_global(part, [r_[n].to(device) for r_ in got], cu)
+        _judge_add(judge, failures, n, j, cand, ref, nv)
+    sels = [_local_to_global(part, cu, r).to(device) for r in range(W)]
+    refs = _dw_partials(dpre, taps, sels)
+    naive = _dw_partials(dpre_nv, taps_nv, sels, torch.bfloat16)
+    for r in range(W):
+        _judge_add(
+            judge, failures, f"dw.r{r}", j, got[r]["dw"].to(device), refs[r], naive[r]
+        )
 
 
 def _run_rank_conv(
@@ -966,61 +877,59 @@ def _run_rank_conv(
     result_dir: str | None,
     backend: str,
 ) -> dict:
-    """C7 on one rank: ``y`` / ``dx`` / ``dweight`` of the rank's tokens against the FP64 oracle of the whole pack,
-    ``y`` bitwise equal to the conv package's single-rank conv of the whole pack on the rank's tokens, its repeat
-    bitwise, and the halo-row gradients delivered to the predecessor ranks (rank 0 / 1: 1 / 2 tokens of document 0)."""
+    """C7 on one rank over 32 draws: on every draw ``y`` bitwise the conv package's single-rank conv of the whole
+    pack on the rank's tokens, its repeat bitwise, the shapes, the halo-row gradients delivered to the predecessor
+    ranks (rank 0 / 1: 1 / 2 tokens of document 0, non-zero) and the empty rank; on rank 0 ``y`` / ``dx`` / every
+    rank's ``dweight`` partial judged against the FP64 oracle beside the naive BF16 tier
+    (:func:`_judge_conv_draw`)."""
     conv = _conv_mod()
     conv_kcp = _conv_mod("kcp")
 
     part, cu = _partition(row)
     ctx = plan.cake_gdn_nondet_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    gen = torch.Generator(device="cpu").manual_seed(43567)
-    x_all = (torch.randn(total, CONV_C, generator=gen) * 0.5).to(torch.bfloat16)
-    w = (torch.randn(CONV_C, CONV_WIDTH, generator=gen) * 0.5).float()
-    dy_all = (torch.randn(total, CONV_C, generator=gen) * 0.5).to(torch.bfloat16)
     l2g = _local_to_global(part, cu, rank)
-    x_local = x_all[l2g].to(device).requires_grad_(True)
-    w_dev = w.to(device).requires_grad_(True)
-    dy_local = dy_all[l2g].to(device)
-    t0 = time.time()
-    y = conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_dev, ctx)
-    y.backward(dy_local)
-    dx, dw = x_local.grad, w_dev.grad
-    y2 = conv_kcp.cake_causal_conv1d_det_kcp(x_local.detach(), w_dev.detach(), ctx)
-    torch.cuda.synchronize(device)
-    # the oracle (FP64 on this rank's device, the whole pack) and the single-rank conv of the whole pack
-    y_ref, dx_ref, dpre, taps = _conv_reference(
-        x_all.to(device), w.to(device), cu, dy_all.to(device)
-    )
     sel = l2g.to(device)
-    dw_ref = torch.stack(
-        [(dpre[sel] * tap[sel]).sum(0) for tap in taps], dim=1
-    )  # this rank's partial of dweight (the framework reduces the ranks)
     cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
-    y_single = conv.cake_causal_conv1d_det(x_all.to(device), w.to(device), cu_dev)
     flags: dict[str, bool] = {}
-    metrics: dict[str, dict] = {}
-    metrics["y"] = _outside(y, y_ref[sel], atol=CONV_Y_ATOL, rtol=CONV_Y_RTOL)
-    metrics["dx"] = _outside(dx, dx_ref[sel], atol=CONV_Y_ATOL, rtol=CONV_Y_RTOL)
-    metrics["dw"] = _outside(dw, dw_ref, atol=CONV_DW_ATOL, rtol=CONV_DW_RTOL)
-    flags["y_within"] = metrics["y"]["count_outside"] == 0 and metrics["y"]["finite"]
-    flags["dx_within"] = metrics["dx"]["count_outside"] == 0 and metrics["dx"]["finite"]
-    flags["dw_within"] = metrics["dw"]["count_outside"] == 0 and metrics["dw"]["finite"]
-    flags["y_eq_single_rank"] = torch.equal(y, y_single[sel])
-    flags["repeat"] = torch.equal(y, y2)
-    flags["shapes"] = tuple(y.shape) == tuple(x_local.shape) and tuple(
-        dx.shape
-    ) == tuple(x_local.shape)
-    # the halo rows: the predecessor ranks' tokens feed rank 3's first outputs, so their dx must carry that term
-    # (non-zero), and a rank without tokens has empty y / dx
-    if rank in (0, 1):
-        flags["halo_grad_nonzero"] = bool((dx.float().abs() > 0).any().item())
-    if rank == 2:
-        flags["empty_rank"] = y.numel() == 0 and dx.numel() == 0
+    judge, failures = (TierJudge(), []) if rank == 0 else (None, [])
+    t0 = time.time()
+    for j in range(DRAWS):
+        x_all, w, dy_all = _conv_operands(draw_seed(CONV_SEED, j), total)
+        x_local = x_all[l2g].to(device).requires_grad_(True)
+        w_dev = w.to(device).requires_grad_(True)
+        y = conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_dev, ctx)
+        y.backward(dy_all[l2g].to(device))
+        dx, dw = x_local.grad, w_dev.grad
+        y2 = conv_kcp.cake_causal_conv1d_det_kcp(x_local.detach(), w_dev.detach(), ctx)
+        # the single-rank conv of the whole pack
+        y_single = conv.cake_causal_conv1d_det(x_all.to(device), w.to(device), cu_dev)
+        torch.cuda.synchronize(device)
+        fl = {
+            "y_eq_single_rank": torch.equal(y, y_single[sel]),
+            "repeat": torch.equal(y, y2),
+            "shapes": tuple(y.shape) == tuple(x_local.shape)
+            and tuple(dx.shape) == tuple(x_local.shape),
+        }
+        # the halo rows: the predecessor ranks' tokens feed rank 3's first outputs, so their dx must carry that term
+        # (non-zero), and a rank without tokens has empty y / dx
+        if rank in (0, 1):
+            fl["halo_grad_nonzero"] = bool((dx.float().abs() > 0).any().item())
+        if rank == 2:
+            fl["empty_rank"] = y.numel() == 0 and dx.numel() == 0
+        for key, ok in fl.items():
+            flags[key] = flags.get(key, True) and bool(ok)
+        got = _gather({"y": y.detach().cpu(), "dx": dx.cpu(), "dw": dw.cpu()}, W, group)
+        del x_local, w_dev, y, y2, dx, dw, y_single
+        if judge is not None:
+            _judge_conv_draw(
+                judge, failures, j, part, cu, W, device, x_all, w, dy_all, got
+            )
+        del got
     report = {
         "row": dataclasses.asdict(row),
         "pass": all(flags.values()),
+        "failing": [k for k, ok in flags.items() if not ok],
         "rank": rank,
         "world": W,
         "backend": "conv",
@@ -1034,17 +943,18 @@ def _run_rank_conv(
         "flags": flags,
         "gated": sorted(flags),
         "reported": [],
-        "metrics": metrics,
         "info_by_rank": [
             {
                 "rank": rank,
-                "T_r": int(x_local.shape[0]),
+                "T_r": int(l2g.numel()),
                 "l2g_first": int(l2g[0]) if len(l2g) else None,
             }
         ],
-        "seconds": round(time.time() - t0, 2),
+        "seconds": None,
         "C": CONV_C,
     }
+    _judge_report(report, judge, failures)
+    report["seconds"] = round(time.time() - t0, 2)
     if result_dir:
         os.makedirs(result_dir, exist_ok=True)
         with open(
@@ -1054,33 +964,35 @@ def _run_rank_conv(
     return report
 
 
-def test_conv_halo_row(slurm) -> None:
-    """C7: ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing): ``y`` / ``dx`` /
-    ``dweight`` vs FP64 on every rank, ``y`` bitwise the conv package's single-rank conv, history rows from two
-    predecessor ranks, an empty predecessor and a document start.  Runs under Slurm with >= 4 ranks."""
+def test_conv_halo_row(slurm, record_property) -> None:
+    """C7: ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing): ``y`` / ``dx`` / ``dweight``
+    judged against FP64 (naive BF16 tier, 32 draws), ``y`` bitwise the conv package's single-rank conv, history rows
+    from two predecessor ranks, an empty predecessor and a document start.  Runs under Slurm with >= 4 ranks."""
     if slurm is None:
         pytest.skip("the conv halo row runs under Slurm (4 ranks)")
     conv = _conv_mod()
     if not conv.is_cake_causal_conv1d_det_train_supported(slurm.device):
         pytest.skip("the conv package does not support this device")
-    _slurm_row(C7_ROW, slurm, "conv", _run_rank_conv)
+    _slurm_row(C7_ROW, slurm, "conv", _run_rank_conv, record_property)
 
 
 # ----------------------------------------------------------------------------------------------------------------
 # Whole-layer checkpoint rows (issue #7818): KCP convolution -> packed q | k | v views -> caller L2 norm of q, k ->
-# cake_gdn_nondet_kcp, one checkpointed region per layer with one CakeGDNNondetKcpRecomputeHandle.  Gated: the GDN
-# part of the recompute exchanges nothing (with a convolution that takes the handle the whole recompute exchanges
-# nothing; before that, exactly the convolution's own forward collectives remain, the whole-layer zero is reported as
-# pending); the original forward and the backward exchange as in the plain checkpoint; the direct backward's
-# collectives by name are the deterministic layer's (b1, b2 and the convolution's halo), no parameter reduction;
-# out / dx / dweight / dg / dbeta of the handle checkpoint within the budget constants of the plain checkpoint and
-# of the direct pass, and every form within the correctness clause of the FP64 layer oracle.  Runs under Slurm.
+# cake_gdn_nondet_kcp, one checkpointed region per layer with one CakeGDNNondetKcpRecomputeHandle, over 32 draws of
+# the operands.  Gated on every draw: the GDN part of the recompute exchanges nothing (with a convolution that takes
+# the handle the whole recompute exchanges nothing; before that, exactly the convolution's own forward collectives
+# remain, the whole-layer zero is reported as pending); the original forward and the backward exchange as in the
+# plain checkpoint; the backward of every form issues exactly ``LAYER_BWD_COLLECTIVES``; no parameter reduction.
+# Judged on rank 0: out / dx / dweight / dg / dbeta of the direct pass, the plain checkpoint and the handle checkpoint,
+# each against the FP64 layer oracle beside its naive BF16 tier (:func:`_layer_reference`).  Runs under Slurm.  The L8
+# rows keep the (16, 48) heads (C = 10240 convolution channels) at about 1k tokens (the 32 draws of the FP64 oracle);
+# L8r keeps the empty rank, the 1-token rank and the document chains of its ragged layout.
 
 LAYER_ROWS = [
     Row("L4", (303, 200), (2, 6), 4, "explicit:c7", stage="layer"),
     Row(
         "L8",
-        (10240, 8192, 2085, 333),
+        (512, 320, 165, 33),
         (16, 48),
         8,
         "zigzag_per_document",
@@ -1088,13 +1000,18 @@ LAYER_ROWS = [
     ),
     Row(
         "L8r",
-        (10240, 8192, 2085, 333),
+        (512, 320, 165, 33),
         (16, 48),
         8,
-        "ragged:5000,0,1,3000,2849,4000,3000,3000",
+        "ragged:246,0,1,148,141,148,118,228",
         stage="layer",
     ),
 ]
+# the seed of the layer's convolution operands (draw j at draw_seed(LAYER_SEED, j)); its GDN operands come from the
+# seeded generator at draw_seed(SEED, j)
+LAYER_SEED = 78180
+# (run mode, judged form): the direct pass, the plain checkpoint, the checkpoint with the recompute handle
+LAYER_ARMS = (("direct", "direct"), ("plain", "plain_ckpt"), ("handle", "handle"))
 
 
 def _l2_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -1104,32 +1021,56 @@ def _l2_normalize(x: torch.Tensor) -> torch.Tensor:
     return (xf / torch.sqrt((xf * xf).sum(-1, keepdim=True) + 1e-6)).to(torch.bfloat16)
 
 
-def _l2_normalize_f64(x: torch.Tensor) -> torch.Tensor:
-    """The same L2 norm in FP64 without the rounding (the oracle's derivative)."""
+def _l2_normalize_exact(x: torch.Tensor) -> torch.Tensor:
+    """The same L2 norm without the FP32 math and the rounding, in the dtype of ``x``: FP64 for the oracle's
+    derivative, BF16 for its naive tier."""
     return x / torch.sqrt((x * x).sum(-1, keepdim=True) + 1e-6)
 
 
 def _layer_reference(
-    row: Row, part, cu: list[int], rank: int, device, x_all, w_all, conv
-) -> dict[str, torch.Tensor]:
-    """FP64 oracle of the whole layer on this rank's tokens: the exact GDN of the layer's own BF16 operands (the conv
-    package's single-rank convolution of the whole pack -- bitwise the KCP convolution on every rank's tokens, the C7
-    row's gate -- through the caller's L2 norm), its FP64 gradients carried back through the FP64 L2 norm and the FP64
-    convolution + SiLU; ``dw`` is this rank's partial (the weight leaf is per rank)."""
+    row: Row,
+    part,
+    cu: list[int],
+    W: int,
+    device,
+    x_all,
+    w_all,
+    conv,
+    seed: int,
+    *,
+    l2n: bool = False,
+) -> tuple[dict, dict]:
+    """FP64 oracle of the whole layer and its naive BF16 tier, on the layer's own BF16 operands: the conv package's
+    single-rank convolution of the whole pack (bitwise the KCP convolution on every rank's tokens, the C7 row's gate)
+    feeds the exact GDN of the whole pack (the GDN operands of the generator at ``seed``), whose FP64 gradients are
+    carried back to the convolution output and through the FP64 convolution + SiLU.  Without ``l2n`` the GDN reads
+    the caller's L2 norm of the q / k views (the layer's own BF16 rows) and ``dq`` / ``dk`` go back through that norm
+    in FP64; with ``l2n`` (the in-kernel norm) it reads the raw views: ``gdn_exact_l2n_with_grads`` normalizes them in
+    FP64 and returns the gradients of the raw rows.  The naive tier runs the same chain on the same operands in
+    PyTorch BF16 (``gdn_naive_with_grads`` with the norm's autograd on the BF16 rows, or ``gdn_naive_l2n_with_grads``;
+    :func:`_conv_naive`).  ``out`` / ``dx`` / ``dg`` / ``dbeta`` of the whole pack; ``dw`` the list of every rank's
+    partial (the weight leaf is per rank)."""
     ref_mod = _reference()
     H_qk, HV = row.heads
     total = cu[-1]
-    sel = _local_to_global(part, cu, rank).to(device)
     x_dev, w_dev = x_all.to(device), w_all.to(device)
     cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
     with torch.no_grad():
         y = conv.cake_causal_conv1d_det(x_dev, w_dev, cu_dev)
     qkv = y.view(total, 2 * H_qk + HV, 128)
-    q = _l2_normalize(qkv[:, :H_qk])
-    k = _l2_normalize(qkv[:, H_qk : 2 * H_qk])
+    if l2n:  # the raw views: the oracle's norm is FP64, the naive tier's BF16
+        q, k = qkv[:, :H_qk], qkv[:, H_qk : 2 * H_qk]
+        exact, naive_fn = (
+            ref_mod.gdn_exact_l2n_with_grads,
+            ref_mod.gdn_naive_l2n_with_grads,
+        )
+    else:
+        q = _l2_normalize(qkv[:, :H_qk])
+        k = _l2_normalize(qkv[:, H_qk : 2 * H_qk])
+        exact, naive_fn = ref_mod.gdn_exact_with_grads, ref_mod.gdn_naive_with_grads
     v = qkv[:, 2 * H_qk :].contiguous()
-    glob = _global_inputs(row, cu, device)
-    gdn = ref_mod.gdn_exact_with_grads(
+    glob = _global_inputs(row, cu, device, seed=seed)
+    args = (
         q,
         k,
         v,
@@ -1137,31 +1078,87 @@ def _layer_reference(
         glob["beta"],
         glob["dout"],
         torch.tensor(cu, dtype=torch.int64),
-        scale=SCALE,
     )
-    del glob, q, k, v
-    y64 = y.detach().to(F64).requires_grad_(True)
-    y3 = y64.view(total, 2 * H_qk + HV, 128)
-    outs = (
-        _l2_normalize_f64(y3[:, :H_qk]),
-        _l2_normalize_f64(y3[:, H_qk : 2 * H_qk]),
-        y3[:, 2 * H_qk :],
-    )
-    (dy64,) = torch.autograd.grad(
-        outs, (y64,), (gdn["dq"].to(F64), gdn["dk"].to(F64), gdn["dv"].to(F64))
-    )
-    del outs, y3, y64
-    _, dx64, dpre, taps = _conv_reference(x_dev, w_dev, cu, dy64, round_dx=False)
-    dw = torch.stack([(dpre[sel] * tap[sel]).sum(0) for tap in taps], dim=1)
-    out = {
-        "out": gdn["out"][sel].to(F64),
-        "dx": dx64[sel],
-        "dw": dw,
-        "dg": gdn["dg"][sel].to(F64),
-        "dbeta": gdn["dbeta"][sel].to(F64),
+    gdn = exact(*args, scale=SCALE)
+    gdn_nv = naive_fn(*args, scale=SCALE)
+    del glob, args, q, k, v
+    # dq / dk / dv onto the convolution output: FP64 (oracle) and BF16 (naive)
+    dy = {}
+    for tier, dtype, grads in (("oracle", F64, gdn), ("naive", torch.bfloat16, gdn_nv)):
+        if l2n:  # dq / dk are already the gradients of the raw rows
+            dy[tier] = torch.cat(
+                [grads[n].to(dtype).reshape(total, -1) for n in ("dq", "dk", "dv")],
+                dim=1,
+            )
+            continue
+        yl = y.detach().to(dtype).requires_grad_(True)
+        y3 = yl.view(total, 2 * H_qk + HV, 128)
+        outs = (
+            _l2_normalize_exact(y3[:, :H_qk]),
+            _l2_normalize_exact(y3[:, H_qk : 2 * H_qk]),
+            y3[:, 2 * H_qk :],
+        )
+        (dy[tier],) = torch.autograd.grad(
+            outs, (yl,), tuple(grads[n].to(dtype) for n in ("dq", "dk", "dv"))
+        )
+        del yl, y3, outs
+    _, dx64, dpre, taps = _conv_reference(x_dev, w_dev, cu, dy["oracle"])
+    _, dx_nv, dpre_nv, taps_nv = _conv_naive(x_dev, w_dev, cu, dy["naive"])
+    sels = [_local_to_global(part, cu, r).to(device) for r in range(W)]
+    refs = {
+        "out": gdn["out"].to(F64),
+        "dx": dx64,
+        "dg": gdn["dg"].to(F64),
+        "dbeta": gdn["dbeta"].to(F64),
+        "dw": _dw_partials(dpre, taps, sels),
     }
-    del gdn, dx64, dpre, taps, dy64
-    return out
+    naive = {
+        "out": gdn_nv["out"],
+        "dx": dx_nv,
+        "dg": gdn_nv["dg"],
+        "dbeta": gdn_nv["dbeta"],
+        "dw": _dw_partials(dpre_nv, taps_nv, sels, torch.bfloat16),
+    }
+    return refs, naive
+
+
+def _judge_layer_draw(
+    judge: TierJudge,
+    failures: list[str],
+    j: int,
+    row: Row,
+    part,
+    cu: list[int],
+    W: int,
+    device,
+    x_all: torch.Tensor,
+    w_all: torch.Tensor,
+    conv,
+    seed: int,
+    got: list[dict],
+    *,
+    l2n: bool = False,
+) -> None:
+    """Rank 0, draw ``j`` of a layer row: per form (``direct``, ``plain_ckpt``, ``handle``) ``out`` / ``dx`` / ``dg``
+    / ``dbeta`` reassembled to the global order and every rank's ``dw`` partial (``<form>.dw.r<rank>``) against the
+    FP64 layer oracle beside its naive BF16 tier (``l2n``: the oracle of the in-kernel norm)."""
+    refs, naive = _layer_reference(
+        row, part, cu, W, device, x_all, w_all, conv, seed, l2n=l2n
+    )
+    for _mode, arm in LAYER_ARMS:
+        for n in ("out", "dx", "dg", "dbeta"):
+            cand = _to_global(part, [r_[arm][n].to(device) for r_ in got], cu)
+            _judge_add(judge, failures, f"{arm}.{n}", j, cand, refs[n], naive[n])
+        for r in range(W):
+            _judge_add(
+                judge,
+                failures,
+                f"{arm}.dw.r{r}",
+                j,
+                got[r][arm]["dw"].to(device),
+                refs["dw"][r],
+                naive["dw"][r],
+            )
 
 
 def _run_rank_layer(
@@ -1175,8 +1172,10 @@ def _run_rank_layer(
     *,
     l2n: bool = False,
 ) -> dict:
-    """One whole-layer row (``l2n``: #7817, the in-kernel L2 norm on the raw convolution output views instead of the
-    caller's norm)."""
+    """One whole-layer row over 32 draws (``l2n``: #7817, the in-kernel L2 norm on the raw convolution output views
+    instead of the caller's norm): the collective counts of the three forms on every draw (the backward's against
+    the fixed list ``LAYER_BWD_COLLECTIVES``), and on rank 0 their outputs judged against the FP64 layer oracle
+    (:func:`_judge_layer_draw`)."""
     conv = _conv_mod()
     conv_kcp = _conv_mod("kcp")
 
@@ -1184,13 +1183,7 @@ def _run_rank_layer(
     C = (2 * H_qk + HV) * 128
     part, cu = _partition(row)
     ctx = plan.cake_gdn_nondet_train_kcp_build_context(part, group, rank, device)
-    gen = torch.Generator(device="cpu").manual_seed(78180)
-    x_all = (torch.randn(cu[-1], C, generator=gen) * 0.5).to(torch.bfloat16)
-    w_all = (torch.randn(C, CONV_WIDTH, generator=gen) * 0.5).float()
     l2g = _local_to_global(part, cu, rank)
-    x_local = x_all[l2g].to(device)
-    ops = _local_inputs(row, part, cu, rank, device)
-    g, beta, dout = ops["g"], ops["beta"], ops["dout"]
     conv_takes_handle = (
         "recompute_handle"
         in inspect.signature(conv_kcp.cake_causal_conv1d_det_kcp).parameters
@@ -1219,16 +1212,13 @@ def _run_rank_layer(
             **({"use_qk_l2norm_in_kernel": True} if l2n else {}),
         )
 
-    def leaves_of():
-        return [
+    def run(mode: str, x_local, w_all, g, beta, dout):
+        leaves = [
             x_local.detach().clone().requires_grad_(True),
             w_all.to(device).requires_grad_(True),
             g.detach().clone().requires_grad_(True),
             beta.detach().clone().requires_grad_(True),
         ]
-
-    def run(mode: str):
-        leaves = leaves_of()
         hd = kcp.CakeGDNNondetKcpRecomputeHandle() if mode == "handle" else None
         from torch.utils.checkpoint import checkpoint
 
@@ -1253,77 +1243,88 @@ def _run_rank_layer(
             "handle_keys": sorted(hd.entries) if hd is not None else [],
         }
 
-    # the convolution's own forward collectives (its halo exchange), for the pending whole-layer count
-    with CollectiveCounter() as cc_conv:
-        conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_all.to(device), ctx)
-    conv_fwd = cc_conv.record()
+    flags: dict[str, bool] = {}
+    first: dict[str, object] = {}
+    conv_fwd: dict | None = None
+    judge, failures = (TierJudge(), []) if rank == 0 else (None, [])
     t0 = time.time()
-    res_d, rec_d = run("direct")
-    res_p, rec_p = run("plain")
-    res_h, rec_h = run("handle")
-    # (b) the deterministic layer (its own context of the same partition; the convolution reads it by duck typing):
-    # the direct backward's collectives by name
-    det_kcp = _det_mod("cake_kcp")
-    det_plan = _det_mod("cake_kcp_plan")
-    det_part, _ = _partition_with(det_plan.cake_gdn_det_train_kcp_partition, row)
-    det_ctx = det_plan.cake_gdn_det_train_kcp_build_context(
-        det_part, group, rank, device
-    )
-    det_leaves = leaves_of()
-    with _NamedCounter() as cc_det:
-        y_d = conv_kcp.cake_causal_conv1d_det_kcp(det_leaves[0], det_leaves[1], det_ctx)
-        qkv_d = y_d.view(y_d.shape[0], 2 * H_qk + HV, 128)
-        if l2n:  # the deterministic layer with the norm on the same raw views
-            qd, kd = qkv_d[:, :H_qk], qkv_d[:, H_qk : 2 * H_qk]
+    for j in range(DRAWS):
+        x_all, w_all, _ = _conv_operands(draw_seed(LAYER_SEED, j), cu[-1], C)
+        x_local = x_all[l2g].to(device)
+        gdn_seed = draw_seed(int(_inputs().SEED), j)
+        ops = _local_inputs(row, part, cu, rank, device, seed=gdn_seed)
+        if conv_fwd is None:
+            # the convolution's own forward collectives (its halo exchange), for the pending whole-layer count
+            with CollectiveCounter() as cc_conv:
+                conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_all.to(device), ctx)
+            conv_fwd = cc_conv.record()
+        res, rec = {}, {}
+        for mode, _arm in LAYER_ARMS:
+            res[mode], rec[mode] = run(
+                mode, x_local, w_all, ops["g"], ops["beta"], ops["dout"]
+            )
+        rec_d, rec_p, rec_h = rec["direct"], rec["plain"], rec["handle"]
+        rc_calls = rec_h["calls"].get("recompute", 0)
+        rc_waits = rec_h["waits"].get("recompute", 0)
+        fl = {
+            "layer_orig_bwd_comm_unchanged": all(
+                rec_h[t].get(ph, 0) == rec_p[t].get(ph, 0)
+                for t in ("calls", "waits")
+                for ph in ("orig", "bwd")
+            ),
+            "layer_no_param_reduction": _no_param_reduction(rec_d, rec_p, rec_h),
+            "layer_bwd_collectives_fixed": all(
+                r_["named"].get("bwd", {}) == LAYER_BWD_COLLECTIVES
+                for r_ in (rec_d, rec_p, rec_h)
+            ),
+        }
+        if conv_takes_handle:
+            fl["layer_recompute_no_comm"] = rc_calls == 0 and rc_waits == 0
         else:
-            qd = _l2_normalize(qkv_d[:, :H_qk])
-            kd = _l2_normalize(qkv_d[:, H_qk : 2 * H_qk])
-        out_det = det_kcp.cake_gdn_det_kcp(
-            qd,
-            kd,
-            qkv_d[:, 2 * H_qk :],
-            det_leaves[2],
-            det_leaves[3],
-            det_ctx,
-            save_transfer=False,
-            backend=backend,
-            **({"use_qk_l2norm_in_kernel": True} if l2n else {}),
+            # only the convolution's own halo exchange is left in the recompute: the GDN part exchanges nothing
+            fl["layer_gdn_recompute_no_comm"] = rc_calls == conv_fwd["calls"].get(
+                "orig", 0
+            ) and rc_waits == conv_fwd["waits"].get("orig", 0)
+        for key, ok in fl.items():
+            flags[key] = flags.get(key, True) and bool(ok)
+        if j == 0:
+            first = {
+                "direct": rec_d,
+                "plain": rec_p,
+                "handle": rec_h,
+                "plain_recompute_calls": rec_p["calls"].get("recompute", 0),
+                "handle_recompute_calls": rc_calls,
+                "handle_recompute_waits": rc_waits,
+            }
+        got = _gather(
+            {
+                arm: {n: t.detach().cpu() for n, t in res[mode].items()}
+                for mode, arm in LAYER_ARMS
+            },
+            W,
+            group,
         )
-        cc_det.phase = "bwd"
-        out_det.backward(dout)
-    rec_det = cc_det.record()
-    del det_leaves, y_d, qkv_d, qd, kd, out_det
-    flags: dict[str, bool] = {
-        "layer_orig_bwd_comm_unchanged": all(
-            rec_h[t].get(ph, 0) == rec_p[t].get(ph, 0)
-            for t in ("calls", "waits")
-            for ph in ("orig", "bwd")
-        ),
-        "layer_bwd_collectives_eq_det": rec_d["named"].get("bwd", {})
-        == rec_det["named"].get("bwd", {}),
-        "layer_no_param_reduction": _no_param_reduction(rec_d, rec_p, rec_h),
-    }
-    rc_calls = rec_h["calls"].get("recompute", 0)
-    rc_waits = rec_h["waits"].get("recompute", 0)
-    if conv_takes_handle:
-        flags["layer_recompute_no_comm"] = rc_calls == 0 and rc_waits == 0
-    else:
-        # only the convolution's own halo exchange is left in the recompute: the GDN part exchanges nothing
-        flags["layer_gdn_recompute_no_comm"] = rc_calls == conv_fwd["calls"].get(
-            "orig", 0
-        ) and rc_waits == conv_fwd["waits"].get("orig", 0)
-    # (g) the FP64 layer oracle and the cross-form budget checks
-    ref_mod = _reference()
-    refs = _layer_reference(row, part, cu, rank, device, x_all, w_all, conv)
-    judge = _Judge(row, ref_mod, None)
-    for name, r_ in (("direct", res_d), ("plain_ckpt", res_p), ("handle", res_h)):
-        judge.fp64(name, r_, refs, LAYER_TENSORS)
-    judge.cross("handle_vs_plain_ckpt", res_h, res_p, LAYER_TENSORS)
-    judge.cross("handle_vs_direct", res_h, res_d, LAYER_TENSORS)
-    del refs, res_d, res_p, res_h
+        del res, ops, x_local
+        if judge is not None:
+            _judge_layer_draw(
+                judge,
+                failures,
+                j,
+                row,
+                part,
+                cu,
+                W,
+                device,
+                x_all,
+                w_all,
+                conv,
+                gdn_seed,
+                got,
+                l2n=l2n,
+            )
+        del got
     host = _host_map(group, W)
     flags["host_map"] = host["ok"]
-    verdicts = judge.finish(group, W)
     report = {
         "row": dataclasses.asdict(row),
         "pass": True,
@@ -1344,26 +1345,21 @@ def _run_rank_layer(
         "reported": []
         if conv_takes_handle
         else ["layer_recompute_no_comm (pending: conv recompute_handle)"],
-        "judged": {},
         "info_by_rank": [
             {
                 "rank": rank,
-                "T_r": int(x_local.shape[0]),
+                "T_r": int(l2g.numel()),
                 "conv_takes_handle": conv_takes_handle,
                 "conv_fwd_collectives": conv_fwd,
-                "direct": rec_d,
-                "plain": rec_p,
-                "handle": rec_h,
-                "det_direct": rec_det,
-                "plain_recompute_calls": rec_p["calls"].get("recompute", 0),
-                "handle_recompute_calls": rc_calls,
-                "handle_recompute_waits": rc_waits,
+                "N_out": int(ctx.N_out),
+                **first,
             }
         ],
         "seconds": None,
         "C": C,
     }
-    _fold(report, [flags], verdicts)
+    _fold(report, [flags])
+    _judge_report(report, judge, failures)
     report["seconds"] = round(time.time() - t0, 2)
     if result_dir:
         os.makedirs(result_dir, exist_ok=True)
@@ -1378,7 +1374,7 @@ def _run_rank_layer(
 
 
 @pytest.mark.parametrize("row", LAYER_ROWS, ids=_row_id)
-def test_layer_checkpoint_rows(row: Row, slurm) -> None:
+def test_layer_checkpoint_rows(row: Row, slurm, record_property) -> None:
     """#7818 whole-layer rows: KCP convolution + L2 norm + cake_gdn_nondet_kcp in one checkpointed
     region with one recompute handle (see the block comment above).  Runs under Slurm with >= the row's ranks."""
     if slurm is None:
@@ -1386,7 +1382,9 @@ def test_layer_checkpoint_rows(row: Row, slurm) -> None:
     conv = _conv_mod()
     if not conv.is_cake_causal_conv1d_det_train_supported(slurm.device):
         pytest.skip("the conv package does not support this device")
-    _slurm_row(row, slurm, _backend_name(), _run_rank_layer)
+    _slurm_row(row, slurm, _backend_name(), _run_rank_layer, record_property)
+
+
 L2N_SKIP = (
     "the in-kernel Q/K L2 norm records (fwd_prep_l2n, bwd_dqkg_l2n, qk_apply) are not in the shipped registry "
     "yet: use_qk_l2norm_in_kernel cannot run on the kernel backend"
@@ -1404,10 +1402,10 @@ def _skip_unless_l2n(backend: str) -> None:
 
 
 @pytest.mark.parametrize("row", LAYER_ROWS, ids=_row_id)
-def test_l2n_layer_checkpoint_rows(row: Row, slurm) -> None:
+def test_l2n_layer_checkpoint_rows(row: Row, slurm, record_property) -> None:
     """#7817 whole-layer rows: KCP convolution + ``cake_gdn_nondet_kcp(use_qk_l2norm_in_kernel=True)``
-    on the RAW convolution output views in one checkpointed region (the B3 boundary), with
-    and without a recompute handle, against the FP64 layer oracle and one another within the budgets."""
+    on the RAW convolution output views in one checkpointed region (the B3 boundary), with and without a recompute
+    handle, each form judged against the FP64 layer oracle (naive BF16 tier, 32 draws)."""
     if slurm is None:
         pytest.skip("the layer rows run under Slurm")
     conv = _conv_mod()
@@ -1420,4 +1418,5 @@ def test_l2n_layer_checkpoint_rows(row: Row, slurm) -> None:
         slurm,
         backend,
         lambda *a: _run_rank_layer(*a, l2n=True),
+        record_property,
     )

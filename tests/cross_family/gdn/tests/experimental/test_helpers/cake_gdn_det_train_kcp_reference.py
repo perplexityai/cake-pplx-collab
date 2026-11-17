@@ -50,9 +50,19 @@ or exactly the requested ``token_range``):
   ``carry_diagnostic`` (``||M_f||_2`` and the carried fraction per fragment).
 * ``conv_exact`` / ``conv_exact_with_grads``: per-document width-4 causal
   depthwise conv + SiLU in FP64 with history rows and ``dhistory``.
-* ``error_metrics`` / ``elementwise_mismatch`` / ``ulp_storage`` /
-  ``judge_tensor`` / ``compare_to_reference`` (rel-RMS, max-abs, the one
-  storage-ulp max-abs clause) and ``reference_pack`` (whole pack, per document).
+* ``reference_pack`` (whole pack, per document).
+* ``gdn_exact_l2n_with_grads`` / ``gdn_naive_l2n_with_grads``: the same with the
+  in-kernel Q / K L2 norm (``l2n_exact`` / ``l2n_naive``): the oracle normalizes
+  the raw rows in FP64 and carries ``dq`` / ``dk`` back through that norm; only
+  the naive tier normalizes in BF16.
+* ``gdn_naive_forward`` / ``gdn_naive_with_grads`` / ``naive_cut_states`` /
+  ``naive_pack``: the naive tier of the tests' judge
+  (``tests/cake_naive.py``), PyTorch BF16: the recurrence and its autograd of
+  ``gdn_exact_with_grads`` / ``reference_pack`` on the same inputs with every
+  op in BF16 (the BF16 operands as stored, an FP32 gate / beta / state /
+  cotangent as stored; the products ``S^T k`` and ``S^T q`` take BF16 operands,
+  an elementwise op of an FP32 tensor runs in FP32 by torch's promotion), each
+  result rounded to BF16.
 
 Provenance: port of the calibration-harness modules ``gdn_inputs.py``
 (sha256 6bd0f61e3e02287645244256b94e3fc4b54249c8b8d9377635f2f491f808ee1e) and
@@ -375,8 +385,6 @@ STORAGE_OF = {
     "dbeta": "fp32",
 }  # storage format in which each tensor is compared (out/dq/dk/dv as stored BF16, dg/dbeta as FP32)
 STORAGE_DTYPE = {"bf16": torch.bfloat16, "fp32": torch.float32}
-FRACTION_BITS = {"bf16": 7, "fp32": 23}
-MIN_EXP = -126
 PROGRESS_BLOCKS = 64
 F64 = torch.float64
 
@@ -900,180 +908,304 @@ def conv_exact_with_grads(
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# error metrics and the per-tensor verdict (dbeta is compared in its FP32 storage)
+# the naive tier (PyTorch BF16)
 
-_BLOCK_ELEMS = 1 << 26
-
-
-def _blocks(cand: torch.Tensor, ref: torch.Tensor):
-    c = cand.detach().reshape(-1)
-    r = ref.detach().reshape(-1)
-    if c.numel() != r.numel():
-        raise ValueError(f"shape mismatch {tuple(cand.shape)} vs {tuple(ref.shape)}")
-    dev = c.device if c.is_cuda else r.device
-    for i in range(0, c.numel(), _BLOCK_ELEMS):
-        yield i, c[i : i + _BLOCK_ELEMS].to(dev), r[i : i + _BLOCK_ELEMS].to(dev)
+NAIVE_DTYPE = torch.bfloat16
 
 
-def error_metrics(cand: torch.Tensor, ref: torch.Tensor) -> dict:
-    """rel_rms = RMS(cand - ref) / RMS(ref), max_abs, rms, ref_rms, ref_max_abs, numel, nonfinite, and the worst element
-    (flat index, |err|, ref and cand values there) -- the candidate is compared AS STORED, everything computed in FP64."""
-    n = int(cand.numel())
-    res = {
-        "rel_rms": 0.0,
-        "max_abs": 0.0,
-        "rms": 0.0,
-        "ref_rms": 0.0,
-        "ref_max_abs": 0.0,
-        "numel": n,
-        "nonfinite": 0,
-        "worst": None,
-        "dtype": str(cand.dtype).replace("torch.", ""),
-    }
-    if n == 0:
-        return res
-    sq_err = sq_ref = 0.0
-    max_abs = ref_max = 0.0
-    nonfinite = 0
-    worst = None
-    for base, c, r in _blocks(cand, ref):
-        c64 = c.to(F64)
-        r64 = r.to(F64)
-        nonfinite += int((~torch.isfinite(c64)).sum().item())
-        err = c64 - r64
-        sq_err += float((err * err).sum().item())
-        sq_ref += float((r64 * r64).sum().item())
-        ae = err.abs()
-        j = int(torch.argmax(torch.nan_to_num(ae, nan=float("inf"))).item())
-        m = float(ae[j].item())
-        if worst is None or m > worst["err"] or math.isnan(m):
-            worst = {
-                "index": base + j,
-                "err": m,
-                "ref": float(r64[j].item()),
-                "cand": float(c64[j].item()),
-            }
-        max_abs = max(max_abs, m)
-        ref_max = max(ref_max, float(r64.abs().max().item()))
-        del c64, r64, err, ae
-    rms_ref = math.sqrt(sq_ref / n)
-    rms_err = math.sqrt(sq_err / n)
+def _stored(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """``x`` as the naive tier in ``dtype`` reads it: cast to ``dtype`` when ``x`` is stored no wider (a BF16 operand),
+    else as is (an FP32 gate, beta, state or cotangent: an elementwise op of it runs in FP32 by torch's promotion)."""
+    return x.to(dtype) if x.dtype.itemsize <= dtype.itemsize else x
+
+
+def _block_naive(S0, qe, ke, v, g, beta, scale, dtype):
+    # :func:`_block` with every op in ``dtype``: S^T k and S^T q are products of operands cast to ``dtype`` (an FP32
+    # state is cast where a product takes it); the decay and the update follow torch's type promotion
+    St = S0
+    outs = []
+    for t in range(ke.shape[0]):
+        St = St * torch.exp(g[t])[:, None, None]
+        kt = ke[t]
+        pred = torch.einsum(
+            "hk,hkv->hv", kt.to(dtype), St.to(dtype)
+        )  # S^T k -> [HV, V]
+        St = St + (beta[t][:, None] * kt)[:, :, None] * (v[t] - pred)[:, None, :]
+        outs.append(scale * torch.einsum("hk,hkv->hv", qe[t].to(dtype), St.to(dtype)))
+    return torch.stack(outs, 0), St
+
+
+def _recur_naive(S0, qe, ke, v, g, beta, scale, block, dtype):
+    """:func:`_recur` of the naive tier: the 64-token blocks of :func:`_block_naive`, checkpointed under autograd."""
+    St, outs = S0, []
+    for b0 in range(0, ke.shape[0], block):
+        b1 = min(b0 + block, ke.shape[0])
+        args = (St, qe[b0:b1], ke[b0:b1], v[b0:b1], g[b0:b1], beta[b0:b1], scale, dtype)
+        if torch.is_grad_enabled():
+            ob, St = checkpoint(_block_naive, *args, use_reentrant=False)
+        else:
+            ob, St = _block_naive(*args)
+        outs.append(ob)
+    o = torch.cat(outs, 0) if outs else ke.new_zeros(0, ke.shape[1], v.shape[-1])
+    return o, St
+
+
+def gdn_naive_forward(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    cu_seqlens,
+    *,
+    scale: float = SCALE,
+    h0=None,
+    token_range=None,
+    block: int = BLOCK,
+    dtype: torch.dtype = NAIVE_DTYPE,
+):
+    """The naive tier of :func:`gdn_exact_forward` (every op in ``dtype``, the module docstring): ``(out, final_state)``
+    of global tokens [a, b), not rounded (``out`` is ``dtype``, the state FP32 when the gate is)."""
+    q, k, v, g, beta, cu, a, b = _prepare(q, k, v, g, beta, cu_seqlens, token_range)
+    HV, K, V = v.shape[1], q.shape[2], v.shape[2]
+    dev = q.device
+    qe, ke = _expand_heads(_stored(q, dtype), HV), _expand_heads(_stored(k, dtype), HV)
+    v, g, beta = _stored(v, dtype), _stored(g, dtype), _stored(beta, dtype)
+    a_is_start = a in cu
+    if h0 is not None:
+        h0 = _stored(h0, dtype)
+        if tuple(h0.shape) != (HV, K, V):
+            raise ValueError(
+                f"h0 must be [HV, K, V] = {(HV, K, V)}, got {tuple(h0.shape)}"
+            )
+        if a_is_start and bool((h0 != 0).any()):
+            raise ValueError(f"token {a} starts a document: h0 must be None or zero")
+    S = torch.zeros(HV, K, V, dtype=dtype, device=dev)
+    if h0 is not None and not a_is_start:
+        S = h0
+    outs = []
+    for _d, lo, hi in _segments(cu, a, b):
+        S_init = S if lo == a else torch.zeros(HV, K, V, dtype=dtype, device=dev)
+        o, S = _recur_naive(
+            S_init,
+            qe[lo - a : hi - a],
+            ke[lo - a : hi - a],
+            v[lo - a : hi - a],
+            g[lo - a : hi - a],
+            beta[lo - a : hi - a],
+            scale,
+            block,
+            dtype,
+        )
+        outs.append(o)
+    out = torch.cat(outs, 0) if outs else torch.zeros(0, HV, V, dtype=dtype, device=dev)
+    return out, S
+
+
+def gdn_naive_with_grads(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    dout,
+    cu_seqlens,
+    *,
+    scale: float = SCALE,
+    h0=None,
+    dfinal=None,
+    token_range=None,
+    block: int = BLOCK,
+    dtype: torch.dtype = NAIVE_DTYPE,
+) -> dict:
+    """The naive tier of :func:`gdn_exact_with_grads`: the same recurrence and autograd of global tokens [a, b) on
+    the same inputs, every op in ``dtype`` (see the module docstring), each result rounded to ``dtype``: out,
+    final_state, dq, dk, dv, dg, dbeta, dh0."""
+    dout = _tok(dout, 3, "dout")
+    cu = _cu_list(cu_seqlens)
+    a, b = _range(cu, token_range)
+    dout = _stored(_slice_to_range(dout, cu[-1], a, b, "dout"), dtype)
+    qq, kk, vv, gg, bb, _, _, _ = _prepare(q, k, v, g, beta, cu_seqlens, token_range)
+    leaves = [
+        _stored(x.detach(), dtype).clone().requires_grad_(True)
+        for x in (qq, kk, vv, gg, bb)
+    ]
+    HV, K, V = vv.shape[1], qq.shape[2], vv.shape[2]
+    dev = qq.device
+    a_is_start = a in cu
+    h0_leaf = None
+    if not a_is_start:
+        h0_leaf = (
+            torch.zeros(HV, K, V, dtype=dtype, device=dev)
+            if h0 is None
+            else _stored(h0.detach(), dtype).clone()
+        ).requires_grad_(True)
+    out, S = gdn_naive_forward(
+        *leaves,
+        cu,
+        scale=scale,
+        h0=h0_leaf,
+        token_range=(a, b),
+        block=block,
+        dtype=dtype,
+    )
+    outputs, cots = [out], [dout]
+    if dfinal is not None:
+        outputs.append(S)
+        cots.append(_stored(dfinal.detach(), dtype).to(S.dtype))
+    all_leaves = leaves + ([h0_leaf] if h0_leaf is not None else [])
+    grads = torch.autograd.grad(outputs, all_leaves, cots, allow_unused=True)
+    grads = [
+        torch.zeros_like(leaf) if gr is None else gr
+        for leaf, gr in zip(all_leaves, grads, strict=True)
+    ]
+    res = {"out": out.detach().to(dtype), "final_state": S.detach().to(dtype)}
     res.update(
-        rel_rms=(rms_err / rms_ref)
-        if rms_ref > 0
-        else (float("inf") if rms_err > 0 else 0.0),
-        max_abs=max_abs,
-        rms=rms_err,
-        ref_rms=rms_ref,
-        ref_max_abs=ref_max,
-        nonfinite=nonfinite,
-        worst=worst,
+        {n: gr.detach().to(dtype) for n, gr in zip(GRAD_NAMES, grads[:5], strict=True)}
+    )
+    res["dh0"] = (
+        grads[5].detach().to(dtype)
+        if h0_leaf is not None
+        else torch.zeros(HV, K, V, dtype=dtype, device=dev)
     )
     return res
 
 
-def elementwise_mismatch(
-    cand: torch.Tensor, ref: torch.Tensor, atol: float = 1e-2, rtol: float = 1e-2
-) -> dict:
-    mismatch = nonfinite = 0
-    worst = 0.0
-    for _, c, r in _blocks(cand, ref):
-        c64 = c.to(F64)
-        r64 = r.to(F64)
-        excess = (c64 - r64).abs() - (atol + rtol * r64.abs())
-        bad = excess > 0
-        mismatch += int(bad.sum().item())
-        if mismatch:
-            worst = max(worst, float(excess.max().item()))
-        nonfinite += int((~torch.isfinite(c64)).sum().item())
-    return {
-        "mismatch": mismatch,
-        "numel": int(cand.numel()),
-        "nonfinite": nonfinite,
-        "pass": bool(mismatch == 0 and nonfinite == 0),
-        "worst_excess": worst,
-        "atol": atol,
-        "rtol": rtol,
-    }
+# the in-kernel Q / K L2 norm: x / sqrt(sum x^2 + L2N_EPS) per token and head
+L2N_EPS = 1e-6
 
 
-def worst_element(cand: torch.Tensor, ref: torch.Tensor) -> dict | None:
-    return error_metrics(cand, ref)["worst"]
+def l2n_exact(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(x / n, n)`` in FP64, ``n = sqrt(sum x^2 + L2N_EPS)`` per token and head, from the raw rows ``x``."""
+    xd = x.detach().to(F64)
+    n = torch.sqrt((xd * xd).sum(-1, keepdim=True) + L2N_EPS)
+    return xd / n, n
 
 
-def ulp_storage(magnitude: float, storage: str) -> float:
-    """Unit in the last place of `storage` ('bf16' | 'fp32') in the binade of |magnitude| (form:
-    2 ** (floor(log2 m) - p), p = 7 / 23, exponent clamped at the minimum normal exponent -126)."""
-    m = abs(float(magnitude))
-    if math.isnan(m) or math.isinf(m):
-        raise ValueError(f"non-finite magnitude {magnitude!r}")
-    if m == 0.0:
-        e = MIN_EXP
-    else:
-        _, exp = math.frexp(m)
-        e = max(exp - 1, MIN_EXP)
-    return math.ldexp(1.0, e - FRACTION_BITS[storage])
+def l2n_naive(
+    x: torch.Tensor, dtype: torch.dtype = NAIVE_DTYPE
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The naive tier of :func:`l2n_exact`: the raw rows read as ``dtype`` and every op in ``dtype``."""
+    xb = _stored(x.detach(), dtype)
+    n = torch.sqrt((xb * xb).sum(-1, keepdim=True) + L2N_EPS)
+    return xb / n, n
 
 
-def judge_tensor(
-    metrics: dict, budget_rel_rms: float, budget_max_abs: float, storage: str
-) -> dict:
-    """G1 verdict of one tensor: pass_pre_u1 (rel-RMS and max-abs within budget, finite) and pass_u1 (max-abs may exceed
-    the budget by one storage ulp of |ref| at the candidate's worst element: the one-storage-ulp slack of the
-    acceptance rule)."""
-    rel, mx, nf = (
-        float(metrics["rel_rms"]),
-        float(metrics["max_abs"]),
-        int(metrics["nonfinite"]),
+def _l2n_pullback(dxh: torch.Tensor, xh: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+    """The gradient of the raw rows from that of the normalized rows: ``(dx_hat - x_hat (dx_hat . x_hat)) / n``."""
+    return (dxh - xh * (dxh * xh).sum(-1, keepdim=True)) / n
+
+
+def gdn_exact_l2n_with_grads(q, k, v, g, beta, dout, cu_seqlens, **kw) -> dict:
+    """:func:`gdn_exact_with_grads` with the in-kernel Q / K L2 norm, all in FP64 from the raw inputs: the raw
+    ``q`` / ``k`` rows normalized in FP64 (:func:`l2n_exact`, no rounding of the normalized rows), the recurrence and
+    its autograd on them, ``dq`` / ``dk`` carried back through the FP64 norm (gradients of the raw rows)."""
+    qh, nq = l2n_exact(_tok(q, 3, "q"))
+    kh, nk = l2n_exact(_tok(k, 3, "k"))
+    res = gdn_exact_with_grads(qh, kh, v, g, beta, dout, cu_seqlens, **kw)
+    a, b = _range(_cu_list(cu_seqlens), kw.get("token_range"))
+    total = _cu_list(cu_seqlens)[-1]
+    qh, nq, kh, nk = (
+        _slice_to_range(t, total, a, b, n)
+        for t, n in ((qh, "q"), (nq, "q"), (kh, "k"), (nk, "k"))
     )
-    brel, bmax = float(budget_rel_rms), float(budget_max_abs)
-    rel_ok, finite_ok = rel <= brel, nf == 0
-    pass_pre = bool(rel_ok and mx <= bmax and finite_ok)
-    out = {
-        "storage": storage,
-        "rel_rms": rel,
-        "max_abs": mx,
-        "nonfinite": nf,
-        "budget_rel_rms": brel,
-        "budget_max_abs": bmax,
-        "ratio_rel": (rel / brel) if brel > 0 else float("inf"),
-        "ratio_max": (mx / bmax) if bmax > 0 else float("inf"),
-        "pass_pre_u1": pass_pre,
-    }
-    w = metrics.get("worst")
-    if w is None:
-        out.update(
-            ulp_at_worst=None,
-            budget_max_abs_u1=None,
-            pass_u1=(True if pass_pre else None),
-        )
-        return out
-    ulp = ulp_storage(w["ref"], storage)
-    bmax_u1 = bmax + ulp
-    out.update(
-        ulp_at_worst=ulp,
-        ref_at_worst=w["ref"],
-        budget_max_abs_u1=bmax_u1,
-        ratio_max_u1=(mx / bmax_u1) if bmax_u1 > 0 else float("inf"),
-        pass_u1=bool(rel_ok and mx <= bmax_u1 and finite_ok),
+    res["dq"] = _l2n_pullback(res["dq"], qh, nq)
+    res["dk"] = _l2n_pullback(res["dk"], kh, nk)
+    return res
+
+
+def gdn_naive_l2n_with_grads(
+    q, k, v, g, beta, dout, cu_seqlens, *, dtype: torch.dtype = NAIVE_DTYPE, **kw
+) -> dict:
+    """The naive tier of :func:`gdn_exact_l2n_with_grads`: the raw rows normalized in ``dtype`` (:func:`l2n_naive`),
+    :func:`gdn_naive_with_grads` on them and the pullback of ``dq`` / ``dk`` in ``dtype``; every result in ``dtype``."""
+    qh, nq = l2n_naive(_tok(q, 3, "q"), dtype)
+    kh, nk = l2n_naive(_tok(k, 3, "k"), dtype)
+    res = gdn_naive_with_grads(qh, kh, v, g, beta, dout, cu_seqlens, dtype=dtype, **kw)
+    a, b = _range(_cu_list(cu_seqlens), kw.get("token_range"))
+    total = _cu_list(cu_seqlens)[-1]
+    qh, nq, kh, nk = (
+        _slice_to_range(t, total, a, b, n)
+        for t, n in ((qh, "q"), (nq, "q"), (kh, "k"), (nk, "k"))
     )
-    out["u1_decisive"] = bool(out["pass_u1"] and not pass_pre)
+    res["dq"] = _l2n_pullback(res["dq"], qh, nq).to(dtype)
+    res["dk"] = _l2n_pullback(res["dk"], kh, nk).to(dtype)
+    return res
+
+
+@torch.no_grad()
+def naive_cut_states(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    cu_seqlens,
+    cuts,
+    *,
+    scale: float = SCALE,
+    block: int = BLOCK,
+    dtype: torch.dtype = NAIVE_DTYPE,
+) -> dict[int, torch.Tensor]:
+    """The naive tier of :func:`cut_states`: the state carried out of the tokens before every global cut, from
+    :func:`gdn_naive_forward` chained the same way, each rounded to ``dtype``."""
+    cu = _cu_list(cu_seqlens)
+    cuts = sorted({int(c) for c in cuts})
+    qq, kk, vv, gg, bb, _, _, _ = _prepare(q, k, v, g, beta, cu_seqlens, None)
+    HV, K, V = vv.shape[1], qq.shape[2], vv.shape[2]
+    out: dict[int, torch.Tensor] = {}
+    S = torch.zeros(HV, K, V, dtype=dtype, device=qq.device)
+    prev = 0
+    for c in cuts:
+        if c > prev:
+            _, S = gdn_naive_forward(
+                qq,
+                kk,
+                vv,
+                gg,
+                bb,
+                cu,
+                scale=scale,
+                h0=(None if prev in cu else S),
+                token_range=(prev, c),
+                block=block,
+                dtype=dtype,
+            )
+        out[c] = S.to(dtype)
+        prev = c
     return out
 
 
-def compare_to_reference(
-    cand: dict, ref: dict, *, elementwise: bool = True, names=TENSORS
+def naive_pack(
+    inputs: dict, device, *, scale: float = SCALE, block: int = BLOCK
 ) -> dict:
-    """Per-tensor error_metrics (+ elementwise 1e-2 clause) of a candidate dict vs the FP64 reference dict."""
-    res = {}
-    for n in names:
-        if n not in cand or n not in ref:
+    """The naive tier of :func:`reference_pack`: out / dq / dk / dv / dg / dbeta of the whole pack as CPU BF16 tensors
+    without the batch axis, document by document (:func:`gdn_naive_with_grads`)."""
+    cu = _cu_list(inputs["cu_seqlens"])
+    q, k, v, g, beta, dout = (inputs[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+    q, k, v, dout = (
+        _tok(t, 3, n) for t, n in ((q, "q"), (k, "k"), (v, "v"), (dout, "dout"))
+    )
+    g, beta = _tok(g, 2, "g"), _tok(beta, 2, "beta")
+    res = {
+        "out": torch.zeros(v.shape, dtype=NAIVE_DTYPE),
+        "dq": torch.zeros(q.shape, dtype=NAIVE_DTYPE),
+        "dk": torch.zeros(k.shape, dtype=NAIVE_DTYPE),
+        "dv": torch.zeros(v.shape, dtype=NAIVE_DTYPE),
+        "dg": torch.zeros(g.shape, dtype=NAIVE_DTYPE),
+        "dbeta": torch.zeros(beta.shape, dtype=NAIVE_DTYPE),
+    }
+    for d in range(len(cu) - 1):
+        s0, s1 = cu[d], cu[d + 1]
+        if s1 <= s0:
             continue
-        m = error_metrics(cand[n], ref[n])
-        m["storage"] = STORAGE_OF.get(n)
-        if elementwise:
-            m["elementwise_1e-2"] = elementwise_mismatch(cand[n], ref[n], 1e-2, 1e-2)
-        res[n] = m
+        ops = [t[s0:s1].to(device) for t in (q, k, v, g, beta, dout)]
+        r = gdn_naive_with_grads(
+            *ops[:5], ops[5], [0, s1 - s0], scale=scale, block=block
+        )
+        for n in TENSORS:
+            res[n][s0:s1] = r[n].cpu()
+        del ops, r
     return res
 
 

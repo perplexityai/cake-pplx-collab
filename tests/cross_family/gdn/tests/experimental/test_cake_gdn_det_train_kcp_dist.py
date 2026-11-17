@@ -11,36 +11,46 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Multi-GPU rows of the context-parallel (KCP) packed GDN training route (``cake_gdn_det_train_kcp.cake_kcp``): ``W`` ranks over
-NCCL, each holding the fragments of one partition of a packed batch, compared with the exact FP64 per-document
-recurrence of the same operands and with one another.  Per row and rank the test checks
+NCCL, each holding the fragments of one partition of a packed batch, judged against the exact FP64 per-document
+recurrence of the same operands and compared with one another bit for bit.  Every row runs ``DRAWS`` (32) independent
+draws of its operands (the seeded generator at ``draw_seed(SEED, j)``; draw 0 is the generator's own seed) inside one
+process group.  Per row the test checks
 
-* vs FP64 (rank 0, the outputs reassembled to the global order): ``out, dq, dk, dv`` as stored BF16, ``dg, dbeta`` FP32;
-  the correctness rows (regime ``normal``) by the elementwise clause ``|cand - ref| <= 1e-2 + 1e-2 |ref|`` with zero
-  mismatches on every tensor; the accuracy rows (regimes A1-A4) by the per-(row, CP, tensor) budgets of
-  ``cake_gdn_det_train_kcp_g1_budgets.json`` (rel-RMS <= budget and max-abs <= budget + one storage ulp of |ref| at the
-  worst element, all six tensors; their elementwise counts are recorded as information); rel-RMS / max-abs recorded
-  for every tensor;
-* bitwise (G3): repeat; saved == replay (``boundary_mode``); ``save_mode`` light == full; autograd == explicit;
-  ``torch.utils.checkpoint(use_reentrant=False)`` == direct; ``save_transfer`` True == False; ring == a2a where the
-  partition allows the ring; ``save_mode="full"`` with ``save_transfer=False`` (a2a and, where allowed, ring) == the
+* accuracy (rank 0, the outputs reassembled to the global order): ``out, dq, dk, dv`` (BF16) and ``dg, dbeta`` (FP32)
+  judged by the naive BF16 tier of ``tests/cake_naive.py``: their error against the FP64 oracle
+  (``gdn_exact_with_grads``) beside the error of the PyTorch BF16 recurrence on the same operands
+  (``gdn_naive_with_grads``), median and largest over the draws, L2 and max norm; the forward-only rows judge ``out``
+  and the crossing-in fragments' carried states ``S_in`` (``gdn_exact_forward`` / ``cut_states`` and their naive
+  tiers); rank 0 records one ``naive_tier`` verdict per output; the ``p4`` rows also judge the forced ``P = 4`` plan
+  (``segments=4``) as ``p4.<output>``, its ``P`` read from the launch records;
+* route (the production-size row PROD-C4, every draw): the shipped plan rule segments every rank's fragment
+  (``P > 1``) and the forward and backward launch records ran that plan;
+* bitwise on every draw: repeat; saved == replay (``boundary_mode``); ``save_mode`` light == full; autograd ==
+  explicit; ``torch.utils.checkpoint(use_reentrant=False)`` == direct; ``save_transfer`` True == False; ring == a2a
+  where the partition allows the ring; strided packed-QKV views == contiguous operands;
+* bitwise on draw 0 (G3): the checkpoint's full / replay / kept-tape / ``"auto"`` forms and the recompute handle ==
+  direct; ``save_mode="full"`` with ``save_transfer=False`` (a2a and, where allowed, ring) == the
   light form with every package allocation filled with NaN bytes, at the plan's ``P`` and at the forced ``P = 2``
-  (``segments=2``, where every rank's fragments take it; the full saved set holds ``M_seg`` there); strided packed-QKV views == contiguous operands (``layout`` tma and copy; under tma the
-  backward writes one packed dQKV row, and ``cake_gdn_det_train_kcp_packed_qkv_views`` hands it to a packed leaf without a concatenation;
-  plain ``split`` views of the leaf, direct and checkpointed, keep torch's split backward and their hooks, issue #8367);
+  (``segments=2``, where every rank's fragments take it; the full saved set holds ``M_seg`` there); the copy layout
+  of strided packed-QKV views == contiguous operands (under tma the backward writes one packed dQKV row, and
+  ``cake_gdn_det_train_kcp_packed_qkv_views`` hands it to a packed leaf without a concatenation; plain ``split``
+  views of the leaf, direct and checkpointed, keep torch's split backward and their hooks, issue #8367);
   ``.backward()`` twice accumulates exactly twice the gradient;
-* semantics (G4): zero-gradient leak (``dout`` zero outside one document -> exactly zero gradients on the others) and
-  independence (the other documents' operands replaced -> one document's outputs bitwise unchanged);
-* contracts (G10): #7039 retained bytes after a checkpointed forward (``graph="off"``), the exchange byte counts against
-  ``cake_gdn_det_train_kcp_comm_bytes``, CUDA-graph capture of forward + backward (no steady-state D2H / sync), the #7038 side-stream
-  ratio of the backward (asserted for the kernel backend; reported for the torch emulation).
+* semantics (G4, draw 0): zero-gradient leak (``dout`` zero outside one document -> exactly zero gradients on the
+  others) and independence (the other documents' operands replaced -> one document's outputs bitwise unchanged);
+* contracts (G10, draw 0): #7039 retained bytes after a checkpointed forward (``graph="off"``), the exchange byte counts
+  against ``cake_gdn_det_train_kcp_comm_bytes``, CUDA-graph capture of forward + backward (no steady-state D2H / sync),
+  the #7038 side-stream ratio of the backward (recorded, never a gate).
 
 Two launch forms: ``torch.multiprocessing.spawn`` (``pytest`` on a node with >= ``W`` GPUs) and one process per Slurm
 task (``SLURM_PROCID`` / ``SLURM_NTASKS``: the WORLD group is initialised once per process, every row runs on a
 sub-group of its ``W`` lowest ranks; the other ranks skip the row).  ``KCP_TEST_BACKEND`` selects ``kernels`` |
 ``fake`` (default: ``kernels`` when the package's ``build.json`` lists the programs, else ``fake``);
-``KCP_TEST_ROWS`` selects rows by name (comma list; ``all``) or by stage (``int1`` CP <= 4, ``int3`` CP8, ``int4`` CP16);
-``KCP_TEST_RESULT_DIR`` receives one JSON per row.
-Operands come from the seeded CPU generator (bitwise identical on every rank and host).
+``KCP_TEST_ROWS`` selects rows by name (comma list; ``all``) or by stage (``int1`` CP <= 4, ``int3`` CP8, ``int4`` CP16,
+``prod`` the production-size row); ``KCP_TEST_RESULT_DIR`` receives one JSON per row.
+Operands come from the seeded CPU generator (bitwise identical on every rank and host).  The row shapes are sized
+for 32 draws of the FP64 oracle and its naive tier on rank 0 (at most about 4k tokens per row; the production-size
+row PROD-C4 holds 8,191 tokens, see the rows block).
 """
 
 from __future__ import annotations
@@ -51,7 +61,6 @@ import datetime as _dt
 import gc
 import importlib
 import json
-import math
 import os
 import socket
 import statistics
@@ -66,6 +75,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 from tests.experimental.test_helpers.kcp_collective_shims import (
     CollectiveCounter,
     RecomputePhase,
@@ -94,8 +104,6 @@ GRADS = (
     "dg",
     "dbeta",
 )  # autograd order of the leaves (q, k, v, g, beta)
-ATOL = RTOL = 1e-2
-STATE_REL_RMS_MAX = 1e-2  # forward-only mode: S_in (FP32, owner-merged) vs the FP64 cut state, per crossing-in fragment
 WORLD_TIMEOUT_S = 300  # NCCL / rendezvous timeout of the WORLD group (printed at init)
 SCALE = kcp.SCALE
 C_CONV = 10240
@@ -105,15 +113,10 @@ SIDE_STREAM_ITERS = 7
 
 
 def _reference():
-    """The FP64 reference: the in-tree test helper when present, else the session harness on PYTHONPATH."""
-    try:
-        from tests.experimental.test_helpers import (
-            cake_gdn_det_train_kcp_reference as ref,
-        )  # type: ignore[attr-defined]
+    """The FP64 oracle and its naive BF16 tier (the in-tree test helper)."""
+    from tests.experimental.test_helpers import cake_gdn_det_train_kcp_reference as ref
 
-        return ref
-    except ImportError:
-        return importlib.import_module("gdn_reference")
+    return ref
 
 
 def _inputs():
@@ -125,94 +128,91 @@ def _inputs():
     return gen
 
 
-BUDGETS_FILE = (
-    Path(__file__).resolve().parent / "cake_gdn_det_train_kcp_g1_budgets.json"
-)
-STORAGE = {
-    "out": "bf16",
-    "dq": "bf16",
-    "dk": "bf16",
-    "dv": "bf16",
-    "dg": "fp32",
-    "dbeta": "fp32",
-}
-
-
-def _budgets() -> dict:
-    """The accuracy budgets of the multi-rank rows (the file beside this test): per (row, CP, tensor) the rel-RMS and
-    max-abs budget = 1.10 x max(single-rank local-path error of this package, FLA tf32x3 error at the FLA layout of
-    record), declared before the rows ran and vendored unchanged."""
-    with open(BUDGETS_FILE) as fh:
-        return json.load(fh)
-
-
-def _budget_cell(row: Row) -> tuple[dict, int] | None:
-    """The budget cell of a row: the row's base name (``A1-cp16`` -> ``A1``) at CP = ``row.W``.  When the table has no
-    cell at that CP the row is judged at its nearest CP of record (closest log2 distance, ties -> the lower CP; the CP
-    used is recorded in the report): ``A1-cp16`` -> the A1 CP8 cell.  ``None`` when the table has no such row."""
-    cells = _budgets()["rows"].get(row.name.split("-")[0])
-    if not cells:
-        return None
-    cps = sorted(int(c) for c in cells)
-    if row.W in cps:
-        return cells[str(row.W)], row.W
-    cp = min(cps, key=lambda c: (abs(math.log2(c / row.W)), c))
-    return cells[str(cp)], cp
-
-
-def _judge(
-    report: dict,
-    row: Row,
-    name: str,
-    cand: torch.Tensor,
-    ref: torch.Tensor,
-    ref_mod,
-    budget: tuple[dict, int] | None,
-) -> None:
-    """Rank-0 verdict of one reassembled tensor against FP64, written to ``report["metrics"][name]`` and folded into
-    ``report["pass"]``.  Correctness rows (regime ``normal``): the elementwise clause, zero elements beyond
-    ``ATOL + RTOL |ref|``.  Accuracy rows (regimes A1-A4): the row's budget cell (``_budget_cell``): rel-RMS within the
-    budget and max-abs within the budget plus one storage ulp of |ref| at the worst element (the reference module's
-    ``judge_tensor``), on all six tensors; the elementwise count is recorded as information.  Finiteness gates every
-    row; an accuracy row without a budget cell cannot pass."""
-    err = cand - ref
-    excess = err.abs() - (ATOL + RTOL * ref.abs())
-    mism = int((excess > 0).sum())
-    elementwise = row.regime == "normal"
-    m = {
-        "mismatch": mism,
-        "rel_rms": float(
-            err.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt().clamp_min(1e-300)
-        ),
-        "max_abs": float(err.abs().max()) if err.numel() else 0.0,
-        "ref_rms": float(ref.pow(2).mean().sqrt()) if ref.numel() else 0.0,
-        "finite": bool(torch.isfinite(cand).all()),
-        "gated": elementwise,  # the elementwise count is the verdict of the correctness rows only
-        "verdict": "elementwise" if elementwise else "budget",
-    }
-    if elementwise:
-        ok = m["finite"] and mism == 0
-    elif budget is None:
-        m["budget"] = None
-        ok = False
-    else:
-        cell, cp = budget
-        b = cell["tensors"][name]
-        m["budget"] = ref_mod.judge_tensor(
-            ref_mod.error_metrics(cand, ref),
-            b["budget_rel_rms"],
-            b["budget_max_abs"],
-            b["storage"],
-        )
-        m["budget"]["cp_of_cell"] = cp
-        ok = m["finite"] and bool(m["budget"]["pass_u1"])
-    report["metrics"][name] = m
-    report["pass"] &= ok
+def _draw_seed(j: int) -> int:
+    """The operand seed of draw ``j``: the generator's own seed for draw 0, far apart for the others."""
+    return draw_seed(int(_inputs().SEED), j)
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# rows (C1-C9 correctness rows, A1-A4 accuracy rows, the no-leak rows; the int4 stage = the CP16 rows of G4: at least
-# one correctness row at W = 16, here the C6 zigzag row and the A1 contiguous row at the (2, 6) head pair)
+# the judge (rank 0): every floating output against the FP64 oracle beside the naive BF16 tier (tests/cake_naive.py)
+
+
+def _judge_add(
+    judge: TierJudge,
+    failures: list[str],
+    name: str,
+    j: int,
+    actual: torch.Tensor,
+    oracle: torch.Tensor,
+    naive: torch.Tensor,
+) -> None:
+    """Draw ``j`` of output ``name``: held to its contract against the oracle and added to the judge with the naive
+    tier's value.  The oracle and the naive value are laid out as ``actual`` (the reassembled candidate) when they
+    hold as many elements; a shape mismatch is a contract failure and is not judged."""
+    if oracle.numel() == actual.numel():
+        oracle = oracle.reshape(actual.shape)
+        naive = naive.reshape(actual.shape)
+    if (m := contract(name, actual, oracle)) is not None:
+        failures.append(f"draw {j}: {m}")
+        if actual.shape != oracle.shape:
+            return
+    judge.add(name, j, actual, oracle, {"bf16": naive})
+
+
+def _judge_report(report: dict, judge: TierJudge | None, failures: list[str]) -> None:
+    """Rank 0: the row's verdicts (``naive_tier``, one per judged output) and its failures (contracts, then the
+    judge's), folded into ``report["pass"]``."""
+    if judge is None:
+        return
+    failures = failures + judge.failures()
+    report["naive_tier"] = list(judge.verdicts().values())
+    report["failures"] = failures
+    report["pass"] &= not failures
+
+
+def _record_verdicts(report: dict | None, record_property) -> None:
+    """The test process records rank 0's verdicts (pytest ``record_property``, read by the conftest's ``TIER``
+    lines)."""
+    if record_property is None:
+        return
+    for verdict in (report or {}).get("naive_tier", []):
+        record_property("naive_tier", verdict)
+
+
+def _gather(obj, W: int, group) -> list:
+    """``obj`` of every rank of the group in rank order (``all_gather_object``; ``[obj]`` at ``W = 1``)."""
+    if W == 1:
+        return [obj]
+    objs: list = [None] * W
+    dist.all_gather_object(objs, obj, group=group)
+    return objs
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# rows (C1-C9 layout rows, A1-A4 adversarial-regime rows, the no-leak rows; the int4 stage = the CP16 rows of G4: at
+# least one row at W = 16, here the C6 zigzag row and the A1 contiguous row at the (2, 6) head pair).  Every row is
+# judged the same way (the naive BF16 tier over 32 draws); the shapes keep each row's layout features at a size the
+# 32 draws of the FP64 oracle allow: several documents of odd and chunk-aligned lengths, fragments of more than one
+# 64-token chunk with a partial last chunk, a 1-token rank and an empty rank where the row had them, the same
+# document chains (hop counts, so the same rows take the ring), grouped heads HV / H_qk = 3, and (16, 48) heads.
+# C6-cp16: 32 zigzag pieces of 66 / 67 tokens, so every rank's piece of the document holds one full 64-token chunk.
+#
+# The prod stage: the production-size row PROD-C4 on its production route.  At the production heads (16, 48) the shipped
+# plan rule (``small_one``, from ``row_cost_lpt``) segments the fragment of a one-fragment rank into the one-wave fill
+# ``P = floor(SM / HV)`` (3 on 148 / 152 SMs, 4 on 212 SMs: the segment transfer walk, the carry merges and the compose
+# chain run) once that beats ``P = 1`` in its cost model, i.e. from about 17 (148 / 152 SMs) or 23 (212 SMs) chunks per
+# fragment; below that it plans ``P = 1`` (as on the two-fragment ranks of a zigzag partition at 148 / 152 SMs, where
+# ``P = 2`` needs a second wave).  The ~1k-token (16, 48) rows C6 / C8 therefore run ``P = 1``.  PROD-C4 is one
+# 8,191-token document over 4 contiguous ranks (a node of 4 GPUs): a 32-chunk fragment per rank (the last one 2,047
+# tokens, a partial last chunk), clear of both thresholds, the document crossing every rank (a2a exchange).  Its route
+# is gated on every draw (``prod_route_segmented``): the shipped rule's plan has ``P > 1`` and the forward and backward
+# launch records ran that ``P`` on every rank.  The FP64 oracle and its naive tier cost about T x 16 ms for the 32 draws
+# (about 2.2 minutes on rank 0; more at HV = 48 if the per-token ops stop being launch bound).
+#
+# The ``p4`` rows also run the forced ``P = 4`` plan (``segments=4``, a split plan of more than two segments; the
+# shipped rule plans ``P = 1`` on the (4, 12) and (2, 6) rows and 3 on PROD-C4 at 148 / 152 SMs) on every draw,
+# judged against the same oracle as ``p4.<output>``; the forward and backward launch records must report ``P = 4``
+# (``p4_launch_P``), and every rank's longest fragment must allow it (``p4_allowed``: at least 4 chunks).
 
 
 @dataclasses.dataclass(frozen=True)
@@ -224,7 +224,8 @@ class Row:
     layout: str  # contiguous | zigzag | zigzag_per_document | ragged:<T_r list> | explicit:<name>
     regime: str = "normal"
     leak: bool = False  # run the zero-gradient leak / independence checks
-    stage: str = "int1"  # int1 (CP <= 4, small), int3 (CP8 / large), int4 (CP16)
+    stage: str = "int1"  # int1 (CP <= 4, small), int3 (CP8 / large), int4 (CP16), prod (production size)
+    p4: bool = False  # also judge the forced P = 4 plan (segments=4)
 
 
 def _c5_fragments() -> list[list[tuple[int, int, int]]]:
@@ -244,14 +245,14 @@ def _c5_fragments() -> list[list[tuple[int, int, int]]]:
 EXPLICIT = {"c5": (_c5_fragments, (63 + 64 + 65 + 66, 1 + 64 + 63 + 65))}
 
 ROWS = [
-    Row("C1-cp2", (100, 640, 77, 1000, 129), (2, 6), 2, "contiguous", leak=True),
-    Row("C1-cp4", (100, 640, 77, 1000, 129), (2, 6), 4, "contiguous"),
-    Row("C2-C", (3000,), (4, 12), 4, "contiguous"),
-    Row("C2-Z", (3000,), (4, 12), 4, "zigzag"),
-    Row("C2-D", (3000,), (4, 12), 4, "zigzag_per_document"),
-    Row("C3", (2048, 5, 3000, 1), (1, 3), 4, "zigzag_per_document", leak=True),
-    Row("C4a", (1000, 2000), (8, 24), 4, "ragged:700,1,1300,999"),
-    Row("C4b", (1000, 2000), (8, 24), 4, "ragged:1200,0,900,900"),
+    Row("C1-cp2", (100, 290, 77, 420, 129), (2, 6), 2, "contiguous", leak=True),
+    Row("C1-cp4", (100, 290, 77, 420, 129), (2, 6), 4, "contiguous"),
+    Row("C2-C", (1021,), (4, 12), 4, "contiguous", p4=True),
+    Row("C2-Z", (1021,), (4, 12), 4, "zigzag"),
+    Row("C2-D", (1021,), (4, 12), 4, "zigzag_per_document"),
+    Row("C3", (1024, 5, 1001, 1), (1, 3), 4, "zigzag_per_document", leak=True),
+    Row("C4a", (500, 520), (8, 24), 4, "ragged:350,1,370,299"),
+    Row("C4b", (500, 520), (8, 24), 4, "ragged:600,0,210,210"),
     Row("C5", EXPLICIT["c5"][1], (4, 4), 4, "explicit:c5"),
     Row("C9a", (1,), (2, 6), 2, "contiguous"),
     Row("C9b", (0,), (2, 6), 2, "contiguous"),
@@ -259,28 +260,31 @@ ROWS = [
     Row("leak-D", (300, 500, 200), (2, 6), 2, "zigzag_per_document", leak=True),
     Row(
         "A3",
-        (32801, 32769),
+        (2017, 1985),
         (2, 6),
         4,
         "zigzag_per_document",
         regime="A3",
         stage="int3",
     ),
-    Row("C6", (65553,), (16, 48), 8, "zigzag", stage="int3"),
-    Row("C8", (10240, 8192, 2085), (16, 48), 8, "contiguous", stage="int3"),
-    Row("A1", (32801,), (2, 6), 8, "contiguous", regime="A1", stage="int3"),
-    Row("A2", (40000,), (2, 6), 8, "contiguous", regime="A2", stage="int3"),
-    Row("A4", (131071,), (2, 6), 8, "contiguous", regime="A4", stage="int3"),
-    Row("C6-cp16", (65553,), (16, 48), 16, "zigzag", stage="int4"),
-    Row("A1-cp16", (32801,), (2, 6), 16, "contiguous", regime="A1", stage="int4"),
+    Row("C6", (1041,), (16, 48), 8, "zigzag", stage="int3"),
+    Row("C8", (512, 448, 101), (16, 48), 8, "contiguous", stage="int3"),
+    Row("A1", (4065,), (2, 6), 8, "contiguous", regime="A1", stage="int3", p4=True),
+    Row("A2", (4000,), (2, 6), 8, "contiguous", regime="A2", stage="int3"),
+    Row("A4", (4095,), (2, 6), 8, "contiguous", regime="A4", stage="int3"),
+    Row("C6-cp16", (2113,), (16, 48), 16, "zigzag", stage="int4"),
+    Row("A1-cp16", (4065,), (2, 6), 16, "contiguous", regime="A1", stage="int4"),
+    Row("PROD-C4", (8191,), (16, 48), 4, "contiguous", stage="prod", p4=True),
 ]
+# the forced segment count of the p4 rows
+P4 = 4
 
 
 def _selected_rows() -> list[Row]:
     sel = os.environ.get("KCP_TEST_ROWS", "int1")
     if sel == "all":
         return list(ROWS)
-    if sel in ("int1", "int3", "int4"):
+    if sel in ("int1", "int3", "int4", "prod"):
         return [r for r in ROWS if r.stage == sel]
     names = {s.strip() for s in sel.split(",") if s.strip()}
     rows = [r for r in ROWS if r.name in names]
@@ -451,6 +455,16 @@ def _to_global(
     return g
 
 
+def _local_to_global(part, cu: list[int], rank: int) -> torch.Tensor:
+    """Global token index of every local token of ``rank`` (fragment order), CPU int64."""
+    pieces = [
+        torch.arange(cu[f.doc] + f.off, cu[f.doc] + f.off + f.length)
+        for f in part.fragments[rank]
+        if f.length
+    ]
+    return torch.cat(pieces) if pieces else torch.zeros(0, dtype=torch.int64)
+
+
 def _doc_mask_local(part, cu: list[int], rank: int, doc: int, device) -> torch.Tensor:
     """Boolean ``[T_r]``: the local tokens of document ``doc``."""
     pieces = []
@@ -512,12 +526,13 @@ def _m_seg_rule(saved) -> dict:
     }
 
 
-def _p2_group_ok(ctx, HV: int, group, W: int, device: torch.device) -> bool:
-    """Every rank's fragments take the segments override ``P = 2`` (the longest fragment of each rank has at least
-    two chunks).  Many rows plan ``P = 1``; the forced ``P = 2`` forms put the full backward's read of the saved
-    ``M_seg^T`` plane on them.  A group decision (MIN over the ranks): every rank runs the same calls."""
+def _p_group_ok(ctx, HV: int, P: int, group, W: int, device: torch.device) -> bool:
+    """Every rank's fragments take the segments override ``P`` (the longest fragment of each rank has at least ``P``
+    chunks).  Many rows plan ``P = 1``; the forced ``P = 2`` forms put the full backward's read of the saved
+    ``M_seg^T`` plane on them, the forced ``P = 4`` arm a split plan of more than two segments.  A group decision (MIN
+    over the ranks): every rank runs the same calls."""
     try:
-        ok = int(ctx.heads(HV, P=2).P) == 2
+        ok = int(ctx.heads(HV, P=P).P) == P
     except ValueError:
         ok = False
     flag = torch.tensor([1 if ok else 0], dtype=torch.int32, device=device)
@@ -762,26 +777,22 @@ def _rank_fragments(ctx, rank: int) -> tuple:
     return frs
 
 
-def _run_rank_fwd(
-    rank: int,
+def _fwd_draw(
+    ctx,
+    ws,
+    base: dict,
+    ops: dict,
     W: int,
-    row: Row,
-    group,
-    device: torch.device,
-    result_dir: str | None,
-    backend: str,
-) -> dict:
-    """Forward-only body of one rank (INT1): the forward's bitwise forms, ``out`` against the FP64 forward and the
-    crossing-in fragments' ``S_in`` against the FP64 cut states; nothing of the backward runs."""
-    H_qk, HV = row.heads
-    part, cu = _partition(row)
-    ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
-    total = cu[-1]
-    ops = _local_inputs(row, part, cu, rank, device)
+    rank: int,
+    cu: list[int],
+    HV: int,
+    info: dict,
+) -> tuple[torch.Tensor, torch.Tensor, list, dict[str, bool]]:
+    """One draw of the forward-only body: ``out``, this rank's carried states ``S_in`` (``[n_in, HV, 128, 128]``,
+    ``in_slot`` order) with the global cut of each, and the bitwise flags of the forward's forms (repeat,
+    ``save_transfer``, light == full, saved == replay, ring == a2a, strided views and the copy layout == contiguous);
+    ``info`` receives the launch record."""
     q, k, v, g, beta = (ops[n] for n in ("q", "k", "v", "g", "beta"))
-    ws = kcp.CakeGDNDetKcpWorkspace()
-    base = {"backend": backend}
-    t_start = time.time()
 
     def fwd(qq=q, kk=k, vv=v, **opts):
         return kcp.cake_gdn_det_train_kcp_forward(
@@ -789,7 +800,6 @@ def _run_rank_fwd(
         )
 
     flags: dict[str, bool] = {}
-    info: dict[str, object] = {}
     out, saved = fwd()
     info["fwd_record"] = {
         k_: v_
@@ -822,26 +832,113 @@ def _run_rank_fwd(
         if f.length > 0 and f.off > 0:
             cuts[int(ctx.in_slot[f.slot])] = int(cu[f.doc] + f.off)
     info["s_in_cuts"] = cuts
-    # gather
-    objs_out: list = [None] * W
-    objs_s: list = [None] * W
-    objs_cuts: list = [None] * W
-    flag_list: list = [None] * W
-    info_list: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(objs_out, out.cpu(), group=group)
-        dist.all_gather_object(objs_s, s_in.cpu(), group=group)
-        dist.all_gather_object(objs_cuts, cuts, group=group)
-        dist.all_gather_object(flag_list, flags, group=group)
-        dist.all_gather_object(info_list, info, group=group)
-    else:
-        objs_out, objs_s, objs_cuts, flag_list, info_list = (
-            [out.cpu()],
-            [s_in.cpu()],
-            [cuts],
-            [flags],
-            [info],
+    return out, s_in, cuts, flags
+
+
+def _judge_fwd_draw(
+    judge: TierJudge,
+    failures: list[str],
+    j: int,
+    row: Row,
+    part,
+    cu: list[int],
+    device,
+    seed: int,
+    objs_out: list,
+    objs_s: list,
+    objs_cuts: list,
+) -> None:
+    """Rank 0, draw ``j`` of the forward-only body: ``out`` reassembled to the global order against
+    ``gdn_exact_forward``, and every rank's crossing-in ``S_in`` (stacked in rank, then slot order) against
+    ``cut_states``, each beside its naive BF16 tier (``gdn_naive_forward``, ``naive_cut_states``)."""
+    ref_mod = _reference()
+    glob = _global_inputs(row, cu, device, seed=seed)
+    ops = (
+        glob["q"],
+        glob["k"],
+        glob["v"],
+        glob["g"],
+        glob["beta"],
+        torch.tensor(cu, dtype=torch.int64),
+    )
+    ref_out, _ = ref_mod.gdn_exact_forward(*ops, scale=SCALE)
+    naive_out, _ = ref_mod.gdn_naive_forward(*ops, scale=SCALE)
+    cand = _to_global(part, [t.to(device) for t in objs_out], cu, cu[-1])
+    _judge_add(judge, failures, "out", j, cand, ref_out, naive_out.to(torch.bfloat16))
+    picked = [
+        (st[slot], c)
+        for cs, st in zip(objs_cuts, objs_s, strict=True)
+        for slot, c in enumerate(cs)
+        if c is not None
+    ]
+    if not picked:
+        return
+    cuts = sorted({c for _, c in picked})
+    states = ref_mod.cut_states(*ops, cuts, scale=SCALE)
+    naive_states = ref_mod.naive_cut_states(*ops, cuts, scale=SCALE)
+    _judge_add(
+        judge,
+        failures,
+        "s_in",
+        j,
+        torch.stack([s_ for s_, _ in picked]).to(device),
+        torch.stack([states[c].to(device).reshape(s_.shape) for s_, c in picked]),
+        torch.stack([naive_states[c].to(device).reshape(s_.shape) for s_, c in picked]),
+    )
+
+
+def _run_rank_fwd(
+    rank: int,
+    W: int,
+    row: Row,
+    group,
+    device: torch.device,
+    result_dir: str | None,
+    backend: str,
+) -> dict:
+    """Forward-only body of one rank (INT1) over the row's draws: the forward's bitwise forms on every draw
+    (:func:`_fwd_draw`); on rank 0 ``out`` and the crossing-in fragments' ``S_in`` judged against the FP64 forward
+    and cut states beside the naive BF16 tier; nothing of the backward runs."""
+    H_qk, HV = row.heads
+    part, cu = _partition(row)
+    ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
+    total = cu[-1]
+    ws = kcp.CakeGDNDetKcpWorkspace()
+    base = {"backend": backend}
+    t_start = time.time()
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {}
+    judge, failures = (TierJudge(), []) if rank == 0 and total > 0 else (None, [])
+    # an empty pack has nothing to judge: one draw of its bitwise forms
+    for j in range(DRAWS if total > 0 else 1):
+        seed = _draw_seed(j)
+        ops = _local_inputs(row, part, cu, rank, device, seed=seed)
+        out, s_in, cuts, fl = _fwd_draw(
+            ctx, ws, base, ops, W, rank, cu, HV, info if j == 0 else {}
         )
+        for key, ok in fl.items():
+            flags[key] = flags.get(key, True) and bool(ok)
+        objs_out = _gather(out.cpu(), W, group)
+        objs_s = _gather(s_in.cpu(), W, group)
+        objs_cuts = _gather(cuts, W, group)
+        del out, s_in, ops
+        if judge is not None:
+            _judge_fwd_draw(
+                judge,
+                failures,
+                j,
+                row,
+                part,
+                cu,
+                device,
+                seed,
+                objs_out,
+                objs_s,
+                objs_cuts,
+            )
+        del objs_out, objs_s
+    flag_list = _gather(flags, W, group)
+    info_list = _gather(info, W, group)
     report = {
         "row": dataclasses.asdict(row),
         "mode": "forward",
@@ -862,8 +959,6 @@ def _run_rank_fwd(
         "flags": {},
         "gated": [],
         "reported": [],
-        "metrics": {},
-        "states": [],
         "info_by_rank": info_list,
     }
     for key in flag_list[0]:
@@ -871,60 +966,7 @@ def _run_rank_fwd(
         report["flags"][key] = ok
         report["gated"].append(key)
         report["pass"] &= ok
-    if rank == 0 and total > 0:
-        ref_mod = _reference()
-        glob = _global_inputs(row, cu, device)
-        cu_t = torch.tensor(cu, dtype=torch.int64)
-        ref_out = ref_mod.gdn_exact_forward(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, scale=SCALE
-        )
-        ref_out = ref_out[0] if isinstance(ref_out, tuple) else ref_out
-        cand = _to_global(part, [t.to(device) for t in objs_out], cu, total).to(
-            torch.float64
-        )
-        ref = ref_out.to(device=device, dtype=torch.float64).reshape(cand.shape)
-        _judge(report, row, "out", cand, ref, ref_mod, _budget_cell(row))
-        all_cuts = sorted({c for cs in objs_cuts for c in cs if c is not None})
-        if all_cuts:
-            states = ref_mod.cut_states(
-                glob["q"],
-                glob["k"],
-                glob["v"],
-                glob["g"],
-                glob["beta"],
-                cu_t,
-                all_cuts,
-                scale=SCALE,
-            )
-            for r_, (cs, st) in enumerate(zip(objs_cuts, objs_s, strict=True)):
-                for slot, c in enumerate(cs):
-                    if c is None:
-                        continue
-                    cand_s = st[slot].to(device=device, dtype=torch.float64)
-                    ref_s = (
-                        states[c]
-                        .to(device=device, dtype=torch.float64)
-                        .reshape(cand_s.shape)
-                    )
-                    e = cand_s - ref_s
-                    rel = float(
-                        e.pow(2).mean().sqrt()
-                        / ref_s.pow(2).mean().sqrt().clamp_min(1e-300)
-                    )
-                    doc = max(i for i in range(len(cu) - 1) if cu[i] <= c)
-                    entry = {
-                        "rank": r_,
-                        "slot": slot,
-                        "cut": c,
-                        "doc": doc,
-                        "off": c - cu[doc],
-                        "rel_rms": rel,
-                        "max_abs": float(e.abs().max()),
-                        "ref_rms": float(ref_s.pow(2).mean().sqrt()),
-                        "finite": bool(torch.isfinite(cand_s).all()),
-                    }
-                    report["states"].append(entry)
-                    report["pass"] &= entry["finite"] and rel <= STATE_REL_RMS_MAX
+    _judge_report(report, judge, failures)
     report["seconds"] = round(time.time() - t_start, 2)
     if W > 1:
         verdict: list = [None] * W
@@ -975,25 +1017,32 @@ def _kept_record(T_r: int) -> dict:
     }
 
 
-def _run_rank(
+def _rank_draw(
     rank: int,
     W: int,
     row: Row,
     group,
     device: torch.device,
-    result_dir: str | None,
     backend: str,
-) -> dict:
-    """The body of one rank: every mode of the KCP forward / backward, gathered to rank 0 and compared there."""
+    part,
+    cu: list[int],
+    ctx,
+    ws,
+    ops: dict,
+    seed: int,
+    info: dict,
+    *,
+    full: bool,
+) -> tuple[dict, dict[str, bool]]:
+    """One draw of the body of one rank on the draw's operands ``ops`` (generated at ``seed``): the primary saved
+    forward + backward (``res``, the judged outputs) and the bitwise flags.  Every draw runs the core forms (repeat,
+    saved == replay, light == full, autograd == explicit, checkpoint == direct, ``save_transfer``, ring == a2a,
+    strided views == contiguous) and on the prod row the route check; ``full`` (draw 0) runs every other mode of the
+    KCP forward / backward and the contracts as well.  ``info`` receives the records."""
     H_qk, HV = row.heads
-    part, cu = _partition(row)
-    ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    ops = _local_inputs(row, part, cu, rank, device)
     q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
-    ws = kcp.CakeGDNDetKcpWorkspace()
     base = {"backend": backend}
-    t_start = time.time()
 
     def saved_pass(qq=q, kk=k, vv=v, gg=g, bb=beta, dd=dout, **opts) -> dict:
         o = {**base, **opts}
@@ -1036,7 +1085,6 @@ def _run_rank(
         }
 
     flags: dict[str, bool] = {}
-    info: dict[str, object] = {}
     res = saved_pass()
     info["fwd_record"] = {
         k_: v_
@@ -1050,6 +1098,22 @@ def _run_rank(
     }
     info["fwd_sequence"] = list(kcp.LAST_CALL["fwd"]["sequence"])
     info["bwd_sequence"] = list(kcp.LAST_CALL["bwd"]["sequence"])
+    if row.stage == "prod":
+        # the production route: the shipped rule's plan segments this rank's fragments, and the primary forward and
+        # backward ran that plan (their launch records)
+        seg = ctx.heads(HV).segments
+        info["plan"] = {
+            "P": int(seg.P),
+            "p_rule": seg.p_rule,
+            "n_frag": int(seg.n_frag),
+            "NC_max_frag": int(seg.NC_max_frag),
+        }
+        flags["prod_route_segmented"] = (
+            seg.p_rule == plan.P_RULE_DEFAULT
+            and int(seg.P) > 1
+            and int(kcp.LAST_CALL["fwd"]["P"]) == int(seg.P)
+            and int(kcp.LAST_CALL["bwd"]["P"]) == int(seg.P)
+        )
     flags["repeat"] = _eq(res, saved_pass())
     flags["saved_eq_replay"] = _eq(res, saved_pass(boundary_mode="replay"))
     flags["light_eq_full"] = _eq(res, saved_pass(save_mode="full"))
@@ -1057,6 +1121,22 @@ def _run_rank(
     flags["autograd_eq_saved"] = _eq(res, res_auto)
     res_ckpt = autograd_pass(True)
     flags["ckpt_eq_direct"] = _eq(res_auto, res_ckpt)
+    res_recompute = saved_pass(save_transfer=False)
+    flags["save_transfer_eq"] = _eq(res, res_recompute)
+    ring_eligible = W > 1 and int(ctx.n_d_max) - 1 <= kcp.RING_MAX_HOPS
+    info["ring_eligible"] = ring_eligible
+    flags["ring_eq_a2a"] = (not ring_eligible) or _eq(
+        res_recompute, saved_pass(exchange="ring", save_transfer=False)
+    )
+    # strided packed-QKV views, zero-copy (layout="tma"): bitwise the contiguous call
+    _buf, qs, ks, vs = _packed_views(q, k, v)
+    flags["strided_eq_contiguous"] = _eq(res, saved_pass(qs, ks, vs))
+    # issue #7817: packed operands -> #8 writes dq / dk / dv as the same views of one packed dQKV row
+    flags["packed_grad_layout"] = (
+        int(q.shape[0]) == 0 or kcp.LAST_CALL["bwd"]["grad_layout"] == "packed"
+    )  # T_r = 0: nothing to pack
+    if not full:  # the draws after the first: the core forms only
+        return res, flags
     flags["ckpt_full_eq_direct"] = _eq(res_auto, autograd_pass(True, save_mode="full"))
     flags["ckpt_replay_eq_direct"] = _eq(
         res_auto, autograd_pass(True, boundary_mode="replay")
@@ -1281,13 +1361,6 @@ def _run_rank(
     peaks = {"off": _ckpt_peak(**OFF), "on": _ckpt_peak(**KEPT)}
     info["ckpt_peak_bytes"] = peaks
     flags["kept_peak_le_off"] = peaks["on"] <= peaks["off"]
-    res_recompute = saved_pass(save_transfer=False)
-    flags["save_transfer_eq"] = _eq(res, res_recompute)
-    ring_eligible = W > 1 and int(ctx.n_d_max) - 1 <= kcp.RING_MAX_HOPS
-    info["ring_eligible"] = ring_eligible
-    flags["ring_eq_a2a"] = (not ring_eligible) or _eq(
-        res_recompute, saved_pass(exchange="ring", save_transfer=False)
-    )
     # save_mode="full" without save_transfer (the keyword, or the ring exchange, which needs it): the full backward
     # runs no transfer walk, so at P > 1 its merges read the saved M_seg^T plane; on NaN-filled allocations a read of
     # an unwritten plane cannot pass on the bytes the forward left in the caching allocator
@@ -1300,20 +1373,14 @@ def _run_rank(
         )
     # many rows plan P = 1: the same full / ring + full forms again at the forced P = 2 (segments override, where every
     # rank's fragments take it), against the light form at P = 2
-    info["p2_eligible"] = _p2_group_ok(ctx, HV, group, W, device)
+    info["p2_eligible"] = _p_group_ok(ctx, HV, 2, group, W, device)
     if info["p2_eligible"]:
         _p2_full_flags(saved_pass, info, flags, ring=ring_eligible)
     res_host = saved_pass(group_reduce="host")
     info["host_reduce_eq_fused"] = _eq(
         res, res_host
     )  # reported: both forms are fixed-order FP32 + one rounding
-    # strided packed-QKV views: zero-copy (layout="tma") and the copy adapter, both bitwise the contiguous call
-    _buf, qs, ks, vs = _packed_views(q, k, v)
-    flags["strided_eq_contiguous"] = _eq(res, saved_pass(qs, ks, vs))
-    # issue #7817: packed operands -> #8 writes dq / dk / dv as the same views of one packed dQKV row
-    flags["packed_grad_layout"] = (
-        int(q.shape[0]) == 0 or kcp.LAST_CALL["bwd"]["grad_layout"] == "packed"
-    )  # T_r = 0: nothing to pack
+    # the copy adapter of the strided packed-QKV views: bitwise the contiguous call
     flags["copy_layout_eq_contiguous"] = _eq(res, saved_pass(qs, ks, vs, layout="copy"))
     # the copy adapter copies strided views; a one-token view is already contiguous, stays a packed view and keeps
     # the packed gradient row
@@ -1619,14 +1686,8 @@ def _run_rank(
             bool(torch.equal(res_sel[n][others], torch.zeros_like(res_sel[n][others])))
             for n in GRADS
         )
-        gen = _inputs()
         alt = _local_inputs(
-            row,
-            part,
-            cu,
-            rank,
-            device,
-            doc_override=(doc, int(getattr(gen, "SEED", 20261023)) + 1),
+            row, part, cu, rank, device, seed=seed, doc_override=(doc, seed + 1)
         )
         res_alt = saved_pass(
             alt["q"], alt["k"], alt["v"], alt["g"], alt["beta"], alt["dout"]
@@ -1641,22 +1702,121 @@ def _run_rank(
             )
             or not bool(others.any())
         )
-    # gather
-    gathered = {}
-    for n in TENSORS:
-        objs: list = [None] * W
-        if W > 1:
-            dist.all_gather_object(objs, res[n].cpu(), group=group)
-        else:
-            objs = [res[n].cpu()]
-        gathered[n] = objs
-    flag_list: list = [None] * W
-    info_list: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(flag_list, flags, group=group)
-        dist.all_gather_object(info_list, info, group=group)
-    else:
-        flag_list, info_list = [flags], [info]
+    return res, flags
+
+
+def _p4_draw(ctx, ws, ops: dict, backend: str) -> tuple[dict, bool]:
+    """The forced ``P = 4`` plan (``segments=4``) on one draw's operands, on its own workspace (the row's other forms
+    and contracts never see its pools): the six outputs and whether the forward and the backward launch records ran
+    ``P = 4``."""
+    q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+    o = {"backend": backend, "segments": P4}
+    out, saved = kcp.cake_gdn_det_train_kcp_forward(
+        q, k, v, g, beta, ctx, workspace=ws, **o
+    )
+    p_fwd = int(kcp.LAST_CALL["fwd"]["P"])
+    dq, dk, dv, dbeta, dg = kcp.cake_gdn_det_train_kcp_backward(
+        q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws, **o
+    )
+    ok = p_fwd == P4 and int(kcp.LAST_CALL["bwd"]["P"]) == P4
+    return {"out": out, "dq": dq, "dk": dk, "dv": dv, "dg": dg, "dbeta": dbeta}, ok
+
+
+def _judge_full_draw(
+    judge: TierJudge,
+    failures: list[str],
+    j: int,
+    row: Row,
+    part,
+    cu: list[int],
+    device,
+    seed: int,
+    gathered: dict[str, list],
+) -> None:
+    """Rank 0, draw ``j``: the six outputs reassembled to the global order (and those of the forced ``P = 4`` pass as
+    ``p4.<output>``) against the FP64 oracle ``gdn_exact_with_grads`` beside its naive BF16 tier
+    ``gdn_naive_with_grads`` on the same operands."""
+    ref_mod = _reference()
+    glob = _global_inputs(row, cu, device, seed=seed)
+    ops = (
+        glob["q"],
+        glob["k"],
+        glob["v"],
+        glob["g"],
+        glob["beta"],
+        glob["dout"],
+        torch.tensor(cu, dtype=torch.int64),
+    )
+    refs = ref_mod.gdn_exact_with_grads(*ops, scale=SCALE)
+    naive = ref_mod.gdn_naive_with_grads(*ops, scale=SCALE)
+    del glob, ops
+    for name, tensors in gathered.items():
+        n = name.rsplit(".", 1)[-1]  # "p4.dq" -> "dq"
+        cand = _to_global(part, [t.to(device) for t in tensors], cu, cu[-1])
+        _judge_add(judge, failures, name, j, cand, refs[n], naive[n])
+
+
+def _run_rank(
+    rank: int,
+    W: int,
+    row: Row,
+    group,
+    device: torch.device,
+    result_dir: str | None,
+    backend: str,
+) -> dict:
+    """The body of one rank over the row's draws (:func:`_rank_draw`: every mode of the KCP forward / backward on
+    draw 0, the core forms on every draw; on a ``p4`` row the forced ``P = 4`` pass of :func:`_p4_draw` on every
+    draw); each draw's outputs are gathered to rank 0 and judged there against the FP64 oracle beside the naive BF16
+    tier."""
+    part, cu = _partition(row)
+    ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
+    total = cu[-1]
+    ws = kcp.CakeGDNDetKcpWorkspace()
+    t_start = time.time()
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {}
+    p4 = False
+    if row.p4:
+        p4 = _p_group_ok(ctx, row.heads[1], P4, group, W, device)
+        flags["p4_allowed"] = p4
+    ws4 = kcp.CakeGDNDetKcpWorkspace() if p4 else None
+    judge, failures = (TierJudge(), []) if rank == 0 and total > 0 else (None, [])
+    # an empty pack has nothing to judge: one draw of its bitwise forms
+    for j in range(DRAWS if total > 0 else 1):
+        seed = _draw_seed(j)
+        ops = _local_inputs(row, part, cu, rank, device, seed=seed)
+        res, fl = _rank_draw(
+            rank,
+            W,
+            row,
+            group,
+            device,
+            backend,
+            part,
+            cu,
+            ctx,
+            ws,
+            ops,
+            seed,
+            info if j == 0 else {},
+            full=j == 0,
+        )
+        gathered = {n: _gather(res[n].cpu(), W, group) for n in TENSORS}
+        del res
+        if p4:
+            res, fl["p4_launch_P"] = _p4_draw(ctx, ws4, ops, backend)
+            for n in TENSORS:
+                gathered[f"p4.{n}"] = _gather(res[n].cpu(), W, group)
+            del res
+        del ops
+        for key, ok in fl.items():
+            flags[key] = flags.get(key, True) and bool(ok)
+        if judge is not None:
+            _judge_full_draw(judge, failures, j, row, part, cu, device, seed, gathered)
+        del gathered
+    flag_list = _gather(flags, W, group)
+    info_list = _gather(info, W, group)
     report: dict = {
         "row": dataclasses.asdict(row),
         "rank": rank,
@@ -1672,7 +1832,6 @@ def _run_rank(
         "flags": {},
         "gated": [],
         "reported": [],
-        "metrics": {},
         "info_by_rank": info_list,
         "seconds": None,
     }
@@ -1689,27 +1848,7 @@ def _run_rank(
         else:
             report["gated"].append(key)
             report["pass"] &= ok
-    if rank == 0 and total > 0:
-        ref_mod = _reference()
-        glob = _global_inputs(row, cu, device)
-        cu_t = torch.tensor(cu, dtype=torch.int64)
-        refs = ref_mod.gdn_exact_with_grads(
-            glob["q"],
-            glob["k"],
-            glob["v"],
-            glob["g"],
-            glob["beta"],
-            glob["dout"],
-            cu_t,
-            scale=SCALE,
-        )
-        budget = _budget_cell(row)
-        for n in TENSORS:
-            cand = _to_global(part, [t.to(device) for t in gathered[n]], cu, total).to(
-                torch.float64
-            )
-            ref = refs[n].to(device=device, dtype=torch.float64).reshape(cand.shape)
-            _judge(report, row, n, cand, ref, ref_mod, budget)
+    _judge_report(report, judge, failures)
     report["seconds"] = round(time.time() - t_start, 2)
     if W > 1:
         verdict: list = [None] * W
@@ -1782,7 +1921,8 @@ def _free_port() -> int:
 def _spawn_entry(
     rank: int, W: int, row: Row, port: int, result_dir: str, backend: str
 ) -> None:
-    """One spawned rank (the verdict travels through rank 0's report file)."""
+    """One spawned rank (the verdict and rank 0's naive-tier verdicts travel through rank 0's report file; the
+    parent test records them and asserts)."""
     device = torch.device("cuda", rank % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
     try:
@@ -1791,11 +1931,7 @@ def _spawn_entry(
             os.environ.setdefault("MASTER_PORT", str(port))
             dist.init_process_group("nccl", rank=rank, world_size=W, device_id=device)
         group = dist.group.WORLD if W > 1 else None
-        report = _run_rank(rank, W, row, group, device, result_dir, backend)
-        if not report["pass"]:
-            raise AssertionError(
-                f"rank {rank}: {json.dumps(report, default=str)[:4000]}"
-            )
+        _run_rank(rank, W, row, group, device, result_dir, backend)
     finally:
         kcp.graph_cache_clear()
         if dist.is_initialized():
@@ -1940,8 +2076,10 @@ def _skip_unless_runnable(W: int, backend: str) -> None:
         pytest.skip("the KCP programs are not exported in the package's build.json yet")
 
 
-def _slurm_row(row: Row, slurm, backend: str, body) -> None:
-    """One row under Slurm: sub-group of the row's ranks, WORLD-wide verdict (see :func:`test_multi_gpu_rows`)."""
+def _slurm_row(row: Row, slurm, backend: str, body, record_property=None) -> None:
+    """One row under Slurm: sub-group of the row's ranks, WORLD-wide verdict: every rank (member or not) passes or
+    fails the same row, so ``-x`` and the session teardown keep the collectives aligned across ranks.  Rank 0 records
+    the row's naive-tier verdicts with ``record_property`` before the verdict is asserted."""
     W = row.W
     if slurm.world < W:
         pytest.skip(f"row needs {W} ranks, the step has {slurm.world}")
@@ -1983,19 +2121,27 @@ def _slurm_row(row: Row, slurm, backend: str, body) -> None:
         if not ok:
             pytest.fail(f"rank {slurm.rank}: row failed on its {W} member ranks")
         pytest.skip(f"rank {slurm.rank} is not part of the row's {W}-rank group")
-    assert ok, json.dumps(
-        {k: v for k, v in report.items() if k != "info_by_rank"}, default=str
+    _record_verdicts(report, record_property)
+    assert ok, _summary(report)
+
+
+def _summary(report: dict) -> str:
+    """A row report without the per-rank records and the verdict list (the failures stay), for an assert message."""
+    return json.dumps(
+        {k: v for k, v in report.items() if k not in ("info_by_rank", "naive_tier")},
+        default=str,
     )[:6000]
 
 
 @pytest.mark.parametrize("row", _selected_rows(), ids=_row_id)
-def test_forward_rows(row: Row, slurm) -> None:
-    """INT1 forward-only rows (``KCP_TEST_MODE=forward``): #1-#5, ``out`` vs FP64, ``S_in`` vs the FP64 cut states."""
+def test_forward_rows(row: Row, slurm, record_property) -> None:
+    """INT1 forward-only rows (``KCP_TEST_MODE=forward``): #1-#5 bitwise, ``out`` and ``S_in`` judged against the FP64
+    forward and cut states (naive BF16 tier, 32 draws)."""
     if _test_mode() != "forward":
         pytest.skip("KCP_TEST_MODE=forward selects the forward-only rows")
     backend = _backend_name()
     if slurm is not None:
-        _slurm_row(row, slurm, backend, _run_rank_fwd)
+        _slurm_row(row, slurm, backend, _run_rank_fwd, record_property)
         return
     _skip_unless_runnable(row.W, backend)
     if row.W != 1:
@@ -2009,52 +2155,19 @@ def test_forward_rows(row: Row, slurm) -> None:
         os.environ.get("KCP_TEST_RESULT_DIR"),
         backend,
     )
-    assert report["pass"], report
+    _record_verdicts(report, record_property)
+    assert report["pass"], _summary(report)
 
 
 @pytest.mark.parametrize("row", _selected_rows(), ids=_row_id)
-def test_multi_gpu_rows(row: Row, slurm) -> None:
+def test_multi_gpu_rows(row: Row, slurm, record_property) -> None:
+    """Forward + backward rows: the bitwise forms and contracts of :func:`_rank_draw`, and the six outputs judged
+    against the FP64 oracle (naive BF16 tier, 32 draws)."""
     if _test_mode() != "full":
         pytest.skip("KCP_TEST_MODE=forward: the forward-only rows run instead")
     backend = _backend_name()
     if slurm is not None:
-        W = row.W
-        if slurm.world < W:
-            pytest.skip(f"row needs {W} ranks, the step has {slurm.world}")
-        group = slurm.group(
-            W
-        )  # collective over WORLD: every rank calls it, members and non-members alike
-        if slurm.world > 1:
-            dist.barrier()
-        if backend == "kernels" and not _programs_exported():
-            pytest.skip(
-                "the KCP programs are not exported in the package's build.json yet"
-            )
-        report = None
-        if slurm.rank < W:
-            report = _run_rank(
-                slurm.rank,
-                W,
-                row,
-                group,
-                slurm.device,
-                os.environ.get("KCP_TEST_RESULT_DIR"),
-                backend,
-            )
-        # the verdict is WORLD-wide: every rank (member or not) passes or fails the same row, so ``-x`` and the
-        # session teardown keep the collectives aligned across ranks
-        ok = report is None or bool(report["pass"])
-        if slurm.world > 1:
-            verdicts: list = [None] * slurm.world
-            dist.all_gather_object(verdicts, ok)
-            ok = all(verdicts)
-        if slurm.rank >= W:
-            if not ok:
-                pytest.fail(f"rank {slurm.rank}: row failed on its {W} member ranks")
-            pytest.skip(f"rank {slurm.rank} is not part of the row's {W}-rank group")
-        assert ok, json.dumps(
-            {k: v for k, v in report.items() if k != "info_by_rank"}, default=str
-        )[:6000]
+        _slurm_row(row, slurm, backend, _run_rank, record_property)
         return
     _skip_unless_runnable(row.W, backend)
     with tempfile.TemporaryDirectory(prefix="cake_gdn_kcp_dist_") as tmp:
@@ -2068,28 +2181,8 @@ def test_multi_gpu_rows(row: Row, slurm) -> None:
         )
         with open(os.path.join(result_dir, _row_id(row) + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
-
-
-def test_accuracy_budget_cells_cover_the_accuracy_rows() -> None:
-    """Every accuracy row (regime != ``normal``) maps to a budget cell with all six tensors (finite, positive budgets,
-    the declared storage per tensor); the rows at a CP of record use their own CP, the CP16 row ``A1-cp16`` (no CP16
-    cell) the A1 CP8 cell.  CPU-only."""
-    table = _budgets()
-    assert table["status"] == "FINAL" and table["cells"] == 216
-    rows = [r for r in ROWS if r.regime != "normal"]
-    assert {r.name for r in rows} == {"A3", "A1", "A2", "A4", "A1-cp16"}
-    for row in rows:
-        got = _budget_cell(row)
-        assert got is not None, row.name
-        cell, cp = got
-        assert cp == (8 if row.name == "A1-cp16" else row.W), (row.name, cp)
-        assert set(cell["tensors"]) == set(TENSORS), row.name
-        for n, b in cell["tensors"].items():
-            assert b["storage"] == STORAGE[n], (row.name, n)
-            assert 0.0 < b["budget_rel_rms"] < 1.0, (row.name, n)
-            assert 0.0 < b["budget_max_abs"] < 1.0, (row.name, n)
-    assert _budget_cell(Row("Zz", (1,), (2, 6), 2, "contiguous")) is None
+    _record_verdicts(report, record_property)
+    assert report["pass"], _summary(report)
 
 
 def test_public_api_cannot_select_test_programs() -> None:
@@ -2120,11 +2213,8 @@ def test_public_api_cannot_select_test_programs() -> None:
 
 CONV_C = 10240
 CONV_WIDTH = 4
-CONV_Y_ATOL, CONV_Y_RTOL = (
-    1e-3,
-    2.0**-7,
-)  # one BF16 ulp, no element outside (the conv package's own gate)
-CONV_DW_ATOL, CONV_DW_RTOL = 5e-2, 1e-4  # FP32 dweight against the FP64 oracle
+# the seed of the C7 operands: draw 0; draw j at draw_seed(CONV_SEED, j)
+CONV_SEED = 43567
 
 
 def _c7_fragments() -> list[list[tuple[int, int, int]]]:
@@ -2135,14 +2225,10 @@ EXPLICIT["c7"] = (_c7_fragments, (303, 200))
 C7_ROW = Row("C7", (303, 200), (2, 6), 4, "explicit:c7", stage="conv")
 
 
-def _conv_reference(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.Tensor):
-    """FP64 oracle of the unpartitioned width-4 depthwise causal convolution + SiLU with the conv package's KCP
-    semantics (``weight[c, 3]`` multiplies the current token; zero history at a document start; the SiLU
-    derivative on the unrounded preactivation): BF16 ``y`` and ``dx`` (one rounding each), FP64 ``dpre`` for the
-    per-rank ``dweight`` partials."""
-    S, _ = x.shape
-    xf, wd = x.double(), w.double()
-    doc = torch.zeros(S, dtype=torch.int64, device=x.device)
+def _doc_shifts(cu: list[int], S: int, device):
+    """``shifted(t, k)`` (``t[i - k]`` of the same document, else 0) and ``shifted_up(t, k)`` (``t[i + k]`` of the
+    same document, else 0) over the ``S`` packed tokens of ``cu``: exact copies in the dtype of ``t``."""
+    doc = torch.zeros(S, dtype=torch.int64, device=device)
     for i in range(len(cu) - 1):
         doc[cu[i] : cu[i + 1]] = i
 
@@ -2166,33 +2252,98 @@ def _conv_reference(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.T
             out[: S - k] = torch.where(same[:, None], t[k:], torch.zeros_like(t[k:]))
         return out
 
+    return shifted, shifted_up
+
+
+def _conv_reference(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.Tensor):
+    """FP64 oracle of the unpartitioned width-4 depthwise causal convolution + SiLU with the conv package's KCP
+    semantics (``weight[c, 3]`` multiplies the current token; zero history at a document start; the SiLU
+    derivative on the unrounded preactivation): FP64 ``y``, ``dx`` and ``dpre``, and the taps for the per-rank
+    ``dweight`` partials."""
+    shifted, shifted_up = _doc_shifts(cu, x.shape[0], x.device)
+    xf, wd = x.double(), w.double()
     halo = CONV_WIDTH - 1
     pre = sum(wd[:, k][None, :] * shifted(xf, halo - k) for k in range(CONV_WIDTH))
     s = torch.sigmoid(pre)
-    y = (pre * s).to(torch.bfloat16)
+    y = pre * s
     dpre = dy.double() * s * (1 + pre * (1 - s))
-    dx = sum(
-        wd[:, k][None, :] * shifted_up(dpre, halo - k) for k in range(CONV_WIDTH)
-    ).to(torch.bfloat16)
+    dx = sum(wd[:, k][None, :] * shifted_up(dpre, halo - k) for k in range(CONV_WIDTH))
     taps = [shifted(xf, halo - k) for k in range(CONV_WIDTH)]
     return y, dx, dpre, taps
 
 
-def _outside(
-    actual: torch.Tensor, expected: torch.Tensor, *, atol: float, rtol: float
-) -> dict:
-    """Elements of ``actual`` beyond ``atol + rtol |expected|`` and the comparison's statistics."""
-    a = actual.detach().reshape(-1).double()
-    b = expected.detach().reshape(-1).double()
-    if a.numel() == 0:
-        return {"count_outside": 0, "max_abs_diff": 0.0, "finite": True, "n": 0}
-    diff = (a - b).abs()
-    return {
-        "count_outside": int((diff > atol + rtol * b.abs()).sum().item()),
-        "max_abs_diff": float(diff.max().item()),
-        "finite": bool(torch.isfinite(a).all().item()),
-        "n": int(a.numel()),
-    }
+def _stored(t: torch.Tensor) -> torch.Tensor:
+    """``t`` as the naive BF16 tier reads it: BF16 when stored no wider, else as stored (the FP32 weight)."""
+    return t.to(torch.bfloat16) if t.dtype.itemsize <= 2 else t
+
+
+def _conv_naive(x: torch.Tensor, w: torch.Tensor, cu: list[int], dy: torch.Tensor):
+    """The naive tier of :func:`_conv_reference`: the same ops on the same inputs in PyTorch BF16 -- ``x`` and ``dy``
+    read as BF16, the FP32 weight as stored (its products with BF16 rows run in FP32 by torch's type promotion) --
+    with ``y`` and ``dx`` rounded to BF16; ``dpre`` and the BF16 taps for the per-rank ``dweight`` partials (rounded
+    to BF16 by :func:`_dw_partials`)."""
+    shifted, shifted_up = _doc_shifts(cu, x.shape[0], x.device)
+    xb, wb, dyb = _stored(x), _stored(w), _stored(dy)
+    halo = CONV_WIDTH - 1
+    pre = sum(wb[:, k][None, :] * shifted(xb, halo - k) for k in range(CONV_WIDTH))
+    s = torch.sigmoid(pre)
+    y = (pre * s).to(torch.bfloat16)
+    dpre = dyb * s * (1 + pre * (1 - s))
+    dx = sum(
+        wb[:, k][None, :] * shifted_up(dpre, halo - k) for k in range(CONV_WIDTH)
+    ).to(torch.bfloat16)
+    taps = [shifted(xb, halo - k) for k in range(CONV_WIDTH)]
+    return y, dx, dpre, taps
+
+
+def _dw_partials(dpre, taps, sels, dtype=None) -> list[torch.Tensor]:
+    """Every rank's ``dweight`` partial ``[C, 4]`` (the framework reduces the ranks): the sum over the rank's
+    tokens ``sel`` of ``dpre`` times each tap, rounded to ``dtype`` when given (the naive tier)."""
+    out = []
+    for sel in sels:
+        dw = torch.stack([(dpre[sel] * tap[sel]).sum(0) for tap in taps], dim=1)
+        out.append(dw if dtype is None else dw.to(dtype))
+    return out
+
+
+def _conv_operands(seed: int, total: int, C: int = CONV_C):
+    """The convolution operands of one draw (CPU, the same on every rank): ``x`` and ``dy`` ``[total, C]`` BF16 and
+    the FP32 weight ``[C, 4]``."""
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    x_all = (torch.randn(total, C, generator=gen) * 0.5).to(torch.bfloat16)
+    w = (torch.randn(C, CONV_WIDTH, generator=gen) * 0.5).float()
+    dy_all = (torch.randn(total, C, generator=gen) * 0.5).to(torch.bfloat16)
+    return x_all, w, dy_all
+
+
+def _judge_conv_draw(
+    judge: TierJudge,
+    failures: list[str],
+    j: int,
+    part,
+    cu: list[int],
+    W: int,
+    device,
+    x_all: torch.Tensor,
+    w: torch.Tensor,
+    dy_all: torch.Tensor,
+    got: list[dict],
+) -> None:
+    """Rank 0, draw ``j`` of C7: ``y`` / ``dx`` reassembled to the global order and every rank's ``dweight`` partial
+    (``dw.r<rank>``) against the FP64 oracle of the whole pack beside its naive BF16 tier."""
+    x, wd, dy = x_all.to(device), w.to(device), dy_all.to(device)
+    y_ref, dx_ref, dpre, taps = _conv_reference(x, wd, cu, dy)
+    y_nv, dx_nv, dpre_nv, taps_nv = _conv_naive(x, wd, cu, dy)
+    for n, ref, nv in (("y", y_ref, y_nv), ("dx", dx_ref, dx_nv)):
+        cand = _to_global(part, [r_[n].to(device) for r_ in got], cu, cu[-1])
+        _judge_add(judge, failures, n, j, cand, ref, nv)
+    sels = [_local_to_global(part, cu, r).to(device) for r in range(W)]
+    refs = _dw_partials(dpre, taps, sels)
+    naive = _dw_partials(dpre_nv, taps_nv, sels, torch.bfloat16)
+    for r in range(W):
+        _judge_add(
+            judge, failures, f"dw.r{r}", j, got[r]["dw"].to(device), refs[r], naive[r]
+        )
 
 
 def _run_rank_conv(
@@ -2204,63 +2355,54 @@ def _run_rank_conv(
     result_dir: str | None,
     backend: str,
 ) -> dict:
-    """C7 on one rank: ``y`` / ``dx`` / ``dweight`` of the rank's tokens against the FP64 oracle of the whole pack,
-    ``y`` bitwise equal to the single-rank conv of the whole pack on the rank's tokens, repeat bitwise, and the
-    halo-row gradients delivered to the predecessor ranks (rank 0 / 1: 1 / 2 tokens of document 0)."""
+    """C7 on one rank over 32 draws: on every draw ``y`` bitwise the single-rank conv of the whole pack on the rank's
+    tokens, its repeat bitwise, the shapes, the halo-row gradients delivered to the predecessor ranks (rank 0 / 1: 1 /
+    2 tokens of document 0, non-zero) and the empty rank; on rank 0 ``y`` / ``dx`` / every rank's ``dweight`` partial
+    judged against the FP64 oracle beside the naive BF16 tier (:func:`_judge_conv_draw`)."""
     from cake_pplx import cake_causal_conv1d_det_train as conv
     from cake_pplx import cake_causal_conv1d_det_train_kcp as conv_kcp
 
     part, cu = _partition(row)
     ctx = plan.cake_gdn_det_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    gen = torch.Generator(device="cpu").manual_seed(43567)
-    x_all = (torch.randn(total, CONV_C, generator=gen) * 0.5).to(torch.bfloat16)
-    w = (torch.randn(CONV_C, CONV_WIDTH, generator=gen) * 0.5).float()
-    dy_all = (torch.randn(total, CONV_C, generator=gen) * 0.5).to(torch.bfloat16)
-    pieces = [
-        torch.arange(cu[f.doc] + f.off, cu[f.doc] + f.off + f.length)
-        for f in part.fragments[rank]
-        if f.length
-    ]
-    l2g = torch.cat(pieces) if pieces else torch.zeros(0, dtype=torch.int64)
-    x_local = x_all[l2g].to(device).requires_grad_(True)
-    w_dev = w.to(device).requires_grad_(True)
-    dy_local = dy_all[l2g].to(device)
-    t0 = time.time()
-    y = conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_dev, ctx)
-    y.backward(dy_local)
-    dx, dw = x_local.grad, w_dev.grad
-    y2 = conv_kcp.cake_causal_conv1d_det_kcp(x_local.detach(), w_dev.detach(), ctx)
-    torch.cuda.synchronize(device)
-    # the oracle (FP64 on this rank's device, the whole pack) and the single-rank conv of the whole pack
-    y_ref, dx_ref, dpre, taps = _conv_reference(
-        x_all.to(device), w.to(device), cu, dy_all.to(device)
-    )
+    l2g = _local_to_global(part, cu, rank)
     sel = l2g.to(device)
-    dw_ref = torch.stack(
-        [(dpre[sel] * tap[sel]).sum(0) for tap in taps], dim=1
-    )  # this rank's partial of dweight (the framework reduces the ranks)
     cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
-    y_single = conv.cake_causal_conv1d_det(x_all.to(device), w.to(device), cu_dev)
     flags: dict[str, bool] = {}
-    metrics: dict[str, dict] = {}
-    metrics["y"] = _outside(y, y_ref[sel], atol=CONV_Y_ATOL, rtol=CONV_Y_RTOL)
-    metrics["dx"] = _outside(dx, dx_ref[sel], atol=CONV_Y_ATOL, rtol=CONV_Y_RTOL)
-    metrics["dw"] = _outside(dw, dw_ref, atol=CONV_DW_ATOL, rtol=CONV_DW_RTOL)
-    flags["y_within"] = metrics["y"]["count_outside"] == 0 and metrics["y"]["finite"]
-    flags["dx_within"] = metrics["dx"]["count_outside"] == 0 and metrics["dx"]["finite"]
-    flags["dw_within"] = metrics["dw"]["count_outside"] == 0 and metrics["dw"]["finite"]
-    flags["y_eq_single_rank"] = torch.equal(y, y_single[sel])
-    flags["repeat"] = torch.equal(y, y2)
-    flags["shapes"] = tuple(y.shape) == tuple(x_local.shape) and tuple(
-        dx.shape
-    ) == tuple(x_local.shape)
-    # the halo rows: the predecessor ranks' tokens feed rank 3's first outputs, so their dx must carry that term
-    # (non-zero), and a rank without tokens has empty y / dx
-    if rank in (0, 1):
-        flags["halo_grad_nonzero"] = bool((dx.float().abs() > 0).any().item())
-    if rank == 2:
-        flags["empty_rank"] = y.numel() == 0 and dx.numel() == 0
+    judge, failures = (TierJudge(), []) if rank == 0 else (None, [])
+    t0 = time.time()
+    for j in range(DRAWS):
+        x_all, w, dy_all = _conv_operands(draw_seed(CONV_SEED, j), total)
+        x_local = x_all[l2g].to(device).requires_grad_(True)
+        w_dev = w.to(device).requires_grad_(True)
+        y = conv_kcp.cake_causal_conv1d_det_kcp(x_local, w_dev, ctx)
+        y.backward(dy_all[l2g].to(device))
+        dx, dw = x_local.grad, w_dev.grad
+        y2 = conv_kcp.cake_causal_conv1d_det_kcp(x_local.detach(), w_dev.detach(), ctx)
+        # the single-rank conv of the whole pack
+        y_single = conv.cake_causal_conv1d_det(x_all.to(device), w.to(device), cu_dev)
+        torch.cuda.synchronize(device)
+        fl = {
+            "y_eq_single_rank": torch.equal(y, y_single[sel]),
+            "repeat": torch.equal(y, y2),
+            "shapes": tuple(y.shape) == tuple(x_local.shape)
+            and tuple(dx.shape) == tuple(x_local.shape),
+        }
+        # the halo rows: the predecessor ranks' tokens feed rank 3's first outputs, so their dx must carry that term
+        # (non-zero), and a rank without tokens has empty y / dx
+        if rank in (0, 1):
+            fl["halo_grad_nonzero"] = bool((dx.float().abs() > 0).any().item())
+        if rank == 2:
+            fl["empty_rank"] = y.numel() == 0 and dx.numel() == 0
+        for key, ok in fl.items():
+            flags[key] = flags.get(key, True) and bool(ok)
+        got = _gather({"y": y.detach().cpu(), "dx": dx.cpu(), "dw": dw.cpu()}, W, group)
+        del x_local, w_dev, y, y2, dx, dw, y_single
+        if judge is not None:
+            _judge_conv_draw(
+                judge, failures, j, part, cu, W, device, x_all, w, dy_all, got
+            )
+        del got
     report = {
         "row": dataclasses.asdict(row),
         "rank": rank,
@@ -2276,17 +2418,18 @@ def _run_rank_conv(
         "flags": flags,
         "gated": sorted(flags),
         "reported": [],
-        "metrics": metrics,
         "info_by_rank": [
             {
                 "rank": rank,
-                "T_r": int(x_local.shape[0]),
+                "T_r": int(l2g.numel()),
                 "l2g_first": int(l2g[0]) if len(l2g) else None,
             }
         ],
-        "seconds": round(time.time() - t0, 2),
+        "seconds": None,
         "C": CONV_C,
     }
+    _judge_report(report, judge, failures)
+    report["seconds"] = round(time.time() - t0, 2)
     if result_dir:
         os.makedirs(result_dir, exist_ok=True)
         with open(
@@ -2296,16 +2439,17 @@ def _run_rank_conv(
     return report
 
 
-def test_conv_halo_row(slurm) -> None:
-    """C7: the causal_conv1d family's ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing): ``y`` / ``dx`` /
-    ``dweight`` vs FP64 on every rank, ``y`` bitwise the single-rank conv, history rows from two predecessor ranks,
-    an empty predecessor and a document start.  Runs under Slurm with >= 4 ranks."""
+def test_conv_halo_row(slurm, record_property) -> None:
+    """C7: the causal_conv1d family's ``cake_causal_conv1d_det_kcp`` through this package's context (duck typing):
+    ``y`` / ``dx`` / ``dweight`` judged against FP64 (naive BF16 tier, 32 draws), ``y`` bitwise the single-rank conv,
+    history rows from two predecessor ranks, an empty predecessor and a document start.  Runs under Slurm with >= 4
+    ranks."""
     if slurm is None:
         pytest.skip("the conv halo row runs under Slurm (4 ranks)")
     conv = pytest.importorskip("cake_pplx.cake_causal_conv1d_det_train")
     if not conv.is_cake_causal_conv1d_det_train_supported(slurm.device):
         pytest.skip("the conv package does not support this device")
-    _slurm_row(C7_ROW, slurm, "conv", _run_rank_conv)
+    _slurm_row(C7_ROW, slurm, "conv", _run_rank_conv, record_property)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2535,11 +2679,10 @@ def test_layer_checkpoint_rows(row: Row, slurm) -> None:
 # * the composed chain: out / dv / dbeta / dg == the norm-off route on the materialized ``(qn, kn)`` (the forward's
 #   own rows, ``record_qk``); dq / dk == ``bf16(l2n_pullback(x, r, D))`` with ``D`` the norm-off route's
 #   ``group_reduce="host"`` partials summed in head order (the oracle of #8_l2n's fused group sum + pullback);
-# * #1_l2n: its eight tapes == v1 #1 on the materialized ``(qn, kn)``; its ``qn`` / ``kn`` / ``r`` == the
+# * #1_l2n: its eight tapes == the norm-off #1 on the materialized ``(qn, kn)``; its ``qn`` / ``kn`` / ``r`` == the
 #   ``cake_l2n`` reference (CPU, FTZ off); ``qk_apply`` on its ``r`` == its ``qn`` / ``kn``; the backward's rows and
 #   regenerated ``r`` == the forward's;
-# * norm off unchanged: the v1 records' library identities and csrc bytes are the pinned ones of 615a65850, and the
-#   norm-off route launches only them;
+# * the norm-off route launches no record of the in-kernel norm's programs (``L2N_PROGRAMS``);
 # * packed QKV views with the norm: bitwise the contiguous call, the split still aliases the packed dQKV row;
 # * memory: no ``qn`` / ``kn`` / ``qk_rstd`` in the arena after a forward or a backward; the bytes a forward retains
 #   with the norm == without + ``8 T_r H_qk`` (the saved r); saved bytes on - off == the query's ``qk_rstd`` term;
@@ -2549,32 +2692,6 @@ def test_layer_checkpoint_rows(row: Row, slurm) -> None:
 # The rows skip with a clear reason while the registry does not ship the three records (the kernel backend refuses
 # the option then); ``KCP_TEST_BACKEND=fake`` runs them on the torch emulation.
 
-V1_LIBRARIES = {
-    "bwd_dqkg": "cake_gdn_det_train_501d82df9928cfc02551",
-    "bwd_prep": "cake_gdn_det_train_d4be7d17c0c64e05e81c",
-    "fwd_o": "cake_gdn_det_train_48f2bbfe1482cf86506c",
-    "fwd_prep": "cake_gdn_det_train_3465abf6a7e24059f85c",
-    "gate_epilogue": "cake_gdn_det_train_b902b0b0bef82d9f7c53",
-    "kcp_affine_merge_c16": "cake_gdn_det_train_89f5ff59f03eb170e3bf_kcp",
-    "kcp_affine_merge_c8": "cake_gdn_det_train_c6958a0a4ed5cb55a9a1_kcp",
-    "kcp_dhu_offset": "cake_gdn_det_train_665649ff924fda17ec3f_kcp",
-    "kcp_dhu_offset_vh64": "cake_gdn_det_train_0ed5c4450f8dbac6fb1e_kcp",
-    "kcp_dhu_tape": "cake_gdn_det_train_8b193b1101cc03b7d704_kcp",
-    "kcp_dhu_tape_vh64": "cake_gdn_det_train_a44997811b71d9d83fb4_kcp",
-    "kcp_fwdh_offset": "cake_gdn_det_train_eb58759a50e781620aed_kcp",
-    "kcp_fwdh_offset_vh64": "cake_gdn_det_train_fc32e3ea90cd1b718ad8_kcp",
-    "kcp_fwdh_tape": "cake_gdn_det_train_01f0e0eab26c58ff3953_kcp",
-    "kcp_fwdh_tape_vh64": "cake_gdn_det_train_2eade16c7f51796727a5_kcp",
-    "kcp_transfer_walk": "cake_gdn_det_train_ca5488020bef49bf474b_kcp",
-    "kcp_transfer_walk_three_mma": "cake_gdn_det_train_2f42874614b85ffc14fe_kcp",
-    "kcp_transfer_walk_plain_tf32": "cake_gdn_det_train_efbba796414578cbd8b5_kcp",
-}
-# sha256 over the sorted lines "<file> <sha256>\n" of the 36 csrc files (<library>_kernel.cu / _binding.cu) of the
-# 18 records above as rendered with the v2 output walk and the exact-zero transfer walk (kcp_transfer_walk: bitwise
-# the v1 walk's outputs); every other record keeps its v1 library and SASS on sm_100a / sm_103a / sm_107a
-V1_CSRC_DIGEST = "515e92fd735ca504645b0d52356486aa6b66dd0bc00cbc34b15146ca102b3b33"
-# The output walk (#2 with #5 folded in): no v1 record, launched by the norm-off and the norm-on forward alike.
-NORM_OFF_EXTRA_RECORDS = ("kcp_fwdh_out", "kcp_fwdh_out_vh64")
 L2N_SKIP = (
     "the in-kernel Q/K L2 norm records (fwd_prep_l2n, bwd_dqkg_l2n, qk_apply) are not in the shipped registry "
     "yet: use_qk_l2norm_in_kernel cannot run on the kernel backend"
@@ -2590,19 +2707,6 @@ def _l2n_shipped() -> bool:
 def _skip_unless_l2n(backend: str) -> None:
     if backend == "kernels" and not _l2n_shipped():
         pytest.skip(L2N_SKIP)
-
-
-def _v1_csrc_digest() -> str:
-    import hashlib
-
-    lines = []
-    for lib in sorted(V1_LIBRARIES.values()):
-        for suffix in ("_kernel.cu", "_binding.cu"):
-            path = PACKAGE_DIR / "csrc" / f"{lib}{suffix}"
-            lines.append(
-                f"{path.name} {hashlib.sha256(path.read_bytes()).hexdigest()}\n"
-            )
-    return hashlib.sha256("".join(sorted(lines)).encode()).hexdigest()
 
 
 def _raw_qk(
@@ -2729,28 +2833,20 @@ def _run_rank_l2n(
             **{n: lf.grad for n, lf in zip(GRADS, leaves, strict=True)},
         }
 
-    # norm off unchanged: pinned v1 identities and bytes; the norm-off route launches only v1 records and the output
-    # walk (a program of both routes, new beside the v1 records; NORM_OFF_EXTRA_RECORDS)
+    # the norm-off route launches no record of the in-kernel norm's programs
     jit = _mod("cake_jit")
-    flags["norm_off_libraries_pinned"] = all(
-        ({**jit.MODULES, **jit.TEST_MODULES}.get(n) or {}).get("library") == lib
-        for n, lib in V1_LIBRARIES.items()
-    )
-    try:
-        info["v1_csrc_digest"] = _v1_csrc_digest()
-    except OSError as exc:
-        info["v1_csrc_digest"] = f"unavailable: {exc}"
-    flags["norm_off_csrc_bytes_pinned"] = info["v1_csrc_digest"] == V1_CSRC_DIGEST
+    l2n_records = {
+        name
+        for name, rec in {**jit.MODULES, **jit.TEST_MODULES}.items()
+        if rec.get("program") in kcp.L2N_PROGRAMS
+    }
     res_off = saved_pass()
     used = {r for r, _g in res_off["fwd"]["records"]} | {
         r for r, _g in res_off["bwd"]["records"]
     }
     info["norm_off_records"] = sorted(used)
-    flags["norm_off_bitwise_unchanged"] = (
-        flags["norm_off_libraries_pinned"]
-        and flags["norm_off_csrc_bytes_pinned"]
-        and used <= set(V1_LIBRARIES) | set(NORM_OFF_EXTRA_RECORDS)
-        and not res_off["fwd"]["qk_l2norm"]
+    flags["norm_off_launches_no_l2n_record"] = (
+        not (used & l2n_records) and not res_off["fwd"]["qk_l2norm"]
     )
 
     # the norm on: mode equalities
@@ -2827,7 +2923,7 @@ def _run_rank_l2n(
                 ),
             )
     # the forced P = 2 forms (see _run_rank)
-    info["p2_eligible"] = _p2_group_ok(ctx, HV, group, W, device)
+    info["p2_eligible"] = _p_group_ok(ctx, HV, 2, group, W, device)
     if info["p2_eligible"]:
         _p2_full_flags(
             saved_pass,
@@ -2888,12 +2984,14 @@ def _run_rank_l2n(
             flags["l2n_fused_dqdk_eq_partials_pullback"] = ok_fused
         else:
             info["fused_dqdk_eq_partials_pullback"] = ok_fused
-        # #1_l2n against v1 #1 on the materialized rows, the reference, and qk_apply
+        # #1_l2n against the norm-off #1 on the materialized rows, the reference, and qk_apply
         on = _prep_tapes(ctx, q, k, v, g, beta, l2n=True, backend=backend)
         off = _prep_tapes(
             ctx, on["qn"], on["kn"], v, g, beta, l2n=False, backend=backend
         )
-        flags["l2n_prep_tapes_eq_v1"] = all(torch.equal(on[n], off[n]) for n in off)
+        flags["l2n_prep_tapes_eq_norm_off"] = all(
+            torch.equal(on[n], off[n]) for n in off
+        )
         flags["l2n_prep_rows_eq_forward"] = torch.equal(on["qn"], qn) and torch.equal(
             on["rstd"], rstd
         )
@@ -3132,16 +3230,6 @@ def _run_rank_l2n(
     for key in keys:
         ok = all(f[key] for f in flag_list if key in f)
         report["flags"][key] = ok
-        # the csrc-byte pin needs the rendered sources of the v1 records in the tree (a re-render at a new pin is
-        # reported, and the bytes A/B of the render lane decides)
-        if key == "norm_off_csrc_bytes_pinned":
-            report["reported"].append(key)
-            continue
-        if key == "norm_off_bitwise_unchanged" and not all(
-            f.get("norm_off_csrc_bytes_pinned", True) for f in flag_list
-        ):
-            ok = all(f["norm_off_libraries_pinned"] for f in flag_list)
-            report["flags"][key] = ok
         report["gated"].append(key)
         report["pass"] &= ok
     report["seconds"] = round(time.time() - t_start, 2)

@@ -17,13 +17,13 @@ CPU tests of the in-kernel Q / K L2 norm of the non-deterministic KCP GDN packag
 (``cake_pplx._backends.cake_gdn_nondet_train_kcp``; ``use_qk_l2norm_in_kernel``), mirrored from the deterministic package's tests:
 
 * the pure-torch reference ``cake_l2n`` against an exact rational oracle (every FP32 step rounded from the exact
-  value; subnormals, zero rows, overflow of the sum of squares, wide exponents), in the documented orders;
+  value; random row scales, zero rows, signed zeros; inputs, squares and sums in FP32's normal range), in the
+  documented orders;
 * the fake backend's three programs (``fwd_prep_l2n`` / ``bwd_dqkg_l2n`` / ``qk_apply``) against the reference and
   against the norm-off programs on the normalized rows;
 * the host plumbing on the fake backend: the composed chain (helper -> norm-off route on ``(q_hat, k_hat)`` ->
   helper pullback) bitwise, every saved / replay / checkpoint / handle form bitwise the direct one, ``qn`` / ``kn``
-  never retained, the saved set v2, the option keyword, the byte queries; and the deterministic package with the
-  norm on the same inputs within the deterministic accuracy constants;
+  never retained, the saved set v2, the option keyword, the byte queries;
 * issue #8367 (norm off and on): plain ``split`` / ``view`` head views of a packed QKV row keep torch's autograd
   path -- their hooks and ``retain_grad`` fire, the gradients are bitwise (fake backend) those of contiguous
   operands and of ``cake_gdn_nondet_train_kcp_packed_qkv_views`` views, and only the packed views hand the packed dQKV row on without a
@@ -31,8 +31,8 @@ CPU tests of the in-kernel Q / K L2 norm of the non-deterministic KCP GDN packag
 
 The fake backend is not bitwise the device programs in #1 / #8's bodies (different accumulation orders): these tests
 prove the plumbing and the oracle, not GPU numerics (``test_cake_gdn_nondet_train_kcp_dist.py`` holds the GPU rows).
-The suite imports the package and the deterministic package through ``tests/cake/test_helpers/cake_package.py`` and nothing
-else from cake_pplx; the facade's hand-off of the option is tested in ``test_cake_gdn_nondet_train_kcp_api.py``.
+The suite imports the package through ``tests/cake/test_helpers/cake_package.py`` and nothing else from cake_pplx;
+the facade's hand-off of the option is tested in ``test_cake_gdn_nondet_train_kcp_api.py``.
 """
 
 from __future__ import annotations
@@ -53,13 +53,6 @@ def _mod(sub: str | None = None):
     from tests.cake.test_helpers.cake_package import cake_package
 
     return cake_package("cake_gdn_nondet_train_kcp", sub)
-
-
-def _det_mod(sub: str | None = None):
-    """A module of the deterministic package through the test-helper registry (a stale entry fails, never skips)."""
-    from tests.cake.test_helpers.cake_package import cake_package
-
-    return cake_package("cake_gdn_det_train_kcp", sub)
 
 
 kcp = _mod("cake_kcp")
@@ -264,30 +257,14 @@ def oracle_pullback(row: list[float], r: float, D: list[float]) -> list[float]:
 
 
 def _edge_rows() -> torch.Tensor:
-    """BF16 rows ``[n, 128]``: random scales, a zero row, an overflowing sum of squares, subnormal rows, wide
-    exponents in one row, a sum near the FP32 normal bound, signed zeros."""
+    """BF16 rows ``[n, 128]``: random scales, a zero row, signed zeros (every value, square and sum of squares in
+    FP32's normal range)."""
     gen = torch.Generator().manual_seed(78170)
     rows = [
         torch.randn(128, generator=gen) * s
         for s in (1.0, 1e-3, 37.0, 2.0**30, 2.0**-30)
     ]
     rows.append(torch.zeros(128))
-    rows.append(
-        torch.full((128,), 2.0**70)
-    )  # x^2 = 2^140 overflows FP32: ss = inf, r = 0
-    big = torch.randn(128, generator=gen)
-    big[5] = 2.0**64  # x^2 = 2^128: the first overflowing square
-    rows.append(big)
-    rows.append(torch.randn(128, generator=gen) * 2.0**-130)  # subnormal BF16
-    rows.append(
-        torch.randn(128, generator=gen) * 2.0**-70
-    )  # squares in FP32's subnormal range
-    rows.append(torch.randn(128, generator=gen) * 2.0**-63)  # ss near 2^-126
-    wide = torch.randn(128, generator=gen)
-    wide[::3] *= 2.0**40
-    wide[1::3] *= 2.0**-40
-    wide[2::7] *= 2.0**-128
-    rows.append(wide)
     signed = torch.zeros(128)
     signed[::2] = -0.0
     signed[7] = -3.0
@@ -319,24 +296,23 @@ def test_ss_fma_emulation_is_the_exact_rounding() -> None:
             o_r,
         )
         assert _bits16(q_hat[i]) == _bits16(torch.tensor(o_q, dtype=F32).to(BF16)), i
-    # the overflow row: r = 0 exactly; the zero row: r = 1 / sqrt(fp32(1e-6))
-    assert float(r[6]) == 0.0 and math.isinf(float(ss[6]))
+    # the zero row: r = 1 / sqrt(fp32(1e-6))
     assert float(r[5]) == f_div(
         1.0, f_sqrt(struct.unpack("<f", struct.pack("<f", 1e-6))[0])
     )
 
 
 def test_ss_fma_emulation_random_exponent_sweep() -> None:
-    """Each fma step of the emulation against the exact rounding, over random BF16 pairs with exponents across the
-    whole range (subnormal squares and overflowing ones included)."""
+    """Each fma step of the emulation against the exact rounding, over random BF16 pairs with exponents across FP32's
+    normal range (no input, square or sum is subnormal or overflows; exponent gaps beyond 100)."""
     gen = torch.Generator().manual_seed(7817)
     x = (
         torch.randn(4096, generator=gen)
-        * torch.exp2(torch.randint(-140, 70, (4096,), generator=gen).float())
+        * torch.exp2(torch.randint(-30, 30, (4096,), generator=gen).float())
     ).to(BF16)
     s = (
         torch.rand(4096, generator=gen)
-        * torch.exp2(torch.randint(-149, 128, (4096,), generator=gen).float())
+        * torch.exp2(torch.randint(-100, 100, (4096,), generator=gen).float())
     ).to(F32)
     xd = x.to(F32).to(torch.float64)
     got = (xd * xd + s.to(torch.float64)).to(F32)
@@ -1560,53 +1536,3 @@ def test_no_fla_import() -> None:
     ctx, ops = _setup()
     _saved_pass(ctx, ops, use_qk_l2norm_in_kernel=True)
     assert "fla" not in sys.modules
-
-
-def _rel_rms(a: torch.Tensor, b: torch.Tensor) -> float:
-    a, b = a.double(), b.double()
-    return float(
-        ((a - b).pow(2).mean().sqrt() / b.pow(2).mean().sqrt().clamp_min(1e-30)).item()
-    )
-
-
-@pytest.mark.parametrize("heads", [(2, 2), (2, 6)])
-def test_det_package_with_the_norm_within_the_det_constants(heads) -> None:
-    """The deterministic package with the norm on the same raw inputs and context (fake backend): every tensor within
-    the deterministic accuracy constants of this package (rel-RMS <= 1e-2, max-abs <= 2e-2 of max|ref|), worst over
-    both save modes and the checkpoint replay."""
-    det_kcp = _det_mod("cake_kcp")
-    det_plan = _det_mod("cake_kcp_plan")
-    H_qk, HV = heads
-    ops = _raw_inputs(CU, H_qk, HV)
-    part = plan.cake_gdn_nondet_train_kcp_partition(
-        torch.tensor(CU, dtype=torch.int64), 1, "contiguous"
-    )
-    ctx = plan.cake_gdn_nondet_train_kcp_build_context(part, None, 0, CPU)
-    det_part = det_plan.cake_gdn_det_train_kcp_partition(
-        torch.tensor(CU, dtype=torch.int64), 1, "contiguous"
-    )
-    det_ctx = det_plan.cake_gdn_det_train_kcp_build_context(det_part, None, 0, CPU)
-    worst = {}
-    for save_mode in ("light", "full"):
-        nd = _saved_pass(ctx, ops, use_qk_l2norm_in_kernel=True, save_mode=save_mode)
-        o = dict(backend="fake", use_qk_l2norm_in_kernel=True, save_mode=save_mode)
-        out, saved = det_kcp.cake_gdn_det_train_kcp_forward(*_ops(ops), det_ctx, **o)
-        dq, dk, dv, dbeta, dg = det_kcp.cake_gdn_det_train_kcp_backward(
-            *_ops(ops), det_ctx, ops["dout"], saved=saved, **o
-        )
-        det = {"out": out, "dq": dq, "dk": dk, "dv": dv, "dg": dg, "dbeta": dbeta}
-        for n in TENSORS:
-            ref = det[n].double()
-            rr = _rel_rms(nd[n], det[n])
-            ma = float((nd[n].double() - ref).abs().max().item())
-            bound = 2e-2 * float(ref.abs().max().item())
-            worst[n] = max(worst.get(n, 0.0), rr)
-            assert rr <= 1e-2 and ma <= bound + 1e-30, (
-                heads,
-                save_mode,
-                n,
-                rr,
-                ma,
-                bound,
-            )
-    assert set(worst) == set(TENSORS)

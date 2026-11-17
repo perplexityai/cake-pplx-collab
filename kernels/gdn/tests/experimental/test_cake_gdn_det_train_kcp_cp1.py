@@ -14,22 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The CP = 1 local path of the Cake packed GDN training package
-(``cake_pplx.cake_gdn_det_train_kcp`` with a one-rank context) against the exact FP64
-reference of ``tests/experimental/test_helpers/cake_gdn_det_train_kcp_reference.py``.
+(``cake_pplx.cake_gdn_det_train_kcp`` with a one-rank context).
 
-Covered here: the six outputs ``out, dq, dk, dv, dbeta, dg`` on ragged packs
-of the normal gate regime (natural-log gates down to the -42 class; zero
-elementwise mismatches), the adversarial weak-erasure regimes (contract,
-finiteness and a relative-RMS sanity bound; mismatch counts recorded as
-evidence), the six head pairs (16, 48), (8, 24), (4, 12),
-(2, 6), (1, 3), (4, 4), the degenerate one-token / zero-token packs, the packed
-QKV strided view against the contiguous input, and the explicit forward /
-backward entries against autograd (output order ``dq, dk, dv, dbeta, dg``,
-saved-context against replay), the fused output walk against the split forward
-on the same build (test knob ``fused_o`` 1 / 0, bitwise), and ``save_mode="full"`` without ``save_transfer`` at
-``P = 2`` under NaN-filled allocations against the light form (bitwise).  The multi-rank rows, the bitwise contracts and
-the runtime contracts live in ``test_cake_gdn_det_train_kcp_dist.py``; the CPU plan,
-table and byte-query tests in ``test_cake_gdn_det_train_kcp.py``.
+Accuracy: the six outputs ``out, dq, dk, dv, dbeta, dg`` of every row are judged with ``tests/cake_naive.py``: over
+32 draws of the row's operands, each output's error against the exact FP64 reference of
+``tests/experimental/test_helpers/cake_gdn_det_train_kcp_reference.py`` (``reference_pack``) beside the error of its
+naive BF16 tier (``naive_pack``).  The rows: ragged packs of the normal gate regime and of the pinned strong-decay
+regime (every full 64-token chunk's gate sum below -100), the adversarial weak-erasure regimes (slow isotropic /
+anisotropic decay over one long document), the six head pairs (16, 48), (8, 24), (4, 12), (2, 6), (1, 3), (4, 4) and
+the one-token pack; the zero-token pack is held to its contract (shapes and dtypes).
+
+Bitwise contracts on the same build: the packed QKV strided view against the contiguous input, plain split views
+against packed views and contiguous operands, the explicit forward / backward entries against autograd (output order
+``dq, dk, dv, dbeta, dg``, saved-context against replay), a caller stream against the default stream, every
+``reuse_recompute_tapes`` form against direct autograd, the fused output walk against the split forward (test knob
+``fused_o`` 1 / 0), the forward form of #1_l2n against the full one (test knob ``prep_form`` 1 / 0), and
+``save_mode="full"`` without ``save_transfer`` at ``P = 2`` under NaN-filled allocations against the light form; and
+the host plumbing of the kernels backend (sync-free context preparation, the workspace bytes, the eager pool sizing).
+The multi-rank rows, their bitwise contracts and the runtime contracts live in ``test_cake_gdn_det_train_kcp_dist.py``;
+the CPU plan, table and byte-query tests in ``test_cake_gdn_det_train_kcp.py``.
 """
 
 from __future__ import annotations
@@ -39,34 +42,23 @@ import importlib
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_package import PACKAGES, cake_package
+from tests.cake_naive import contract, judge_case
 from tests.experimental.test_helpers.cake_gdn_det_train_kcp_reference import (
     BLOCK,
     D,
     GRAD_NAMES,
+    SEED,
     STORAGE_OF,
     TENSORS,
-    elementwise_mismatch,
-    error_metrics,
     head_params,
     make_inputs,
+    naive_pack,
     reference_pack,
 )
-from tests.cake.test_helpers.cake_package import PACKAGES, cake_package
 
 gdn_api = importlib.import_module("cake_pplx.cake_gdn_det_train_kcp")
 
-# Accuracy gate, declared before the first run: every output elementwise within
-# ``|cand - ref| <= ATOL + RTOL * |ref|`` of the exact FP64 reference of the same BF16 / FP32 inputs with ZERO
-# mismatches on all six tensors; ``out`` / ``dq`` / ``dk`` / ``dv`` are compared as stored BF16, ``dg`` / ``dbeta`` as
-# FP32.  The rel-RMS / max-abs of every tensor is recorded beside the verdict (the budget tables of the multi-rank
-# rows are derived from the same metrics).
-ATOL = RTOL = 1e-2
-# The zero-mismatch gate is the contract of the normal gate regime (the correctness rows).  The adversarial weak-erasure
-# regimes (slow isotropic / anisotropic decay over one long document) are judged by the multi-rank budget tables with
-# their negative control; here they keep the contract, finiteness and a sanity bound on the relative RMS error, and
-# their mismatch counts are recorded as evidence.  Bound declared before the first run of these shapes.
-GATED_REGIMES = ("normal", "normal+decay4")
-ADVERSARIAL_REL_RMS_MAX = 1e-2
 OPERANDS = ("q", "k", "v", "g", "beta")
 EXPLICIT_GRAD_ORDER = (
     "dq",
@@ -83,19 +75,22 @@ STORAGE_DTYPE = {"bf16": torch.bfloat16, "fp32": torch.float32}
 PINNED_DECAY_MIN = 4.0
 PINNED_CHUNK_GATE_SUM_MIN = 100.0
 
-# id, document lengths (none a multiple of 64 unless the case says so), (H_qk, HV), operand regime
+# id, document lengths (none a multiple of 64 unless the case says so), (H_qk, HV), operand regime.  Each row is judged
+# over 32 draws (kernel, FP64 reference and naive tier per draw), so the packs hold about 1024 tokens or fewer (and
+# tokens x value heads <= 50k): several documents with a partial last chunk, a document boundary inside a chunk
+# (c4) and one on a chunk boundary followed by tiny documents (c3); the weak-erasure rows keep their one long
+# document.  At CP = 1 every row runs one segment per document (P = 1), as the larger packs did.
 SHAPES = (
-    ("c1-2x6-ragged", (100, 640, 77, 1000, 129), (2, 6), "normal"),
-    ("c1-2x6-gen-decay-pinned", (100, 640, 77, 1000, 129), (2, 6), "normal+decay4"),
-    ("c2-4x12-one-doc", (3000,), (4, 12), "normal"),
-    ("c3-1x3-tiny-docs", (2048, 5, 3000, 1), (1, 3), "normal"),
-    ("c4-8x24-chunk-interior", (1500, 1500), (8, 24), "normal"),
+    ("c1-2x6-ragged", (100, 330, 77, 388, 129), (2, 6), "normal"),
+    ("c1-2x6-gen-decay-pinned", (100, 330, 77, 388, 129), (2, 6), "normal+decay4"),
+    ("c2-4x12-one-doc", (1000,), (4, 12), "normal"),
+    ("c3-1x3-tiny-docs", (512, 5, 500, 1), (1, 3), "normal"),
+    ("c4-8x24-chunk-interior", (500, 500), (8, 24), "normal"),
     ("c5-4x4-63-64-65", (63 + 64 + 65 + 500,), (4, 4), "normal"),
-    ("c8s-16x48", (2048 + 37, 1000), (16, 48), "normal"),
+    ("c8s-16x48", (512 + 37, 400), (16, 48), "normal"),
     ("a1s-2x6-slow-decay", (1201,), (2, 6), "A1"),
     ("a2s-2x6-anisotropic", (1301,), (2, 6), "A2"),
     ("one-token", (1,), (2, 6), "normal"),
-    ("zero-tokens", (0,), (2, 6), "normal"),
 )
 
 
@@ -106,14 +101,14 @@ def _cu(lengths) -> list[int]:
     return cu
 
 
-def _inputs(cu: list[int], heads: tuple[int, int], regime: str) -> dict:
-    """The row's operands; ``"normal+decay4"`` is the normal regime with every value head's decay rate e^A raised
-    to at least PINNED_DECAY_MIN (g = -max(e^A, 4) * softplus(x), i.e. g scaled by max(1, 4 / e^A) per head)."""
+def _inputs(cu: list[int], heads: tuple[int, int], regime: str, seed: int) -> dict:
+    """The row's operands of ``seed``; ``"normal+decay4"`` is the normal regime with every value head's decay rate e^A
+    raised to at least PINNED_DECAY_MIN (g = -max(e^A, 4) * softplus(x), i.e. g scaled by max(1, 4 / e^A) per head)."""
     if regime != "normal+decay4":
-        return make_inputs(cu, *heads, regime=regime)
-    inputs = make_inputs(cu, *heads, regime="normal")
+        return make_inputs(cu, *heads, regime=regime, seed=seed)
+    inputs = make_inputs(cu, *heads, regime="normal", seed=seed)
     rate = torch.exp(
-        head_params(*heads)["a_log"]
+        head_params(*heads, seed)["a_log"]
     )  # [HV] decay rates e^A of the normal regime
     inputs["g"] = (
         (inputs["g"] * torch.clamp(PINNED_DECAY_MIN / rate, min=1.0))
@@ -165,20 +160,10 @@ def _run_fwd_bwd(inputs: dict, ctx, device: torch.device) -> dict:
     return res
 
 
-def _check_contract(res: dict, inputs: dict) -> None:
-    T, H, HV = inputs["q"].shape[1], inputs["q"].shape[2], inputs["v"].shape[2]
-    expect = {
-        "out": (T, HV, D),
-        "dq": (T, H, D),
-        "dk": (T, H, D),
-        "dv": (T, HV, D),
-        "dg": (T, HV),
-        "dbeta": (T, HV),
-    }
+def _check_dtypes(res: dict) -> None:
+    """``out`` / ``dq`` / ``dk`` / ``dv`` are stored BF16, ``dg`` / ``dbeta`` FP32."""
     for n in TENSORS:
-        assert tuple(res[n].shape) == expect[n], (n, tuple(res[n].shape))
         assert res[n].dtype == STORAGE_DTYPE[STORAGE_OF[n]], (n, res[n].dtype)
-        assert bool(torch.isfinite(res[n]).all()), f"{n} has non-finite values"
 
 
 @pytest.mark.parametrize(
@@ -186,38 +171,42 @@ def _check_contract(res: dict, inputs: dict) -> None:
     [s[1:] for s in SHAPES],
     ids=[s[0] for s in SHAPES],
 )
-def test_local_path_matches_the_exact_reference(
+def test_local_path_meets_the_naive_tier(
     device, record_property, lengths, heads, regime
 ) -> None:
+    """``out, dq, dk, dv, dg, dbeta`` of the autograd forward + backward over 32 draws of the row's operands (draw 0
+    is the operands' default seed), each against the FP64 ``reference_pack`` beside the naive BF16 ``naive_pack``."""
     cu = _cu(lengths)
-    inputs = _inputs(cu, heads, regime)
+    ctx = _local_context(cu, device)
+    seen = {}
+
+    def run(j, s):
+        inputs = _inputs(cu, heads, regime, s)
+        seen["inputs"] = inputs
+        res = _run_fwd_bwd(inputs, ctx, device)
+        if j == 0:
+            _check_dtypes(res)
+        ref, _ = reference_pack(inputs, device)
+        return {n: res[n] for n in TENSORS}, {n: ref[n] for n in TENSORS}
+
+    def naive(j, tier):
+        return naive_pack(seen["inputs"], device)
+
+    judge, failures = judge_case(run, naive, seed=SEED)
+    judge.record(record_property)
+    assert not failures, failures
+
+
+def test_local_path_on_the_zero_token_pack(device) -> None:
+    """The zero-token pack runs and its six outputs hold their contract: the reference's (empty) shapes and the
+    contract dtypes.  One input judges no accuracy, so the pack is not judged."""
+    cu = _cu((0,))
+    inputs = make_inputs(cu, 2, 6)
     ref, _ = reference_pack(inputs, device)
     res = _run_fwd_bwd(inputs, _local_context(cu, device), device)
-    _check_contract(res, inputs)
-    rows, failures = [], []
+    _check_dtypes(res)
     for n in TENSORS:
-        r = ref[n].to(device)
-        m = error_metrics(res[n], r)
-        e = elementwise_mismatch(res[n], r, ATOL, RTOL)
-        rows.append(
-            f"| {heads} | {regime} | {cu[-1]} | {n} | {STORAGE_OF[n]} | {m['rel_rms']:.3e} | {m['max_abs']:.3e} | {e['mismatch']} / {e['numel']} |"
-        )
-        record_property(f"{n}_rel_rms", m["rel_rms"])
-        record_property(f"{n}_max_abs", m["max_abs"])
-        record_property(f"{n}_mismatch", e["mismatch"])
-        if regime in GATED_REGIMES and not e["pass"]:
-            failures.append(
-                f"{n}: {e['mismatch']} of {e['numel']} elements outside |cand - ref| <= {ATOL} + {RTOL} |ref| (worst excess {e['worst_excess']:.3e}), rel-RMS {m['rel_rms']:.3e}, max-abs {m['max_abs']:.3e}, worst {m['worst']}"
-            )
-        if regime not in GATED_REGIMES and not m["rel_rms"] <= ADVERSARIAL_REL_RMS_MAX:
-            failures.append(
-                f"{n}: adversarial regime {regime} rel-RMS {m['rel_rms']:.3e} > {ADVERSARIAL_REL_RMS_MAX} (max-abs {m['max_abs']:.3e}, {e['mismatch']} of {e['numel']} elements outside the elementwise band, worst {m['worst']})"
-            )
-    print(
-        "\n| heads | regime | tokens | tensor | storage | rel-RMS | max-abs | mismatches |\n|---|---|---|---|---|---|---|---|\n"
-        + "\n".join(rows)
-    )
-    assert not failures, "\n".join(failures)
+        assert (message := contract(n, res[n], ref[n])) is None, message
 
 
 @pytest.mark.parametrize(
