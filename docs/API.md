@@ -31,7 +31,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mhc_head | Same kernels as det | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
-| dsa_indexer | The per-row set of (id, score) repeats, but slot order varies | Raises before launch |
+| dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
 | dsa_sparse_attention | `dkv` uses unordered FP32 atomics. No output is promised to repeat bit for bit. | Backward raises |
 | dense_gemm | Some routes add partials in arrival order. No run-to-run guarantee. | Alerts only for order-varying launches (explicit split counts) |
 | moe_grouped_gemm | Every shipped launch has a fixed order. `dW` can differ from det on a split 512 tail. | No shipped launch alerts |
@@ -993,11 +993,11 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - Selection: the exact global top `min(top_k, visible)` keys per query row, ranked by score descending, then key id descending. det returns them in ascending id order, and nondet leaves the slot order unspecified.
 - Forward only. It returns int32 indices and FP32 scores. No autograd or backward is documented.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. On `sm_107a`, the FP8 logits can differ from DeepGEMM's in the last bits.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`.
 
 **Inputs.**
 
-- `q`: BF16 `[T, 32, 128]`, contiguous (`float8_e4m3fn` for the det FP8 form).
+- `q`: BF16 `[T, 32, 128]`, contiguous (`float8_e4m3fn` for the FP8 form of either mode).
 - `k`: BF16 `[Tkv, 128]`. A row-strided view is allowed if the row stride is a multiple of 8 elements (16 for FP8). Must have the same dtype as `q`.
 - `w`: FP32 `[T, 32]`, pre-scaled by `32**-0.5`.
 - `cu_seqlens_q` / `cu_seqlens_k`: int32 `[S+1]` on the device, with `cu_seqlens_q[-1]==T` and `cu_seqlens_k[-1]==Tkv`. Both are required (`ValueError` if `None`).
@@ -1020,17 +1020,17 @@ The module exports only these two functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
-Repeatability is set equality. Each row repeats its set of (id, score bits) pairs and its valid count bit for bit, but the slot order and the positions of the `-1`/`-inf` padding may vary. It selects the same set as det, with the same scores. Under deterministic algorithms it raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. BF16 only. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
+Results are sets. Each row holds its selected ids with their scores, but the slot order and the positions of the `-1`/`-inf` padding are unspecified and may vary between calls. Under deterministic algorithms a call with queries and keys (T > 0 and Tkv > 0) raises `RuntimeError` before it allocates or launches; with `warn_only=True` it warns and runs. It takes the BF16 form and the opt-in FP8 form, as det. Source: [`kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py`](../kernels/dsa_indexer/cake_pplx/cake_dsa_indexer_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_dsa_indexer_nondet_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True)` | As det, without `k_scale`. FP8 `q`/`k` raise `ValueError`. | Returns `(indices, scores)`. Ids are unique within a row, with `-1` in unused slots; scores are `-inf` at the `-1` slots. Can be captured in a CUDA graph. |
-| `cake_dsa_indexer_nondet_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | `dtype` must be `torch.bfloat16`; FP8 raises `ValueError` | Same bound as det. Never consults the deterministic-algorithms setting. |
+| `cake_dsa_indexer_nondet_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True, k_scale=None)` | As det. `k_scale` is FP32 `[Tkv]`, contiguous, FP8 form only. In the FP8 form `softmax_scale` must be `None`. | Returns `(indices, scores)`. Ids are unique within a row, with `-1` in unused slots; scores are `-inf` at the `-1` slots. Can be captured in a CUDA graph. |
+| `cake_dsa_indexer_nondet_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Same bound as det for the same call and form. Never consults the deterministic-algorithms setting. |
 
 **Options and environment.**
 
 - `workspace_buffer`: when omitted, the buffer is allocated through the caching allocator. On the ticket architectures, a shared buffer has its ticket word zeroed before every run.
-- `max_seqlen_k`: does not change results. It selects the rank-finalize variant and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
+- `max_seqlen_k`: does not change the selected ids (det: nor the score bits). It selects the rank-finalize variant (det) and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
 - `return_scores=False` returns `None` for `scores`, but the scores are still computed internally.
 - The facades read no environment variable of their own. Backend partition knobs are private.
 
@@ -1054,14 +1054,14 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 )
 # indices: int32 [T, 128], ascending segment-local ids, -1 padding
 # scores:  float32 [T, 128], -inf padding
-# nondet: cake_pplx.cake_dsa_indexer_nondet_train.cake_dsa_indexer_nondet_train_topk, same call (BF16 only)
+# nondet: cake_pplx.cake_dsa_indexer_nondet_train.cake_dsa_indexer_nondet_train_topk, same call (both forms)
 ```
 
 **Caveats.**
 
 - The geometry is fixed at 32 indexer heads and head dim 128.
-- FP8 is an opt-in form of det only.
-- Nondet output tensors vary between calls. Compare the per-row sets, not the tensors.
+- FP8 is an opt-in form in both modes.
+- Nondet output tensors vary between calls. Compare the per-row id sets, not the tensors.
 - Operator tests skip on devices other than compute capability 10.0, 10.3 or 10.7.
 - Finite inputs are the normal domain. With NaN or inf, the output structure stays intact and the kernels do not hang, but the values are not otherwise specified.
 - `cu_seqlens` are never read on the host.

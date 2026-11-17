@@ -74,9 +74,14 @@ directory of a main checkout, in the same process: the package is
 self-contained -- relative imports, ``Path(__file__)`` manifest, JIT names
 salted by its own closure digests -- so both versions run on the same input
 tensors), ``cake_aa`` / ``cake_far_aa`` / ``cake_main_aa`` (the same arm prepared a second time:
-the in-process A/A band).  Every pair of arms is compared bitwise (ids and score bits) on
-every row and the verdicts are recorded (``same_bits``), together with a
-SHA-256 of each arm's ids and score bits for cross-process comparisons.
+the in-process A/A band).  ``same_bits`` compares bitwise (ids and score bits), on every row, every
+pair of Cake arms of one form within one package: the arms of this package among themselves and the
+``--main-package`` arms among themselves.  No arm of this package is compared bitwise with an arm of
+the ``--main-package`` copy (the bits may change between package versions), and no BF16 arm with an
+FP8 arm.  Separately, the ids of every arm, of any form or package, are compared with the anchor's
+(``cake``; ``cake_fp8`` in ``--form fp8``), and the number of rows with the anchor's ids is recorded
+as ``rows_identical_to_cake`` (information only: nothing is asserted on it).
+A SHA-256 of each arm's ids and score bits is recorded for cross-process comparisons.
 
 Timing: :func:`gpu_times`, CUPTI activity tracing through ``torch.profiler``
 with a cold L2 between iterations (per-iteration GPU span of the whole
@@ -89,9 +94,12 @@ Every row is measured in three paired phases -- the arms in the given order
 (``IL``) -- and the medians of each phase and of all samples are reported
 together with the wrapper-inclusive wall time, the peak extra device memory
 beyond inputs / outputs / workspace, and the explicit workspace bytes of the
-``cake`` arm.  ``--verify`` judges every arm against the FP64 / FP32
-reference of ``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
-only; the reference scores every visible pair).
+``cake`` arm.  ``--verify`` compares every arm with the FP64 selection of
+``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
+only; the reference scores every visible pair): the structure checks, and the
+number of rows whose ids equal the FP64 selection's, as information (on
+Gaussian inputs the FP32 rounding may reorder keys whose FP64 scores are
+near-tied).
 
 FP8 mode (``--form fp8``): the inputs are float8_e4m3fn ``q`` / ``k`` with
 per-key FP32 ``k_scale`` (``ref.make_fp8_inputs``: amax scaling per (query,
@@ -115,7 +123,8 @@ BF16 form on the same data dequantized to BF16: ``q`` exactly, ``bf16(k * k_scal
 ``softmax_scale = 1``).
 Timing boundary: a Cake arm's span is the complete operator (scan, merge,
 finalize into caller-owned outputs and workspace).  ``same_bits`` / ``all_cake_arms_identical``
-compare the Cake arms of one form; the speed ratios are against ``cake_fp8``.
+compare the Cake arms of one form and one package; ``rows_identical_to_cake`` and the speed ratios
+are against ``cake_fp8``.
 
 Usage::
 
@@ -1173,16 +1182,19 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
                 "main" if arm.backend is not cake_backend else "candidate"
             )
         result["arms"][arm_name] = record
-    # bitwise identity of every pair of arms (ids and score bits): the contract says every cake arm agrees
+    # bitwise identity (ids and score bits) of every pair of cake arms of one form and one package (this package's
+    # arms among themselves, the --main-package arms among themselves): run-to-run and invariance; arms of another
+    # form or another package version are not compared bitwise
     result["same_bits"] = {
         f"{a}|{b}": ref.same_bits(outputs[a], outputs[b])
         for a, b in itertools.combinations(outputs, 2)
+        if _cake_pair(f"{a}|{b}")
     }
-    # the cake arms of one form agree bitwise; the FP8 form's bits are not the BF16 form's
-    cake_pairs = [key for key in result["same_bits"] if _cake_pair(key)]
     result["all_cake_arms_identical"] = (
-        all(result["same_bits"][key] for key in cake_pairs) if cake_pairs else None
+        all(result["same_bits"].values()) if result["same_bits"] else None
     )
+    # every other arm, of any form or package, against the anchor: the number of rows with the anchor's ids
+    # (information only, nothing is asserted on it) and the time ratio
     if anchor in outputs:
         for arm_name, out in outputs.items():
             if arm_name != anchor:
@@ -1198,8 +1210,12 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
             data = arm_inputs[arm_name]
             if id(data) not in references:
                 references[id(data)] = ref.select_reference(data)
-            verdict = ref.judge(out, references[id(data)])
-            result["arms"][arm_name]["verdict"] = str(verdict).splitlines()[0]
+            failures, rows, same = ref.compare_selection(out, references[id(data)])
+            result["arms"][arm_name]["verdict"] = (
+                f"structure {failures[0]}"
+                if failures
+                else f"{same}/{rows} rows hold the FP64 selection's ids"
+            )
     if (
         len(row["seg_q"]) == 1
         and row["seg_q"][0] == row["seg_k"][0]
@@ -1211,10 +1227,20 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
     return result
 
 
+def _same_package(a: str, b: str) -> bool:
+    """``a`` and ``b`` run the same package: both or neither of them from ``--main-package`` (``MAIN_ARMS``)."""
+    return (a in MAIN_ARMS) == (b in MAIN_ARMS)
+
+
 def _cake_pair(key: str) -> bool:
-    """``a|b`` names two cake arms of one form."""
+    """``a|b`` names two cake arms of one form and one package."""
     a, b = key.split("|")
-    return a.startswith("cake") and b.startswith("cake") and arm_form(a) == arm_form(b)
+    return (
+        a.startswith("cake")
+        and b.startswith("cake")
+        and arm_form(a) == arm_form(b)
+        and _same_package(a, b)
+    )
 
 
 def print_row(result):
@@ -1246,13 +1272,12 @@ def print_row(result):
             f"  [{result['row']}] coarse-only GB200 reference latency quoted by the request: {result['reference_gb200_ms']} ms"
         )
     same = result.get("same_bits", {})
-    cake_pairs = [key for key in same if _cake_pair(key)]
-    if cake_pairs:
-        identical = sum(same[key] for key in cake_pairs)
+    if same:
+        identical = sum(same.values())
         differing = [key for key, v in same.items() if not v]
         tail = f"; DIFFER {differing}" if differing else ""
         print(
-            f"  [{result['row']}] same_bits: {identical}/{len(cake_pairs)} cake pairs identical{tail}",
+            f"  [{result['row']}] same_bits: {identical}/{len(same)} cake pairs identical{tail}",
             flush=True,
         )
 
@@ -1293,7 +1318,7 @@ def main():
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="judge every arm against the FP64 / FP32 reference (small rows)",
+        help="compare every arm with the FP64 selection: structure, rows identical (small rows)",
     )
     parser.add_argument(
         "--main-package",
