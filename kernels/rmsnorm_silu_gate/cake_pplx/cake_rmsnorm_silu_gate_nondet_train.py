@@ -57,8 +57,8 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   about -88.72, where ``ex2.approx`` overflows); its bits need not be the
   deterministic package's.
   Where ``x`` and ``z`` hold packed rows (row ``n`` at element ``128 n``) a
-  forward with 16 threads to a row runs up to 38 rows per SM on SM100, 36
-  on SM103 and 65 on SM107, other layouts up to 12 rows per SM on SM100 and
+  forward with 16 threads to a row runs up to 36 rows per SM on SM100 and
+  SM103 and 65 on SM107, other layouts up to 12 rows per SM on SM100 and
   SM103 (59 on SM107), and past that, in bands of rows per SM, the pipelined
   forwards (builds of the deterministic package's forward program with a
   gate that does not flush), forwards whose CTAs each walk several row
@@ -318,8 +318,8 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     ``y`` repeats bit for bit for the same inputs on the same device (its bits
     need not be the deterministic package's; that one is
     :func:`cake_pplx.cake_rmsnorm_silu_gate_det_train.cake_rmsnorm_silu_gate_det_train_forward`).
-    A forward with 16 threads to a row runs up to 38 rows per SM on SM100,
-    36 on SM103 and 65 on SM107 where ``x`` and ``z`` hold packed rows (row
+    A forward with 16 threads to a row runs up to 36 rows per SM on SM100
+    and SM103 and 65 on SM107 where ``x`` and ``z`` hold packed rows (row
     ``n`` at element ``128 n``), up to 12 on SM100 / SM103 (59 on SM107) for
     other layouts, and past that, in bands of rows per SM, the pipelined
     forwards, forwards whose CTAs each walk several row blocks and (other
