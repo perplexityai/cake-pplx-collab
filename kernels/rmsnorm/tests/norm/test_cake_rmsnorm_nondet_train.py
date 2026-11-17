@@ -1171,23 +1171,6 @@ def test_autograd_accumulates_into_existing_grads(
     check.check(record_property)
 
 
-def _requested_bytes() -> int:
-    """Device bytes this process requested from the CUDA caching allocator and
-    still holds.  ``torch.cuda.memory_allocated`` counts whole allocator blocks
-    instead, and the allocator can serve a request with a cached block up to
-    1 MiB larger without splitting it, so the blocks it counts depend on what
-    earlier tests left in the cache.  The count is a statistic of the native
-    allocator: under another backend (``cudaMallocAsync`` or a pluggable
-    allocator) the test fails here instead of trusting a count that backend
-    does not keep."""
-    backend = torch.cuda.get_allocator_backend()
-    assert backend == "native", (
-        f"the requested-bytes count needs the native CUDA caching allocator, "
-        f"not {backend!r} (PYTORCH_CUDA_ALLOC_CONF backend)"
-    )
-    return torch.cuda.memory_stats()["requested_bytes.all.current"]
-
-
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_autograd_params()))
 def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w: str):
     """The autograd function saves three tensors -- the normalized input (the
@@ -1210,7 +1193,7 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
         return tensor
 
     torch.cuda.synchronize()
-    base = _requested_bytes()
+    base = ref.requested_bytes(_device())
     with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
         outputs = rmsnorm(xa, wa, eps, residual=ua)
     y = outputs[0] if residual else outputs
@@ -1222,12 +1205,16 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
     assert len(others) == 1, [(tuple(t.shape), t.dtype) for t in saved]
     assert others[0].dtype == torch.float32 and tuple(others[0].shape) == (rows,)
     torch.cuda.synchronize()
-    held = _requested_bytes() - base
+    held = ref.requested_bytes(_device()) - base
     outputs_bytes = y.numel() * y.element_size() + (
         normalized.numel() * normalized.element_size() if residual else 0
     )
-    # the outputs plus the FP32 rstd (requested bytes, 2048 bytes of slack)
-    assert held <= outputs_bytes + 4 * rows + 2048, (held, outputs_bytes)
+    # exactly the outputs plus the FP32 rstd (requested bytes are not rounded:
+    # no slack)
+    assert held == outputs_bytes + 4 * rows, (
+        f"{held} bytes held after the forward, outputs {outputs_bytes} + "
+        f"FP32 rstd {4 * rows}"
+    )
     saved.clear()  # drop this test's references to the saved tensors
     others.clear()
     if residual:
@@ -1242,8 +1229,8 @@ def test_autograd_saves_only_its_inputs_and_rstd(hidden: int, residual: bool, w:
         t.untyped_storage().data_ptr(): t.untyped_storage().nbytes() for t in grads
     }
     grads_bytes = sum(storages.values())
-    left = _requested_bytes() - base
-    assert left <= grads_bytes + 2048, (
+    left = ref.requested_bytes(_device()) - base
+    assert left == grads_bytes, (
         f"{left} bytes held after the backward, gradients {grads_bytes}"
     )
 

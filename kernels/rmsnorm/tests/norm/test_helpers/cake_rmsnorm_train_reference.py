@@ -1,5 +1,6 @@
-"""FP64 oracles, the naive PyTorch BF16 tier, the accuracy judge and registry
-readers shared by the suites of the Cake RMSNorm training packages.
+"""FP64 oracles, the naive PyTorch BF16 tier, the accuracy judge, registry
+readers and the memory tests' requested-bytes count shared by the suites of
+the Cake RMSNorm training packages.
 
 Accuracy has no tolerance (``tests/cake/test_helpers/cake_naive.py``).  Each
 floating output -- ``y``, ``rstd`` and ``h_new`` of the forward, ``dx`` and
@@ -30,6 +31,7 @@ Nothing here imports a package: the registry readers take the package's
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Mapping
 
 import torch
@@ -411,6 +413,25 @@ def form(loader, names: list[str]) -> str:
 def windows(loader, arch: str, hidden: int, kind: str, residual: bool, w: str):
     """``[(above, at_most, library)]`` of the route on ``arch`` (``program_windows``)."""
     return list(loader.program_windows(arch, hidden, kind, residual, w))
+
+
+def requested_bytes(device: torch.device) -> int:
+    """Device bytes this process requested from the CUDA caching allocator on
+    ``device`` and still holds, after a garbage collection (a tensor kept only
+    by a reference cycle is freed first).  ``torch.cuda.memory_allocated``
+    counts whole allocator blocks instead: every request rounded up to a
+    multiple of 512 bytes, and a cached block up to 1 MiB larger served
+    without splitting it, so the blocks it counts depend on what earlier tests
+    left in the cache.  The count is a statistic of the native allocator:
+    under another backend (``cudaMallocAsync`` or a pluggable allocator) this
+    fails instead of returning a count that backend does not keep."""
+    backend = torch.cuda.get_allocator_backend()
+    assert backend == "native", (
+        f"the requested-bytes count needs the native CUDA caching allocator, "
+        f"not {backend!r} (PYTORCH_CUDA_ALLOC_CONF backend)"
+    )
+    gc.collect()
+    return torch.cuda.memory_stats(device)["requested_bytes.all.current"]
 
 
 def workspace_at_rest(loader, ws: torch.Tensor) -> bool:
