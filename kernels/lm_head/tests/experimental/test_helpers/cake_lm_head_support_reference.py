@@ -30,7 +30,8 @@ Contract reproduced here (independently of the package):
 :func:`reference_support_fp64` evaluates it in float64 from the BF16 input values (no rounding of ``z``)
 with PyTorch autograd, chunked over rows; :func:`reference_support_b0` is the eager PyTorch path at the
 contract's rounding boundaries (BF16 ``z`` promoted to FP32, a dense ``[T, V]`` logits tensor with the
-support as a mask, autograd), the "dense logits + support mask" baseline.
+support as a mask, autograd), the "dense logits + support mask" baseline; :func:`naive_support_bf16` is the
+same path with every tensor in BF16, the naive tier of the shared judge ``tests/cake_naive.py``.
 """
 
 from __future__ import annotations
@@ -547,6 +548,93 @@ def reference_support_b0(
     for name in OUTPUTS:
         if res[name] is not None:
             res[name] = res[name].detach()
+    res["dX"] = (
+        X.grad.detach()
+        if (need_dx and X.grad is not None)
+        else (torch.zeros_like(inp.X) if need_dx else None)
+    )
+    res["dW"] = (
+        W.grad.detach()
+        if (need_dw and W.grad is not None)
+        else (torch.zeros_like(inp.W) if need_dw else None)
+    )
+    return res
+
+
+def naive_support_bf16(
+    inp: SupportInputs,
+    *,
+    outputs: Sequence[str],
+    upstream: Optional[dict] = None,
+    need_dx: bool = True,
+    need_dw: bool = True,
+) -> dict:
+    """The naive tier of the shared judge (``tests/cake_naive.py``): :func:`reference_support_b0` with every tensor
+    in BF16.  ``z = X @ W^T`` (torch's default BF16 GEMM), ``q = z / tau`` with the BF16 temperature rows, the
+    support as a mask of the dense ``[T, V]`` logits, the masked ``logsumexp``, the gathers, the teacher's BF16
+    ``lq``, ``Q = exp(lq)`` and the KL terms all run on BF16 tensors through autograd; the upstreams are cast to
+    BF16.  Returns BF16 ``packed [M]`` / ``selected [T]`` / ``kl [T]`` for the requested ``outputs`` (``None``
+    otherwise), ``lse [T]`` (0 on empty rows) and the BF16 gradients ``dX`` / ``dW`` (``None`` when not
+    requested)."""
+    for name in outputs:
+        if name not in OUTPUTS:
+            raise ValueError(f"unknown output {name!r}")
+    bf = torch.bfloat16
+    up = {
+        k: (None if v is None else v.to(bf)) for k, v in _upstreams(inp, outputs, upstream).items()
+    }
+    T, V, M = inp.T, inp.V, inp.M
+    device = inp.X.device
+    X = inp.X.detach().requires_grad_(bool(need_dx))
+    W = inp.W.detach().requires_grad_(bool(need_dw))
+    ids = inp.support_ids.to(torch.int64)
+    counts = inp.counts.to(device)
+    rows = torch.repeat_interleave(torch.arange(T, device=device), counts)
+    lpos = label_positions(inp.support_ids, inp.support_offsets, inp.labels).to(device)
+    offsets = inp.support_offsets.to(torch.int64).to(device)
+    multi = counts >= 2
+    zero_t = torch.zeros(T, dtype=bf, device=device)
+    res: dict = dict(packed=None, selected=None, kl=None)
+    with torch.enable_grad():
+        z = X @ W.t()  # BF16 [T, V]
+        q = z / inp.tau_rows().to(bf)[:, None]
+        mask = torch.zeros(T, V, dtype=torch.bool, device=device)
+        mask[rows, ids] = True
+        qm = q.masked_fill(~mask, -math.inf)
+        qm = torch.where((counts > 0)[:, None], qm, torch.zeros_like(qm))
+        lse = torch.logsumexp(qm, dim=1)
+        logp_full = q - lse[:, None]
+        packed = torch.where(
+            multi[rows], logp_full[rows, ids], torch.zeros(M, dtype=bf, device=device)
+        )
+        loss = torch.zeros((), dtype=bf, device=device)
+        if "packed" in outputs:
+            res["packed"] = packed
+            if up["packed"] is not None:
+                loss = loss + (packed * up["packed"]).sum()
+        if "selected" in outputs:
+            j = (offsets[:-1] + lpos.clamp_min(0)).clamp_max(max(M - 1, 0))
+            sel = torch.where(lpos >= 0, packed[j], zero_t) if M else zero_t
+            res["selected"] = sel
+            if up["selected"] is not None:
+                loss = loss + (sel * torch.where(lpos >= 0, up["selected"], zero_t)).sum()
+        if "kl" in outputs:
+            lq_full = torch.full((T, V), -math.inf, dtype=bf, device=device)
+            lq_full[rows, ids] = inp.teacher.to(bf)
+            Q = torch.exp(lq_full)
+            lpk = torch.zeros(T, V, dtype=bf, device=device)
+            lpk = lpk.index_put((rows, ids), packed)
+            term = torch.where(Q > 0, Q * (lq_full - lpk), torch.zeros_like(Q))
+            kl = torch.where(multi, term.sum(1), zero_t)
+            res["kl"] = kl
+            if up["kl"] is not None:
+                loss = loss + (kl * torch.where(multi, up["kl"], zero_t)).sum()
+        if (need_dx or need_dw) and loss.requires_grad:
+            loss.backward()
+    for name in OUTPUTS:
+        if res[name] is not None:
+            res[name] = res[name].detach()
+    res["lse"] = torch.where(counts > 0, lse, torch.zeros_like(lse)).detach()
     res["dX"] = (
         X.grad.detach()
         if (need_dx and X.grad is not None)
