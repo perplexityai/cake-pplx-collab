@@ -25,8 +25,8 @@ backend) and the mode rules of the deterministic package: no entry point takes a
 raises nor warns in any call, the backward's workspace is a zero-filled FP32
 tensor of one size for every row count that
 ``cake_rmsnorm_silu_gate_det_train_reset_workspace`` zeroes again, and the
-backward and the reset refuse the non-deterministic package's workspaces (FP64
-or ``uint8``), the backward also in a call with no rows.  The reset is not a
+backward and the reset refuse the non-deterministic package's workspace
+(``uint8``) and an FP64 tensor, the backward also in a call with no rows.  The reset is not a
 ``cake_pplx`` top-level name.  The numerical contract is
 ``test_cake_rmsnorm_silu_gate_det_train.py``'s.
 """
@@ -77,9 +77,27 @@ WORKSPACE_ELEMENTS = 4738
 WORKSPACE_BYTES = 18952
 
 
+# The FP32 requirement every other unfit buffer gets (the start of its message).
+FP32_REQUIREMENT = "workspace must be a contiguous, 16-byte aligned FP32 tensor"
+
+
+def _refused(info, dtype: torch.dtype) -> bool:
+    """Whether the ``ValueError`` of ``info`` is the refusal of a ``dtype``
+    workspace (:func:`_refusal`): the whole message for ``uint8``, its start
+    for FP64."""
+    message = str(info.value)
+    if dtype == torch.float64:
+        return message.startswith(FP32_REQUIREMENT)
+    return message == _refusal(dtype)
+
+
 def _refusal(dtype: torch.dtype) -> str:
-    """The refusal of a workspace of the non-deterministic package."""
-    name = {torch.float64: "FP64", torch.uint8: "uint8"}[dtype]
+    """The refusal of a ``dtype`` workspace: a workspace of the
+    non-deterministic package (``uint8``) names both modes' workspaces; an
+    FP64 tensor gets the FP32 requirement (:data:`FP32_REQUIREMENT`)."""
+    if dtype == torch.float64:
+        return FP32_REQUIREMENT
+    name = {torch.uint8: "uint8"}[dtype]
     return (
         f"workspace is {name}, a workspace of the non-deterministic mode "
         "(cake_pplx.cake_rmsnorm_silu_gate_nondet_train."
@@ -368,9 +386,10 @@ def test_workspace_is_zero_filled_and_reset_zeroes_it() -> None:
 @requires_device
 @pytest.mark.parametrize("dtype", [torch.float64, torch.uint8], ids=["fp64", "uint8"])
 def test_backward_refuses_the_nondeterministic_workspace(dtype: torch.dtype) -> None:
-    """The backward and the reset refuse an FP64 or ``uint8`` tensor (the
-    non-deterministic package's workspace) naming both modes' workspaces and
-    leave it as it is; another unfit FP32 buffer keeps its own message."""
+    """The backward and the reset refuse a ``uint8`` tensor (the
+    non-deterministic package's workspace) naming both modes' workspaces, and
+    an FP64 tensor with the FP32 requirement, and leave it as it is; another
+    unfit FP32 buffer keeps its own message."""
     x = torch.randn(129, 48, D, device="cuda").bfloat16()
     w = torch.ones(D, dtype=torch.bfloat16, device="cuda")
     other = torch.zeros(4 * D + 1, dtype=dtype, device="cuda")
@@ -379,10 +398,10 @@ def test_backward_refuses_the_nondeterministic_workspace(dtype: torch.dtype) -> 
             module.cake_rmsnorm_silu_gate_det_train_backward(
                 x, x, x, w, EPS, workspace=other
             )
-        assert str(info.value) == _refusal(dtype), str(info.value)
+        assert _refused(info, dtype), str(info.value)
         with pytest.raises(ValueError) as info:
             module.cake_rmsnorm_silu_gate_det_train_reset_workspace(other)
-        assert str(info.value) == _refusal(dtype), str(info.value)
+        assert _refused(info, dtype), str(info.value)
         with pytest.raises(ValueError, match="contiguous, 16-byte aligned FP32 tensor"):
             module.cake_rmsnorm_silu_gate_det_train_backward(
                 x,
@@ -402,9 +421,9 @@ def test_backward_refuses_the_nondeterministic_workspace(dtype: torch.dtype) -> 
 def test_backward_with_no_rows_refuses_the_nondeterministic_workspace(
     shape: tuple, dtype: torch.dtype
 ) -> None:
-    """A call with no rows refuses the non-deterministic package's FP64 or
-    ``uint8`` workspace with the ``ValueError`` of a call with rows, before it
-    returns (``grad_weight`` keeps its value).  With this package's FP32
+    """A call with no rows refuses the non-deterministic package's ``uint8``
+    workspace (and an FP64 tensor) with the ``ValueError`` of a call with
+    rows, before it returns (``grad_weight`` keeps its value).  With this package's FP32
     workspace it returns zero-sized ``dx`` and ``dz`` and a zero ``dw``, or
     keeps ``grad_weight`` when accumulating."""
     empty = torch.empty(shape, dtype=torch.bfloat16, device="cuda")
@@ -421,7 +440,7 @@ def test_backward_with_no_rows_refuses_the_nondeterministic_workspace(
         with pytest.raises(ValueError) as no_rows:
             backward(empty, empty, empty, w, EPS, grad_weight=main, workspace=other)
         assert str(no_rows.value) == str(with_rows.value), str(no_rows.value)
-        assert str(no_rows.value) == _refusal(dtype), str(no_rows.value)
+        assert _refused(no_rows, dtype), str(no_rows.value)
         assert torch.equal(main, torch.full_like(main, 1.5))
         dx, dz, dw = backward(empty, empty, empty, w, EPS, workspace=ws)
         assert dx.shape == dz.shape == empty.shape and dx.numel() == dz.numel() == 0
