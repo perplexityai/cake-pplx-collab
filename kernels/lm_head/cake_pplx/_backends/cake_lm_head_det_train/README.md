@@ -1396,10 +1396,11 @@ times the tier's and its error is 0 on every input where the tier's is 0;
 every input is also held to the output's contract (shape, dtype, finite
 values, exact zeros on the ignored rows).  The reference backend is judged at
 H 256, V 512 on the CPU, or on a compute capability 10.0 / 10.3 / 10.7 GPU (on
-another GPU the host tests run on the CPU); the cake backend at H 6144, V 8192 (other
-vocabularies where a test's route needs them, and one call per entry at T
-4097 at the production head, H 6144, V 154880) and the candidate-support
-entries at their own shapes.  Calls at the production shape keep their
+another GPU the host tests run on the CPU); the cake backend at H 6144, V 8192
+(other shapes where a test's route needs them: other vocabularies, V 256 at
+H 2048 as well as at H 6144, and one call per entry at T 4097 at the
+production head, H 6144, V 154880) and the candidate-support entries at their
+own shapes.  Calls at the production shape keep their
 contract and their bitwise checks: the same bytes from run to run, and the
 bit identities between the forms documented above.  Each verdict prints a
 `TIER` line in pytest's terminal summary.  The outputs that miss the tier
