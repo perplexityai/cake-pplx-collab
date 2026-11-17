@@ -17,14 +17,17 @@ Candidate-support entries of the non-deterministic LM-head
 package ``cake_pplx._backends.cake_lm_head_nondet_train``:
 ``cake_lm_head_nondet_train_support_logprob`` / ``cake_lm_head_nondet_train_support_kl`` take no ``deterministic``, raise
 PyTorch's deterministic-algorithms alert in their backward before a dense dX of more than one K slice (every other
-backward has one fixed order), and are held to the gate of
-``tests/experimental/test_helpers/cake_lm_head_support_reference.py`` (1.05x the masked PyTorch baseline's error
-against the FP64 oracle plus a floor).  The dense dX adds its vocabulary blocks into the chunk sum through the
-K-sliced reduction (``cake_support.support_dx_form``: one slice adds in one fixed order, more slices -- only inside
-the rule's measured cells, or forced by a test -- add in the order they finish).  The gradients carry no run-to-run
-promise in this package and are checked over repeated runs against the gate.  No test compares this package's
-outputs with the deterministic package's.  The package is reached through
-``tests.cake.test_helpers.cake_package``.
+backward has one fixed order).  A judged case runs ``DRAWS`` (32) inputs, each made from its draw's seed alone, and
+judges every output and both gradients against the naive BF16 tier of the shared judge (``tests/cake_naive.py``,
+through ``tests/experimental/test_helpers/cake_lm_head_judge.py``: ``judge_support``): in the L2 and the max norm,
+the median and the largest absolute error against the FP64 oracle at most 1.005 times those of
+``naive_support_bf16`` on the same inputs; every draw also keeps its contract (dtypes, shapes, finite values, the
+selected ``logp`` of an ignored row and the packed ``logp`` of a single-candidate row exactly 0).  The dense dX adds
+its vocabulary blocks into the chunk sum through the K-sliced reduction (``cake_support.support_dx_form``: one slice
+adds in one fixed order, more slices -- only inside the rule's measured cells, or forced by a test -- add in the order
+they finish).  The gradients carry no run-to-run promise in this package: a repeated case launches every draw
+``REPEATS`` times and the judge keeps each output's largest error.  No test compares this package's outputs with the
+deterministic package's.  The package is reached through ``tests.cake.test_helpers.cake_package``.
 """
 
 import contextlib
@@ -35,13 +38,13 @@ import warnings
 import pytest
 import torch
 
-from tests.experimental.test_helpers.cake_lm_head_judge import contract_support
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    contract_support,
+    judge_support,
+    judge_support_inputs,
+)
 from tests.experimental.test_helpers.cake_lm_head_support_reference import (
-    gate_failures,
     make_support_inputs,
-    reference_support_b0,
-    reference_support_fp64,
-    support_error_report,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -99,23 +102,23 @@ def run_support(inp, outputs, *, upstream=None, need_dx=True, need_dw=True, **kw
     return res
 
 
-def check_gates(inp, outputs, *, oracle=None, b0err=None, **kw):
-    """One call of this package against the FP64 oracle with the suite's gate (``GATE_MARGIN`` times B0's error
-    plus ``GATE_TINY``)."""
-    res = run_support(inp, outputs, **kw)
-    if oracle is None:
-        oracle = reference_support_fp64(inp, outputs=outputs)
-    if b0err is None:
-        b0err = support_error_report(
-            reference_support_b0(inp, outputs=outputs), oracle, inp
-        )
-    err = support_error_report(res, oracle, inp)
-    assert not err["nan"], err
-    gated = {f"{n}_max_abs" for n in outputs} | {"dX_rel_l2", "dW_rel_l2"}
-    assert gated <= err.keys() and gated <= b0err.keys(), (err, b0err)
-    bad = gate_failures(err, b0err)
-    assert not bad, f"{bad}\nerrors {err}\nB0 {b0err}"
-    return res, err, b0err
+def judged(record_property, outputs, mk, kw, *, device, seed=None, **judge_kw):
+    """Judge this package's call ``run_support(inp, outputs, **kw)`` against the naive tier over the draws
+    (:func:`judge_support`): the draw of seed ``s`` makes the inputs of the :func:`make_support_inputs` keywords
+    ``mk`` (``T`` among them; ``H`` 512 on the device) with :func:`judge_support_inputs`.  The case's seed is
+    ``SEED + T`` unless given; ``judge_kw``: ``route``, ``repeats``, ``upstream``."""
+    mk = dict(mk)
+    T = mk.pop("T")
+    if device != DEV:
+        mk.setdefault("H", 512)
+    return judge_support(
+        record_property,
+        make=lambda s: judge_support_inputs(T, s, device=device, **mk),
+        launch=lambda inp: run_support(inp, outputs, **kw),
+        outputs=outputs,
+        seed=SEED + T if seed is None else seed,
+        **judge_kw,
+    )
 
 
 def _bits(t):
@@ -323,10 +326,10 @@ SUPPORT_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(SUPPORT_CASES))
-def test_reference_matches_the_oracle(case):
+def test_reference_meets_the_naive_tier(case, record_property):
+    """The reference backend: every output and both gradients meet the naive tier."""
     outputs, mk, kw = SUPPORT_CASES[case]
-    inp = small(**mk)
-    check_gates(inp, outputs, **kw)
+    judged(record_property, outputs, mk, kw, device=DEV)
 
 
 # ---------------------------------------------------------------------------
@@ -363,36 +366,31 @@ def cuda_inputs(T, **kw):
 
 @pytest.mark.parametrize("form", sorted(CAKE_FORMS))
 @pytest.mark.parametrize("case", sorted(SUPPORT_CASES))
-def test_cake_matches_the_oracle(case, form, monkeypatch):
-    """Every output and both gradients pass the gate in each pass form.  A dense dX adds its vocabulary blocks into
-    the chunk sum through the reduction form at the rule's :func:`cake_support.support_dx_form`: every shape here is
-    outside the rule's measured cells, so every block runs one slice."""
+def test_cake_meets_the_naive_tier(case, form, monkeypatch, record_property):
+    """Every output and both gradients meet the naive tier in each pass form.  A dense dX adds its vocabulary blocks
+    into the chunk sum through the reduction form at the rule's :func:`cake_support.support_dx_form`: every shape here
+    is outside the rule's measured cells, so every block of every draw runs one slice."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", **CAKE_FORMS[form])
     forms = _record_dx_forms(monkeypatch)
-    check_gates(inp, outputs, **kw)
     dense = CAKE_FORMS[form].get("path") == "dense"
-    assert bool(forms) == dense, forms
-    assert all(s == 1 for s, _ in forms), forms
+
+    def route(inp, res):
+        assert bool(forms) == dense, forms
+        assert all(s == 1 for s, _ in forms), forms
+        forms.clear()
+
+    judged(record_property, outputs, mk, kw, device=CUDA, route=route)
 
 
 @pytest.mark.parametrize("case", ["kl+packed heavy constant", "selected heavy hetero"])
-def test_cake_worst_case_over_repeated_runs(case):
-    """``REPEATS`` runs: each passes the gate (the worst case is the gate's)."""
+def test_cake_worst_case_over_repeated_runs(case, record_property):
+    """``REPEATS`` launches per draw meet the naive tier: the judge keeps each output's largest error."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake")
-    oracle = reference_support_fp64(inp, outputs=outputs)
-    b0err = support_error_report(
-        reference_support_b0(inp, outputs=outputs), oracle, inp
-    )
-    for _ in range(REPEATS):
-        check_gates(inp, outputs, oracle=oracle, b0err=b0err, **kw)
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 def test_cake_frozen_inputs_and_retain_graph():
@@ -417,10 +415,9 @@ def test_cake_frozen_inputs_and_retain_graph():
         **inp.kwargs(),
         backend="cake",
     )
-    g1 = torch.autograd.grad(out, (X, W), inp.d, retain_graph=True)
-    g2 = torch.autograd.grad(out, (X, W), inp.d)
-    for a, b in zip(g1, g2, strict=True):
-        assert torch.equal(_bits(a), _bits(b))
+    for retain in (True, False):
+        dX, dW = torch.autograd.grad(out, (X, W), inp.d, retain_graph=retain)
+        contract_support(dict(dX=dX, dW=dW), inp)
 
 
 # ---------------------------------------------------------------------------
@@ -648,26 +645,30 @@ DX_CASES = ["kl two chunks", "selected chunked", "packed shr hetero"]
 @pytest.mark.parametrize("form", DX_FORMS, ids=lambda f: f"S{f[0]}F{f[1]}")
 @pytest.mark.parametrize("case", DX_CASES)
 @pytest.mark.parametrize("vocab_block", [None, 256])
-def test_cake_dense_dx_reduction_forms(case, form, vocab_block, monkeypatch):
-    """The dense dX pass at every slice / split-tail form passes the gate.  Above one slice each block's reduction
-    GEMM is followed right away by its slab sum (:func:`_assert_slab_sums_follow_their_blocks`): the storing form
-    after a chunk's first vocabulary block, the accumulating form after each later one (``vocab_block`` 256: two
-    blocks per chunk)."""
+def test_cake_dense_dx_reduction_forms(
+    case, form, vocab_block, monkeypatch, record_property
+):
+    """The dense dX pass at every slice / split-tail form meets the naive tier.  On every draw, above one slice each
+    block's reduction GEMM is followed right away by its slab sum (:func:`_assert_slab_sums_follow_their_blocks`): the
+    storing form after a chunk's first vocabulary block, the accumulating form after each later one (``vocab_block``
+    256: two blocks per chunk)."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", path={"X": "dense"}, vocab_block=vocab_block)
     _force_dx_form(monkeypatch, form)
     launched = _record_dense_launches(monkeypatch)
-    check_gates(inp, outputs, **kw)
-    storing, accumulating = _assert_slab_sums_follow_their_blocks(launched)
-    if form[0] == 1:
-        assert storing == accumulating == 0, launched
-    else:
-        assert storing, launched
-        if vocab_block is not None:
-            assert accumulating, launched
+
+    def route(inp, res):
+        storing, accumulating = _assert_slab_sums_follow_their_blocks(launched)
+        if form[0] == 1:
+            assert storing == accumulating == 0, launched
+        else:
+            assert storing, launched
+            if vocab_block is not None:
+                assert accumulating, launched
+        launched.clear()
+
+    judged(record_property, outputs, mk, kw, device=CUDA, route=route)
 
 
 def _force_dense_order(monkeypatch, order):
@@ -728,7 +729,7 @@ def test_cake_dense_backward_orders_have_the_same_bits(
 ):
     """The dense backward forced chunk-outer and forced block-outer (:func:`cake_support._dense_order`) gives the same
     bits on the outputs, dX and dW: both orders run the same launches and add every FP32 element in the same order.
-    With ignored labels, empty rows and rows no upstream reaches; the rule's own order passes the gate and equals both.
+    With ignored labels, empty rows and rows no upstream reaches; the rule's own order equals both.
     Every shape here is outside the dense dX rule's cells (one K slice per block).  ``form`` ``(2, 0)`` forces two K
     slices on every block (blocks of 4 or 8 K steps): the ordered slab sums -- storing at a chunk's first block,
     accumulating at a later one (``vocab_block`` 256: two blocks) -- give the same bits in both orders too."""
@@ -756,12 +757,7 @@ def test_cake_dense_backward_orders_have_the_same_bits(
         assert forms and all(s == form[0] for s, _ in forms), forms
     assert_same(runs["chunk"], runs["block"])
     monkeypatch.setattr(cake_support, "_dense_order", rule)
-    if up is None and need_dx and need_dw:
-        res, _, _ = check_gates(inp, outputs, **kw)
-    else:
-        res = run_support(
-            inp, outputs, upstream=up, need_dx=need_dx, need_dw=need_dw, **kw
-        )
+    res = run_support(inp, outputs, upstream=up, need_dx=need_dx, need_dw=need_dw, **kw)
     assert_same(res, runs["chunk"])
     if up is not None:
         # the rows no upstream reaches: dX exactly 0 in both orders
@@ -897,40 +893,15 @@ def test_cake_backward_alerts_only_before_a_k_sliced_dense_dx(monkeypatch):
     contract_support(warned, inp, outputs=outputs)
 
 
-def _repeat_dense_dx(label, inp, outputs, kw, *, oracle, b0err):
-    """``REPEATS`` runs of this package against the FP64 oracle: each passes the gate.  Prints the worst dX error
-    (beside the masked PyTorch baseline's, B0) and the number of distinct dX results."""
-    worst, distinct = 0.0, set()
-    for _ in range(REPEATS):
-        res, err, _ = check_gates(inp, outputs, oracle=oracle, b0err=b0err, **kw)
-        worst = max(worst, err["dX_rel_l2"])
-        distinct.add(_bits(res["dX"]).cpu().numpy().tobytes().__hash__())
-    print(
-        f"DENSE_DX {label} worst-of-{REPEATS}: dX_rel_l2 {worst:.3e} (B0 "
-        f"{b0err['dX_rel_l2']:.3e}) distinct {len(distinct)}"
-    )
-
-
-def _oracle_and_b0(inp, outputs):
-    oracle = reference_support_fp64(inp, outputs=outputs)
-    b0err = support_error_report(
-        reference_support_b0(inp, outputs=outputs), oracle, inp
-    )
-    return oracle, b0err
-
-
 @pytest.mark.parametrize("case", DX_CASES)
-def test_cake_dense_dx_worst_case_over_repeated_runs(case, monkeypatch):
-    """``REPEATS`` runs of a K-sliced dense dX (S = 4, split tail) per entry (KL, selected, packed) against the FP64
-    oracle (:func:`_repeat_dense_dx`)."""
+def test_cake_dense_dx_worst_case_over_repeated_runs(case, monkeypatch, record_property):
+    """A K-sliced dense dX (S = 4, split tail) per entry (KL, selected, packed): ``REPEATS`` launches per draw meet the
+    naive tier (the judge keeps each output's largest error)."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", path={"X": "dense"})
-    oracle, b0err = _oracle_and_b0(inp, outputs)
     _force_dx_form(monkeypatch, (4, 2))
-    _repeat_dense_dx(f"S4F2 {case}", inp, outputs, kw, oracle=oracle, b0err=b0err)
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 # Production-like dense-X geometry (the cases above run H = 512: one 512-column item, at most 8 K steps and two
@@ -953,35 +924,34 @@ PROD_FORMS = [(1, 0), (1, 2), (2, 1), (3, 0), (4, 2)]
 
 
 def _prod_case(case):
+    """The outputs, the input keywords and the entry keywords of a production-like case."""
     outputs, mk, kw = PROD_CASES[case]
     mk = dict(mk, H=1536, V=1280)
-    inp = cuda_inputs(mk.pop("T"), **mk)
-    return outputs, inp, dict(kw, backend="cake", path={"X": "dense"}, vocab_block=512)
+    return outputs, mk, dict(kw, backend="cake", path={"X": "dense"}, vocab_block=512)
 
 
 @pytest.mark.parametrize("form", PROD_FORMS, ids=lambda f: f"S{f[0]}F{f[1]}")
 @pytest.mark.parametrize("case", sorted(PROD_CASES))
-def test_cake_dense_dx_production_geometry(case, form, monkeypatch):
-    """Dense dX at production-like geometry with every block forced to ``form`` (one to four slices) passes the
-    gate."""
+def test_cake_dense_dx_production_geometry(case, form, monkeypatch, record_property):
+    """Dense dX at production-like geometry with every block forced to ``form`` (one to four slices) meets the naive
+    tier."""
     _require_cake()
-    outputs, inp, kw = _prod_case(case)
+    outputs, mk, kw = _prod_case(case)
     _force_dx_form(monkeypatch, form)
-    check_gates(inp, outputs, **kw)
+    judged(record_property, outputs, mk, kw, device=CUDA)
 
 
 @pytest.mark.parametrize("slices", [2, 3, 4])
 @pytest.mark.parametrize("case", sorted(PROD_CASES))
-def test_cake_dense_dx_production_geometry_repeated(case, slices, monkeypatch):
-    """``REPEATS`` runs at ``slices`` K slices with the rule's split tail at production-like geometry
-    (:func:`_repeat_dense_dx`)."""
+def test_cake_dense_dx_production_geometry_repeated(
+    case, slices, monkeypatch, record_property
+):
+    """``slices`` K slices with the rule's split tail at production-like geometry: ``REPEATS`` launches per draw meet
+    the naive tier (the judge keeps each output's largest error)."""
     _require_cake()
-    outputs, inp, kw = _prod_case(case)
-    oracle, b0err = _oracle_and_b0(inp, outputs)
+    outputs, mk, kw = _prod_case(case)
     _force_dx_form(monkeypatch, (slices, None))
-    _repeat_dense_dx(
-        f"S{slices} {case}", inp, outputs, kw, oracle=oracle, b0err=b0err
-    )
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 # (T, H, V, vocab_block, S on B200): one chunk inside a cell of the rule, two vocabulary blocks
@@ -994,33 +964,33 @@ RULE_CELL_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(RULE_CELL_CASES))
-def test_cake_dense_dx_rule_cell(case, monkeypatch):
+def test_cake_dense_dx_rule_cell(case, monkeypatch, record_property):
     """A call inside a measured cell of the rule (B200, 148 SMs): the rule itself runs the cell's slices on every
-    block (one slice on any other device) and passes the gate, and above one slice ``REPEATS`` runs pass
-    :func:`_repeat_dense_dx`."""
+    block of every launch (one slice on any other device) and meets the naive tier; above one slice every draw
+    launches ``REPEATS`` times (the judge keeps each output's largest error)."""
     _require_cake()
     T, H, V, vb, slices = RULE_CELL_CASES[case]
-    inp = cuda_inputs(T, H=H, V=V, k_cap=64, kind="heavy", teacher=True)
+    mk = dict(T=T, H=H, V=V, k_cap=64, kind="heavy", teacher=True)
     kw = dict(backend="cake", path={"X": "dense"}, vocab_block=vb)
     cx = cake_support._cake_context(CUDA)
     want = slices if (cx.arch, cx.num_sms) == ("sm_100a", 148) else 1
-    oracle, b0err = _oracle_and_b0(inp, ("kl",))
     forms = _record_dx_forms(monkeypatch)
-    check_gates(inp, ("kl",), oracle=oracle, b0err=b0err, **kw)
-    assert len(forms) == 2 and {s for s, _ in forms} == {want}, forms
-    if want == 1:
-        return
-    _repeat_dense_dx(
-        f"rule cell {case} {forms}", inp, ("kl",), kw, oracle=oracle, b0err=b0err
-    )
+
+    def route(inp, res):
+        assert len(forms) == 2 and {s for s, _ in forms} == {want}, forms
+        forms.clear()
+
+    repeats = REPEATS if want > 1 else 1
+    judged(record_property, ("kl",), mk, kw, device=CUDA, route=route, repeats=repeats)
 
 
-def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch):
+def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch, record_property):
     """H % 512 == 256 (H = 768): the dense dX / dW forms need whole 512-column items, so a call whose mean support
-    reaches every dense threshold runs the forward dense and X / W sparse and passes the gate; a forced dense X pass
-    raises."""
+    reaches every dense threshold runs the forward dense and X / W sparse and meets the naive tier; a forced dense X
+    pass raises."""
     _require_cake()
-    inp = cuda_inputs(64, H=768, V=1280, k_cap=1280, kind="full", teacher=True)
+    mk = dict(T=64, H=768, V=1280, k_cap=1280, kind="full", teacher=True)
+    inp = cuda_inputs(**mk)
     arch = cake_support._cake_context(CUDA).arch
     plan = cake_support.support_memory_report(
         inp.T, inp.H, inp.V, inp.M, outputs=("kl",), arch=arch
@@ -1029,19 +999,19 @@ def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch):
     with pytest.raises(ValueError, match="the dense X pass needs H"):
         run_support(inp, ("kl",), backend="cake", path={"X": "dense"})
     forms = _record_dx_forms(monkeypatch)
-    check_gates(inp, ("kl",), backend="cake")
+    judged(record_property, ("kl",), mk, dict(backend="cake"), device=CUDA)
     assert forms == []
 
 
 @pytest.mark.parametrize("form", [(1, 1), (2, 1)], ids=lambda f: f"S{f[0]}F{f[1]}")
-def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
-    """The dense dX form under CUDA graph capture (replayed twice over the graph pool's reused, nonzero buffers), on
-    two concurrent streams, and after a larger call left nonzero blocks in the caching allocator: every call keeps its
-    contract, the concurrent call's KL and dW have the sequential call's bits (dX too at one slice), and with K slices
-    the graph replay passes the gate."""
+def test_cake_dense_dx_graph_streams_and_reused_buffers(
+    form, monkeypatch, record_property
+):
+    """The dense dX form after a larger call left nonzero blocks in the caching allocator: the eager call meets the
+    naive tier.  Under CUDA graph capture (replayed twice over the graph pool's reused, nonzero buffers) and on two
+    concurrent streams (after a sequential call) every call keeps its contract."""
     _require_cake()
     _force_dx_form(monkeypatch, form)
-    exact = form[0] == 1
     kw = dict(backend="cake", path="dense")
 
     def inputs(T, seed):
@@ -1058,22 +1028,22 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
         kl, dx, dw = out
         contract_support(dict(kl=kl, dX=dx, dW=dw), inp, outputs=("kl",))
 
-    def same(a, b):
-        (kl, dx, dw), (kl_ref, dx_ref, dw_ref) = a, b
-        assert torch.equal(_bits(kl), _bits(kl_ref))
-        assert torch.equal(_bits(dw), _bits(dw_ref))
-        if exact:
-            assert torch.equal(_bits(dx), _bits(dx_ref))
-
     big, big_kw = inputs(4097, SEED + 1)
     small_inp, small_kw = inputs(1300, SEED + 2)
     leaf = lambda t: t.detach().clone().requires_grad_(True)  # noqa: E731
-    # a larger call first: its freed blocks (nonzero) are reused by the smaller call
+    # a larger call first: its freed blocks (nonzero) are reused by the smaller calls, judged over the draws
     step(big, big_kw, leaf(big.X), leaf(big.W))
+    judged(
+        record_property,
+        ("kl",),
+        dict(T=1300, k_cap=32, kind="heavy", teacher=True),
+        kw,
+        device=CUDA,
+    )
     contract(step(small_inp, small_kw, leaf(small_inp.X), leaf(small_inp.W)), small_inp)
-    # two streams, each with its own problem, against the sequential results
+    # a sequential call, then two streams, each with its own problem
     s1, s2 = torch.cuda.Stream(), torch.cuda.Stream()
-    seq_big = step(big, big_kw, leaf(big.X), leaf(big.W))
+    contract(step(big, big_kw, leaf(big.X), leaf(big.W)), big)
     s1.wait_stream(torch.cuda.current_stream())
     s2.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s1):
@@ -1084,7 +1054,6 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
     torch.cuda.current_stream().wait_stream(s2)
     contract(par_small, small_inp)
     contract(par_big, big)
-    same(par_big, seq_big)
     # CUDA graph capture of the whole step, replayed twice
     X, W = leaf(small_inp.X), leaf(small_inp.W)
     side = torch.cuda.Stream()
@@ -1100,15 +1069,6 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
         graph.replay()
         torch.cuda.synchronize()
         contract(static, small_inp)
-    if not exact:
-        oracle = reference_support_fp64(small_inp, outputs=("kl",))
-        b0err = support_error_report(
-            reference_support_b0(small_inp, outputs=("kl",)), oracle, small_inp
-        )
-        err = support_error_report(
-            dict(kl=static[0], dX=static[1], dW=static[2]), oracle, small_inp
-        )
-        assert not gate_failures(err, b0err), (err, b0err)
 
 
 def test_sparse_dw_zero_fill_bits():
