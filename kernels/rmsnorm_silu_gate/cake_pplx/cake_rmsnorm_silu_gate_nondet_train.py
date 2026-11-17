@@ -44,9 +44,10 @@ the rows and the SM count fix the grid and the bits), except in the fused
 band (below: past 512 rows on SM100, past 256 rows on SM103, up to 1000 rows
 per SM; on SM107 past 64 up to 256 rows per SM), where its last bits may vary
 from run to run.  A band runs a
-backward whose weight gradient may vary only where that makes the
-checkpointed training step (2 x forward + backward) at least 3 % faster than
-the repeatable backward.  The kernels are those of the standalone package
+backward whose weight gradient may vary only where the band-selection
+measurement found the checkpointed training step (2 x forward + backward)
+about 3 % or more faster than with the repeatable backward (near a band's
+edges the gain can be smaller).  The kernels are those of the standalone package
 ``cake_pplx._backends.cake_rmsnorm_silu_gate_nondet_train``:
 
 - The forward computes ``rstd`` with ``rsqrt.approx`` and the SiLU gate with

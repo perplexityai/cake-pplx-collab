@@ -29,13 +29,15 @@ bit for bit: the same inputs on the same device give the same bits on every
 call, whatever the order in which CTAs run and the work beside the call on
 other streams, and whatever the grid.  A BF16 weight gradient repeats bit for
 bit too, whatever the grid but in the repeatable band (whose grid, and so
-whose bits, the rows and the SM count fix), except in the fused and the
-row-claims bands of ``cake_jit.BACKWARD_BANDS`` (the role
-``bwd_bf16_fused``, on every architecture, and the roles ``bwd_bf16_rc`` and
-``bwd_bf16_rc_mid``, on sm_100a and sm_103a only), where its last bits may
-vary from run to run.  A band runs a backward whose weight gradient may vary
-only where it makes the checkpointed training step (2 x forward + backward)
-at least 3 % faster than the repeatable backward.
+whose bits, the rows and the SM count fix), except in the fused band of
+``cake_jit.BACKWARD_BANDS`` (the role ``bwd_bf16_fused``, on every
+architecture), where its last bits may vary from run to run (as would those
+of the row-claims backwards ``bwd_bf16_rc`` and ``bwd_bf16_rc_mid``, sm_100a
+and sm_103a, which no band runs).  A band runs a backward whose weight
+gradient may vary only where the band-selection measurement found the
+checkpointed training step (2 x forward + backward) about 3 % or more faster
+than with the repeatable backward (near a band's edges the gain can be
+smaller).
 The forward computes ``rstd`` with ``rsqrt.approx`` and the SiLU gate with
 ``ex2.approx`` and ``rcp.approx`` (the deterministic forward's split gate:
 the reciprocal of a scaled ``1 + e``, a nonzero sigmoid down to where
@@ -171,8 +173,9 @@ Host design (the input layout rules are the deterministic package's):
   module), allocated on first use and kept in ``_STREAM_WORKSPACES`` for later
   calls: 29192 bytes each on sm_100a and sm_103a and 36360 on sm_107a, at
   most one per backward module that takes one (the static, the fused
-  ``_fused``, the row-claims ``_rc`` and ``_rc_mid`` and the claimed ``_mid``
-  backwards an architecture routes) for every stream that ran such a
+  ``_fused``, the repeatable ``_rep`` and ``_rep_long``, the row-claims
+  ``_rc`` and ``_rc_mid`` and the claimed ``_mid`` backwards an architecture
+  routes) for every stream that ran such a
   backward.  Such eager calls also keep a reserve of
   64 zero-filled workspaces per device (in one allocation, 29440 bytes each,
   about 1.8 MiB, on sm_100a and sm_103a and 36608 bytes each, about 2.2 MiB,
@@ -695,7 +698,8 @@ def cake_rmsnorm_silu_gate_nondet_train_reset_workspace(
 
 
 # The workspaces of calls without a caller workspace (every launch of the
-# static, the claimed, the row-claims and the fused backwards needs one: it
+# static, the claimed, the row-claims, the fused and the repeatable backwards
+# needs one: it
 # takes the arrival ticket, and the claimed, the row-claims and the fused ones
 # claim their chunks or blocks; the small-row backwards need none): one per
 # (device, stream, backward module), zero-filled once and kept for the process

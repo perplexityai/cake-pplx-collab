@@ -179,10 +179,11 @@ outputs are the repeatable backward's bits at every row count and grid.  It
 runs in the repeatable backward's place on packed rows (``dy``, ``x`` and
 ``z`` with head stride 128 and token stride ``H * 128``) from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM, where it is faster.
-A BF16 weight gradient runs the fused backward only where its varying
-weight gradient makes the checkpointed training step (2 x forward +
-backward) at least 3 % faster than the repeatable backward's, and the
-repeatable backward past that.
+A BF16 weight gradient runs the fused backward only where the
+band-selection measurement found its varying weight gradient making the
+checkpointed training step (2 x forward + backward) about 3 % or more
+faster than with the repeatable backward (near a band's edges the gain can
+be smaller), and the repeatable backward past that.
 ``BACKWARD_BANDS`` gives each backward its rows on each architecture.
 
 Grids (:func:`launch_grid`): the forward and the short forward launch one
@@ -2157,11 +2158,12 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # deterministic package's exact weight-gradient sum): the fused backward's
 # weight gradient may vary in its last bits from run to run (and so may the
 # row-claims backwards', ``_rc``, ``_rc_mid``, which no band runs), so it
-# runs only where it makes the checkpointed training step at least 3 %
-# faster than the repeatable backward does; every other band repeats its
-# bits.  On sm_100a and sm_103a the fused backward runs up to 1000 rows per
+# runs only where the band-selection measurement found the checkpointed
+# training step about 3 % or more faster than with the repeatable backward
+# (near a band's edges the gain can be smaller); every other band repeats
+# its bits.  On sm_100a and sm_103a the fused backward runs up to 1000 rows per
 # SM and the repeatable backward past it.  On sm_107a the fused backward
-# saves at least 3 % of the step only past 64 and up to 256 rows per SM (both
+# saved about 3 % or more of the step only past 64 and up to 256 rows per SM (both
 # cuts on the repeatable backward's waves of 64 rows per SM), so the
 # repeatable backward runs up to ``SM107A_BF16_REP_LAST`` rows per SM, the
 # fused backward up to ``SM107A_BF16_FUSED_LAST`` and the repeatable backward

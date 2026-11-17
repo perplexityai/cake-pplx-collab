@@ -209,8 +209,8 @@ REP_WORKSPACE_BYTES = 18952
 WORKSPACE_BYTES = {"sm_100a": 29192, "sm_103a": 29192, "sm_107a": 36360}
 RESERVE_STRIDE = {"sm_100a": 29440, "sm_103a": 29440, "sm_107a": 36608}
 
-# The accuracy matrix; test_cake_rmsnorm_silu_gate_nondet_train_api.py runs the same
-# cases against the deterministic package.
+# The accuracy matrix (shapes, layouts, edge data and epsilons judged against
+# the PyTorch BF16 naive tier).
 SHAPES = [
     (1, 1),
     (1, 48),
@@ -684,12 +684,11 @@ def merge_draws(draws):
             found.update(draw.naive())
         return found
 
-    expected, contract_only, launched = {}, set(), []
+    expected, launched = {}, []
     for draw in draws:
         expected.update(draw.expected)
-        contract_only |= draw.contract_only
         launched += list(draw.launches)
-    return Draw(launched, expected, naive_values, contract_only)
+    return Draw(launched, expected, naive_values)
 
 
 def _launch_count(repeats=REPEATS):

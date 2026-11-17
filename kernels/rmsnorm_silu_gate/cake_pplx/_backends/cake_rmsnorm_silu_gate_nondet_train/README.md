@@ -28,9 +28,10 @@ but in the repeatable band (`bwd_bf16_rep`, whose grid, and so whose bits,
 the rows and the SM count fix), except in the fused band (`bwd_bf16_fused`;
 see "Programs and routes"), where its last bits may vary from run to run.
 A band runs a program whose `dw` may vary
-only where that makes the checkpointed training step (2 x forward +
-backward) at least 3 % faster than the repeatable program does; every other
-band repeats its bits:
+only where the band-selection measurement found the checkpointed training
+step (2 x forward + backward) about 3 % or more faster than with the
+repeatable program (near a band's edges the gain can be smaller); every
+other band repeats its bits:
 
 | architecture | fused band of a BF16 `dw` (may vary) | repeatable band of a BF16 `dw` (repeats) |
 | --- | --- | --- |
@@ -78,9 +79,11 @@ FP64.  On GB300 (`sm_103a`) the step
 with the short backward (`bwd_bf16_short`) is 7.8 % .. 14.8 % faster than
 with the faster of the exact tiny backward and the row-claims backward at
 48 .. 256 rows (13.1 % .. 18.7 % faster than with the exact tiny backward),
-and the row-claims backward saves 6.9 % .. 13.1 % of the step against the
-exact tiny backward at 336 .. 512 rows (at least 3 %), so `sm_103a` runs no
-BF16 exact tiny backward and its next band starts at 257 rows.  On
+and in version 0.1.0 the row-claims backward (which no band runs in this
+version) saved 6.9 % .. 13.1 % of the step against the exact tiny backward
+at 336 .. 512 rows, so `sm_103a` runs no BF16 exact tiny backward and its
+next band starts at 257 rows.  That band now runs the fused backward, which
+has not been measured against the exact tiny backward at 257 .. 512 rows.  On
 B200 (`sm_100a`) the steps with the short and with the exact tiny backward
 are within 3 % of each other at up to 256 rows, and under that
 benchmark timer the short backward alone is the faster of the two at every
@@ -288,8 +291,9 @@ the last band always; a call with `compute_grad_weight=False` takes the BF16
 bands).
 A BF16 weight gradient runs the fused backward past its small-row bands up
 to 1000 rows per SM and the repeatable backward past it on `sm_100a` and
-`sm_103a`; on `sm_107a`, where the fused backward saves at least 3 % of the
-step only past 64 and up to 256 rows per SM (both cuts on the repeatable
+`sm_103a`; on `sm_107a`, where the band-selection measurement found the
+fused backward saving about 3 % or more of the step only past 64 and up to
+256 rows per SM (both cuts on the repeatable
 backward's waves of 64 rows per SM), the repeatable backward runs past the
 small-row bands up to 64 rows per SM, the fused backward up to 256 and the
 repeatable backward past it
