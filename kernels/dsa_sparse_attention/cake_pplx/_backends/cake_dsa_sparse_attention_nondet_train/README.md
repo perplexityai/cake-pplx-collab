@@ -307,6 +307,8 @@ token count as well (crossover between 16 and 20 at `T = 2048`, between 24 and
 28 at `T = 4096`), so one count is a compromise.  `sm_100a` and `sm_103a`
 keep their base rules.
 
+### Explicit entry points, prepared runner and binding cache
+
 Explicit forward / backward entry points without autograd, a prepared
 allocation-free runner (`prepare_dsa_train`, CUDA-graph capturable) and the
 workspace sizing helper live in `cake_backend.py`.  A binding is validated and
