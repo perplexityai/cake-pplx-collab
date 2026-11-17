@@ -2103,16 +2103,19 @@ def test_accumulate_is_the_overwrite_plus_add(
         torch.cuda.synchronize()
         d.op("out", out, "wgrad", g, x, sizes, start=start)
 
-    # draw 0 (the last) is the case's own inputs and out0: ``out`` holds its result after
-    judge_draws(record_property, draw, seed=31)
-    assert torch.equal(_bits(out), _bits(first)), "the judged draw 0 differs from first"
-    _assert_empty_groups_keep_their_values(out, out0, sizes)
-    one_shot = out0.clone()
-    assert pkg.cake_moe_grouped_gemm_det_train_wgrad(
-        g, x, offs, out=one_shot, accumulate=True
-    ) is (one_shot)
-    torch.cuda.synchronize()
-    assert torch.equal(_bits(one_shot), _bits(first))
+    # ``after`` runs after the draws: draw 0 (the last) is the case's own inputs and out0,
+    # so ``out`` holds its result there
+    def after():
+        assert torch.equal(_bits(out), _bits(first)), "the judged draw 0 differs from first"
+        _assert_empty_groups_keep_their_values(out, out0, sizes)
+        one_shot = out0.clone()
+        assert pkg.cake_moe_grouped_gemm_det_train_wgrad(
+            g, x, offs, out=one_shot, accumulate=True
+        ) is (one_shot)
+        torch.cuda.synchronize()
+        assert torch.equal(_bits(one_shot), _bits(first))
+
+    judge_draws(record_property, draw, seed=31, then=after)
 
 
 # The fused-against-composed cases of each half-release form: a forced shape with an
@@ -2646,19 +2649,21 @@ def test_autograd_accumulates_into_main_grad(
         dws16 = [product("wgrad", g, x0, sizes, torch.bfloat16) for g in (g1, g2)]
         d.output("main_grad", got.main_grad, oracle_sum(start, dws64), naive_sum(start, dws16))
 
-    # draw 0 (the last) restores the case's own inputs for the checks below
-    judge_draws(record_property, draw, seed=51)
-    _, default_dxs = _run_micro_steps(
-        lambda a, b: pkg.cake_moe_grouped_gemm_det(a, b, offs),
-        x0,
-        w0,
-        mg0,
-        (g1, g2),
-        ckpt,
-        early_stop,
-    )
-    for got, expect in zip(dxs, default_dxs, strict=True):
-        assert torch.equal(got, expect)
+    # draw 0 (the last) restores the case's own inputs for the checks of ``after``
+    def after():
+        _, default_dxs = _run_micro_steps(
+            lambda a, b: pkg.cake_moe_grouped_gemm_det(a, b, offs),
+            x0,
+            w0,
+            mg0,
+            (g1, g2),
+            ckpt,
+            early_stop,
+        )
+        for got, expect in zip(dxs, default_dxs, strict=True):
+            assert torch.equal(got, expect)
+
+    judge_draws(record_property, draw, seed=51, then=after)
 
 
 def test_autograd_bf16_main_grad_is_accumulate_grad(monkeypatch):

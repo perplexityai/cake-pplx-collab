@@ -69,6 +69,7 @@ from tests.cake.test_helpers.cake_moe_judge import (
     naive_sum,
     oracle_sum,
     product,
+    raise_misses,
 )
 from tests.cake.test_helpers.cake_naive import DRAWS, draw_seed
 from tests.experimental import test_cake_moe_grouped_gemm_nondet_train as base
@@ -1592,6 +1593,7 @@ def _judge_accumulate(
     make_out0=None,
     before=None,
     name="out",
+    misses=None,
 ):
     """Judge the accumulate ``launch`` (prepared on ``g``, ``x``, ``offs`` and ``out``)
     against the naive BF16 tier of ``out0 + count x dW`` over ``cake_naive.DRAWS`` inputs
@@ -1602,7 +1604,8 @@ def _judge_accumulate(
     ``_out0`` of ``kind`` scaled by the fp32 overwrite of the same plan).  For each
     ``count`` of ``adds`` it copies ``out0`` into ``out``, calls ``before()`` (if given),
     launches ``count`` times and reports ``out`` (as ``name``, or ``<name>_x<count>``).
-    Draw 0, the last, is the case's own inputs and ``out0``."""
+    Draw 0, the last, is the case's own inputs and ``out0``.  ``misses``: collect the
+    naive-tier misses (``judge_draws``)."""
     n, k = out.shape[1:]
     if make_out0 is None:
         overwrite = prepare_wgrad(g, x, offs, out_dtype=torch.float32)
@@ -1626,7 +1629,7 @@ def _judge_accumulate(
             label = name if count == 1 else f"{name}_x{count}"
             d.op(label, out, "wgrad", g, x, sizes, start=out0, adds=count)
 
-    judge_draws(record_property, draw, seed=seed)
+    judge_draws(record_property, draw, seed=seed, misses=misses)
 
 
 # ---------------------------------------------------------------------------
@@ -2137,15 +2140,17 @@ def test_short_groups_accumulate_their_own_rows(
             elif not torch.equal(_bits(got), _bits(first)):
                 changed.append((d.index, call))
 
-    judge_draws(record_property, draw, seed=39)
-    assert not changed, (
-        f"{len(changed)} launches differ from their draw's first in some bit: {changed[:8]}"
-    )
-    if split:
-        # Every launch after the first found the stream's kept slots to poison.
-        assert poisoned == DRAWS * per_draw - 1, poisoned
-        torch.cuda.synchronize()
-        base._assert_tail_at_rest(device)
+    def after():
+        assert not changed, (
+            f"{len(changed)} launches differ from their draw's first in some bit: {changed[:8]}"
+        )
+        if split:
+            # Every launch after the first found the stream's kept slots to poison.
+            assert poisoned == DRAWS * per_draw - 1, poisoned
+            torch.cuda.synchronize()
+            base._assert_tail_at_rest(device)
+
+    judge_draws(record_property, draw, seed=39, then=after)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
@@ -2279,6 +2284,7 @@ def test_graph_replay_accumulates_at_every_replay(route, monkeypatch, record_pro
             replayed, out, f"{route} layout {index}: replay vs eager"
         )
     replay = types.SimpleNamespace(launch=graph.replay)
+    missed = []  # the naive-tier misses of both layouts, raised last
     for index, layout in enumerate((sizes, second)):
         offs.copy_(base._offs(layout, device))
         _judge_accumulate(
@@ -2296,7 +2302,9 @@ def test_graph_replay_accumulates_at_every_replay(route, monkeypatch, record_pro
             make_out0=lambda gen, g, x: torch.randn(
                 out0.shape, generator=gen, device=device
             ),
+            misses=missed,
         )
+    raise_misses(missed)
 
 
 @pytest.mark.parametrize("route", ["fused", "composed"])
@@ -2491,19 +2499,21 @@ def test_autograd_accumulates_into_main_grad(
             "main_grad", got.main_grad, oracle_sum(start, dws64), naive_sum(start, dws16)
         )
 
-    # draw 0 (the last) restores the case's own inputs for the check below
-    judge_draws(record_property, draw, seed=51)
-    _, default_dxs = _run_micro_steps(
-        lambda a, b: pkg.cake_moe_grouped_gemm_nondet(a, b, offs),
-        x0,
-        w0,
-        mg0,
-        (g1, g2),
-        ckpt,
-        early_stop,
-    )
-    for got, expect in zip(dxs, default_dxs, strict=True):
-        assert torch.equal(got, expect)
+    # draw 0 (the last) restores the case's own inputs for the check of ``after``
+    def after():
+        _, default_dxs = _run_micro_steps(
+            lambda a, b: pkg.cake_moe_grouped_gemm_nondet(a, b, offs),
+            x0,
+            w0,
+            mg0,
+            (g1, g2),
+            ckpt,
+            early_stop,
+        )
+        for got, expect in zip(dxs, default_dxs, strict=True):
+            assert torch.equal(got, expect)
+
+    judge_draws(record_property, draw, seed=51, then=after)
 
 
 @pytest.mark.parametrize("zero_out", [False, True], ids=["empty", "zeros"])

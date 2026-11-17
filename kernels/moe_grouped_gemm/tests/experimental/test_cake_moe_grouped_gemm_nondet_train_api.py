@@ -71,7 +71,7 @@ from cake_pplx._backends.cake_moe_grouped_gemm_nondet_train import (
 from cake_pplx._backends.cake_moe_grouped_gemm_nondet_train import (
     cake_backend as cb,
 )
-from tests.cake.test_helpers.cake_moe_judge import judge_draws
+from tests.cake.test_helpers.cake_moe_judge import judge_draws, raise_misses
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "cake_moe_grouped_gemm_nondet_train"
@@ -768,29 +768,30 @@ def test_prepared_split_tail_wgrad_never_alerts(record_property):
         g.copy_(ng)
         d.op("dW", launch.launch(), "wgrad", g, x, sizes)
 
-    judge_draws(record_property, draw, seed=60)
+    def after():
+        sizes = base.RAGGED_E4
+        x, w, g, offs = base._inputs(sizes, 512, 256, device, seed=61)
+        k256 = cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs)
+        assert k256.plan["tile_k"] == 256 and not k256.order_varying, k256.plan
+        fwd = cb.cake_moe_grouped_gemm_nondet_train_prepare_forward(x, w, offs)
+        ref = k256.launch().clone()
+        y_ref = fwd.launch().clone()
+        for warn_only in (False, True):
+            k256.out.fill_(float("nan"))
+            fwd.out.fill_(float("nan"))
+            with (
+                _TorchDeterministic(warn_only),
+                warnings.catch_warnings(record=True) as rec,
+            ):
+                warnings.simplefilter("always")
+                out = k256.launch()
+                y = fwd.launch()
+            torch.cuda.synchronize()
+            assert _user_warnings(rec) == [], (warn_only, [str(r.message) for r in rec])
+            base._assert_same_bits(out, ref, f"k256 dW warn_only={warn_only}")
+            base._assert_same_bits(y, y_ref, f"Y warn_only={warn_only}")
 
-    sizes = base.RAGGED_E4
-    x, w, g, offs = base._inputs(sizes, 512, 256, device, seed=61)
-    k256 = cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs)
-    assert k256.plan["tile_k"] == 256 and not k256.order_varying, k256.plan
-    fwd = cb.cake_moe_grouped_gemm_nondet_train_prepare_forward(x, w, offs)
-    ref = k256.launch().clone()
-    y_ref = fwd.launch().clone()
-    for warn_only in (False, True):
-        k256.out.fill_(float("nan"))
-        fwd.out.fill_(float("nan"))
-        with (
-            _TorchDeterministic(warn_only),
-            warnings.catch_warnings(record=True) as rec,
-        ):
-            warnings.simplefilter("always")
-            out = k256.launch()
-            y = fwd.launch()
-        torch.cuda.synchronize()
-        assert _user_warnings(rec) == [], (warn_only, [str(r.message) for r in rec])
-        base._assert_same_bits(out, ref, f"k256 dW warn_only={warn_only}")
-        base._assert_same_bits(y, y_ref, f"Y warn_only={warn_only}")
+    judge_draws(record_property, draw, seed=60, then=after)
 
 
 def test_autograd_backward_never_alerts(record_property):
@@ -821,6 +822,7 @@ def test_autograd_backward_never_alerts(record_property):
         ("k512", k512_sizes, k512_shape, 62),
         ("k256", base.RAGGED_E4, (512, 256), 63),
     )
+    missed = []  # the naive-tier misses of both shapes, raised last
     for tile, sizes, (n, k), seed in cases:
         x0, w0, g, offs = base._inputs(sizes, n, k, device, seed=seed)
         # The backward prepares this weight gradient (same operands, same plan).
@@ -856,7 +858,8 @@ def test_autograd_backward_never_alerts(record_property):
             d.op(f"dX_{tile}", dx, "dgrad", g, w0, sizes)
             d.op(f"dW_{tile}", dw, "wgrad", g, x0, sizes)
 
-        judge_draws(record_property, draw, seed=seed)
+        judge_draws(record_property, draw, seed=seed, misses=missed)
+    raise_misses(missed)
 
 
 @pytest.mark.parametrize(

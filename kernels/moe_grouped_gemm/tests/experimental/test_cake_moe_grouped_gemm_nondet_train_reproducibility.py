@@ -336,13 +336,16 @@ def _inputs(case, device):
 OUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
 
 
-def _judge(record_property, case, launch, a, b, out, device, *, start_of=None, fill=None):
+def _judge(
+    record_property, case, launch, a, b, out, device, *, start_of=None, fill=None, then=None
+):
     """Judge ``launch``'s whole ``out`` (sampled rows above ``FULL_ORACLE_MACS``) against
     the naive BF16 tier over ``cake_naive.DRAWS`` inputs: draw ``j`` writes the operands
     of ``draw_seed(_seed(case), j)`` into ``a`` and ``b`` (a prepared launch stays valid
     when its operands are rewritten in place), sets ``out`` (``start_of(d)``: an
     accumulate's start, copied in; else filled with ``fill`` bytes when given), poisons
-    the split-tail slots and launches.  Draw 0, the last, is the case's own inputs."""
+    the split-tail slots and launches.  Draw 0, the last, is the case's own inputs.
+    ``then``: the test's later checks (``judge_draws``)."""
 
     def draw(d):
         na, nb = _operands(case, device, d.seed)
@@ -359,7 +362,7 @@ def _judge(record_property, case, launch, a, b, out, device, *, start_of=None, f
         name = OUT_NAMES[case.op] if start is None else "main_grad"
         d.op(name, out, case.op, a, b, case.sizes, start=start)
 
-    judge_draws(record_property, draw, seed=_seed(case))
+    judge_draws(record_property, draw, seed=_seed(case), then=then)
 
 
 def _out(case, device):
@@ -746,31 +749,34 @@ def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
     for s, t in zip([0] + ends[:-1], ends, strict=True):
         if t == s + 1:
             assert int(_bits(out[s:t]).count_nonzero()) > 0, label
-    _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE)
-    if not ef:
-        pytest.skip(f"no evict-first data-gradient tile on {arch}")
-    monkeypatch.setitem(
-        c,
-        "dgrad_evict_first_min_rows",
-        dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
-    )
-    plain_out = _out(case, device)
-    plain = _prepare(cb, case, a, b, offs, plain_out)
-    assert plain.stages[0] == "main_wide", plain.stages
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    plain_out.view(torch.uint8).fill_(FILL_BYTE)
-    plain.launch()
-    torch.cuda.synchronize(device)
-    assert torch.equal(_bits(plain_out), _bits(out)), "main_wide"
-    del plain_out
-    monkeypatch.setitem(c, "wide_dgrad_archs", [])
-    narrow_out = _out(case, device)
-    narrow = _prepare(cb, case, a, b, offs, narrow_out)
-    assert narrow.stages[0] == "main", narrow.stages
-    narrow_out.view(torch.uint8).fill_(FILL_BYTE)
-    narrow.launch()
-    torch.cuda.synchronize(device)
-    assert torch.equal(_bits(narrow_out), _bits(out)), "main"
+
+    def after():
+        if not ef:
+            pytest.skip(f"no evict-first data-gradient tile on {arch}")
+        monkeypatch.setitem(
+            c,
+            "dgrad_evict_first_min_rows",
+            dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
+        )
+        plain_out = _out(case, device)
+        plain = _prepare(cb, case, a, b, offs, plain_out)
+        assert plain.stages[0] == "main_wide", plain.stages
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        plain_out.view(torch.uint8).fill_(FILL_BYTE)
+        plain.launch()
+        torch.cuda.synchronize(device)
+        assert torch.equal(_bits(plain_out), _bits(out)), "main_wide"
+        del plain_out
+        monkeypatch.setitem(c, "wide_dgrad_archs", [])
+        narrow_out = _out(case, device)
+        narrow = _prepare(cb, case, a, b, offs, narrow_out)
+        assert narrow.stages[0] == "main", narrow.stages
+        narrow_out.view(torch.uint8).fill_(FILL_BYTE)
+        narrow.launch()
+        torch.cuda.synchronize(device)
+        assert torch.equal(_bits(narrow_out), _bits(out)), "main"
+
+    _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE, then=after)
 
 
 def _row_padded(t):

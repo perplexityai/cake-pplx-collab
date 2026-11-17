@@ -176,10 +176,11 @@ class _Case:
         return _operands(op, self.x, self.w, self.g)
 
 
-def _judge_launch(record_property, op, launch, case, *, launches=1, name=None):
+def _judge_launch(record_property, op, launch, case, *, launches=1, name=None, then=None):
     """Judge the prepared ``launch`` of ``op`` on ``case`` over the draws of ``case.seed``:
     each draw refills the inputs, then ``launches`` launches into an output refilled with
-    NaN each judge it and give the bits of the draw's first launch (run to run)."""
+    NaN each judge it and give the bits of the draw's first launch (run to run).
+    ``then``: the test's later checks (``judge_draws``)."""
 
     def draw(d):
         case.refill(d.seed)
@@ -193,7 +194,7 @@ def _judge_launch(record_property, op, launch, case, *, launches=1, name=None):
             else:
                 assert torch.equal(out, first), f"draw {d.index} launch {call}"
 
-    judge_draws(record_property, draw, seed=case.seed)
+    judge_draws(record_property, draw, seed=case.seed, then=then)
 
 
 def _fresh_stream_workspaces(monkeypatch):
@@ -1029,11 +1030,13 @@ def test_wgrad_short_groups_never_include_the_next_group(out_dtype, record_prope
             elif not torch.equal(out, first):
                 differ.append((d.index, call, int((out != first).sum())))
 
-    judge_draws(record_property, draw, seed=case.seed)
-    assert not differ, (
-        f"{len(differ)} of {DRAWS * (per_draw - 1)} relaunches differ from their draw's "
-        f"first launch (draw, launch, elements): {differ[:3]}"
-    )
+    def after():
+        assert not differ, (
+            f"{len(differ)} of {DRAWS * (per_draw - 1)} relaunches differ from their draw's "
+            f"first launch (draw, launch, elements): {differ[:3]}"
+        )
+
+    judge_draws(record_property, draw, seed=case.seed, then=after)
 
 
 def test_prepared_launch_reuses_buffers_without_allocation(record_property):
@@ -1091,15 +1094,18 @@ def test_scheduler_workspace_rests_after_every_launch(op, monkeypatch, record_pr
             f"the {op} program bound on this device takes no scheduler workspace"
         )
     c = HOST_PLAN_CONSTANTS
-    _judge_launch(record_property, op, launch, case, launches=4)
-    torch.cuda.synchronize()
-    sched = cb.stream_workspace("sched", device)
-    assert sched is not None and sched.dtype == torch.uint32
-    assert sched.numel() == int(c["sched_words"]) and sched.is_contiguous()
-    assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
-    if _probes_queue_split(device, op):
-        assert launch.plan["queue_split"] == "probed"
-        assert cb.stream_queue_split(device) is not None
+
+    def after():
+        torch.cuda.synchronize()
+        sched = cb.stream_workspace("sched", device)
+        assert sched is not None and sched.dtype == torch.uint32
+        assert sched.numel() == int(c["sched_words"]) and sched.is_contiguous()
+        assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
+        if _probes_queue_split(device, op):
+            assert launch.plan["queue_split"] == "probed"
+            assert cb.stream_queue_split(device) is not None
+
+    _judge_launch(record_property, op, launch, case, launches=4, then=after)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
@@ -1124,27 +1130,30 @@ def test_wgrad_wave_sync_route_and_rest_state(out_dtype, monkeypatch, record_pro
     assert launch.stages[0] == ("main_wave" if wave else "main")
     assert launch.plan["wave_mode"] == (int(c["wave_sync_mode"][arch]) if wave else 0)
     assert ("wave_sync" in _workspace_kinds(launch)) == wave
-    _judge_launch(record_property, "wgrad", launch, case, launches=3)
-    out = launch.out
-    torch.cuda.synchronize()
-    if wave:
-        counters = cb.stream_workspace("wave_sync", device)
-        assert counters is not None and counters.dtype == torch.uint32
-        assert counters.numel() == int(c["wave_sync_words"])
-        assert _u32_words(counters) == [0] * int(c["wave_sync_words"])
-    # Below the threshold (or with the wave build switched off) the plain build runs.
-    short = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x[:, : k // 2].contiguous(), offs, out_dtype=out_dtype
-    )
-    assert short.stages[0] == "main" and short.plan["wave_mode"] == 0
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wave_sync_min_k", 1 << 30)
-    plain = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
-    )
-    assert plain.stages[0] == "main" and plain.plan["wave_mode"] == 0
-    assert plain.plan["tile_k"] == launch.plan["tile_k"]
-    torch.cuda.synchronize()
-    assert torch.equal(plain.launch(), out)
+
+    def after():
+        out = launch.out
+        torch.cuda.synchronize()
+        if wave:
+            counters = cb.stream_workspace("wave_sync", device)
+            assert counters is not None and counters.dtype == torch.uint32
+            assert counters.numel() == int(c["wave_sync_words"])
+            assert _u32_words(counters) == [0] * int(c["wave_sync_words"])
+        # Below the threshold (or with the wave build switched off) the plain build runs.
+        short = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            g, x[:, : k // 2].contiguous(), offs, out_dtype=out_dtype
+        )
+        assert short.stages[0] == "main" and short.plan["wave_mode"] == 0
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wave_sync_min_k", 1 << 30)
+        plain = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            g, x, offs, out_dtype=out_dtype
+        )
+        assert plain.stages[0] == "main" and plain.plan["wave_mode"] == 0
+        assert plain.plan["tile_k"] == launch.plan["tile_k"]
+        torch.cuda.synchronize()
+        assert torch.equal(plain.launch(), out)
+
+    _judge_launch(record_property, "wgrad", launch, case, launches=3, then=after)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
@@ -1224,20 +1233,23 @@ def test_wide_tile_gives_the_256_column_tile_bits(op, monkeypatch, record_proper
         else "main"
     )
     assert launch.plan["tile_n"] == int(c["wide_block_n" if wide else "block_n"])
-    _judge_launch(record_property, op, launch, case, launches=3)
-    torch.cuda.synchronize()
-    if not wide:
-        pytest.skip(f"no 512-column {op} tile on {arch}")
-    sched = cb.stream_workspace("sched", device)
-    assert sched is not None
-    assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"wide_{op}_archs", [])
-    narrow, _ = _prepare_row_op(op, RAGGED_E6, n, k, device)
-    assert narrow.stages[0] == "main"
-    assert narrow.plan["tile_n"] == int(c["block_n"])
-    assert narrow.plan["clusters"] >= launch.plan["clusters"]
-    torch.cuda.synchronize()
-    assert torch.equal(narrow.launch(), launch.out)
+
+    def after():
+        torch.cuda.synchronize()
+        if not wide:
+            pytest.skip(f"no 512-column {op} tile on {arch}")
+        sched = cb.stream_workspace("sched", device)
+        assert sched is not None
+        assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"wide_{op}_archs", [])
+        narrow, _ = _prepare_row_op(op, RAGGED_E6, n, k, device)
+        assert narrow.stages[0] == "main"
+        assert narrow.plan["tile_n"] == int(c["block_n"])
+        assert narrow.plan["clusters"] >= launch.plan["clusters"]
+        torch.cuda.synchronize()
+        assert torch.equal(narrow.launch(), launch.out)
+
+    _judge_launch(record_property, op, launch, case, launches=3, then=after)
 
 
 def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property):
@@ -1275,25 +1287,28 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property
         if wide
         else "main"
     )
-    _judge_launch(record_property, "dgrad", launch, case, launches=2)
-    torch.cuda.synchronize()
-    if not ef:
-        pytest.skip(f"no evict-first data-gradient tile on {arch}")
-    monkeypatch.setitem(
-        HOST_PLAN_CONSTANTS,
-        "dgrad_evict_first_min_rows",
-        dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
-    )
-    plain, _ = _prepare_row_op("dgrad", sizes, n, k, device)
-    assert plain.stages[0] == "main_wide"
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    torch.cuda.synchronize()
-    assert torch.equal(plain.launch(), launch.out)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_dgrad_archs", [])
-    narrow, _ = _prepare_row_op("dgrad", sizes, n, k, device)
-    assert narrow.stages[0] == "main"
-    torch.cuda.synchronize()
-    assert torch.equal(narrow.launch(), launch.out)
+
+    def after():
+        torch.cuda.synchronize()
+        if not ef:
+            pytest.skip(f"no evict-first data-gradient tile on {arch}")
+        monkeypatch.setitem(
+            HOST_PLAN_CONSTANTS,
+            "dgrad_evict_first_min_rows",
+            dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
+        )
+        plain, _ = _prepare_row_op("dgrad", sizes, n, k, device)
+        assert plain.stages[0] == "main_wide"
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        torch.cuda.synchronize()
+        assert torch.equal(plain.launch(), launch.out)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_dgrad_archs", [])
+        narrow, _ = _prepare_row_op("dgrad", sizes, n, k, device)
+        assert narrow.stages[0] == "main"
+        torch.cuda.synchronize()
+        assert torch.equal(narrow.launch(), launch.out)
+
+    _judge_launch(record_property, "dgrad", launch, case, launches=2, then=after)
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
@@ -1335,40 +1350,43 @@ def test_wide_ts33_gives_the_wide_tile_bits(op, monkeypatch, record_property):
         if wide
         else "main"
     )
-    _judge_launch(record_property, op, launch, case, launches=3)
-    torch.cuda.synchronize()
-    if not ts33:
-        pytest.skip(f"no 3 / 3 head / tail {op} tile on {arch}")
-    sched = cb.stream_workspace("sched", device)
-    assert sched is not None
-    assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
-    captured = launch.out.clone()
-    side = torch.cuda.Stream(device)
-    side.wait_stream(torch.cuda.current_stream(device))
-    with torch.cuda.stream(side):
-        launch.launch()
-    torch.cuda.current_stream(device).wait_stream(side)
-    torch.cuda.synchronize()
-    assert torch.equal(launch.out, captured)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        launch.launch()
-    for _ in range(2):
-        launch.out.fill_(float("nan"))
-        graph.replay()
+
+    def after():
+        torch.cuda.synchronize()
+        if not ts33:
+            pytest.skip(f"no 3 / 3 head / tail {op} tile on {arch}")
+        sched = cb.stream_workspace("sched", device)
+        assert sched is not None
+        assert _u32_words(sched[:3]) == [int(v) for v in c["sched_rest"]]
+        captured = launch.out.clone()
+        side = torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            launch.launch()
+        torch.cuda.current_stream(device).wait_stream(side)
         torch.cuda.synchronize()
         assert torch.equal(launch.out, captured)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"{op}_wide_ts33_archs", [])
-    plain, _ = _prepare_row_op(op, sizes, n, k, device)
-    assert plain.stages[0] == "main_wide"
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    torch.cuda.synchronize()
-    assert torch.equal(plain.launch(), launch.out)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"wide_{op}_archs", [])
-    narrow, _ = _prepare_row_op(op, sizes, n, k, device)
-    assert narrow.stages[0] == "main"
-    torch.cuda.synchronize()
-    assert torch.equal(narrow.launch(), launch.out)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch.launch()
+        for _ in range(2):
+            launch.out.fill_(float("nan"))
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(launch.out, captured)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"{op}_wide_ts33_archs", [])
+        plain, _ = _prepare_row_op(op, sizes, n, k, device)
+        assert plain.stages[0] == "main_wide"
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        torch.cuda.synchronize()
+        assert torch.equal(plain.launch(), launch.out)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, f"wide_{op}_archs", [])
+        narrow, _ = _prepare_row_op(op, sizes, n, k, device)
+        assert narrow.stages[0] == "main"
+        torch.cuda.synchronize()
+        assert torch.equal(narrow.launch(), launch.out)
+
+    _judge_launch(record_property, op, launch, case, launches=3, then=after)
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
@@ -1408,25 +1426,29 @@ def test_probed_queue_split_gives_the_even_split_bits(op, monkeypatch, record_pr
         main.wait_stream(stream)
     torch.cuda.synchronize()
     assert all(torch.equal(out, outs[0]) for out in outs)
+
     # The launches of both streams now pass the probed split (where the launch probes):
-    # judge it over the draws, then the even split's bits on the case's own inputs.
-    _judge_launch(record_property, op, launch, case)
-    assert torch.equal(launch.out, outs[0])
-    if not probed:
-        assert splits == [None] * len(splits)
-        pytest.skip(f"no probed queue split for {op} on this device")
-    # The first launch on each stream enqueues the probe and passes the even split;
-    # the stream is synchronized after it, so the next launches pass the probe's split.
-    for split in splits:
-        assert split is not None
-        c0, c1 = split
-        assert c0 >= 1 and c1 >= 1 and c0 + c1 == cb.sm_count(device) // 2
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "domain_split_archs", [])
-    even, _ = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
-    assert even.plan["queue_split"] == "even"
-    assert (even.plan["c0"], even.plan["c1"]) == (launch.plan["c0"], launch.plan["c1"])
-    torch.cuda.synchronize()
-    assert torch.equal(even.launch(), outs[0])
+    # judge it over the draws, then (``after``) the even split's bits on the case's own
+    # inputs.
+    def after():
+        assert torch.equal(launch.out, outs[0])
+        if not probed:
+            assert splits == [None] * len(splits)
+            pytest.skip(f"no probed queue split for {op} on this device")
+        # The first launch on each stream enqueues the probe and passes the even split;
+        # the stream is synchronized after it, so the next launches pass the probe's split.
+        for split in splits:
+            assert split is not None
+            c0, c1 = split
+            assert c0 >= 1 and c1 >= 1 and c0 + c1 == cb.sm_count(device) // 2
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "domain_split_archs", [])
+        even, _ = _prepare_row_op(op, RAGGED_E6, 1024, 512, device)
+        assert even.plan["queue_split"] == "even"
+        assert (even.plan["c0"], even.plan["c1"]) == (launch.plan["c0"], launch.plan["c1"])
+        torch.cuda.synchronize()
+        assert torch.equal(even.launch(), outs[0])
+
+    _judge_launch(record_property, op, launch, case, then=after)
 
 
 @pytest.mark.parametrize("probe", ["no_compiler", "no_sm_seen"])
@@ -1448,9 +1470,12 @@ def test_queue_split_stays_even_without_a_probe(probe, monkeypatch, record_prope
     monkeypatch.setattr(cb, "_queue_probe_module", lambda capability: module)
     launch, case = _prepare_row_op("dgrad", RAGGED_E6, 1024, 512, device)
     assert launch.plan["queue_split"] == "probed"
-    _judge_launch(record_property, "dgrad", launch, case, launches=3)
-    torch.cuda.synchronize()
-    assert cb.stream_queue_split(device) is None
+
+    def after():
+        torch.cuda.synchronize()
+        assert cb.stream_queue_split(device) is None
+
+    _judge_launch(record_property, "dgrad", launch, case, launches=3, then=after)
 
 
 def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch, record_property):
@@ -1486,21 +1511,24 @@ def test_fwd_lwh_ef_gives_the_wide_tile_bits(monkeypatch, record_property):
         if wide
         else "main"
     )
-    _judge_launch(record_property, "fwd", launch, case, launches=2)
-    torch.cuda.synchronize()
-    if not ef:
-        pytest.skip(f"no last-wave-halves forward tile on {arch}")
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "fwd_lwh_ef_max_k", k - 1)
-    plain, _ = _prepare_row_op("fwd", sizes, n, k, device)
-    assert plain.stages[0] == "main_wide"
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    torch.cuda.synchronize()
-    assert torch.equal(plain.launch(), launch.out)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_fwd_archs", [])
-    narrow, _ = _prepare_row_op("fwd", sizes, n, k, device)
-    assert narrow.stages[0] == "main"
-    torch.cuda.synchronize()
-    assert torch.equal(narrow.launch(), launch.out)
+
+    def after():
+        torch.cuda.synchronize()
+        if not ef:
+            pytest.skip(f"no last-wave-halves forward tile on {arch}")
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "fwd_lwh_ef_max_k", k - 1)
+        plain, _ = _prepare_row_op("fwd", sizes, n, k, device)
+        assert plain.stages[0] == "main_wide"
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        torch.cuda.synchronize()
+        assert torch.equal(plain.launch(), launch.out)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_fwd_archs", [])
+        narrow, _ = _prepare_row_op("fwd", sizes, n, k, device)
+        assert narrow.stages[0] == "main"
+        torch.cuda.synchronize()
+        assert torch.equal(narrow.launch(), launch.out)
+
+    _judge_launch(record_property, "fwd", launch, case, launches=2, then=after)
 
 
 @pytest.mark.parametrize("sizes", [RAGGED_E6, EVICT_FIRST_E2], ids=["ragged", "long"])
@@ -1542,29 +1570,32 @@ def test_fwd_evict_first_gives_the_wide_tile_bits(sizes, monkeypatch, record_pro
         if wide
         else "main"
     )
-    _judge_launch(record_property, "fwd", launch, case, launches=5)
-    first = launch.out.view(torch.int16).clone()
-    torch.cuda.synchronize()
-    if not ef:
-        pytest.skip(f"no X / Y evict-first forward tile on {arch}")
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        launch.launch()
-    launch.out.fill_(float("nan"))
-    graph.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(launch.out.view(torch.int16), first)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "fwd_evict_first_archs", [])
-    plain, _ = _prepare_row_op("fwd", sizes, n, k, device)
-    assert plain.stages[0] == "main_wide"
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    torch.cuda.synchronize()
-    assert torch.equal(plain.launch().view(torch.int16), first)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_fwd_archs", [])
-    narrow, _ = _prepare_row_op("fwd", sizes, n, k, device)
-    assert narrow.stages[0] == "main"
-    torch.cuda.synchronize()
-    assert torch.equal(narrow.launch().view(torch.int16), first)
+
+    def after():
+        first = launch.out.view(torch.int16).clone()
+        torch.cuda.synchronize()
+        if not ef:
+            pytest.skip(f"no X / Y evict-first forward tile on {arch}")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch.launch()
+        launch.out.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize()
+        assert torch.equal(launch.out.view(torch.int16), first)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "fwd_evict_first_archs", [])
+        plain, _ = _prepare_row_op("fwd", sizes, n, k, device)
+        assert plain.stages[0] == "main_wide"
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        torch.cuda.synchronize()
+        assert torch.equal(plain.launch().view(torch.int16), first)
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "wide_fwd_archs", [])
+        narrow, _ = _prepare_row_op("fwd", sizes, n, k, device)
+        assert narrow.stages[0] == "main"
+        torch.cuda.synchronize()
+        assert torch.equal(narrow.launch().view(torch.int16), first)
+
+    _judge_launch(record_property, "fwd", launch, case, launches=5, then=after)
 
 
 @pytest.mark.parametrize("wave", [False, True])
@@ -1599,22 +1630,25 @@ def test_wgrad_k512_halves_gives_the_drain_build_bits(
     )
     halves = arch in c["k512_release_archs"]
     assert launch.stages[0] == (f"{base}_halves" if halves else base)
-    _judge_launch(record_property, "wgrad", launch, case, launches=2)
-    out = launch.out
-    torch.cuda.synchronize()
-    if base == "main_wave":
-        counters = cb.stream_workspace("wave_sync", device)
-        assert _u32_words(counters) == [0] * int(c["wave_sync_words"])
-    if not halves:
-        pytest.skip(f"no half-release twin on {arch}")
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k512_release_archs", [])
-    drain = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
-    )
-    assert drain.stages[0] == base and drain.plan["tile_k"] == 512
-    assert drain.plan["wave_mode"] == launch.plan["wave_mode"]
-    torch.cuda.synchronize()
-    assert torch.equal(drain.launch(), out)
+
+    def after():
+        out = launch.out
+        torch.cuda.synchronize()
+        if base == "main_wave":
+            counters = cb.stream_workspace("wave_sync", device)
+            assert _u32_words(counters) == [0] * int(c["wave_sync_words"])
+        if not halves:
+            pytest.skip(f"no half-release twin on {arch}")
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k512_release_archs", [])
+        drain = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            g, x, offs, out_dtype=out_dtype
+        )
+        assert drain.stages[0] == base and drain.plan["tile_k"] == 512
+        assert drain.plan["wave_mode"] == launch.plan["wave_mode"]
+        torch.cuda.synchronize()
+        assert torch.equal(drain.launch(), out)
+
+    _judge_launch(record_property, "wgrad", launch, case, launches=2, then=after)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
@@ -1648,19 +1682,22 @@ def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch, record
     assert plan["raster_rows"] == 0
     tail = ("tail_reduce",) if plan["tail_splits"] > 1 else ()
     assert launch.stages == ("main_halves_k256t", *tail)
-    _judge_launch(record_property, "wgrad", launch, case, launches=2)
-    outs = [launch.out.clone()]
-    torch.cuda.synchronize()
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k512_archs", [])
-    k256 = cake_moe_grouped_gemm_det_train_prepare_wgrad(
-        g, x, offs, out_dtype=out_dtype
-    )
-    assert k256.plan["tile_k"] == cb.K256_TAIL_TILE_K and k256.stages[0] == "main"
-    keys = ("clusters", "num_tail", "tail_splits", "raster_rows")
-    if any(k256.plan[key] != plan[key] for key in keys):
-        pytest.skip(f"the 256-wide k tile splits other tiles on this {arch} device")
-    torch.cuda.synchronize()
-    assert torch.equal(k256.launch(), outs[0])
+
+    def after():
+        outs = [launch.out.clone()]
+        torch.cuda.synchronize()
+        monkeypatch.setitem(HOST_PLAN_CONSTANTS, "k512_archs", [])
+        k256 = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+            g, x, offs, out_dtype=out_dtype
+        )
+        assert k256.plan["tile_k"] == cb.K256_TAIL_TILE_K and k256.stages[0] == "main"
+        keys = ("clusters", "num_tail", "tail_splits", "raster_rows")
+        if any(k256.plan[key] != plan[key] for key in keys):
+            pytest.skip(f"the 256-wide k tile splits other tiles on this {arch} device")
+        torch.cuda.synchronize()
+        assert torch.equal(k256.launch(), outs[0])
+
+    _judge_launch(record_property, "wgrad", launch, case, launches=2, then=after)
 
 
 def test_two_streams_take_separate_workspaces(monkeypatch, record_property):
@@ -1702,23 +1739,25 @@ def test_two_streams_take_separate_workspaces(monkeypatch, record_property):
         d.op("Y", first.out, "fwd", *case.operands("fwd"), case.sizes)
         d.op("dX", second.out, "dgrad", *case2.operands("dgrad"), case2.sizes)
 
-    judge_draws(record_property, draw, seed=0)
-    buffers = [cb.stream_workspace("sched", device, stream) for stream in streams]
-    assert all(buffer is not None for buffer in buffers)
-    assert buffers[0].data_ptr() != buffers[1].data_ptr()
-    rest = [int(v) for v in HOST_PLAN_CONSTANTS["sched_rest"]]
-    for buffer in buffers:
-        assert _u32_words(buffer[:3]) == rest
-    current = cb.stream_workspace("sched", device)
-    assert current is None or current.data_ptr() not in {
-        buffer.data_ptr() for buffer in buffers
-    }
-    for stream, launch, op in zip(
-        streams, (first, second), ("fwd", "dgrad"), strict=True
-    ):
-        probed = _probes_queue_split(device, op)
-        assert launch.plan["queue_split"] == ("probed" if probed else "even")
-        assert (cb.stream_queue_split(device, stream) is not None) == probed
+    def after():
+        buffers = [cb.stream_workspace("sched", device, stream) for stream in streams]
+        assert all(buffer is not None for buffer in buffers)
+        assert buffers[0].data_ptr() != buffers[1].data_ptr()
+        rest = [int(v) for v in HOST_PLAN_CONSTANTS["sched_rest"]]
+        for buffer in buffers:
+            assert _u32_words(buffer[:3]) == rest
+        current = cb.stream_workspace("sched", device)
+        assert current is None or current.data_ptr() not in {
+            buffer.data_ptr() for buffer in buffers
+        }
+        for stream, launch, op in zip(
+            streams, (first, second), ("fwd", "dgrad"), strict=True
+        ):
+            probed = _probes_queue_split(device, op)
+            assert launch.plan["queue_split"] == ("probed" if probed else "even")
+            assert (cb.stream_queue_split(device, stream) is not None) == probed
+
+    judge_draws(record_property, draw, seed=0, then=after)
 
 
 @pytest.mark.parametrize("op", ["fwd", "dgrad", "wgrad"])
@@ -1768,10 +1807,12 @@ def test_cuda_graph_replay(op, monkeypatch, record_property):
             if op != "wgrad":
                 assert torch.equal(launch.out, eager)
 
-    judge_draws(record_property, draw, seed=case.seed)
-    if _probes_queue_split(device, op):
-        assert launch.plan["queue_split"] == "probed" and probes == 1
-        assert cb.stream_queue_split(device, side) is not None
+    def after():
+        if _probes_queue_split(device, op):
+            assert launch.plan["queue_split"] == "probed" and probes == 1
+            assert cb.stream_queue_split(device, side) is not None
+
+    judge_draws(record_property, draw, seed=case.seed, then=after)
 
 
 @pytest.mark.parametrize("op", ["dgrad", "wgrad"])
@@ -1799,10 +1840,13 @@ def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch, rec
     torch.cuda.synchronize()
     after = torch.cuda.memory_stats(device)
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
-    _judge_launch(record_property, op, launch, case)
-    if _probes_queue_split(device, op):
-        assert launch.plan["queue_split"] == "probed"
-        assert cb.stream_queue_split(device) is not None
+
+    def split_checks():
+        if _probes_queue_split(device, op):
+            assert launch.plan["queue_split"] == "probed"
+            assert cb.stream_queue_split(device) is not None
+
+    _judge_launch(record_property, op, launch, case, then=split_checks)
 
 
 def test_prepared_launch_follows_new_offsets(record_property):
@@ -1924,17 +1968,19 @@ def test_autograd_wrapper_matches_reference_and_is_deterministic(record_property
                 d.exact(f"dW[{e}] (empty group)", w.grad[e], torch.zeros_like(w.grad[e]))
         kept.update(x=x, w=w, g=g, offs=offs)
 
-    judge_draws(record_property, draw, seed=0)
-    x, w, g, offs = kept["x"], kept["w"], kept["g"], kept["offs"]
-    dx, dw = x.grad.clone(), w.grad.clone()
-    x.grad = None
-    w.grad = None
-    # Same gradients from the m_indptr form; bitwise reproducible.
-    cake_moe_grouped_gemm_det(x, w, _m_indptr(RAGGED_E6, device)).backward(g)
-    torch.cuda.synchronize()
-    assert torch.equal(x.grad, dx) and torch.equal(w.grad, dw)
-    with pytest.raises(ValueError):
-        cake_moe_grouped_gemm_det(x.float(), w, offs)
+    def after():
+        x, w, g, offs = kept["x"], kept["w"], kept["g"], kept["offs"]
+        dx, dw = x.grad.clone(), w.grad.clone()
+        x.grad = None
+        w.grad = None
+        # Same gradients from the m_indptr form; bitwise reproducible.
+        cake_moe_grouped_gemm_det(x, w, _m_indptr(RAGGED_E6, device)).backward(g)
+        torch.cuda.synchronize()
+        assert torch.equal(x.grad, dx) and torch.equal(w.grad, dw)
+        with pytest.raises(ValueError):
+            cake_moe_grouped_gemm_det(x.float(), w, offs)
+
+    judge_draws(record_property, draw, seed=0, then=after)
 
 
 # ---------------------------------------------------------------------------
@@ -2185,18 +2231,20 @@ def test_checkpoint_early_stop_skips_the_forward_launch(
         d.op("dW", dw, "wgrad", g, x0, sizes)
         kept.update(x0=x0, w0=w0, g=g, offs=offs, plain=plain)
 
-    judge_draws(record_property, draw, seed=13)
-    x0, w0, g, offs, plain = (kept[key] for key in ("x0", "w0", "g", "offs", "plain"))
-    for arm, gemm, forwards in (
-        ("wrapper", _wrapper(offs), 1 if early_stop else 2),
-        ("control", _in_forward(offs), 2),
-    ):
-        calls["fwd"].clear()
-        got = _step(
-            gemm, _leaves(x0, w0), (g,), ckpt="non_reentrant", early_stop=early_stop
-        )
-        assert calls["fwd"] == [(n, k)] * forwards, arm
-        _assert_same_step(got, plain)
+    def after():
+        x0, w0, g, offs, plain = (kept[key] for key in ("x0", "w0", "g", "offs", "plain"))
+        for arm, gemm, forwards in (
+            ("wrapper", _wrapper(offs), 1 if early_stop else 2),
+            ("control", _in_forward(offs), 2),
+        ):
+            calls["fwd"].clear()
+            got = _step(
+                gemm, _leaves(x0, w0), (g,), ckpt="non_reentrant", early_stop=early_stop
+            )
+            assert calls["fwd"] == [(n, k)] * forwards, arm
+            _assert_same_step(got, plain)
+
+    judge_draws(record_property, draw, seed=13, then=after)
 
 
 @pytest.mark.parametrize("case", list(AUTOGRAD_CASES))
