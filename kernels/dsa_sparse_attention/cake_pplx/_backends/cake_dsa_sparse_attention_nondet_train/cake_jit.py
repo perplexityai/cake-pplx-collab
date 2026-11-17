@@ -28,9 +28,11 @@ from . import cake_build
 # policies that select the key-range-pass form of the backward
 # (``key_pass_policy``, see ``cake_backend.KeyPassPolicy``) and the direct
 # accumulation into the caller's packed rows through the natural-layout main
-# stages (``dkv_direct``, see ``cake_backend.DkvDirectPolicy``), and one physical
-# entry per stage: the ``library`` stem of its ``build.json`` entries
-# (``<library>_<arch>``, see ``cake_build``), the FFI entry and the launch
+# stages (``dkv_direct``, see ``cake_backend.DkvDirectPolicy``; like
+# ``key_pass_policy`` it may carry per-architecture ``rules``, each replacing
+# the base value on its target), and one physical entry per stage: the
+# ``library`` stem of its ``build.json`` entries (``<library>_<arch>``, see
+# ``cake_build``), the FFI entry and the launch
 # geometry the binding bakes in (block, cluster, cooperative launch, dynamic
 # shared memory, programmatic dependent launch).  A stage entry may narrow the
 # record's architectures with its own ``arches``: its library ships for those
@@ -89,7 +91,12 @@ MODULES: dict[str, dict[str, Any]] = {
                 },
             },
         },
-        "dkv_direct": {"min_keys_per_query": 4},
+        # direct accumulation from 4 keys per query token; on sm_107a, whose
+        # natural-layout drain is slower, from 20 (see the backend README)
+        "dkv_direct": {
+            "min_keys_per_query": 4,
+            "rules": {"sm_107a": {"min_keys_per_query": 20}},
+        },
         "fwd": {
             "library": "cake_dsa_h64_train_c949a885132a772bdb53",
             "ffi_entry": "run",
@@ -199,12 +206,16 @@ MODULES: dict[str, dict[str, Any]] = {
     # per token of FP32 dQ partial).  Measured on the acceptance GPUs, one key
     # pass is the fastest plan on every row and build (``max_passes`` 1: the
     # policy never plans a second pass; ``key_passes`` still forces the pass
-    # form, whose stages and scratch stay registered) and the natural-layout
-    # main stage beats the permuted accumulator plus cast whenever the row has
-    # at least one key per query (``min_keys_per_query`` 1).  The compaction and
-    # cast stages are rope-independent kernels shared with the RoPE program
-    # (same libraries, same launch geometry; the cast runs over the one 512-wide
-    # accumulator, 16 groups per key); the delta stage is the strided delta
+    # form, whose stages and scratch stay registered) and, on ``sm_100a`` /
+    # ``sm_103a``, the natural-layout main stage beats the permuted accumulator
+    # plus cast whenever the row has at least one key per query
+    # (``min_keys_per_query`` 1).  On ``sm_107a`` the natural-layout drain is
+    # slower: the permuted accumulator plus cast was faster on every measured
+    # row below 20 keys per query (VR200 backward: 0.3-6.3 % at 1 .. 16.6), so
+    # the ``sm_107a`` rule takes the natural stage from 20 keys per query on.  The
+    # compaction and cast stages are rope-independent kernels shared with the
+    # RoPE program (same libraries, same launch geometry; the cast runs over the
+    # one 512-wide accumulator, 16 groups per key); the delta stage is the strided delta
     # kernel, shared with the RoPE record like compact and cast (both records'
     # ``bwd_delta`` / ``nope_bwd_delta`` name one library; 256 threads: it
     # reads ``dout`` through its token and head strides, so a head-major
@@ -237,7 +248,10 @@ MODULES: dict[str, dict[str, Any]] = {
             "max_passes": 1,
             "dq_partial_bytes_per_token": 131072,
         },
-        "dkv_direct": {"min_keys_per_query": 1},
+        "dkv_direct": {
+            "min_keys_per_query": 1,
+            "rules": {"sm_107a": {"min_keys_per_query": 20}},
+        },
         "index_prep": {
             "library": "cake_dsa_h64_nope_train_db791110b21a91be1388",
             "ffi_entry": "run",

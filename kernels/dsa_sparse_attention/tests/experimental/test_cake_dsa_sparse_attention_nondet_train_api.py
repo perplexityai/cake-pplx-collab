@@ -444,17 +444,23 @@ def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
 
 
 def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_property):
-    """Through the public entry with ``dkv_acc`` and S >= 4 T: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the cast
-    path, ``1`` and ``auto`` the direct path (the record's rule picks it at S / T = 8), and an explicit
-    ``dkv_direct`` keyword wins over the variable.  Every step's ``out``, query gradients and accumulator increment
-    (through the destination map, over a random fill) are judged on the same draw."""
-    _require_direct_program()
+    """Through the public entry with ``dkv_acc`` at S / T = 8: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the cast
+    path, ``1`` the direct path, ``auto`` (and the variable unset) the record's rule of the device's architecture
+    (the direct path from 4 keys per query on sm_100a / sm_103a, the cast path on sm_107a, whose rule asks for 20),
+    and an explicit ``dkv_direct`` keyword wins over the variable.  Every step's ``out``, query gradients and
+    accumulator increment (through the destination map, over a random fill) are judged on the same draw."""
+    record, _stages = _require_direct_program()
     env = public_api.DKV_DIRECT_ENV
     cache = cake_backend.BINDING_CACHE
+    arch = cake_backend.arch_for(torch.device("cuda"))
 
     def case(s, j):
         inp = make_inputs([256], [2048], seed=s, topk=128)
         S, S_dst = inp.total_k, 400
+        rule = cake_backend.DkvDirectPolicy.from_record(record).wants(
+            inp.total_q, S, arch
+        )
+        assert rule is (arch != "sm_107a")
         gen = torch.Generator(device="cuda").manual_seed(s + 1)
         dst_map = torch.randint(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
@@ -485,7 +491,7 @@ def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_pr
             return plans[0].dkv_direct, run
 
         runs = {}
-        for mode, want in (("0", False), ("1", True), ("auto", True)):
+        for mode, want in (("0", False), ("1", True), ("auto", rule)):
             monkeypatch.setenv(env, mode)
             direct, runs[f"env {mode}"] = step()
             assert direct is want, mode
@@ -498,7 +504,7 @@ def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_pr
         assert direct is True
         monkeypatch.delenv(env)
         direct, runs["env unset"] = step()
-        assert direct is True
+        assert direct is rule
         return nv.judged(nv.rope_problem(inp), runs)
 
     nv.judge_draws(record_property, case, seed=SEED + 24)

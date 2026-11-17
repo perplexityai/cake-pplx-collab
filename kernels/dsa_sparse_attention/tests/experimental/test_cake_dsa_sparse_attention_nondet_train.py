@@ -448,6 +448,72 @@ def test_plan_dkv_direct_rule_and_env():
     assert cake_backend.DkvDirectPolicy.from_record({}) is None
 
 
+# The registered direct-accumulation rule per program and architecture (keys per query token from which the
+# natural-layout main stage adds into the FP32 rows directly): the base on sm_100a / sm_103a and without a device
+# (``None``), the record's ``rules["sm_107a"]`` on sm_107a, whose natural-layout drain is slower.
+_DKV_DIRECT_MIN_KEYS = {
+    cake_jit.PROGRAM: {"sm_100a": 4, "sm_103a": 4, "sm_107a": 20, None: 4},
+    cake_jit.NOPE_PROGRAM: {"sm_100a": 1, "sm_103a": 1, "sm_107a": 20, None: 1},
+}
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a", None])
+@pytest.mark.parametrize("program", cake_jit.PROGRAMS)
+def test_dkv_direct_rule_by_architecture(program, arch):
+    """The registered records' direct-accumulation decision per architecture (host side, no launch): direct iff
+    S >= min_keys_per_query(arch) * T -- 4 (RoPE) / 1 (NoPE) keys per query on sm_100a, sm_103a and without a
+    device, 20 on sm_107a in both programs -- checked on both sides of every threshold, at exactly 20 T among them;
+    ``dkv_direct=True`` / ``False`` override the rule on every architecture, and without ``dkv_acc`` a RoPE binding
+    never accumulates directly."""
+    record = cake_jit.record(program)
+    stages = cake_jit.registered_stages(program)
+    assert cake_backend.record_direct_stages(record, stages, program)
+    table = _DKV_DIRECT_MIN_KEYS[program]
+    assert set(record["arches"]) | {None} == set(table)
+    policy = cake_backend.DkvDirectPolicy.from_record(record)
+    m = table[arch]
+    assert policy.min_keys_for(arch) == m
+    assert policy.min_keys_per_query == table[None]  # the base
+    assert dict(policy.rules) == {
+        a: n for a, n in table.items() if a is not None and n != table[None]
+    }
+    T = 1000
+
+    def plan(S, **kw):
+        if program == cake_jit.NOPE_PROGRAM:
+            # every NoPE backward accumulates into a natural FP32 buffer (fresh dkv or dkv_acc)
+            nope = cake_backend._plan_nope_direct(
+                record, stages, T, S, kw.get("dkv_direct"), arch=arch
+            )
+            assert nope == cake_backend.plan_dkv_direct(
+                record, stages, T, S, accumulate=True, program=program, arch=arch, **kw
+            )
+            return nope
+        return cake_backend.plan_dkv_direct(
+            record, stages, T, S, accumulate=True, program=program, arch=arch, **kw
+        )
+
+    sizes = {1, T - 1, T, 4 * T - 1, 4 * T, m * T - 1, m * T, 20 * T - 1, 20 * T}
+    for S in sorted(sizes | {64 * T}):
+        want = S >= m * T
+        assert policy.wants(T, S, arch) is want, S
+        assert plan(S) is want, S
+        assert plan(S, dkv_direct=None) is want, S
+        assert plan(S, dkv_direct=True) is True, S
+        assert plan(S, dkv_direct=False) is False, S
+        if program == cake_jit.PROGRAM:
+            assert not cake_backend.plan_dkv_direct(
+                record, stages, T, S, accumulate=False, arch=arch
+            )
+            assert not cake_backend.plan_dkv_direct(
+                record, stages, T, S, accumulate=False, dkv_direct=True, arch=arch
+            )
+    # the thresholds themselves: exactly 20 T is direct on every architecture, 20 T - 1 only below sm_107a
+    assert plan(20 * T) is True
+    assert plan(20 * T - 1) is (arch != "sm_107a")
+    assert plan(table[None] * T) is (arch != "sm_107a")
+
+
 def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
     """``dkv_direct.rules`` maps an architecture to exactly the rule fields with a positive integer count; an
     architecture without a rule, or ``None``, takes the base; anything else in the record is refused loudly
@@ -669,6 +735,10 @@ def test_registry_record_is_well_formed():
         assert direct is not None
         assert direct.wants(1, direct.min_keys_per_query)
         assert not direct.wants(1, direct.min_keys_per_query - 1)
+        # every architecture's rule (the base where the record has none) has its threshold at its own count
+        for arch in list(record["arches"]) + [None]:
+            assert direct.wants(1, direct.min_keys_for(arch), arch)
+            assert not direct.wants(1, direct.min_keys_for(arch) - 1, arch)
         assert (
             cake_launch.STAGE_ARGS["bwd_main_natural"]
             == cake_launch.STAGE_ARGS["bwd_main"]
@@ -2292,20 +2362,24 @@ def _require_direct_program():
 
 
 def test_backward_dkv_acc_direct_and_cast_paths(record_property):
-    """With dkv_acc and S >= 4 T the natural-layout main stage adds into the caller's rows itself (no accumulators, no
-    cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients through the cast
-    stage; ``dkv_direct=None`` (the default) takes the rule.  Each mode adds through a duplicating destination map
+    """With dkv_acc the natural-layout main stage (``dkv_direct=True``) adds into the caller's rows itself (no
+    accumulators, no cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients
+    through the cast stage; ``dkv_direct=None`` (the default) takes the rule of the device's architecture (at
+    S / T = 8: the direct path from 4 keys per query on sm_100a / sm_103a, the cast path on sm_107a, whose rule
+    asks for 20).  Both paths run on every architecture.  Each mode adds through a duplicating destination map
     into a [S_dst, 704] buffer, on the prepared runner and on the eager entry: every call's outputs and buffer
     increment are judged (the contract holds unmapped rows and the columns from 576 on to their bits), and the
     in-range map passes the opt-in value check."""
     record, stages = _require_direct_program()
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    policy = cake_backend.DkvDirectPolicy.from_record(record)
 
     def case(s, j):
-        inp = make_inputs(
-            [256], [2048], seed=s, topk=128
-        )  # S / T = 8: the size rule picks direct
+        inp = make_inputs([256], [2048], seed=s, topk=128)  # S / T = 8
         args, explicit = _forward_and_natural_dkv(inp)
         S, S_dst = inp.total_k, 400
+        rule = policy.wants(inp.total_q, S, arch)
+        assert rule is (arch != "sm_107a")
         gen = torch.Generator(device="cuda").manual_seed(s + 3)
         dst_map = torch.randint(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
@@ -2323,7 +2397,7 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
                 dkv_direct=mode,
                 check_dst_map=True,
             )
-            assert runner.dkv_direct == (mode is not False)
+            assert runner.dkv_direct == (rule if mode is None else mode)
             if runner.dkv_direct:
                 assert (
                     "bwd_main_natural" in runner.launches
@@ -2355,7 +2429,9 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
             # the workspace of a direct binding has no FP32 accumulators; dkv_direct sizes it the same way
             T, device = inp.total_q, torch.device("cuda")
             plain = dsa_train_workspace_size(T, S, 128, device)
-            direct_size = dsa_train_workspace_size(T, S, 128, device, dkv_acc=True)
+            direct_size = dsa_train_workspace_size(
+                T, S, 128, device, dkv_acc=True, dkv_direct=True
+            )
             assert plain - direct_size >= S * D_QK * 4
             assert (
                 dsa_train_workspace_size(
@@ -2363,15 +2439,20 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
                 )
                 == plain
             )
-            assert (
-                dsa_train_workspace_size(
-                    T, S, 128, device, dkv_acc=True, dkv_direct=True
-                )
-                == direct_size
+            # the default (the rule of this device's architecture) sizes the path it selects
+            assert dsa_train_workspace_size(T, S, 128, device, dkv_acc=True) == (
+                direct_size if rule else plain
             )
-            # S < 4 T keeps the cast path by the rule
+            # S < 4 T keeps the cast path by the rule; the device's rule switches at its own threshold
             assert not cake_backend.plan_dkv_direct(
                 record, stages, 1000, 3999, accumulate=True
+            )
+            m = policy.min_keys_for(arch)
+            assert not cake_backend.plan_dkv_direct(
+                record, stages, 1000, m * 1000 - 1, accumulate=True, arch=arch
+            )
+            assert cake_backend.plan_dkv_direct(
+                record, stages, 1000, m * 1000, accumulate=True, arch=arch
             )
         return nv.judged(nv.rope_problem(inp), runs)
 
@@ -2857,7 +2938,9 @@ def test_registry_programs_are_well_formed(program):
     """Both records: declared stages in the program's order with physical entries, every library named in
     ``build.json`` for every arch, five launch leaves per stage, launchers and grids for every stage; the NoPE
     record carries its own policies (2048 B per key, one pass by default, natural accumulation from one key per
-    query) and may be partial until its libraries are exported (a registered forward stage comes first)."""
+    query on sm_100a / sm_103a, from 20 on sm_107a) and may be partial until its libraries are exported (a
+    registered forward stage comes first); the RoPE record accumulates directly from 4 keys per query, from 20 on
+    sm_107a."""
     assert cake_jit.PROGRAMS == (cake_jit.PROGRAM, NOPE_PROGRAM)
     record = cake_jit.record(program)
     order = cake_jit.STAGES_OF[program]
@@ -2878,9 +2961,16 @@ def test_registry_programs_are_well_formed(program):
     direct = cake_backend.DkvDirectPolicy.from_record(record)
     assert direct is not None
     if program == NOPE_PROGRAM:
-        # natural accumulation whenever the row has at least one key per query (measured faster than the
-        # permuted drain on every row) and one pass by default (measured fastest on every row): no per-arch rules
+        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured
+        # faster than the permuted drain on every row there), from 20 keys per query on sm_107a (its natural-layout
+        # drain is slower), and one pass by default (measured fastest on every row): no per-arch key-pass rules
         assert direct.min_keys_per_query == 1
+        assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
+            "sm_100a": 1,
+            "sm_103a": 1,
+            "sm_107a": 20,
+        }
+        assert direct.min_keys_for(None) == 1
         assert policy.key_bytes == 2048
         assert policy.dq_partial_bytes_per_token == NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
         assert policy.max_passes == 1
@@ -2894,6 +2984,12 @@ def test_registry_programs_are_well_formed(program):
         assert policy.token_chunk_multiple == rope.token_chunk_multiple
     else:
         assert direct.min_keys_per_query == 4
+        assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
+            "sm_100a": 4,
+            "sm_103a": 4,
+            "sm_107a": 20,
+        }
+        assert direct.min_keys_for(None) == 4
     pending = []
     for stage in stages:
         physical = record[stage]
@@ -3968,8 +4064,12 @@ _NOPE_STAND_IN_LAUNCH = {
 
 
 def _completed_nope_record() -> dict:
-    """The registered NoPE record completed with stand-in entries for the stages it does not register yet."""
+    """The registered NoPE record completed with stand-in entries for the stages it does not register yet.  Its
+    direct-accumulation rule is pinned to the architecture-independent one key per query: the launch tests over it
+    (S = 8 T) expect the natural-layout main stage by the rule on every device;
+    :func:`test_nope_plan_direct_rule_follows_the_device_architecture` plans the registered per-architecture rule."""
     record = dict(cake_jit.record(NOPE_PROGRAM))
+    record["dkv_direct"] = {"min_keys_per_query": 1}
     for stage in cake_jit.NOPE_STAGES:
         if stage not in record:
             library = f"{NOPE_PROGRAM}_stand_in_{stage}"
@@ -5901,6 +6001,63 @@ def test_nope_eager_backward_reads_a_strided_dout_in_place(monkeypatch):
     assert len(cake_backend.BINDING_CACHE) == 3  # three layouts, three plans
 
 
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_nope_plan_direct_rule_follows_the_device_architecture(monkeypatch, arch):
+    """The registered NoPE rule reaches every planner with the device's architecture (``arch_for``, stood in per
+    target over the recording launch entries): the natural-layout main stage from one key per query on sm_100a /
+    sm_103a, from 20 on sm_107a (S = 20 T natural, S = 20 T - 1 the permuted accumulator and the cast) -- the eager
+    backward fresh and with ``dkv_acc``, the prepared runner, its layout and ``dsa_nope_train_workspace_size``
+    alike; ``dkv_direct=True`` / ``False`` override the rule on every target, the forced key passes included."""
+    registered = dict(cake_jit.record(NOPE_PROGRAM)["dkv_direct"])
+    calls = []
+    record = _stand_in_nope_program(monkeypatch, calls)
+    # the registered per-architecture rule, not the stand-in's pinned one
+    record["dkv_direct"] = registered
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    m = cake_backend.DkvDirectPolicy.from_record(record).min_keys_for(arch)
+    assert m == (20 if arch == "sm_107a" else 1)
+    T, K = 8, 5
+    device = torch.device("cuda")
+    out, lse, o_lo = _saved_outputs(T)
+    natural = ["nope_bwd_delta", "nope_bwd_main_natural"]
+    cast = ["nope_bwd_delta", "nope_bwd_main", "nope_bwd_cast"]
+
+    def launched():
+        seq = [c[0] for c in calls]
+        calls.clear()
+        return seq
+
+    for S in sorted({T - 1, T, m * T - 1, m * T, 20 * T - 1, 20 * T}):
+        want = S >= m * T
+        q, kv, idx, dout = _nope_device_inputs(T, S, K, seed=S)
+        args = (q, kv, idx, out, o_lo, lse, dout)
+        calls.clear()
+        backward_nope(*args)
+        assert launched() == (natural if want else cast), S
+        acc = torch.zeros(S, D_LATENT, device="cuda")
+        backward_nope(*args, dkv_acc=acc)
+        assert launched() == (natural if want else cast), S
+        backward_nope(*args, dkv_direct=True)
+        assert launched() == natural, S
+        backward_nope(*args, dkv_direct=False)
+        assert launched() == cast, S
+        if S >= 2:
+            backward_nope(*args, key_passes=2)
+            pass_main = "nope_bwd_main_pass_natural" if want else "nope_bwd_main_pass"
+            mains = [c for c in launched() if c.startswith("nope_bwd_main")]
+            assert mains == [pass_main] * 2, S
+        runner = prepare_dsa_nope_train(q, kv, idx, dout=dout)
+        assert runner.dkv_direct is want, S
+        size = dsa_nope_train_workspace_size(T, S, K, device)
+        assert runner.layout["total"] == size, S
+        assert size == dsa_nope_train_workspace_size(T, S, K, device, dkv_direct=want)
+        assert ("dkv_latent_acc" in runner.layout) is not want, S
+        stages = cake_jit.registered_stages(NOPE_PROGRAM)
+        planned = cake_backend._plan_nope_direct(record, stages, T, S, None, arch=arch)
+        assert planned is want, S
+        del runner
+
+
 def test_nope_registered_record_without_kernels_fails_loudly():
     """Before the NoPE libraries exist the entries refuse loudly instead of launching: a record without the stages
     raises ``NotImplementedError`` naming them, a complete record whose libraries ``build.json`` does not carry yet
@@ -5930,7 +6087,9 @@ def test_nope_registered_record_without_kernels_fails_loudly():
     program, record = record_for(torch.device("cuda"), NOPE_PROGRAM)
     assert program == NOPE_PROGRAM
     stages = cake_jit.registered_stages(NOPE_PROGRAM)
-    direct = cake_backend._plan_nope_direct(record, stages, T, S, None)
+    direct = cake_backend._plan_nope_direct(
+        record, stages, T, S, None, arch=cake_backend.arch_for()
+    )
     assert (
         dsa_nope_train_workspace_size(T, S, K, torch.device("cuda"))
         == (
@@ -6328,9 +6487,10 @@ def test_nope_backward_repeat_calls(record_property):
 def test_nope_backward_destination_map_with_duplicates_matches_index_add(
     record_property,
 ):
-    """A random destination map with repeated rows into a wider FP32 buffer, on the record's route and forced
-    through the cast: each accumulation is judged against the oracle's key gradients added through the map
-    (``index_add``), its columns past 512 untouched; a map value out of range raises with ``check_dst_map``."""
+    """A random destination map with repeated rows into a wider FP32 buffer, on the record's route, forced through
+    the natural-layout main stage and forced through the cast: each accumulation is judged against the oracle's key
+    gradients added through the map (``index_add``), its columns past 512 untouched; a map value out of range
+    raises with ``check_dst_map``."""
     _require_nope_program(backward=True)
 
     def case(s, j):
@@ -6344,7 +6504,8 @@ def test_nope_backward_destination_map_with_duplicates_matches_index_add(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
         )
         runs = {"fresh": dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv)}
-        for label, direct in (("map", None), ("map cast", False)):
+        # the record's route (the rule of the device's architecture), then both paths forced on every architecture
+        for label, direct in (("map", None), ("map direct", True), ("map cast", False)):
             acc = torch.zeros(S_dst, 704, device="cuda")
             dq_m, none = backward_nope(
                 *args, dkv_acc=acc, dkv_dst_map=dst_map, dkv_direct=direct
@@ -6369,44 +6530,61 @@ def test_nope_backward_destination_map_with_duplicates_matches_index_add(
 
 
 def test_nope_backward_direct_and_cast_paths(record_property):
-    """With S >= 4 T the natural-layout main stage adds into the FP32 buffer itself (no accumulator, no cast),
-    for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path.  Prepared runners
-    and eager calls on both paths: every call is judged."""
-    _require_nope_direct_program()
+    """The natural-layout main stage (``dkv_direct=True``) adds into the FP32 buffer itself (no accumulator, no
+    cast), for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path; both run on
+    every architecture.  ``dkv_direct=None`` takes the rule of the device's architecture (S = 8 T: the natural stage
+    from one key per query on sm_100a / sm_103a, the cast path on sm_107a, whose rule asks for 20).  Prepared runners
+    and eager calls on both paths and by the rule: every call is judged."""
+    record, _stages = _require_nope_direct_program()
+    rule = cake_backend.DkvDirectPolicy.from_record(record).wants(
+        256, 2048, cake_backend.arch_for(torch.device("cuda"))
+    )
 
     def case(s, j):
         inp = _nope_inputs(256, 2048, seed=s, topk=128)
         out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
         args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-        direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
+        direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=True)
         cast = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=False)
+        by_rule = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
         assert direct.dkv_direct and "nope_bwd_cast" not in direct.launches
         assert not cast.dkv_direct and "nope_bwd_cast" in cast.launches
+        assert by_rule.dkv_direct is rule
+        assert ("nope_bwd_cast" in by_rule.launches) is not rule
         assert (
             "dkv_latent_acc" not in direct.tensors and "dkv_latent_acc" in cast.tensors
         )
         dq_d, dkv_d = direct.step()
         dq_c, dkv_c = cast.step()
-        dq_e, dkv_e = backward_nope(*args)
+        dq_r, dkv_r = by_rule.step()
+        dq_e, dkv_e = backward_nope(*args, dkv_direct=True)
         dq_f, dkv_f = backward_nope(*args, dkv_direct=False)
+        dq_er, dkv_er = backward_nope(*args)
         torch.cuda.synchronize()
         acc_d = torch.zeros(inp.total_k, D_LATENT, device="cuda")
         acc_c = torch.zeros_like(acc_d)
-        dq_ad, _ = backward_nope(*args, dkv_acc=acc_d)
+        acc_r = torch.zeros_like(acc_d)
+        dq_ad, _ = backward_nope(*args, dkv_acc=acc_d, dkv_direct=True)
         dq_ac, _ = backward_nope(*args, dkv_acc=acc_c, dkv_direct=False)
+        dq_ar, _ = backward_nope(*args, dkv_acc=acc_r)
         torch.cuda.synchronize()
         zeros = torch.zeros_like(acc_d)
         runs = {
             "eager": dict(out=out, lse=lse, o_lo=o_lo, dq=dq_e, dkv=dkv_e),
             "eager cast": dict(dq=dq_f, dkv=dkv_f),
+            "eager rule": dict(dq=dq_er, dkv=dkv_er),
             "runner": dict(
                 out=direct.out, lse=direct.lse, o_lo=direct.o_lo, dq=dq_d, dkv=dkv_d
             ),
             "runner cast": dict(
                 out=cast.out, lse=cast.lse, o_lo=cast.o_lo, dq=dq_c, dkv=dkv_c
             ),
+            "runner rule": dict(
+                out=by_rule.out, lse=by_rule.lse, o_lo=by_rule.o_lo, dq=dq_r, dkv=dkv_r
+            ),
             "acc": dict(dq=dq_ad, dkv_acc=nv.Acc(before=zeros, after=acc_d)),
             "acc cast": dict(dq=dq_ac, dkv_acc=nv.Acc(before=zeros, after=acc_c)),
+            "acc rule": dict(dq=dq_ar, dkv_acc=nv.Acc(before=zeros, after=acc_r)),
         }
         return nv.judged(nv.nope_problem(inp), runs)
 
@@ -6414,8 +6592,10 @@ def test_nope_backward_direct_and_cast_paths(record_property):
 
 
 def test_nope_backward_forced_key_passes(record_property):
-    """Three forced key passes (two eager calls and a prepared runner) beside the single pass: every call is
-    judged."""
+    """Three forced key passes (two eager calls and a prepared runner) beside the single pass, on the record's route,
+    plus three passes forced through the natural-layout pass stage (``dkv_direct=True``) and through the permuted
+    pass stage and the cast (``dkv_direct=False``), so both pass forms run on every architecture (S = 16 T: the rule
+    takes the natural form on sm_100a / sm_103a, the permuted form on sm_107a): every call is judged."""
     _require_nope_pass_program()
 
     def case(s, j):
@@ -6425,6 +6605,8 @@ def test_nope_backward_forced_key_passes(record_property):
         single = backward_nope(*args, key_passes=1)
         passes = backward_nope(*args, key_passes=3)
         again = backward_nope(*args, key_passes=3)
+        natural = backward_nope(*args, key_passes=3, dkv_direct=True)
+        permuted = backward_nope(*args, key_passes=3, dkv_direct=False)
         runner = prepare_dsa_nope_train(*args[:3], dout=inp.dout, key_passes=3)
         assert runner.key_passes == 3
         dq_r, dkv_r = runner.step()
@@ -6433,6 +6615,8 @@ def test_nope_backward_forced_key_passes(record_property):
             "single": dict(out=out, lse=lse, o_lo=o_lo, dq=single[0], dkv=single[1]),
             "passes": dict(dq=passes[0], dkv=passes[1]),
             "again": dict(dq=again[0], dkv=again[1]),
+            "passes natural": dict(dq=natural[0], dkv=natural[1]),
+            "passes permuted": dict(dq=permuted[0], dkv=permuted[1]),
             "runner": dict(
                 out=runner.out, lse=runner.lse, o_lo=runner.o_lo, dq=dq_r, dkv=dkv_r
             ),
@@ -6444,8 +6628,10 @@ def test_nope_backward_forced_key_passes(record_property):
 
 def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
     """Two forced passes over a row longer than one token chunk (4736 at K_slots 2176, plus 128): the launches run
-    chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward and the
-    single pass, every output judged."""
+    chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward on the
+    record's route, the single pass, and the two-pass backward forced through the natural-layout pass stage
+    (``dkv_direct=True``) and through the permuted pass stage and the cast (``dkv_direct=False``), so both pass
+    forms run on every architecture: every output judged."""
     record, _stages = _require_nope_pass_program()
     device = torch.device("cuda")
     chunk = KeyPassPolicy.from_record(record).token_chunk(2176)
@@ -6486,11 +6672,15 @@ def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
         a = backward_nope(*args, key_passes=2)
         b = backward_nope(*args, key_passes=2)
         single = backward_nope(*args, key_passes=1)
+        natural = backward_nope(*args, key_passes=2, dkv_direct=True)
+        permuted = backward_nope(*args, key_passes=2, dkv_direct=False)
         torch.cuda.synchronize()
         runs = {
             "two passes": dict(out=out, lse=lse, o_lo=o_lo, dq=a[0], dkv=a[1]),
             "again": dict(dq=b[0], dkv=b[1]),
             "single": dict(dq=single[0], dkv=single[1]),
+            "two passes natural": dict(dq=natural[0], dkv=natural[1]),
+            "two passes permuted": dict(dq=permuted[0], dkv=permuted[1]),
         }
         return nv.judged(nv.nope_problem(inp), runs)
 
