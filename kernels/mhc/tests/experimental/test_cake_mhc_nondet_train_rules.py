@@ -3767,6 +3767,31 @@ def test_package_wiring() -> None:
     assert not (REPO / "cake_pplx/_backends/cake_mhc_train.py").exists()
 
 
+# The token-owner programs whose sm_107a binding ships as that architecture's own unit
+# (csrc/<library>_sm_107a_binding.cu): at hidden 7168 sm_107a launches them in its oversized shared-memory mode (two
+# CTAs per SM), unlike the program's sm_100a / sm_103a binding.
+OWN_BINDING_UNITS = {("cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168", "sm_107a")}
+
+
+def _binding_source(library: str, arch: str) -> str:
+    """The binding unit of ``library`` on ``arch``: the architecture's own unit where it ships one
+    (:data:`OWN_BINDING_UNITS`), else the program's ``csrc/<library>_binding.cu``."""
+    if (library, arch) in OWN_BINDING_UNITS:
+        return f"csrc/{library}_{arch}_binding.cu"
+    return f"csrc/{library}_binding.cu"
+
+
+def _own_binding_units(package) -> set:
+    """``(library, arch)`` of every ``csrc/<library>_<arch>_binding.cu`` of the package."""
+    units = set()
+    for path in (package / "csrc").glob("*_binding.cu"):
+        stem = path.name[: -len("_binding.cu")]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            if stem.endswith("_" + arch):
+                units.add((stem[: -len(arch) - 1], arch))
+    return units
+
+
 @pytest.mark.cpu_only
 def test_build_manifest_lists_every_program() -> None:
     """``build.json`` (schema ``cake-build/1``) names this package and carries exactly one entry per (record library,
@@ -3791,7 +3816,7 @@ def test_build_manifest_lists_every_program() -> None:
             assert entry["arch"] == arch and entry["entry"] == "run", (name, arch)
             assert entry["sources"] == [
                 f"csrc/{record['library']}_kernel.cu",
-                f"csrc/{record['library']}_binding.cu",
+                _binding_source(record["library"], arch),
             ]
             assert "--use_fast_math" not in entry["nvcc_flags"]
             assert "--prec-div=true" in entry["nvcc_flags"]
@@ -3799,8 +3824,12 @@ def test_build_manifest_lists_every_program() -> None:
                 assert (PACKAGE_DIR / source).is_file(), source
             assert set(entry["sha256"]) == set(entry["sources"])
     stems = {record["library"] for record in nd.MODULES.values()}
+    # an architecture's own binding unit exists exactly where the manifest lists it
+    assert _own_binding_units(PACKAGE_DIR) == OWN_BINDING_UNITS, sorted(_own_binding_units(PACKAGE_DIR))
     for path in (PACKAGE_DIR / "csrc").glob("*.cu"):
         stem = path.name.rsplit("_", 1)[0]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):  # an architecture's own unit
+            stem = stem.removesuffix("_" + arch)
         assert stem in stems and stem.startswith(ND_PREFIX), path.name
 
 

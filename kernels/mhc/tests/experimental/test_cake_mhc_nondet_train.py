@@ -2114,6 +2114,31 @@ def test_zero_tokens_launch_nothing(hidden: int) -> None:
         torch.use_deterministic_algorithms(prev[0], warn_only=prev[1])
 
 
+# The token-owner programs whose sm_107a binding ships as that architecture's own unit
+# (csrc/<library>_sm_107a_binding.cu): at hidden 7168 sm_107a launches them in its oversized shared-memory mode (two
+# CTAs per SM), unlike the program's sm_100a / sm_103a binding.
+OWN_BINDING_UNITS = {("cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168", "sm_107a")}
+
+
+def _binding_source(library: str, arch: str) -> str:
+    """The binding unit of ``library`` on ``arch``: the architecture's own unit where it ships one
+    (:data:`OWN_BINDING_UNITS`), else the program's ``csrc/<library>_binding.cu``."""
+    if (library, arch) in OWN_BINDING_UNITS:
+        return f"csrc/{library}_{arch}_binding.cu"
+    return f"csrc/{library}_binding.cu"
+
+
+def _own_binding_units(package) -> set:
+    """``(library, arch)`` of every ``csrc/<library>_<arch>_binding.cu`` of the package."""
+    units = set()
+    for path in (package / "csrc").glob("*_binding.cu"):
+        stem = path.name[: -len("_binding.cu")]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            if stem.endswith("_" + arch):
+                units.add((stem[: -len(arch) - 1], arch))
+    return units
+
+
 def test_registry_records_reference_the_build_manifest() -> None:
     """Every ``MODULES`` record of the package names its ``build.json`` library (schema ``cake-build/1``): one entry
     per (library, architecture) with the kernel and binding sources under ``csrc/`` of this package."""
@@ -2139,7 +2164,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert entry["entry"] == "run"
             assert entry["sources"] == [
                 f"csrc/{record['library']}_kernel.cu",
-                f"csrc/{record['library']}_binding.cu",
+                _binding_source(record["library"], arch),
             ]
             assert set(entry["sha256"]) == set(entry["sources"])
             for source in entry["sources"]:
@@ -2148,6 +2173,8 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert "--use_fast_math" not in entry["nvcc_flags"]
             assert "--prec-div=true" in entry["nvcc_flags"]
     assert referenced == set(libraries)
+    # an architecture's own binding unit exists exactly where the manifest lists it
+    assert _own_binding_units(package) == OWN_BINDING_UNITS, sorted(_own_binding_units(package))
 
 
 # ----------------------------------------------------------------------------------------------------------------
