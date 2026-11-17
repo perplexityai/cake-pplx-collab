@@ -68,9 +68,6 @@ What differs from the deterministic module:
   package's copies of the deterministic programs and host plan, the L2
   evict-first twins of the wide tile included: bitwise the deterministic
   outputs.
-  The 256-wide k tile's `main_wave` program is the same kernel rendered from a
-  newer source: it takes two more buffer arguments (`A_rows`, `B_rows`) that
-  its sm_100a / sm_103a builds never read, and it has no sm_107a build.
 - The weight gradient with the 512-wide k tile runs builds of the
   deterministic package's k512 forms (`main`, `main_wave`, `main_halves`,
   `main_wave_halves`, `main_halves_k256t`) that finish their split tail in
@@ -143,11 +140,12 @@ The route is chosen by a static rule (nothing is compiled, loaded or
 test-built to decide it): an accumulate build is bound when its prebuilt
 library exists under `aot/`, or else when the version of the JIT shim's
 toolkit reaches the build's `build.json` `min_cuda`, with `nvcc` under the CUDA
-path and `CAKE_PPLX_DISABLE_JIT` unset (the loader's own rule). The fp32 accumulate builds use the PTX ISA 9.4
-`red.add.noftz.f32` form, so their `min_cuda` is 13.4 on every architecture;
-an ahead-of-time build with an older toolkit ships no library for them, and
-with a JIT toolkit below 13.4 the call composes (`"min_cuda"`) instead of
-failing.
+path and `CAKE_PPLX_DISABLE_JIT` unset (the loader's own rule). The fp32
+accumulate builds use the PTX ISA 9.4 `red.add.noftz.f32` form, so their
+`min_cuda` is 13.4 on `sm_100a` and `sm_103a` (13.5, the floor of every build,
+on `sm_107a`); an ahead-of-time build with an older toolkit ships no library
+for them, and with a JIT toolkit below that floor the call composes
+(`"min_cuda"`) instead of failing.
 
 `out` is required (`out_dtype` None or `out.dtype`) and must not overlap
 itself (row stride at least `K`, expert stride at least `N` row strides: an
@@ -401,10 +399,8 @@ and `sm_107a`. `cake_jit.PROGRAMS` / `ROUTES`, `build.json` and `csrc/` are
 written by the Cake export; `cake_build.py` is the shared loader, byte-identical
 in every Cake package. The fwd, dgrad, 256-wide k tile weight-gradient and
 tail-reduce programs are copies of the deterministic package's under this
-package's prefix (`cake_moe_grouped_gemm_<digest>`, the same digests), except
-that the 256-wide k tile's `main_wave` program is rendered from a newer source
-of the same kernel (two more, unused buffer arguments; sm_100a / sm_103a
-only); the 512-wide k tile's routes bind the ordered one-launch tail builds.
+package's prefix (`cake_moe_grouped_gemm_<digest>`, the same digests); the
+512-wide k tile's routes bind the ordered one-launch tail builds.
 
 | feature | sm_100a | sm_103a | sm_107a |
 | --- | --- | --- | --- |
@@ -421,8 +417,8 @@ only); the 512-wide k tile's routes bind the ordered one-launch tail builds.
 | `wgrad` output dtypes | bf16, fp32 | bf16, fp32 | bf16, fp32 |
 | `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `main_halves_queue` | `main_halves`, `main_wave_halves`, `main_halves_queue` | `main_halves`, `main_halves_k256t` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
-| CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.4 |
-| CUDA toolkit floor of the fp32 `_acc` builds | 13.4 | 13.4 | 13.4 |
+| CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
+| CUDA toolkit floor of the fp32 `_acc` builds | 13.4 | 13.4 | 13.5 |
 
 The slack tail placement runs a launch's split tail whole on the clusters the
 full waves leave least loaded when every tail tile fits there; the kernel

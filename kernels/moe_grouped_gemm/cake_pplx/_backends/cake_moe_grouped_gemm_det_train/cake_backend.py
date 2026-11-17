@@ -936,8 +936,8 @@ STREAM_WORKSPACES = ("sched", "wave_sync")
 # operands' row-addressed bases, the same tensors as ``A`` / ``B`` (``_bind`` passes them where the
 # argument plan names them).  A build on an architecture outside ``ROW_BASE_READ_ARCHS`` never reads its
 # row bases, and the host binds a one-element view of the operand there: no copy, any row stride, safe
-# under CUDA graph capture.  (Today only the 256-wide k tile's ``main_wave`` program on sm_100a /
-# sm_103a takes row bases, and it does not read them.)
+# under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave`` programs take row bases;
+# only the ``main`` build for sm_107a reads them.)
 OPERAND_ALIASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
 # Stream workspaces (module docstring): one buffer per (kind, device index,

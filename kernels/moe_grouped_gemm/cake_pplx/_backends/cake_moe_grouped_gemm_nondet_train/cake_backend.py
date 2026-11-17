@@ -35,10 +35,7 @@ and ``cake_moe_grouped_gemm_nondet`` of the package, and the module
 argument.  The deterministic entries are those of the module
 ``cake_pplx.cake_moe_grouped_gemm_det_train``; nothing here routes to them.
 ``fwd``, ``dgrad`` and the weight gradient with the 256-wide k tile run this
-package's copies of the deterministic programs and give their bits (the
-256-wide k tile's ``main_wave`` program is the same kernel rendered from a newer
-source: it takes two more buffer arguments, ``A_rows`` / ``B_rows``, which its
-sm_100a / sm_103a builds never read, and it has no sm_107a build).  The
+package's copies of the deterministic programs and give their bits.  The
 weight gradient with the 512-wide k tile runs the builds of the deterministic
 package's k512 forms whose split tail (the tiles of the last partial wave, cut
 into ``tail_splits`` k-step units over the clusters) is finished in the same
@@ -1270,8 +1267,8 @@ HOST_ARGUMENTS: dict[str, frozenset[str]] = {
 # descriptor.  The kernel build reads rows through it only in its sm_107a override (``ROW_BASE_READ_ARCHS``),
 # which takes the row pitch to be the row width, so the operand must have dense rows there.  On another
 # architecture the build never reads it, and the host binds a one-element view of the operand: no copy, any
-# row stride, safe under CUDA graph capture.  (Today only the 256-wide k tile's ``main_wave`` program on
-# sm_100a / sm_103a takes row bases, and it does not read them.)
+# row stride, safe under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave`` programs take
+# row bases; only the ``main`` build for sm_107a reads them.)
 ROW_BASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
 GRID_ARGUMENTS = ("grid_x", "grid_y", "grid_z")

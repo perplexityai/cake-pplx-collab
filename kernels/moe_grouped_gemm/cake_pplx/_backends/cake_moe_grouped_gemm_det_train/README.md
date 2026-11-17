@@ -32,7 +32,9 @@ Alignment: `fwd` needs `N % 256 == 0` and `K % 64 == 0`; `dgrad` needs
 `K % 256 == 0` and `N % 64 == 0`; `wgrad` needs `N % 256 == 0` and `K` a
 multiple of its k tile (256, or 512 when selected, see below). Outputs may be
 row-padded (any leading strides, unit stride along the last dimension); the
-padding is never written.
+padding is never written. On `sm_107a` the weight gradient with the 256-wide
+k tile also reads `g` and `x` through plain row pointers, so there both need
+dense rows (row stride equal to the row width; `ValueError` otherwise).
 
 Numerics: fp32 tensor-core accumulation with one bf16 rounding at the store
 (the fp32 weight-gradient variant stores the accumulator); bitwise
@@ -197,7 +199,8 @@ how it adds, and every other plan key is the overwrite's:
 
 A build can load when its prebuilt library is under `aot/` or the JIT shim's
 toolkit reaches its `build.json` `min_cuda` (13.4 for the main stages'
-accumulate builds, which use the PTX ISA 9.4 `red.global.add.noftz.f32`), with
+accumulate builds on `sm_100a` and `sm_103a`, which use the PTX ISA 9.4
+`red.global.add.noftz.f32`; 13.5 for every `sm_107a` build), with
 `nvcc` under the CUDA path and `CAKE_PPLX_DISABLE_JIT` unset;
 `cake_backend.acc_library_loadable` applies that rule without building or
 loading anything, and
@@ -410,7 +413,7 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   architecture is listed in `k512_archs` and the average rows per group reach
   the architecture's `k512_min_rows_per_group`; 256 otherwise. The two tiles
   are separate registered programs; the fp32 output is the compile-line
-  specialization `-DWGRAD_OUT=32` of the bf16 program.
+  specialization `-DCAKE_WGRAD_OUT=32` of the bf16 program.
 - Weight-gradient tail: the tiles of the last partial wave are split into
   `tail_splits` k-step chunks over all clusters (`wgrad_tail_tiles`,
   `wgrad_tail_plan`, a closed-form cost model of rounds, partial traffic and one
@@ -488,11 +491,12 @@ fused one.
 | `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
 | `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
-| CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.4 |
+| CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
+| CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.5 |
 
 The programs are exact-architecture tcgen05 payloads built for the exact
 targets `sm_100a`, `sm_103a` and `sm_107a` (`build.json` `arch_flags`).
-`cake_jit.PROGRAMS` lists twenty-nine libraries, one per kernel and build,
+`cake_jit.PROGRAMS` lists thirty libraries, one per kernel and build,
 each a kernel and a host-binding translation unit under
 `csrc/cake_moe_grouped_det_gemm/` shared by the architectures it is built for (an
 architecture-dependent line is folded under `__CUDA_ARCH__`):
@@ -524,23 +528,25 @@ architecture-dependent line is folded under `__CUDA_ARCH__`):
   `sm_100a` and `sm_103a`, one for `sm_107a`), `main_wave_halves` (`sm_100a`,
   `sm_103a`) and `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
   route, which add the weight gradient into `C` with one fp32 add per element
-  (their `build.json` entries need CUDA 13.4, `min_cuda`), and the twin of the
-  tail-reduce that adds the ordered sum of a split tail's partials into `C`
-  (`tail_reduce_acc`, on the fp32 512- and 256-wide k tile routes, for all
-  three architectures).
-- the weight-gradient main kernel with a 256- or 512-wide k tile and the
-  weight-gradient tail-reduce, as the previous delivery shipped them.
+  (their `build.json` entries need CUDA 13.4 on `sm_100a` and `sm_103a`,
+  `min_cuda`), and the twin of the tail-reduce that adds the ordered sum of a
+  split tail's partials into `C` (`tail_reduce_acc`, on the fp32 512- and
+  256-wide k tile routes, for all three architectures).
+- the weight-gradient main kernel with a 256- or 512-wide k tile (the routes'
+  `main` stage): the 512-wide one for `sm_100a` and `sm_103a`, the 256-wide
+  one in two builds, one for `sm_100a` and `sm_103a` and one for `sm_107a`
+  that also reads the operands' rows through `A_rows` / `B_rows` (above).
+- the weight-gradient tail-reduce, one kernel for both k tiles.
 
 The host launches a stage only where the constants above list the
 architecture, so a library may be built for an architecture its stage is not
 launched on.
 
 A specialization is a compile-line definition on its `build.json` entries:
-the tail-reduce k tile (`-DWGRAD_TILE=256|512`) and the fp32 weight-gradient
-output (`-DWGRAD_OUT=32` on the kernels of the last list item,
-`-DCAKE_WGRAD_OUT=32` on the other weight-gradient kernels; the bf16 output is
-the default). `cake_jit.ROUTES` maps each public route (operation, output dtype, k tile) to its stage programs
-and specializations. `build.json` (schema `cake-build/1`, written by the
+the tail-reduce k tile (`-DCAKE_WGRAD_TILE=512`; 256 is the default) and the
+fp32 weight-gradient output (`-DCAKE_WGRAD_OUT=32`; the bf16 output is the
+default). `cake_jit.ROUTES` maps each public route (operation, output dtype,
+k tile) to its stage programs and specializations. `build.json` (schema `cake-build/1`, written by the
 export) is the only record of what to compile: one entry per build
 `<library>[<specialization tag>]_<arch>` -- the tag is `_wgrad_tile256` /
 `_wgrad_tile512` for the specialized tail-reduce builds, `_wgrad_out32` for the
@@ -555,19 +561,11 @@ cache name carries the exact target and the closure digest; the target comes
 only from the entry's `-gencode` flags). The bindings include the package's
 `csrc/cake_ffi_checks.h`.
 
-The kernel translation units of the first four list items are
-self-contained. Programs whose bindings differ only in the kernel they launch,
-its block size and its dynamic shared memory share one binding, which a
-member's entries compile under `-DCAKE_KERNEL_SYMBOL`, `-DCAKE_PROGRAM_SHIM`
-and, where they differ from the owner's, `-DCAKE_BINDING_THREADS` /
-`-DCAKE_BINDING_SMEM`. The previous weight-gradient and tail-reduce kernels
-share one device header, `cake_moe_grouped_det_gemm_device.cuh` (their common preamble:
-typedefs, tensor-map ABI, math constants and the tcgen05 helpers behind
-need-guards), and their bindings share the dynamic shared-memory opt-in and
-TMA descriptor encoders through the fragment headers
-`cake_moe_grouped_det_gemm_binding_*.h` included inside each host-shim namespace.
-These headers are hand folds of exported text that no `build.json` entry
-lists, so the build's dependency tracking, not a manifest digest, covers them.
+Every kernel translation unit is self-contained. Programs whose bindings
+differ only in the kernel they launch, its block size and its dynamic shared
+memory share one binding, which a member's entries compile under
+`-DCAKE_KERNEL_SYMBOL`, `-DCAKE_PROGRAM_SHIM` and, where they differ from the
+owner's, `-DCAKE_BINDING_THREADS` / `-DCAKE_BINDING_SMEM`.
 
 Measured on B200 (`sm_100a`), GB300 (`sm_103a`) and R200 (`sm_107a`); the
 performance summary is in the delivery pull requests.
