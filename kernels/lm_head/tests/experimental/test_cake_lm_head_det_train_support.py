@@ -15,7 +15,9 @@ limitations under the License.
 
 Host tests of the candidate-support entry points of the Cake LM-head package:
 the argument contract, the validation stage's error word, the canonical FP32 sequence of the row stages and the
-reference backend against the masked FP64 oracle (gate: 1.05x the masked PyTorch baseline's error plus a floor).
+accuracy of every output (``packed`` / ``selected`` / ``kl``) and of ``dX`` / ``dW``: judged against the masked FP64
+oracle beside the naive BF16 tier (the masked PyTorch path with every tensor in BF16) over the shared judge's draws
+(``tests/cake_naive.py``), on the reference backend and on the cake backend's pass forms.
 The package is reached through ``tests.cake.test_helpers.cake_package`` only.
 """
 
@@ -31,19 +33,23 @@ from fractions import Fraction
 import pytest
 import torch
 
+from tests.cake_naive import judge_case
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    SEED_OFFSETS,
+    contract_support,
+    judge_support,
+    judge_support_inputs,
+)
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     Inputs as LossInputs,
 )
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import reference_fp64
 from tests.experimental.test_helpers.cake_lm_head_support_reference import (
     IGNORE_INDEX,
-    gate_failures,
     label_positions,
     make_support,
     make_support_inputs,
-    reference_support_b0,
     reference_support_fp64,
-    support_error_report,
     topp_support,
 )
 from tests.cake.test_helpers.cake_package import cake_package
@@ -103,19 +109,39 @@ def run_support(inp, outputs, *, upstream=None, need_dx=True, need_dw=True, **kw
     return res
 
 
-def check_gates(inp, outputs, *, upstream=None, **kw):
-    res = run_support(inp, outputs, upstream=upstream, **kw)
-    oracle = reference_support_fp64(inp, outputs=outputs, upstream=upstream)
-    b0 = reference_support_b0(inp, outputs=outputs, upstream=upstream)
-    err = support_error_report(res, oracle, inp)
-    b0err = support_error_report(b0, oracle, inp)
-    assert not err["nan"], err
-    # every requested output and both gradients are gated (no metric silently missing on either side)
-    gated = {f"{n}_max_abs" for n in outputs} | {"dX_rel_l2", "dW_rel_l2"}
-    assert gated <= err.keys() and gated <= b0err.keys(), (err, b0err)
-    bad = gate_failures(err, b0err)
-    assert not bad, f"{bad}\nerrors {err}\nB0 {b0err}"
-    return res, err, b0err
+def judge_entry(record_property, make, outputs, *, seed, upstream=None, forms=None, rerun=False, **kw):
+    """Judge the entry that forms ``outputs`` (:func:`run_support` with ``kw``; with ``forms``, one call per form name
+    with ``kw`` updated by ``forms[name]``) over the judge's draws: ``make(s)`` gives the draw's inputs,
+    ``upstream(inp)`` (default the inputs' ``g`` / ``d`` / ``e``) the upstream gradients.  Every output and ``dX`` /
+    ``dW`` meet the naive BF16 tier against the masked FP64 oracle (:func:`judge_support`: one oracle and one naive
+    value per draw for every form; the selected ``logp`` of an ignored row and the packed ``logp`` of a
+    single-candidate row exactly 0).  ``rerun``: the first draw's call is repeated and gives the same bits."""
+    first = [rerun]
+
+    def call(inp, extra):
+        up = None if upstream is None else upstream(inp)
+        res = run_support(inp, outputs, upstream=up, **dict(kw, **extra))
+        if first[0]:
+            assert_same(res, run_support(inp, outputs, upstream=up, **dict(kw, **extra)))
+        return res
+
+    def launch(inp):
+        if forms is None:
+            res = call(inp, {})
+        else:
+            res = {name: call(inp, extra) for name, extra in forms.items()}
+        first[0] = False
+        return res
+
+    return judge_support(
+        record_property,
+        make=make,
+        launch=launch,
+        outputs=outputs,
+        seed=seed,
+        upstream=upstream,
+        forms=None if forms is None else tuple(forms),
+    )
 
 
 def assert_same(a, b):
@@ -938,34 +964,111 @@ NUMERIC_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(NUMERIC_CASES))
-def test_numerics_against_oracle(case):
-    outputs, mk, kw = NUMERIC_CASES[case]
-    inp = small(**mk)
+# Every row of these cases has at most one candidate: every output and both gradients are exact zeros, whatever the
+# draw, so they are held to that contract (one input) and judge no accuracy.
+SINGLE_CANDIDATE_CASES = {"selected k_cap 1"}
+
+
+def _at_least_two_candidates(inp, s, top):
+    """``inp`` of one row with at least two candidates.  A row of fewer has the exact packed 0 and no gradient: no
+    accuracy to judge, and two such draws have the same oracle values.  Such a row gets ``K`` uniform in ``[2, top]``
+    and its ids from the support ids' generator (``s + 17``), and the packed upstream ``g`` is drawn again from the
+    support upstreams' generator (``s + 7``) at its new length."""
+    if inp.T != 1:
+        raise ValueError("a one-row case only")
+    if inp.M >= 2:
+        return inp
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(s + SEED_OFFSETS["support ids"])
+    k = int(torch.randint(2, top + 1, (1,), generator=gen))
+    ids = torch.randperm(inp.V, generator=gen)[:k]
+    ug = torch.Generator(device="cpu")
+    ug.manual_seed(s + SEED_OFFSETS["support upstreams"])
+    g = torch.randn(k, generator=ug) * 0.05
+    device = inp.X.device
+    return replace(
+        inp,
+        support_ids=ids.to(inp.support_ids.dtype).to(device),
+        support_offsets=torch.tensor([0, k], dtype=inp.support_offsets.dtype, device=device),
+        g=g.to(device),
+    )
+
+
+def _case_inputs(case, s, *, device=DEV, H=None):
+    """The inputs of the judged draw of seed ``s`` of :data:`NUMERIC_CASES` ``case`` (:func:`judge_support_inputs`;
+    ``H`` replaces the case's hidden size)."""
+    _, mk, _ = NUMERIC_CASES[case]
+    mk = dict(mk)
+    T = mk.pop("T")
+    if H is not None:
+        mk["H"] = H
+    inp = judge_support_inputs(T, s, device=device, **mk)
     if case == "selected strided X":
-        padded = torch.zeros(inp.T, inp.H + 64, dtype=torch.bfloat16)
+        padded = torch.zeros(inp.T, inp.H + 64, dtype=torch.bfloat16, device=device)
         padded[:, : inp.H] = inp.X
         inp.X = padded[:, : inp.H]
         assert inp.X.stride(0) == inp.H + 64
-    check_gates(inp, outputs, **kw)
+    if case == "packed T1 scalar":
+        inp = _at_least_two_candidates(inp, s, mk["k_max"])
+    return inp
+
+
+def _assert_single_candidate_zeros(inp, outputs, res):
+    """Every row with at most one candidate: the call's contract and exact zero outputs and gradients."""
+    assert int(inp.counts.max()) <= 1
+    contract_support(res, inp, outputs=outputs)
+    for name in (*outputs, "dX", "dW"):
+        assert not bool(res[name].any()), name
+
+
+@pytest.mark.parametrize("case", sorted(NUMERIC_CASES))
+def test_numerics_against_oracle(case, record_property):
+    """The reference backend: every output and both gradients meet the naive BF16 tier against the masked FP64
+    oracle (:func:`judge_entry`); the cases whose rows have at most one candidate are held to their exact zeros."""
+    outputs, mk, kw = NUMERIC_CASES[case]
+    if case in SINGLE_CANDIDATE_CASES:
+        inp = _case_inputs(case, SEED + mk["T"])
+        _assert_single_candidate_zeros(inp, outputs, run_support(inp, outputs, **kw))
+        return
+    judge_entry(record_property, lambda s: _case_inputs(case, s), outputs, seed=SEED + mk["T"], **kw)
 
 
 @pytest.mark.parametrize("scale", [0.0, -1.0, 1e4])
-def test_upstream_values(scale):
-    inp = small(T=129, k_cap=16, labels=True, teacher=True, tau_form="hetero")
-    up = dict(packed=inp.g * scale, kl=inp.e * scale)
+def test_upstream_values(scale, record_property):
+    """Scaled upstreams of the packed and KL outputs: judged against the naive tier with the same upstreams; a zero
+    upstream gives zero gradients (its contract)."""
+    T, outputs = 129, ("packed", "kl")
+    mk = dict(k_cap=16, labels=True, teacher=True, tau_form="hetero")
+
+    def upstream(inp):
+        return dict(packed=inp.g * scale, kl=inp.e * scale)
+
     if scale == 0.0:
-        res = run_support(inp, ("packed", "kl"), upstream=up)
+        inp = small(T=T, **mk)
+        res = run_support(inp, outputs, upstream=upstream(inp))
+        contract_support(res, inp, outputs=outputs)
         assert not res["dX"].any() and not res["dW"].any()
-    else:
-        check_gates(inp, ("packed", "kl"), upstream=up)
+        return
+    judge_entry(
+        record_property,
+        lambda s: judge_support_inputs(T, s, **mk),
+        outputs,
+        seed=SEED + T,
+        upstream=upstream,
+    )
 
 
-def test_teacher_minus_inf_entries():
-    inp = small(T=257, k_cap=32, teacher=True, teacher_inf_frac=0.3)
-    assert bool(torch.isinf(inp.teacher).any())
-    res, _, _ = check_gates(inp, ("kl",))
-    assert bool(torch.isfinite(res["kl"]).all())
+def test_teacher_minus_inf_entries(record_property):
+    """A teacher with about 30 % of its entries at ``-inf`` (on every draw): the KL is judged (finite by the
+    contract)."""
+    T = 257
+
+    def make(s):
+        inp = judge_support_inputs(T, s, k_cap=32, teacher=True, teacher_inf_frac=0.3)
+        assert bool(torch.isinf(inp.teacher).any())
+        return inp
+
+    judge_entry(record_property, make, ("kl",), seed=SEED + T)
 
 
 # ---------------------------------------------------------------------------
@@ -1008,7 +1111,6 @@ def test_scalar_equals_constant_tensor_bitwise(s):
     b = _with_tau(base, torch.full((base.T,), s))
     assert_same(run_support(a, ("packed", "kl")), run_support(b, ("packed", "kl")))
     assert_same(run_support(a, ("selected",)), run_support(b, ("selected",)))
-    check_gates(a, ("packed", "kl"))
 
 
 def test_frozen_inputs_bitwise():
@@ -1213,41 +1315,52 @@ def test_full_support_oracle_matches_full_vocabulary_oracle():
     assert float((ours["selected"] - theirs["logp"]).abs().max()) < 1e-12
     assert float((ours["dX"] - theirs["dX"]).norm() / theirs["dX"].norm()) < 1e-12
     assert float((ours["dW"] - theirs["dW"]).norm() / theirs["dW"].norm()) < 1e-12
-    check_gates(inp, ("selected",))
 
 
-def test_replay_uses_the_recorded_support():
-    T, V, H = 96, V_HOST, H_HOST
-    base = small(T=T, k_cap=16, x_scale=4.0)
+def _replay_inputs(s, *, H, device):
+    """The replay case's draw of seed ``s`` (``T`` 96, ``V`` :data:`V_HOST`): the support recorded as the top-p sets
+    (``p`` 0.9, ``k_cap`` 16) under ``W``, then a weight update ``W1`` (from a CPU generator seeded ``s`` plus the
+    ``"replay weight update"`` offset of ``SEED_OFFSETS``) that changes some top-p set.  Returns the recorded call's
+    inputs (``W1``, the recorded support, its own upstream ``g``), the inputs with the top-p sets under ``W1`` and the
+    rows whose set changed."""
+    T, V = 96, V_HOST
+    base = judge_support_inputs(T, s, H=H, V=V, k_cap=16, x_scale=4.0, device=device)
     ids, off = topp_support(base.X, base.W, p=0.9, k_cap=16)
-    gen = torch.Generator().manual_seed(SEED + 5)
-    W1 = (base.W.float() + 0.5 * torch.randn(V, H, generator=gen) / math.sqrt(H)).to(
-        torch.bfloat16
-    )
+    gen = torch.Generator().manual_seed(s + SEED_OFFSETS["replay weight update"])
+    W1 = (base.W.float().cpu() + 0.5 * torch.randn(V, H, generator=gen) / math.sqrt(H)).to(torch.bfloat16)
+    W1 = W1.to(device)
     ids1, off1 = topp_support(base.X, W1, p=0.9, k_cap=16)
     sets0 = [set(ids[off[t] : off[t + 1]].tolist()) for t in range(T)]
     sets1 = [set(ids1[off1[t] : off1[t + 1]].tolist()) for t in range(T)]
     changed = [t for t in range(T) if sets0[t] != sets1[t]]
     assert changed, "the update must change some top-p set"
-    rec = make_support_inputs(
-        T, seed=SEED, H=H, V=V, k_cap=16, device=DEV, W=W1, x_scale=4.0
+    g = (torch.randn(int(ids.numel()), generator=gen) * 0.05).to(device)
+    rec = replace(base, W=W1, support_ids=ids.to(device), support_offsets=off.to(device), g=g)
+    new = replace(base, W=W1, support_ids=ids1.to(device), support_offsets=off1.to(device))
+    return rec, new, changed
+
+
+def _recorded_support(s, *, H, device):
+    """:func:`_replay_inputs`' recorded call, after checking on the draw that the oracle sees the support: the
+    masked ``lse`` of the recorded sets and of the recomputed top-p sets differ on the changed rows (recomputing top-p
+    would be detected)."""
+    rec, new, changed = _replay_inputs(s, H=H, device=device)
+    kw = dict(outputs=("packed",), upstream=dict(packed=None), need_dx=False, need_dw=False)
+    lse_rec = reference_support_fp64(rec, **kw)["lse"]
+    lse_new = reference_support_fp64(new, **kw)["lse"]
+    assert bool((lse_rec != lse_new)[changed].any())
+    return rec
+
+
+def test_replay_uses_the_recorded_support(record_property):
+    """A call replays the support recorded under the old weights with the updated ones: its packed output and
+    gradients meet the naive tier on the recorded support."""
+    judge_entry(
+        record_property,
+        lambda s: _recorded_support(s, H=H_HOST, device=DEV),
+        ("packed",),
+        seed=SEED + 96,
     )
-    rec.support_ids, rec.support_offsets = ids, off
-    rec.g = torch.randn(int(ids.numel()), generator=gen) * 0.05
-    res, _, _ = check_gates(rec, ("packed",))
-    new = make_support_inputs(
-        T, seed=SEED, H=H, V=V, k_cap=16, device=DEV, W=W1, x_scale=4.0
-    )
-    new.support_ids, new.support_offsets = ids1, off1
-    lse_rec = reference_support_fp64(
-        rec, outputs=("packed",), need_dx=False, need_dw=False
-    )["lse"]
-    lse_new = reference_support_fp64(
-        new, outputs=("packed",), need_dx=False, need_dw=False
-    )["lse"]
-    assert (
-        float((lse_rec - lse_new)[changed].abs().max()) > 1e-3
-    )  # recomputing top-p would be detected
 
 
 def test_label_positions_helper_rejects_foreign_labels():
@@ -1309,19 +1422,17 @@ def _expect_device_assert(script, what):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
-def test_device_reference_matches_oracle():
-    inp = make_support_inputs(
-        257,
-        seed=SEED,
-        k_cap=32,
-        kind="heavy",
-        labels=True,
-        teacher=True,
-        tau_form="hetero",
-        device="cuda",
+@pytest.mark.parametrize("outputs", [("packed", "kl"), ("selected",)], ids="+".join)
+def test_device_reference_matches_oracle(outputs, record_property):
+    """The reference backend on the device: every output and both gradients meet the naive tier."""
+    T = 257
+    mk = dict(k_cap=32, kind="heavy", labels=True, teacher=True, tau_form="hetero")
+    judge_entry(
+        record_property,
+        lambda s: judge_support_inputs(T, s, device="cuda", **mk),
+        outputs,
+        seed=SEED + T,
     )
-    check_gates(inp, ("packed", "kl"))
-    check_gates(inp, ("selected",))
 
 
 # ---------------------------------------------------------------------------
@@ -1378,16 +1489,35 @@ def _numeric_case(case, H=512):
     return inp, outputs, kw
 
 
+def _judge_cake_case(record_property, case, **knobs):
+    """:data:`NUMERIC_CASES` ``case`` on the cake backend with the pass ``knobs`` (``H`` 512): every output and both
+    gradients meet the naive tier and the first draw's rerun is bitwise equal; a case whose rows have at most one
+    candidate is held to its exact zeros and its rerun bits."""
+    outputs, mk, kw = NUMERIC_CASES[case]
+    kw = dict(kw, backend="cake", **knobs)
+    if case in SINGLE_CANDIDATE_CASES:
+        inp, _, _ = _numeric_case(case)
+        res = run_support(inp, outputs, **kw)
+        _assert_single_candidate_zeros(inp, outputs, res)
+        assert_same(res, run_support(inp, outputs, **kw))
+        return
+    judge_entry(
+        record_property,
+        lambda s: _case_inputs(case, s, device=CUDA, H=512),
+        outputs,
+        seed=SEED + mk["T"],
+        rerun=True,
+        **kw,
+    )
+
+
 @pytest.mark.parametrize("form", sorted(CAKE_FORMS))
 @pytest.mark.parametrize("case", sorted(NUMERIC_CASES))
-def test_cake_numerics_against_oracle(case, form):
-    """Every output and both gradients of the cake backend pass the gate against the FP64 oracle (each pass form
-    forced and the host rule), and a rerun is bitwise equal."""
+def test_cake_numerics_against_oracle(case, form, record_property):
+    """Every output and both gradients of the cake backend meet the naive tier against the masked FP64 oracle (each
+    pass form forced and the host rule), and a rerun is bitwise equal."""
     _require_cake()
-    inp, outputs, kw = _numeric_case(case)
-    kw = dict(kw, backend="cake", **CAKE_FORMS[form])
-    res, _, _ = check_gates(inp, outputs, **kw)
-    assert_same(res, run_support(inp, outputs, **kw))
+    _judge_cake_case(record_property, case, **CAKE_FORMS[form])
 
 
 @pytest.mark.parametrize(
@@ -1396,105 +1526,112 @@ def test_cake_numerics_against_oracle(case, form):
 @pytest.mark.parametrize(
     "case", ["kl+packed heavy constant", "selected heavy hetero", "kl two chunks"]
 )
-def test_cake_sparse_weight_gradient_modes(case, dw):
+def test_cake_sparse_weight_gradient_modes(case, dw, record_property):
     """The sparse dW in the global (BF16 store) and chunked (FP32 pair ranges) modes, with the default split and a
-    split of 16 (every segment of a heavy id cut into parts and summed in part order)."""
+    split of 16 (every segment of a heavy id cut into parts and summed in part order): judged against the naive tier,
+    and a rerun is bitwise equal."""
     _require_cake()
-    inp, outputs, kw = _numeric_case(case)
     mode, split = dw
-    kw = dict(kw, backend="cake", path="sparse", dw_mode=mode, dw_split=split)
-    res, _, _ = check_gates(inp, outputs, **kw)
-    assert_same(res, run_support(inp, outputs, **kw))
+    _judge_cake_case(record_property, case, path="sparse", dw_mode=mode, dw_split=split)
 
 
 @pytest.mark.parametrize(
     "dw", [("global", None), ("global", 16), ("chunked", None), ("chunked", 16)]
 )
-def test_cake_sparse_weight_gradient_drops_out_of_range_ids(dw):
-    """The sparse dW pass called without the validation stage (the case of device assertions compiled out): a pair
-    whose int32 id is negative or ``>= V`` adds nothing and no row outside ``[0, V)`` is written (guard rows on both
-    sides stay zero); every other row has the bits of the same call with those pairs moved to an unused id and a
-    zero upstream, and matches the FP64 sum."""
+def test_cake_sparse_weight_gradient_drops_out_of_range_ids(dw, record_property):
+    """The sparse dW pass called without the validation stage (the case of device assertions compiled out), on every
+    draw of the judge: a pair whose int32 id is negative or ``>= V`` adds nothing and no row outside ``[0, V)`` is
+    written (guard rows on both sides stay zero); every other row has the bits of the same call with those pairs moved
+    to an unused id and a zero upstream.  The written rows (``dW``) meet the naive tier against the FP64 sum of the
+    in-range pairs of the active rows: the naive tier is ``index_add`` in BF16 of the BF16 products ``dz * x`` on the
+    host (the device's BF16 ``index_add`` adds in a run-dependent order)."""
     _require_cake()
     mode, split = dw
     T, H, V = 96, 512, 1000
-    gen = torch.Generator().manual_seed(SEED)
-    counts = torch.randint(0, 9, (T,), generator=gen)
-    counts[:4] = 1  # K_t < 2: inactive rows, whose pairs take the sentinel key
-    off = torch.zeros(T + 1, dtype=torch.int32)
-    off[1:] = torch.cumsum(counts, 0)
-    M = int(off[-1])
-    # every in-range id below V - 1: row V - 1 receives no pair
-    ids = torch.randint(0, V - 1, (M,), generator=gen, dtype=torch.int32)
-    X = torch.randn(T, H, generator=gen).to(torch.bfloat16)
-    dz = torch.randn(M, generator=gen).to(torch.bfloat16)
-    bad = torch.arange(3, M, 7)
-    out_of_range = torch.tensor([-1, V, V + 17, -(2**31)], dtype=torch.int32)
-    bad_ids = ids.clone()
-    bad_ids[bad] = out_of_range[torch.arange(bad.numel()) % 4]
-    ref_ids, ref_dz = ids.clone(), dz.clone()
-    ref_ids[bad], ref_dz[bad] = V - 1, 0.0  # in range, sorted after every other id
-
     cx = cake_support._cake_context(CUDA)
-    problem = cake_support.SupportProblem(
-        num_rows=T,
-        hidden=H,
-        vocab=V,
-        num_pairs=M,
-        k_cap=8,
-        chunk=32,
-        has_labels=False,
-        has_teacher=False,
-    )
-    plan = cake_support.make_support_plan(
-        problem,
-        cx.arch,
-        cx.geometry,
-        cake_support._resolve_knobs("sparse", mode, None, split),
-    )
-    assert plan.dw_mode == mode and (mode == "global") == (plan.dw_pairs == M)
-    off32 = off.to(CUDA)
-    rows, ld = cake_support._rows_operand(X.to(CUDA))
-    active = cake_support._row_active(off32, None, False)
+    naive = {}
 
-    def sparse_dw(ids_rows, scale):
-        dtype = torch.bfloat16 if mode == "global" else torch.float32
-        guarded = torch.zeros((V + 2, H), dtype=dtype, device=CUDA)
-        for p0 in range(0, M, plan.dw_pairs):
-            cake_support._sga_dw_range(
-                cx,
-                plan,
-                problem,
-                rows,
-                ld,
-                ids_rows.to(CUDA),
-                off32,
-                scale.to(CUDA),
-                active,
-                guarded[1 : V + 1],
-                "bf16" if mode == "global" else "f32_add",
-                p0,
-                min(M, p0 + plan.dw_pairs),
-            )
-        torch.cuda.synchronize()
-        return guarded.cpu()
+    def run(j, s):
+        gen = torch.Generator().manual_seed(s)
+        counts = torch.randint(0, 9, (T,), generator=gen)
+        counts[:4] = 1  # K_t < 2: inactive rows, whose pairs take the sentinel key
+        off = torch.zeros(T + 1, dtype=torch.int32)
+        off[1:] = torch.cumsum(counts, 0)
+        M = int(off[-1])
+        # every in-range id below V - 1: row V - 1 receives no pair
+        ids = torch.randint(0, V - 1, (M,), generator=gen, dtype=torch.int32)
+        X = torch.randn(T, H, generator=gen).to(torch.bfloat16)
+        dz = torch.randn(M, generator=gen).to(torch.bfloat16)
+        bad = torch.arange(3, M, 7)
+        out_of_range = torch.tensor([-1, V, V + 17, -(2**31)], dtype=torch.int32)
+        bad_ids = ids.clone()
+        bad_ids[bad] = out_of_range[torch.arange(bad.numel()) % 4]
+        ref_ids, ref_dz = ids.clone(), dz.clone()
+        ref_ids[bad], ref_dz[bad] = V - 1, 0.0  # in range, sorted after every other id
 
-    got, ref = sparse_dw(bad_ids, dz), sparse_dw(ref_ids, ref_dz)
-    bits = torch.int16 if mode == "global" else torch.int32
-    assert not got[0].view(bits).any() and not got[V + 1].view(bits).any()
-    assert not got[V].view(bits).any()  # row V - 1: no pair
-    assert torch.equal(got[1:V].view(bits), ref[1:V].view(bits))
-    keep = (counts >= 2).repeat_interleave(counts)
-    keep[bad] = False
-    expect = torch.zeros(V, H, dtype=torch.float64)
-    row_of = torch.arange(T).repeat_interleave(counts)
-    expect.index_add_(
-        0,
-        ids[keep].long(),
-        dz[keep].double()[:, None] * X[row_of[keep]].double(),
-    )
-    assert expect.abs().sum() > 0
-    torch.testing.assert_close(got[1 : V + 1].double(), expect, rtol=1e-2, atol=2e-2)
+        problem = cake_support.SupportProblem(
+            num_rows=T,
+            hidden=H,
+            vocab=V,
+            num_pairs=M,
+            k_cap=8,
+            chunk=32,
+            has_labels=False,
+            has_teacher=False,
+        )
+        plan = cake_support.make_support_plan(
+            problem,
+            cx.arch,
+            cx.geometry,
+            cake_support._resolve_knobs("sparse", mode, None, split),
+        )
+        assert plan.dw_mode == mode and (mode == "global") == (plan.dw_pairs == M)
+        off32 = off.to(CUDA)
+        rows, ld = cake_support._rows_operand(X.to(CUDA))
+        active = cake_support._row_active(off32, None, False)
+
+        def sparse_dw(ids_rows, scale):
+            dtype = torch.bfloat16 if mode == "global" else torch.float32
+            guarded = torch.zeros((V + 2, H), dtype=dtype, device=CUDA)
+            for p0 in range(0, M, plan.dw_pairs):
+                cake_support._sga_dw_range(
+                    cx,
+                    plan,
+                    problem,
+                    rows,
+                    ld,
+                    ids_rows.to(CUDA),
+                    off32,
+                    scale.to(CUDA),
+                    active,
+                    guarded[1 : V + 1],
+                    "bf16" if mode == "global" else "f32_add",
+                    p0,
+                    min(M, p0 + plan.dw_pairs),
+                )
+            torch.cuda.synchronize()
+            return guarded.cpu()
+
+        got, ref = sparse_dw(bad_ids, dz), sparse_dw(ref_ids, ref_dz)
+        bits = torch.int16 if mode == "global" else torch.int32
+        assert not got[0].view(bits).any() and not got[V + 1].view(bits).any()
+        assert not got[V].view(bits).any()  # row V - 1: no pair
+        assert torch.equal(got[1:V].view(bits), ref[1:V].view(bits))
+        keep = (counts >= 2).repeat_interleave(counts)
+        keep[bad] = False
+        row_of = torch.arange(T).repeat_interleave(counts)
+        pair_ids = ids[keep].long()
+        expect = torch.zeros(V, H, dtype=torch.float64)
+        expect.index_add_(0, pair_ids, dz[keep].double()[:, None] * X[row_of[keep]].double())
+        assert expect.abs().sum() > 0
+        naive[j] = torch.zeros(V, H, dtype=torch.bfloat16).index_add_(
+            0, pair_ids, dz[keep][:, None] * X[row_of[keep]]
+        )
+        return {"dW": got[1 : V + 1]}, {"dW": expect}
+
+    judge, failures = judge_case(run, lambda j, tier: {"dW": naive.pop(j)}, seed=SEED)
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)
 
 
 def test_cake_sparse_global_dw_zero_fill_bits(monkeypatch):
@@ -1682,8 +1819,9 @@ def test_cake_dense_needs_whole_items():
     inp = cuda_inputs(16, H=256, k_cap=8)
     with pytest.raises(ValueError, match="the dense X pass needs H"):
         run_support(inp, ("packed",), backend="cake", path="dense")
-    # the dense forward alone runs at any H
-    check_gates(inp, ("packed",), backend="cake", path={"F": "dense"})
+    # the dense forward alone runs at any H (its accuracy: the dense forms of test_cake_numerics_against_oracle)
+    res = run_support(inp, ("packed",), backend="cake", path={"F": "dense"})
+    contract_support(res, inp, outputs=("packed",))
 
 
 def test_cake_empty_calls():
@@ -1906,20 +2044,18 @@ def test_cake_step_memory_is_vocabulary_invariant(form):
         assert_same(results[0], dict(res, dW=dW[:V0]))
 
 
-def test_cake_replay_uses_the_recorded_support():
+def test_cake_replay_uses_the_recorded_support(record_property):
+    """:func:`test_replay_uses_the_recorded_support` on the cake backend (``H`` 512), the sparse and the dense
+    256-column forms judged as named outputs of one case (``packed@sparse``, ``packed@dense_vb256``, ...)."""
     _require_cake()
-    T, V, H = 96, V_HOST, 512
-    base = cuda_inputs(T, H=H, V=V, k_cap=16, x_scale=4.0)
-    ids, off = topp_support(base.X, base.W, p=0.9, k_cap=16)
-    gen = torch.Generator().manual_seed(SEED + 5)
-    W1 = (
-        base.W.float().cpu() + 0.5 * torch.randn(V, H, generator=gen) / math.sqrt(H)
-    ).to(torch.bfloat16)
-    rec = cuda_inputs(T, H=H, V=V, k_cap=16, W=W1.to(CUDA), x_scale=4.0)
-    rec.support_ids, rec.support_offsets = ids.to(CUDA), off.to(CUDA)
-    rec.g = (torch.randn(int(ids.numel()), generator=gen) * 0.05).to(CUDA)
-    for form in ("sparse", "dense vb256"):
-        check_gates(rec, ("packed",), backend="cake", **CAKE_FORMS[form])
+    judge_entry(
+        record_property,
+        lambda s: _recorded_support(s, H=512, device=CUDA),
+        ("packed",),
+        seed=SEED + 96,
+        backend="cake",
+        forms={"sparse": CAKE_FORMS["sparse"], "dense_vb256": CAKE_FORMS["dense vb256"]},
+    )
 
 
 def test_public_support_entries():

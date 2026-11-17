@@ -18,8 +18,13 @@ The zero-weight split of the deterministic LM-head package's loss entry (``cake_
 split indices, the floor, the loss mode and the not-applied list on the host, the exact loss's term placement against
 the plain path's reduction bit for bit, and on the device the bits the split keeps against the same call without it
 (``loss`` in the exact mode, ``logp`` of every row, ``dX`` of the gradient rows whose chunk keeps its dX form), the
-exact ``+0`` ``dX`` rows of the zero-weight rows, the deterministic contract (the same bits on every run), the
-accuracy gates of ``test_cake_lm_head_det_train.py`` and the peak memory against the call without the split.
+exact ``+0`` ``dX`` rows of the zero-weight rows, the deterministic contract (the same bits on every run) and the peak
+memory against the call without the split.
+
+Accuracy: each output of the split call (``loss`` / ``logp`` / ``dX`` / ``dW``) is judged against the float64 oracle
+beside the naive BF16 tier over the shared judge's draws (``tests/cake_naive.py``; the reference backend at the host
+shape, the generated program at ``JUDGE_H`` / ``JUDGE_V``), and each loss mode's loss against the float64 sum of its own
+FP32 terms beside ``torch.sum`` of the same terms in BF16.
 """
 
 import contextlib
@@ -38,13 +43,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
-    error_report,
-    make_inputs,
-    reference_fp64,
-    reference_unchunked,
-    rel_l2,
+from tests.cake_naive import judge_case
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    JUDGE_H,
+    JUDGE_V,
+    SEED_OFFSETS,
+    contract_lm_head,
+    judge_inputs,
+    judge_lm_head,
 )
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 from tests.cake.test_helpers.cake_package import cake_package
 
 cake_backend = cake_package("cake.cake_lm_head_det_train", "cake_backend")
@@ -57,12 +65,8 @@ CUDA = torch.device("cuda")
 DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# The accuracy gates of the deterministic suite (``test_cake_lm_head_det_train.py``), copied unchanged: at most 1.05x
-# the error of the unchunked PyTorch path on the same inputs plus a floor per metric, and twice the production-geometry
-# unchunked error as a sanity ceiling.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
+# A judged draw's zero-weight rows come from a CPU generator seeded with the draw's seed plus this offset.
+ZERO_SET_OFFSET = SEED_OFFSETS["zero sets"]
 # Runs of one call compared bit for bit (the deterministic contract).
 RUNS = 3
 # A floor above every call of this file: the plain path (no split).
@@ -87,30 +91,6 @@ def _require_program(*, entry: str = "loss"):
         pytest.skip(
             f"generated chunked LM-head program ({entry} entry) not registered for this device"
         )
-
-
-def _check_against_references(result, inp, *, ceiling=False):
-    """``test_cake_lm_head_det_train.py``'s gate, unchanged."""
-    oracle = reference_fp64(inp)
-    b0 = reference_unchunked(inp)
-    errors = error_report(result, oracle, inp.labels)
-    b0_errors = error_report(b0, oracle, inp.labels)
-    assert not errors["nan"]
-    for key, tiny in GATE_TINY.items():
-        if key in errors:
-            assert errors[key] <= GATE_MARGIN * b0_errors[key] + tiny, (
-                f"{key}: {errors[key]:.3e} vs unchunked {b0_errors[key]:.3e}"
-            )
-    if ceiling:
-        for key, measured in PRODUCTION_B0.items():
-            if key in errors:
-                assert errors[key] <= 2.0 * measured, (
-                    f"{key}: {errors[key]:.3e} above twice the production-geometry unchunked error"
-                )
-    assert errors["logp_ignored_zero"]
-    if result.get("dX") is not None:
-        assert errors["dX_ignored_zero"]
-    return errors, b0_errors
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:
@@ -156,15 +136,16 @@ def _loss_mode(mode):
         cake_backend.set_zero_weight_loss_mode(previous)
 
 
-def _zero_weight_set(inp, kind, *, seed=SEED):
+def _zero_weight_set(inp, kind, *, seed=SEED, gen_seed=None):
     """bool ``[T]`` of the valid rows whose weight becomes zero: ``"none"``, ``"one"`` (the first valid row),
     ``("group", f)`` (whole groups of 512 consecutive rows, ``round(f * groups)`` of them), ``("random", f)``
-    (``round(f * T_v)`` random valid rows) or ``"all"``."""
+    (``round(f * T_v)`` random valid rows) or ``"all"``.  The rows come from a CPU generator seeded ``gen_seed``
+    (default ``seed + T``)."""
     valid = inp.labels >= 0
     T = int(valid.numel())
     zs = torch.zeros(T, dtype=torch.bool, device=valid.device)
     gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed + T)
+    gen.manual_seed(seed + T if gen_seed is None else gen_seed)
     if kind == "none":
         return zs
     if kind == "all":
@@ -204,6 +185,26 @@ def _host_inputs(T, *, seed=SEED, **kw):
     return make_inputs(
         T, objective="policy", seed=seed + T, H=H_HOST, V=V_HOST, device=DEV, **kw
     )
+
+
+def _zero_rows(inp):
+    """bool ``[T]``: the zero-weight rows of ``inp`` (the valid rows whose weight is ``+0`` or ``-0``)."""
+    return (inp.labels >= 0) & (inp.loss_weights == 0)
+
+
+def _judged_inputs(T, kind, s, *, H, V, device):
+    """The policy inputs of the judged draw of seed ``s`` (:func:`judge_inputs`) with the zero-weight rows of
+    ``kind`` from a CPU generator seeded ``s + ZERO_SET_OFFSET`` (``-0`` on every other one)."""
+    base = judge_inputs(T, s, H=H, V=V, device=device, objective="policy")
+    zero = _zero_weight_set(base, kind, gen_seed=s + ZERO_SET_OFFSET)
+    return _with_zero_weights(base, zero, negative_zero=True)
+
+
+def _split_contract(result, inp):
+    """:func:`contract_lm_head` of a split call plus its exact ``+0`` ``dX`` rows of the zero-weight rows."""
+    contract_lm_head(result, inp)
+    if result.get("dX") is not None:
+        assert _all_plus_zero(result["dX"][_zero_rows(inp)]), "a zero-weight row's dX row is not +0"
 
 
 def _loss_call(
@@ -506,11 +507,6 @@ def test_exact_loss_reproduces_the_plain_reduction(n_v, frac, C):
         backend="reference",
     )
     assert _same_bits(got, plain), (float(got), float(plain))
-    if n_g:
-        # the regrouped sum of the same terms is the same value to the FP32 sum's rounding, not necessarily the same bits
-        assert math.isclose(
-            float(got), -float(tg.double().sum()), rel_tol=1e-6, abs_tol=1e-6
-        )
 
 
 ZERO_KINDS_HOST = ["one", ("random", 0.166), ("group", 0.5), "all"]
@@ -519,47 +515,58 @@ ZERO_KINDS_HOST = ["one", ("random", 0.166), ("group", 0.5), "all"]
 @pytest.mark.parametrize("mode", ["exact", "regroup"])
 @pytest.mark.parametrize("kind", ZERO_KINDS_HOST, ids=str)
 @pytest.mark.parametrize("T, C", [(37, 16), (1200, 256)])
-def test_reference_zero_weight_rows(kind, T, C, mode):
+def test_reference_zero_weight_rows(kind, T, C, mode, record_property):
     """The reference backend with zero-weight rows (``+0`` and ``-0``, ignored rows mixed in, ragged multi-chunk
-    calls): the deterministic suite's gates against the FP64 oracle; the zero-weight rows' ``dX`` rows are exact
-    ``+0``; ``logp`` / ``loss`` / ``dX`` / ``dW`` agree with the call without the split at the reference GEMMs'
-    precision (the reference GEMMs may round differently for another ``M``); the memory report records the split."""
-    base = _host_inputs(T)
+    calls), on every draw of the judge: the split call's ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive BF16
+    tier against the FP64 oracle; the zero-weight and ignored rows' ``dX`` rows are exact ``+0``; the memory report
+    records the split and its loss mode.  Every valid row of zero weight: ``logp`` is judged, ``loss`` is ``0`` with the
+    bits of the call without the split, ``dX`` and ``dW`` are zero."""
     if kind == ("group", 0.5) and T < 1024:
         kind = ("random", 0.5)  # one 512-row group: the fraction rounds to no group
-    zero = _zero_weight_set(base, kind)
-    inp = _with_zero_weights(base, zero, negative_zero=True)
-    with _zero_weight_floor(0), _loss_mode(mode):
-        split = _loss_call(inp, C, backend="reference")
-        fr = cake_backend.forward_loss(
-            inp.X,
-            inp.W,
-            inp.labels,
-            objective="policy",
-            infer_logp=inp.infer_logp,
-            loss_weights=inp.loss_weights,
-            chunk_size=C,
-            backend="reference",
-        )
-    with _zero_weight_floor(NO_SPLIT):
-        plain = _loss_call(inp, C, backend="reference")
-    valid = inp.labels >= 0
-    assert fr.memory["zero_weight_rows"] == int(zero.sum())
-    assert fr.memory["zero_weight_loss_mode"] == mode
-    assert ("zero_weight_exact_loss_temporary_bytes" in fr.memory) == (mode == "exact")
-    assert _all_plus_zero(split["dX"][zero])
-    assert bool((split["logp"][~valid] == 0).all())
-    torch.testing.assert_close(split["logp"], plain["logp"], atol=2e-5, rtol=1e-5)
-    if bool(zero[valid].all()):
-        assert float(split["loss"]) == 0.0 and _same_bits(split["loss"], plain["loss"])
-        assert not bool(split["dX"].any()) and not bool(split["dW"].any())
-        return
-    _check_against_references(split, inp)
-    assert math.isclose(
-        float(split["loss"]), float(plain["loss"]), rel_tol=1e-5, abs_tol=1e-6
+    every = kind == "all"
+
+    def make(s):
+        return _judged_inputs(T, kind, s, H=H_HOST, V=V_HOST, device=DEV)
+
+    def launch(inp):
+        with _zero_weight_floor(0), _loss_mode(mode):
+            result = _loss_call(inp, C, backend="reference")
+            result["memory"] = cake_backend.forward_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                objective="policy",
+                infer_logp=inp.infer_logp,
+                loss_weights=inp.loss_weights,
+                chunk_size=C,
+                backend="reference",
+            ).memory
+        if every:
+            with _zero_weight_floor(NO_SPLIT):
+                result["plain_loss"] = _loss_call(inp, C, backend="reference")["loss"]
+        return result
+
+    def route(inp, result):
+        memory = result["memory"]
+        assert memory.get("zero_weight_rows") == int(_zero_rows(inp).sum()), "the call did not split"
+        assert memory["zero_weight_loss_mode"] == mode
+        assert ("zero_weight_exact_loss_temporary_bytes" in memory) == (mode == "exact")
+
+    def contract(result, inp):
+        _split_contract(result, inp)
+        if every:
+            assert float(result["loss"]) == 0.0 and _same_bits(result["loss"], result["plain_loss"])
+            assert not bool(result["dX"].any()) and not bool(result["dW"].any())
+
+    judge_lm_head(
+        record_property,
+        make=make,
+        launch=launch,
+        seed=SEED + T,
+        names=("logp",) if every else None,
+        route=route,
+        contract=contract,
     )
-    assert rel_l2(split["dX"].float(), plain["dX"].float()) <= 1e-3
-    assert rel_l2(split["dW"].float(), plain["dW"].float()) <= 1e-3
 
 
 def test_reference_zero_weight_rows_without_return_logp():
@@ -1261,16 +1268,50 @@ ZERO_DEVICE_CASES = [
 ]
 
 
+def _judge_split(record_property, T, kind, C):
+    """The split call (exact mode, default switches) at the judged shape (``JUDGE_H``, ``JUDGE_V``, ``T`` rows, chunk
+    ``C``) over the judge's draws: ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier against the FP64
+    oracle; on every draw the chunk loop runs over the gradient rows only (the split's route) and the zero-weight and
+    ignored rows' ``dX`` rows are exact ``+0``."""
+
+    def make(s):
+        return _judged_inputs(T, kind, s, H=JUDGE_H, V=JUDGE_V, device=CUDA)
+
+    def launch(inp):
+        with _zero_weight_floor(0), _recording_loss_plans() as plans:
+            result = _loss_call(inp, C)
+        result["plans"] = list(plans)
+        return result
+
+    def route(inp, result):
+        grad_rows = int(((inp.labels >= 0) & (inp.loss_weights != 0)).sum())
+        plans = result["plans"]
+        assert len(plans) == 1 and plans[0].valid_rows == grad_rows, (
+            f"the chunk loop ran {[p.valid_rows for p in plans]} rows, not the {grad_rows} gradient rows: no split"
+        )
+
+    judge_lm_head(
+        record_property,
+        make=make,
+        launch=launch,
+        seed=SEED + T,
+        route=route,
+        contract=_split_contract,
+    )
+
+
 @pytest.mark.parametrize("hidden_count", [None, False])
 @pytest.mark.parametrize("T, kind", ZERO_DEVICE_CASES, ids=str)
 def test_device_exact_loss_and_logp_match_the_plain_path(
-    glm_weight, T, kind, hidden_count
+    glm_weight, T, kind, hidden_count, record_property
 ):
     """The split in the exact mode against the same call without it: ``loss`` and ``logp`` (every row; the
     zero-weight rows' from the logp-only pass) bit for bit; the zero-weight rows' ``dX`` rows exact ``+0``; the
-    gradient rows' ``dX`` rows bit for bit where their chunk runs the same dX form and K-slice count, the rest within
-    the gates; ``dW`` within the deterministic suite's gates (the K reduction over other chunk rows).  Every valid row
-    of zero weight: the plain loss (``+0``), zero gradients, no gradient GEMM."""
+    gradient rows' ``dX`` rows bit for bit where their chunk runs the same dX form and K-slice count.  Every valid row
+    of zero weight: the plain loss (``+0``), zero gradients, no gradient GEMM.  Accuracy: with the default count path,
+    the split call at the judged shape and the case's ``T`` meets the naive BF16 tier (:func:`_judge_split`, one
+    judged case per zero kind; the hidden and the host count give the same bits,
+    :func:`test_device_runs_repeat_and_both_count_paths`); every valid row of zero weight is held to its contract."""
     _require_program(entry="loss")
     base = _device_inputs(T, W=glm_weight)
     zero = _zero_weight_set(base, kind)
@@ -1289,6 +1330,7 @@ def test_device_exact_loss_and_logp_match_the_plain_path(
     )
     assert _same_bits(split["logp"], plain["logp"])
     assert _all_plus_zero(split["dX"][zero])
+    contract_lm_head(split, inp)
     if bool(zero[valid].all()):
         assert split_plans == []  # no gradient GEMM
         assert _all_plus_zero(split["loss"])
@@ -1299,12 +1341,12 @@ def test_device_exact_loss_and_logp_match_the_plain_path(
         inp.labels, zero, C, split_plans[0], plain_plans[0]
     )
     assert _same_bits(split["dX"][rows], plain["dX"][rows])
-    _check_against_references(split, inp, ceiling=True)
-    dw_rel = rel_l2(split["dW"].float(), plain["dW"].float())
     print(
         f"\nzero-weight T={T} {kind} zero {int(zero.sum())}/{int(valid.sum())}: dX rows bitwise "
-        f"{int(rows.numel())}/{int((valid & ~zero).sum())}, dW rel-L2 vs plain {dw_rel:.2e}"
+        f"{int(rows.numel())}/{int((valid & ~zero).sum())}"
     )
+    if hidden_count is None:
+        _judge_split(record_property, T, kind, C)
 
 
 @pytest.mark.parametrize("T, split_expected", [(4095, False), (4096, True)])
@@ -1384,19 +1426,22 @@ def test_device_runs_repeat_and_both_count_paths(glm_weight, hidden_count):
     assert split_syncs == plain_syncs
 
 
-# The regroup test's independent inputs: each its own X / labels / weights (``seed`` SEED + i) and zero-weight groups.
-REGROUP_INPUTS = 32
+# The regroup test's rows (one chunk of 4096 is three full chunks and a one-row tail) and its judged outputs: each
+# loss mode's loss.
+REGROUP_T = 12289
+REGROUP_OUTPUTS = ("loss@exact", "loss@regroup")
 
 
-def _regroup_case(W, seed):
-    """One input of :func:`test_device_regroup_mode` (``T`` 12289, 30 % of the valid rows zero-weight in groups of
-    512, chunk 4096): the exact and the regroup mode's calls, the FP64 sum of the valid rows' FP32 loss terms (the
-    kernel's own terms, the zero-weight rows' ``+-0``; policy loss ``0 - sum``), the naive tier's loss, PyTorch BF16
-    (the same terms in row order in bfloat16, summed by ``torch.sum`` in bfloat16 on the device, widened exactly),
-    ``torch.sum``'s loss in FP32 on the device (reported, not judged), and each loss's relative error
-    ``|loss - FP64 loss| / |FP64 loss|``."""
-    base = _device_inputs(12289, W=W, seed=seed)
-    inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3), seed=seed))
+def _regroup_case(W, s):
+    """One draw of :func:`test_device_regroup_mode` from the draw seed ``s`` (``T`` :data:`REGROUP_T`, the fixed
+    ``W``, ``X`` / labels / weights from ``s``, 30 % of the valid rows zero-weight in groups of 512 from ``s +
+    ZERO_SET_OFFSET``, chunk 4096): the exact and the regroup mode's calls, the FP64 sum of the valid rows' FP32 loss
+    terms (the kernel's own terms, the zero-weight rows' ``+-0``; policy loss ``0 - sum``) as a float64 0-dim tensor,
+    the naive tier's loss, PyTorch BF16 (the same terms in row order in bfloat16, summed by ``torch.sum`` in bfloat16
+    on the device) and ``torch.sum``'s loss in FP32 on the device (reported, not judged)."""
+    base = make_inputs(REGROUP_T, objective="policy", seed=s, device=CUDA, W=W)
+    zero = _zero_weight_set(base, ("group", 0.3), gen_seed=s + ZERO_SET_OFFSET)
+    inp = _with_zero_weights(base, zero)
     seen = {}
     exact_loss = cake_backend._zero_weight_exact_loss
 
@@ -1425,55 +1470,41 @@ def _regroup_case(W, seed):
     rows[seen["row_index"].long()] = seen["terms"]
     rows[seen["zero_index"].long()] = inp.loss_weights[seen["zero_index"].long()]
     terms = rows[valid]
-    oracle = 0.0 - math.fsum(terms.double().cpu().tolist())
-    bf16 = terms.to(torch.bfloat16)
-    naive = float(torch.zeros((), device=terms.device, dtype=torch.bfloat16).sub_(bf16.sum()))
-    fp32 = float(torch.zeros((), device=terms.device).sub_(terms.sum()))
-    losses = {
-        "exact": float(exact["loss"]),
-        "regroup": float(regroup["loss"]),
-        "torch.sum bf16": naive,
-        "torch.sum fp32": fp32,
-    }
-    errors = {name: abs(loss - oracle) / abs(oracle) for name, loss in losses.items()}
-    return SimpleNamespace(inp=inp, exact=exact, regroup=regroup, oracle=oracle, losses=losses, errors=errors)
+    oracle = torch.tensor(0.0 - math.fsum(terms.double().cpu().tolist()), dtype=torch.float64)
+    naive = torch.zeros((), device=terms.device, dtype=torch.bfloat16).sub_(terms.to(torch.bfloat16).sum())
+    fp32 = torch.zeros((), device=terms.device).sub_(terms.sum())
+    return SimpleNamespace(exact=exact, regroup=regroup, oracle=oracle, naive=naive, fp32=fp32)
 
 
-def test_device_regroup_mode(glm_weight):
-    """The ``"regroup"`` mode on :data:`REGROUP_INPUTS` independent inputs: ``logp`` / ``dX`` / ``dW`` are the exact
-    mode's bits on every input (the loss mode changes the loss only), and the first input's regroup call passes the
-    deterministic suite's gates.  Each mode's loss is held to the naive tier, PyTorch BF16 (``torch.sum`` of the
-    terms in bfloat16), with k = 1 over the inputs; ``torch.sum`` in FP32 is printed beside it, not judged.  An
-    input's error is relative, ``|loss - FP64 loss| / |FP64 loss|`` (:func:`_regroup_case`): the norm of the error over
-    the norm of the expected value, as the naive check of a single input measures it, so the inputs' errors are on one
-    scale whatever their losses' sizes.  On every input where the naive tier's error is 0, each mode's error is 0;
-    over the inputs, each mode's median and maximum error are at most the naive tier's.  A loss is one number, so its
-    L2 and max norm are the same and one comparison of each statistic covers both norms."""
+def test_device_regroup_mode(glm_weight, record_property):
+    """The ``"regroup"`` mode on the judge's draws (seeds ``draw_seed(SEED, j)``; the fixed GLM-geometry ``W``: this
+    judges the reduction of the per-row terms, whose ``X``, labels and zero-weight rows change with the draw):
+    ``logp`` / ``dX`` / ``dW`` are the exact mode's bits on every draw (the loss mode changes the loss only), and each
+    mode's loss (``loss@exact``, ``loss@regroup``) meets the naive tier, ``torch.sum`` of the same FP32 terms in
+    bfloat16, against the float64 sum of those terms (:func:`_regroup_case`): the shared judge's absolute error in the
+    L2 and max norm, median and largest over the draws.  ``torch.sum`` in FP32 is printed beside it, not judged."""
     _require_program(entry="loss")
-    errors = {"exact": [], "regroup": [], "torch.sum bf16": [], "torch.sum fp32": []}
-    for i in range(REGROUP_INPUTS):
-        case = _regroup_case(glm_weight, SEED + i)
+    naive, fp32 = {}, []
+
+    def run(j, s):
+        case = _regroup_case(glm_weight, s)
         for key in ("logp", "dX", "dW"):
-            assert _same_bits(case.regroup[key], case.exact[key]), (i, key)
-        if i == 0:
-            _check_against_references(case.regroup, case.inp, ceiling=True)
-        if case.errors["torch.sum bf16"] == 0:
-            for name in ("exact", "regroup"):
-                assert case.errors[name] == 0, (i, name, case.losses, case.oracle)
-        for name, err in case.errors.items():
-            errors[name].append(err)
-    naive = errors["torch.sum bf16"]
-    report = ", ".join(
-        f"{name} median {statistics.median(v):.4e} max {max(v):.4e}" for name, v in errors.items()
+            assert _same_bits(case.regroup[key], case.exact[key]), (j, key)
+        naive[j] = case.naive
+        fp32.append(abs(float(case.fp32) - float(case.oracle)))
+        outputs = {"loss@exact": case.exact["loss"], "loss@regroup": case.regroup["loss"]}
+        return outputs, dict.fromkeys(REGROUP_OUTPUTS, case.oracle)
+
+    def tier(j, _tier):
+        return dict.fromkeys(REGROUP_OUTPUTS, naive.pop(j))
+
+    judge, failures = judge_case(run, tier, seed=SEED)
+    judge.record(record_property)
+    print(
+        f"\nregroup: torch.sum in FP32 (not judged), absolute error median {statistics.median(fp32):.4e} max "
+        f"{max(fp32):.4e} over {len(fp32)} draws"
     )
-    print(f"\nregroup over {REGROUP_INPUTS} inputs, relative error: {report}")
-    for name in ("exact", "regroup"):
-        ours = errors[name]
-        assert statistics.median(ours) <= statistics.median(naive) and max(ours) <= max(naive), (
-            f"{name} over {REGROUP_INPUTS} inputs: relative error median {statistics.median(ours):.4e} max "
-            f"{max(ours):.4e} against the naive tier (torch.sum in bfloat16)'s median {statistics.median(naive):.4e} "
-            f"max {max(naive):.4e}"
-        )
+    assert not failures, "\n".join(failures)
 
 
 def test_device_noncontiguous_x(glm_weight):
@@ -1529,8 +1560,9 @@ def test_device_non_finite_zero_weight_rows(glm_weight):
 @pytest.mark.parametrize("train", ["xw", "x_only", "none"])
 def test_device_budget_mode(glm_weight, train):
     """The opt-in module's ``memory_mode="budget"`` splits the rows as the fast form (no hidden valid-row count): the
-    loss / ``logp`` bits of the budget call without the split, ``+0`` ``dX`` rows on the zero-weight rows, ``dW``
-    within the gates; the budget plan counts every valid row."""
+    loss / ``logp`` bits of the budget call without the split, ``+0`` ``dX`` rows on the zero-weight rows and the
+    call's contract; the budget plan counts every valid row.  The budget forms are bitwise the fast form, whose
+    accuracy :func:`test_device_exact_loss_and_logp_match_the_plain_path` judges."""
     _require_program(entry="loss")
     base = _device_inputs(12289, W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.3))
@@ -1550,8 +1582,7 @@ def test_device_budget_mode(glm_weight, train):
     )
     if split["dX"] is not None:
         assert _all_plus_zero(split["dX"][zero])
-    if train == "xw":
-        _check_against_references(split, inp, ceiling=True)
+    contract_lm_head(split, inp)
 
 
 def _release_cached_blocks():

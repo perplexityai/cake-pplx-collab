@@ -16,8 +16,9 @@ limitations under the License.
 The zero-gradient row skip of the deterministic LM-head package's log-probability backward
 (``cake_backend.zero_dlogp_partition``, the ``_dcnt`` forms, ``set_zero_dlogp_min_rows``): the partition
 against its reference, the plan and eligibility rules on the host, and on the device the deterministic contract
-(the same bits on every run), the accuracy gates of ``test_cake_lm_head_det_train.py`` and the bits that the skip
-keeps (``logp``; ``dX`` / ``dW`` of a call without zero-gradient rows).
+(the same bits on every run) and the bits that the skip keeps (``logp``; ``dX`` / ``dW`` of a call without
+zero-gradient rows).  Accuracy: the skip call's ``logp`` / ``dX`` / ``dW`` at ``JUDGE_H`` / ``JUDGE_V`` are judged
+against the float64 oracle beside the naive BF16 tier over the shared judge's draws (``tests/cake_naive.py``).
 """
 
 import contextlib
@@ -28,12 +29,13 @@ from dataclasses import replace
 import pytest
 import torch
 
-from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
-    error_report,
-    make_inputs,
-    reference_fp64,
-    reference_unchunked,
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    SEED_OFFSETS,
+    contract_lm_head,
+    judge_inputs,
+    judge_lm_head,
 )
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 from tests.cake.test_helpers.cake_package import cake_package
 
 cake_backend = cake_package("cake.cake_lm_head_det_train", "cake_backend")
@@ -43,12 +45,8 @@ generated_program_available = cake_backend.generated_program_available
 
 SEED = 20260930
 CUDA = torch.device("cuda")
-# The accuracy gates of the deterministic suite (``test_cake_lm_head_det_train.py``), copied unchanged: at most 1.05x
-# the error of the unchunked PyTorch path on the same inputs plus a floor per metric, and twice the production-geometry
-# unchunked error as a sanity ceiling.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
+# A judged draw's zero-gradient rows come from a CPU generator seeded with the draw's seed plus this offset.
+ZERO_SET_OFFSET = SEED_OFFSETS["zero sets"]
 # Runs of one call compared bit for bit (the deterministic contract).
 RUNS = 5
 
@@ -88,32 +86,6 @@ def _require_skip():
         pytest.skip(
             "this device's record registers no zero-gradient row skip (no counted dz arm or partition kernel)"
         )
-
-
-def _check_against_references(
-    result, inp, *, entry="loss", grad_weight_dtype=torch.bfloat16, ceiling=False
-):
-    """``test_cake_lm_head_det_train.py``'s gate, unchanged."""
-    oracle = reference_fp64(inp, entry=entry)
-    b0 = reference_unchunked(inp, entry=entry, grad_weight_dtype=grad_weight_dtype)
-    errors = error_report(result, oracle, inp.labels)
-    b0_errors = error_report(b0, oracle, inp.labels)
-    assert not errors["nan"]
-    for key, tiny in GATE_TINY.items():
-        if key in errors:
-            assert errors[key] <= GATE_MARGIN * b0_errors[key] + tiny, (
-                f"{key}: {errors[key]:.3e} vs unchunked {b0_errors[key]:.3e}"
-            )
-    if ceiling:
-        for key, measured in PRODUCTION_B0.items():
-            if key in errors:
-                assert errors[key] <= 2.0 * measured, (
-                    f"{key}: {errors[key]:.3e} above twice the production-geometry unchunked error"
-                )
-    assert errors["logp_ignored_zero"]
-    if result.get("dX") is not None:
-        assert errors["dX_ignored_zero"]
-    return errors, b0_errors
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:
@@ -162,15 +134,16 @@ def _counting_partitions(monkeypatch):
     yield calls
 
 
-def _zero_set(labels, kind, *, seed=SEED):
+def _zero_set(labels, kind, *, seed=SEED, gen_seed=None):
     """bool ``[T]`` of the valid rows whose ``dlogp`` becomes zero: ``"none"``, ``"all"``, ``"one"`` (the first valid
     row), ``("group", f)`` (whole groups of 512 consecutive rows, ``round(f * groups)`` of them) or ``("random", f)``
-    (``round(f * T_v)`` random valid rows)."""
+    (``round(f * T_v)`` random valid rows).  The rows come from a CPU generator seeded ``gen_seed`` (default ``seed +
+    T``)."""
     valid = labels >= 0
     T = int(valid.numel())
     zs = torch.zeros(T, dtype=torch.bool, device=valid.device)
     gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed + T)
+    gen.manual_seed(seed + T if gen_seed is None else gen_seed)
     if kind == "none":
         return zs
     if kind == "all":
@@ -763,26 +736,68 @@ def _assert_skip_contract(inp, zero, C, got, plain, skip_plan, plain_plan):
         assert _same_bits(first["dX"], plain["dX"]) and _same_bits(
             first["dW"], plain["dW"]
         )
+    contract_lm_head(first, inp, entry="logprob")
     if not bool(live.any()):
         assert not bool(first["dX"].float().any()) and not bool(
             first["dW"].float().any()
         )
-        return
-    # the deterministic suite's gates: the production ceiling is a temperature-1 figure and applies, as in
-    # test_device_temperature_heterogeneous_matches_the_references, only where every temperature is at least 1
-    tau = inp.temperature
-    ceiling = tau is None or float(torch.as_tensor(tau).min()) >= 1.0
-    _check_against_references(first, inp, entry="logprob", ceiling=ceiling)
+
+
+def _judge_skip(record_property, monkeypatch, T, C, kind, *, temperature=None, counted=None):
+    """The skip call (floor 0) at the judged shape (``JUDGE_H``, ``JUDGE_V``, ``T`` rows, chunk ``C``; ``temperature``:
+    a form of the inputs' temperature) over the judge's draws: ``logp`` / ``dX`` / ``dW`` of the backward of the
+    inputs' ``dlogp`` (``+0`` / ``-0`` on the zero-gradient rows of ``kind``, from a CPU generator seeded ``s +
+    ZERO_SET_OFFSET``) meet the naive BF16 tier against the FP64 oracle.  On every draw the backward runs one partition
+    on a counted plan (the skip's route; with ``counted`` given, the counted temperature dz arm or the mixed plan) and
+    the skipped and ignored rows' ``dX`` rows are exact ``+0``."""
+
+    def make(s):
+        base = judge_inputs(T, s, device=CUDA, temperature=temperature)
+        return _with_zero_dlogp(base, _zero_set(base.labels, kind, gen_seed=s + ZERO_SET_OFFSET))
+
+    cake_backend.BINDING_CACHE.clear()
+    with _counting_partitions(monkeypatch) as calls:
+
+        def launch(inp):
+            before = len(calls)
+            with _zero_dlogp_floor(0):
+                result = _logprob_call(inp, C)
+            result["partitions"] = len(calls) - before
+            return result
+
+        def route(inp, result):
+            assert result["partitions"] == 1, f"{result['partitions']} partitions: the skip did not run"
+            plans = [p for p in _backward_plans() if p.dcnt]
+            assert plans, "no counted backward plan"
+            if counted is not None:
+                for plan in plans:
+                    assert plan.temperature and (type(plan).__name__ == "_CountedTemperaturePlan") == counted
+
+        def contract(result, inp):
+            contract_lm_head(result, inp, entry="logprob")
+            zero = (inp.labels >= 0) & (inp.dlogp == 0)
+            assert not bool(_bits(result["dX"][zero]).any()), "a zero-gradient row's dX row is not +0"
+
+        judge_lm_head(
+            record_property,
+            make=make,
+            launch=launch,
+            entry="logprob",
+            seed=SEED + T,
+            route=route,
+            contract=contract,
+        )
 
 
 @pytest.mark.parametrize("T, C, kind", SKIP_CASES, ids=str)
 def test_device_zero_dlogp_skip_is_deterministic_and_accurate(
-    glm_weight, monkeypatch, T, C, kind
+    glm_weight, monkeypatch, T, C, kind, record_property
 ):
     """The skip on the device: ``RUNS`` calls give the same ``logp`` / ``dX`` / ``dW`` bits; ``logp`` is the bits of
     the call without the skip; skipped and ignored rows get exact ``+0`` ``dX`` rows; a live row whose chunk keeps its
     dX slice count gets the bits of the call without the skip, and with no zero-gradient row ``dX`` and ``dW`` are that
-    call's bits; the deterministic suite's accuracy gates against the FP64 oracle hold."""
+    call's bits.  Accuracy: the skip call at the judged shape meets the naive BF16 tier (:func:`_judge_skip`); every
+    row of zero gradient is held to its contract."""
     _require_skip()
     base = _device_inputs(T, W=glm_weight)
     zero = _zero_set(base.labels, kind)
@@ -791,16 +806,18 @@ def test_device_zero_dlogp_skip_is_deterministic_and_accurate(
     assert skip_plan.chunks == plain_plan.chunks
     assert skip_plan.dx_slices == plain_plan.dx_slices
     _assert_skip_contract(inp, zero, C, got, plain, skip_plan, plain_plan)
+    if kind != "all":
+        _judge_skip(record_property, monkeypatch, T, C, kind)
 
 
 @pytest.mark.parametrize("form", ["scalar", "hetero"])
 @pytest.mark.parametrize("counted", [True, False], ids=("counted_dz", "mixed"))
 @pytest.mark.parametrize("kind", ["none", ("random", 0.166), ("group", 0.5)], ids=str)
 def test_device_temperature_zero_dlogp_skip(
-    glm_weight, monkeypatch, form, counted, kind
+    glm_weight, monkeypatch, form, counted, kind, record_property
 ):
     """The skip of a call with a temperature (the scalar form and a per-token ``[T]`` tensor; the counted temperature
-    dz arm and the mixed plan): the same contract as without a temperature."""
+    dz arm and the mixed plan): the same contract and the same judge as without a temperature."""
     _require_skip()
     module_name, _ = cake_backend.record_for(CUDA)
     if counted and cake_backend.LOGPROB_DZ_DCNT_TAU_STAGE not in set(
@@ -818,6 +835,8 @@ def test_device_temperature_zero_dlogp_skip(
         and (type(skip_plan).__name__ == "_CountedTemperaturePlan") == counted
     )
     _assert_skip_contract(inp, zero, C, got, plain, skip_plan, plain_plan)
+    with _tau_dz_counted(counted):
+        _judge_skip(record_property, monkeypatch, T, C, kind, temperature=form, counted=counted)
 
 
 def test_device_zero_dlogp_paths_without_the_skip(glm_weight, monkeypatch):
