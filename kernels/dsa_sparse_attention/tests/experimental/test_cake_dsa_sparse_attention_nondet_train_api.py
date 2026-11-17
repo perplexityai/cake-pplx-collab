@@ -444,10 +444,10 @@ def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
 
 
 def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_property):
-    """Through the public entry with ``dkv_acc`` at S / T = 8: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the cast
-    path, ``1`` the direct path, ``auto`` (and the variable unset) the record's rule of the device's architecture
-    (the direct path from 4 keys per query on sm_100a / sm_103a, the cast path on sm_107a, whose rule asks for 20),
-    and an explicit ``dkv_direct`` keyword wins over the variable.  Every step's ``out``, query gradients and
+    """Through the public entry with ``dkv_acc`` at S / T = 8, top-k 128: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the
+    cast path, ``1`` the direct path, ``auto`` (and the variable unset) the record's rule of the device's
+    architecture (the direct path from 4 keys per query on every architecture: on sm_107a T * K_eff = 32,768 stays
+    below the rule's work bound 112 S + 2^20), and an explicit ``dkv_direct`` keyword wins over the variable.  Every step's ``out``, query gradients and
     accumulator increment (through the destination map, over a random fill) are judged on the same draw."""
     record, _stages = _require_direct_program()
     env = public_api.DKV_DIRECT_ENV
@@ -458,9 +458,9 @@ def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_pr
         inp = make_inputs([256], [2048], seed=s, topk=128)
         S, S_dst = inp.total_k, 400
         rule = cake_backend.DkvDirectPolicy.from_record(record).wants(
-            inp.total_q, S, arch
+            inp.total_q, S, inp.topk, arch=arch
         )
-        assert rule is (arch != "sm_107a")
+        assert rule is True
         gen = torch.Generator(device="cuda").manual_seed(s + 1)
         dst_map = torch.randint(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32

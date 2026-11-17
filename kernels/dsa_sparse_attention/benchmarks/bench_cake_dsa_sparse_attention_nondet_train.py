@@ -1168,28 +1168,41 @@ def _chunk_bounds(inp, chunk):
     return bounds
 
 
-def _record_dkv_direct(device, num_queries, num_kv, program=None):
-    """The shipped record's direct-accumulation decision for a ``dkv_acc`` backward of
-    ``num_queries`` query tokens over ``num_kv`` keys on ``device``: the size rule of the
-    device's architecture (``dkv_direct.rules[arch]``, the base without one).
+def _record_dkv_direct(
+    device, num_queries, num_kv, topk, num_segments=1, program=None, dkv_direct=None
+):
+    """The planner's direct-accumulation decision (``cake_backend.plan_dkv_direct``) for a
+    ``dkv_acc`` backward of ``num_queries`` query tokens over ``num_kv`` keys with ``topk``
+    index slots per query and ``num_segments`` packed segments on ``device``.
+    ``dkv_direct=None`` applies the shipped record's rule of the device's architecture
+    (``dkv_direct.rules[arch]``, the base without one); ``True`` / ``False`` force the path
+    (the direct path only where the program registers the natural stages).
     ``program=None`` is the RoPE record (the bridge arm), else the named program's record
     (the native arm)."""
     kw = {} if program is None else dict(program=program)
     _, record = cake_backend.record_for(device, **kw)
     stages = cake_jit.registered_stages(**kw)
-    policy = cake_backend.DkvDirectPolicy.from_record(record)
     return bool(
-        policy is not None
-        and cake_backend.record_direct_stages(record, stages, **kw)
-        and policy.wants(num_queries, num_kv, cake_backend.arch_for(device))
+        cake_backend.plan_dkv_direct(
+            record,
+            stages,
+            num_queries,
+            num_kv,
+            topk,
+            accumulate=True,
+            dkv_direct=dkv_direct,
+            arch=cake_backend.arch_for(device),
+            num_segments=num_segments,
+            **kw,
+        )
     )
 
 
-def _bridge_dkv_direct(device, num_queries, num_kv):
+def _bridge_dkv_direct(device, num_queries, num_kv, topk, num_segments):
     """The shipped record's direct-accumulation decision for a bridge call
     (:func:`_record_dkv_direct`), passed explicitly so the binding does not depend on the
     environment."""
-    return _record_dkv_direct(device, num_queries, num_kv)
+    return _record_dkv_direct(device, num_queries, num_kv, topk, num_segments)
 
 
 def _planner_key_passes(inp, chunk, program=None):
@@ -1292,7 +1305,12 @@ class ArmCakeNope:
             # the record's rule on this device for the whole row: the entry's default (the
             # arm passes no ``dkv_direct``; ``CAKE_PPLX_DSA_DKV_DIRECT=0`` / ``1`` overrides it)
             dkv_direct=_record_dkv_direct(
-                inp.q.device, inp.total_q, inp.total_k, program=self.program
+                inp.q.device,
+                inp.total_q,
+                inp.total_k,
+                inp.topk,
+                inp.num_segments,
+                program=self.program,
             ),
         )
 
@@ -1428,7 +1446,9 @@ class ArmCakeRopeBridge:
     def __init__(self, inp, chunk=NOPE_CHUNK):
         self.inp, self.chunk = inp, chunk
         self.q = inp.q.detach().requires_grad_()
-        self.direct = _bridge_dkv_direct(inp.q.device, inp.total_q, inp.total_k)
+        self.direct = _bridge_dkv_direct(
+            inp.q.device, inp.total_q, inp.total_k, inp.topk, inp.num_segments
+        )
         self.eager = None
 
     def versions(self):
@@ -1516,7 +1536,9 @@ class ArmCakeRopeBridge:
                     cu_q,
                     cu_k,
                     segments,
-                    _bridge_dkv_direct(inp.q.device, q1 - q0, inp.total_k),
+                    _bridge_dkv_direct(
+                        inp.q.device, q1 - q0, inp.total_k, inp.topk, segments
+                    ),
                 )
                 for q0, q1, cu_q, cu_k, segments in _chunk_bounds(inp, self.chunk)
             ]

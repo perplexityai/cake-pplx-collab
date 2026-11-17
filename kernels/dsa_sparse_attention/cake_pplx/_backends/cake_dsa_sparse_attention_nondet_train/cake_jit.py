@@ -28,9 +28,13 @@ from . import cake_build
 # policies that select the key-range-pass form of the backward
 # (``key_pass_policy``, see ``cake_backend.KeyPassPolicy``) and the direct
 # accumulation into the caller's packed rows through the natural-layout main
-# stages (``dkv_direct``, see ``cake_backend.DkvDirectPolicy``; like
-# ``key_pass_policy`` it may carry per-architecture ``rules``, each replacing
-# the base value on its target), and one physical entry per stage: the
+# stages (``dkv_direct``, see ``cake_backend.DkvDirectPolicy``: a base
+# ``min_keys_per_query`` and, like ``key_pass_policy``, per-architecture
+# ``rules`` that replace it on their target with a rule of three fields --
+# ``min_keys_per_query``, ``cast_slots_per_key`` and ``cast_min_slots``, which
+# weigh the cast path's extra cost, proportional to the key count, against
+# the natural drain's, proportional to the main stage's query x selected-slot
+# work), and one physical entry per stage: the
 # ``library`` stem of its ``build.json`` entries (``<library>_<arch>``, see
 # ``cake_build``), the FFI entry and the launch
 # geometry the binding bakes in (block, cluster, cooperative launch, dynamic
@@ -91,11 +95,22 @@ MODULES: dict[str, dict[str, Any]] = {
                 },
             },
         },
-        # direct accumulation from 4 keys per query token; on sm_107a, whose
-        # natural-layout drain is slower, from 20 (see the backend README)
+        # direct accumulation from 4 keys per query token.  On sm_107a the
+        # natural-layout drain costs extra in proportion to the main stage's
+        # query x selected-slot work, the cast path a zero fill and a cast over
+        # the S accumulator rows plus two launches: the cast path also serves
+        # rows with T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots,
+        # ceil(S / num_segments)) (see cake_backend.DkvDirectPolicy and the
+        # backend README)
         "dkv_direct": {
             "min_keys_per_query": 4,
-            "rules": {"sm_107a": {"min_keys_per_query": 20}},
+            "rules": {
+                "sm_107a": {
+                    "min_keys_per_query": 4,
+                    "cast_slots_per_key": 112,
+                    "cast_min_slots": 1048576,
+                },
+            },
         },
         "fwd": {
             "library": "cake_dsa_h64_train_c949a885132a772bdb53",
@@ -209,10 +224,15 @@ MODULES: dict[str, dict[str, Any]] = {
     # form, whose stages and scratch stay registered) and, on ``sm_100a`` /
     # ``sm_103a``, the natural-layout main stage beats the permuted accumulator
     # plus cast whenever the row has at least one key per query
-    # (``min_keys_per_query`` 1).  On ``sm_107a`` the natural-layout drain is
-    # slower: the permuted accumulator plus cast was faster on every measured
-    # row below 20 keys per query (VR200 backward: 0.3-6.3 % at 1 .. 16.6), so
-    # the ``sm_107a`` rule takes the natural stage from 20 keys per query on.  The
+    # (``min_keys_per_query`` 1).  On ``sm_107a`` the natural-layout drain costs
+    # extra in proportion to the main stage's work (T x K_eff query x
+    # selected-slot pairs, K_eff = min(K_slots, ceil(S / num_segments))), the
+    # cast path a zero fill and a cast proportional to S plus two launches, so
+    # the ``sm_107a`` rule takes the permuted accumulator plus cast where
+    # T * K_eff >= 112 * S + 2^20 and the natural stage otherwise.  On VR200
+    # the rule picks the cast path on no measured row where it was slower, and
+    # keeps the natural stage on small rows, small top-k and short-document
+    # packs, where the cast path measured up to 8 % slower in backward.  The
     # compaction and cast stages are rope-independent kernels shared with the
     # RoPE program (same libraries, same launch geometry; the cast runs over the
     # one 512-wide accumulator, 16 groups per key); the delta stage is the strided delta
@@ -250,7 +270,13 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "dkv_direct": {
             "min_keys_per_query": 1,
-            "rules": {"sm_107a": {"min_keys_per_query": 20}},
+            "rules": {
+                "sm_107a": {
+                    "min_keys_per_query": 1,
+                    "cast_slots_per_key": 112,
+                    "cast_min_slots": 1048576,
+                },
+            },
         },
         "index_prep": {
             "library": "cake_dsa_h64_nope_train_db791110b21a91be1388",
