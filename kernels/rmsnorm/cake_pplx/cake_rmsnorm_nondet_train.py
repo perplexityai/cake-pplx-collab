@@ -64,30 +64,25 @@ token-count window, the form this build's registry lists for the window
 (``cake_jit.program_windows``; the backend's backward notes are generated
 from it).  The single-kernel form, in the windows that ship it: persistent
 CTAs claim row chunks, write ``dx`` and add their per-column ``dw`` sums into
-FP64 sums in the workspace in the order they finish; the CTA that finishes
-last rounds the sums into ``dw``.  ``dx`` is bitwise reproducible and within
-one BF16 ulp of ``max(|dx|, rms(dx))`` of the deterministic backward's ``dx``
-(not always bitwise equal to it); ``dw`` is not guaranteed bitwise
-reproducible (the order of the FP64 additions depends on scheduling).  In the
-windows those notes name, a twosum single kernel keeps each
-thread's ``dw`` column sums exact (error-free FP32 products, TwoSum
-compensation) before the FP64 additions, so its ``dw`` error does not grow
-with ``T``; a kblock single kernel adds the ``dw`` products of each block of 8
-rows in FP32 and keeps the block sums as FP32 TwoSum pairs before the FP64
-additions, so its ``dw`` error grows slowly with ``T``; a pair-row single
-kernel keeps the twosum sums as FP32 pairs, writes one row of pairs per CTA
-into scratch in the workspace and folds the rows in helper CTAs once every row
-is in, with no FP64 additions (the order of its rows depends on scheduling, so
-its ``dw`` is not guaranteed bitwise reproducible either).  Every other window
+FP32 sums in the workspace (one word per column) in the order they finish;
+the CTA that finishes last stores ``dw``, the FP32 sum of the replicas.
+``dx`` is bitwise reproducible and within one BF16 ulp of
+``max(|dx|, rms(dx))`` of the deterministic backward's ``dx`` (not always
+bitwise equal to it); ``dw`` is not guaranteed bitwise reproducible (the
+order of the FP32 additions depends on scheduling).  In the windows those
+notes name, a part-row single kernel writes its CTAs' FP32 ``dw`` sums as one
+FP32 row per CTA into scratch in the workspace and folds the rows in helper
+CTAs once every row is in, with no column sums and no atomic add of a sum
+(the order of its rows depends on scheduling, so its ``dw`` is not
+guaranteed bitwise reproducible either).  Every other window
 runs the deterministic package's backward pair (main kernel and fixed-order
 reduce), rendered into this package.  The package also accepts ``[..., H]``
 inputs whose leading dimensions collapse into rows (for example a
 ``[T, heads, 256]`` per-head view sharing one ``w[256]``) and an FP32 weight
 on the routes that ship the FP32-weight programs.
 
-All kernels use FP32 statistics and accumulation (the non-deterministic
-single kernel's ``dw`` sums across CTAs in FP64, the pair-row single kernel's
-in FP32 pairs) with IEEE division and square root (no
+All kernels use FP32 statistics and accumulation, one FP32 word per sum
+(no FP64 and no compensated sums), with IEEE division and square root (no
 fast-math).  Inputs and outputs are BF16; ``rstd`` and ``dw``
 are FP32.  Row-strided inputs (``x``, ``residual``, ``g``, ``g_residual``)
 are accepted when ``stride(1) == 1``, ``stride(0)`` is a multiple of eight
@@ -99,9 +94,9 @@ returns empty outputs (a zero ``dw``) without launching.
 The backward's workspace (``cake_rmsnorm_nondet_train_backward_workspace_bytes(T,
 H, device)`` bytes) has one layout, with offsets fixed by the
 package, for every call: the deterministic pair's counters, the single kernel's
-counters and FP64 column sums (``cake_jit.SUMS_BYTES``, the largest of the
+counters and FP32 column sums (``cake_jit.SUMS_BYTES``, the largest of the
 package's single kernels) and, when a window up to ``T`` runs the deterministic
-pair or a pair-row single kernel, its FP32 partial rows or the pair-row
+pair or a part-row single kernel, its FP32 partial rows or the part-row
 scratch (one region after the sums; it needs no rest state).  Zero the buffer
 once: after every launch the
 kernels leave the counters at rest and the sums at zero, so with no host write
@@ -159,7 +154,7 @@ Usage::
     y = cake_rmsnorm_nondet(x, w, eps)
     y, h_new = cake_rmsnorm_nondet(h, w, eps, residual=u)  # fused add
 
-    # caller-owned workspace (counters, FP64 column sums, partial rows)
+    # caller-owned workspace (counters, FP32 column sums, partial rows)
     ws = cake_rmsnorm_nondet_train_backward_workspace(T, H, x.device)
     dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd, workspace=ws)
 
@@ -284,11 +279,11 @@ def cake_rmsnorm_nondet_train_backward(
 
     The call runs, per window of ``T``, the form the "Program selection by
     token count" notes list for that window: in the windows that ship it, one
-    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP64
-    sums in the workspace, which the CTA that finishes last rounds into ``dw``
-    (``dx`` is bitwise reproducible and within one BF16 ulp of
-    ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not always
-    bitwise equal to it; the order of the FP64 additions depends on
+    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP32
+    sums in the workspace (one word per column), which the CTA that finishes
+    last adds into ``dw`` (``dx`` is bitwise reproducible and within one BF16
+    ulp of ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not
+    always bitwise equal to it; the order of the FP32 additions depends on
     scheduling, so ``dw`` is not guaranteed bitwise reproducible); in the
     others, the deterministic package's backward pair rendered into this
     package.

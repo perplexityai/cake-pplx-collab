@@ -353,7 +353,7 @@ def _workspace_record(
     its chunks on ``slots = ctas_per_sm x SMs`` persistent CTAs; a route that
     switches modules on the row count is sized by the module with the largest
     partial capacity, whose layout every pair module of the route shares.  A
-    column-task module (``claim_sum_f64``) binds no partial rows and does not
+    column-task module (``claim_sum_f32``) binds no partial rows and does not
     size them.
     """
 
@@ -418,7 +418,7 @@ def cake_rmsnorm_det_train_backward_workspace_bytes(
     (the partial's high and low part) for a module whose workspace rule
     spells ``partial_rows`` 2, among the modules a call of at most ``rows``
     tokens can launch.  A column-task module (the small token counts of a
-    route, workspace rule ``claim_sum_f64``) uses the counters alone.  The size grows with
+    route, workspace rule ``claim_sum_f32``) uses the counters alone.  The size grows with
     ``rows`` and a buffer sized for ``rows`` serves every call with at most
     that many tokens.  The counters must be zero on first use (allocate with
     ``torch.zeros`` or use :func:`cake_rmsnorm_det_train_backward_workspace`); the
@@ -506,9 +506,9 @@ def _workspace_views(
         )
     hidden = int(record["hidden"])
     begin = layout["partial_offset"]
-    if record["workspace_rule"]["kind"] == "claim_sum_f64":
+    if record["workspace_rule"]["kind"] == "claim_sum_f32":
         # A column-task kernel keeps no sums: ``partial`` binds an empty region.
-        partial = workspace[begin:begin].view(torch.float64)
+        partial = workspace[begin:begin].view(torch.float32)
     else:
         n_rows = layout["n_chunks"] * layout["partial_rows"]
         partial = workspace[begin : begin + 4 * n_rows * hidden].view(torch.float32)

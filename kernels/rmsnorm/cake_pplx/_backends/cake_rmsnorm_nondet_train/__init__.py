@@ -21,8 +21,9 @@ loader and the generated CUDA sources under ``csrc/``).
 This package runs its own kernels only: the forward programs of the
 deterministic package (rendered here; the forward has no cross-row reduction)
 and, per token-count window, the backward form the registry lists for it: in
-the windows that ship it, one kernel whose CTAs add their ``dw`` sums into FP64
-workspace sums in the order they finish, so ``dw`` is not guaranteed bitwise
+the windows that ship it, one kernel whose CTAs add their ``dw`` sums into FP32
+workspace sums (one word per column) in the order they finish, so ``dw`` is not
+guaranteed bitwise
 reproducible; in the others, the deterministic package's backward pair (main
 kernel and fixed-order ``dw`` reduce) rendered here.  The mode is part of the
 name only: every public name carries ``nondet`` (the constants excepted) and no
@@ -534,12 +535,12 @@ def cake_rmsnorm_nondet_train_backward_workspace_bytes(
     (``cake_jit.workspace_layout``, offsets fixed by the package): the
     deterministic pairs' ``uint32`` counters (``cake_jit.COUNTERS_BYTES``), the
     single kernel's counters (``cake_jit.SINGLE_COUNTERS_BYTES`` at
-    ``cake_jit.SINGLE_COUNTERS_OFFSET``), its FP64 column sums
+    ``cake_jit.SINGLE_COUNTERS_OFFSET``), its FP32 column sums
     (``cake_jit.SUMS_BYTES`` at ``cake_jit.SUMS_OFFSET``, the largest
     ``workspace_bytes`` of the package's single kernels) and, when a window up
     to ``rows`` of the width runs the deterministic pair, that pair's FP32
     partial rows at ``cake_jit.PAIR_ROWS_OFFSET``, which grow with ``rows`` (a
-    pair-row single kernel's FP32 scratch, one row of FP32 pairs per CTA, takes
+    part-row single kernel's FP32 scratch, one FP32 row per CTA, takes
     the same place).
     The size returned is the largest layout of the records the width's
     backward routes (``hidden``, ``residual``, both weight dtypes) run for up
@@ -589,10 +590,11 @@ def _workspace_views(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(the region bound to ``partial``, the counters, the layout)`` of the
-    launched workspace owner ``record``: the FP64 column sums of a single
-    kernel (its workspace rule's ``sum_bytes``, the kernel's
-    ``workspace_bytes``), the FP32 scratch of a pair-row single kernel (its
-    workspace rule's ``part_row_bytes``, one row of FP32 pairs, per CTA of the
+    launched workspace owner ``record``: the FP32 column sums of a single
+    kernel (``[replicas, hidden]``, one word per column; its workspace rule's
+    ``sum_bytes``, the kernel's ``workspace_bytes``), the FP32 scratch of a
+    part-row single kernel (its workspace rule's ``part_row_bytes``, one FP32
+    row, per CTA of the
     launch grid; the kernel's ``workspace_bytes`` is 0), the FP32
     ``[n_chunks, hidden]`` partial rows of a pair
     main kernel (``capacity``: the routes' pair record of the largest
@@ -621,11 +623,11 @@ def _workspace_views(
     begin = layout["partial_offset"]
     hidden = int(record["hidden"])
     kind = record["workspace_rule"]["kind"]
-    if kind == "claim_sum_f64":
-        partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float64)
-        required = int(record["workspace_rule"]["sum_bytes"]) // 8
+    if kind == "claim_sum_f32":
+        partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float32)
+        required = int(record["workspace_rule"]["sum_bytes"]) // 4
     elif kind == "claim_part_f32":
-        # one row of FP32 (hi, lo) pairs per CTA of the launch grid (the layout's
+        # one FP32 row per CTA of the launch grid (the layout's
         # ``grid``; the chunk table's ``slots`` may differ from it)
         partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float32)
         required = (
@@ -955,7 +957,7 @@ def _backward(
     )
     # The plain kernels keep the residual-gradient parameters in their signature
     # and never read them: bind them to ``g`` exactly like the source launcher.
-    # The single kernel's last CTA (a pair-row single kernel's helper CTAs), or
+    # The single kernel's last CTA (a part-row single kernel's helper CTAs), or
     # the pair's dw reduce, stores all of ``dw``, so a caller's ``dw`` buffer may
     # hold anything.
     g_h = g_residual if has_residual else g
@@ -997,11 +999,12 @@ def cake_rmsnorm_nondet_train_backward(
 
     The call runs, per window of ``T``, the form the "Program selection by
     token count" notes list for that window: in the windows that ship it, one
-    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP64
-    sums in the workspace, which the CTA that finishes last rounds into ``dw``
+    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP32
+    sums in the workspace (one word per column), which the CTA that finishes
+    last adds into ``dw``
     (``dx`` is bitwise reproducible and within one BF16 ulp of
     ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not always
-    bitwise equal to it; the order of the FP64 additions depends on
+    bitwise equal to it; the order of the FP32 additions depends on
     scheduling, so ``dw`` is not guaranteed bitwise reproducible); in the
     others, the deterministic package's backward pair rendered into this
     package.
