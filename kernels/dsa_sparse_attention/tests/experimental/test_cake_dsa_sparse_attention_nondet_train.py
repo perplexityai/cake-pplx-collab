@@ -771,6 +771,43 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
 
 
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_workspace_helpers_plan_the_direct_rule_of_the_architecture(monkeypatch, arch):
+    """Host only (no device, no launch; ``arch_for`` stood in per target): both workspace helpers size the drain the
+    registered rule of the architecture selects for the row's (T, S, K_slots, num_segments) -- the RoPE helper with
+    ``dkv_acc`` (without it no binding accumulates directly), the NoPE helper always -- equal to the forced
+    ``dkv_direct`` of that decision and apart from the other path by the FP32 accumulator rows, on every row of the
+    decision table: the architecture, the top-k width and the segment count reach the planners."""
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    nope = dsa_nope_train_workspace_size
+    for name, ((T, S, K, segments), _sm107a) in _DKV_DIRECT_ROWS.items():
+        for program, helper, kw in (
+            (cake_jit.PROGRAM, dsa_train_workspace_size, dict(dkv_acc=True)),
+            (cake_jit.NOPE_PROGRAM, nope, {}),
+        ):
+            want = _dkv_direct_expected(program, arch, T, S, K, segments)
+            sizes = {
+                mode: helper(T, S, K, num_segments=segments, dkv_direct=mode, **kw)
+                for mode in (None, True, False)
+            }
+            assert sizes[None] == sizes[want], (program, name)
+            # the cast path's FP32 accumulators: S x (512 + 64) x 4 B (RoPE), S x 512 x 4 B (NoPE)
+            row = D_QK if program == cake_jit.PROGRAM else D_LATENT
+            assert sizes[False] - sizes[True] >= S * row * 4, (program, name)
+        # without dkv_acc a RoPE binding takes the cast path on every architecture
+        plain = dsa_train_workspace_size(T, S, K, num_segments=segments)
+        for mode in (None, True, False):
+            assert (
+                dsa_train_workspace_size(
+                    T, S, K, num_segments=segments, dkv_direct=mode
+                )
+                == plain
+            ), name
+        assert plain == dsa_train_workspace_size(
+            T, S, K, num_segments=segments, dkv_acc=True, dkv_direct=False
+        ), name
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
 def test_backward_binding_keys_hold_the_direct_decision_of_a_packed_row(
     monkeypatch, arch
 ):
