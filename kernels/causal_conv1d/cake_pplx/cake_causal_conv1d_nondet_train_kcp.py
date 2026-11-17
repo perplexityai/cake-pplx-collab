@@ -42,10 +42,11 @@ the recompute-handle rules and the multi-tensor calls are the deterministic KCP 
 the halo exchange: its main program runs before the exchange is waited (no cooperative attribute, no grid barrier;
 its CTAs claim their tokens at run time, so a kernel resident on another stream slows it about in proportion to the
 SMs it holds) and adds the FP32 ``dweight`` runs into zeroed accumulators with unordered global reductions; a tail-row
-program then writes ``dx`` of the fragments' last rows from the received rows.  ``y`` and ``dx`` are bitwise the
-deterministic KCP entry point's;
-the rank-local FP32 ``dweight`` partial is summed in plain FP32 words but is not bitwise reproducible
-run to run (its cross-rank reduction remains the framework's).  The package is chosen by name, so a checkpoint
+program then writes ``dx`` of the fragments' last rows from the received rows.  The package makes no bit promise
+for any output (run to run or against the deterministic KCP entry point).  By default (``dweight_sum="fp32"``) the
+rank-local FP32 ``dweight`` partial is summed in plain FP32 words, with no compensated sums; the opt-in
+``dweight_sum="fp32_pair"`` sums a tile's accumulator copies as an FP32 (hi, lo) pair.  Its cross-rank reduction
+remains the framework's.  The package is chosen by name, so a checkpoint
 recompute (``torch.utils.checkpoint``, reentrant or not) runs the same package.
 
 Name map (the deterministic package -> this module): ``cake_causal_conv1d_det_kcp`` ->
@@ -104,7 +105,7 @@ def cake_causal_conv1d_nondet_kcp(
 
     The first tokens of a fragment that continues a document read the history rows of the preceding fragment
     (exchanged through the context's halo collective) instead of zeros.  FP32 taps, no bias.  The backward overlaps
-    the halo exchange and returns an unordered ``dweight`` partial (``y`` / ``dx`` bitwise the deterministic ones).  When torch's
+    the halo exchange and returns an unordered ``dweight`` partial (no bit promise for any output).  When torch's
     deterministic mode is on as the backward runs, the backward raises a ``RuntimeError`` before any exchange (a
     ``UserWarning``, then it runs, with ``warn_only=True``).
 
@@ -132,7 +133,7 @@ def cake_causal_conv1d_nondet_kcp(
         leaves to kernels of other streams: ``K >= 1`` runs that backward after the halo exchange
         instead of the overlapped one and launches its single-wave grid ``K x ctas_per_sm`` CTAs short, so a kernel of another stream that holds up to ``K`` SMs (for example a communication kernel) does
         not push the top CTAs into a second wave; the unloaded backward gives up the work of those ``K`` SMs.
-        ``y``, ``dx`` and the exchanges are unchanged and ``dweight`` is summed the same way.  With ``K = 0``
+        The forward and the exchanges are the same and ``dweight`` is summed the same way.  With ``K = 0``
         (or ``None``) the backward already launches one SM's CTAs short wherever the last channel-tile rank of the
         full grid holds at least ``ctas_per_sm`` CTAs, so ``K = 1`` leaves the grid unchanged at those widths (for
         example ``C`` = 10240, 6144 and 5120 on a 152-SM GB200 / GB300, ``C`` = 10240, 6144 and 3072 on a 148-SM
@@ -145,8 +146,8 @@ def cake_causal_conv1d_nondet_kcp(
     dweight_sum : str, optional
         Keyword-only, default ``None`` (= ``"fp32"``: one FP32 word per accumulator copy of the rank's
         ``dweight``).  ``"fp32_pair"`` (opt-in): the overlapped backward sums the accumulator copies of a tile's
-        ``dweight`` as an FP32 (hi, lo) pair and rounds once (FP32 operations only); ``y``, ``dx``, the workspace
-        and the exchanges are unchanged, and the cross-CTA order still varies run to run.  Validated by the package
+        ``dweight`` as an FP32 (hi, lo) pair and rounds once (FP32 operations only); the forward, the workspace
+        and the exchanges are the same, and the cross-CTA order still varies run to run.  Validated by the package
         when given: a non-``str`` raises ``TypeError``; another ``str``, ``"fp32_pair"`` with
         ``bwd_reserve_sms >= 1``, and (in the backward) ``"fp32_pair"`` beyond the overlapped backward's channel
         limit raise ``ValueError``; it never runs another program.  Each rank may choose its own value.
@@ -185,8 +186,8 @@ def cake_causal_conv1d_nondet_kcp_multi(
     """Autograd-enabled context-parallel convolutions of several tensors of one layer (for example its q, k and v)
     with one halo exchange per direction, non-deterministic backward.
 
-    Outputs and ``dx`` are bitwise ``tuple(cake_causal_conv1d_nondet_kcp(x, w, ctx) for x, w in zip(xs,
-    weights))``; each ``dweight`` is that tensor's own unordered FP32 partial.  Under torch's deterministic mode the
+    Each tensor runs the programs of :func:`cake_causal_conv1d_nondet_kcp`; each ``dweight`` is that tensor's own
+    unordered FP32 partial.  Under torch's deterministic mode the
     backward alerts like the single call's.
 
     Parameters

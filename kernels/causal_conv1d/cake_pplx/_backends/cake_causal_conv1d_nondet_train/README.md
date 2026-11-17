@@ -113,8 +113,8 @@ The forward runs two programs:
    as the single-rank forward does.
 2. The history-row program (`kcp_fwd_halo`) runs after the exchange's wait. It writes `y` of the first
    `min(3, len)` rows of every fragment with a history row again, from the received pool, with the `kcp_fwd`
-   program's instructions. `y` therefore keeps the bits of the one-launch forward (the `kcp_fwd` program with the
-   context's history table). The program runs only when the rank receives history rows.
+   program's instructions, the instructions of the one-launch forward (the `kcp_fwd` program with the context's
+   history table). The program runs only when the rank receives history rows.
 
 The order depends on the entry and the architecture:
 
@@ -135,8 +135,7 @@ Outside `kcp.FWD_MAIN_ARCHS` (for the multi entry, `kcp.MULTI_FWD_MAIN_ARCHS`) t
 program; before the wait, with every `hist_row_off` entry `-1`, followed by the history-row program. Every supported
 architecture is in both sets, so the shipped forward does not launch the `kcp_fwd` program. Its launch grid follows
 the architecture (`kcp.FWD_RESERVE_SMS`): on sm_107a it is one SM short of the co-resident CTA count when that grid
-holds every channel tile, and on sm_100a and sm_103a it is the full co-resident grid. `y` does not depend on any
-grid.
+holds every channel tile, and on sm_100a and sm_103a it is the full co-resident grid.
 
 ### The backward
 
@@ -150,11 +149,10 @@ deterministic route's head program. Then:
    Cluster Launch Control, they also take the lanes of CTAs that have not
    started. A kernel resident on another stream therefore leaves no work waiting
    for the SMs it holds. Its token arithmetic computes two adjacent channels
-   per packed FP32 (`f32x2`) instruction, as the deterministic KCP backward does;
-   `dx` and each run's FP32 `dweight` sum are bitwise
-   those of the scalar (one channel per instruction) build. The FP32 `dweight` runs are added into four FP32
+   per packed FP32 (`f32x2`) instruction, as the deterministic KCP backward does.
+   The FP32 `dweight` runs are added into four FP32
    accumulator copies in the order the runs end. The copies are summed once per
-   channel tile.
+   channel tile (with `dweight_sum="fp32_pair"`, as an FP32 (hi, lo) pair).
 3. After the wait, on a rank that receives tail rows, the tail-row program
    (`kcp_bwd_halo`) writes `dx` of the last three rows of each such
    fragment from the received rows.
@@ -173,7 +171,7 @@ exchange arrives, beside the main program instead of after it. The caller's
 stream joins the side stream after the main program. The buffers that the side
 stream fills are allocated on the caller's stream before the fork. The programs
 and their inputs are the same, and each `dx` row comes from the program that
-writes it with one rank, so no bit changes.
+writes it with one rank.
 
 The main program splits each lane into units of `M` tokens
 (`kcp_jit.dyn_plan`). Lane `j` starts at token `j x NL x M` (`NL` units per
@@ -225,16 +223,15 @@ and 1 there.
 
 ### Determinism and accuracy, per output
 
-Below, "same call" means the same inputs, device, SM count, package version,
-world size, partition (CP layout) and keywords.
+The non-deterministic package makes no bit promise. No output is promised to
+repeat bit for bit, run to run, or to match the deterministic package's bits.
 
-| Output | Repeats bit for bit | Relation to the deterministic KCP route | Accuracy vs exact FP64 |
-| --- | --- | --- | --- |
-| `y` | yes, for the same call | bitwise the deterministic KCP forward's | one BF16 rounding of the FP32 result |
-| `hist` (history pool) | yes, for the same call | bitwise the deterministic KCP forward's | copies of other fragments' `x_local` rows |
-| `dx` | yes, for the same call | bitwise the deterministic KCP backward's, on both backward forms (overlapped and one-program) | the deterministic KCP `dx`'s: within one BF16 ulp of an FP64 oracle |
-| `dweight` (rank-local FP32 partial) | no: the cross-CTA sum is unordered | not bitwise | an unordered sum of the CTAs' FP32 rows, every sum one plain FP32 word (no FP64 and no compensated sums) |
-| checkpoint recompute (with or without a handle) | yes | | same `y` bits; the backward from it gives the same `dx` bits |
+| Output | Accuracy vs exact FP64 |
+| --- | --- |
+| `y` | one BF16 rounding of the FP32 result |
+| `hist` (history pool) | copies of other fragments' `x_local` rows |
+| `dx` | within one BF16 ulp of an FP64 oracle |
+| `dweight` (rank-local FP32 partial) | an unordered sum of the CTAs' FP32 rows. By default (`dweight_sum="fp32"`) every sum is one plain FP32 word, with no compensated sums; the opt-in `"fp32_pair"` sums a tile's accumulator copies as an FP32 (hi, lo) pair. No FP64 |
 
 The package issues no reduction collective for `dweight`. Each rank returns
 its partial, and the framework sums the partials across the ranks (for example, the
@@ -248,7 +245,8 @@ There are no environment variables. Every setting is a keyword argument.
 | --- | --- | --- | --- |
 | `recompute_handle` | `CakeCausalConv1dNondetKcpRecomputeHandle()` or any object with an `entries` dict | `None` | The checkpoint recompute runs without the forward halo exchange (see below). |
 | `cooperative` | `None`, `False` | `None` | `None` and `False` mean the same. `True` raises `ValueError`. |
-| `bwd_reserve_sms` | int `K`, `0 <= K <` SM count | `None` (= 0) | `K >= 1` runs the one-program backward after the exchange with a grid `K x ctas_per_sm` CTAs short. Supported on SM100 / SM103 only; `ValueError` on SM107. A `bool` or a non-`int` raises `TypeError`. A value out of range raises `ValueError`. `y`, `dx` and the exchanges are unchanged; `dweight` is summed the same way. Each rank may choose its own value. |
+| `bwd_reserve_sms` | int `K`, `0 <= K <` SM count | `None` (= 0) | `K >= 1` runs the one-program backward after the exchange with a grid `K x ctas_per_sm` CTAs short. Supported on SM100 / SM103 only; `ValueError` on SM107. A `bool` or a non-`int` raises `TypeError`. A value out of range raises `ValueError`. The forward and the exchanges are the same; `dweight` is summed the same way. Each rank may choose its own value. |
+| `dweight_sum` | `None`, `"fp32"`, `"fp32_pair"` | `None` (= `"fp32"`) | `"fp32"`: one plain FP32 word per accumulator copy of `dweight`. `"fp32_pair"` is an opt-in: the overlapped backward's main program sums the accumulator copies of a tile as an FP32 (hi, lo) pair and rounds once, with FP32 operations only. It needs the overlapped backward: with `bwd_reserve_sms >= 1` the call raises `ValueError`, and a backward with tokens and `C > 65536` (`kcp_jit.DYN_MAX_CHANNELS`) raises `ValueError`. It never runs another program. Another string raises `ValueError`; a non-string raises `TypeError`. Each rank may choose its own value. |
 | `graph` | `"replay"` | omitted (eager) | Explicit `kcp` calls only: keyed CUDA-graph capture and replay. |
 
 ### Sharing the GPU with other streams
@@ -315,5 +313,5 @@ direction instead of `n`.
 
 - Inputs: each `xs[i]` is BF16 `[T_r, C_i]` and each `weights[i]` is FP32 `[C_i, 4]`. Each `C_i` is a multiple of 8, and they may differ.
 - Exchange: the tensors' send rows travel side by side in one `all_to_all_single`. After the wait, when the call uses the side stream (more than one rank, every tensor on the overlapped pair) and every tensor has the same width, each tensor's tail-row program reads its rows in place in the received pool, and the programs run concurrently on the side stream and streams forked from it. Otherwise the rows are copied into each tensor's own pool.
-- Programs: each tensor then runs the single call's programs. In the forward on sm_107a, the first tensor's main program runs before the wait (see The forward). Outputs and `dx` are bitwise one single call per tensor. Each `dweight` is that tensor's own unordered partial.
-- Keywords: one `bwd_reserve_sms` value applies to every tensor. One recompute handle covers the whole call; its `"conv"` entry holds the `n` history pools.
+- Programs: each tensor then runs the single call's programs. In the forward on sm_107a, the first tensor's main program runs before the wait (see The forward). Each `dweight` is that tensor's own unordered partial.
+- Keywords: one `bwd_reserve_sms` value and one `dweight_sum` value apply to every tensor. One recompute handle covers the whole call; its `"conv"` entry holds the `n` history pools.

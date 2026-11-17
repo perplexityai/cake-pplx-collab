@@ -38,23 +38,25 @@ with or without ``warn_only=True``::
       (cake_pplx.cake_causal_conv1d_det_
       train[_kcp])
 
-The forward is fixed-order (the deterministic package's programs) and never
+The forward is fixed-order (this package's copies of the deterministic package's programs) and never
 alerts; only the backward's unordered ``dweight`` / ``dbias`` reduction does,
 and it reads torch's deterministic setting when it runs (the autograd backward
 included).  The package is chosen by name, so a checkpoint recompute
 (``torch.utils.checkpoint``, reentrant or not) runs the same package.
 
-Numerical contract: only the run-to-run bitwise reproducibility of
-``dweight`` / ``dbias`` is relaxed.  ``y`` is bitwise the deterministic
-forward's (the same programs).  ``dx`` is bitwise the deterministic backward's
-for the same route and channel count (the same per-thread FP32 arithmetic and
-one BF16 rounding).  ``dweight`` / ``dbias`` accumulate in plain FP32 words on
-every route, as the deterministic reduce sums (the default
-``silu_grad_preactivation="bf16"``: within about 3e-5 rel-L2 of the exact FP64
-gradient; the ``silu_grad_preactivation="fp32"`` routes spread the adds over
-sixteen FP32 copies of the accumulators, added in copy order at the end; no
-FP64 and no compensated sums), and are rounded once into the requested dtype;
-the accumulation order across CTAs varies run to run.  The inputs,
+Numerical contract: the non-deterministic package makes no bit promise (no
+output is promised to repeat bit for bit run to run or to match the
+deterministic package's bits).  The forward runs the deterministic package's
+programs.  ``dx`` uses the deterministic backward's per-thread FP32 arithmetic
+and one BF16 rounding.  By default (``dweight_sum="fp32"``) ``dweight`` /
+``dbias`` accumulate in plain FP32 words on every route, as the deterministic
+reduce sums (the default ``silu_grad_preactivation="bf16"``: within about
+3e-5 rel-L2 of the exact FP64 gradient; the ``silu_grad_preactivation="fp32"``
+routes spread the adds over sixteen FP32 copies of the accumulators, added in
+copy order at the end; no FP64 and no compensated sums; the opt-in
+``dweight_sum="fp32_pair"`` keeps FP32 (hi, lo) pairs instead), and are
+rounded once into the requested dtype; the accumulation order across CTAs
+varies run to run.  The inputs,
 output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
@@ -79,7 +81,7 @@ non-int, ``ValueError`` for another value): the backward launches
 ``bwd_grid_mult`` times its default untrimmed CTA count, a finer static
 partition of the token axis for a backward that overlaps kernels of other
 streams.  The CTAs of each channel tile split its tokens among themselves at
-any grid size, so ``dx`` is still bitwise the deterministic one and
+any grid size, so ``dx`` is computed the same way and
 ``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
 grid).
@@ -296,8 +298,8 @@ def cake_causal_conv1d_nondet_train_forward(
 ) -> torch.Tensor:
     r"""Packed width-4 depthwise causal convolution + SiLU, training forward.
 
-    The package's copy of the deterministic forward programs: ``y`` is bitwise the deterministic package's, and
-    the forward runs (without an alert) under torch's deterministic mode.
+    The package's copy of the deterministic forward programs; the forward runs (without an alert) under torch's
+    deterministic mode.
 
     Parameters
     ----------
@@ -381,17 +383,17 @@ def cake_causal_conv1d_nondet_train_backward(
         default grid): the backward launches ``bwd_grid_mult`` times its
         default untrimmed CTA count, so each CTA streams that much fewer tokens
         (for a backward that overlaps kernels of other streams: a CTA that
-        starts late trails by a shorter stream).  ``dx`` is bitwise the
-        default's; more CTAs add into the same accumulators (same plain FP32
-        sums, same workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
+        starts late trails by a shorter stream).  ``dx`` is computed as by
+        the default; more CTAs add into the same accumulators (same sum form,
+        same workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
     dweight_sum : {"fp32", "fp32_pair"}
         The sum form of ``dweight`` / ``dbias``.  ``"fp32"`` (default): one
         plain FP32 word per sum.  ``"fp32_pair"`` (opt-in): an FP32 (hi, lo)
         pair per sum -- the CTA's fold Kahan-compensated and every accumulator
         word a pair that keeps each add's rounding error, rounded once to the
-        output dtype; FP32 operations only, the same ``dx`` and the same
-        workspace (the CTAs' order still varies run to run).  Only with
+        output dtype; FP32 operations only, ``dx`` computed as by the default
+        and the same workspace (the CTAs' order still varies run to run).  Only with
         ``silu_grad_preactivation="fp32"``; ``ValueError`` otherwise and for
         another ``str``, ``TypeError`` for a non-``str``.
 

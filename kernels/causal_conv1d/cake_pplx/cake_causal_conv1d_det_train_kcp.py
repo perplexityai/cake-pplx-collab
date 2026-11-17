@@ -35,6 +35,9 @@ loads none of it); the single-rank entry points are in ``cake_pplx.cake_causal_c
     # a layer's q / k / v convolutions with one halo exchange per direction
     # (bitwise three single calls)
     q, k, v = cake_causal_conv1d_det_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
+
+The KCP path has no ``dweight_sum`` keyword: it offers no FP32 (hi, lo) pair opt-in, and ``dweight`` is summed
+in plain FP32 words.
 """
 
 from __future__ import annotations

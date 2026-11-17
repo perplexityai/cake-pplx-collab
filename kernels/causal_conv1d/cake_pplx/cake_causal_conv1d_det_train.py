@@ -43,9 +43,11 @@ the boundary flash-linear-attention's backward uses (``dweight`` lands within
 about 3e-5 rel-L2 of the exact FP64 gradient), and ``p = pre`` unrounded with
 a BF16 ``weight`` (there the rounding can move ``dx`` across a BF16 rounding
 midpoint); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
-program).  Under both, every ``dweight`` / ``dbias`` sum is one plain
-FP32 word: no FP64 and no compensated (two-word) sums.  ``dx`` is within one
-BF16 ulp of exact under both.  The backward is two
+program).  By default (``dweight_sum="fp32"``), under both, every ``dweight``
+/ ``dbias`` sum is one plain FP32 word: no compensated (two-word) sums.  The
+opt-in ``dweight_sum="fp32_pair"`` (with ``"fp32"`` only) sums them as FP32
+(hi, lo) pairs.  No program uses FP64.  ``dx`` is within one BF16 ulp of
+exact under both.  The backward is two
 ordinary launches on one stream: a persistent main program writes ``dx`` and
 one FP32 partial row of ``dweight`` (and ``dbias``) per CTA into a workspace,
 and a reduce program launched programmatically dependent on it sums the rows
@@ -76,9 +78,10 @@ between calls, the host never reads ``cu_seqlens`` (no synchronization), ``S
 == 0`` returns empty outputs without launching, and the calls are CUDA Graph
 capturable once the libraries are built.
 
-A call's arguments (bias, BF16 taps or gradient, the SiLU' policy) select its
-route, and within a route the channel count selects one of the architecture's
-programs through a host-side rule of the backend's registry (never the data),
+A call's arguments (bias, BF16 taps or gradient, the SiLU' policy,
+``dweight_sum``) select its route, and within a route the channel count
+selects one of the architecture's programs through a host-side rule of the
+backend's registry (never the data),
 so a given ``(S, C, device)`` and route always run the same program.  The
 workspace size is the maximum over every backward program of every route, so
 one buffer of ``cake_causal_conv1d_det_train_backward_workspace_bytes(S, C,
@@ -289,9 +292,9 @@ def cake_causal_conv1d_det_train_backward(
     on other streams never stall the call).
 
     The call's arguments select the route (bias, BF16 among ``weight`` /
-    ``dweight``, the SiLU' policy) and the channel count selects the route's
-    program through a host-side rule of the backend's registry (never the
-    data), so a given ``(S, C, device)`` and route always run the same program.
+    ``dweight``, the SiLU' policy, ``dweight_sum``) and the channel count
+    selects the route's program through a host-side rule of the backend's
+    registry (never the data), so a given ``(S, C, device)`` and route always run the same program.
     Before capturing a CUDA Graph, build every library of the device's
     architecture (the backend's ``cake_jit.specs_for_arch``, in
     ``cake_pplx._backends.cake_causal_conv1d_det_train``) so that no
