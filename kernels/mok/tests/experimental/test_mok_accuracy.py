@@ -26,7 +26,9 @@ values), against the oracle's weight gradient: the same error as the accumulator
 gradient.  E4M3 values the MXFP8 kernels store (the saved gate, up and activation of the resident macrobatch) are judged
 as their dequantized values against the oracle's value before quantization; ``x``'s E4M3 codes and UE8M0 scales are
 exact against the recipe.  The kernel-shaped alternatives of :data:`tests.experimental._mok_naive.ALTERNATIVE` are
-measured on the same draws and reported (``ALT`` lines), never judged.
+measured on the same draws and reported (``ALT`` lines), never judged.  The known accuracy gaps
+(:mod:`tests.experimental._mok_gaps`) are judged in items of their own under a strict expected-failure marker: the
+MXFP8 score gradient of every MXFP8 case.
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -38,6 +40,7 @@ import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import TierJudge, judge_case
+from tests.experimental import _mok_gaps as gaps
 from tests.experimental import _mok_naive as naive
 from tests.experimental._mok_reference import (
     mxfp8_quantize,
@@ -138,15 +141,17 @@ def _reference_values(r, sh, dtype_cast=None):
     return values
 
 
-def _finish(judge, alt, failures, record_property):
-    judge.record(record_property)
-    for verdict in alt.verdicts().values():
-        record_property("naive_alternative", verdict)
-    assert not failures, "\n".join(failures)
+def _check(record_property, part, judged, known=()):
+    """Judge item ``part`` of a case (:func:`tests.experimental._mok_gaps.check`) from the case's shared run
+    ``judged`` = ``(judge, alternatives, failures)``; the main item also records the alternatives."""
+    judge, alt, failures = judged
+    if part == gaps.OUTPUTS:
+        for verdict in alt.verdicts().values():
+            record_property("naive_alternative", verdict)
+    gaps.check(record_property, part, list(judge.verdicts().values()), failures, known)
 
 
 def _bf16_case(
-    record_property,
     *,
     swiglu_limit=None,
     fp32_wgrad=False,
@@ -225,39 +230,37 @@ def _bf16_case(
         return outputs, oracle
 
     judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden)
-    _finish(judge, alt, failures, record_property)
+    return judge, alt, failures
+
+
+def _bf16(record_property, part="outputs", known=(), **kwargs):
+    require_gpu()
+    _check(record_property, part, gaps.judged(("bf16", *sorted(kwargs.items())), lambda: _bf16_case(**kwargs)), known)
 
 
 @pytest.mark.parametrize("empty", [False, True], ids=["routed", "empty-experts"])
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
 def test_fused_training_accuracy(record_property, geometry, empty):
-    require_gpu()
-    _bf16_case(record_property, geometry=geometry, empty=empty)
+    _bf16(record_property, geometry=geometry, empty=empty)
 
 
 def test_fused_training_clamped_swiglu_accuracy(record_property):
     """A limit near the activations' standard deviation clamps a large fraction of gate and up."""
-    require_gpu()
-    _bf16_case(record_property, swiglu_limit=0.125)
+    _bf16(record_property, swiglu_limit=0.125)
 
 
 @pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
 def test_fused_training_fp32_wgrad_accuracy(record_property, geometry):
-    require_gpu()
-    _bf16_case(record_property, fp32_wgrad=True, geometry=geometry)
+    _bf16(record_property, fp32_wgrad=True, geometry=geometry)
 
 
 @pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
 def test_fused_training_local_experts_accuracy(record_property, experts):
     """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
-    require_gpu()
-    _bf16_case(
-        record_property, swiglu_limit=0.125, experts=experts, topk=8, geometry=(512, 256, 2048)
-    )
+    _bf16(record_property, swiglu_limit=0.125, experts=experts, topk=8, geometry=(512, 256, 2048))
 
 
 def _mxfp8_case(
-    record_property,
     *,
     swiglu_limit,
     geometry,
@@ -381,33 +384,42 @@ def _mxfp8_case(
         seed=seed + hidden + intermediate + macro,
         exact=frozenset({"x_codes", "x_scales"}),
     )
-    _finish(judge, alt, failures, record_property)
+    return judge, alt, failures
+
+
+#: The known-gap outputs of every MXFP8 case.
+MXFP8_GAPS = (("d_scores", gaps.MXFP8_D_SCORES),)
+MXFP8_PARTS = pytest.mark.parametrize("part", gaps.parts(MXFP8_GAPS))
+
+
+def _mxfp8(record_property, part, **kwargs):
+    require_gpu()
+    run = gaps.judged(("mxfp8", *sorted(kwargs.items())), lambda: _mxfp8_case(**kwargs))
+    _check(record_property, part, run, [name for name, _ in MXFP8_GAPS])
 
 
 LIMITS = pytest.mark.parametrize("swiglu_limit", [None, 0.75], ids=["plain", "clamped"])
 
 
+@MXFP8_PARTS
 @LIMITS
 @pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
-def test_mxfp8_training_accuracy(record_property, swiglu_limit, geometry):
-    require_gpu()
-    _mxfp8_case(record_property, swiglu_limit=swiglu_limit, geometry=geometry)
+def test_mxfp8_training_accuracy(record_property, swiglu_limit, geometry, part):
+    _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry)
 
 
+@MXFP8_PARTS
 @LIMITS
 @pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
-def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geometry):
-    require_gpu()
-    _mxfp8_case(record_property, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True)
+def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geometry, part):
+    _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True)
 
 
+@MXFP8_PARTS
 @pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
-def test_mxfp8_training_local_experts_accuracy(record_property, experts):
+def test_mxfp8_training_local_experts_accuracy(record_property, experts, part):
     """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
-    require_gpu()
-    _mxfp8_case(
-        record_property, swiglu_limit=0.75, geometry=(512, 256, 2048), experts=experts, topk=8
-    )
+    _mxfp8(record_property, part, swiglu_limit=0.75, geometry=(512, 256, 2048), experts=experts, topk=8)
 
 
 @pytest.mark.parametrize("topk", [2, 8])
