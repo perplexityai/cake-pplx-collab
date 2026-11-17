@@ -807,6 +807,11 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
     base.set_ieee_fp32()
     device = torch.device("cuda", torch.cuda.current_device())
     timer = Timer(device, args.timer, args.calls, args.dry)
+    try:  # a timer that cannot record (e.g. a CUPTI too old for the device) fails the run here, not per arm
+        timer.times(lambda: timer.flush.zero_(), calls=2, dry=0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"TIMER SELF-TEST FAILED ({timer.backend}): {_err(exc)}", file=sys.stderr, flush=True)
+        return 4
     judge = base.load_naive_judge()
     arms = make_arms([a for a in args.arms.split(",") if a], args)
     shapes = parse_shapes(args)
