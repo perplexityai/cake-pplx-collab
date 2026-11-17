@@ -74,12 +74,14 @@ short backward ``bwd_bf16_short`` and the exact tiny backward ``_t512``, each
 up to a count of rows), its fused role (``_fused``: a BF16 weight gradient,
 in a band of rows per SM) and its repeatable role (``_rep``: a BF16
 weight gradient past the fused band, and on sm_107a also before it; an FP32
-weight gradient past its small-row band; on packed rows from
-``LONG_BACKWARD_ROWS_PER_SM`` rows per SM its long role ``_rep_long`` in
-its place); for a BF16 weight gradient its call role (the static backward,
-where an architecture routes one for the role), its row-claims roles
-(``_rc``, ``_rc_mid``) and its mid role (the claimed backward), which no
-band runs.
+weight gradient past its small-row band but in the band of its call role on
+sm_100a and sm_103a; on packed rows from ``LONG_BACKWARD_ROWS_PER_SM``
+rows per SM its long role ``_rep_long`` in its place), its call role (the
+static backward, where an architecture routes one for the role: an FP32
+weight gradient on sm_100a and sm_103a, in a band of rows per SM; a BF16
+one on sm_107a, which no band runs), for a BF16 weight gradient its
+row-claims roles (``_rc``, ``_rc_mid``) and its mid role (the claimed
+backward), which no band runs.
 The forward's programs: the tiny forward (16 threads to a row, one 8-row
 block per 128-thread CTA, the gate before the sum of squares, packed rows
 only; the short forward's arithmetic and bits), the short forward (16
@@ -127,9 +129,13 @@ in L2, thread 0 with one bulk prefetch per tensor where ``dy``, ``x`` and
 layouts: a prefetch per thread).  On sm_107a: the static backward adds its
 windows to 4 copies with an occupancy word per copy (``sparse``) and runs
 one wave at most, and the claimed backward warms the block two ahead.  The
-call role of an FP32 weight gradient routes no module (its bands cover every
-row count), and no chunked backward of an FP32 weight gradient ships: past
-its small-row band it runs the repeatable backward (``bwd_f32_rep``).  The
+call role of an FP32 weight gradient is the static backward on sm_100a and
+sm_103a (``bwd_f32``: no prefetch, its CTA that arrives last reading each
+window by an atomic exchange with 0, the same sums in fewer instructions),
+which its band runs past ``F32_REP_LAST`` and up to ``F32_STATIC_LAST``
+rows per SM; it routes no module on sm_107a, and no claimed backward of an
+FP32 weight gradient ships: elsewhere past its small-row band an FP32
+weight gradient runs the repeatable backward (``bwd_f32_rep``).  The
 row-claims backwards of a BF16 weight gradient,
 on sm_100a and sm_103a (256 threads, 16-row blocks, the CTAs past one wave
 claiming blocks from the claim counter; ``_rc_mid``: 5 CTAs per SM, thread
@@ -201,7 +207,11 @@ band-selection measurement found its varying weight gradient making the
 checkpointed training step (2 x forward + backward) about 3 % or more
 faster than with the repeatable backward (near a band's edges the gain can
 be smaller), and the repeatable backward past that; an FP32 weight gradient
-runs the repeatable backward past its small-row band (512 rows).
+runs the repeatable backward past its small-row band (512 rows), but on
+sm_100a and sm_103a the static backward past one and up to two of the
+repeatable backward's waves of 64 rows per SM, where the band-selection
+measurement found the static backward saving about 2 to 7 % (B200) and
+5 to 8 % (GB300) of the checkpointed training step.
 ``BACKWARD_BANDS`` gives each backward its rows on each architecture.
 
 Grids (:func:`launch_grid`): the forward and the short forward launch one
@@ -1319,6 +1329,97 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd_bf16_t512",
     },
+    # The static backward into a FP32 weight gradient on sm_100a and sm_103a:
+    # 128 threads, 16 lanes per row (8-row blocks), the deterministic
+    # backward's chunks, CTA b running the chunks b, b + grid, ... with no
+    # claim and no prefetch, the chunk partials summed exactly in integer
+    # windows, the CTA that arrives last reading each window by an atomic
+    # exchange with 0 (the same sums in fewer instructions), the weight
+    # gradient rounded once to FP32; BACKWARD_BANDS gives it its rows, past 64
+    # and up to 128 rows per SM (F32_REP_LAST, F32_STATIC_LAST; at most 2 row
+    # blocks a CTA of its grid of 8 CTAs per SM) (build {"bulk": 0,
+    # "chunks_per_step": 0, "finish": "exch", "min_blocks": 8, "out": "f32",
+    # "prefetch_ahead": 0, "schedule": "static", "slots": 4, "sparse": 0}).
+    "cake_rmsnorm_silu_gate_train_421e73578399336342e3": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "dw_win"],
+            ["buffer", "dw_spec"],
+            ["buffer", "dw_done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["parameter", "blocks_per_chunk"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunk_limit": 8192,
+            "ctas_per_sm": 8,
+            "kind": "chunks",
+            "rows_per_block": 8,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_421e73578399336342e3",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 15616,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
+        "logical": {
+            "accumulate": "accumulate",
+            "blocks_per_chunk": "blocks_per_chunk",
+            "dw": "dw",
+            "dw_done": "dw_done",
+            "dw_spec": "dw_spec",
+            "dw_win": "dw_win",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_f32",
+        "workspace": {
+            "dw_done": 2,
+            "dw_spec": 128,
+            "dw_win": 3584,
+        },
+    },
     # The exact small-row backward into a FP32 weight gradient:
     # one cluster of 16 CTAs of 4 teams of the 128-thread CTA of the
     # deterministic backward at 2e989556 (team q of CTA r runs the 8-row
@@ -1848,6 +1949,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "bwd_bf16_rep": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_rep_long": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
+        "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
         "bwd_f32_t512": "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015",
         "bwd_f32_rep": "cake_rmsnorm_silu_gate_train_ae2073f31d0923e61736",
         "bwd_f32_rep_long": "cake_rmsnorm_silu_gate_train_be861a132bbc76cb6433",
@@ -1866,6 +1968,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_fused": "cake_rmsnorm_silu_gate_train_2ce27f38a52585400ca0",
         "bwd_bf16_rep": "cake_rmsnorm_silu_gate_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_rep_long": "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992",
+        "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
         "bwd_f32_t512": "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015",
         "bwd_f32_rep": "cake_rmsnorm_silu_gate_train_ae2073f31d0923e61736",
         "bwd_f32_rep_long": "cake_rmsnorm_silu_gate_train_be861a132bbc76cb6433",
@@ -1989,9 +2092,19 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # runs for no row count.  The cuts are this table only (host plan: a new
 # cut needs no new program).  An FP32 weight gradient runs, past its
 # small-row band (512 rows), the repeatable backward (``_rep``: the
-# deterministic package's FP32 backward program, whose CTAs claim their
-# blocks) at every row count; no static or claimed backward of an FP32
-# weight gradient ships.  A BF16 weight gradient runs, past
+# deterministic package's FP32 backward program, at most 4 CTAs per SM
+# claiming 16-row blocks, so a wave is 64 rows per SM), but on sm_100a and
+# sm_103a the static backward (the call role: 8 CTAs per SM, CTA ``b``
+# running the chunks ``b``, ``b + grid``, ... of 8-row blocks) past
+# ``F32_REP_LAST`` and up to ``F32_STATIC_LAST`` rows per SM: past one wave
+# and up to two the repeatable backward's CTAs take a second round of
+# blocks, the static backward splits those rows more evenly, and the
+# band-selection measurement found it saving about 2-7 % (B200) and 5-8 %
+# (GB300) of the checkpointed training step (both cuts on the repeatable
+# backward's waves of 64 rows per SM); elsewhere, where it measured, it
+# found the repeatable backward faster in the step or tying it, and faster
+# in the backward alone.  No claimed FP32 backward ships, nor a static one
+# on sm_107a.  A BF16 weight gradient runs, past
 # its small-row bands, the fused backward (``_fused``, whose CTAs claim their
 # blocks) and the repeatable backward (``_rep``, the same schedule with the
 # deterministic package's exact weight-gradient sum): the fused backward's
@@ -2012,6 +2125,10 @@ ROWS = "rows"
 # and the end of the fused band.
 SM107A_BF16_REP_LAST = 64
 SM107A_BF16_FUSED_LAST = 256
+# The sm_100a and sm_103a FP32 cuts in rows per SM: the end of the first
+# repeatable band and the end of the static band.
+F32_REP_LAST = 64
+F32_STATIC_LAST = 128
 BACKWARD_BANDS: dict[
     str, dict[str, tuple[tuple[tuple[str, int] | float | None, str], ...]]
 ] = {
@@ -2024,6 +2141,8 @@ BACKWARD_BANDS: dict[
         ),
         "bwd_f32": (
             ((ROWS, 512), "bwd_f32_t512"),
+            (F32_REP_LAST, "bwd_f32_rep"),
+            (F32_STATIC_LAST, "bwd_f32"),
             (None, "bwd_f32_rep"),
         ),
     },
@@ -2035,6 +2154,8 @@ BACKWARD_BANDS: dict[
         ),
         "bwd_f32": (
             ((ROWS, 512), "bwd_f32_t512"),
+            (F32_REP_LAST, "bwd_f32_rep"),
+            (F32_STATIC_LAST, "bwd_f32"),
             (None, "bwd_f32_rep"),
         ),
     },
@@ -2060,10 +2181,11 @@ BACKWARD_BANDS: dict[
 # look-ahead loop, the same bits) is faster there.  The cuts are the
 # deterministic package's for the same pairs of programs (its BF16 and its
 # FP32 backward), the same for both weight-gradient dtypes: 2560 rows per SM
-# on sm_100a and sm_103a and 1536 on sm_107a, where of a BF16 weight
-# gradient only the last repeatable band (past ``SM107A_BF16_FUSED_LAST``)
-# reaches it.  Other layouts and fewer rows run the band's module.  Host
-# plan only, as the bands.
+# on sm_100a and sm_103a and 1536 on sm_107a; of a role with two repeatable
+# bands only the last reaches it (of a BF16 weight gradient on sm_107a past
+# ``SM107A_BF16_FUSED_LAST``, of an FP32 one on sm_100a and sm_103a past
+# ``F32_STATIC_LAST``).  Other layouts and fewer rows run the band's module.
+# Host plan only, as the bands.
 LONG = "_long"
 LONG_BACKWARD_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16_rep": 2560, "bwd_f32_rep": 2560},
@@ -2082,8 +2204,9 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # roles (``fwd_tiny``, ``fwd_short``, ``fwd_mid``, ``fwd_long``,
 # ``fwd_xlong``) in the rows of their ``FORWARD_BANDS`` bands; a backward
 # role (its own module, the static backward, where an architecture routes
-# one: ``bwd_bf16`` on sm_107a, which no band runs; ``bwd_f32`` routes
-# none), its small-row roles (``BAND_ROLES``), its fused and repeatable roles
+# one: ``bwd_bf16`` on sm_107a, which no band runs; ``bwd_f32`` on sm_100a
+# and sm_103a, in a band of rows per SM), its small-row roles
+# (``BAND_ROLES``), its fused and repeatable roles
 # (``<role>_fused``, ``<role>_rep``: ``bwd_bf16_fused``, ``bwd_bf16_rep``
 # and ``bwd_f32_rep``, every architecture) and the repeatable roles' long
 # roles (``bwd_bf16_rep_long`` and ``bwd_f32_rep_long``, every

@@ -34,13 +34,15 @@ would those of the row-claims backwards ``bwd_bf16_rc`` and
 ``bwd_bf16_rc_mid``, sm_100a and sm_103a, which no band runs).  ``y``,
 ``dx`` and ``dz`` are the same bits whatever the grid, and so is the weight
 gradient but in the repeatable bands (``bwd_bf16_rep``, and ``bwd_f32_rep``,
-which runs every FP32 weight gradient past 512 rows), whose grid, and so
-whose weight-gradient bits, the rows and the SM count fix: the same bits for
-the same rows and SM count, possibly other bits on a device with another SM
-count.  From version 0.2.2 to 0.2.3 a call with an FP32 weight gradient of
-more than 512 rows changed its ``dx``, ``dz`` and weight-gradient bits (to
-the deterministic package's FP32 backward's bits in this tree).  A band
-runs a backward whose weight
+which runs an FP32 weight gradient past 512 rows but in the static band of
+sm_100a and sm_103a), whose grid, and so whose weight-gradient bits, the
+rows and the SM count fix: the same bits for the same rows and SM count,
+possibly other bits on a device with another SM count.  From version 0.2.2
+to 0.2.3 a call with an FP32 weight gradient of more than 512 rows changed
+its ``dx``, ``dz`` and weight-gradient bits (to the deterministic package's
+FP32 backward's bits in this tree), except on sm_100a and sm_103a past 64
+and up to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2
+ran it up to 256 rows per SM there).  A band runs a backward whose weight
 gradient may vary only where the band-selection measurement found the
 checkpointed training step (2 x forward + backward) about 3 % or more faster
 than with the repeatable backward (near a band's edges the gain can be
@@ -59,12 +61,15 @@ same inputs on the same device.  Each backward program repeats ``dx`` and
 architecture, so the last bits of ``dx`` and ``dz`` can differ between bands
 (the deterministic package's backward need not give these bits; in the
 repeatable bands they are the deterministic package's bits).  The chunked
-backwards of a BF16 weight gradient (the static and the claimed backward,
-which no band runs) compute the FP32 partial of each chunk of rows (the
-chunks of the deterministic backward at ``2e989556``); they add the
-partials exactly, as signed 64-bit integer windows of the FP32 values (an
-addition of integers does not depend on its order), and round the exact sum
-once into ``dw`` in integer arithmetic (FP32, then BF16; no FP64).
+backwards (the static backward of an FP32 weight gradient on sm_100a and
+sm_103a, ``bwd_f32``, past 64 and up to 128 rows per SM; the static and the
+claimed backward of a BF16 weight gradient, which no band runs) compute the
+FP32 partial of each chunk of rows (the chunks of the deterministic
+backward at ``2e989556``); they add the partials exactly, as signed 64-bit
+integer windows of the FP32 values (an addition of integers does not depend
+on its order), and round the exact sum once into ``dw`` in integer
+arithmetic (FP32, then BF16 for a BF16 ``dw``; no FP64), so ``dw`` is the
+same bits at any grid.
 An infinite or ``NaN`` partial makes its column's
 ``dw`` infinite or ``NaN`` with the class the exact sum of the partials gives
 it (a ``NaN``'s sign and payload need not be its).  A call of few rows runs a small-row
@@ -104,8 +109,9 @@ fixed-point digits in the workspace and the sum rounded once by the CTA that
 arrives last.  Its ``dx``, ``dz`` and ``dw`` are the deterministic package's bits,
 the same for the rows and the SM count.  Past its small-row band (512
 rows) a call with an FP32 weight gradient runs the repeatable backward of
-an FP32 weight gradient (``bwd_f32_rep``, on every architecture), this
-package's copy of the deterministic package's FP32 backward: the same
+an FP32 weight gradient (``bwd_f32_rep``, on every architecture; on sm_100a
+and sm_103a past 64 and up to 128 rows per SM the static backward, above),
+this package's copy of the deterministic package's FP32 backward: the same
 schedule, chunks, runs and digits, the sum rounded once to FP32, so its
 ``dx``, ``dz`` and ``dw`` are the deterministic package's FP32 bits, the
 same for the rows and the SM count.  The flag word of a column records an
@@ -261,8 +267,10 @@ Host design (the input layout rules are the deterministic package's):
   and the extra-long forward on sm_100a, 16-term chains of 8 lanes folded by
   1, 2, 4.  So ``y``'s bits can differ between bands while each program
   repeats them.  The static and the claimed
-  backward (a BF16 weight gradient; routed, no band runs them) run
-  128-thread CTAs of 8-row blocks in the deterministic
+  backward (the static backward of an FP32 weight gradient on sm_100a and
+  sm_103a, with no prefetch, its CTA that arrives last reading each window
+  by an atomic exchange with 0; of a BF16 weight gradient routed, which no
+  band runs) run 128-thread CTAs of 8-row blocks in the deterministic
   backward's chunks (``cake_jit.backward_chunks``) and launch
   ``cake_jit.backward_ctas`` ``G = min(chunks, ctas_per_sm * SMs)`` CTAs (8
   CTAs per SM), each with the same bits at any grid: a static backward, CTA
@@ -293,7 +301,10 @@ Host design (the input layout rules are the deterministic package's):
   sm_103a, 1536 on sm_107a), its long program (``bwd_bf16_rep_long``, its
   look-ahead loop: the same bits, grid and workspace); for an FP32
   weight gradient the repeatable backward (``bwd_f32_rep``) past the
-  small-row band (512 rows) and, in its place on packed rows from the same
+  small-row band (512 rows), on sm_100a and sm_103a up to 64 rows per SM,
+  the static backward (``bwd_f32``) up to 128 and the repeatable backward
+  past it (``cake_jit.F32_REP_LAST``, ``cake_jit.F32_STATIC_LAST``), and,
+  in the last repeatable band's place on packed rows from the same
   ``cake_jit.LONG_BACKWARD_ROWS_PER_SM`` cuts, its long program
   (``bwd_f32_rep_long``);
   on sm_100a and sm_103a the claimed backward and ``_rc_mid`` warm the CTA's
@@ -1098,8 +1109,16 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     weight gradient.
 
     One kernel (``cake_jit.BACKWARD_BANDS`` picks the module by
-    architecture, weight-gradient dtype and rows).  The FP32 band past the
-    small-row one (512 rows) runs the repeatable backward of an FP32 weight
+    architecture, weight-gradient dtype and rows).  On sm_100a and sm_103a
+    the FP32 band past 64 and up to 128 rows per SM runs the static backward
+    (``bwd_f32``) over the chunks of rows of the deterministic backward at
+    ``2e989556``, CTA ``b`` running the chunks ``b``, ``b + grid``, ...,
+    8 CTAs per SM at most: the chunks' FP32 weight-gradient partials are
+    added exactly as 64-bit integer windows in the workspace; the CTA that
+    arrives last rounds the exact sum once into ``dw`` (adding
+    ``grad_weight``'s value first when accumulating) and zeroes the
+    workspace, the same bits at any grid.  The other FP32 bands past the
+    small-row one (512 rows) run the repeatable backward of an FP32 weight
     gradient (``bwd_f32_rep``; on packed rows from
     ``cake_jit.LONG_BACKWARD_ROWS_PER_SM`` rows per SM its long program),
     this package's copy of the deterministic package's FP32 backward, at

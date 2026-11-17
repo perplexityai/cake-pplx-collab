@@ -55,10 +55,10 @@ the other CTAs' FP32 partials of their columns and finish them in a fixed
 order, with no workspace: the short backward of a BF16 weight gradient
 (256-thread CTAs of 16-row blocks, 6144 bytes of dynamic
 shared memory each) and the exact tiny backward (512-thread CTAs of 4 teams
-of 8-row blocks, 19584 bytes each).  The chunked backwards (the static and
-the claimed backward of a BF16 weight gradient; no band runs either, and no
-static or claimed backward of an FP32 weight gradient ships, so the static
-multi-chunk band probes below skip) cut the rows into
+of 8-row blocks, 19584 bytes each).  The chunked backwards (the static
+backward of an FP32 weight gradient on SM100 and SM103, past 64 and up to
+128 rows per SM; the static and the claimed backward of a BF16 weight
+gradient, which no band runs) cut the rows into
 blocks of 8 rows and the blocks into ``C = ceil(blocks / B)`` chunks of
 ``B = max(1, ceil(blocks / 8192))`` consecutive blocks, and launch
 ``G = min(C, 8 * SMs)`` CTAs of 128 threads, at most one wave (8 CTAs per
@@ -99,7 +99,9 @@ plain FP32 words and each CTA's FP32 column words exactly into fixed-point
 digits of the workspace, so its ``dw`` depends on the rows and
 the SM count only.  The repeatable backward of an FP32 weight gradient
 (``bwd_f32_rep``, past its small-row band on every architecture: from 513
-rows; the deterministic package's FP32 backward program) has the same grid,
+rows, but on SM100 and SM103 past 64 and up to 128 rows per SM, where the
+static backward runs; the deterministic package's FP32 backward program)
+has the same grid,
 block schedule and workspace, adding each thread's FP32 runs of at most 16
 rows into plain FP32 words of its chunk and each CTA's FP32 column words
 exactly into fixed-point digits, so its ``dw`` too depends on the rows and
@@ -164,17 +166,18 @@ band (a static backward's band that holds rows with more chunks than its
 grid has CTAs) of either weight-gradient dtype, at its first such whole
 tokens and at the most tokens whose rows give each CTA the band end's whole
 row blocks a CTA (the band's last whole tokens where that is not past the
-first; a weight-gradient dtype with no such band skips, as both do: no band
-runs a static backward); in each row-claims
+first; a weight-gradient dtype with no such band skips: a BF16 one, whose
+static backward no band runs, and an FP32 one on SM107); in each row-claims
 band (where a band runs a row-claims backward), in the fused band and in each
 repeatable band (of a BF16 weight gradient on every architecture, two on
-sm_107a, and of an FP32 one; their CTAs claim 16-row
-blocks at run time where the rows have more blocks than the grid has CTAs), at its first
+sm_107a, and of an FP32 one, two on sm_100a and sm_103a; their CTAs claim
+16-row blocks at run time where the rows have more blocks than the grid has
+CTAs), at its first
 and its last whole tokens, or, in a band without an end, at its first whole
 tokens and the first whole tokens whose rows have more blocks than one wave
 of its grid has CTAs, where the band's first tokens are below them (the last
-repeatable band's of a BF16 weight gradient are not: its "last" edge
-skips; the FP32 repeatable band's, from 513 rows, are).  The
+repeatable band's are not, so its "last" edge skips, but for that of an
+FP32 weight gradient on sm_107a, from 513 rows).  The
 persistent forwards beside the same side kernels: busy / alone is at most
 ``N / (N - k)``, plus the share of one CTA's blocks in the call (a CTA whose
 slot the side kernel
@@ -1067,14 +1070,17 @@ def test_backward_slows_in_proportion_to_the_sms_held(
 # give each CTA of that grid the band end's whole row blocks a CTA
 # (``floor(band end / (wave * rows_per_block))``), or the band's last whole
 # tokens where those are not past "first" (a band that ends below 2 whole row
-# blocks a CTA); no band runs a static backward, so these probes skip.  A
-# row-claims band, the fused band and a repeatable band of either weight
-# gradient (whose CTAs claim 16-row blocks at run time where the rows have
-# more blocks than its grid has CTAs): "first" and "last" are its first and
-# its last whole tokens; in a band without an end (the last repeatable band of
-# either weight gradient) "last" is the first
-# whole tokens whose rows have more blocks than one wave of its grid has
-# CTAs, where the band's first tokens are below them.  Every size comes from
+# blocks a CTA).  The one static multi-chunk band is the static band of an
+# FP32 weight gradient on sm_100a and sm_103a, past 64 and up to 128 rows per
+# SM (one wave of one-block chunks is 64 rows per SM, so its CTAs end at 2 row
+# blocks each); a BF16 weight gradient has none, nor an FP32 one on sm_107a,
+# and their probes skip.  A row-claims band, the fused band and a repeatable
+# band of either weight gradient (whose CTAs claim 16-row blocks at run time
+# where the rows have more blocks than its grid has CTAs): "first" and "last"
+# are its first and its last whole tokens; in a band without an end (the last
+# repeatable band of either weight gradient) "last" is the first whole tokens
+# whose rows have more blocks than one wave of its grid has CTAs, where the
+# band's first tokens are below them.  Every size comes from
 # BACKWARD_BANDS and the device's SM count; the ``nth`` such band of the
 # weight gradient's role, where the architecture has one.
 BACKWARD_EDGES = ("first", "last")

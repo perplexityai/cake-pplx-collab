@@ -29,7 +29,8 @@ compares this package with the deterministic one.  ``y``, ``dx``, ``dz`` and an
 FP32 weight gradient (accumulated or not) must be the same bits on every
 launch and on every path: streams, CUDA Graph replays, autograd,
 ``compute_grad_weight`` (``False`` the bits of the BF16 bands' module), grids
-smaller than the work (the fused backward and the repeatable backwards of
+smaller than the work (the static backward of an FP32 weight gradient on
+sm_100a and sm_103a, the fused backward and the repeatable backwards of
 both weight-gradient dtypes and their long roles at 1, 3 and 7
 CTAs; the libraries no band selects, ``UNBANDED_LIBRARIES``, only at the
 host's grid on a forced route; a repeatable backward's
@@ -44,8 +45,9 @@ so that their BF16 weight gradient may vary in its last bits from run to run:
 there every launch's BF16 weight gradient, alone and accumulated, is judged
 against the naive implementation instead.  The matrix covers dynamic token and head
 counts (``H = 48`` and small or irregular row counts), ``[T, H, 128]`` strided
-and flattened layouts (also in the bands of the fused and the repeatable
-backwards of both weight-gradient dtypes; the BF16 claimed and the
+and flattened layouts (also in the bands of the static backward of an FP32
+weight gradient and of the fused and the repeatable backwards of both
+weight-gradient dtypes; the BF16 claimed and the
 row-claims programs, which no band runs, only on the forced route, on
 contiguous and projection inputs),
 near-zero variance, saturated gates, weight-gradient terms that cancel per
@@ -65,8 +67,9 @@ two streams; the fill inside the graph past the graph-workspace limit), the
 autograd wrapper (non-reentrant checkpointing included), the state a
 checkpointed step keeps, the registry's routes (a
 module for every call, which the support query requires; none of the programs
-the package no longer ships, the static and the claimed backwards of an FP32
-weight gradient among them), bands, chunks and grids (the first and the last
+the package no longer ships, the claimed backwards of an FP32 weight
+gradient and its static backward of sm_107a among them), bands, chunks and
+grids (the first and the last
 rows of every band of ``BACKWARD_BANDS`` run the band's program; packed rows
 of the last repeatable band of either weight gradient from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on run its long role,
@@ -135,13 +138,15 @@ WORKSPACE_LAYOUTS = {
     5: (("dw_win", 0, 5 * 7 * 128), ("dw_spec", 35840, 128), ("dw_done", 36352, 2)),
 }
 MODULE_WORKSPACE_BYTES = {4: 29192, 5: 36360}
-# The slots of each static and claimed backward module (a BF16 weight
-# gradient; no static or claimed backward of an FP32 weight gradient ships),
-# by architecture and role: 4 for the claimed (``_mid``) backward on every
-# architecture and 5 for the static backward of sm_107a.
+# The slots of each static and claimed backward module, by architecture and
+# role: on sm_100a and sm_103a 4 for the static backward of an FP32 weight
+# gradient and the claimed backward (``_mid``) of a BF16 one; on sm_107a 5 for
+# the static backward and 4 for the claimed backward of a BF16 weight
+# gradient (no claimed backward of an FP32 weight gradient ships, nor a
+# static one on sm_107a).
 BACKWARD_SLOTS = {
-    "sm_100a": {"bwd_bf16_mid": 4},
-    "sm_103a": {"bwd_bf16_mid": 4},
+    "sm_100a": {"bwd_f32": 4, "bwd_bf16_mid": 4},
+    "sm_103a": {"bwd_f32": 4, "bwd_bf16_mid": 4},
     "sm_107a": {"bwd_bf16": 5, "bwd_bf16_mid": 4},
 }
 # The torch dtype of each workspace buffer's view.
@@ -452,9 +457,10 @@ def _band_shape(band: str) -> tuple[int, int] | None:
     band narrower than that) the band's first rows as tokens of one head;
     ``None`` where this device routes no such band.  The first band of the
     role where it has more than one (on sm_107a the BF16 repeatable role
-    runs on both sides of the fused band; :func:`_range_shape` takes any); a
-    long role's band (:func:`_device_band`) holds packed rows, which these
-    shapes are."""
+    runs on both sides of the fused band, on sm_100a and sm_103a the FP32 one
+    on both sides of the static band; :func:`_range_shape` takes any); a long
+    role's band (:func:`_device_band`) holds packed rows, which these shapes
+    are."""
     tokens = _band_tokens(band)
     if tokens is not None:
         return tokens, 48
@@ -726,7 +732,9 @@ def test_layouts(layout, record_property):
 # thread.  No band runs the row-claims and the claimed backwards
 # (``bwd_bf16_rc``, ``bwd_bf16_rc_mid``, ``bwd_bf16_mid``): their cases skip.
 # One token of many heads (its token stride passed as 0) and contiguous tokens
-# are packed rows.  The row-claims backward (``bwd_bf16_rc``) warms no rows;
+# are packed rows.  The static backward of an FP32 weight gradient
+# (``bwd_f32``, sm_100a and sm_103a; no band of sm_107a: its cases skip) and
+# the row-claims backward (``bwd_bf16_rc``) warm no rows;
 # the fused and the repeatable backwards (``bwd_bf16_fused``,
 # ``bwd_bf16_rep``, ``bwd_f32_rep``) warm the next block of a claim on every
 # architecture (one bulk prefetch per tensor for packed rows, else a prefetch
@@ -734,6 +742,7 @@ def test_layouts(layout, record_property):
 # (``bwd_bf16_rep_long``, ``bwd_f32_rep_long``, which look ahead along a
 # claim) run packed rows only: their bands take the contiguous input alone.
 BULK_BANDS = (
+    "bwd_f32",
     "bwd_bf16_rc",
     "bwd_bf16_rc_mid",
     "bwd_bf16_mid",
@@ -818,7 +827,7 @@ def test_layouts_in_the_row_claims_and_claimed_backward_bands(
 def test_edge_values(data, dw_dtype, record_property):
     """``EDGE_DATA`` at 37 tokens of 48 heads (1776 rows: past the small-row
     bands, in a band of each weight-gradient dtype that runs on a workspace,
-    for an FP32 weight gradient its repeatable band), judged by
+    for an FP32 weight gradient its first repeatable band), judged by
     ``check_all`` into a ``dw_dtype`` weight gradient."""
     check_all(
         record_property,
@@ -955,12 +964,14 @@ def test_compute_grad_weight_false_touches_no_weight_state(monkeypatch):
 
 
 # The band roles of the backwards that run on a workspace: the static
-# backward (the call role ``bwd_bf16``), the row-claims backwards and the
-# claimed backward of a BF16 weight gradient (no band runs them: skipped),
-# the fused backward, the repeatable backwards of both weight-gradient dtypes
-# and their long roles (on their packed rows).
+# backwards (the call roles: ``bwd_f32`` on sm_100a and sm_103a; ``bwd_bf16``,
+# which no band runs: skipped), the row-claims backwards and the claimed
+# backward of a BF16 weight gradient (no band runs them: skipped), the fused
+# backward, the repeatable backwards of both weight-gradient dtypes and their
+# long roles (on their packed rows).
 GRID_BANDS = (
     "bwd_bf16",
+    "bwd_f32",
     "bwd_bf16_rc",
     "bwd_bf16_rc_mid",
     "bwd_bf16_mid",
@@ -1262,8 +1273,8 @@ def test_workspace_errors():
 @pytest.mark.parametrize("role", ["bwd_bf16", "bwd_f32"])
 def test_workspace_errors_in_every_band(role, launches):
     """In every ``BACKWARD_BANDS`` band of ``role`` on this device (the
-    small-row, the fused and the repeatable backwards, whatever part of the
-    workspace the band's module uses) and on the packed rows of
+    small-row, the static, the fused and the repeatable backwards, whatever
+    part of the workspace the band's module uses) and on the packed rows of
     its long roles (:func:`_device_long_bands`), a caller workspace that is
     not a contiguous ``torch.uint8`` buffer of at least ``workspace_bytes``
     bytes (one byte short, strided, misaligned, of another dtype:
@@ -1977,11 +1988,12 @@ def test_empty_and_errors():
 # row-claims backwards and the fused backward that added their rows'
 # FP32 sums into FP64 column sums (615c6fae07a6a89f3a45, f14663d91454a0e833f7,
 # 1d4b7311041b9046e379; the programs that add them into FP32 replicas ship);
-# and the static and the claimed backwards of an FP32 weight gradient
-# (421e73578399336342e3 and a8cfbb391df971a9cb59, f2f608aa8d7a81906c9b and
-# 75a7f19a91e6ec05dffc): an FP32 weight gradient runs the repeatable backward
-# (``bwd_f32_rep``, the deterministic package's FP32 backward program) past
-# its small-row band.
+# and the static backward of an FP32 weight gradient on sm_107a
+# (a8cfbb391df971a9cb59) and the claimed backwards of an FP32 weight gradient
+# (f2f608aa8d7a81906c9b, 75a7f19a91e6ec05dffc): past its small-row band an
+# FP32 weight gradient runs the repeatable backward (``bwd_f32_rep``, the
+# deterministic package's FP32 backward program), and on sm_100a and sm_103a
+# the static backward 421e73578399336342e3 in a band of rows per SM.
 REMOVED_PROGRAMS = tuple(
     f"cake_rmsnorm_silu_gate_train_{digest}"
     for digest in (
@@ -2000,7 +2012,6 @@ REMOVED_PROGRAMS = tuple(
         "615c6fae07a6a89f3a45",
         "f14663d91454a0e833f7",
         "1d4b7311041b9046e379",
-        "421e73578399336342e3",
         "a8cfbb391df971a9cb59",
         "f2f608aa8d7a81906c9b",
         "75a7f19a91e6ec05dffc",
@@ -2017,8 +2028,9 @@ def test_registry_records_reference_the_build_manifest():
     weight gradient that no band runs (programs kept routed for
     measurement; the call role ``bwd_bf16`` on sm_107a only: no static
     backward of a BF16 weight gradient ships on sm_100a and sm_103a); the
-    call role ``bwd_f32`` routes no module (no static or claimed backward of
-    an FP32 weight gradient ships); every
+    call role ``bwd_f32`` (the static backward of an FP32 weight gradient) is
+    routed on sm_100a and sm_103a only, where a band runs it, and no claimed
+    backward of an FP32 weight gradient ships; every
     module record names its ``build.json`` library (schema ``cake-build/1``),
     whose entries carry the package's kernel and binding sources and the
     precise-arithmetic flags; no record, library or source file names a
@@ -2078,8 +2090,12 @@ def test_registry_records_reference_the_build_manifest():
             unbanded,
         )
         assert not unbanded & set(loader.BAND_ROLES), (arch, unbanded)
-        # no static or claimed backward of an FP32 weight gradient ships
-        assert not {"bwd_f32", "bwd_f32_mid"} & routed, arch
+        # the static backward of an FP32 weight gradient on sm_100a and
+        # sm_103a only, in a band; no claimed backward of an FP32 weight
+        # gradient ships
+        assert ("bwd_f32" in routed) == (arch != "sm_107a"), arch
+        assert ("bwd_f32" in backward_bands) == (arch != "sm_107a"), arch
+        assert "bwd_f32_mid" not in routed, arch
         assert ("bwd_bf16" in routed) == (arch == "sm_107a"), arch
         for role, name in loader.ROUTES[arch].items():
             record = loader.MODULES[name]
@@ -2508,9 +2524,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     repeatable (``REP_ROLES``) or a claimed backward by its grid rule, the
     ends of each kind in increasing order; last, with no end, the repeatable
     backward of either weight gradient (of a BF16 one after the fused band,
-    of an FP32 one right after its one small-row band, ``bwd_f32_t512`` up to
-    512 rows: no static or claimed backward of an FP32 weight gradient
-    ships); packed rows of the last repeatable band from
+    of an FP32 one after its one small-row band, ``bwd_f32_t512`` up to 512
+    rows, on sm_100a and sm_103a after a first repeatable band up to 64 rows
+    per SM and the static backward up to 128, on sm_107a right after the
+    small-row band: no claimed backward of an FP32 weight gradient ships);
+    packed rows of the last repeatable band from
     ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (``LONG_ROWS_PER_SM``, both
     weight-gradient dtypes) run its long role (:func:`_long_bands`), other
     rows the band's role.  No grid rule carries a band's
@@ -2556,15 +2574,26 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
             # the small-row bands (counts of rows) and the bands of rows per SM,
             # each kind's ends increasing; the last with no end the repeatable
             # backward of either weight gradient, of a BF16 one after the
-            # fused band, of an FP32 one after its small-row band
+            # fused band, of an FP32 one after its small-row band and, on
+            # sm_100a and sm_103a, a first repeatable band up to 64 rows per
+            # SM and the static backward up to 128 (the two cuts on the
+            # repeatable backward's waves of 64 rows per SM)
             final = {"bwd_bf16": "bwd_bf16_rep", "bwd_f32": "bwd_f32_rep"}[role]
             assert bands[-1] == (None, final), (arch, role, bands[-1])
             if role == "bwd_bf16":
                 assert bands[-2][1] == "bwd_bf16_fused", (arch, bands)
                 assert type(bands[-2][0]) in (int, float), (arch, bands)
-            else:
+            elif arch == "sm_107a":
                 assert bands == (
                     ((loader.ROWS, 512), "bwd_f32_t512"),
+                    (None, "bwd_f32_rep"),
+                ), (arch, bands)
+            else:
+                assert (loader.F32_REP_LAST, loader.F32_STATIC_LAST) == (64, 128)
+                assert bands == (
+                    ((loader.ROWS, 512), "bwd_f32_t512"),
+                    (64, "bwd_f32_rep"),
+                    (128, "bwd_f32"),
                     (None, "bwd_f32_rep"),
                 ), (arch, bands)
             counts, per_sm = [], []
@@ -2789,19 +2818,24 @@ def test_backward_bands_run_their_modules_from_their_first_to_their_last_rows(
 ):
     """``BACKWARD_BANDS`` of every architecture on ``sm_count`` SMs
     (:func:`_check_backward_bands`); the call role ``bwd_bf16`` has no module
-    on sm_100a and sm_103a and the call role ``bwd_f32`` none on any
-    architecture (``route_module`` raises ``ValueError``): there the bands of
-    the role cover every row count without it."""
+    on sm_100a and sm_103a and the call role ``bwd_f32`` none on sm_107a
+    (``route_module`` raises ``ValueError``): there the bands of the role
+    cover every row count without it.  On sm_100a and sm_103a the call role
+    ``bwd_f32`` (the static backward) is the module of a band."""
     for arch in loader.ARCHES:
         _check_backward_bands(arch, sm_count)
     for arch, role in (
         ("sm_100a", "bwd_bf16"),
         ("sm_103a", "bwd_bf16"),
-        *((arch, "bwd_f32") for arch in loader.ARCHES),
+        ("sm_107a", "bwd_f32"),
     ):
         assert role not in loader.ROUTES[arch], (arch, role)
         with pytest.raises(ValueError, match="no exported"):
             loader.route_module(arch, role)
+    for arch in ("sm_100a", "sm_103a"):
+        banded = [band for _, band in loader.BACKWARD_BANDS[arch]["bwd_f32"]]
+        assert banded.count("bwd_f32") == 1, (arch, banded)
+        assert "bwd_f32" in loader.ROUTES[arch], arch
 
 
 def test_backward_bands_run_their_modules_on_this_device(launches, record_property):
@@ -2867,7 +2901,8 @@ def test_backward_runs_the_long_role_on_packed_rows_only(sm_count):
     limit), and the repeatable backward a row fewer, for a single token
     (token stride 0), a token stride of 0 in any one tensor, a gate or a
     ``dy`` sliced from a projection, head-major rows and a head stride other
-    than 128 (every row count here is past the FP32 small-row band)."""
+    than 128 (every row count here is in the last repeatable band of either
+    weight gradient)."""
     assert loader.LONG == "_long"
     cuts = {
         arch: {
@@ -3121,8 +3156,8 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
     end without a ``None`` band, its own module), so the support query is
     true on this device; an architecture that routes no module for one band's
     role or one long role, or whose bands of a role without a module of its
-    own end (the call role ``bwd_f32`` has none on any architecture), or that
-    is not exported, does not."""
+    own end (the call role ``bwd_bf16`` has none on sm_100a and sm_103a,
+    ``bwd_f32`` none on sm_107a), or that is not exported, does not."""
     assert pkg.is_cake_rmsnorm_silu_gate_nondet_train_supported(torch.device("cuda"))
     assert not loader.routes_every_call("sm_90a")
     routes = loader.ROUTES
@@ -3158,15 +3193,16 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
     assert not loader.routes_every_call("sm_100a")
     assert loader.routes_every_call("sm_107a")
     # the bands of an FP32 weight gradient without their last (``None``)
-    # band (the BF16 bands whole): no architecture routes a module of the
-    # call role ``bwd_f32`` past them
+    # band (the BF16 bands whole): sm_107a routes no module of the call role
+    # ``bwd_f32`` past them, sm_100a and sm_103a its static backward
     bands = {a: dict(by_role) for a, by_role in full.items()}
     for arch in loader.ARCHES:
         bands[arch]["bwd_f32"] = bands[arch]["bwd_f32"][:-1]
     monkeypatch.setattr(loader, "BACKWARD_BANDS", bands)
     for arch in loader.ARCHES:
-        assert "bwd_f32" not in loader.ROUTES[arch], arch
-        assert not loader.routes_every_call(arch), arch
+        own = "bwd_f32" in loader.ROUTES[arch]
+        assert own == (arch != "sm_107a"), arch
+        assert loader.routes_every_call(arch) == own, arch
 
 
 # (rows, SMs, CTAs) of the long forward: 32-row blocks, the fewest whole waves

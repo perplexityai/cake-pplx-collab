@@ -364,9 +364,10 @@ def test_the_two_modes_are_separate_modules() -> None:
     )
     # the non-deterministic package routes its call roles, the roles its
     # forward and backward bands name, the long roles of its banded roles and
-    # backward roles of a BF16 weight gradient that no band runs; the FP32
-    # backward's call role alone has no module: on every architecture its
-    # bands (the small-row and the repeatable ones) take every row count
+    # backward roles of a BF16 weight gradient that no band runs; a backward
+    # call role has no module where its bands, whose last has no end, take
+    # every row count: the BF16 one on sm_100a and sm_103a, the FP32 one (its
+    # static backward, which a band runs on sm_100a and sm_103a) on sm_107a
     loader = nd_backend.cake_jit
     roles = {record["role"] for record in loader.MODULES.values()}
     banded = {
@@ -380,10 +381,18 @@ def test_the_two_modes_are_separate_modules() -> None:
         for bands in by_role.values()
         for _, role in bands
     }
-    assert set(loader.ROLES) - roles == {"bwd_f32"}
-    for by_role in loader.BACKWARD_BANDS.values():
-        assert by_role["bwd_f32"][-1][0] is None
-    assert (set(loader.ROLES) - {"bwd_f32"}) | banded <= roles
+    assert set(loader.ROLES) | banded <= roles
+    unrouted = {
+        arch: set(loader.ROLES) - set(routes) for arch, routes in loader.ROUTES.items()
+    }
+    assert unrouted == {
+        "sm_100a": {"bwd_bf16"},
+        "sm_103a": {"bwd_bf16"},
+        "sm_107a": {"bwd_f32"},
+    }
+    for arch, missing in unrouted.items():
+        for role in missing:
+            assert loader.BACKWARD_BANDS[arch][role][-1][0] is None, (arch, role)
     longs = {role + loader.LONG for role in banded} & roles
     assert all(
         role.startswith("bwd_bf16_")
