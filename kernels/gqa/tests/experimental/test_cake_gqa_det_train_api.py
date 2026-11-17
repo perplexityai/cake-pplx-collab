@@ -23,7 +23,8 @@ budget's ``None`` standing for the backend's 16 GiB default), every entry point 
 non-deterministic package's entry of the same role, the extras of ``cake_gqa_det_train_workspace_bytes`` are
 keyword-only, and every entry point forwards every argument, ``budget_bytes`` included, to the backend unchanged.
 On SM100 / SM103 / SM107: the entry points return the backend's results bit for bit, the workspace helpers, and
-autograd with each ``dkv_acc`` form, without an ``ExperimentalWarning``.
+autograd with each ``dkv_acc`` form, without an ``ExperimentalWarning``: the gradients of the explicit backward, bit
+for bit, and every output meeting the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``).
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ import pytest
 import torch
 
 import cake_pplx.cake_gqa_det_train as api
+from tests.cake.test_helpers.cake_gqa_naive import judge_draws, judged
 
 BACKEND = "cake_pplx._backends.cake_gqa_det_train"
 ENTRY_POINTS = (
@@ -305,8 +307,8 @@ def _device_or_skip() -> torch.device:
     return torch.device("cuda:0")
 
 
-def _inputs(q_lens, k_lens, device, h_q=24, h_kv=4):
-    g = torch.Generator(device=device).manual_seed(0)
+def _inputs(q_lens, k_lens, device, h_q=24, h_kv=4, seed=0):
+    g = torch.Generator(device=device).manual_seed(seed)
 
     def randn(*shape):
         return torch.randn(*shape, generator=g, device=device).to(torch.bfloat16)
@@ -372,65 +374,87 @@ def test_entry_points_return_the_backend_results() -> None:
 
 
 @pytest.mark.parametrize("form", ("none", "window", "rowmap"))
-def test_autograd_dkv_forms(form) -> None:
+def test_autograd_dkv_forms(form, record_property) -> None:
+    """Autograd with each ``dkv_acc`` form gives the gradients of the explicit backward bit for bit (the BF16 leaves,
+    the FP32 window, the row-map adds in ascending window order), and its outputs meet the naive BF16 tier against
+    the FP64 oracle over the judge's draws."""
     device = _device_or_skip()
-    q, k, v, dout, cu_q, cu_k = _inputs((257, 129), (513, 129), device)
+    q_lens, k_lens = (257, 129), (513, 129)
     # Window rows 0..512 to destination rows 0..512, then 513..641 again to rows 0..128 (repeated rows).
     row_map = torch.cat([torch.arange(513), torch.arange(129)]).to(
         device=device, dtype=torch.int32
     )
-    holder = {}
+    dst_init = tuple(torch.ones(513, 4, D, device=device) for _ in range(2))
 
-    def dkv_acc():
+    def case(seed):
+        q, k, v, dout, cu_q, cu_k = _inputs(q_lens, k_lens, device, seed=seed)
+        holder = {}
+
+        def dkv_acc():
+            if form == "window":
+                holder["k"] = torch.empty(k.shape, dtype=torch.float32, device=device)
+                holder["v"] = torch.empty(v.shape, dtype=torch.float32, device=device)
+                return holder["k"], holder["v"]
+            holder["k"] = dst_init[0].clone()
+            holder["v"] = dst_init[1].clone()
+            return holder["k"], holder["v"], row_map
+
+        leaves = [t.clone().requires_grad_() for t in (q, k, v)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = api.cake_gqa_det(
+                *leaves,
+                cu_q,
+                cu_k,
+                softmax_scale=SCALE,
+                dkv_acc=None if form == "none" else dkv_acc,
+            )
+            out.backward(dout)
+            fwd = api.cake_gqa_det_train_forward(
+                q, k, v, cu_q, cu_k, softmax_scale=SCALE
+            )
+            _, rdk, rdv = api.cake_gqa_det_train_backward(
+                q,
+                k,
+                v,
+                *fwd,
+                dout,
+                cu_q,
+                cu_k,
+                softmax_scale=SCALE,
+                dkv_dtype=torch.float32,
+            )
+            _, bdk, bdv = api.cake_gqa_det_train_backward(
+                q, k, v, *fwd, dout, cu_q, cu_k, softmax_scale=SCALE
+            )
+        torch.cuda.synchronize()
+        assert leaves[0].grad is not None and leaves[0].grad.dtype == torch.bfloat16
+        x = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "dout": dout,
+            "cq": cu_q.tolist(),
+            "ck": cu_k.tolist(),
+        }
+        got = {"out": out.detach(), "dq": leaves[0].grad}
+        if form == "none":
+            assert leaves[1].grad.dtype == torch.bfloat16
+            assert torch.equal(_bits(leaves[1].grad), _bits(bdk))
+            assert torch.equal(_bits(leaves[2].grad), _bits(bdv))
+            got.update(dk=leaves[1].grad, dv=leaves[2].grad)
+            return judged(x, {form: ("bf16", got)})
+        assert leaves[1].grad is None and leaves[2].grad is None
+        got.update(dk=holder["k"], dv=holder["v"])
         if form == "window":
-            holder["k"] = torch.empty(k.shape, dtype=torch.float32, device=device)
-            holder["v"] = torch.empty(v.shape, dtype=torch.float32, device=device)
-            return holder["k"], holder["v"]
-        holder["k"] = torch.ones(513, 4, D, device=device)
-        holder["v"] = torch.ones(513, 4, D, device=device)
-        return holder["k"], holder["v"], row_map
+            assert torch.equal(_bits(holder["k"]), _bits(rdk))
+            assert torch.equal(_bits(holder["v"]), _bits(rdv))
+            return judged(x, {form: ("fp32", got)})
+        # Ascending window order: rows 0..512 add their first window row, then rows 0..128 their second.
+        for held, window in ((holder["k"], rdk), (holder["v"], rdv)):
+            expected = torch.ones(513, 4, D, device=device) + window[:513]
+            expected[:129] = expected[:129] + window[513:]
+            assert torch.equal(_bits(held), _bits(expected))
+        return judged(x, {form: ("rowmap", got)}, dst_init, row_map)
 
-    leaves = [t.clone().requires_grad_() for t in (q, k, v)]
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        out = api.cake_gqa_det(
-            *leaves,
-            cu_q,
-            cu_k,
-            softmax_scale=SCALE,
-            dkv_acc=None if form == "none" else dkv_acc,
-        )
-        out.backward(dout)
-        fwd = api.cake_gqa_det_train_forward(q, k, v, cu_q, cu_k, softmax_scale=SCALE)
-        _, rdk, rdv = api.cake_gqa_det_train_backward(
-            q,
-            k,
-            v,
-            *fwd,
-            dout,
-            cu_q,
-            cu_k,
-            softmax_scale=SCALE,
-            dkv_dtype=torch.float32,
-        )
-        _, bdk, bdv = api.cake_gqa_det_train_backward(
-            q, k, v, *fwd, dout, cu_q, cu_k, softmax_scale=SCALE
-        )
-    torch.cuda.synchronize()
-    assert leaves[0].grad is not None and leaves[0].grad.dtype == torch.bfloat16
-    if form == "none":
-        assert leaves[1].grad.dtype == torch.bfloat16
-        assert torch.equal(_bits(leaves[1].grad), _bits(bdk))
-        assert torch.equal(_bits(leaves[2].grad), _bits(bdv))
-        torch.testing.assert_close(leaves[1].grad.float(), rdk, rtol=2**-8, atol=0)
-        return
-    assert leaves[1].grad is None and leaves[2].grad is None
-    if form == "window":
-        assert torch.equal(_bits(holder["k"]), _bits(rdk))
-        assert torch.equal(_bits(holder["v"]), _bits(rdv))
-        return
-    # Ascending window order: rows 0..512 add their first window row, then rows 0..128 their second.
-    for got, window in ((holder["k"], rdk), (holder["v"], rdv)):
-        expected = torch.ones(513, 4, D, device=device) + window[:513]
-        expected[:129] = expected[:129] + window[513:]
-        assert torch.equal(_bits(got), _bits(expected))
+    judge_draws(record_property, case)

@@ -25,11 +25,10 @@ the ``dkv_acc`` callable type ``CakeGQANondetDkvAccSource`` resolve to the
 backend's objects on first access.
 
 The mode is part of the name: no entry takes a ``deterministic`` keyword
-(passing one is a ``TypeError``).  Every sum of the forward and the backward
-has one fixed order: ``out``, ``lse``, dQ and every dK / dV form repeat bit
-for bit run to run for one shape, one ``max_seqlen_k``, one workspace budget
-and the same host boundaries (given or not), and nothing raises PyTorch's
-determinism alert.
+(passing one is a ``TypeError``).  The package does not promise that an
+output repeats bit for bit, from run to run or across workspace budgets, host
+boundaries, streams or kernels running beside it.  Nothing adds with atomics,
+and nothing raises PyTorch's determinism alert.
 
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin
 wrappers: the checks, the launch plan, the workspace, the autograd Function
@@ -171,9 +170,9 @@ def cake_gqa_nondet(
         to the device).  With them the backward plans its dS^T workspace chunks from each key block's exact tile
         count: fewer, fuller chunks on long layouts and a workspace of the exact size; without them it bounds the
         counts from ``T_q`` and ``B``.  The kernels read the device boundaries: host boundaries that disagree only
-        move the chunks (and the dQ rounding) while every device key segment fits the host plan's key blocks and
-        every chunk holds its device tiles; otherwise a device-side assert fires before the main kernel runs
-        (reported at the next synchronization; the CUDA context is unusable after it).  The dQ bits depend on them.
+        move the chunks (and with them the rounding, not the accuracy) while every device key segment fits the host
+        plan's key blocks and every chunk holds its device tiles; otherwise a device-side assert fires before the
+        main kernel runs (reported at the next synchronization; the CUDA context is unusable after it).
 
     Returns
     -------
@@ -181,9 +180,8 @@ def cake_gqa_nondet(
 
     Notes
     -----
-    The forward and the backward are bitwise reproducible run to run (one fixed summation order; the bits depend on
-    the shapes, ``max_seqlen_k``, the workspace budget and the host boundaries) and raise no PyTorch determinism
-    alert.
+    The forward and the backward raise no PyTorch determinism alert; the package does not promise that their
+    outputs repeat bit for bit.
     """
     return _pkg().cake_gqa_nondet(
         q,
@@ -238,7 +236,8 @@ def cake_gqa_nondet_train_forward(
 
     Notes
     -----
-    Fixed-order and bitwise reproducible run to run; it never raises the deterministic-algorithms alert.
+    It never raises the deterministic-algorithms alert; the package does not promise that its outputs repeat bit
+    for bit.
     """
     return _pkg().cake_gqa_nondet_train_forward(
         q,
@@ -305,8 +304,8 @@ def cake_gqa_nondet_train_backward(
         FP32 ``[N_dst, H_kv, 256]`` destinations that the window gradients are added into; they need ``row_map``.
     row_map : torch.Tensor, optional
         int32 ``[T_k]``: window row ``j`` adds into destination row ``row_map[j]`` (rows may repeat;
-        out-of-range rows are not checked); a destination row becomes ``((dst + w_j1) + w_j2) + ...`` over its
-        window rows in ascending ``j``.
+        out-of-range rows are not checked); destination row ``r`` becomes ``dst`` plus the FP32 window rows ``j``
+        with ``row_map[j] = r``.
     max_seqlen_k : int, optional
         As in :func:`cake_gqa_nondet`.
     workspace : optional
@@ -320,11 +319,11 @@ def cake_gqa_nondet_train_backward(
 
     Notes
     -----
-    Bitwise reproducible run to run: dS^T goes to a workspace chunk (allocated per call, at most the workspace's
-    ``budget_bytes`` above the minimum chunk), dK / dV are summed by the CTA pair that owns their key block, dQ is
-    a GEMM over the workspace, and the row-map destinations are folded in window order; nothing adds with
-    atomics.  The bits depend on the shapes, ``max_seqlen_k``, the budget and the host boundaries only (another
-    budget or other host boundaries may move the last bits of dQ).  No PyTorch determinism alert is raised.
+    dS^T goes to a workspace chunk (allocated per call, at most the workspace's ``budget_bytes`` above the minimum
+    chunk), dK / dV are summed by the CTA pair that owns their key block, dQ is a GEMM over the workspace, and the
+    row-map destinations are folded in window order; nothing adds with atomics.  The budget and the host boundaries
+    can move the rounding of the outputs, not their accuracy; the package does not promise that the outputs repeat
+    bit for bit.  No PyTorch determinism alert is raised.
     """
     return _pkg().cake_gqa_nondet_train_backward(
         q,
@@ -369,8 +368,8 @@ def cake_gqa_nondet_train_workspace(
         The CUDA device; ``None`` is the current device.
     budget_bytes : int, optional
         The bound of one backward call's dS^T workspace; ``None`` is 16 GiB.  A call whose dS^T exceeds it runs in
-        chunks (at least one KV head and two key blocks per chunk, even past the budget).  The chunks set the dQ
-        rounding: one budget gives the same bits on every run.
+        chunks (at least one KV head and two key blocks per chunk, even past the budget).  The budget can move the
+        rounding of the outputs, not their accuracy.
 
     Returns
     -------
