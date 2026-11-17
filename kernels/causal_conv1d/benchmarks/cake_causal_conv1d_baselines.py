@@ -162,6 +162,12 @@ def _distribution(name: str) -> Optional[str]:
         return None
 
 
+def _fla_distribution() -> str:
+    """The installed distribution of ``fla``: ``fla-core`` (the kernels alone) or the ``flash-linear-attention`` one."""
+
+    return "fla-core" if _distribution("fla-core") else "flash-linear-attention"
+
+
 def feature(
     *,
     preactivation: str,
@@ -438,7 +444,7 @@ def single_rank_arm(
         route_of: Optional[Callable[[], Any]] = None
         if name in ("fla", "fla_gluon"):
             entry.update(
-                library=_library("fla", "flash-linear-attention"),
+                library=_library("fla", _fla_distribution()),
                 entry=FLA_ENTRY + (" [Gluon]" if name == "fla_gluon" else " [Triton]"),
                 determinism="deterministic (FP32 per-chunk partials, ordered reduce)",
                 preactivation="bf16",
@@ -608,7 +614,7 @@ def kcp_arm(
         if name in ("fla_cp_triton", "fla_cp_cuda"):
             backend = name.removeprefix("fla_cp_")
             entry.update(
-                library=_library("fla", "flash-linear-attention"),
+                library=_library("fla", _fla_distribution()),
                 entry=f"{FLA_ENTRY}(cp_context=build_cp_context(...), backend={backend!r})",
                 determinism="deterministic (FP32 per-chunk partials, ordered reduce)"
                 if backend == "triton"
