@@ -159,6 +159,7 @@ def test_chains_match_reference(row, monkeypatch) -> None:
     cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
     rows = [_local(part, r, cu, torch.arange(T)).to(device) for r in range(W)]
     assert torch.equal(torch.sort(torch.cat(rows)).values.cpu(), torch.arange(T))
+    exchange = conv_kcp._exchange
 
     def launch(_draw: int, seed: int):
         g = torch.Generator(device="cpu").manual_seed(seed)
@@ -167,6 +168,8 @@ def test_chains_match_reference(row, monkeypatch) -> None:
         dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16).to(device)
         xs = [_local(part, r, cu, x_all) for r in range(W)]
         dys = [_local(part, r, cu, dy_all) for r in range(W)]
+        # the previous draw's halo stand-in is still patched in: the one-rank call runs on the real exchange
+        monkeypatch.setattr(conv_kcp, "_exchange", exchange)
         y_one, dx_one, dw_one = _single_rank(lengths, x_all, w, dy_all, device)
 
         # forward: the send rows of every rank, then each rank's call on its pool
