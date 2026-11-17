@@ -42,8 +42,8 @@ and hold no output to an error bound of its own.  The
 backward's workspace is zero after every call (``compute_grad_weight=False``
 and accumulation included), serves every shape and both weight-gradient
 dtypes, is zeroed by ``cake_rmsnorm_silu_gate_det_train_reset_workspace``, and
-the non-deterministic package's workspaces (FP64 or ``uint8``) and unfit FP32
-buffers are refused; a call without a workspace uses its stream's and, during
+the non-deterministic package's workspace (``uint8``) and unfit buffers (FP32
+ones, FP16, FP64) are refused; a call without a workspace uses its stream's and, during
 CUDA Graph capture, one of the device's reserve (or one the graph zero-fills).
 Without a device, the registry's records and grids are checked at several SM
 counts.
@@ -1424,7 +1424,7 @@ DETERMINISTIC_WORKSPACE = (
 
 def refusal(dtype):
     """The refusal of a workspace of the non-deterministic package."""
-    name = {torch.float64: "FP64", torch.uint8: "uint8"}[dtype]
+    name = {torch.uint8: "uint8"}[dtype]
     return (
         f"workspace is {name}, a workspace of the non-deterministic mode "
         f"({NONDETERMINISTIC_WORKSPACE}); the deterministic backward needs its "
@@ -1443,28 +1443,29 @@ def unfit(device, elements):
 
 
 def _unfit_buffers(elements):
-    """FP32 buffers of ones the backward and the reset refuse: too small, not
-    16-byte aligned, strided, and an FP16 one."""
+    """Buffers of ones the backward and the reset refuse: FP32 ones too small,
+    not 16-byte aligned and strided, an FP16 one and an FP64 one."""
     base = torch.ones(2 * elements + 4, dtype=torch.float32, device="cuda")
     return (
         torch.ones(elements - 1, dtype=torch.float32, device="cuda"),
         base[1 : elements + 1],
         base[: 2 * elements : 2],
         torch.ones(elements, dtype=torch.float16, device="cuda"),
+        torch.ones(elements, dtype=torch.float64, device="cuda"),
     )
 
 
 def test_backward_refuses_unfit_workspaces(launches):
-    """The backward refuses an FP64 or ``uint8`` tensor (a workspace of the
+    """The backward refuses a ``uint8`` tensor (a workspace of the
     non-deterministic package) naming both modes' workspaces, with rows and
     with none, for both weight-gradient dtypes, and keeps ``grad_weight``;
-    another unfit buffer (too small, not 16-byte aligned, strided, FP16, on
-    the host) gets the FP32 requirement.  Nothing is launched and no refused
+    another unfit buffer (too small, not 16-byte aligned, strided, FP16, FP64,
+    on the host) gets the FP32 requirement.  Nothing is launched and no refused
     buffer is written."""
     x, z, w, dy = make(65, 48, seed=13)
     empty = torch.empty(0, 48, D, dtype=torch.bfloat16, device="cuda")
     elements = workspace_for(1, x.device).numel()
-    for dtype in (torch.float64, torch.uint8):
+    for dtype in (torch.uint8,):
         other = torch.ones(elements, dtype=dtype, device="cuda")
         for args in ((dy, x, z), (empty, empty, empty)):
             for gdtype in (torch.bfloat16, torch.float32):
@@ -1543,14 +1544,14 @@ def test_reset_workspace_of_a_zero_workspace_is_a_no_op(launches):
 
 def test_reset_workspace_errors():
     """``reset_workspace`` refuses a non-tensor (``TypeError``), the
-    non-deterministic package's FP64 and ``uint8`` workspaces naming both
-    modes' workspaces, other unfit buffers with the FP32 requirement and a
+    non-deterministic package's ``uint8`` workspace naming both modes'
+    workspaces, other unfit buffers with the FP32 requirement and a
     host tensor, each left as it is; it takes no mode keyword."""
     device = torch.device("cuda")
     elements = workspace_for(1, device).numel()
     with pytest.raises(TypeError):
         reset_workspace(None)
-    for dtype in (torch.float64, torch.uint8):
+    for dtype in (torch.uint8,):
         other = torch.ones(elements, dtype=dtype, device="cuda")
         with pytest.raises(ValueError) as info:
             reset_workspace(other)

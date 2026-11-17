@@ -131,8 +131,8 @@ Host design (every control is a keyword; no environment variable):
   whose order does not change it), so ``torch.use_deterministic_algorithms``
   does not affect any call.  The
   backward refuses a workspace of the non-deterministic package
-  (``cake_pplx.cake_rmsnorm_silu_gate_nondet_train``; an FP64 or ``uint8``
-  tensor) with a ``ValueError``, also in a call with no rows.
+  (``cake_pplx.cake_rmsnorm_silu_gate_nondet_train``; a ``uint8`` tensor)
+  with a ``ValueError``, also in a call with no rows.
 """
 
 from __future__ import annotations
@@ -629,10 +629,10 @@ def _stream_workspace_views(
 
 
 def _refuse_nondeterministic_workspace(workspace: Optional[torch.Tensor]) -> None:
-    """Refuse a workspace of the non-deterministic package (an FP64 or uint8
-    tensor), naming both modes' workspaces."""
+    """Refuse a workspace of the non-deterministic package (a uint8 tensor),
+    naming both modes' workspaces."""
 
-    names = {torch.float64: "FP64", torch.uint8: "uint8"}
+    names = {torch.uint8: "uint8"}
     if isinstance(workspace, torch.Tensor) and workspace.dtype in names:
         raise ValueError(
             f"workspace is {names[workspace.dtype]}, a workspace of the "
