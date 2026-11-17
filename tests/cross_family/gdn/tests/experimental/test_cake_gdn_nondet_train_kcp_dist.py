@@ -104,6 +104,7 @@ plan = _mod("cake_kcp_plan")
 PACKAGE_DIR = Path(kcp.__file__).resolve().parent
 LAYER_TENSORS = ("out", "dx", "dw", "dg", "dbeta")
 WORLD_TIMEOUT_S = 300  # NCCL / rendezvous timeout of the WORLD group (printed at init)
+ROW_TIMEOUT_S = 3600  # gloo timeout of a row's verdict exchange (``_Slurm.cpu``), which covers the longest row
 SCALE = kcp.SCALE
 F64 = torch.float64
 # (b) collectives that would reduce parameters across the group: never issued by the route
@@ -628,6 +629,14 @@ class _Slurm:
                 device_id=self.device,
                 timeout=_dt.timedelta(seconds=WORLD_TIMEOUT_S),
             )
+        # the ranks outside a row's group wait in the row's verdict exchange (``_slurm_row``) while the row runs.  A
+        # production-stage row outlasts WORLD_TIMEOUT_S where the FP64 oracle is slow, and the NCCL watchdog would then
+        # abort the waiting ranks, so the exchange runs on a CPU group of its own whose timeout covers the longest row.
+        self.cpu = (
+            dist.new_group(backend="gloo", timeout=_dt.timedelta(seconds=ROW_TIMEOUT_S))
+            if self.world > 1
+            else None
+        )
         print(
             f"[kcp_train_dist] init timeout {WORLD_TIMEOUT_S} s; "
             f"rank {self.rank}/{self.world} local {local} host {socket.gethostname()} device {self.device} "
@@ -702,7 +711,7 @@ def _slurm_row(row, slurm, backend: str, body, record_property) -> None:
     ok = report is None or bool(report["pass"])
     if slurm.world > 1:
         verdicts: list = [None] * slurm.world
-        dist.all_gather_object(verdicts, ok)
+        dist.all_gather_object(verdicts, ok, group=slurm.cpu)
         ok = all(verdicts)
     if slurm.rank >= W:
         if not ok:
