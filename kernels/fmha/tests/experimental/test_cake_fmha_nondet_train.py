@@ -228,7 +228,9 @@ def test_stage_launchers_pass_the_registry_arguments_positionally(D, causal, mon
     calls = []
     monkeypatch.setattr(cake_backend, "device_arch", lambda index: ARCHES[0])
     monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, args)))
-    B, H, Sq, Skv = 2, 3, 256, 384
+    # Sizes and tile counts all distinct, so a swapped integer argument or grid axis changes the recorded call.
+    B, H, Sq, Skv = 2, 3, 5 * cake_jit.BLOCK, 7 * cake_jit.BLOCK
+    assert len({B, H, Sq, Skv, Sq // cake_jit.BLOCK, Skv // cake_jit.BLOCK}) == 6
     bf16, fp32 = {"dtype": torch.bfloat16}, {"dtype": torch.float32}
     q, out, dout, dq = (torch.empty(B, Sq, H, D, **bf16) for _ in range(4))
     k, v, dk, dv = (torch.empty(B, Skv, H, D, **bf16) for _ in range(4))

@@ -32,7 +32,8 @@ lengths, grid and index limits, a non-finite scale, a base not 16-byte aligned);
 then the results meet the tier); an empty batch returns empty gradients and alerts nothing; the launches run on the
 current stream without synchronizing; a call captured in a CUDA graph replays to results that meet the tier; a device
 outside the exported architectures is a ``RuntimeError``; with two devices, operands on the device that is not current
-give results there that meet the tier, and operands on two devices are a ``ValueError``.  The package promises no bits: no test compares two runs bit for bit. """
+give results there that meet the tier, and operands on two devices are a ``ValueError``.  The package promises no bits:
+no test compares two runs bit for bit. """
 
 from __future__ import annotations
 
