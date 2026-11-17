@@ -20,7 +20,7 @@ Times the *complete operator* of both packages on the rows of
 ``benchmarks/bench_cake_dsa_indexer_det_train.py`` (loaded by path: its row
 definitions, input builders, CUPTI timer and deterministic arm are reused
 unchanged; ``--rows`` takes its row and group names, ``iid`` / ``sink`` /
-``pool`` / ``all`` / ``fp8``, the last measured in the BF16 form here):
+``pool`` / ``all`` / ``fp8``) in the input form of ``--form``:
 
 * ``det``: ``cake_pplx._backends.cake_dsa_indexer_det_train`` -- the
   scan, the split merge where the dispatch splits the key ranges, and the
@@ -28,6 +28,17 @@ unchanged; ``--rows`` takes its row and group names, ``iid`` / ``sink`` /
 * ``nondet``: ``cake_pplx._backends.cake_dsa_indexer_nondet_train``
   -- the same scan programs and the plain split merge, without an ordering
   pass: every row holds its selection in no specified slot order.
+
+With ``--form bf16`` (the default) every arm runs the BF16 form.  With
+``--form fp8`` every arm runs the FP8 form of its package on the
+deterministic benchmark's FP8 inputs (``build_fp8_inputs``: float8_e4m3fn
+``q`` / ``k`` with per-key FP32 ``k_scale``, amax scaling per (query, head)
+and per key, the query and softmax scales folded into ``w``) of the plain iid
+rows; ``--rows fp8`` (the default of the mode) is its FP8 shape set:
+``P1``, ``glm2k_16k`` (2048 queries over 16384 keys), ``s1_8k_on_64k`` (8192
+over 73728), ``s2_4x2k_packed`` (four segments of 2048 queries over 18432,
+43008, 67584 and 100352 keys) and ``s3_cold16k`` (16384 over 16384), top-k
+2048, causal.
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
@@ -62,6 +73,8 @@ Usage::
     python benchmarks/bench_cake_dsa_indexer_nondet_train.py [--rows P1 S2 ...] [--arms det,nondet]
         [--reps 20] [--strided-k] [--verify] [--cupti-required] [--json out.json]
     python benchmarks/bench_cake_dsa_indexer_nondet_train.py --rows sink --arms det,nondet,det_aa,nondet_aa
+        --cupti-required --json out.json
+    python benchmarks/bench_cake_dsa_indexer_nondet_train.py --form fp8 --arms det,nondet,det_aa,nondet_aa
         --cupti-required --json out.json
 """
 
@@ -127,6 +140,7 @@ def nondet_plan_record(inputs, knobs: dict) -> dict:
         ratio=inputs.ratio,
         device=inputs.device,
         **det_bench.row_extra(inputs),
+        **det_bench.form_extra(inputs),
         **knobs,
     )
     return dict(
@@ -165,6 +179,7 @@ class NondetArm(det_bench.Arm):
                 top_k=inputs.top_k,
                 ratio=inputs.ratio,
                 device=dev,
+                **det_bench.form_extra(inputs),
             )
         )
         self.workspace = torch.empty(
@@ -394,11 +409,18 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
+        "--form",
+        choices=det_bench.FORMS,
+        default="bf16",
+        help="input form of every arm: bf16 (default) or fp8 (float8_e4m3fn q / k with per-key scales on the plain "
+        "iid rows; see the module docstring)",
+    )
+    parser.add_argument(
         "--rows",
         nargs="*",
         default=None,
-        help="rows of the deterministic benchmark to measure (default: its default rows; the group names iid / sink / "
-        "pool / all / fp8 expand)",
+        help="rows of the deterministic benchmark to measure (default: its default rows with --form bf16, its fp8 "
+        "group with --form fp8; the group names iid / sink / pool / all / fp8 expand)",
     )
     parser.add_argument(
         "--arms",
@@ -444,31 +466,34 @@ def main():
         raise SystemExit(
             f"an arm may be named once; use det_aa / nondet_aa for an A/A pair: {arms}"
         )
-    rows = det_bench.expand_rows(
-        det_bench.DEFAULT_ROWS if args.rows is None else args.rows
-    )
+    fp8 = args.form == "fp8"
+    if args.rows is None:
+        args.rows = det_bench.FP8_ROWS if fp8 else det_bench.DEFAULT_ROWS
+    rows = det_bench.expand_rows(args.rows)
     unknown_rows = [r for r in rows if r not in det_bench.ROWS]
     if unknown_rows:
         raise SystemExit(
             f"unknown rows {unknown_rows}; known: {sorted(det_bench.ROWS)} and the groups {sorted(det_bench.ROW_GROUPS)}"
         )
+    dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
     for package, backend in (("det", det_backend), ("nondet", nondet_backend)):
         used = any(a.split("_")[0] == package for a in arms)
-        if used and not backend.generated_program_available(device):
+        if used and not backend.generated_program_available(device, dtype=dtype):
             raise SystemExit(
-                f"generated {package} programs not registered for this device"
+                f"generated {package} programs of the {args.form} form not registered for this device"
             )
     print(
         f"{props.name} ({props.multi_processor_count} SMs, cc {props.major}.{props.minor}, CUDA {torch.version.cuda}), "
-        f"rows {rows}, arms {arms}"
+        f"rows {rows}, arms {arms}, form {args.form}"
     )
     print(f"timing boundary: {TIMING_BOUNDARY}", flush=True)
     results = []
     for name in rows:
-        inputs = det_bench.build_inputs(name, device, args.strided_k)
+        build = det_bench.build_fp8_inputs if fp8 else det_bench.build_inputs
+        inputs = build(name, device, args.strided_k)
         print(
             f"[{name}] T={inputs.num_queries} Tkv={inputs.num_keys} segments={inputs.num_segments} "
-            f"top_k={inputs.top_k} ratio={inputs.ratio}: {det_bench.ROWS[name]['note']}",
+            f"top_k={inputs.top_k} ratio={inputs.ratio} form={args.form}: {det_bench.ROWS[name]['note']}",
             flush=True,
         )
         result = measure_row(name, inputs, arms, args)
@@ -497,6 +522,7 @@ def main():
                     warmup=args.warmup,
                     reps=args.reps,
                     strided_k=args.strided_k,
+                    form=args.form,
                     timing_boundary=TIMING_BOUNDARY,
                 ),
                 indent=1,

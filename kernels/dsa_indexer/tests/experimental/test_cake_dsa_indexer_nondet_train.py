@@ -63,7 +63,6 @@ cake_build = cake_package("cake.cake_dsa_indexer_nondet_train", "cake_build")
 cake_jit = cake_package("cake.cake_dsa_indexer_nondet_train", "cake_jit")
 cake_policy = cake_package("cake.cake_dsa_indexer_nondet_train", "cake_policy")
 ABI_CONTRACT = cake_backend.ABI_CONTRACT
-BF16_ONLY = cake_backend.BF16_ONLY
 CONTRACT_SCALARS = cake_backend.CONTRACT_SCALARS
 CONTRACT_TENSORS = cake_backend.CONTRACT_TENSORS
 HEAD_DIM = cake_backend.HEAD_DIM
@@ -113,9 +112,9 @@ _FROZEN_GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212,
 # identity
 MERGE_PROGRAM = "cake_dsa_indexer_nondet_topk_b8440d1d1d54917a47d7"
 _PROGRAM_NAME = re.compile(r"cake_dsa_indexer_nondet_topk_[0-9a-f]{20}")
-# a word of the deterministic package's ordering pass (the finalize, the rank finalize, the rank-fused merge) or of its
-# FP8 form: no role, key, program, policy field or module attribute of this package carries one
-_ORDERING_OR_FP8 = re.compile(r"finalize|rank|fp8", re.IGNORECASE)
+# a word of the deterministic package's ordering pass (the finalize, the rank finalize, the rank-fused merge): no role,
+# key, program, policy field or module attribute of this package carries one
+_ORDERING = re.compile(r"finalize|rank", re.IGNORECASE)
 ALERT = "does not have a deterministic implementation"
 
 def _lengths(cu):
@@ -398,11 +397,22 @@ def test_registry_records_are_well_formed():
         scan_keys = sorted(k for k in keys if k.startswith("scan:"))
         assert scan_keys and set(keys) == set(scan_keys) | {MERGE_KEY}, arch
         assert keys[MERGE_KEY] == MERGE_PROGRAM, arch
-        # every scan key follows the key grammar of the BF16 form
+        # every scan key follows the key grammar; an FP8 key (``:fp8`` before ``:lsf``) runs the sampled-fit form, in
+        # the plain unit order or as the snake copy of a registered plain FP8 program, and the BF16 record's rules
+        # below are the BF16 programs' (the FP8 form has a record of its own, ``policy_for(arch, "fp8")``)
         for key in scan_keys:
             fields = scan_key_fields(key)
             assert fields is not None, (arch, key)
             assert (key.split(":")[-1] == "lsf") == fields.lsf, (arch, key)
+            if fields.form == cake_policy.FP8:
+                assert fields.sample_fit, (arch, key)
+                assert not fields.snake or key.replace(":s1:", ":s0:", 1) in keys, (
+                    arch,
+                    key,
+                )
+        scan_keys = [
+            k for k in scan_keys if cake_policy.scan_key_form(k) == cake_policy.BF16
+        ]
         # the CTA pair serves exactly the unit geometries whose pair program the architecture registers
         assert policy.pair_units == sorted(
             {
@@ -444,31 +454,37 @@ def test_registry_records_are_well_formed():
             assert stage_slug(key).isidentifier(), key
 
 
-def test_no_role_key_program_or_name_of_an_ordering_pass_or_the_fp8_form():
-    """This package ships the deterministic package's BF16 scan programs and its plain split merge only: no role, key,
-    argument, policy field, plan field or module attribute names the finalize, the rank finalize, the rank-fused merge
-    or the FP8 form, and the scan key grammar has no FP8 form."""
+def test_no_role_key_program_or_name_of_an_ordering_pass():
+    """This package ships the deterministic package's scan programs of both forms and its plain split merge only: no
+    role, key, argument, policy field, plan field or module attribute names the finalize, the rank finalize or the
+    rank-fused merge, and the scan key grammar takes the FP8 form's tag before the order suffix."""
     names = [
         *cake_jit.STAGES,
         *cake_jit.ARG_PLANS,
         *[name for plan in cake_jit.ARG_PLANS.values() for _, name in plan],
         *[key for keys in cake_jit.PROGRAM_KEYS.values() for key in keys],
         *[field for record in cake_jit.POLICY.values() for field in record],
+        *[field for record in cake_jit.POLICY_FP8.values() for field in record],
         *POLICY_FIELDS,
         *[f.name for f in dataclasses.fields(DispatchPolicy)],
         *[f.name for f in dataclasses.fields(ProgramChoice)],
         *cake_policy.ScanKeyFields._fields,
         *[field for record in cake_jit.PROGRAMS.values() for field in record],
     ]
-    assert not [n for n in names if _ORDERING_OR_FP8.search(n)]
+    assert not [n for n in names if _ORDERING.search(n)]
     for module in (cake_jit, cake_policy, cake_backend):
-        found = [n for n in vars(module) if _ORDERING_OR_FP8.search(n)]
+        found = [n for n in vars(module) if _ORDERING.search(n)]
         assert not found, (module.__name__, found)
-    # the deterministic package's FP8 scan keys (``:fp8`` before ``:lsf``) are not keys of this grammar
-    for key in ("scan:l6:u1:s0:f1:fp8", "scan:l6:u1:s0:f1:fp8:lsf"):
-        assert scan_key_fields(key) is None, key
+    # the FP8 scan keys carry ``:fp8`` before ``:lsf``; the other order is not a key of the grammar
+    assert scan_key_fields("scan:l6:u1:s0:f1:fp8") == cake_policy.ScanKeyFields(
+        "l6", 1, False, True, cake_policy.FP8, False
+    )
+    assert scan_key_fields("scan:l6:u1:s0:f1:fp8:lsf") == cake_policy.ScanKeyFields(
+        "l6", 1, False, True, cake_policy.FP8, True
+    )
+    assert scan_key_fields("scan:l6:u1:s0:f1:lsf:fp8") is None
     assert scan_key_fields("scan:l6:u1:s0:f1:lsf") == cake_policy.ScanKeyFields(
-        "l6", 1, False, True, True
+        "l6", 1, False, True, cake_policy.BF16, True
     )
 
 
@@ -654,7 +670,7 @@ def test_shared_binding_sources_keep_distinct_namespaces():
 
 def test_policy_records_round_trip_and_reject_foreign_fields():
     """Every architecture's registry record carries exactly ``POLICY_FIELDS`` and round-trips through
-    ``DispatchPolicy``; a record with a field of the deterministic package's ordering pass or FP8 form, without one
+    ``DispatchPolicy``; a record with a field of the deterministic package's ordering pass, without one
     of its own fields, or with a malformed ``sample_long_rule`` is rejected."""
     for arch, raw in cake_jit.POLICY.items():
         policy = policy_for(arch)
@@ -1115,10 +1131,13 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
             assert list(reads) == [a for a in record["arches"] if a in reads], name
     readers = {}
     for arch, keys in cake_jit.PROGRAM_KEYS.items():
-        static = set(policy_for(arch).static_scan_kinds)
         for key, name in keys.items():
             if not key.startswith("scan:"):
                 continue
+            # the static kinds of the key's form (on sm_107a every FP8 kind is static)
+            static = set(
+                policy_for(arch, cake_policy.scan_key_form(key)).static_scan_kinds
+            )
             parts = key.split(":")
             reads = cake_backend.reads_ticket_word(name, arch)
             assert reads == (
@@ -1151,8 +1170,9 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
 def test_static_scan_kinds_are_registered_ticket_architecture_kinds():
     """Every architecture is a ticket architecture; a record's ``static_scan_kinds`` names the physical scan kinds whose
     programs keep the static enumeration there, each a kind the architecture registers, and a kind with an ``:lsf``
-    copy is never static (the copy reorders ticket draws).  No record names one: every scan program draws its work
-    units, the sm_107a l6 and CTA-pair l6 programs from their ``TicketWord`` block."""
+    copy is never static (the copy reorders ticket draws).  No BF16 record names one: every BF16 scan program draws its
+    work units, the sm_107a l6 and CTA-pair l6 programs from their ``TicketWord`` block; sm_107a's FP8 record names
+    every FP8 kind it registers."""
     assert tuple(cake_jit.POLICY) == cake_jit.TICKET_TAIL_ARCHES
     assert {arch: policy_for(arch).static_scan_kinds for arch in cake_jit.POLICY} == {
         "sm_100a": [],
@@ -1171,6 +1191,22 @@ def test_static_scan_kinds_are_registered_ticket_architecture_kinds():
         lsf_kinds = {parts[1] for parts in scan if parts[-1] == "lsf"}
         for kind in policy_for(arch).static_scan_kinds:
             assert kind in kinds and kind not in lsf_kinds, (arch, kind)
+        # the FP8 form decides its tail by its own record (``POLICY_FP8``): every static kind is an FP8 kind
+        # the architecture registers without an :lsf copy
+        if not cake_backend.fp8_programs_for(arch):
+            continue
+        fp8 = [
+            scan_key_fields(k)
+            for k in keys
+            if k.startswith("scan:") and cake_policy.scan_key_form(k) == cake_policy.FP8
+        ]
+        fp8_static = policy_for(arch, cake_policy.FP8).static_scan_kinds
+        assert cake_backend.ticket_tail_skips(arch, cake_policy.FP8) == frozenset(
+            fp8_static
+        )
+        for kind in fp8_static:
+            assert kind in {f.physical for f in fp8}, (arch, kind)
+            assert kind not in {f.physical for f in fp8 if f.lsf}, (arch, kind)
 
 
 def test_sm107a_sampling_rules_cover_the_7549_rank_geometries():
@@ -1263,11 +1299,12 @@ def test_policy_is_validated_once_per_architecture(monkeypatch):
         program_for("sm_100a", "finalize:t256")
 
 
-def test_plan_and_workspace_bound_take_the_bf16_form_only():
-    """The host plan and the workspace bound take ``dtype=torch.bfloat16`` (the default); the FP8 form of the
-    deterministic package raises with the package's BF16-only text and any other dtype raises by name, both before the
-    device is consulted (``arch`` / ``num_sms`` given here, no device read).  The bound is the larger of the sampled
-    and the unsampled plans; an ``max_seqlen_k`` that bounds no key segment is rejected by the plan."""
+def test_plan_and_workspace_bound_take_the_form_of_their_dtype():
+    """The host plan and the workspace bound take ``dtype=torch.bfloat16`` (the default) or the FP8 form's
+    ``torch.float8_e4m3fn`` (its own programs where the architecture registers them, else ``NotImplementedError``
+    naming the dtype); any other dtype raises by name, all before the device is consulted (``arch`` / ``num_sms`` given
+    here, no device read).  The bound is the larger of the sampled and the unsampled plans of the form; an
+    ``max_seqlen_k`` that bounds no key segment is rejected by the plan."""
     for arch in cake_jit.ARCHES:
         grid = _FROZEN_GRIDS[arch][0]
         call = dict(top_k=2048, arch=arch, num_sms=grid)
@@ -1283,12 +1320,31 @@ def test_plan_and_workspace_bound_take_the_bf16_form_only():
             ).workspace_bytes
             for sample in (None, 0)
         )
+        fp8 = dict(call, dtype=torch.float8_e4m3fn)
+        if cake_backend.fp8_programs_for(arch):
+            plans = [
+                plan_dsa_indexer_nondet_topk(
+                    4096, 65536, 2, sample_tiles_max=sample, **fp8
+                )
+                for sample in (None, 0)
+            ]
+            assert all(
+                cake_policy.scan_key_form(p.scan_key) == cake_policy.FP8 for p in plans
+            )
+            assert cake_dsa_indexer_nondet_train_topk_workspace_size(
+                4096, 65536, 2, **fp8
+            ) == max(p.workspace_bytes for p in plans)
+        else:
+            for fn in (
+                plan_dsa_indexer_nondet_topk,
+                cake_dsa_indexer_nondet_train_topk_workspace_size,
+            ):
+                with pytest.raises(NotImplementedError, match="float8_e4m3fn"):
+                    fn(4096, 65536, 2, **fp8)
         for fn in (
             plan_dsa_indexer_nondet_topk,
             cake_dsa_indexer_nondet_train_topk_workspace_size,
         ):
-            with pytest.raises(ValueError, match="BF16 form only"):
-                fn(4096, 65536, 2, dtype=torch.float8_e4m3fn, **call)
             with pytest.raises(ValueError, match="bfloat16"):
                 fn(4096, 65536, 2, dtype=torch.float16, **call)
         for bad in (65537, 32767):  # above Tkv; below ceil(Tkv / S)
@@ -1473,15 +1529,21 @@ def test_validate_reaches_the_device_rule_for_host_tensors():
             lambda h: setattr(h, "max_seqlen_k", 4),
             "max_seqlen_k",
         ),  # 4 x 2 segments < 10 keys
-        # the FP8 form of the deterministic package: this package offers the BF16 form only
-        (lambda h: setattr(h, "q", h.q.to(torch.float8_e4m3fn)), "BF16 form only"),
-        (lambda h: setattr(h, "k", h.k.to(torch.float8_e4m3fn)), "BF16 form only"),
+        # the q dtype selects the form: mixed q / k dtypes are rejected, and FP8 q / k need the per-key scales
+        (
+            lambda h: setattr(h, "q", h.q.to(torch.float8_e4m3fn)),
+            "k must be float8_e4m3fn",
+        ),
+        (
+            lambda h: setattr(h, "k", h.k.to(torch.float8_e4m3fn)),
+            "k must be bfloat16",
+        ),
         (
             lambda h: (
                 setattr(h, "q", h.q.to(torch.float8_e4m3fn)),
                 setattr(h, "k", h.k.to(torch.float8_e4m3fn)),
             ),
-            "BF16 form only",
+            "need k_scale",
         ),
     ],
 )
@@ -1492,15 +1554,30 @@ def test_validate_rejects(mutate, match):
         _validate(h)
 
 
-def test_fp8_rejection_names_the_deterministic_package():
-    """The BF16-only text tells the caller where the FP8 form lives."""
-    assert "BF16 form only" in BF16_ONLY
-    assert "cake_pplx.cake_dsa_indexer_det_train" in BF16_ONLY
+def test_fp8_q_k_with_k_scale_reach_the_device_rule():
+    """float8_e4m3fn q / k select the FP8 form: with their per-key scales every host rule passes and host tensors fail
+    only the device rule; a BF16 call rejects the scales.  The FP8 form's own rules are covered by
+    ``test_cake_dsa_indexer_nondet_train_fp8.py``."""
     h = _host_inputs()
     h.q, h.k = h.q.to(torch.float8_e4m3fn), h.k.to(torch.float8_e4m3fn)
-    with pytest.raises(ValueError) as info:
-        _validate(h)
-    assert BF16_ONLY in str(info.value)
+    k_scale = torch.ones(h.k.shape[0], dtype=torch.float32)
+    args = (h.q, h.k, h.w, h.cu_q, h.cu_k, h.offsets, h.top_k, h.scale, h.ratio)
+    with pytest.raises(ValueError, match="CUDA"):
+        validate_dsa_indexer_nondet_inputs(*args, k_scale=k_scale)
+    b = _host_inputs()
+    with pytest.raises(ValueError, match="bfloat16 q / k take none"):
+        validate_dsa_indexer_nondet_inputs(
+            b.q,
+            b.k,
+            b.w,
+            b.cu_q,
+            b.cu_k,
+            b.offsets,
+            b.top_k,
+            b.scale,
+            b.ratio,
+            k_scale=k_scale,
+        )
 
 
 def test_bind_program_orders_arguments_and_fails_closed(monkeypatch):
@@ -3698,8 +3775,8 @@ class _EagerCall:
 
 def test_offsets_placeholder_is_one_never_written_tensor_per_device():
     """A call without ``q_causal_offsets`` passes the device's offsets placeholder (one int64 element, ``has_offsets``
-    = 0), and every call the device's ``K_scale`` placeholder (one float32 element, read by no program of this
-    package): the same tensors for every runner and eager call of the device, never written by any launch."""
+    = 0), and every BF16 call the device's ``K_scale`` placeholder (one float32 element, read by no BF16 program): the
+    same tensors for every runner and eager call of the device, never written by any launch."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
     holder = cake_backend._offsets_placeholder(device.index)

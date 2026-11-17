@@ -23,9 +23,10 @@ call's geometry alone: ``T`` queries, ``Tkv`` keys, ``S`` segments, the
 compression ``ratio``, ``top_k`` and the persistent grid (the device's SM
 count).  A call whose plan splits the key ranges runs the plain split merge
 (``MERGE_KEY``) after its scan; no call runs an ordering pass.  The rules are
-those of the deterministic package's policy without its finalize, rank-merge
-and FP8 rules, so a call picks the scan program, candidate capacity, check
-period, split count, CTA pair and ticket plan that package picks for it.
+those of the deterministic package's policy without its finalize and
+rank-merge rules, so a call of either input form picks the scan program,
+candidate capacity, check period, split count, CTA pair and ticket plan that
+package picks for it.
 Every threshold of that choice is a plain number in the registry
 record of the architecture (``cake_jit.POLICY[arch]``); this module evaluates
 the record.  It depends on nothing but the standard library so that the
@@ -61,12 +62,22 @@ and the dispatch sees only host-known integers.  The chosen program never
 changes the selected set -- every form selects the same ids with the same score
 bits per row; only the order of a row's entries can differ -- so a wrong
 choice costs time, not correctness.
+
+The opt-in FP8 input form (float8_e4m3fn ``q`` / ``k``) has its own scan
+programs, keyed ``scan:<kind>:u<unroll>:s<snake>:f1:fp8[:lsf]``, for the narrow,
+l6, split and wide kinds, in the plain unit order (``s0``) but for the snake copy
+(``s1``) of the sm_107a l6 program.  An FP8 call runs the same decision procedure under the
+architecture's FP8 record (``fp8_policy_record``: the ``POLICY`` record with
+the fields of the registry's ``POLICY_FP8`` record replaced) and then the
+registered FP8 program of the decided kind, or of its ``FP8_KIND_FALLBACK``
+kind (``select_fp8_program``).  Every FP8 program of one architecture selects
+the same set per row.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Collection, NamedTuple, Optional
 
 # Record fields in canonical order (the export writes them in this order).
@@ -105,6 +116,7 @@ POLICY_FIELDS = (
     "wide_pair_snake_only",  # a sampled call pairs the wide unit only when it walks the snake order (else the unpaired wide program)
     "snake_default",  # snake unit order when no rule applies
     "snake_rule",  # [program kinds, min mean tiles, min mean tiles (ratio > 1), min unit-cost spread], or None
+    "snake_cap_rule",  # [max segments, max waves of the persistent grid] within which an FP8 call the decision marks snake runs the snake copy of its program, or None (no cap); read only by select_fp8_program
     "snake_packed_rule",  # [program kinds, min mean unit tiles sampled, min mean unit tiles with sampling off or None (never), max waves or None] a call of two or more segments needs for the snake order of snake_rule beyond that many waves of its persistent grid, or None (snake_rule alone); see snake_for
     "snake_l6_fallback_waves",  # max waves of the planned program's persistent grid within which a sampling-off call the l6 preference moves runs the plain-order l6 program where the snake-order one is not registered, or None; see select_program
     "tile_unroll_default",  # tile-loop unroll when no rule applies
@@ -122,6 +134,7 @@ POLICY_FIELDS = (
     "sample_long_rule",  # [physical scan kinds, shift permille] of the long-unit calls of those kinds (more than sample_dispatch_mean_tiles_max mean unit tiles), or None; an explicit shift knob overrides it
     "sample_shift_rule",  # [min top_k, shift permille] replacing sample_shift_permille from that top_k on, or None (the default shift on every call); an explicit sample_shift_permille knob overrides both
     "lsf_programs",  # the architecture ships longest-first segment order copies (scan key suffix :lsf) of its scan programs; the host runs the decided program's copy on packed calls whose key segments differ in length, the program itself where the registry has no copy of it
+    "lsf_single_rule",  # [min mean unit tiles] from which a one-segment FP8 call of the wide unit runs the :lsf copy of its program, or None (never); read only by select_fp8_program
     "static_scan_kinds",  # physical scan kinds whose programs keep the static unit enumeration on a ticket architecture: they never touch the ticket tail, so the host gives their runners none
     "far_sample",  # 1: the sampled first threshold of the ascending-tile-order programs ranks the far sample tiles only (the tile nearest the diagonal left out); 0: every sample tile
     "check_period_max",  # cap on the default selection-trigger check period (tiles)
@@ -137,6 +150,30 @@ PHYSICAL_KINDS = tuple(
     sorted(set(KINDS) - {"split"} | {f"split_{unit}" for unit in UNITS})
 )
 MERGE_KEY = "merge"
+# Input forms of a call, selected by its q / k dtype: ``bf16`` (the default) and ``fp8`` (float8_e4m3fn q / k with
+# per-key FP32 scales, opt-in).  An FP8 scan program's key carries the form tag before the LSF suffix,
+# ``scan:<kind>:u<unroll>:s<snake>:f<fit>:fp8[:lsf]``; the plain merge program serves both forms.
+BF16 = "bf16"
+FP8 = "fp8"
+FORMS = (BF16, FP8)
+# The FP8 scan programs exist for the narrow, l6, split and wide kinds, in the plain unit order (sm_107a also registers the
+# snake copy of its l6 program, which ``select_fp8_program`` runs for a snake-marked call within ``snake_cap_rule``) and in
+# the sampled-fit form.
+# An FP8 call runs the decision procedure of ``select_program`` under the FP8 record (``fp8_policy_record``); a decided
+# kind without an FP8 program runs the FP8 program of its fallback kind below (unpaired; the same unit geometry where it
+# has one, except that a CTA-pair wide unit runs l6).  An unpaired, unsplit wide unit (8 queries) runs the FP8 wide
+# program where the architecture registers one (sm_100a, sm_103a and sm_107a); else it, and a CTA-pair wide unit always,
+# runs the l6 unit (6 queries), the largest FP8 unit below the wide one: per key tile it reads K once for 6 queries
+# rather than for the narrow unit's 4.  A split wide unit (sm_107a only) runs split_narrow: no architecture that splits
+# wide units registers an FP8 split_l6 program.
+FP8_KIND_FALLBACK = {
+    "wide": "l6",
+    "pair_l6": "l6",
+    "pair_narrow": "narrow",
+    "pair_wide": "l6",
+    "split_wide": "split_narrow",
+    "split_l6": "split_narrow",
+}
 # Admissible sampled rank shift (permille): the backend's ``sample_shift_permille`` knob bound and the bound of a record's
 # ``sample_shift_rule`` shift.  Every value selects the same set; the shift only sets how conservative the sampled first
 # threshold is.
@@ -287,6 +324,8 @@ _OPTIONAL_RULE = (
     "pair_rule",
     "l6_solo_rule",
     "snake_rule",
+    "snake_cap_rule",
+    "lsf_single_rule",
     "snake_packed_rule",
     "tile_unroll_rule",
     "sample_shift_rule",
@@ -345,6 +384,7 @@ class DispatchPolicy:
     wide_pair_snake_only: bool
     snake_default: bool
     snake_rule: Optional[list]
+    snake_cap_rule: Optional[list]
     snake_packed_rule: Optional[list]
     snake_l6_fallback_waves: Optional[int]
     tile_unroll_default: int
@@ -362,6 +402,7 @@ class DispatchPolicy:
     sample_class_rule: Optional[list]
     sample_long_rule: Optional[list]
     lsf_programs: bool
+    lsf_single_rule: Optional[list]
     static_scan_kinds: list
     far_sample: int
     check_period_max: int
@@ -514,6 +555,21 @@ class DispatchPolicy:
         if solo_queries is not None and solo_queries < 1:
             raise ValueError(
                 f"policy['l6_solo_unsampled_max_queries'] must be an integer >= 1 or None, got {solo_queries!r}"
+            )
+        snake_cap = raw["snake_cap_rule"]
+        if snake_cap is not None and (
+            len(snake_cap) != 2 or not all(_is_int(v) and v >= 1 for v in snake_cap)
+        ):
+            raise ValueError(
+                f"policy['snake_cap_rule'] must be [max segments >= 1, max waves >= 1] or None, got {snake_cap!r}"
+            )
+        lsf_single = raw["lsf_single_rule"]
+        if lsf_single is not None and (
+            len(lsf_single) != 1
+            or not (_is_number(lsf_single[0]) and lsf_single[0] >= 0)
+        ):
+            raise ValueError(
+                f"policy['lsf_single_rule'] must be [min mean unit tiles >= 0] or None, got {lsf_single!r}"
             )
         packed = raw["snake_packed_rule"]
         if packed is not None and (
@@ -1123,6 +1179,36 @@ class DispatchPolicy:
         units = -(-int(num_queries) // max(1, int(block_q)))
         return -(-units // slots) <= int(cap)
 
+    def snake_copy_fits(
+        self, num_queries: int, num_segments: int, block_q: int, grid: int
+    ) -> bool:
+        """Whether a call of ``num_segments`` segments whose ``num_queries`` queries in units of ``block_q`` take a
+        persistent grid of ``grid`` CTAs stays within ``snake_cap_rule`` (at most its segments and waves; always where
+        the record leaves the rule None).  The snake unit order balances the last waves of one causal document; over
+        packed documents, or over many waves, the plain order is faster (the FP8 sm_107a l6 program), so
+        ``select_fp8_program`` runs a snake copy only within the rule."""
+        rule = self.snake_cap_rule
+        if rule is None:
+            return True
+        units = -(-int(num_queries) // max(1, int(block_q)))
+        waves = -(-units // max(1, int(grid)))
+        return int(num_segments) <= int(rule[0]) and waves <= int(rule[1])
+
+    def lsf_single_fits(
+        self, num_queries: int, num_keys: int, num_segments: int, ratio: int
+    ) -> bool:
+        """Whether a one-segment call reaches ``lsf_single_rule`` (at least its mean unit tiles; never where the record
+        leaves the rule None).  On one segment the :lsf copy walks the units of the plain program in the same order and
+        returns the same rows; on the FP8 sm_103a wide program it measures faster from 64 mean unit tiles on and slower
+        below, so ``select_fp8_program`` runs it on a one-segment wide call only within the rule."""
+        rule = self.lsf_single_rule
+        return (
+            rule is not None
+            and int(num_segments) == 1
+            and self.mean_unit_tiles(num_queries, num_keys, num_segments, ratio)
+            >= rule[0]
+        )
+
     def tile_unroll_for(self, kind: str, top_k: int, snake: bool, block_q: int) -> int:
         rule = self.tile_unroll_rule
         if rule is None or (bool(rule[2]) and snake):
@@ -1179,9 +1265,15 @@ def scan_key(
     snake: bool,
     sample_fit: bool,
     lsf: bool = False,
+    form: str = BF16,
 ) -> str:
-    """``:lsf``: the longest-first (LSF) copy, which hands out the program's tickets longest segment first."""
+    """``:lsf``: the longest-first (LSF) copy, which hands out the program's tickets longest segment first; ``form``
+    ``"fp8"``: the FP8 program, tagged ``:fp8`` before the ``:lsf`` suffix."""
     key = f"scan:{physical}:u{int(tile_unroll)}:s{int(bool(snake))}:f{int(bool(sample_fit))}"
+    if form == FP8:
+        key += ":fp8"
+    elif form != BF16:
+        raise ValueError(f"form must be one of {FORMS}, got {form!r}")
     return key + ":lsf" if lsf else key
 
 
@@ -1192,10 +1284,11 @@ class ScanKeyFields(NamedTuple):
     tile_unroll: int
     snake: bool
     sample_fit: bool
+    form: str
     lsf: bool
 
 
-_SCAN_KEY = re.compile(r"scan:([a-z0-9_]+):u([0-9]+):s([01]):f([01])(:lsf)?")
+_SCAN_KEY = re.compile(r"scan:([a-z0-9_]+):u([0-9]+):s([01]):f([01])(:fp8)?(:lsf)?")
 
 
 def scan_key_fields(key: str) -> Optional[ScanKeyFields]:
@@ -1203,8 +1296,49 @@ def scan_key_fields(key: str) -> Optional[ScanKeyFields]:
     match = _SCAN_KEY.fullmatch(key)
     if match is None:
         return None
-    physical, unroll, snake, fit, lsf = match.groups()
-    return ScanKeyFields(physical, int(unroll), snake == "1", fit == "1", bool(lsf))
+    physical, unroll, snake, fit, fp8, lsf = match.groups()
+    return ScanKeyFields(
+        physical, int(unroll), snake == "1", fit == "1", FP8 if fp8 else BF16, bool(lsf)
+    )
+
+
+def scan_key_form(key: str) -> Optional[str]:
+    """The input form (``FORMS``) of the scan program key ``key``; None for any other key."""
+    fields = scan_key_fields(key)
+    return None if fields is None else fields.form
+
+
+def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
+    """The FP8 form's dispatch record of an architecture: its record ``record`` (``POLICY[arch]``) with the fields of
+    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced.  ``fp8_record`` names its own ``static_scan_kinds``
+    (the FP8 programs never keep the BF16 programs' static kinds) and no field outside ``POLICY_FIELDS``."""
+    if (
+        not isinstance(fp8_record, dict)
+        or "static_scan_kinds" not in fp8_record
+        or not set(fp8_record) <= set(POLICY_FIELDS)
+    ):
+        raise ValueError(
+            f"an FP8 dispatch record must name static_scan_kinds and only fields of {POLICY_FIELDS}, got {fp8_record!r}"
+        )
+    return {**record, **fp8_record}
+
+
+def fp8_scan_programs(scan_keys: Collection[str]) -> dict:
+    """The plain FP8 scan programs of a registry's keys: ``{(physical kind, lsf): {tile unroll: key}}`` over the FP8
+    keys in the plain unit order and the sampled-fit form (``s0`` / ``f1``).  A snake copy (``s1``) is not indexed
+    here: ``select_fp8_program`` swaps it in for its plain program where the decision marks the call snake."""
+    programs: dict = {}
+    for key in scan_keys:
+        fields = scan_key_fields(key)
+        if (
+            fields is None
+            or fields.form != FP8
+            or fields.snake
+            or not fields.sample_fit
+        ):
+            continue
+        programs.setdefault((fields.physical, fields.lsf), {})[fields.tile_unroll] = key
+    return programs
 
 
 def stage_slug(key: str) -> str:
@@ -1510,7 +1644,160 @@ def select_program(
     )
 
 
+def fp8_program_choice(
+    policy: DispatchPolicy,
+    choice: ProgramChoice,
+    key: str,
+    n_split: Optional[int] = None,
+) -> ProgramChoice:
+    """``choice`` run by the FP8 scan program ``key``: the unit geometry, the split and the tile unroll follow the key,
+    an FP8 program has no CTA pair (the launched grid is the requested one), and the capacity, check period and sampling
+    knobs of ``choice`` stay; a split key runs the plain split merge.  ``n_split``: the key-range splits of a split key
+    (default: the plan's, at least 2); the workspace bound follows the unit geometry and the split."""
+    fields = scan_key_fields(key)
+    if fields is None or fields.form != FP8:
+        raise ValueError(f"{key!r} is not an FP8 scan program key")
+    physical = fields.physical
+    split = physical.startswith("split_")
+    unit = physical[len("split_") :] if split else physical
+    if unit not in UNITS:
+        raise ValueError(f"no FP8 program runs the scan kind of {key!r}")
+    block_q = {
+        "narrow": policy.block_q_narrow,
+        "wide": policy.block_q_wide,
+        "l6": policy.block_q_l6,
+    }[unit]
+    if not split:
+        n = 1
+    elif n_split is None:
+        n = max(2, int(choice.n_split))
+    else:
+        n = int(n_split)
+        if n < 2:
+            raise ValueError(f"a split program needs n_split >= 2, got {n_split!r}")
+    grid_ctas = int(choice.grid)
+    scan_entries = grid_ctas * block_q * int(choice.cand_cap)
+    staging = int(choice.num_queries) * n * int(choice.top_k) if split else 0
+    return replace(
+        choice,
+        grid_ctas=grid_ctas,
+        block_q=block_q,
+        unit=unit,
+        n_split=n,
+        split=split,
+        pair=False,
+        kind="split" if split else unit,
+        physical_kind=physical,
+        snake=fields.snake,
+        tile_unroll=fields.tile_unroll,
+        sample_fit=fields.sample_fit,
+        lsf=fields.lsf,
+        scan_key=key,
+        merge_key=MERGE_KEY if split else None,
+        scan_entries=scan_entries,
+        staging_entries=staging,
+        workspace_bytes=(scan_entries + staging) * policy.candidate_entry_bytes
+        + TICKET_TAIL_BYTES,
+    )
+
+
+def fallback_knobs(
+    policy: DispatchPolicy, choice: ProgramChoice, physical: str, call: dict
+) -> ProgramChoice:
+    """``choice`` with the sampled first threshold and the check period of the scan kind ``physical`` that runs in place
+    of the decided one (``FP8_KIND_FALLBACK``): the record's ``sample_class_rule`` and ``check_period_kind_overrides``
+    key on the program kind, so a wide decision's wide-unit shift and check period do not carry over to the l6
+    program.  The knobs ``call`` sets stay."""
+    T, Tkv, S, r, K = (
+        choice.num_queries,
+        choice.num_keys,
+        choice.num_segments,
+        choice.ratio,
+        choice.top_k,
+    )
+    tiles_knob = call.get("sample_tiles_max")
+    shift_knob = call.get("sample_shift_permille")
+    tiles, shift = sample_class_for(
+        policy,
+        physical,
+        T,
+        Tkv,
+        S,
+        r,
+        policy.sample_tiles_for(T, Tkv, S, r)
+        if tiles_knob is None
+        else int(tiles_knob),
+        policy.sample_shift_for(K) if shift_knob is None else int(shift_knob),
+        tiles_knob=tiles_knob is not None,
+        shift_knob=shift_knob is not None,
+    )
+    period = choice.check_period
+    if call.get("check_period") is None:
+        kind = "split" if physical.startswith("split_") else physical
+        period = policy.check_period_for(K, choice.cand_cap, kind)
+    return replace(
+        choice, sample_tiles_max=tiles, sample_shift_permille=shift, check_period=period
+    )
+
+
+def select_fp8_program(
+    policy: DispatchPolicy,
+    *,
+    scan_keys: Collection[str],
+    fp8_programs: Optional[dict] = None,
+    **call: Any,
+) -> ProgramChoice:
+    """The host dispatch of one FP8 call: the decision procedure of ``select_program`` (``call``: its keywords) under the
+    architecture's FP8 record ``policy`` (``fp8_policy_record``) with the registry's ``scan_keys``, run by the FP8
+    program (``fp8_program_choice``) of the decided physical kind -- of its ``FP8_KIND_FALLBACK`` kind, with that
+    kind's sampled first threshold and check period (``fallback_knobs``), where no FP8 program of the decided kind is
+    registered -- in the decided segment order (``:lsf`` where its FP8 copy is registered; also a one-segment call of
+    the wide unit within the record's ``lsf_single_rule``, ``DispatchPolicy.lsf_single_fits``), with the decided tile
+    unroll where an FP8 program of it is registered, else the smallest registered one, and in the snake unit order
+    where the decision marks it, the registry has the snake copy (``s1``) of that program and the call stays within
+    the record's ``snake_cap_rule`` (``DispatchPolicy.snake_copy_fits``).  ``fp8_programs``:
+    ``fp8_scan_programs(scan_keys)``, made once by the caller.  Raises ``NotImplementedError`` when no FP8 program
+    serves the kind."""
+    choice = select_program(policy, scan_keys=scan_keys, **call)
+    programs = fp8_scan_programs(scan_keys) if fp8_programs is None else fp8_programs
+    physical = choice.physical_kind
+    if not any(kind == physical for kind, _lsf in programs):
+        physical = FP8_KIND_FALLBACK.get(physical, physical)
+    # lsf_single_rule: a one-segment call of the wide unit runs the :lsf copy within the rule (the plan leaves it off)
+    lsf = choice.lsf or (
+        physical == "wide"
+        and (physical, True) in programs
+        and policy.lsf_single_fits(
+            choice.num_queries, choice.num_keys, choice.num_segments, choice.ratio
+        )
+    )
+    unrolls = programs.get((physical, lsf)) or programs.get((physical, False))
+    if not unrolls:
+        raise NotImplementedError(
+            f"the FP8 dispatch selected the {physical!r} scan kind, which no registered FP8 program serves "
+            f"(registered FP8 kinds: {sorted({kind for kind, _lsf in programs})})"
+        )
+    key = unrolls.get(choice.tile_unroll, unrolls[min(unrolls)])
+    if physical != choice.physical_kind:
+        choice = fallback_knobs(policy, choice, physical, call)
+    plain = fp8_program_choice(policy, choice, key)
+    twin = key.replace(":s0:", ":s1:", 1)
+    if (
+        choice.snake
+        and twin in scan_keys
+        and policy.snake_copy_fits(
+            plain.num_queries, plain.num_segments, plain.block_q, plain.grid_ctas
+        )
+    ):
+        return fp8_program_choice(policy, choice, twin)
+    return plain
+
+
 __all__ = [
+    "BF16",
+    "FORMS",
+    "FP8",
+    "FP8_KIND_FALLBACK",
     "KINDS",
     "MERGE_KEY",
     "POLICY_FIELDS",
@@ -1519,10 +1806,16 @@ __all__ = [
     "DispatchPolicy",
     "ProgramChoice",
     "ScanKeyFields",
+    "fallback_knobs",
+    "fp8_policy_record",
+    "fp8_program_choice",
+    "fp8_scan_programs",
     "physical_kind",
     "sample_class_for",
     "scan_key",
     "scan_key_fields",
+    "scan_key_form",
+    "select_fp8_program",
     "select_program",
     "stage_slug",
     "ticket_static_path",

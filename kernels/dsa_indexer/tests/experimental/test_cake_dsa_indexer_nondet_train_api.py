@@ -168,8 +168,8 @@ def _bf16_host_args():
 def test_public_entry_point_host_argument_rules():
     """The facade's own checks (before any device rule): segment boundaries are required, ``scores`` goes with
     ``return_scores=True``, and neither the keywords of the SM120 serving form (``backend``, ``q_scale``,
-    ``block_table``, ``context_lens``, ``enable_pdl``) nor the deterministic package's FP8 ``k_scale`` nor a
-    ``deterministic`` switch are parameters of this entry point."""
+    ``block_table``, ``context_lens``, ``enable_pdl``) nor a ``deterministic`` switch are parameters of this entry
+    point."""
     q, k, w, cu_q, cu_k = _bf16_host_args()
     with pytest.raises(ValueError, match="cu_seqlens_q and cu_seqlens_k"):
         cake_dsa_indexer_nondet_train_topk(q, k, w, None, cu_k, top_k=4)
@@ -190,7 +190,6 @@ def test_public_entry_point_host_argument_rules():
         "block_table",
         "context_lens",
         "enable_pdl",
-        "k_scale",
         "deterministic",
     ):
         with pytest.raises(TypeError, match=keyword):
@@ -202,24 +201,26 @@ def test_public_entry_point_host_argument_rules():
         cake_dsa_indexer_nondet_train_topk(q, k, w, cu_q, cu_k, top_k=4)
 
 
-def test_public_signatures_take_no_k_scale():
-    """v1 ships the BF16 form only: no public or backend entry point names ``k_scale``; the workspace bound keeps
-    the deterministic package's ``dtype`` keyword (default ``torch.bfloat16``)."""
+def test_public_signatures_take_k_scale():
+    """Every public and backend entry point takes the FP8 form's ``k_scale`` (default None, for BF16 calls) and no
+    ``deterministic`` switch; the workspace bound takes the input form by its ``dtype`` keyword (default
+    ``torch.bfloat16``)."""
     for fn in (
         cake_dsa_indexer_nondet_train_topk,
-        cake_dsa_indexer_nondet_train_topk_workspace_size,
         cake_backend.cake_dsa_indexer_nondet_train_topk,
-        cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
         cake_backend.prepare_dsa_indexer_nondet_topk,
         cake_backend.validate_dsa_indexer_nondet_inputs,
     ):
         parameters = inspect.signature(fn).parameters
-        assert "k_scale" not in parameters, fn.__qualname__
+        assert parameters["k_scale"].default is None, fn.__qualname__
         assert "deterministic" not in parameters, fn.__qualname__
-    parameters = inspect.signature(
-        cake_dsa_indexer_nondet_train_topk_workspace_size
-    ).parameters
-    assert parameters["dtype"].default is torch.bfloat16
+    for fn in (
+        cake_dsa_indexer_nondet_train_topk_workspace_size,
+        cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
+    ):
+        parameters = inspect.signature(fn).parameters
+        assert "k_scale" not in parameters and "deterministic" not in parameters
+        assert parameters["dtype"].default is torch.bfloat16, fn.__qualname__
 
 
 def _fp8_host_args():
@@ -231,23 +232,78 @@ def _fp8_host_args():
     return q, k, w, cu_q, cu_k
 
 
-def test_public_entry_point_rejects_the_fp8_form():
-    """float8_e4m3fn q / k (one of them or both) raise ``ValueError`` saying this package offers the BF16 form only,
-    before the device rule (host tensors here); the workspace bound raises the same for ``dtype=float8_e4m3fn``,
-    before it reads a device, and names ``bfloat16`` for any other dtype."""
+def test_public_entry_point_fp8_argument_rules():
+    """The FP8 form takes ``k_scale`` for float8_e4m3fn q / k with ``softmax_scale=None``, before the device rule
+    (host tensors here); a BF16 call takes no ``k_scale``, mixed q / k dtypes are rejected, and ``q_scale`` (the
+    MXFP4 form of the SM120 serving entry) is not a parameter here.  The workspace bound takes
+    ``dtype=float8_e4m3fn`` and names ``bfloat16`` for any other dtype, before it reads a device."""
     fq, fk, w, cu_q, cu_k = _fp8_host_args()
     q, k, *_ = _bf16_host_args()
-    for pair in ((fq, fk), (fq, k), (q, fk)):
-        with pytest.raises(ValueError, match="BF16 form only"):
-            cake_dsa_indexer_nondet_train_topk(*pair, w, cu_q, cu_k, top_k=4)
-    with pytest.raises(ValueError, match="BF16 form only"):
-        cake_dsa_indexer_nondet_train_topk_workspace_size(
-            6, 10, 2, top_k=4, dtype=torch.float8_e4m3fn
+    k_scale = torch.ones(10, dtype=torch.float32)
+    with pytest.raises(ValueError, match="CUDA"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, fk, w, cu_q, cu_k, top_k=4, k_scale=k_scale
         )
+    with pytest.raises(TypeError, match="q_scale"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq,
+            fk,
+            w,
+            cu_q,
+            cu_k,
+            top_k=4,
+            k_scale=k_scale,
+            q_scale=torch.ones((6, 32), dtype=torch.int32),
+        )
+    with pytest.raises(ValueError, match="softmax_scale=None"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, fk, w, cu_q, cu_k, top_k=4, k_scale=k_scale, softmax_scale=0.5
+        )
+    with pytest.raises(ValueError, match="need k_scale"):
+        cake_dsa_indexer_nondet_train_topk(fq, fk, w, cu_q, cu_k, top_k=4)
+    with pytest.raises(ValueError, match="bfloat16 q / k take none"):
+        cake_dsa_indexer_nondet_train_topk(
+            q, k, w, cu_q, cu_k, top_k=4, k_scale=k_scale
+        )
+    with pytest.raises(ValueError, match="k must be float8_e4m3fn"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, k, w, cu_q, cu_k, top_k=4, k_scale=k_scale
+        )
+    with pytest.raises(ValueError, match="k must be bfloat16"):
+        cake_dsa_indexer_nondet_train_topk(q, fk, w, cu_q, cu_k, top_k=4)
     with pytest.raises(ValueError, match="bfloat16"):
         cake_dsa_indexer_nondet_train_topk_workspace_size(
             6, 10, 2, top_k=4, dtype=torch.float16
         )
+
+
+def test_public_entry_point_fp8_matches_backend():
+    """The FP8 form through the public entry point: on integer e4m3 inputs the backend call and the public call each
+    hold the exact selection's ids and valid count per row, in any slot order, and both workspace bounds of the FP8
+    form agree."""
+    _require_program()
+    if not generated_program_available(torch.device("cuda"), dtype=torch.float8_e4m3fn):
+        pytest.skip("generated FP8 DSA indexer programs not registered for this device")
+    inputs = ref.make_integer_fp8_inputs(
+        [200, 300], [200, 2500], top_k=128, seed=71, device="cuda"
+    )
+    reference = naive.assert_exact(_run(inputs), inputs, ordered=False)
+    naive.assert_exact(_public(inputs), inputs, reference, ordered=False)
+    sizes = [
+        fn(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=128,
+            device=inputs.device,
+            dtype=torch.float8_e4m3fn,
+        )
+        for fn in (
+            cake_dsa_indexer_nondet_train_topk_workspace_size,
+            cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
+        )
+    ]
+    assert sizes[0] == sizes[1]
 
 
 def test_public_entry_point_under_torch_deterministic_mode():

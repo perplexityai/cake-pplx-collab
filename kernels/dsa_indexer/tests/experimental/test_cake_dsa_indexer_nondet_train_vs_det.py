@@ -15,19 +15,21 @@ limitations under the License.
 """
 
 # Parity of the experimental Cake non-deterministic DSA indexer top-k package with the deterministic one
-# (set-equality semantics): the non-deterministic package runs the deterministic package's BF16 scan
-# programs and its plain split merge under the same host decisions, without the ordering pass.  So
+# (set-equality semantics): the non-deterministic package runs the deterministic package's scan programs of both
+# input forms (BF16 and FP8) and its plain split merge under the same host decisions, without the ordering pass.  So
 #
-# * its registry is the deterministic registry's BF16 scan keys plus the plain ``merge`` key, every program the
-#   deterministic program of the same twenty-hex identity under the ``cake_dsa_indexer_nondet_topk`` prefix, and its
-#   dispatch records are the deterministic records restricted to the fields it keeps;
+# * its registry is the deterministic registry's scan keys plus the plain ``merge`` key, every program the
+#   deterministic program of the same twenty-hex identity under the ``cake_dsa_indexer_nondet_topk`` prefix, its
+#   dispatch records are the deterministic records restricted to the fields it keeps, and its FP8 dispatch records
+#   (``POLICY_FP8``) are the deterministic ones;
 # * every host plan has the deterministic plan's fields (scan program, split, grid, unit, capacity, check period,
 #   sampling, segment order, pair, staging and workspace bytes, ticket decisions), the deterministic package's
 #   rank-fused merge being the plain merge here;
-# * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) are this package's own
-#   (``_OWN_SAMPLING``: its ``sample_class_rule`` and the ``sample_long_rule`` the deterministic record has no field
-#   for), so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.  Whether a
-#   call samples, and every other decision, stays the deterministic one;
+# * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) of a BF16 call are this
+#   package's own (``_OWN_SAMPLING``: its ``sample_class_rule`` and the ``sample_long_rule`` the deterministic record
+#   has no field for), so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.
+#   Whether a call samples, and every other decision, stays the deterministic one; an FP8 call (whose record sets
+#   neither rule on sm_107a) has every decision of the deterministic FP8 plan;
 # * on a device, the calls of a list of operator geometries (random, packed, forced split, pooled, sink, exact cases,
 #   the recorded token counts) plan those decisions at the device's own grid.
 #
@@ -88,13 +90,13 @@ def _det_name(name: str) -> str:
     return DET_PREFIX + name[len(NONDET_PREFIX) :]
 
 
-def _bf16_keys(keys: dict) -> dict:
-    """The keys of a deterministic registry that this package ships: the BF16 scan keys (no ``fp8`` part) and the
-    plain merge."""
+def _shipped_keys(keys: dict) -> dict:
+    """The keys of a deterministic registry that this package ships: the scan keys of both forms and the plain
+    merge."""
     return {
         key: name
         for key, name in keys.items()
-        if (key.startswith("scan:") and "fp8" not in key.split(":")) or key == MERGE_KEY
+        if key.startswith("scan:") or key == MERGE_KEY
     }
 
 
@@ -130,21 +132,21 @@ def test_registry_constants_and_argument_plans_are_the_deterministic_ones():
         assert cake_jit.ARG_PLANS[role] == det_jit.ARG_PLANS[role], role
 
 
-def test_program_keys_are_the_deterministic_bf16_scan_keys_and_the_plain_merge():
-    """Per architecture the keys are the deterministic registry's BF16 scan keys and ``merge``, each naming the
-    deterministic program of the same twenty-hex identity under this package's prefix; every program record has the
-    deterministic record's role, architectures and ticket-argument architectures, and reads its TicketWord exactly
-    where the deterministic program does."""
+def test_program_keys_are_the_deterministic_scan_keys_and_the_plain_merge():
+    """Per architecture the keys are the deterministic registry's scan keys of both forms and ``merge``, each naming
+    the deterministic program of the same twenty-hex identity under this package's prefix; every program record has
+    the deterministic record's role, architectures and ticket-argument architectures, reads its TicketWord exactly
+    where the deterministic program does, and each form keeps the deterministic static scan kinds."""
     assert set(cake_jit.PROGRAM_KEYS) == set(det_jit.PROGRAM_KEYS)
     shipped = set()
     for arch, det_keys in det_jit.PROGRAM_KEYS.items():
         expected = {
-            key: _nondet_name(name) for key, name in _bf16_keys(det_keys).items()
+            key: _nondet_name(name) for key, name in _shipped_keys(det_keys).items()
         }
         assert MERGE_KEY in expected, arch
         assert cake_jit.PROGRAM_KEYS[arch] == expected, arch
         shipped |= set(expected.values())
-        for key, det_name in _bf16_keys(det_keys).items():
+        for key, det_name in _shipped_keys(det_keys).items():
             if key.startswith("scan:"):
                 assert cake_backend.reads_ticket_word(
                     _nondet_name(det_name), arch
@@ -152,6 +154,13 @@ def test_program_keys_are_the_deterministic_bf16_scan_keys_and_the_plain_merge()
         assert cake_backend.ticket_tail_skips(arch) == det_backend.ticket_tail_skips(
             arch
         ), arch
+        assert bool(cake_backend.fp8_programs_for(arch)) == bool(
+            det_backend.fp8_programs_for(arch)
+        ), arch
+        if cake_backend.fp8_programs_for(arch):
+            assert cake_backend.ticket_tail_skips(
+                arch, cake_policy.FP8
+            ) == det_backend.ticket_tail_skips(arch, det_policy.FP8), arch
     assert set(cake_jit.PROGRAMS) == shipped
     for name, record in cake_jit.PROGRAMS.items():
         det_record = det_jit.PROGRAMS[_det_name(name)]
@@ -167,8 +176,9 @@ def test_policy_records_are_the_deterministic_records_restricted():
     """Every architecture's dispatch record holds exactly the fields this package's policy reads, with the
     deterministic record's values: the same scan, capacity, check-period, split, pair, sampling and ticket rules,
     but the sm_107a sampling rules of this package (``_OWN_SAMPLING``); ``sample_long_rule`` is set on sm_107a
-    only."""
+    only.  The FP8 dispatch records (``POLICY_FP8``) are the deterministic package's."""
     assert set(cake_jit.POLICY) == set(det_jit.POLICY)
+    assert cake_jit.POLICY_FP8 == det_jit.POLICY_FP8
     for arch, record in cake_jit.POLICY.items():
         det_record = det_jit.POLICY[arch]
         assert set(record) == set(cake_policy.POLICY_FIELDS), arch
@@ -191,10 +201,14 @@ def test_policy_records_are_the_deterministic_records_restricted():
 # ---------------------------------------------------------------------------
 
 
-def _assert_same_decisions(arch, plan, det_plan, where) -> None:
-    # sm_107a: the sampled tile count and rank shift are this package's own (launch scalars only; ``_OWN_SAMPLING``),
-    # whether the call samples is not
-    own = ("sample_tiles_max", "sample_shift_permille") if arch in _OWN_SAMPLING else ()
+def _assert_same_decisions(arch, plan, det_plan, where, *, own_sampling=True) -> None:
+    # sm_107a: the sampled tile count and rank shift of a BF16 call are this package's own (launch scalars only;
+    # ``_OWN_SAMPLING``), whether the call samples is not; ``own_sampling=False`` (an FP8 call) compares them too
+    own = (
+        ("sample_tiles_max", "sample_shift_permille")
+        if own_sampling and arch in _OWN_SAMPLING
+        else ()
+    )
     assert (plan.sample_tiles_max > 0) == (det_plan.sample_tiles_max > 0), where
     for field in _PLAN_FIELDS:
         if field in own:
@@ -270,6 +284,40 @@ def test_host_plans_are_the_deterministic_plans():
                     plan, det_plan = _plans(arch, T, Tkv, S, **call)
                     _assert_same_decisions(
                         arch, plan, det_plan, (arch, grid, T, Tkv, S, call)
+                    )
+
+
+def test_fp8_host_plans_are_the_deterministic_plans():
+    """On the same geometry grid, every SM count of every architecture that registers FP8 programs, both sample modes
+    and with and without the bound of equal key segments, the plan of an FP8 call (``dtype=torch.float8_e4m3fn``) has
+    every field of the deterministic FP8 plan of the same call, the sampled tile count and rank shift included: the
+    FP8 scan program and its identity, split, grid, unit, capacity, check period, sampling, segment order, pair,
+    staging and workspace bytes and ticket decisions."""
+    arches = [arch for arch in cake_jit.ARCHES if cake_backend.fp8_programs_for(arch)]
+    if not arches:
+        pytest.skip("this checkout registers no FP8 scan program")
+    for arch in arches:
+        tile = cake_backend.policy_for(arch, cake_policy.FP8).tile_keys
+        for grid in _FROZEN_GRIDS[arch]:
+            for T, Tkv, S, ratio, top_k in _geometries(tile):
+                bounds = [None] + ([-(-Tkv // S)] if S > 1 else [])
+                for bound, sample in itertools.product(bounds, (None, 0)):
+                    call = dict(
+                        top_k=top_k,
+                        ratio=ratio,
+                        num_sms=grid,
+                        sample_tiles_max=sample,
+                        max_seqlen_k=bound,
+                        dtype=torch.float8_e4m3fn,
+                    )
+                    plan, det_plan = _plans(arch, T, Tkv, S, **call)
+                    assert cake_policy.scan_key_form(plan.scan_key) == cake_policy.FP8
+                    _assert_same_decisions(
+                        arch,
+                        plan,
+                        det_plan,
+                        (arch, grid, T, Tkv, S, call),
+                        own_sampling=False,
                     )
 
 

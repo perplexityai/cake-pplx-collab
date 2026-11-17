@@ -22,12 +22,13 @@ from typing import Any
 from . import cake_build
 
 # Registry of the generated Cake DSA indexer programs of the non-deterministic
-# package: the BF16 scan programs and the plain split merge of the deterministic
-# package, each under this package's prefix ``cake_dsa_indexer_nondet_topk``
-# with the same twenty-hex identity -- but the sm_107a l6 and CTA-pair l6 keys,
-# whose deterministic programs keep the static unit enumeration, name their
-# ticket twins (the same builds drawing every work unit from their
-# ``TicketWord`` block, each a program of its own).  No program orders a row: the scan writes
+# package: the scan programs of both input forms (BF16, and FP8 with per-key
+# scales) and the plain split merge of the deterministic package, each under
+# this package's prefix ``cake_dsa_indexer_nondet_topk`` with the same
+# twenty-hex identity -- but the sm_107a l6 and CTA-pair l6 BF16 keys, whose
+# deterministic programs keep the static unit enumeration, name their ticket
+# twins (the same builds drawing every work unit from their ``TicketWord``
+# block, each a program of its own).  No program orders a row: the scan writes
 # the selected entries of an unsplit row and its tail padding straight into the
 # outputs, the plain merge those of a split row, so the registry carries no
 # finalize (ascending-id sort) and no rank-fused merge program.  The kernel and
@@ -53,7 +54,8 @@ from . import cake_build
 # program once with its role, its architecture-free ``library`` stem and its
 # architectures, ``PROGRAM_KEYS`` the program of every host dispatch key per
 # architecture (see ``cake_policy``), ``POLICY`` the per-architecture host
-# dispatch record and ``NUMERICS`` the documented numerics of the programs.
+# dispatch record, ``POLICY_FP8`` the fields of that record the FP8 input form
+# replaces and ``NUMERICS`` the documented numerics of the programs.
 # The launch geometry of a program (block, cluster, dynamic shared memory) is
 # fixed in its host binding.  A scan binding takes ``zero_region`` (slot kind
 # ``zero``) right before the grid: a byte range of the workspace it zeroes on
@@ -61,9 +63,9 @@ from . import cake_build
 # Every scan program takes ``TicketWord`` (a 16-byte block) right before it; a
 # program's record lists in ``ticket_arg_arches`` the architectures on which it
 # draws its work units from that block instead of the workspace's ticket tail.
-# Every scan program takes ``K_scale`` (the deterministic package's per-key FP32
-# scales of its FP8 form) right before ``TicketWord``; the BF16 programs of this
-# package never read it.
+# Every scan program takes ``K_scale`` (per-key FP32 scales) right before
+# ``TicketWord``; the FP8 programs (keys tagged ``:fp8``) read it, the BF16
+# programs never do.
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 STAGES: list[str] = ["scan", "merge"]
 ABI: str = "dsa_indexer_v5"
@@ -113,8 +115,9 @@ ARG_PLANS: dict[str, list[list[str]]] = {
 }
 # The architectures whose scan programs draw every work unit from a ticket word
 # (``cake_policy.TICKET_TAIL_BYTES``): every scan program on every architecture
-# but the physical kinds of the ``static_scan_kinds`` of ``POLICY[arch]``,
-# which keep the static enumeration.  A program whose record lists the
+# but the physical kinds of the ``static_scan_kinds`` of its input form
+# (``POLICY[arch]`` for BF16, ``POLICY_FP8[arch]`` for FP8), which keep the
+# static enumeration.  A program whose record lists the
 # architecture in ``ticket_arg_arches`` draws from its ``TicketWord`` block
 # (``cake_backend`` gives a prepared runner one of its own, zeroed once); every
 # other drawing program draws from the workspace's ticket tail.  Every completed
@@ -592,6 +595,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "wide_pair_snake_only": False,
         "snake_default": False,
         "snake_rule": None,
+        "snake_cap_rule": None,
         "snake_packed_rule": None,
         "snake_l6_fallback_waves": None,
         "tile_unroll_default": 1,
@@ -609,6 +613,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [8, 500],
         "sample_long_rule": None,
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
@@ -651,6 +656,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "wide_pair_snake_only": False,
         "snake_default": False,
         "snake_rule": None,
+        "snake_cap_rule": None,
         "snake_packed_rule": None,
         "snake_l6_fallback_waves": None,
         "tile_unroll_default": 1,
@@ -668,6 +674,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [8, 500],
         "sample_long_rule": None,
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
@@ -715,6 +722,7 @@ POLICY: dict[str, dict[str, Any]] = {
             128.0,
             0.5,
         ],
+        "snake_cap_rule": None,
         "snake_packed_rule": [["l6"], 48.0, None, 7],
         "snake_l6_fallback_waves": 310,
         "tile_unroll_default": 1,
@@ -743,12 +751,114 @@ POLICY: dict[str, dict[str, Any]] = {
         "sample_class_rule": [32, 500],
         "sample_long_rule": [["l6"], 500],
         "lsf_programs": True,
+        "lsf_single_rule": None,
         "static_scan_kinds": [],
         "far_sample": 0,
         "check_period_max": 32,
         "check_period_knob_max": 64,
         "check_period_cap_divisor": 512,
         "check_period_kind_overrides": {},
+    },
+}
+# The FP8 input form's dispatch record of an architecture is its ``POLICY``
+# record with these fields replaced (``cake_policy.fp8_policy_record``); each
+# names its own ``static_scan_kinds``: on sm_107a every FP8 scan program keeps
+# the static unit enumeration.  sm_107a keeps no split-fit rule until the FP8
+# split programs are measured under one.  On sm_100a and sm_103a the FP8 wide
+# program decides by waves of the persistent grid (wide_wave_rule): it takes a
+# call from the narrow unit when the narrow units need at least 1.7 times its
+# waves, and from the three-warpgroup unit when those need at least 1.3
+# (sm_100a) or 1.15 (sm_103a) times its waves over at least 84 mean unit tiles
+# (sm_100a).  On sm_103a that minimum is 64 mean unit tiles for one document of
+# at least 14 wide waves, 3.5 more per wide wave below that but on one document
+# at most 8 / (W - 1) ** 2, from two wide waves on at most the larger of that
+# and 55 (60 from 8 wide waves on), while the three-warpgroup unit needs
+# W >= 1.26 times its waves (8 on one wide wave, 55 at W = 1.5, 60 at 10 wide
+# waves and W = 1.4, 72 at W = 4 / 3), at least 112 for packed
+# documents and 40 / (W - 1) while the three-warpgroup unit needs W < 1.26 times
+# its waves (160 at W = 1.25, 240 at W = 7 / 6), on packed documents then also 9
+# / (W - 1) ** 2 (225 at W = 1.2, 324 at W = 7 / 6), and grows as (top_k / 2048)
+# ** 1.1 above top_k 2048 (137 and 240 at top_k 4096); below it the
+# three-warpgroup unit measured faster.  On sm_107a a call the snake rule marks
+# runs the snake copy of the FP8 l6 program only as one document within 40 waves
+# of the persistent grid (snake_cap_rule): packed documents and longer calls are
+# faster in the plain order.  On sm_103a a one-document call of the FP8 wide
+# unit runs its :lsf copy from 64 mean unit tiles on (lsf_single_rule): the same
+# units in the same order, measured faster there and slower on shorter units.
+# No FP8 call walks its key tiles in descending order (desc_walk_kinds None):
+# the descending-walk programs are BF16 programs.  Each FP8 record leaves the
+# BF16 snake rules of packed calls and of the l6 fallback off
+# (snake_packed_rule, snake_l6_fallback_waves), so the FP8 plans keep their
+# own measured rules.  Each FP8 record names every split field itself, so the
+# FP8 split counts stay as measured (no split-resident rule) whatever the BF16
+# split rule becomes.  The sm_107a FP8 record keeps no sampling class or
+# long-unit rule (sample_class_rule, sample_long_rule): the BF16 record's
+# sampling rules were measured on the BF16 ticket programs.  Nor does it run a
+# longest-first copy (lsf_programs False): its FP8 programs keep the static unit
+# enumeration, which draws no tickets to order, while the BF16 record runs the
+# :lsf copies of its l6 ticket programs.
+POLICY_FP8: dict[str, dict[str, Any]] = {
+    "sm_100a": {
+        "static_scan_kinds": [],
+        "wide_wave_rule": [1.7, 1.3, 84.0],
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": None,
+        "split_wave_scope": None,
+        "split_fit_rule": [4096],
+        "split_resident_rule": None,
+        "split_units": ["l6", "narrow"],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
+    },
+    "sm_103a": {
+        "static_scan_kinds": [],
+        "wide_wave_rule": [
+            1.7,
+            1.15,
+            64.0,
+            2048,
+            1.1,
+            112.0,
+            3.5,
+            14,
+            1.26,
+            40.0,
+            9.0,
+            8.0,
+            55.0,
+            8,
+            60.0,
+        ],
+        "lsf_single_rule": [64.0],
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": None,
+        "split_wave_scope": None,
+        "split_fit_rule": [4096],
+        "split_resident_rule": None,
+        "split_units": ["l6", "narrow"],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
+    },
+    "sm_107a": {
+        "static_scan_kinds": ["l6", "narrow", "split_narrow", "wide"],
+        "sample_class_rule": None,
+        "sample_long_rule": None,
+        "lsf_programs": False,
+        "split_max": 16,
+        "split_min_range_tiles": 32,
+        "split_wave_rule": [1000, 0.12],
+        "split_wave_scope": [["narrow"], 1, True],
+        "split_fit_rule": None,
+        "split_resident_rule": None,
+        "split_units": ["narrow", "wide"],
+        "snake_cap_rule": [1, 40],
+        "desc_walk_kinds": None,
+        "snake_packed_rule": None,
+        "snake_l6_fallback_waves": None,
     },
 }
 
