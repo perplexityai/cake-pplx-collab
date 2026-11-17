@@ -596,8 +596,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                 mbarrier_wait(s_empty_addr, _phase_s_empty_0);
                 _phase_s_empty_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                int _smem_desc_lo_0 = ((k_buf_addr) >> 4) & 0x7FFF;
+                int _smem_desc_lo_1 = (((q_buf_addr) >> 4) & 0x7FFF) + (q_qk_stage) * 1024;
+#else
                 int _smem_desc_lo_0 = ((k_buf_addr) >> 4) & 0x3FFF;
                 int _smem_desc_lo_1 = (((q_buf_addr) >> 4) & 0x3FFF) + (q_qk_stage) * 1024;
+#endif
                 asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -638,8 +643,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                 mbarrier_wait(do_full_addr, _phase_do_full_0);
                 _phase_do_full_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                int _smem_desc_lo_2 = ((v_buf_addr) >> 4) & 0x7FFF;
+                int _smem_desc_lo_3 = ((do_buf_addr) >> 4) & 0x7FFF;
+#else
                 int _smem_desc_lo_2 = ((v_buf_addr) >> 4) & 0x3FFF;
                 int _smem_desc_lo_3 = ((do_buf_addr) >> 4) & 0x3FFF;
+#endif
                 asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -682,8 +692,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     mbarrier_wait(s_empty_addr, _phase_s_empty_0);
                     _phase_s_empty_0 ^= 1;
                     asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                    int _smem_desc_lo_4 = ((k_buf_addr) >> 4) & 0x7FFF;
+                    int _smem_desc_lo_5 = (((q_buf_addr) >> 4) & 0x7FFF) + (q_qk_stage) * 1024;
+#else
                     int _smem_desc_lo_4 = ((k_buf_addr) >> 4) & 0x3FFF;
                     int _smem_desc_lo_5 = (((q_buf_addr) >> 4) & 0x3FFF) + (q_qk_stage) * 1024;
+#endif
                     asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -725,7 +740,11 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     mbarrier_wait(p_full_addr, _phase_p_full_0);
                     _phase_p_full_0 ^= 1;
                     asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                    int _smem_desc_lo_6 = (((do_mn_addr) >> 4) & 0x7FFF) | 0x4000000;
+#else
                     int _smem_desc_lo_6 = (((do_mn_addr) >> 4) & 0x3FFF) | 0x4000000;
+#endif
                     asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -776,7 +795,11 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     mbarrier_wait(ds_ready_addr, _phase_ds_ready_0);
                     _phase_ds_ready_0 ^= 1;
                     asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                    int _smem_desc_lo_7 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (q_mma_stage) * 1024;
+#else
                     int _smem_desc_lo_7 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (q_mma_stage) * 1024;
+#endif
                     asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -825,8 +848,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     tcgen05_commit(q_empty_addr + (q_mma_stage) * 8);
                     q_mma_stage += 1;
                     if (q_mma_stage == 2) { q_mma_stage = 0; }
+#if __CUDA_ARCH__ == 1070
+                    int _smem_desc_lo_8 = (((ds_buf_addr) >> 4) & 0x7FFF) | 0x4000000;
+                    int _smem_desc_lo_9 = (((k_mn_addr) >> 4) & 0x7FFF) | 0x4000000;
+#else
                     int _smem_desc_lo_8 = (((ds_buf_addr) >> 4) & 0x3FFF) | 0x4000000;
                     int _smem_desc_lo_9 = (((k_mn_addr) >> 4) & 0x3FFF) | 0x4000000;
+#endif
                     asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -888,8 +916,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     mbarrier_wait(dq_reduce_done_addr, _phase_dq_reduce_done_0);
                     _phase_dq_reduce_done_0 ^= 1;
                     asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                    int _smem_desc_lo_10 = ((v_buf_addr) >> 4) & 0x7FFF;
+                    int _smem_desc_lo_11 = ((do_buf_addr) >> 4) & 0x7FFF;
+#else
                     int _smem_desc_lo_10 = ((v_buf_addr) >> 4) & 0x3FFF;
                     int _smem_desc_lo_11 = ((do_buf_addr) >> 4) & 0x3FFF;
+#endif
                     asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -930,7 +963,11 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                 mbarrier_wait(p_full_addr, _phase_p_full_0);
                 _phase_p_full_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                int _smem_desc_lo_12 = (((do_mn_addr) >> 4) & 0x7FFF) | 0x4000000;
+#else
                 int _smem_desc_lo_12 = (((do_mn_addr) >> 4) & 0x3FFF) | 0x4000000;
+#endif
                 asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -987,7 +1024,11 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                 _phase_ds_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int tail_first_dk = ((num_m_blocks == m_start_1 + 1) ? 1 : 0);
+#if __CUDA_ARCH__ == 1070
+                int _smem_desc_lo_13 = ((((q_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (q_mma_stage) * 1024;
+#else
                 int _smem_desc_lo_13 = ((((q_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (q_mma_stage) * 1024;
+#endif
                 asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -1034,8 +1075,13 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     "}\n"
                     :: "r"(tmem_dk_accum), "r"(_smem_desc_lo_13), "r"(tmem_ds_tmem), "r"(((tail_first_dk) ? 0 : 1)) : "memory");
                 tcgen05_commit(dkv_full_addr + 8);
+#if __CUDA_ARCH__ == 1070
+                int _smem_desc_lo_14 = (((ds_buf_addr) >> 4) & 0x7FFF) | 0x4000000;
+                int _smem_desc_lo_15 = (((k_mn_addr) >> 4) & 0x7FFF) | 0x4000000;
+#else
                 int _smem_desc_lo_14 = (((ds_buf_addr) >> 4) & 0x3FFF) | 0x4000000;
                 int _smem_desc_lo_15 = (((k_mn_addr) >> 4) & 0x3FFF) | 0x4000000;
+#endif
                 asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
