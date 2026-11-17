@@ -10172,38 +10172,68 @@ def _arena_tickets_zero():
     return True
 
 
+def _n1_bound_wgrad_draw(make, G, X, out):
+    """The judge's ``draw`` of a K1 weight gradient whose launch is bound to ``G``, ``X`` and ``out``: ``make(seed)``
+    gives the draw's ``G`` and ``X``, written in place into the bound ones; ``out`` is filled with NaN."""
+
+    def draw(seed):
+        G_s, X_s = make(seed)
+        G.copy_(G_s)
+        X.copy_(X_s)
+        nan_fill([out])
+        return SimpleNamespace(G=G, X=X, out=out)
+
+    return draw
+
+
+def _n1_wgrad_product(*names):
+    """The judge's ``product`` of K1 weight gradients ``out[N, K] = G[T, N].T @ X[T, K]``, one per name of ``names``
+    (all the same GEMM), on the operands converted to the judge's dtype."""
+
+    def product(v, dtype):
+        return dict.fromkeys(names, v.G.to(dtype).t() @ v.X.to(dtype))
+
+    return product
+
+
 @pytest.mark.parametrize("splits", [2, 3])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("row", sorted(K1_ROWS))
-def test_gpu_k1_budgets_over_reruns(row, out_dtype, splits, k1_rule):
-    """The split-K weight gradient meets the deterministic budgets against FP64 on every one of ``RERUNS`` prepared
-    launches and convenience calls, each into a NaN-poisoned ``out``; its distance to the deterministic result stays
-    within the same budget; two splits repeat bit for bit; the tickets are zero after every launch; the profiler
-    shows this package's program and no deterministic K1 program."""
+def test_gpu_k1_split_k_wgrad_over_reruns(
+    row, out_dtype, splits, k1_rule, record_property
+):
+    """The split-K weight gradient, prepared and through the convenience path, meets the naive BF16 tier against
+    FP64 over the judge's draws, each launch into a NaN-poisoned ``out`` (``1 + RERUNS`` launches of each on the first
+    draw, every one judged); the tickets are zero after every launch; the profiler shows this package's program and
+    no deterministic K1 program."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs(row, 16231, out_dtype, device, SEED)
-    ref = G.double().t() @ X.double()
-    det_out = det_backend.cake_dense_gemm_det_train_projection_wgrad(
-        G, X, torch.empty_like(out)
-    )
     prepared = _k1_prepare(G, X, out, arch, splits)
     _assert_ran(prepared.launch, prepared.module_name)
     k1_rule(G, X, out, splits)
-    first = None
-    for i in range(RERUNS):
-        out.fill_(float("nan"))
+
+    def make(s):
+        return _k1_wgrad_inputs(row, 16231, out_dtype, device, s)[:2]
+
+    def launch(v):
         prepared.launch()
         torch.cuda.synchronize()
-        _k1_check(out, ref, f"prepared rerun {i}")
-        _k1_check(out, det_out.double(), f"vs det rerun {i}")
-        assert prepared.counters_are_zero(), i
-        if splits == 2:
-            first = out.clone() if first is None else first
-            assert torch.equal(out, first), i
-        out.fill_(float("nan"))
-        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
+        assert prepared.counters_are_zero()
+        got = v.out.clone()
+        nan_fill([v.out])
+        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(v.G, v.X, v.out)
         torch.cuda.synchronize()
-        _k1_check(out, ref, f"convenience rerun {i}")
+        return {"prepared": got, "convenience": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED,
+        draw=_n1_bound_wgrad_draw(make, G, X, out),
+        launch=launch,
+        product=_n1_wgrad_product("prepared", "convenience"),
+        launches=1 + RERUNS,
+        poison=lambda v: [v.out],
+    )
     assert _arena_tickets_zero()
     _assert_ran(
         lambda: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out),
@@ -10212,18 +10242,32 @@ def test_gpu_k1_budgets_over_reruns(row, out_dtype, splits, k1_rule):
 
 
 @pytest.mark.parametrize("splits", [1, 2, 3, 4, 8])
-def test_gpu_k1_explicit_split_counts(splits):
-    """Every explicit split count (``1``: this package's program storing whole tiles) gives the budgeted result and
-    leaves the tickets zero."""
+def test_gpu_k1_explicit_split_counts(splits, record_property):
+    """Every explicit split count (``1``: this package's program storing whole tiles) meets the naive BF16 tier
+    against FP64 over the judge's draws, each launch into a NaN-poisoned ``out`` (three on the first draw), and leaves
+    the tickets zero."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs("indexer_k", 16231, torch.bfloat16, device, SEED + 1)
     prepared = _k1_prepare(G, X, out, arch, splits)
-    for _ in range(3):
-        out.fill_(float("nan"))
+
+    def make(s):
+        return _k1_wgrad_inputs("indexer_k", 16231, torch.bfloat16, device, s)[:2]
+
+    def launch(v):
         prepared.launch()
         torch.cuda.synchronize()
-        _k1_check(out, G.double().t() @ X.double())
         assert prepared.counters_are_zero()
+        return {"prepared": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 1,
+        draw=_n1_bound_wgrad_draw(make, G, X, out),
+        launch=launch,
+        product=_n1_wgrad_product("prepared"),
+        launches=3,
+        poison=lambda v: [v.out],
+    )
 
 
 # The 192-wide row-major program (sm_107a): ``(d_out, d_in, T, splits)``, the 4096 -> 1024 row it serves (22 column
@@ -10236,10 +10280,10 @@ K1_ROW_MAJOR_ROWS = ((1024, 4096, 16231, 1), (1032, 4104, 1001, 2))
 @pytest.mark.parametrize(
     "shape", K1_ROW_MAJOR_ROWS, ids=lambda s: "x".join(map(str, s))
 )
-def test_gpu_k1_row_major_program(shape, transposed_out, k1_rule):
-    """The row-major-store program (operands exchanged) meets the FP32 budget against FP64 for either orientation of
-    the caller's views, prepared and through the convenience path, each launch into a NaN-poisoned ``out``; one split
-    repeats bit for bit and stores what the deterministic budget allows; the tickets are zero after every launch; the
+def test_gpu_k1_row_major_program(shape, transposed_out, k1_rule, record_property):
+    """The row-major-store program (operands exchanged) meets the naive BF16 tier against FP64 over the judge's draws
+    for either orientation of the caller's views, prepared (three launches on the first draw) and through the
+    convenience path (two), each launch into a NaN-poisoned ``out``; the tickets are zero after every launch; the
     profiler shows this package's program."""
     device, arch = _atomic_device_or_skip()
     if arch != "sm_107a":
@@ -10250,7 +10294,6 @@ def test_gpu_k1_row_major_program(shape, transposed_out, k1_rule):
     g = torch.Generator(device=device).manual_seed(SEED + 7)
     G, X = _bf16((T, d_out), device, g), _bf16((T, d_in), device, g)
     out = torch.full((d_out, d_in), float("nan"), device=device, dtype=torch.float32)
-    ref = G.double().t() @ X.double()
     A, B = (X.t(), G) if transposed_out else (G.t(), X)
     prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(
         A,
@@ -10264,23 +10307,45 @@ def test_gpu_k1_row_major_program(shape, transposed_out, k1_rule):
     assert prepared.template == template and not prepared.plan.out_t
     assert prepared.plan.swapped == transposed_out
     _assert_ran(prepared.launch, prepared.module_name)
-    first = None
-    for i in range(3):
-        out.fill_(float("nan"))
+
+    def make(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        return _bf16((T, d_out), device, g), _bf16((T, d_in), device, g)
+
+    draw = _n1_bound_wgrad_draw(make, G, X, out)
+
+    def launch(v):
         prepared.launch()
         torch.cuda.synchronize()
-        _k1_check(out, ref, f"prepared rerun {i}")
-        assert prepared.counters_are_zero(), i
-        if splits == 1:
-            first = out.clone() if first is None else first
-            assert torch.equal(out, first), i
+        assert prepared.counters_are_zero()
+        return {"prepared": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 7,
+        draw=draw,
+        launch=launch,
+        product=_n1_wgrad_product("prepared"),
+        launches=3,
+        poison=lambda v: [v.out],
+    )
     if transposed_out:
         assert k1_rule(G, X, out, splits, block_n=192) == template
-        for i in range(2):
-            out.fill_(float("nan"))
-            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
+
+        def convenience(v):
+            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(v.G, v.X, v.out)
             torch.cuda.synchronize()
-            _k1_check(out, ref, f"convenience rerun {i}")
+            return {"convenience": v.out}
+
+        judge_gemm(
+            record_property,
+            seed=SEED + 7,
+            draw=draw,
+            launch=convenience,
+            product=_n1_wgrad_product("convenience"),
+            launches=2,
+            poison=lambda v: [v.out],
+        )
         assert _arena_tickets_zero()
 
 
@@ -10296,12 +10361,12 @@ K1_CHAIN_SHAPES = (
 
 
 @pytest.mark.parametrize("shape", K1_CHAIN_SHAPES, ids=lambda s: "x".join(map(str, s)))
-def test_gpu_k1_chain_programs(shape, monkeypatch):
-    """The one-split program of three accumulation chains, prepared with ``chains=3``, meets the K1 accuracy rule (the
-    deterministic package's budget against FP64, :func:`_k1_check`); each launch into a NaN-poisoned ``out`` repeats bit
-    for bit, also replayed from a CUDA graph; the convenience path at a token count of a range of
-    :data:`K1_CHAIN_RANGES_BY_SM` for the device's SM count stores the same bits; the profiler shows the three-chain
-    program; fewer than three K blocks raise ``ValueError``."""
+def test_gpu_k1_chain_programs(shape, monkeypatch, record_property):
+    """The one-split program of three accumulation chains, prepared with ``chains=3``, meets the naive BF16 tier
+    against FP64 over the judge's draws, each launch into a NaN-poisoned ``out`` (four on the first draw), also replayed
+    from a CUDA graph (two replays on the first draw) and through the convenience path at a token count of a range of
+    :data:`K1_CHAIN_RANGES_BY_SM` for the device's SM count; the profiler shows the three-chain program; fewer than
+    three K blocks raise ``ValueError``."""
     device, arch = _atomic_device_or_skip()
     d_out, d_in, T, block_n = shape
     if block_n == 192 and arch != "sm_107a":
@@ -10323,24 +10388,45 @@ def test_gpu_k1_chain_programs(shape, monkeypatch):
     assert prepared.template == template
     assert (prepared.splits, prepared.plan.chains) == (1, 3)
     _assert_ran(prepared.launch, prepared.module_name)
-    out.fill_(float("nan"))
-    prepared.launch()
-    torch.cuda.synchronize()
-    _k1_check(out, G.double().t() @ X.double(), "prepared")
-    first = out.clone()
-    for i in range(3):
-        out.fill_(float("nan"))
+
+    def make(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        return _bf16((T, d_out), device, g), _bf16((T, d_in), device, g)
+
+    draw = _n1_bound_wgrad_draw(make, G, X, out)
+
+    def launch(v):
         prepared.launch()
         torch.cuda.synchronize()
-        assert torch.equal(out, first), i
+        return {"prepared": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 11,
+        draw=draw,
+        launch=launch,
+        product=_n1_wgrad_product("prepared"),
+        launches=4,
+        poison=lambda v: [v.out],
+    )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         prepared.launch()
-    for i in range(2):
-        out.fill_(float("nan"))
+
+    def replay(v):
         graph.replay()
         torch.cuda.synchronize()
-        assert torch.equal(out, first), ("graph", i)
+        return {"graph": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 11,
+        draw=draw,
+        launch=replay,
+        product=_n1_wgrad_product("graph"),
+        launches=2,
+        poison=lambda v: [v.out],
+    )
     # the convenience path at a token count of a chain range for this device
     sm_count = det_backend.device_facts(device).sm_count
     key = (arch, 1, d_in, d_out, "f32")
@@ -10356,11 +10442,20 @@ def test_gpu_k1_chain_programs(shape, monkeypatch):
     monkeypatch.setattr(cake_backend, "K1_ORDERED_RANGES_BY_SM", {})
     monkeypatch.setattr(cake_backend, "K1_PARITY_RANGES_BY_SM", {})
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-    try:
-        out.fill_(float("nan"))
-        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
+
+    def convenience(v):
+        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(v.G, v.X, v.out)
         torch.cuda.synchronize()
-        assert torch.equal(out, first)
+        return {"convenience": v.out}
+
+    try:
+        judge_gemm(
+            record_property,
+            seed=SEED + 11,
+            draw=draw,
+            launch=convenience,
+            product=_n1_wgrad_product("convenience"),
+        )
         _assert_ran(
             lambda: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
                 G, X, out
@@ -10381,9 +10476,11 @@ def test_gpu_k1_chain_programs(shape, monkeypatch):
         )
 
 
-def test_gpu_k1_batched_mla_head_views():
+def test_gpu_k1_batched_mla_head_views(record_property):
     """The batched MLA weight gradient (64 heads, strided head views of ``[T, H, slot]`` activations): this
-    package's split-K program at an explicit split count (one slot per head tile and split)."""
+    package's split-K program at an explicit split count (one slot per head tile and split), each launch into a
+    NaN-poisoned ``out`` (three on the first draw), and the default convenience path meet the naive BF16 tier against
+    FP64 over the judge's draws."""
     device, arch = _atomic_device_or_skip()
     _require_template(arch, cake_backend.atomic_k1_template(256, False))
     g = torch.Generator(device=device).manual_seed(SEED + 2)
@@ -10397,48 +10494,95 @@ def test_gpu_k1_batched_mla_head_views():
     out = torch.full(
         (H, D_in, D_out), float("nan"), device=device, dtype=torch.bfloat16
     )
-    ref = A.double() @ B.double()
     prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(
         A, B, out, splits=2, block_n=256
     )
     assert isinstance(prepared, cake_backend.CakeDenseGemmNondetProjectionLaunch)
     assert (prepared.plan.L, prepared.splits, prepared.plan.swapped) == (H, 2, True)
-    for _ in range(3):
-        out.fill_(float("nan"))
+    out2 = torch.empty_like(out)
+
+    def draw(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        act.copy_(_bf16((T, H, slot), device, g)[..., :D_in])
+        d_out.copy_(_bf16((T, H, D_out), device, g))
+        nan_fill([out, out2])
+        return SimpleNamespace(A=A, B=B)
+
+    def heads(name):
+        return lambda v, dtype: {name: v.A.to(dtype) @ v.B.to(dtype)}
+
+    def launch(v):
         prepared.launch()
         torch.cuda.synchronize()
-        _k1_check(out, ref)
         assert prepared.counters_are_zero()
-    # the planner keeps the batched rows on the deterministic program: the default convenience path matches it
-    out2 = torch.empty_like(out)
-    cake_backend.cake_dense_gemm_nondet_train_projection(A, B, out2)
-    torch.cuda.synchronize()
-    _k1_check(out2, ref)
+        return {"prepared": out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 2,
+        draw=draw,
+        launch=launch,
+        product=heads("prepared"),
+        launches=3,
+        poison=lambda v: [out],
+    )
+
+    # the planner keeps the batched rows on the deterministic program, through the default convenience path
+    def convenience(v):
+        cake_backend.cake_dense_gemm_nondet_train_projection(v.A, v.B, out2)
+        torch.cuda.synchronize()
+        return {"convenience": out2}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 2,
+        draw=draw,
+        launch=convenience,
+        product=heads("convenience"),
+    )
 
 
-def test_gpu_k1_ragged_token_counts_reuse_poisoned_scratch(k1_rule):
+def _n1_wgrad_draw(row, T, out_dtype, device):
+    """The judge's ``draw`` of fresh tensors of :func:`_k1_wgrad_inputs` from the draw's seed: ``G``, ``X`` and a
+    NaN ``out``."""
+
+    def draw(seed):
+        G, X, out = _k1_wgrad_inputs(row, T, out_dtype, device, seed)
+        return SimpleNamespace(G=G, X=X, out=out)
+
+    return draw
+
+
+def test_gpu_k1_ragged_token_counts_reuse_poisoned_scratch(k1_rule, record_property):
     """Changing ``T`` up and down on one stream with a verdict for the row: the convenience path reuses its arena
     (grown, never shrunk); the split slots are poisoned with NaN before each call (a stale value never reaches
     ``out``: the padding columns the last split reads are discarded), every output -- poisoned too -- meets the
-    budget, and the tickets are zero throughout.  The shortest token count (65) is below the split count's 129 rows,
-    so that call runs the deterministic program (its bits)."""
+    naive BF16 tier against FP64 over the judge's draws at each ``T``, and the tickets are zero throughout.  The
+    shortest token count (65) is below the split count's 129 rows, so that call runs the deterministic program (its
+    cache entry has no plan of this package and the deterministic package's plan)."""
     device, arch = _atomic_device_or_skip()
     k1_rule(*_k1_wgrad_inputs("thin_48", 128, torch.bfloat16, device, SEED), 3)
-    for i, T in enumerate(K1_RAGGED_T):
-        G, X, out = _k1_wgrad_inputs(
-            "thin_48", T, torch.bfloat16, device, SEED + 10 + i
-        )
+
+    def launch(v):
         for arena in cake_backend._ATOMIC_ARENAS.values():
             if "k1_slots" in arena.buffers:
                 arena.buffers["k1_slots"].fill_(float("nan"))
-        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
+        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(v.G, v.X, v.out)
         torch.cuda.synchronize()
-        _k1_check(out, G.double().t() @ X.double(), f"T={T}")
-        assert _arena_tickets_zero(), T
+        assert _arena_tickets_zero(), v.G.shape[0]
+        return {f"T{v.G.shape[0]}": v.out}
+
+    for i, T in enumerate(K1_RAGGED_T):
+        judge_gemm(
+            record_property,
+            seed=SEED + 10 + i,
+            draw=_n1_wgrad_draw("thin_48", T, torch.bfloat16, device),
+            launch=launch,
+            product=_n1_wgrad_product(f"T{T}"),
+        )
         if not cake_backend.k1_splits_fit(3, T):
-            assert torch.equal(
-                out, det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X)
-            )
+            entry = next(reversed(cake_backend._K1_ATOMIC_CACHE.values()))
+            assert entry.plan is None and entry.det_plan is not None, T
     assert len(cake_backend._ATOMIC_ARENAS) == 1
     (arena,) = cake_backend._ATOMIC_ARENAS.values()
     assert arena.version >= 2  # created, then grown or reused; never shrunk
@@ -10455,41 +10599,65 @@ def test_gpu_k1_small_token_counts_guard():
 
 
 def test_gpu_torch_deterministic_mode_alerts_before_an_order_varying_launch(
-    k1_rule, torch_determinism
+    k1_rule, torch_determinism, record_property
 ):
     """Under ``torch.use_deterministic_algorithms(True)`` a call whose launch is fixed order
-    (two splits: one add) runs without an alert and repeats bit for bit; a launch whose result varies run to run
-    (three splits) raises PyTorch's ``RuntimeError`` before it launches (``out`` untouched), or with
-    ``warn_only=True`` warns and runs this package's program within the accuracy rule.  The setting never changes
-    the program that runs."""
+    (two splits: one add) runs without an alert or a warning (``1 + RERUNS`` calls on the first draw of the judge); a
+    launch whose result varies run to run (three splits) raises PyTorch's ``RuntimeError`` before it launches (``out``
+    untouched), or with ``warn_only=True`` warns and runs this package's program.  Both results meet the naive BF16
+    tier against FP64 over the judge's draws.  The setting never changes the program that runs."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs("indexer_k", 16231, torch.bfloat16, device, SEED + 40)
-    # the FP64 reference before the mode is on (its cuBLAS GEMM would need CUBLAS_WORKSPACE_CONFIG under it)
-    ref = G.double().t() @ X.double()
+    draw = _n1_wgrad_draw("indexer_k", 16231, torch.bfloat16, device)
+
+    def under_the_mode(name, warn_only, expect):
+        """The judge's launch: the call inside ``expect()`` under ``torch.use_deterministic_algorithms(True,
+        warn_only=warn_only)``, the mode off again after it (the judge's FP64 and BF16 products are cuBLAS GEMMs,
+        which would need CUBLAS_WORKSPACE_CONFIG under it)."""
+
+        def launch(v):
+            torch.use_deterministic_algorithms(True, warn_only=warn_only)
+            try:
+                with expect():
+                    got = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
+                        v.G, v.X, v.out
+                    )
+                torch.cuda.synchronize()
+            finally:
+                torch.use_deterministic_algorithms(False)
+            return {name: got}
+
+        return launch
+
     k1_rule(G, X, out, 2)
-    torch.use_deterministic_algorithms(True)
-    with _no_warnings():
-        first = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
-            G, X, out
-        ).clone()
-        for _ in range(RERUNS):
-            again = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
-                G, X, out
-            )
-            assert torch.equal(again, first)
+    judge_gemm(
+        record_property,
+        seed=SEED + 40,
+        draw=draw,
+        launch=under_the_mode("two_splits", False, _no_warnings),
+        product=_n1_wgrad_product("two_splits"),
+        launches=1 + RERUNS,
+        poison=lambda v: [v.out],
+    )
     k1_rule(G, X, out, 3)
+    torch.use_deterministic_algorithms(True)
     out.fill_(7.0)
     with pytest.raises(RuntimeError, match="at 3 splits"):
         cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
     torch.cuda.synchronize()
     assert bool((out == 7.0).all())
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    with pytest.warns(UserWarning, match="at 3 splits"):
-        got = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
-    torch.cuda.synchronize()
     torch.use_deterministic_algorithms(False)
-    _k1_check(first, ref, "two splits")
-    _k1_check(got, ref, "three splits")
+    judge_gemm(
+        record_property,
+        seed=SEED + 40,
+        draw=draw,
+        launch=under_the_mode(
+            "three_splits",
+            True,
+            lambda: pytest.warns(UserWarning, match="at 3 splits"),
+        ),
+        product=_n1_wgrad_product("three_splits"),
+    )
     assert _arena_tickets_zero()
 
 
@@ -10502,14 +10670,15 @@ K1_DSM_ALERT_ROWS = {
 }
 
 
-def test_gpu_the_cluster_program_does_not_alert(torch_determinism):
+def test_gpu_the_cluster_program_does_not_alert(torch_determinism, record_property):
     """The shipped cluster row ``4096 -> 64`` FP32 at 2048 tokens of :data:`K1_DSM_RANGES_BY_SM` (the cluster program
     of :data:`K1_DSM_ALERT_ROWS` on the part: two or three splits, added in cluster-rank order) launches without an
-    alert or a warning under ``torch.use_deterministic_algorithms(True)``, and with ``warn_only=True``: the planning
-    call, the call from the cached key and the prepared launch run the cluster program (by kernel name), every output
-    meets the deterministic package's FP32 budget against FP64 (:func:`_k1_check`), and all of them have the same
-    bits.  ``test_the_cluster_program_does_not_alert`` checks the same calls on the CPU binding.  A part of any other SM
-    count or architecture skips."""
+    alert or a warning under ``torch.use_deterministic_algorithms(True)``, and with ``warn_only=True``: on every draw
+    of the judge, the planning call, the call from the cached key and the prepared launch, then the call and the
+    prepared launch with ``warn_only=True``, each into a NaN-poisoned ``out``, meet the naive BF16 tier against FP64;
+    the call and the prepared launch run the cluster program (by kernel name).
+    ``test_the_cluster_program_does_not_alert`` checks the same calls on the CPU binding.  A part of any other SM count
+    or architecture skips."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     if (arch, sm_count) not in K1_DSM_ALERT_ROWS:
@@ -10520,72 +10689,100 @@ def test_gpu_the_cluster_program_does_not_alert(torch_determinism):
     )
     assert dsm == K1_DSM_ALERT_ROWS[(arch, sm_count)]
     _require_template(arch, cake_backend.dsm_k1_template(*dsm))
-    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-    g = torch.Generator(device=device).manual_seed(SEED + 99)
-    G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
-    # the FP64 reference before the mode is on (its cuBLAS GEMM would need CUBLAS_WORKSPACE_CONFIG under it)
-    ref = G.double().t() @ X.double()
-    out = torch.full((N, M), float("nan"), device=device, dtype=torch.float32)
-    got = []
-    torch.use_deterministic_algorithms(True)
-    with _no_warnings():
-        for _ in range(2):  # the planning call, then the call from the cached key
-            out.fill_(float("nan"))
-            assert (
-                cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
-                is out
-            )
-            got.append(out.clone())
-        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
-            G, X, out
-        )
-        out.fill_(float("nan"))
-        assert prepared.launch() is out
-        got.append(out.clone())
-        torch.cuda.synchronize()
+    wgrad = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad
+
+    def draw(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        G, X = _bf16((T, N), device, g), _bf16((T, M), device, g)
+        out = torch.full((N, M), float("nan"), device=device, dtype=torch.float32)
+        return SimpleNamespace(G=G, X=X, out=out)
+
+    def launch(v):
+        """A draw's calls from empty convenience caches; the mode is off again after them (the judge's FP64 and BF16
+        products are cuBLAS GEMMs, which would need CUBLAS_WORKSPACE_CONFIG under it)."""
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        got = {}
+        torch.use_deterministic_algorithms(True)
+        try:
+            with _no_warnings():
+                # the planning call, then the call from the cached key
+                for name in ("planning", "cached"):
+                    nan_fill([v.out])
+                    assert wgrad(v.G, v.X, v.out) is v.out
+                    got[name] = v.out.clone()
+                v.prepared = (
+                    cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
+                        v.G, v.X, v.out
+                    )
+                )
+                nan_fill([v.out])
+                assert v.prepared.launch() is v.out
+                got["prepared"] = v.out.clone()
+                torch.cuda.synchronize()
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            with _no_warnings():
+                nan_fill([v.out])
+                wgrad(v.G, v.X, v.out)
+                got["warn_only"] = v.out.clone()
+                nan_fill([v.out])
+                v.prepared.launch()
+                got["warn_only_prepared"] = v.out.clone()
+                torch.cuda.synchronize()
+        finally:
+            torch.use_deterministic_algorithms(False)
+        return got
+
+    last = judge_gemm(
+        record_property,
+        seed=SEED + 99,
+        draw=draw,
+        launch=launch,
+        product=_n1_wgrad_product(
+            "planning", "cached", "prepared", "warn_only", "warn_only_prepared"
+        ),
+    )
     ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
     assert entry.plan.dsm and entry.arena is None
     assert (entry.plan.block_n, entry.plan.splits) == dsm and not entry.order_varying
+    prepared = last.prepared
     assert isinstance(prepared, cake_backend.CakeDenseGemmNondetProjectionLaunch)
     assert prepared.plan.dsm and prepared.plan.reproducible
     assert (prepared.plan.block_n, prepared.plan.splits) == dsm
-    # still under the mode: the calls ran the cluster program
-    _assert_ran(
-        lambda: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out),
-        entry.module_name,
-    )
+    # under the mode: the calls run the cluster program
+    torch.use_deterministic_algorithms(True)
+    _assert_ran(lambda: wgrad(last.G, last.X, last.out), entry.module_name)
     _assert_ran(prepared.launch, prepared.module_name)
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    with _no_warnings():
-        out.fill_(float("nan"))
-        cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
-        got.append(out.clone())
-        out.fill_(float("nan"))
-        prepared.launch()
-        got.append(out.clone())
-        torch.cuda.synchronize()
     torch.use_deterministic_algorithms(False)
-    for i, result in enumerate(got):
-        _k1_check(result, ref, f"cluster program call {i}")
-        assert torch.equal(result, got[0]), f"cluster program call {i}: other bits"
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
 
 
-def test_gpu_det_then_atomic_share_a_stream_not_a_workspace(k1_rule):
+def test_gpu_det_then_atomic_share_a_stream_not_a_workspace(k1_rule, record_property):
     """A deterministic call and a call of this package of one geometry on one stream: each package keeps its own
-    arena (the deterministic package's slabs never reach this package's tickets)."""
+    arena (the deterministic package's slabs never reach this package's tickets); both outputs, each written into
+    NaN, meet the naive BF16 tier against FP64 over the judge's draws (three pairs of calls on the first)."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs("indexer_k", 16231, torch.bfloat16, device, SEED + 50)
     k1_rule(G, X, out, 2)
-    ref = G.double().t() @ X.double()
-    for _ in range(3):
+
+    def launch(v):
         det = det_backend.cake_dense_gemm_det_train_projection_wgrad(
-            G, X, torch.empty_like(out)
+            v.G, v.X, torch.full_like(v.out, float("nan"))
         )
-        atomic = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, out)
+        atomic = cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
+            v.G, v.X, v.out
+        )
         torch.cuda.synchronize()
-        _k1_check(det, ref)
-        _k1_check(atomic, ref)
+        return {"det": det, "atomic": atomic}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 50,
+        draw=_n1_wgrad_draw("indexer_k", 16231, torch.bfloat16, device),
+        launch=launch,
+        product=_n1_wgrad_product("det", "atomic"),
+        launches=3,
+        poison=lambda v: [v.out],
+    )
     ours = {
         id(b) for a in cake_backend._ATOMIC_ARENAS.values() for b in a.buffers.values()
     }
@@ -10594,89 +10791,165 @@ def test_gpu_det_then_atomic_share_a_stream_not_a_workspace(k1_rule):
     assert _arena_tickets_zero()
 
 
-def test_gpu_k1_deterministic_program_through_the_binding():
+def _n1_assert_ran_det(fn) -> None:
+    """``fn`` launches a K1 / K2 GEMM program of the deterministic package (the profiler's kernel names)."""
+    names = _profile_kernel_names(fn)
+    assert any(_det_kernel(name) for name in names), names
+
+
+def test_gpu_k1_deterministic_program_through_the_binding(record_property):
     """K1 calls of this package that run the deterministic program -- the forward, the input gradient (BF16
     and FP32 out), the weight gradient of rows without a verdict (both orientations, BF16 and FP32 out, another
-    ``sk``), the batched head views of the generic entry -- go through this package's binding and give the
-    deterministic package's bits: dense and padded outputs (the padding untouched), fresh tensors on every call, a
-    larger row growing the arena (the smaller rows' bindings carved again), another stream with an arena of its own,
-    the slice counters zero after the launches; a batched call the deterministic package runs on its swapped
-    small-token program stays unbound (that package's call); a binding the deterministic package refuses raises its
-    error."""
+    ``sk``), the batched head views of the generic entry -- go through this package's binding, run the deterministic
+    package's program (by kernel name) and meet the naive BF16 tier against FP64 over the judge's draws, each call
+    into a NaN-poisoned ``out`` (two on the first draw): dense and padded outputs (the padding untouched), fresh
+    tensors on every draw, a larger row growing the arena (the smaller rows' bindings carved again), another stream
+    with an arena of its own, the slice counters zero after the launches; a batched call the deterministic package
+    runs on its swapped small-token program stays unbound (that package's call); a binding the deterministic package
+    refuses raises its error."""
     device = _det_device_or_skip()
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     rows = (("kv_a", 576, 6144), ("4096to128", 128, 4096), ("wide", 2048, 4096))
+    H, slot, D_in, D_out = 64, 256, 192, 512
+    # op -> (the out shape of a row ``(N, K)`` at ``T`` tokens, the out dtype, this package's call on the row's ``X``,
+    # ``W``, ``G`` into ``o``, the GEMM it computes)
+    # fmt: off
+    ops = {
+        "fwd": (lambda T, N, K: (T, N), torch.bfloat16,
+                lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_forward(X, W, o), "fwd"),
+        "dgrad": (lambda T, N, K: (T, K), torch.bfloat16,
+                  lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, o), "dgrad"),
+        "dgrad_f32": (lambda T, N, K: (T, K), torch.float32,
+                      lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, o), "dgrad"),
+        "wgrad": (lambda T, N, K: (N, K), torch.bfloat16,
+                  lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o), "wgrad"),
+        "wgrad_f32": (lambda T, N, K: (N, K), torch.float32,
+                      lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o), "wgrad"),
+        "wgrad_sk": (lambda T, N, K: (N, K), torch.float32,
+                     lambda X, W, G, o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o, sk=False),
+                     "wgrad"),
+    }
+    gemms = {
+        "fwd": lambda X, W, G: X @ W.t(),
+        "dgrad": lambda X, W, G: G @ W,
+        "wgrad": lambda X, W, G: G.t() @ X,
+    }
+    # fmt: on
     ran, swapped = set(), set()
 
-    def check(T, seed, pad_out=False):
-        g = torch.Generator(device=device).manual_seed(seed)
+    def check(T, seed, pad_out=False, where=""):
+        arch = det_backend.arch_for(device)
+        sm_count = det_backend.device_facts(device).sm_count
+        # output -> (row, N, K, op)
+        calls = {}
         for name, N, K in rows:
-            X, W, G = (
-                _bf16((T, K), device, g),
-                _bf16((N, K), device, g, K**-0.5),
-                _bf16((T, N), device, g),
-            )
-            # op -> (out shape, out dtype, the deterministic package's call, this package's call)
-            # fmt: off
-            calls = {
-                "fwd": ((T, N), torch.bfloat16, lambda o: det_backend.cake_dense_gemm_det_train_projection_forward(X, W, o),
-                        lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_forward(X, W, o)),
-                "dgrad": ((T, K), torch.bfloat16, lambda o: det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, o),
-                          lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, o)),
-                "dgrad_f32": ((T, K), torch.float32, lambda o: det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, o),
-                              lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, o)),
-                "wgrad": ((N, K), torch.bfloat16, lambda o: det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, o),
-                          lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o)),
-                "wgrad_f32": ((N, K), torch.float32, lambda o: det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, o),
-                              lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o)),
-                "wgrad_sk": ((N, K), torch.float32, lambda o: det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, o, sk=False),
-                             lambda o: cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, o, sk=False)),
-            }
-            # fmt: on
-            arch = det_backend.arch_for(device)
-            sm_count = det_backend.device_facts(device).sm_count
-            for op, ((rows_, cols), dtype, det_call, call) in calls.items():
+            for op, (_, dtype, _, _) in ops.items():
                 f32 = dtype == torch.float32
                 kw = dict(arch=arch, L=1, M=K, N=N, K=T, out_f32=f32, sm_count=sm_count)
                 if op.startswith("wgrad") and (
                     cake_backend.k1_plan(**kw) or cake_backend.k1_dsm_plan(**kw)
                 ):
                     continue  # a row with a verdict or a cluster range: this package's program
+                calls[f"{where}T{T}.{name}.{op}"] = (name, N, K, op)
+        # the batched MLA forward / input gradient head views of the generic entry
+        heads = (f"{where}T{T}.mla_fwd", f"{where}T{T}.mla_dgrad")
+
+        def draw(s):
+            g = torch.Generator(device=device).manual_seed(s)
+            operands = {
+                name: (
+                    _bf16((T, K), device, g),
+                    _bf16((N, K), device, g, K**-0.5),
+                    _bf16((T, N), device, g),
+                )
+                for name, N, K in rows
+            }
+            act = _bf16((T, H, slot), device, g)[..., :D_in]
+            weight = _bf16((H, D_in, D_out), device, g, D_in**-0.5)
+            d_out = _bf16((T, H, D_out), device, g)
+            views = dict(
+                zip(
+                    heads,
+                    (
+                        (act.permute(1, 0, 2), weight, (T, H, D_out)),
+                        (d_out.permute(1, 0, 2), weight.transpose(1, 2), (T, H, D_in)),
+                    ),
+                    strict=True,
+                )
+            )
+            out, storage = {}, {}
+            for key, (_, N, K, op) in calls.items():
+                (rows_, cols), dtype = ops[op][0](T, N, K), ops[op][1]
                 if pad_out:
-                    storage = torch.full(
+                    storage[key] = torch.full(
                         (rows_, cols + 64), 7.0, device=device, dtype=dtype
                     )
-                    out = storage[:, :cols]
+                    out[key] = storage[key][:, :cols]
                 else:
-                    out = torch.empty(rows_, cols, device=device, dtype=dtype)
-                want = det_call(out).clone()
-                for _ in range(2):
-                    out.fill_(float("nan"))
-                    assert call(out) is out
-                    assert torch.equal(out, want), (name, op, T, pad_out)
-                if pad_out:
-                    assert bool((storage[:, cols:] == 7.0).all()), (name, op)
+                    out[key] = torch.empty(rows_, cols, device=device, dtype=dtype)
+            for key, (_, _, shape) in views.items():
+                out[key] = torch.empty(
+                    shape, device=device, dtype=torch.bfloat16
+                ).permute(1, 0, 2)
+            nan_fill(out.values())
+            return SimpleNamespace(
+                operands=operands, views=views, out=out, storage=storage
+            )
+
+        def launch(v):
+            for key, (name, _, _, op) in calls.items():
+                assert ops[op][2](*v.operands[name], v.out[key]) is v.out[key]
                 ran.add(op)
-        # the batched MLA forward / input gradient head views of the generic entry
-        H, slot, D_in, D_out = 64, 256, 192, 512
-        act = _bf16((T, H, slot), device, g)[..., :D_in]
-        weight = _bf16((H, D_in, D_out), device, g, D_in**-0.5)
-        d_out = _bf16((T, H, D_out), device, g)
-        for A, B, shape in (
-            (act.permute(1, 0, 2), weight, (T, H, D_out)),
-            (d_out.permute(1, 0, 2), weight.transpose(1, 2), (T, H, D_in)),
-        ):
-            out = torch.empty(shape, device=device, dtype=torch.bfloat16).permute(
-                1, 0, 2
+            for key, (A, B, _) in v.views.items():
+                assert (
+                    cake_backend.cake_dense_gemm_nondet_train_projection(
+                        A, B, v.out[key]
+                    )
+                    is v.out[key]
+                )
+            torch.cuda.synchronize()
+            for key, padded in v.storage.items():
+                assert bool((padded[:, v.out[key].shape[1] :] == 7.0).all()), key
+            return v.out
+
+        def product(v, dtype):
+            operands = {
+                name: [t.to(dtype) for t in xwg] for name, xwg in v.operands.items()
+            }
+            got, memo = {}, {}
+            for key, (name, _, _, op) in calls.items():
+                gemm = ops[op][3]
+                if (name, gemm) not in memo:
+                    memo[name, gemm] = gemms[gemm](*operands[name])
+                got[key] = memo[name, gemm]
+            for key, (A, B, _) in v.views.items():
+                got[key] = A.to(dtype) @ B.to(dtype)
+            return got
+
+        last = judge_gemm(
+            record_property,
+            seed=seed,
+            draw=draw,
+            launch=launch,
+            product=product,
+            launches=2,
+            poison=lambda v: list(v.out.values()),
+        )
+        for key, (name, _, _, op) in calls.items():
+            _n1_assert_ran_det(
+                functools.partial(ops[op][2], *last.operands[name], last.out[key])
             )
-            if det_backend._swap_ab_launch(A, B, out, False) is not None:
+        for key, (A, B, shape) in last.views.items():
+            if det_backend._swap_ab_launch(A, B, last.out[key], False) is not None:
                 swapped.add((T, shape))
-            want = det_backend.cake_dense_gemm_det_train_projection(A, B, out).clone()
-            out.fill_(float("nan"))
-            assert (
-                cake_backend.cake_dense_gemm_nondet_train_projection(A, B, out) is out
+            _n1_assert_ran_det(
+                functools.partial(
+                    cake_backend.cake_dense_gemm_nondet_train_projection,
+                    A,
+                    B,
+                    last.out[key],
+                )
             )
-            assert torch.equal(out, want), (T, tuple(shape))
 
     for T, pad_out in ((1000, False), (4097, True), (64, False)):
         check(T, SEED + 80 + T, pad_out)
@@ -10697,12 +10970,12 @@ def test_gpu_k1_deterministic_program_through_the_binding():
             if kind in arena.buffers:
                 arena.require(kind, 2 * arena.buffers[kind].numel())
     for T, pad_out in ((1000, False), (4097, True), (64, False)):
-        check(T, SEED + 81 + T, pad_out)
+        check(T, SEED + 81 + T, pad_out, where="grown.")
     assert all(e.k1.version != versions[id(e)] for e in det_entries + wgrad_entries)
     stream = torch.cuda.Stream(device)
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        check(1000, SEED + 82)
+        check(1000, SEED + 82, where="stream.")
     torch.cuda.synchronize()
     assert stream.cuda_stream in {key[1] for key in cake_backend._ATOMIC_ARENAS}
     for arena in cake_backend._ATOMIC_ARENAS.values():
@@ -10720,107 +10993,181 @@ def test_gpu_k1_deterministic_program_through_the_binding():
         cake_backend.cake_dense_gemm_nondet_train_projection_forward(Xm, W)
 
 
-def test_gpu_k1_bound_launch_is_the_unbound_launch(k1_rule):
-    """A row with a verdict at two splits (two partials per element: bitwise reproducible): the convenience path's
-    bound launch gives the bits of the per-call ordered launch (``_launch_atomic_k1_unbound``) and of the prepared
-    launch, on fresh tensors every call, the tickets zero after."""
+def test_gpu_k1_bound_and_unbound_launches(k1_rule, record_property):
+    """A row with a verdict at two splits: the prepared launch, the convenience path's bound launch (on fresh tensors
+    every draw) and the per-call ordered launch of its cache entry (``_launch_atomic_k1_unbound``) each meet the naive
+    BF16 tier against FP64 over the judge's draws, each into a NaN-poisoned ``out``, the tickets zero after every
+    call."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs("indexer_k", 4097, torch.float32, device, SEED + 90)
     k1_rule(G, X, out, 2)
     prepared = _k1_prepare(G, X, torch.empty_like(out), arch, 2)
-    prepared.launch()
-    want = prepared.out.clone()
-    for i in range(3):
-        G2, X2, out2 = G.clone(), X.clone(), torch.full_like(out, float("nan"))
+
+    def make(s):
+        return _k1_wgrad_inputs("indexer_k", 4097, torch.float32, device, s)[:2]
+
+    def launch(v):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"prepared": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 90,
+        draw=_n1_bound_wgrad_draw(make, G, X, prepared.out),
+        launch=launch,
+        product=_n1_wgrad_product("prepared"),
+    )
+    draw = _n1_wgrad_draw("indexer_k", 4097, torch.float32, device)
+
+    def convenience(v):
         assert (
-            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G2, X2, out2)
-            is out2
+            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(v.G, v.X, v.out)
+            is v.out
         )
         torch.cuda.synchronize()
-        assert torch.equal(out2, want), i
         assert _arena_tickets_zero()
+        return {"convenience": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 90,
+        draw=draw,
+        launch=convenience,
+        product=_n1_wgrad_product("convenience"),
+    )
     entries = [e for e in cake_backend._K1_ATOMIC_CACHE.values() if e.plan is not None]
     (entry,) = entries
     assert entry.k1 is not None and entry.plan.splits == 2
     det = det_backend
     index = out.get_device()
-    unbound = torch.full_like(out, float("nan"))
-    cake_backend._launch_atomic_k1_unbound(
-        entry,
-        X.t(),
-        G,
-        unbound,
-        index,
-        det._current_raw_stream(index),
-        int(det.pdl_enabled(None, index)),
+
+    def unbound(v):
+        cake_backend._launch_atomic_k1_unbound(
+            entry,
+            v.X.t(),
+            v.G,
+            v.out,
+            index,
+            det._current_raw_stream(index),
+            int(det.pdl_enabled(None, index)),
+        )
+        torch.cuda.synchronize()
+        assert _arena_tickets_zero()
+        return {"unbound": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 90,
+        draw=draw,
+        launch=unbound,
+        product=_n1_wgrad_product("unbound"),
     )
-    torch.cuda.synchronize()
-    assert torch.equal(unbound, want) and _arena_tickets_zero()
 
 
 @pytest.mark.parametrize("splits", [1, 2])
-def test_gpu_k1_pdl_waits_for_an_early_producer(splits, k1_rule):
+def test_gpu_k1_pdl_waits_for_an_early_producer(splits, k1_rule, record_property):
     """This package's weight gradient as a programmatic dependent launch: the deterministic forward before it
     (K = 8192) triggers its dependents at entry and writes ``G``; the weight gradient starts while it runs and must
-    still read every row it wrote, and its tickets end zero for the next launch on the stream."""
+    still read every row it wrote (``G`` and ``out`` hold NaN before each launch pair, three on the first draw): it
+    meets the naive BF16 tier against FP64 of the ``G`` the forward writes over the judge's draws, and its tickets end
+    zero for the next launch on the stream."""
     device, arch = _atomic_device_or_skip()
     N, K = K1_ROWS["indexer_k"]
     T = 4096
-    g = torch.Generator(device=device).manual_seed(SEED + 60)
-    H = _bf16((T, 8192), device, g)
-    Wg = (torch.randn(N, 8192, device=device, generator=g) * 8192**-0.5).to(
-        torch.bfloat16
+    # the row's verdict (its shapes)
+    k1_rule(
+        torch.empty(T, N, device=device, dtype=torch.bfloat16),
+        torch.empty(T, K, device=device, dtype=torch.bfloat16),
+        torch.empty(N, K, device=device, dtype=torch.bfloat16),
+        splits,
     )
-    X = _bf16((T, K), device, g)
-    G = torch.empty(T, N, device=device, dtype=torch.bfloat16)
-    out = torch.empty(N, K, device=device, dtype=torch.bfloat16)
-    k1_rule(G, X, out, splits)
-    for _ in range(3):
-        G.fill_(float("nan"))
-        out.fill_(float("nan"))
+
+    def draw(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        H = _bf16((T, 8192), device, g)
+        Wg = (torch.randn(N, 8192, device=device, generator=g) * 8192**-0.5).to(
+            torch.bfloat16
+        )
+        X = _bf16((T, K), device, g)
+        G = torch.empty(T, N, device=device, dtype=torch.bfloat16)
+        out = torch.empty(N, K, device=device, dtype=torch.bfloat16)
+        # the G the forward writes: the operand of the judge's products
         det_backend.cake_dense_gemm_det_train_projection_forward(
             H, Wg, G, enable_pdl=True
         )
+        return SimpleNamespace(H=H, Wg=Wg, X=X, G=G, out=out)
+
+    def launch(v):
+        nan_fill([v.G, v.out])
+        det_backend.cake_dense_gemm_det_train_projection_forward(
+            v.H, v.Wg, v.G, enable_pdl=True
+        )
         cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(
-            G, X, out, enable_pdl=True
+            v.G, v.X, v.out, enable_pdl=True
         )
         torch.cuda.synchronize()
-        _k1_check(out, G.double().t() @ X.double())
+        return {"out": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 60,
+        draw=draw,
+        launch=launch,
+        product=_n1_wgrad_product("out"),
+        launches=3,
+    )
     assert _arena_tickets_zero()
 
 
-def test_gpu_k1_bound_deterministic_program_waits_for_an_early_producer():
+def test_gpu_k1_bound_deterministic_program_waits_for_an_early_producer(
+    record_property,
+):
     """The deterministic program through this package's binding as a programmatic dependent launch: the
     deterministic forward before it (K = 8192) triggers its dependents at entry and writes ``G``; the input gradient
-    (bound, ``enable_pdl=True``) starts while it runs and must still read every row it
-    wrote -- the deterministic package's bits -- and its slice counters end zero."""
+    (bound, ``enable_pdl=True``) starts while it runs and must still read every row it wrote (``G`` and ``dX`` hold
+    NaN before each launch pair, three on the first draw): it meets the naive BF16 tier against FP64 of the ``G`` the
+    forward writes over the judge's draws, its binding is the cache entry of the deterministic program and its slice
+    counters end zero."""
     device = _det_device_or_skip()
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     T, N, K = 4096, 128, 4096
-    g = torch.Generator(device=device).manual_seed(SEED + 61)
-    H = _bf16((T, 8192), device, g)
-    Wg = _bf16((N, 8192), device, g, 8192**-0.5)
-    W = _bf16((N, K), device, g, K**-0.5)
-    G = torch.empty(T, N, device=device, dtype=torch.bfloat16)
-    dX = torch.empty(T, K, device=device, dtype=torch.bfloat16)
-    det_backend.cake_dense_gemm_det_train_projection_forward(H, Wg, G, enable_pdl=False)
-    want = det_backend.cake_dense_gemm_det_train_projection_dgrad(
-        G, W, enable_pdl=False
-    ).clone()
-    for _ in range(3):
-        G.fill_(float("nan"))
-        dX.fill_(float("nan"))
+
+    def draw(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        H = _bf16((T, 8192), device, g)
+        Wg = _bf16((N, 8192), device, g, 8192**-0.5)
+        W = _bf16((N, K), device, g, K**-0.5)
+        G = torch.empty(T, N, device=device, dtype=torch.bfloat16)
+        dX = torch.empty(T, K, device=device, dtype=torch.bfloat16)
+        # the G the forward writes: the operand of the judge's products
         det_backend.cake_dense_gemm_det_train_projection_forward(
             H, Wg, G, enable_pdl=True
         )
+        return SimpleNamespace(H=H, Wg=Wg, W=W, G=G, dX=dX)
+
+    def launch(v):
+        nan_fill([v.G, v.dX])
+        det_backend.cake_dense_gemm_det_train_projection_forward(
+            v.H, v.Wg, v.G, enable_pdl=True
+        )
         assert (
             cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(
-                G, W, dX, enable_pdl=True
+                v.G, v.W, v.dX, enable_pdl=True
             )
-            is dX
+            is v.dX
         )
         torch.cuda.synchronize()
-        assert torch.equal(dX, want)
+        return {"dX": v.dX}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 61,
+        draw=draw,
+        launch=launch,
+        product=lambda v, dtype: {"dX": v.G.to(dtype) @ v.W.to(dtype)},
+        launches=3,
+    )
     entries = [e for e in cake_backend._K1_DET_CACHE.values() if e.k1 is not None]
     assert entries
     for arena in cake_backend._ATOMIC_ARENAS.values():
