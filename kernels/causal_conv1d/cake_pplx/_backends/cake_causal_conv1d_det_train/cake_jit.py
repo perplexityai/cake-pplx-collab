@@ -2112,7 +2112,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 66560,
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_det_train_c8027a64ba3cc38333bf",
@@ -2188,7 +2188,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 66560,
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_det_train_f1545adfd2bb28044419",
@@ -2268,7 +2268,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 74752,
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_det_train_149ca6f53934ba630033",
@@ -2346,7 +2346,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 74752,
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_det_train_843c010db78c79107fd3",
@@ -3271,6 +3271,190 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 4,
         },
     },
+    # Rendered by the exporter from the family adapter's scaffold: the backward
+    # with vec 8, copy tma2d, stage_tokens 8, min_blocks 2, grad_pre fp32,
+    # fold_every 4, dtype_flags, fold_kahan
+    # (2 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
+    # routed record of a higher threshold admits C; below every threshold the
+    # fallback record (no select_rule) runs.
+    "cake_causal_conv1d_det_train_170d89481a616ae977b3": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "partial"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_det_train_170d89481a616ae977b3",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_170d89481a616ae977b3",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 99328,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_170d89481a616ae977b3",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "partial": "partial",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "x_map": "x",
+        },
+        "reduce": "cake_causal_conv1d_det_train_ebc449a7bf278411309d",
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "kind": "partial_rows",
+            "taps": 4,
+        },
+    },
+    # Rendered by the exporter from the family adapter's scaffold: the backward
+    # with vec 8, copy tma2d, stage_tokens 8, min_blocks 2, bias, grad_pre fp32,
+    # fold_every 4, dtype_flags, fold_kahan
+    # (2 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
+    # routed record of a higher threshold admits C; below every threshold the
+    # fallback record (no select_rule) runs.
+    "cake_causal_conv1d_det_train_a681165b3e81204c73ff": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "partial"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+                "sm_103a": 1,
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_a681165b3e81204c73ff",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 107520,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "partial": "partial",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "x_map": "x",
+        },
+        "reduce": "cake_causal_conv1d_det_train_2a80334666f9e19b5c56",
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_100a": 512,
+                "sm_103a": 512,
+                "sm_107a": 1024,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "kind": "partial_rows",
+            "taps": 5,
+        },
+    },
     # The reduce program every backward route shares: the second launch of a
     # backward call.  Launched programmatically dependent on the main program
     # (``use_pdl``: the binding sets the programmatic-stream-serialization
@@ -3468,7 +3652,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 4096,
             "use_pdl": True,
         },
         "library": "cake_causal_conv1d_det_train_ebc449a7bf278411309d",
@@ -3518,7 +3702,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 5120,
             "use_pdl": True,
         },
         "library": "cake_causal_conv1d_det_train_2a80334666f9e19b5c56",
@@ -3562,6 +3746,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_bias_fp32g_pair": [
             "cake_causal_conv1d_det_train_149ca6f53934ba630033",
+            "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
@@ -3573,6 +3758,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_fp32g_pair": [
             "cake_causal_conv1d_det_train_c8027a64ba3cc38333bf",
+            "cake_causal_conv1d_det_train_170d89481a616ae977b3",
         ],
         "fwd": [
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
@@ -3602,6 +3788,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_bias_fp32g_pair": [
             "cake_causal_conv1d_det_train_149ca6f53934ba630033",
+            "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
@@ -3613,6 +3800,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_fp32g_pair": [
             "cake_causal_conv1d_det_train_c8027a64ba3cc38333bf",
+            "cake_causal_conv1d_det_train_170d89481a616ae977b3",
         ],
         "fwd": [
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
@@ -3645,6 +3833,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_bias_fp32g_pair": [
             "cake_causal_conv1d_det_train_843c010db78c79107fd3",
+            "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_det_train_8b9b8db0833fd64a578f",
@@ -3656,6 +3845,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_fp32g_pair": [
             "cake_causal_conv1d_det_train_f1545adfd2bb28044419",
+            "cake_causal_conv1d_det_train_170d89481a616ae977b3",
         ],
         "fwd": [
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
