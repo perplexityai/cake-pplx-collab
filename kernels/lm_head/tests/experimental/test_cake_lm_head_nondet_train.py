@@ -6522,7 +6522,8 @@ def test_device_fresh_thread_and_preload(glm_weight, record_property):
     assert out["state_before"] is None
     contract_lm_head(out["result"], inp)
     assert out["preloaded"] == (True, True)
-    del inp, out
+    out.clear()  # the names stay bound: ``fresh`` / ``preloaded`` read them
+    inp = None
     _judge_problems(record_property, launch, ("main", "fresh_thread"), seed=SEED + 12289)
 
 
@@ -9251,7 +9252,8 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep, re
     assert runner.plan.logprob_keep
     with pytest.raises(NotImplementedError, match="eager entry points"):
         runner.forward()
-    del runner, inp, ref
+    del runner, ref
+    inp = None  # the name stays bound: ``leaves`` / ``call`` read it
 
     def retained_passes(problem):
         X = problem.X.detach().requires_grad_(True)
@@ -14275,7 +14277,8 @@ def test_device_temperature_fresh_thread_process_and_changing_t(
     for i, (a, b) in enumerate(zip(sliced, first, strict=True)):
         _assert_fixed_order_bits(a, b, ("sliced vs one slice", inputs[i].T))
         contract_lm_head(a, inputs[i], entry="logprob")
-    del inputs, first, sliced, main, fresh, outcome
+    del inputs, first, sliced, main, fresh
+    outcome.clear()  # the name stays bound: ``worker`` reads it
 
     def launch(j, s):
         draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05, temperature="hetero")
@@ -16872,7 +16875,8 @@ def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight, re
 
     for result in passes(a).values():
         contract_lm_head(result, a)
-    del a, b, X, W, seen_w
+    del a, b, X, W
+    seen_w.clear()  # the name stays bound: the hook reads it
 
     def launch(j, s):
         draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
