@@ -161,7 +161,7 @@ Opt-in SM reserve of the main backward (keyword ``bwd_reserve_sms``, default
 launches the single-wave grid less ``K x ctas_per_sm`` CTAs, whatever the last
 channel-tile rank holds, so ``K`` SMs held by kernels of other streams leave the
 backward one wave.  It changes the launch grid only (same programs, ``dx``
-bitwise, ``dweight`` within the same budget); the host cache and graph keys hold
+bitwise, ``dweight`` summed the same way); the host cache and graph keys hold
 ``K``.  A multi-wave grid (``grid_mult`` > 1) launches unchanged.  On sm_107a
 ``K >= 1`` raises ``ValueError`` (:data:`RESERVE_UNSUPPORTED`): there the reserved
 grid costs up to 1.055x the shipped grid unloaded (C 1024, 62585 tokens).
@@ -698,7 +698,7 @@ def _handle_hist(
 # of every operand and caller-owned output) eagerly, capture the second call into a ``torch.cuda.CUDAGraph`` (replayed
 # once) and replay the graph on every later call of the key: the halo gather, the ``all_to_all_single``, its wait and
 # the kernels with the same arguments in the same order (``y`` / ``hist`` / ``dx`` bitwise the eager result; ``dweight``
-# within the eager call's budget, summed in an unordered cross-CTA order) and no host work between them.  Any other key
+# summed in plain FP32 words, as the eager call, in an unordered cross-CTA order) and no host work between them.  Any other key
 # runs eagerly (silent fallback); a rank without tokens is never captured.  A replayed call returns the graph's static
 # tensors (detached): the next replay of the key overwrites them, so a framework must keep its inputs pointer-stable and
 # consume the outputs before the next call of the same layer.  This module keeps its own cache (no import of the KDA
@@ -2700,7 +2700,7 @@ def cake_causal_conv1d_nondet_kcp(
         ``None`` (default) = ``RESERVE_DEFAULT`` = 0: the backward grid of :func:`_bwd_grid`.  ``K >= 1``: the main
         backward launches its single-wave grid less ``K x ctas_per_sm`` CTAs, so it stays one wave while kernels of
         other streams hold up to ``K`` SMs; it costs the unloaded backward the work of ``K`` SMs.  ``y``, ``dx`` and
-        the exchanges are unchanged; ``dweight`` stays within the budget.  ``TypeError`` for a ``bool`` or a
+        the exchanges are unchanged; ``dweight`` is summed the same way.  ``TypeError`` for a ``bool`` or a
         non-``int``; ``ValueError`` below zero, at the device's SM count or above, or ``K >= 1`` on sm_107a
         (:data:`RESERVE_UNSUPPORTED`: the reserved grid is outside the opt-in's unloaded-cost limit there).  The
         ranks of a group may differ.
@@ -3001,7 +3001,7 @@ def cake_causal_conv1d_nondet_train_kcp_multi_backward(
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     r"""The KCP backward of several convolutions of one layer with one halo exchange: ``(dxs, dweights)``,
     ``cake_causal_conv1d_nondet_train_kcp_backward(xs[i], weights[i], ctx, dys[i], hists[i])`` per tensor (``dxs``
-    bitwise; each ``dweights[i]`` an unordered FP32 partial of the same budget).
+    bitwise; each ``dweights[i]`` an unordered FP32 partial).
 
     The head programs of every tensor run first, their send rows travel packed in one exchange, and each tensor's
     received rows are folded into its ``dx`` by that tensor's programs: on the overlapped route its main program runs

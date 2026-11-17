@@ -80,7 +80,7 @@ non-int, ``ValueError`` for another value): the backward launches
 partition of the token axis for a backward that overlaps kernels of other
 streams.  The CTAs of each channel tile split its tokens among themselves at
 any grid size, so ``dx`` is still bitwise the deterministic one and
-``dweight`` / ``dbias`` keep their budgets; the workspace size does not depend
+``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
 grid).
 
@@ -373,8 +373,8 @@ def cake_causal_conv1d_nondet_train_backward(
         default untrimmed CTA count, so each CTA streams that much fewer tokens
         (for a backward that overlaps kernels of other streams: a CTA that
         starts late trails by a shorter stream).  ``dx`` is bitwise the
-        default's; more CTAs add into the same accumulators (same budgets, same
-        workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
+        default's; more CTAs add into the same accumulators (same plain FP32
+        sums, same workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
 
     Returns

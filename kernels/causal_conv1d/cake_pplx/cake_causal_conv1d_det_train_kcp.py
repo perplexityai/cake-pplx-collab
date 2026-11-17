@@ -100,8 +100,8 @@ def cake_causal_conv1d_det_kcp(
         SM short of the co-resident CTA count, then a fixed-order reduce kernel on the same stream; it starts beside
         a small kernel of another stream (for example a communication kernel).  ``True``: one cooperative launch,
         which starts only when all its CTAs fit on the GPU at once, so it waits for any kernel of another stream
-        that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible and within the
-        same FP64-oracle bound in each form, but its bits differ between the forms, so keep one form for runs whose
+        that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible and summed in
+        plain FP32 words in each form, but its bits differ between the forms, so keep one form for runs whose
         ``dweight`` bits must match.  Every rank of ``ctx.group`` passes the same value: no collective depends on
         the form, but the ranks' ``dweight`` partials would otherwise mix two reduction orders.
 

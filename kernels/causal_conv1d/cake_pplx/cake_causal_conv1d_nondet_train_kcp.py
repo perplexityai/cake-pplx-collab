@@ -44,7 +44,7 @@ its CTAs claim their tokens at run time, so a kernel resident on another stream 
 SMs it holds) and adds the FP32 ``dweight`` runs into zeroed accumulators with unordered global reductions; a tail-row
 program then writes ``dx`` of the fragments' last rows from the received rows.  ``y`` and ``dx`` are bitwise the
 deterministic KCP entry point's;
-the rank-local FP32 ``dweight`` partial stays within the deterministic error budget but is not bitwise reproducible
+the rank-local FP32 ``dweight`` partial is summed in plain FP32 words but is not bitwise reproducible
 run to run (its cross-rank reduction remains the framework's).  The package is chosen by name, so a checkpoint
 recompute (``torch.utils.checkpoint``, reentrant or not) runs the same package.
 
@@ -127,7 +127,7 @@ def cake_causal_conv1d_nondet_kcp(
         leaves to kernels of other streams: ``K >= 1`` runs that backward after the halo exchange
         instead of the overlapped one and launches its single-wave grid ``K x ctas_per_sm`` CTAs short, so a kernel of another stream that holds up to ``K`` SMs (for example a communication kernel) does
         not push the top CTAs into a second wave; the unloaded backward gives up the work of those ``K`` SMs.
-        ``y``, ``dx`` and the exchanges are unchanged and ``dweight`` stays within the same budget.  With ``K = 0``
+        ``y``, ``dx`` and the exchanges are unchanged and ``dweight`` is summed the same way.  With ``K = 0``
         (or ``None``) the backward already launches one SM's CTAs short wherever the last channel-tile rank of the
         full grid holds at least ``ctas_per_sm`` CTAs, so ``K = 1`` leaves the grid unchanged at those widths (for
         example ``C`` = 10240, 6144 and 5120 on a 152-SM GB200 / GB300, ``C`` = 10240, 6144 and 3072 on a 148-SM

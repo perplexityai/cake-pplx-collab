@@ -231,7 +231,7 @@ The backward has two launches. A persistent main launch writes `dx` plus per-CTA
 |---|---|---|---|
 | `cake_causal_conv1d_det` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1)` | As above | Autograd. Returns BF16 `y`. The backward saves only `x`, `weight`, `bias` and `cu_seqlens`. Parameter gradients come back in the parameters' dtypes. |
 | `cake_causal_conv1d_det_train_forward` | `(x, weight, cu_seqlens, *, bias=None, out=None, workspace=None)` | `out` preallocated BF16; `workspace` int32 from `..._forward_workspace`, one per stream | Returns BF16 `y` of `x`'s shape. S == 0 returns an empty output without launching. Not autograd. |
-| `cake_causal_conv1d_det_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | `dy` BF16, contiguous; `workspace` uint8 from `..._backward_workspace` (no zeroing needed); `dx` BF16, `dweight [C,4]` and `dbias [C]` each FP32 or BF16 (`dbias` needs `bias`); `bwd_grid_mult` 1 to 4 | Returns `(dx, dweight)`, plus `dbias` when `bias` is given. `"bf16"` gives about 3e-5 rel-L2 `dweight` vs FP64. `"fp32"` uses an FP64 final reduction, gives about 2e-7, and is slower. `dx` is within one BF16 ulp either way. Size the workspace with the same or a larger `bwd_grid_mult`. A non-int `bwd_grid_mult` raises `TypeError`; other bad values raise `ValueError`. |
+| `cake_causal_conv1d_det_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | `dy` BF16, contiguous; `workspace` uint8 from `..._backward_workspace` (no zeroing needed); `dx` BF16, `dweight [C,4]` and `dbias [C]` each FP32 or BF16 (`dbias` needs `bias`); `bwd_grid_mult` 1 to 4 | Returns `(dx, dweight)`, plus `dbias` when `bias` is given. `"bf16"` evaluates SiLU' at the BF16-rounded preactivation, and `dweight` is within about 3e-5 rel-L2 of the exact FP64 gradient. `"fp32"` evaluates it at the unrounded FP32 preactivation and is slower. Both sum `dweight` and `dbias` in plain FP32 words, with no FP64 and no compensated sums. `dx` is within one BF16 ulp either way. Size the workspace with the same or a larger `bwd_grid_mult`. A non-int `bwd_grid_mult` raises `TypeError`; other bad values raise `ValueError`. |
 
 Other public names:
 
@@ -243,7 +243,7 @@ Other public names:
 
 ### `cake_pplx.cake_causal_conv1d_det_train_kcp`
 
-Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is reproducible and, per the backend docstring, within `5e-2 + 1e-4 * abs(dw)` of an FP64 oracle. Reducing it across ranks is the caller's job. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
+Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is summed in plain FP32 words and is bitwise reproducible run to run. Reducing it across ranks is the caller's job. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -254,13 +254,13 @@ Other public names: `CakeCausalConv1dDetKcpFunction`, `CakeCausalConv1dDetKcpMul
 
 ### `cake_pplx.cake_causal_conv1d_nondet_train`
 
-The forward runs the det programs, so `y` is bitwise det. The backward is one launch that adds `dweight`/`dbias` into zeroed accumulators with unordered global reductions. `dx` is bitwise det. `dweight`/`dbias` are within det's error budgets but are not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before launch; with `warn_only=True` it emits a `UserWarning` and runs. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py).
+The forward runs the det programs, so `y` is bitwise det. The backward is one launch that adds `dweight`/`dbias` into zeroed accumulators with unordered global reductions. `dx` is bitwise det. `dweight`/`dbias` accumulate in plain FP32 words, as the det reduce does, but their order across CTAs varies, so they are not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before launch; with `warn_only=True` it emits a `UserWarning` and runs. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_causal_conv1d_nondet` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1)` | As det. `bwd_grid_mult` is checked at the forward call. | Autograd. Returns BF16 `y`. The backward raises under deterministic algorithms. |
 | `cake_causal_conv1d_nondet_train_forward` | `(x, weight, cu_seqlens, *, bias=None, out=None, workspace=None)` | As the det forward; workspace from `..._nondet_train_forward_workspace` | Returns BF16 `y`, bitwise det. No alert. |
-| `cake_causal_conv1d_nondet_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | `"bf16"` uses FP32 accumulators and `"fp32"` uses FP64 accumulators. The workspace comes from `..._nondet_train_backward_workspace`; its size depends on `C` and the route, not on `S` or `bwd_grid_mult`. An FP32 `dweight` must be 16-byte aligned. | Returns `(dx, dweight)`, plus `dbias` with `bias`. S == 0 returns an empty `dx` and zero gradients. Never share a workspace between concurrent launches. |
+| `cake_causal_conv1d_nondet_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | Both `"bf16"` and `"fp32"` accumulate in plain FP32 words; the `"fp32"` routes spread the adds over sixteen FP32 accumulator copies, added in copy order at the end. The workspace comes from `..._nondet_train_backward_workspace`; its size depends on `C` and the route, not on `S` or `bwd_grid_mult`. An FP32 `dweight` must be 16-byte aligned. | Returns `(dx, dweight)`, plus `dbias` with `bias`. S == 0 returns an empty `dx` and zero gradients. Never share a workspace between concurrent launches. |
 
 Other public names:
 
@@ -271,7 +271,7 @@ Other public names:
 
 ### `cake_pplx.cake_causal_conv1d_nondet_train_kcp`
 
-The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. `y` and `dx` are bitwise det KCP. The rank-local `dweight` partial is within det's budget but is not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
+The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. `y` and `dx` are bitwise det KCP. The rank-local FP32 `dweight` partial is not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -316,7 +316,7 @@ y.backward(torch.randn_like(y))  # x.grad BF16, w.grad FP32
 - `is_*_supported` checks only the base routes. Optional routes can still raise `ValueError` per call.
 - Do not share workspaces between launches that may run concurrently, for example on two streams.
 - Ranks are not compared. A mismatch in KCP multi tensor count, channels or order, or in the recompute handle, hangs or silently corrupts data.
-- The accuracy figures (3e-5 and 2e-7 rel-L2) come from the source docstrings.
+- The 3e-5 rel-L2 figure comes from the source docstrings. The package tests judge the L2 and max error of every output against an FP64 oracle, relative to a PyTorch BF16 implementation of the same operation, over 32 random draws.
 
 ---
 

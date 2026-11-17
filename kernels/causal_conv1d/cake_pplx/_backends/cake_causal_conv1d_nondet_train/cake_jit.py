@@ -51,8 +51,8 @@ several copies every copy's, added in copy order in FP32), stores ``dw`` (and
 included), the host never zeroes them again, and nothing synchronizes with
 the host.  The summation order of the cross-CTA sum depends
 on the CTAs' timing: ``dweight`` / ``dbias`` are not bitwise reproducible run
-to run (the only relaxed property); their accuracy budget is the det
-reduction's.
+to run (the only relaxed property); they accumulate in plain FP32 words,
+as the det reduction does.
 
 The backward workspace (:func:`accumulator_layout`) is one ``uint8`` buffer:
 ``acc`` (``slots x taps x C`` FP32 words: ``slots`` copies of the ``[C, 4]``

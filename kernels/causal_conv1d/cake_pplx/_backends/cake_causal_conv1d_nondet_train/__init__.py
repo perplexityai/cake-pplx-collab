@@ -37,7 +37,7 @@ copies of the accumulator, added in copy order at the end) -- and the last
 CTA of each channel tile stores the gradients and zeroes its accumulators.
 The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
 ``dbias`` are not bitwise reproducible run to run; that is the only relaxed
-property (the accumulation dtypes, rounding boundaries and accuracy budgets
+property (the accumulation dtypes, plain FP32 words, and rounding boundaries
 are the det package's).  No reduce program, no host synchronization, no cooperative
 launch, no grid barrier.
 
@@ -1165,7 +1165,7 @@ def cake_causal_conv1d_nondet_train_backward(
         default grid): the program launches ``bwd_grid_mult`` times its
         untrimmed grid, so each CTA streams that much fewer tokens.  ``dx`` is
         bitwise the default's; more CTAs add into the same accumulators, so
-        ``dweight`` / ``dbias`` keep the route's budget.  The workspace size does
+        ``dweight`` / ``dbias`` are summed the same way.  The workspace size does
         not depend on it.  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
 
