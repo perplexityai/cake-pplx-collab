@@ -1231,23 +1231,26 @@ def test_fp32_weight_is_applied_at_fp32(hidden: int, residual: bool, rows: int) 
     ``test_fp32_weight_meets_the_naive_tier``'s)."""
 
     _skip_unless_fp32_routes(hidden, residual)
-    label = f"hidden={hidden} residual={residual} rows={rows} fp32 w"
-    generator = _generator(hidden, rows, residual, 89)
-    w32 = 1.0 + 1e-3 * torch.randn(
-        hidden, dtype=torch.float32, device=_device(), generator=generator
-    )
-    assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
-    seed = generator.get_state()
-    outputs, dx, _dw, _ = _fp32_case(hidden, rows, residual, w32, generator)
-    generator.set_state(seed)
-    outputs16, dx16, _dw16, _ = _fp32_case(
-        hidden, rows, residual, w32.to(torch.bfloat16), generator
-    )
-    assert torch.equal(outputs16[1], outputs[1]), f"{label}: rstd does not depend on w"
-    assert not torch.equal(outputs16[0], outputs[0]), (
-        f"{label}: y ignores the FP32 weight"
-    )
-    assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
+    for draw in range(ref.DRAWS):
+        label = f"hidden={hidden} residual={residual} rows={rows} fp32 w draw={draw}"
+        generator = _generator(hidden, rows, residual, 89, draw=draw)
+        w32 = 1.0 + 1e-3 * torch.randn(
+            hidden, dtype=torch.float32, device=_device(), generator=generator
+        )
+        assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
+        seed = generator.get_state()
+        outputs, dx, _dw, _ = _fp32_case(hidden, rows, residual, w32, generator)
+        generator.set_state(seed)
+        outputs16, dx16, _dw16, _ = _fp32_case(
+            hidden, rows, residual, w32.to(torch.bfloat16), generator
+        )
+        assert torch.equal(outputs16[1], outputs[1]), (
+            f"{label}: rstd does not depend on w"
+        )
+        assert not torch.equal(outputs16[0], outputs[0]), (
+            f"{label}: y ignores the FP32 weight"
+        )
+        assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
