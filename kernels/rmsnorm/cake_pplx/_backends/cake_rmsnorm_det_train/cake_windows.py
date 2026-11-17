@@ -132,7 +132,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (1, 256, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
             (256, 6144, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
             (6144, 50688, "cake_rmsnorm_det_train_9479b1298a1b19d4d996"),
-            (50688, None, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
+            (50688, None, "cake_rmsnorm_det_train_9479b1298a1b19d4d996"),
         ),
         "bwd_h6144": (
             (0, 384, "cake_rmsnorm_det_train_f2271417b1a596d0540f"),
@@ -1449,7 +1449,7 @@ its own windows.
 * ``sm_100a`` ``bwd_h5120``: (0, 1] 080e0a6c ? (1, 256] dd3a3573 ? (256, 6144] b482c84d
   = (6144, 50688] b482c84d = (50688, inf) b482c84d
 * ``sm_100a`` ``bwd_w32_h5120``: (0, 1] 747d86f3 ? (1, 256] 747d86f3 ?
-  (256, 6144] 40227b2a ? (6144, 50688] 9479b129 ? (50688, inf) 40227b2a
+  (256, 6144] 40227b2a ? (6144, 50688] 9479b129 ? (50688, inf) 9479b129
 * ``sm_100a`` ``bwd_h6144``: (0, 384] f2271417 ? (384, 767] 5c804aed ?
   (767, 4096] 61421bc7 ? (4096, 42496] b93bf060 = (42496, inf) b93bf060
 * ``sm_100a`` ``bwd_w32_h6144``: (0, 384] 8a280a7e ? (384, 4096] 41b80b6a =

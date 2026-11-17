@@ -116,7 +116,7 @@ first eight hex digits of the program name.
 | `bwd_w32_h5120` | (1, 256] | 747d86f3 | column task | - | - |
 | `bwd_w32_h5120` | (256, 6144] | 40227b2a | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |
 | `bwd_w32_h5120` | (6144, 50688] | 9479b129 | compensated, 8-row blocks | tail_div 4, max_halving 5 | c5831b29 (tree) |
-| `bwd_w32_h5120` | (50688, inf) | 40227b2a | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |
+| `bwd_w32_h5120` | (50688, inf) | 9479b129 | compensated, 8-row blocks | tail_div 4, max_halving 5 | c5831b29 (tree) |
 | `bwd_h6144` | (0, 384] | f2271417 | column task | - | - |
 | `bwd_h6144` | (384, 767] | 5c804aed | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
 | `bwd_h6144` | (767, 4096] | 61421bc7 | plain | row-strided slots, 8 SMs left out | 5f5cdc51 (tree) |

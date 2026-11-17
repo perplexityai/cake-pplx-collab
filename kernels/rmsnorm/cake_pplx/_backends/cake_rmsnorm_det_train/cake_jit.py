@@ -18302,6 +18302,70 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
+    # cake_rmsnorm_det_train_c145ef195d7aeb04f242 over the window of cake_rmsnorm_det_train_b482c84dbffcd75a4a4c__50688_inf: no route selects this record; the FP32-weight route of sm_100a runs its twin there.
+    "cake_rmsnorm_det_train_c145ef195d7aeb04f242__50688_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 1,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_det_train_c145ef195d7aeb04f242",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_det_train_c145ef195d7aeb04f242",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 50688,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 128,
+            "kind": "chunk_partials",
+        },
+    },
+    # The FP32-weight twin of cake_rmsnorm_det_train_c145ef195d7aeb04f242__50688_inf (the effective weight read at FP32; every other operand and the host plan the owner's).
+    "cake_rmsnorm_det_train_9479b1298a1b19d4d996__50688_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 1,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_det_train_9479b1298a1b19d4d996",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_det_train_9479b1298a1b19d4d996",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 50688,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 128,
+            "kind": "chunk_partials",
+        },
+    },
     "cake_rmsnorm_det_train_2fc4932fbde0bc848b32": {
         "arches": [
             "sm_103a",
@@ -19596,7 +19660,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_det_train_747d86f34cb58479c7ca",
             "cake_rmsnorm_det_train_40227b2a2b2122628d58",
             "cake_rmsnorm_det_train_9479b1298a1b19d4d996__6144_50688",
-            "cake_rmsnorm_det_train_40227b2a2b2122628d58__50688_inf",
+            "cake_rmsnorm_det_train_9479b1298a1b19d4d996__50688_inf",
             "cake_rmsnorm_det_train_c5831b29d17867842e5f__256_6144",
             "cake_rmsnorm_det_train_c5831b29d17867842e5f__6144_50688",
             "cake_rmsnorm_det_train_c5831b29d17867842e5f__50688_inf",
