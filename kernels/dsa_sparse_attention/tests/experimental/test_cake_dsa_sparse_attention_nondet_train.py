@@ -1372,41 +1372,53 @@ def test_backward_forced_key_passes_with_masked_slots(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 16)
 
 
-def test_backward_forced_passes_over_two_token_chunks():
+def test_backward_forced_passes_over_two_token_chunks(record_property):
     """Two forced passes over a row of 4352 tokens (one full chunk of 4224 and one of 128): the
-    launches run chunk by chunk through every pass and the pass scratch holds one chunk.  At
-    4352 rows x 2048 slots the problem is past the judged size: the forward, two two-pass
-    backwards and the single-pass backward are held to their contract only (shapes, dtypes,
-    finite values, exact zeros on the key rows no slot names)."""
+    launches run chunk by chunk through every pass and the pass scratch holds one chunk (the plan,
+    on the first draw); the forward, two two-pass backwards (``dq`` carried through the FP32
+    partial across the token chunks) and the single-pass backward are judged."""
     record, _stages = _require_key_pass_program()
     device = torch.device("cuda")
     chunk = KeyPassPolicy.from_record(record).token_chunk(2048)
     assert chunk == 4224
-    inp = make_inputs([chunk + 128], [65536], seed=SEED + 18, topk=2048)
-    fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    fwd = cake_backend.forward(*fwd_args)
-    out, lse, o_lo = fwd
-    runner = prepare_dsa_train(*fwd_args, dout=inp.dout, backward=True, key_passes=2)
-    assert runner.key_passes == 2
-    assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
-        (stage, c, p) for c in range(2) for p in range(2) for stage in KEY_PASS_STAGES
-    ]
-    assert runner.layout["dq_partial"][1] == chunk * DQ_PARTIAL_BYTES_PER_TOKEN
-    assert runner.layout["key_scratch"][1] == chunk * 2048 * 4
-    assert (
-        dsa_train_workspace_size(chunk + 128, 65536, 2048, device, key_passes=2)
-        == runner.layout["total"]
-    )
-    del runner
-    args = fwd_args + (out, o_lo, lse, inp.dout)
-    a = cake_backend.backward(*args, key_passes=2)
-    b = cake_backend.backward(*args, key_passes=2)
-    single = cake_backend.backward(*args, key_passes=1)
-    torch.cuda.synchronize()
-    problem = nv.rope_problem(inp)
-    nv.assert_contract("forward", problem, _rope_outputs(fwd))
-    for label, grads in (("2 passes", a), ("2 passes again", b), ("1 pass", single)):
-        nv.assert_contract(label, problem, _rope_outputs(grads=grads))
+
+    def case(s, j):
+        inp = make_inputs([chunk + 128], [65536], seed=s, topk=2048)
+        fwd_args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        fwd = cake_backend.forward(*fwd_args)
+        out, lse, o_lo = fwd
+        if j == 0:
+            runner = prepare_dsa_train(
+                *fwd_args, dout=inp.dout, backward=True, key_passes=2
+            )
+            assert runner.key_passes == 2
+            assert [k for k in runner.backward_order if isinstance(k, tuple)] == [
+                (stage, c, p)
+                for c in range(2)
+                for p in range(2)
+                for stage in KEY_PASS_STAGES
+            ]
+            assert runner.layout["dq_partial"][1] == chunk * DQ_PARTIAL_BYTES_PER_TOKEN
+            assert runner.layout["key_scratch"][1] == chunk * 2048 * 4
+            assert (
+                dsa_train_workspace_size(chunk + 128, 65536, 2048, device, key_passes=2)
+                == runner.layout["total"]
+            )
+            del runner
+        args = fwd_args + (out, o_lo, lse, inp.dout)
+        a = cake_backend.backward(*args, key_passes=2)
+        b = cake_backend.backward(*args, key_passes=2)
+        single = cake_backend.backward(*args, key_passes=1)
+        torch.cuda.synchronize()
+        runs = {
+            "forward": _rope_outputs(fwd),
+            "2 passes": _rope_outputs(grads=a),
+            "2 passes again": _rope_outputs(grads=b),
+            "1 pass": _rope_outputs(grads=single),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 18)
 
 
 def test_forward_derives_row_lengths_in_kernel_and_binding_key_covers_it(
@@ -5920,28 +5932,29 @@ def test_nope_irregular_tail_lengths(seq_q, seq_k, record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 200 + seq_q)
 
 
-def test_nope_backward_32k_x_256k_skewed_row_keeps_the_contract():
-    """The 32k x 256k peaked row (own key ~99 % of the softmax mass, iid K_slots 2176), contract only (a large
-    layout: no FP64 oracle): the forward and backward outputs have their shapes and dtypes, are finite and exactly
-    zero where the contract needs it, and the calibrated self weight (from the forward's ``lse``) lies in the peaked
-    window.  Opt in with ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
+def test_nope_backward_32k_x_256k_skewed_row(record_property):
+    """The 32k x 256k peaked row (own key ~99 % of the softmax mass, iid K_slots 2176): the forward and backward
+    outputs are judged over the draws, and each draw's self weight (from the oracle's ``lse``) lies in the peaked
+    window.  The FP64 oracle of a draw takes minutes: opt in with ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
     if os.environ.get(NOPE_LARGE_TESTS_ENV, "") != "1":
-        pytest.skip(f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 32k x 256k case")
+        pytest.skip(
+            f"set {NOPE_LARGE_TESTS_ENV}=1 to run the 32k x 256k case (minutes of FP64 oracle per draw)"
+        )
     _require_nope_program(backward=True)
     T, S, K = 32768, 262144, 2176
     beta = nope_ref.calibrate_beta_nope(0.99, seed=NOPE_SEED + 300, topk=K)
-    inp = _nope_inputs(
-        T, S, seed=NOPE_SEED + 300, topk=K, self_including=True, beta=beta
-    )
-    out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
-    dq, dkv = backward_nope(inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-    torch.cuda.synchronize()
-    got = dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv)
-    nv.assert_contract("call", nv.nope_problem(inp), got)
-    weight = _self_weight(inp, lse)
-    assert 0.9 < weight < 0.999, (
-        f"calibrated self weight {weight:.4f} outside the peaked window"
-    )
+
+    def case(s, j):
+        inp = _nope_inputs(T, S, seed=s, topk=K, self_including=True, beta=beta)
+        got = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
+        found, oracle, naive = nv.judged(nv.nope_problem(inp), {"": got})
+        weight = _self_weight(inp, oracle["lse"])
+        assert 0.9 < weight < 0.999, (
+            f"draw {j}: calibrated self weight {weight:.4f} outside the peaked window"
+        )
+        return found, oracle, naive
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 300)
 
 
 def test_nope_forward_masked_rows_and_out_of_range(record_property):

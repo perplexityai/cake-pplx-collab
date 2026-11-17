@@ -19,8 +19,8 @@ workspace sizes), the forward's accuracy and its bit-for-bit repeat, and the bit
 accumulate, ``o_lo`` replay, checkpoint, CUDA graph and no-host-sync contracts of the backward.  Accuracy is judged by
 ``tests/cake_naive.py`` through ``tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py``: over 32 draws
 per case, each floating output's error against an FP64 oracle of the same inputs is at most that of the same math in
-PyTorch BF16 (the naive tier; the template's near tie), and 0 wherever that error is 0; the issue layouts are held to
-their contract (finite outputs, exact zeros) without an oracle.  Run-to-run and one-feature checks are bitwise:
+PyTorch BF16 (the naive tier; the template's near tie), and 0 wherever that error is 0; the issue layouts are judged
+the same way.  Run-to-run and one-feature checks are bitwise:
 "bitwise" here is bit-pattern equality (integer views), not ``torch.equal``: ``-0.0`` and NaN payloads count.  GPU
 cases skip without a compute capability 10.0 / 10.3 / 10.7 device or without the registered stages.
 """
@@ -1019,7 +1019,7 @@ def test_nope_runner_graph_replays_bit_for_bit(accumulate):
 
 
 # ---------------------------------------------------------------------------
-# The repro shapes (contract), adversarial inputs (naive tier), the recomputation of flagged rows, non-finite
+# The repro shapes and adversarial inputs (naive tier), the recomputation of flagged rows, non-finite
 # inputs and host synchronization (GPU, needs the registered backward stages)
 # ---------------------------------------------------------------------------
 
@@ -1049,10 +1049,10 @@ def _p8949_indices(t, s, gen):
     return torch.cat([sink, strata, recent.flip(1)], 1).int().contiguous()
 
 
-def _p8949_problem(nope, t=1024, s=8192):
-    """The long-context repro's tensors (generator seed 0, N(0, 1) BF16 in the repro's draw order) at the
+def _p8949_problem(nope, seed, t=1024, s=8192):
+    """The long-context repro's tensors (generator seed ``seed``, N(0, 1) BF16 in the repro's draw order) at the
     accuracy shape ``T = 1024``, ``S = 8192`` (top-k 2048, every slot valid)."""
-    gen = torch.Generator(device="cuda").manual_seed(0)
+    gen = torch.Generator(device="cuda").manual_seed(seed)
 
     def randn(*shape):
         return torch.randn(shape, device="cuda", generator=gen).bfloat16()
@@ -1069,60 +1069,81 @@ def _p8949_problem(nope, t=1024, s=8192):
     return p
 
 
-def test_issue_8949_shape_holds_its_contract():
-    """The long-context repro's shape (T 1024, S 8192, its index generator; an issue layout, held to its contract
-    without an oracle): the forward and the BF16 and FP32 dK/dV forms are finite with the contract's exact zeros,
-    and adding into a zeroed ``dkv_acc`` gives the FP32 form's bits (``+0.0 + v = v``)."""
+def test_issue_8949_shape_meets_the_naive_tier(record_property):
+    """The long-context repro's shape (T 1024, S 8192, its index generator): the forward, the BF16 and FP32 dK/dV
+    forms and the dK/dV added into a zeroed ``dkv_acc`` (judged by its increment) meet the naive tier over the
+    draws; on the first draw the zeroed ``dkv_acc`` holds the FP32 form's bits (``+0.0 + v = v``)."""
     _require_program(backward=True)
-    p = _p8949_problem(nope=False)
-    args = (p["q_latent"], p["q_rope"], p["kv_latent"], p["k_rope"], p["indices"])
-    tl = p["topk_length"]
-    out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
-    bf16 = cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl)
-    out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-    fp32 = cake_backend.backward(
-        *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_fp32=True
-    )
-    acc = torch.zeros(p["kv_latent"].shape[0], D_QK, device="cuda")
-    out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
-    cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc)
-    assert _same_bits(acc[:, :D_LATENT], fp32[2]) and _same_bits(
-        acc[:, D_LATENT:], fp32[3]
-    )
-    problem = nv.Problem(
-        q_latent=p["q_latent"], q_rope=p["q_rope"], kv_latent=p["kv_latent"], k_rope=p["k_rope"],
-        indices=p["indices"], topk_length=tl, dout=p["dout"],
-    )  # fmt: skip
-    names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
-    nv.assert_contract("forward", problem, forward)
-    nv.assert_contract("bf16", problem, dict(zip(names, bf16, strict=True)))
-    nv.assert_contract("fp32", problem, dict(zip(names, fp32, strict=True)))
+
+    def case(s, j):
+        p = _p8949_problem(nope=False, seed=s)
+        args = (p["q_latent"], p["q_rope"], p["kv_latent"], p["k_rope"], p["indices"])
+        tl = p["topk_length"]
+        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+        forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
+        bf16 = cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl)
+        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+        fp32 = cake_backend.backward(
+            *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_fp32=True
+        )
+        acc = torch.zeros(p["kv_latent"].shape[0], D_QK, device="cuda")
+        zero = acc.clone()
+        out, lse, o_lo = cake_backend.forward(*args, topk_length=tl)
+        cake_backend.backward(*args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc)
+        if j == 0:
+            assert _same_bits(acc[:, :D_LATENT], fp32[2]) and _same_bits(
+                acc[:, D_LATENT:], fp32[3]
+            )
+        problem = nv.Problem(
+            q_latent=p["q_latent"], q_rope=p["q_rope"], kv_latent=p["kv_latent"], k_rope=p["k_rope"],
+            indices=p["indices"], topk_length=tl, dout=p["dout"],
+        )  # fmt: skip
+        names = ("dq_latent", "dq_rope", "dkv_latent", "dk_rope")
+        runs = {
+            "forward": forward,
+            "bf16": dict(zip(names, bf16, strict=True)),
+            "fp32": dict(zip(names, fp32, strict=True)),
+            "acc": dict(dkv_acc=nv.Acc(before=zero, after=acc)),
+        }
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 14)
 
 
-def test_issue_8949_shape_holds_its_contract_nope():
-    """NoPE at the long-context repro's shape (an issue layout, held to its contract without an oracle): finite
-    outputs with the contract's exact zeros, and a zeroed ``dkv_acc`` receives the fresh ``dkv`` bits."""
+def test_issue_8949_shape_meets_the_naive_tier_nope(record_property):
+    """NoPE at the long-context repro's shape: the forward, the fresh ``dkv`` and the ``dkv`` added into a zeroed
+    ``dkv_acc`` (judged by its increment) meet the naive tier over the draws; on the first draw the zeroed
+    ``dkv_acc`` holds the fresh ``dkv`` bits."""
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
-    p = _p8949_problem(nope=True)
-    args = (p["q_latent"], p["kv_latent"], p["indices"])
-    tl = p["topk_length"]
-    out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
-    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
-    dq, dkv = cake_backend.backward_nope(
-        *args, out, o_lo, lse, p["dout"], topk_length=tl
-    )
-    acc = torch.zeros(p["kv_latent"].shape[0], D_LATENT, device="cuda")
-    out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
-    cake_backend.backward_nope(
-        *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc
-    )
-    assert _same_bits(acc, dkv)
-    problem = nv.Problem(
-        q_latent=p["q_latent"], kv_latent=p["kv_latent"], indices=p["indices"], topk_length=tl, dout=p["dout"]
-    )
-    nv.assert_contract("forward", problem, forward)
-    nv.assert_contract("backward", problem, dict(dq=dq, dkv=dkv))
+
+    def case(s, j):
+        p = _p8949_problem(nope=True, seed=s)
+        args = (p["q_latent"], p["kv_latent"], p["indices"])
+        tl = p["topk_length"]
+        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+        forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
+        dq, dkv = cake_backend.backward_nope(
+            *args, out, o_lo, lse, p["dout"], topk_length=tl
+        )
+        acc = torch.zeros(p["kv_latent"].shape[0], D_LATENT, device="cuda")
+        zero = acc.clone()
+        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+        cake_backend.backward_nope(
+            *args, out, o_lo, lse, p["dout"], topk_length=tl, dkv_acc=acc
+        )
+        if j == 0:
+            assert _same_bits(acc, dkv)
+        problem = nv.Problem(
+            q_latent=p["q_latent"], kv_latent=p["kv_latent"], indices=p["indices"], topk_length=tl, dout=p["dout"]
+        )
+        runs = {
+            "forward": forward,
+            "backward": dict(dq=dq, dkv=dkv),
+            "acc": dict(dkv_acc=nv.Acc(before=zero, after=acc)),
+        }
+        return nv.judged(problem, runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 15)
 
 
 def _glm_dst_map(num_kv: int) -> tuple[torch.Tensor, int]:
@@ -1133,61 +1154,74 @@ def _glm_dst_map(num_kv: int) -> tuple[torch.Tensor, int]:
     return dst.to(torch.int32).contiguous(), int(dst[-1].item()) + 1
 
 
-def test_issue_8946_glm52_packed_dkv_acc_with_map_holds_its_contract():
-    """The GLM-5.2 workload form (an issue layout, held to its contract without an oracle): packed documents
-    (context-parallel tails of longer prefixes), top-k 2048, the FP32 ``dkv_acc`` addressed through ``dkv_dst_map``
-    with repeated destination rows.  ``dq`` and the accumulated rows are finite with the contract's exact zeros and
-    untouched rows, and the step repeats bit for bit."""
+def test_issue_8946_glm52_packed_dkv_acc_with_map_meets_the_naive_tier(record_property):
+    """The GLM-5.2 workload form: packed documents (context-parallel tails of longer prefixes), top-k 2048, the FP32
+    ``dkv_acc`` addressed through ``dkv_dst_map`` with repeated destination rows (combined as integers before the one
+    FP32 addition).  The forward, ``dq`` and the accumulated rows (judged by their increment, against the gradient
+    added through the map) meet the naive tier over the draws; on the first draw the step repeats bit for bit."""
     _require_program(backward=True)
-    inp = make_inputs([2048, 1024, 1024], [6144, 1024, 3072], seed=SEED + 20, topk=2048)
-    args = _rope_args(inp)
-    S = inp.total_k
-    dst_map, rows = _glm_dst_map(S)
 
-    def run():
-        acc = torch.zeros(rows, D_QK, device="cuda")
-        out, lse, o_lo = cake_backend.forward(*args, topk_length=inp.topk_length)
-        dql, dqr, _, _ = cake_backend.backward(
-            *args, out, o_lo, lse, inp.dout, topk_length=inp.topk_length,
-            dkv_acc=acc, dkv_dst_map=dst_map,
-        )  # fmt: skip
-        return dql, dqr, acc, lse
+    def case(s, j):
+        inp = make_inputs([2048, 1024, 1024], [6144, 1024, 3072], seed=s, topk=2048)
+        args = _rope_args(inp)
+        dst_map, rows = _glm_dst_map(inp.total_k)
 
-    dql, dqr, acc, lse = run()
-    for _ in range(2):
-        again = run()
-        for a, b in zip(again[:3], (dql, dqr, acc), strict=True):
-            assert _same_bits(a, b)
-    problem = nv.rope_problem(inp, topk_length=inp.topk_length)
-    zero = torch.zeros_like(acc)
-    nv.assert_contract(
-        "glm52", problem,
-        dict(lse=lse, dq_latent=dql, dq_rope=dqr, dkv_acc=nv.Acc(before=zero, after=acc, dst_map=dst_map)),
-    )  # fmt: skip
+        def run():
+            acc = torch.zeros(rows, D_QK, device="cuda")
+            out, lse, o_lo = cake_backend.forward(*args, topk_length=inp.topk_length)
+            forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
+            dql, dqr, _, _ = cake_backend.backward(
+                *args, out, o_lo, lse, inp.dout, topk_length=inp.topk_length,
+                dkv_acc=acc, dkv_dst_map=dst_map,
+            )  # fmt: skip
+            return dql, dqr, acc, forward
+
+        dql, dqr, acc, forward = run()
+        if j == 0:
+            for _ in range(2):
+                again = run()
+                for a, b in zip(again[:3], (dql, dqr, acc), strict=True):
+                    assert _same_bits(a, b)
+        zero = torch.zeros_like(acc)
+        got = dict(
+            forward, dq_latent=dql, dq_rope=dqr, dkv_acc=nv.Acc(before=zero, after=acc, dst_map=dst_map)
+        )
+        return nv.judged(nv.rope_problem(inp, topk_length=inp.topk_length), {"": got})
+
+    nv.judge_draws(record_property, case, seed=SEED + 20)
 
 
-def test_issue_8946_glm53_flash_nope_holds_its_contract():
-    """The GLM-5.3-Flash NoPE form (an issue layout, held to its contract without an oracle): the pooled index
-    structure (four-token pools, 2176 slots), scale 1/16; fresh ``dkv`` and a zeroed ``dkv_acc`` give the same bits,
-    finite with the contract's exact zeros."""
+def test_issue_8946_glm53_flash_nope_meets_the_naive_tier(record_property):
+    """The GLM-5.3-Flash NoPE form: the pooled index structure (four-token pools, 2176 slots), scale 1/16; the
+    forward, the fresh ``dkv`` and the ``dkv`` added into a zeroed ``dkv_acc`` (judged by its increment) meet the
+    naive tier over the draws; on the first draw the zeroed ``dkv_acc`` holds the fresh ``dkv`` bits."""
     _require_program(backward=True, program=cake_jit.NOPE_PROGRAM)
-    inp = make_nope_inputs([2048, 2048], [8192, 4096], seed=SEED + 21)
-    args = (inp.q, inp.kv, inp.idx_global)
-    tl = inp.topk_length
-    out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
-    forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
-    dq, dkv = cake_backend.backward_nope(
-        *args, out, o_lo, lse, inp.dout, topk_length=tl
-    )
-    acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
-    out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
-    cake_backend.backward_nope(
-        *args, out, o_lo, lse, inp.dout, topk_length=tl, dkv_acc=acc
-    )
-    assert _same_bits(acc, dkv)
-    problem = nv.nope_problem(inp, topk_length=tl)
-    nv.assert_contract("forward", problem, forward)
-    nv.assert_contract("backward", problem, dict(dq=dq, dkv=dkv))
+
+    def case(s, j):
+        inp = make_nope_inputs([2048, 2048], [8192, 4096], seed=s)
+        args = (inp.q, inp.kv, inp.idx_global)
+        tl = inp.topk_length
+        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+        forward = dict(out=out.clone(), lse=lse.clone(), o_lo=o_lo.clone())
+        dq, dkv = cake_backend.backward_nope(
+            *args, out, o_lo, lse, inp.dout, topk_length=tl
+        )
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        zero = acc.clone()
+        out, lse, o_lo = cake_backend.forward_nope(*args, topk_length=tl)
+        cake_backend.backward_nope(
+            *args, out, o_lo, lse, inp.dout, topk_length=tl, dkv_acc=acc
+        )
+        if j == 0:
+            assert _same_bits(acc, dkv)
+        runs = {
+            "forward": forward,
+            "backward": dict(dq=dq, dkv=dkv),
+            "acc": dict(dkv_acc=nv.Acc(before=zero, after=acc)),
+        }
+        return nv.judged(nv.nope_problem(inp, topk_length=tl), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 21)
 
 
 def _sink_beta(q_parts, k_parts, scale, target=0.95):
