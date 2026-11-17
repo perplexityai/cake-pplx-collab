@@ -283,9 +283,15 @@ def _check_paths(T: int, iters: int, hidden: int) -> None:
 def test_changing_count_does_not_rebuild(record_property) -> None:
     """The count is a launch argument of the run-time-count programs: after one call at a non-default count, calls at
     other counts (and back at the default) load no module, and ``dX`` and ``dfn`` at each count are judged against
-    the naive BF16 tier at that count over 32 inputs."""
+    the naive BF16 tier at that count over 32 inputs.  The calls of the counts run at 255 tokens, whose route may
+    select records of other token-count bands than 64 tokens' (the mapping pass ``nsx_st5_mb1_xn`` at hidden 4096):
+    one call at 255 tokens at the default count and one at a non-default count load them first, so the count of
+    loads compares calls that differ in their Sinkhorn count alone, whatever the earlier tests of the process
+    loaded."""
     _check(64, SINKHORN_ITERS, record_property, prefix="T=64 sinkhorn_iters=20 ")
     _check(64, 3, record_property, prefix="T=64 sinkhorn_iters=3 ")
+    for iters in (SINKHORN_ITERS, 3):
+        _run(_make_inputs(255, seed=SEED + 3), iters)
     loaded = loader.load.cache_info().misses
     for iters in (1, 2, 7, 33, 64, SINKHORN_ITERS, 11):
         _check(

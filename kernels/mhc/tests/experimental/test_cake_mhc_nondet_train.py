@@ -1659,14 +1659,31 @@ def test_large_logits(T: int, record_property) -> None:
     )
 
 
-def test_changing_rows_in_one_process_does_not_rebuild(record_property) -> None:
-    """A changed token count loads no module of either package after the first call; every output at 64 tokens, and
-    ``dX`` and ``dfn`` of one launch at each other count, are judged against the naive BF16 tier over 32 inputs."""
+def test_changing_rows_in_one_process_does_not_rebuild(
+    record_property, monkeypatch
+) -> None:
+    """A changed token count rebuilds no module: it loads no module of the deterministic package, a module of this
+    package only where its route selects a record of another token-count band than the earlier calls' (a mapping-pass
+    ``xn`` form at 65 or 255 tokens, for example), every module loaded during the changed counts is a record of
+    their selection, and calls back at the earlier counts load nothing.  Every output at 64 tokens, and ``dX`` and
+    ``dfn`` of one launch at each other count, are judged against the naive BF16 tier over 32 inputs."""
     _judge_nd(
         lambda s: _make_inputs(64, seed=s), record_property, seed=SEED, prefix="T=64 "
     )
-    loaded = (loader.load.cache_info().misses, det_loader.load.cache_info().misses)
-    for T in (1, 65, 2049, 7, 255):
+    loaded: list[str] = []
+    load = loader.load
+
+    def recording_load(name: str, arch: str):
+        misses = load.cache_info().misses
+        module = load(name, arch)
+        if load.cache_info().misses != misses:
+            loaded.append(name)
+        return module
+
+    monkeypatch.setattr(loader, "load", recording_load)
+    det_loaded = det_loader.load.cache_info().misses
+    counts = (1, 65, 2049, 7, 255)
+    for T in counts:
 
         def case(j: int, s: int, T: int = T):
             i = _make_inputs(T, seed=s)
@@ -1676,10 +1693,29 @@ def test_changing_rows_in_one_process_does_not_rebuild(record_property) -> None:
             return [launch], expected, naive
 
         judge_draws(case, record_property, seed=SEED + T, prefix=f"T={T} ")
+    arch, sm = _arch(), _sm_count()
+    selected = {
+        name
+        for T in counts
+        for kind in ("fwd_prepare", "bwd_prepare", "bwd_finish")
+        for name in loader.selected_modules(arch, HIDDEN, kind, rows=T, sm_count=sm)
+    }
+    assert set(loaded) <= selected, (
+        f"a changed token count loaded modules outside its routes' records: {sorted(set(loaded) - selected)}"
+    )
+    loaded_before = (load.cache_info().misses, det_loader.load.cache_info().misses)
+    assert loaded_before[1] == det_loaded, (
+        "a changed token count loaded a module of the deterministic package"
+    )
+    for T in (64, *reversed(counts)):
+        i = _make_inputs(T, seed=SEED + 5 + T)
+        _nd_backward(i, _forward(i))
     assert (
-        loader.load.cache_info().misses,
+        load.cache_info().misses,
         det_loader.load.cache_info().misses,
-    ) == loaded, "a changed token count rebuilt or reloaded a module"
+    ) == loaded_before, (
+        "a call back at an earlier token count rebuilt or reloaded a module"
+    )
 
 
 def test_argument_validation() -> None:

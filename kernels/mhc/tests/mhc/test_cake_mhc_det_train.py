@@ -1087,14 +1087,50 @@ def test_outputs_are_deterministic(T: int, hidden: int) -> None:
         )
 
 
+# The (route kind, PDL path) of every launch of ``_run``.
+_RUN_ROUTES = (
+    ("fwd_prepare", "forward"),
+    ("fwd_finish", "forward"),
+    ("bwd_prepare", "backward"),
+    ("bwd_finish", "backward"),
+)
+
+
+def _run_selection(T: int, hidden: int) -> set[str]:
+    """The records ``_run`` at ``T`` tokens launches on this device (``selected_modules`` of each of its routes)."""
+    arch, sm = _arch(), loader.sm_count(_device().index)
+    return {
+        name
+        for kind, path in _RUN_ROUTES
+        for name in loader.selected_modules(
+            arch, hidden, kind, rows=T, sm_count=sm, path=path
+        )
+    }
+
+
 def test_changing_rows_in_one_process_does_not_rebuild(
-    hidden: int, record_property
+    hidden: int, record_property, monkeypatch
 ) -> None:
-    """Calls at other token counts in one process rebuild no module; ``dX`` and ``dfn`` at each count are judged
-    against the naive BF16 tier over 32 inputs (and every output at 64 tokens first)."""
+    """Calls at other token counts in one process rebuild no module: the token count is a launch argument, so a
+    changed count loads a module only where its route selects a record of another token-count band than the earlier
+    calls' (on sm_103a with 152 SMs, for example, the mapping pass ``nsx_st5_mb1_xn`` from 65 tokens at hidden 4096
+    and the column slab ``xrsg_p160`` at 255 tokens at 5120 / 7168), every module loaded during the changed counts is
+    a record of their selection, and calls back at the earlier counts load nothing.  ``dX`` and ``dfn`` at each count
+    are judged against the naive BF16 tier over 32 inputs (and every output at 64 tokens first)."""
     _judge_case(64, hidden=hidden, record_property=record_property, prefix="T=64 ")
-    loaded_before = loader.load.cache_info().misses
-    for T in (1, 65, 2049, 7, 255):
+    loaded: list[str] = []
+    load = loader.load
+
+    def recording_load(name: str, arch: str):
+        misses = load.cache_info().misses
+        module = load(name, arch)
+        if load.cache_info().misses != misses:
+            loaded.append(name)
+        return module
+
+    monkeypatch.setattr(loader, "load", recording_load)
+    counts = (1, 65, 2049, 7, 255)
+    for T in counts:
         _judge_case(
             T,
             hidden=hidden,
@@ -1103,8 +1139,15 @@ def test_changing_rows_in_one_process_does_not_rebuild(
             prefix=f"T={T} ",
             record_property=record_property,
         )
-    assert loader.load.cache_info().misses == loaded_before, (
-        "a changed token count rebuilt a module"
+    selected = set().union(*(_run_selection(T, hidden) for T in counts))
+    assert set(loaded) <= selected, (
+        f"a changed token count loaded modules outside its routes' records: {sorted(set(loaded) - selected)}"
+    )
+    loaded_before = load.cache_info().misses
+    for T in (64, *reversed(counts)):
+        _run(_make_inputs(T, hidden=hidden, seed=SEED + 5 + T))
+    assert load.cache_info().misses == loaded_before, (
+        "a call back at an earlier token count rebuilt or reloaded a module"
     )
 
 
@@ -1139,10 +1182,10 @@ def test_changing_eps_in_one_process_does_not_rebuild(
     """A different epsilon is a launch argument of the already compiled programs: no module is rebuilt or reloaded
     when the epsilons change between calls, and ``dX`` and ``dfn`` at each value are judged against the naive BF16
     tier over 32 inputs (the oracle and the tier at that value).  The calls of the epsilons run at 255 tokens, whose
-    route may select records of other token-count bands than 64 tokens' (at hidden 7168 on sm_100a / sm_103a with
-    152 SMs the column slab ``xrsg_p160__h7168``): one call at 255 tokens with the default epsilons loads them first,
-    so the count compares calls that differ in their epsilons alone, whatever the earlier tests of the process
-    loaded."""
+    route may select records of other token-count bands than 64 tokens' (the mapping pass ``nsx_st5_mb1_xn`` at
+    hidden 4096, the column slab ``xrsg_p160`` at 5120 / 7168 on sm_100a / sm_103a boards): one call at 255 tokens
+    with the default epsilons loads them first, so the count compares calls that differ in their epsilons alone,
+    whatever the earlier tests of the process loaded."""
     _judge_case(64, hidden=hidden, record_property=record_property, prefix="T=64 ")
     _run(_make_inputs(255, hidden=hidden, seed=SEED + 3))
     loaded_before = loader.load.cache_info().misses
