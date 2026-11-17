@@ -1171,8 +1171,11 @@ DWEIGHT_SUMS = ("fp32", "fp32_pair")
 
 def _dweight_sum(value: Any, reserve: int, entry: str) -> bool:
     """``dweight_sum`` of a call: whether it asks for the pair build (``"fp32_pair"``); ``None`` and ``"fp32"`` are
-    the default.  ``ValueError`` for another value, and for ``"fp32_pair"`` with ``bwd_reserve_sms >= 1`` (the pair
-    build is the overlapped backward's main program, which a reserve replaces by the one-program backward)."""
+    the default.  ``TypeError`` for a value that is neither ``None`` nor a ``str``, ``ValueError`` for another
+    ``str``, and for ``"fp32_pair"`` with ``bwd_reserve_sms >= 1`` (the pair build is the overlapped backward's main
+    program, which a reserve replaces by the one-program backward)."""
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{entry}: dweight_sum must be None or a str, got {type(value).__name__}")
     if value is not None and value not in DWEIGHT_SUMS:
         raise ValueError(f"{entry}: dweight_sum must be None or one of {DWEIGHT_SUMS}, got {value!r}")
     pair = value == "fp32_pair"
@@ -2779,9 +2782,9 @@ def cake_causal_conv1d_nondet_kcp(
         ``"fp32_pair"`` (opt-in): the overlapped backward's main program sums the accumulator copies of a tile's
         ``dweight`` as an FP32 (hi, lo) pair and rounds once (route ``kcp_bwd_dyn_pair``, FP32 operations only);
         ``y``, ``dx``, the workspace and the exchanges are unchanged, and the cross-CTA order still varies run to
-        run.  Checked here, used by the backward.  ``ValueError`` for another value, with ``bwd_reserve_sms >= 1``,
-        and in the backward of a call the overlapped backward does not run (more than ``DYN_MAX_CHANNELS``
-        channels); never another program.
+        run.  Checked here, used by the backward.  ``TypeError`` for a non-``str``; ``ValueError`` for another
+        ``str``, with ``bwd_reserve_sms >= 1``, and in the backward of a call the overlapped backward does not run
+        (more than ``DYN_MAX_CHANNELS`` channels); never another program.
 
     Returns
     -------

@@ -474,9 +474,12 @@ def _silu_grad_preactivation(value: object) -> str:
 
 
 def _dweight_sum(value: object, policy: str) -> str:
-    """Validate ``dweight_sum`` (one of ``DWEIGHT_SUMS``, ``ValueError`` otherwise); ``"fp32_pair"`` needs the
-    ``"fp32"`` SiLU' policy (``ValueError`` otherwise: only the FP32-SiLU' routes have a pair form)."""
+    """Validate ``dweight_sum``: a ``str`` (``TypeError`` otherwise), one of ``DWEIGHT_SUMS`` (``ValueError``
+    otherwise); ``"fp32_pair"`` needs the ``"fp32"`` SiLU' policy (``ValueError`` otherwise: only the FP32-SiLU'
+    routes have a pair form)."""
 
+    if not isinstance(value, str):
+        raise TypeError(f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}")
     if value not in DWEIGHT_SUMS:
         raise ValueError(f"dweight_sum must be one of {DWEIGHT_SUMS}, got {value!r}")
     if value == "fp32_pair" and policy != "fp32":
@@ -1196,7 +1199,8 @@ def cake_causal_conv1d_nondet_train_backward(
     dweight_sum : {"fp32", "fp32_pair"}
         The sum form of ``dweight`` / ``dbias``: ``"fp32"`` (default) one
         plain FP32 word per sum; ``"fp32_pair"`` (opt-in, with
-        ``silu_grad_preactivation="fp32"`` only, ``ValueError`` otherwise) an
+        ``silu_grad_preactivation="fp32"`` only, ``ValueError`` otherwise; a
+        non-``str`` is a ``TypeError``, another ``str`` a ``ValueError``) an
         FP32 (hi, lo) pair per sum -- the pair route of the call's ``_fp32g``
         route: the same ``dx``, the CTA's fold Kahan-compensated and every
         accumulator word a pair that keeps each add's rounding error, rounded

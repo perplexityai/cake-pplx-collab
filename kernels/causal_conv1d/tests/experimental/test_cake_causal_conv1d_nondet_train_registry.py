@@ -373,9 +373,18 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     assert det_only_hits == det_only_routed, arch
 
 
-# The copies of the FP32 accumulator each backward route keeps (one FP32 word per sum and copy): the fp32g routes
-# spread a channel tile's CTAs over 16 copies, the others add into one.
-ACC_SLOTS = {"bwd": 1, "bwd_dt": 1, "bwd_bias": 1, "bwd_fp32g": 16, "bwd_bias_fp32g": 16}
+# The FP32 accumulator slots each backward route keeps (one FP32 word per sum and slot): the fp32g routes spread a
+# channel tile's CTAs over 16 copies, the others add into one; the opt-in pair routes keep 4 copies of an FP32
+# (hi, lo) pair, 8 slots.
+ACC_SLOTS = {
+    "bwd": 1,
+    "bwd_dt": 1,
+    "bwd_bias": 1,
+    "bwd_fp32g": 16,
+    "bwd_bias_fp32g": 16,
+    "bwd_fp32g_pair": 8,
+    "bwd_bias_fp32g_pair": 8,
+}
 
 
 def _align16(n: int) -> int:
@@ -1101,7 +1110,8 @@ def test_public_names_carry_the_mode_and_take_no_mode_keyword() -> None:
 def test_a_mode_keyword_is_an_ordinary_type_error() -> None:
     """``deterministic=`` (either value) is Python's ordinary ``TypeError`` for an unexpected keyword at every entry
     point, raised before any argument, device or rendering check, so it needs neither a device nor ``build.json``;
-    the autograd function takes no positional mode argument after ``bwd_grid_mult``."""
+    the autograd function takes no positional mode argument after ``dweight_sum`` (and a mode value in the
+    ``dweight_sum`` position is a ``TypeError`` too)."""
 
     x = torch.empty(8, 16, dtype=torch.bfloat16)
     w = torch.empty(16, 4, dtype=torch.float32)
@@ -1125,6 +1135,8 @@ def test_a_mode_keyword_is_an_ordinary_type_error() -> None:
             )
     with pytest.raises(TypeError):
         pkg.CakeCausalConv1dNondetFunction.apply(x, w, cu, None, "bf16", 1, False)
+    with pytest.raises(TypeError):
+        pkg.CakeCausalConv1dNondetFunction.apply(x, w, cu, None, "bf16", 1, "fp32", False)
 
 
 @pytest.mark.cpu_only

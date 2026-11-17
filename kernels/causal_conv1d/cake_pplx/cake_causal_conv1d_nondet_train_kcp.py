@@ -147,9 +147,9 @@ def cake_causal_conv1d_nondet_kcp(
         ``dweight``).  ``"fp32_pair"`` (opt-in): the overlapped backward sums the accumulator copies of a tile's
         ``dweight`` as an FP32 (hi, lo) pair and rounds once (FP32 operations only); ``y``, ``dx``, the workspace
         and the exchanges are unchanged, and the cross-CTA order still varies run to run.  Validated by the package
-        when given: another value, ``"fp32_pair"`` with ``bwd_reserve_sms >= 1``, and (in the backward)
-        ``"fp32_pair"`` beyond the overlapped backward's channel limit raise ``ValueError``; it never runs another
-        program.  Each rank may choose its own value.
+        when given: a non-``str`` raises ``TypeError``; another ``str``, ``"fp32_pair"`` with
+        ``bwd_reserve_sms >= 1``, and (in the backward) ``"fp32_pair"`` beyond the overlapped backward's channel
+        limit raise ``ValueError``; it never runs another program.  Each rank may choose its own value.
 
     Returns
     -------

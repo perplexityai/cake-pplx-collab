@@ -391,7 +391,7 @@ def cake_causal_conv1d_nondet_train_backward(
         output dtype; FP32 operations only, the same ``dx`` and the same
         workspace (the CTAs' order still varies run to run).  Only with
         ``silu_grad_preactivation="fp32"``; ``ValueError`` otherwise and for
-        another value.
+        another ``str``, ``TypeError`` for a non-``str``.
 
     Returns
     -------

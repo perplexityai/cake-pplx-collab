@@ -183,9 +183,11 @@ def test_entry_points_pass_the_call_to_the_package(recorded) -> None:
         "cake_causal_conv1d_nondet_train_backward": (
             (x, w, cu, dy),
             {"bias": b, "silu_grad_preactivation": "fp32", "workspace": ws, "dx": None, "dweight": None, "dbias": None,
-             "bwd_grid_mult": 3},
+             "bwd_grid_mult": 3, "dweight_sum": "fp32_pair"},
         ),
-        "cake_causal_conv1d_nondet": ((x, w, cu, b), {"silu_grad_preactivation": "fp32", "bwd_grid_mult": 3}),
+        "cake_causal_conv1d_nondet": (
+            (x, w, cu, b), {"silu_grad_preactivation": "fp32", "bwd_grid_mult": 3, "dweight_sum": "fp32_pair"}
+        ),
     }  # fmt: skip
     for entry in ENTRIES:
         args, kwargs = calls[entry]
@@ -361,7 +363,7 @@ def _parameters(fn) -> list[tuple]:
 def test_entry_points_mirror_the_package() -> None:
     """The single-rank module's entry points, helpers and support query take exactly the package's parameters, which
     are the deterministic package's; the KCP module's take the deterministic KCP package's plus keyword-only
-    ``bwd_reserve_sms`` last, each as the package takes it."""
+    ``bwd_reserve_sms`` and ``dweight_sum`` last, each as the package takes it."""
 
     for entry, det_name in {**ENTRIES, **HELPERS, SUPPORTED[0]: SUPPORTED[1]}.items():
         mine = _parameters(getattr(facade, entry))
@@ -397,10 +399,11 @@ def test_entry_points_mirror_the_package() -> None:
 
     for entry, det_name in KCP_ENTRIES.items():
         mine = _parameters(getattr(kcp_facade, entry))
-        assert mine[-1] == ("bwd_reserve_sms", inspect.Parameter.KEYWORD_ONLY, None), (
-            entry
-        )
-        assert mine[:-1] == _parameters(getattr(det_kcp_facade, det_name)), entry
+        assert mine[-2:] == [
+            ("bwd_reserve_sms", inspect.Parameter.KEYWORD_ONLY, None),
+            ("dweight_sum", inspect.Parameter.KEYWORD_ONLY, None),
+        ], entry
+        assert mine[:-2] == _parameters(getattr(det_kcp_facade, det_name)), entry
         theirs = {p[0]: p for p in _parameters(getattr(kcp_backend, entry))}
         assert all(theirs.get(p[0]) == p for p in mine), entry
 

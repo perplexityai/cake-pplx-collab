@@ -284,7 +284,7 @@ Other public names: `CakeCausalConv1dNondetKcpRecomputeHandle`. Any object with 
 
 - `silu_grad_preactivation` (`"bf16"` by default, or `"fp32"`): where SiLU' is evaluated.
 - `bwd_grid_mult` (1 by default, up to 4): an opt-in finer static token partition of the backward, which helps overlap with kernels on other streams. In det, the `dweight` bits change with each value and the workspace grows. In nondet, the workspace size does not change.
-- `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only). Other combinations raise `ValueError`; no call falls back to another program. The default never selects a pair program.
+- `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only). Other combinations and other strings raise `ValueError`, and a non-string raises `TypeError` (`None` is the nondet KCP default); no call falls back to another program. The default never selects a pair program.
 - `workspace=`: when omitted, the package keeps one zeroed buffer per (device, current stream), or one per capture inside CUDA Graph capture.
 - KCP: `recompute_handle` must be one per call and micro-step, created outside the outermost checkpoint region, and every rank passes one or none.
 - CUDA Graph: build every library of the architecture first (backend `cake_jit.specs_for_arch`) so that no JIT build runs inside capture.

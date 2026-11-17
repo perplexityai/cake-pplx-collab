@@ -4430,10 +4430,15 @@ SPLIT_ROLES = ("fwd", "bwd")
 # three or four tiles) and cv = 28 (C = 224), the forward at 72 <= cv <= 96
 # (C = 576 to 768).  One tile of cv vectors leaves 128 - cv lanes of every
 # CTA idle over the whole token axis; the programs are unchanged.  Every
-# route of both roles takes the rule.
+# route of both roles takes the rule; a pair route plans its twin's tiles
+# (:data:`PAIR_ROUTES`), the plan its launch follows (:func:`record_route`).
+_NARROW_BWD_ROUTES = ("bwd", "bwd_dt", "bwd_bias", "bwd_fp32g", "bwd_bias_fp32g")
 NARROW_TILE_ROUTES: dict[str, tuple[str, ...]] = {
     "fwd": ("fwd", "fwd_dt", "fwd_bias"),
-    "bwd": ("bwd", "bwd_dt", "bwd_bias", "bwd_fp32g", "bwd_bias_fp32g"),
+    "bwd": (
+        *_NARROW_BWD_ROUTES,
+        *(pair for pair, twin in PAIR_ROUTES.items() if twin in _NARROW_BWD_ROUTES),
+    ),
 }
 NARROW_TILE_THREADS = 128
 # The narrow rows that run whole tiles of another width instead of 32
