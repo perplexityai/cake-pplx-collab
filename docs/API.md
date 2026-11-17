@@ -686,7 +686,7 @@ Backward:
 
 ### `cake_pplx.cake_mhc_det_train`
 
-Reductions run in a fixed order. `dX` and the FP32 `dfn`/`dscale`/`dbase` are bitwise reproducible for a given token count on a given device. No alert under deterministic algorithms. There is no KCP module. Source: [`kernels/mhc/cake_pplx/cake_mhc_det_train.py`](../kernels/mhc/cake_pplx/cake_mhc_det_train.py).
+Reductions run in a fixed order, each sum in one plain FP32 word (no FP64 arithmetic). `dX` and the FP32 `dfn`/`dscale`/`dbase` are bitwise reproducible for a given token count on a given device. No alert under deterministic algorithms. There is no KCP module. Source: [`kernels/mhc/cake_pplx/cake_mhc_det_train.py`](../kernels/mhc/cake_pplx/cake_mhc_det_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -709,17 +709,17 @@ Other public names:
 
 ### `cake_pplx.cake_mhc_nondet_train`
 
-There is no final reduction kernel. The column-slab pass folds the P <= 32 per-chunk FP32 `dfn` partials, which are bitwise the det partials, as a compensated FP32 sum with one rounding. Det sums the same partials in FP64. The result is that `dfn` equals det's except near an FP32 rounding boundary. `dX`, `dscale`, `dbase`, the forward, the stats replay and `backward_prepare` are bitwise det. All outputs repeat run to run on one device. Source: [`kernels/mhc/cake_pplx/cake_mhc_nondet_train.py`](../kernels/mhc/cake_pplx/cake_mhc_nondet_train.py).
+There is no final reduction kernel. The column-slab pass adds the P <= 32 per-chunk FP32 `dfn` partials in ascending chunk order as one plain FP32 sum, and folds `dscale` and `dbase` from the token-owner rows in a fixed order. No sum uses FP64 arithmetic or a compensation word. The forward, the stats replay and `backward_prepare` run copies of the det programs. All outputs repeat run to run on one device. Source: [`kernels/mhc/cake_pplx/cake_mhc_nondet_train.py`](../kernels/mhc/cake_pplx/cake_mhc_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_mhc_nondet_train_prepare` | Same as det prepare | `backward_workspace` from `cake_mhc_nondet_train_backward_workspace` | Autograd. Returns `(U, handle)`. The forward and replay give det bits; the backward runs the nondet `backward_finish`. |
+| `cake_mhc_nondet_train_prepare` | Same as det prepare | `backward_workspace` from `cake_mhc_nondet_train_backward_workspace` | Autograd. Returns `(U, handle)`. The forward and replay run the det programs; the backward runs the nondet `backward_finish`. |
 | `cake_mhc_nondet_train_finish` | `(X, B, handle)` | A handle from another package (for example det) raises `TypeError` | Returns `Y`. |
-| `cake_mhc_nondet_train_forward_prepare` | Same as det | H is 4096 everywhere; 5120/7168 only on SM100/SM103 | Returns `(U, stats)`, bitwise det. |
+| `cake_mhc_nondet_train_forward_prepare` | Same as det | H is 4096 everywhere; 5120/7168 only on SM100/SM103 | Returns `(U, stats)`. |
 | `cake_mhc_nondet_train_forward_stats` | Same as det | As forward_prepare | Returns FP32 `[T, 64]`. |
 | `cake_mhc_nondet_train_forward_finish` | `(X, B, stats, *, out=None)` | As det | Returns `Y`. |
-| `cake_mhc_nondet_train_backward_prepare` | `(dY, B, X, stats, *, dB=None, grad_stats_out=None)` | As det | Returns `(dB, grad_stats)`, bitwise det. |
-| `cake_mhc_nondet_train_backward_finish` | Same as det | `workspace` must come from the nondet factory; the det layout differs | Returns `(dX, dfn, dscale, dbase)`. `dfn` is a compensated FP32 fold, with the caller's `dfn` added last under `accumulate=True`. It is within one FP32 rounding plus `O(P^2 u^2)(abs(start) + sum abs(x_p))` of the exact sum. |
+| `cake_mhc_nondet_train_backward_prepare` | `(dY, B, X, stats, *, dB=None, grad_stats_out=None)` | As det | Returns `(dB, grad_stats)`. |
+| `cake_mhc_nondet_train_backward_finish` | Same as det | `workspace` must come from the nondet factory; the det layout differs | Returns `(dX, dfn, dscale, dbase)`. `dfn` is one FP32 sum of the chunk partials, with the caller's `dfn` added last under `accumulate=True`. It is within `gamma_n (abs(start) + sum abs(x_p))` of the exact sum, with `n` the additions and `gamma_n = n u / (1 - n u)`. |
 
 Other public names:
 
