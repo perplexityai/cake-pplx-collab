@@ -24,38 +24,43 @@ backward after a recomputation matches the backward after the saved forward.
 | `dw` | yes | `T` (it sums every row); the SM count, outside the column-task windows |
 
 `cake_windows.EDGES` gives the measured class of the outputs at every window edge and
-`cake_windows.NOTES` the bounds of the differences.
+`cake_windows.NOTES` the differences measured there.
 
 ## Accuracy
 
-Statistics are computed in FP32. `dx` is one BF16 rounding of FP32 math. With a residual,
-`h_new` is rounded to BF16 before the normalization reads it. The package tests compare
-every output with an FP64 reference of the same math:
+Statistics are computed in FP32. Every sum is one FP32 word, except the chunk sums of
+`dw` in the windows the tables below mark `compensated`, which add each block of rows
+into an FP32 pair (a sum and its compensation word). `dx` is one BF16 rounding of FP32
+math. With a residual, `h_new` is rounded to BF16 before the normalization reads it. The
+package tests hold no tolerance. They judge every floating output (`y`, `rstd` and
+`h_new` of the forward, `dx` and `dw` of the backward, with a BF16 and with an FP32
+weight) by its error against an FP64 reference of the same math, beside the error of the
+naive PyTorch implementation (the same ops in BF16 on the same BF16 inputs) against that
+reference, over 32 independent random inputs of each case:
 
-- `y` and `dx`: `atol = rtol = 1e-2` after scaling both sides to unit RMS;
-- `rstd`: relative L2 error at most `1e-5`;
-- `dw`: its error against the FP64 sum at most that of `torch.nn.functional.rms_norm`
-  run in FP32 on the same BF16 values (forward and autograd backward), in the L2 norm
-  and in the max norm, also at the largest row counts of the long-chunk windows and
-  one row above each accuracy edge.
+- in the L2 norm and in the max norm, the median and the largest error over the inputs
+  are at most 1.005 times the naive implementation's;
+- the error is 0 on every input where the naive implementation's error is 0.
 
 ## dw summation order per window
 
 The backward splits the rows of a call over `ctas_per_sm` x SM count slots and cuts each
 slot's share into chunks by the window's chunk table: one chunk per slot, or a halving
 tail (`tail_div`, `max_halving`). Each chunk sums its rows in FP32 into one FP32 partial
-row of `dw`, in row order or over blocks of rows; the reduce program then adds the
-partial rows of each column slab in FP32 in a fixed order (`chain` or `tree`). Every sum
-is one FP32 word. A row-strided window gives slot `s` the rows
-`s`, `s + n`, `s + 2n`, ... with `n` = min(`T`, slots), and each slot sums its rows
-plainly in row order into its partial row; where its kernel runs beside a side stream,
-the window leaves eight SMs out of the slot count (`ctas_per_sm` x (SM count - 8)). A
-column-task window sums each column over every row in one CTA in a fixed order (FP32
-sums per row lane, the lanes' sums added in FP32), so there `dw` does not depend on the SM
-count. The FP32-weight routes use the
-same windows and orders, except the `_w32` routes the tables list: they keep the
-programs of windows where the BF16 route runs a program without an FP32-weight build.
-Program and reduce names are the first eight hex digits of the program name.
+row of `dw`, in row order or over blocks of rows; a `compensated` window adds each
+block's sums into an FP32 pair and stores the sum less its compensation word as the
+partial row. The reduce program then adds the partial rows of each column slab in FP32
+in a fixed order (`chain` or `tree`), one FP32 word per sum. A row-strided window gives
+slot `s` the rows `s`, `s + n`, `s + 2n`, ... with `n` = min(`T`, slots), and each slot
+sums its rows plainly in row order into its partial row; where its kernel runs beside a
+side stream, the window leaves eight SMs out of the slot count (`ctas_per_sm` x (SM
+count - 8)). A column-task window sums each column over every row in one CTA in a fixed
+order (FP32 sums per row lane, the lanes' sums added in FP32), so there `dw` does not
+depend on the SM count. The FP32-weight routes use the same windows and orders, except
+the `_w32` routes the tables list: they keep the programs of windows where the BF16
+route runs a program without an FP32-weight build, or run another program's FP32-weight
+build where that one is faster with an FP32 weight. Program and reduce names are the
+first eight hex digits of the program name.
 
 ### sm_100a
 
@@ -110,7 +115,7 @@ Program and reduce names are the first eight hex digits of the program name.
 | `bwd_w32_h5120` | (0, 1] | 747d86f3 | column task | - | - |
 | `bwd_w32_h5120` | (1, 256] | 747d86f3 | column task | - | - |
 | `bwd_w32_h5120` | (256, 6144] | 40227b2a | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |
-| `bwd_w32_h5120` | (6144, 50688] | 40227b2a | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |
+| `bwd_w32_h5120` | (6144, 50688] | 9479b129 | compensated, 8-row blocks | tail_div 4, max_halving 5 | c5831b29 (tree) |
 | `bwd_w32_h5120` | (50688, inf) | 40227b2a | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |
 | `bwd_h6144` | (0, 384] | f2271417 | column task | - | - |
 | `bwd_h6144` | (384, 767] | 5c804aed | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
@@ -123,7 +128,10 @@ Program and reduce names are the first eight hex digits of the program name.
 | `bwd_w32_h6144` | (42496, inf) | 62beb52f | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
 | `bwd_residual_h6144` | (0, 1152] | 864e84f3 | column task | - | - |
 | `bwd_residual_h6144` | (1152, 42496] | c1a3be94 | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
-| `bwd_residual_h6144` | (42496, inf) | c1a3be94 | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
+| `bwd_residual_h6144` | (42496, inf) | 84385468 | compensated, 8-row blocks | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
+| `bwd_w32_residual_h6144` | (0, 1152] | 71d36617 | column task | - | - |
+| `bwd_w32_residual_h6144` | (1152, 42496] | ab0e20fe | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
+| `bwd_w32_residual_h6144` | (42496, inf) | ab0e20fe | plain | tail_div 12, max_halving 5 | 5f5cdc51 (tree) |
 
 ### sm_103a
 
@@ -168,7 +176,7 @@ Program and reduce names are the first eight hex digits of the program name.
 | `bwd_w32_h4096` | (1024, 24576] | 47a01388 | plain | row-strided slots, 8 SMs left out | 5d75ea5f (tree) |
 | `bwd_w32_h4096` | (24576, 32768] | a8eb7547 | plain | tail_div 12, max_halving 5 | 5d75ea5f (tree) |
 | `bwd_w32_h4096` | (32768, 48640] | 626aed74 | plain | tail_div 12, max_halving 5 | fcbfa14d (chain) |
-| `bwd_w32_h4096` | (48640, 51200] | 78c26a53 | plain | tail_div 4, max_halving 2 | 5d75ea5f (tree) |
+| `bwd_w32_h4096` | (48640, 51200] | cb164a27 | compensated, 8-row blocks | tail_div 4, max_halving 2 | 5d75ea5f (tree) |
 | `bwd_w32_h4096` | (51200, inf) | 78c26a53 | plain | tail_div 4, max_halving 2 | 5d75ea5f (tree) |
 | `bwd_h512` | (0, 1] | f283bf47 | column task | - | - |
 | `bwd_h512` | (1, 4] | bdfd7789 | column task | - | - |

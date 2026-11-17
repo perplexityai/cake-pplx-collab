@@ -21,8 +21,8 @@ table ``cake_jit.program_windows`` derives from the registry's ``MODULES`` and
 ``NOTES`` the contract of the outputs across the windows; ``SECTIONS`` the text
 the host module appends to the forward and backward docstrings;
 ``ACCURACY_MIN_SMS`` and ``ACCURACY_EDGES`` the backward accuracy guard (see
-``NOTES``).  The package tests hold the table to the registry and the edges to
-the outputs.
+``NOTES``).  The package tests hold the table to the registry and check the
+outputs bitwise across every ``same`` edge.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
             (1, 256, "cake_rmsnorm_det_train_747d86f34cb58479c7ca"),
             (256, 6144, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
-            (6144, 50688, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
+            (6144, 50688, "cake_rmsnorm_det_train_9479b1298a1b19d4d996"),
             (50688, None, "cake_rmsnorm_det_train_40227b2a2b2122628d58"),
         ),
         "bwd_h6144": (
@@ -150,7 +150,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
         "bwd_residual_h6144": (
             (0, 1152, "cake_rmsnorm_det_train_864e84f3d874f850c091"),
             (1152, 42496, "cake_rmsnorm_det_train_c1a3be946e94e94233af"),
-            (42496, None, "cake_rmsnorm_det_train_c1a3be946e94e94233af"),
+            (42496, None, "cake_rmsnorm_det_train_84385468c8e8ef19f3dc"),
         ),
         "bwd_w32_residual_h6144": (
             (0, 1152, "cake_rmsnorm_det_train_71d36617003ab7742a77"),
@@ -345,7 +345,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (1024, 24576, "cake_rmsnorm_det_train_47a01388444960da7aae"),
             (24576, 32768, "cake_rmsnorm_det_train_a8eb754739a1589de3ec"),
             (32768, 48640, "cake_rmsnorm_det_train_626aed743358c27513f1"),
-            (48640, 51200, "cake_rmsnorm_det_train_78c26a53e83c9803bcbf"),
+            (48640, 51200, "cake_rmsnorm_det_train_cb164a27c0157ed0712d"),
             (51200, None, "cake_rmsnorm_det_train_78c26a53e83c9803bcbf"),
         ),
         "bwd_h512": (
@@ -1192,6 +1192,7 @@ EDGE_CLASSES = ["same", "ulp", "dx", "unmeasured"]
 # edges were measured on, and per route the edge above which it runs compensated programs.  On
 # a device with fewer SMs a backward call of such a route selects its programs as if ``T`` were
 # the edge plus one (its launch keeps ``T``).
+# The guard holds no program compensated, so no route has an edge.
 ACCURACY_MIN_SMS: dict[str, int] = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
 ACCURACY_EDGES: dict[str, dict[str, int]] = {}
 
@@ -1231,10 +1232,13 @@ boards with 212 and 216 SMs) cut different chunk tables and can give different `
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
 each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
-depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
-partial row, then the fixed-order fold of the rows.  No program is compensated, so the
-backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
-whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+depend on the SM count.  Every backward program sums ``dw`` in FP32: each chunk's
+partial row, then the fixed-order fold of the rows, one FP32 word per sum, except the
+chunk sums of the windows the package README marks compensated, which add each block
+of rows into an FP32 pair (a sum and its compensation word); there the FP32-pair
+program is the faster one.  The backward accuracy guard has no edge: ``ACCURACY_EDGES``
+is empty and every device, whatever its SM count against ``ACCURACY_MIN_SMS``, selects
+the windows by ``T``.
 Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 """
 
@@ -1276,19 +1280,21 @@ boards with 212 and 216 SMs) cut different chunk tables and can give different `
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
 each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
-depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
-partial row, then the fixed-order fold of the rows.  No program is compensated, so the
-backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
-whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+depend on the SM count.  Every backward program sums ``dw`` in FP32: each chunk's
+partial row, then the fixed-order fold of the rows, one FP32 word per sum, except the
+chunk sums of the windows the package README marks compensated, which add each block
+of rows into an FP32 pair (a sum and its compensation word); there the FP32-pair
+program is the faster one.  The backward accuracy guard has no edge: ``ACCURACY_EDGES``
+is empty and every device, whatever its SM count against ``ACCURACY_MIN_SMS``, selects
+the windows by ``T``.
 Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
-at its upper edge, which the package tests hold: ``=`` bitwise-identical outputs on the
-common rows across it, ``~`` the forward's measured differences (``y`` by at most one
-BF16 ulp, ``rstd`` by at most two FP32 ulps, three on R200 (216 SMs) at the residual
-route's edge 1024), ``dx`` the backward kernel switch, ``?`` not yet measured (the tests
-bound the differences there).
+at its upper edge: ``=`` bitwise-identical outputs on the common rows across it (the
+package tests check them), ``~`` the forward's measured differences (``y`` by at most
+one BF16 ulp, ``rstd`` by at most two FP32 ulps, three on R200 (216 SMs) at the
+residual route's edge 1024), ``dx`` the backward kernel switch, ``?`` not yet measured.
 
 The FP32-weight routes (``fwd_w32_...``) select among the FP32-weight twins of the
 same programs over the same windows, with the same outcome at every edge, and are not
@@ -1402,19 +1408,21 @@ boards with 212 and 216 SMs) cut different chunk tables and can give different `
 bits.  In the windows of its smallest token counts a backward route other than H = 256
 (on sm_100a H = 256 too, to 87 rows) runs column-task programs instead: one CTA sums
 each column of ``dw`` over every row in a fixed order in FP32, so there ``dw`` does not
-depend on the SM count.  Every backward program sums ``dw`` in plain FP32: each chunk's
-partial row, then the fixed-order fold of the rows.  No program is compensated, so the
-backward accuracy guard has no edge: ``ACCURACY_EDGES`` is empty and every device,
-whatever its SM count against ``ACCURACY_MIN_SMS``, selects the windows by ``T``.
+depend on the SM count.  Every backward program sums ``dw`` in FP32: each chunk's
+partial row, then the fixed-order fold of the rows, one FP32 word per sum, except the
+chunk sums of the windows the package README marks compensated, which add each block
+of rows into an FP32 pair (a sum and its compensation word); there the FP32-pair
+program is the faster one.  The backward accuracy guard has no edge: ``ACCURACY_EDGES``
+is empty and every device, whatever its SM count against ``ACCURACY_MIN_SMS``, selects
+the windows by ``T``.
 Measured on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 
 The windows per architecture and route, ``(above, at_most]`` and the program (the first
 8 hex digits of its name).  The mark after a window names the measured outcome
-at its upper edge, which the package tests hold: ``=`` bitwise-identical outputs on the
-common rows across it, ``~`` the forward's measured differences (``y`` by at most one
-BF16 ulp, ``rstd`` by at most two FP32 ulps, three on R200 (216 SMs) at the residual
-route's edge 1024), ``dx`` the backward kernel switch, ``?`` not yet measured (the tests
-bound the differences there).
+at its upper edge: ``=`` bitwise-identical outputs on the common rows across it (the
+package tests check them), ``~`` the forward's measured differences (``y`` by at most
+one BF16 ulp, ``rstd`` by at most two FP32 ulps, three on R200 (216 SMs) at the
+residual route's edge 1024), ``dx`` the backward kernel switch, ``?`` not yet measured.
 
 The FP32-weight routes (``bwd_w32_...``) select among the FP32-weight twins of the
 same programs over the same windows, with the same outcome at every edge, and are not
@@ -1441,13 +1449,15 @@ its own windows.
 * ``sm_100a`` ``bwd_h5120``: (0, 1] 080e0a6c ? (1, 256] dd3a3573 ? (256, 6144] b482c84d
   = (6144, 50688] b482c84d = (50688, inf) b482c84d
 * ``sm_100a`` ``bwd_w32_h5120``: (0, 1] 747d86f3 ? (1, 256] 747d86f3 ?
-  (256, 6144] 40227b2a ? (6144, 50688] 40227b2a ? (50688, inf) 40227b2a
+  (256, 6144] 40227b2a ? (6144, 50688] 9479b129 ? (50688, inf) 40227b2a
 * ``sm_100a`` ``bwd_h6144``: (0, 384] f2271417 ? (384, 767] 5c804aed ?
   (767, 4096] 61421bc7 ? (4096, 42496] b93bf060 = (42496, inf) b93bf060
 * ``sm_100a`` ``bwd_w32_h6144``: (0, 384] 8a280a7e ? (384, 4096] 41b80b6a =
   (4096, 42496] 62beb52f = (42496, inf) 62beb52f
 * ``sm_100a`` ``bwd_residual_h6144``: (0, 1152] 864e84f3 ? (1152, 42496] c1a3be94 ?
-  (42496, inf) c1a3be94
+  (42496, inf) 84385468
+* ``sm_100a`` ``bwd_w32_residual_h6144``: (0, 1152] 71d36617 ? (1152, 42496] ab0e20fe ?
+  (42496, inf) ab0e20fe
 * ``sm_103a`` ``bwd_h1536``: (0, 1] e254714a ? (1, 31] 4aef8d1f ? (31, 214] 4aef8d1f ?
   (214, 1024] 7dc29629 = (1024, 4096] c1a9efdf = (4096, 14928] 1df7db17 =
   (14928, 15566] 4df08ce5 = (15566, 40448] f522f5b8 = (40448, inf) 9cd3c766
@@ -1463,7 +1473,7 @@ its own windows.
   (48640, 51200] 24643edc = (51200, inf) 24643edc
 * ``sm_103a`` ``bwd_w32_h4096``: (0, 1] 27615d0e ? (1, 512] ff7de8d3 ?
   (512, 1024] 16545056 ? (1024, 24576] 47a01388 ? (24576, 32768] a8eb7547 ?
-  (32768, 48640] 626aed74 ? (48640, 51200] 78c26a53 ? (51200, inf) 78c26a53
+  (32768, 48640] 626aed74 ? (48640, 51200] cb164a27 ? (51200, inf) 78c26a53
 * ``sm_103a`` ``bwd_h512``: (0, 1] f283bf47 ? (1, 4] bdfd7789 ? (4, 227] bdfd7789 ?
   (227, 1024] 09601d42 ? (1024, 4096] 8e7f4d81 = (4096, 32768] 274b0055 =
   (32768, inf) cfaae3ce
