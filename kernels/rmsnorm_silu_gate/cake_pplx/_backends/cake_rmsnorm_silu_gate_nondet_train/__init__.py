@@ -196,7 +196,7 @@ Host design (the input layout rules are the deterministic package's):
   ``n`` at element ``128 n``, else of ``cake_jit.STRIDED_FORWARD_BANDS``): a
   call runs the tiny, the short, the plain, the mid, the long, the
   extra-long or a pipelined forward.  The tiny forward (packed rows, up to
-  38 rows per SM on sm_100a, 36 on sm_103a and 65 on sm_107a) launches one
+  36 rows per SM on sm_100a and sm_103a and 65 on sm_107a) launches one
   128-thread CTA per block of 8 rows, with the short forward's arithmetic,
   so the same ``y`` bits; the short forward (other layouts, up to 12 rows
   per SM on sm_100a and sm_103a, 59 on sm_107a) launches one 256-thread CTA

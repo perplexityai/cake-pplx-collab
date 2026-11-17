@@ -1246,7 +1246,7 @@ Other public names:
 
 ### `cake_pplx.cake_dense_gemm_nondet_train`
 
-Same operations, view contracts, dtypes and accuracy budgets as det. Some routes add split-K partials in arrival order, so no row carries a run-to-run bitwise guarantee. Most other rows reuse the det programs, and for those rows `*_plan` / `*_prepare` may return det objects.
+Same operations, view contracts, dtypes and accuracy budgets as det, except the promoted split-K programs (`_kc128`) of long BF16 weight gradients: their output meets the naive BF16 tier (the error of PyTorch's BF16 product against FP64), and they were not measured against det's budgets. Some routes add split-K partials in arrival order, so no row carries a run-to-run bitwise guarantee. Most other rows reuse the det programs, and for those rows `*_plan` / `*_prepare` may return det objects.
 
 Under deterministic algorithms, only an order-varying launch alerts: K1 split-K at >= 3 splits, or a K2 partition that gives an element more than 2 partials. These come only from an explicit split count passed by the caller, not from the shipped default tables. The alert is `RuntimeError`, or `UserWarning` with `warn_only`. Source: [`kernels/dense_gemm/cake_pplx/_backends/cake_dense_gemm_nondet_train/cake_backend.py`](../kernels/dense_gemm/cake_pplx/_backends/cake_dense_gemm_nondet_train/cake_backend.py).
 
@@ -1256,7 +1256,7 @@ Under deterministic algorithms, only an order-varying launch alerts: K1 split-K 
 | `cake_dense_gemm_nondet_train_projection_forward` | `(X, W, out=None, *, enable_pdl=None)` | K1 | Uses fixed-order programs, so a recomputed forward reproduces the result. Rows in `K1_FORWARD_RULES_BY_SM` use other knobs: their bits differ from det but stay the same on every run. |
 | `cake_dense_gemm_nondet_train_projection_dgrad` | `(G, W, out=None, *, out_dtype=None, enable_pdl=None)` | K1 | Same bits as the det plan. |
 | `cake_dense_gemm_nondet_train_projection` | `(A, B, out, *, transposed_out=False, enable_pdl=None, weights_static=False)` | K1 | A weight-gradient layout runs split-K where the planner takes the row. Other rows run the table program or det. |
-| `cake_dense_gemm_nondet_train_projection_prepare` | `(A, B, out, *, splits=_UNSET, chains=_UNSET, transposed_out=_UNSET, sk=_UNSET, <det planner knobs>=_UNSET, enable_pdl=_UNSET)` | K1. Knobs the caller does not set take the det defaults. | Returns `CakeDenseGemmNondetProjectionLaunch` (weight-gradient layout), `CakeDenseGemmNondetProgramLaunch` (program-table row) or `CakeDenseGemmDetProjectionLaunch`. A prepared launch must not run concurrently with itself. `reset_counters()` re-zeroes the tickets after an incomplete launch. |
+| `cake_dense_gemm_nondet_train_projection_prepare` | `(A, B, out, *, splits=_UNSET, chains=_UNSET, promote=_UNSET, transposed_out=_UNSET, sk=_UNSET, <det planner knobs>=_UNSET, enable_pdl=_UNSET)` | K1. Knobs the caller does not set take the det defaults. | Returns `CakeDenseGemmNondetProjectionLaunch` (weight-gradient layout), `CakeDenseGemmNondetProgramLaunch` (program-table row) or `CakeDenseGemmDetProjectionLaunch`. A prepared launch must not run concurrently with itself. `reset_counters()` re-zeroes the tickets after an incomplete launch. |
 | `cake_dense_gemm_nondet_train_projection_wgrad_prepare` | `(G, X, out, *, sk="auto", cta_rows=None, enable_pdl=None)` | K1 | Prepared form of the program that `projection_wgrad` runs. |
 | `cake_dense_gemm_nondet_train_router_wgrad` | `(G, X, out=None, *, splits=None, enable_pdl=None)` | K2 | `splits` comes from the router-table partition by default. Rows without an entry run det at det's split count. |
 | `cake_dense_gemm_nondet_train_router_forward` | `(X, W, out=None, *, splits=None, enable_pdl=None)` | K2 | This package's program runs only with an explicit `splits` (at most 2 partials per element, so the logits repeat) or in a `ROUTER_RULES` SIMT window. Otherwise det runs. |
@@ -1267,7 +1267,7 @@ Under deterministic algorithms, only an order-varying launch alerts: K1 split-K 
 Other public names:
 
 - `ARCHES`, `is_cake_dense_gemm_nondet_train_supported(device)`.
-- `cake_dense_gemm_nondet_train_projection_plan`: takes the det knobs plus `splits` and `chains`, all `_UNSET` by default.
+- `cake_dense_gemm_nondet_train_projection_plan`: takes the det knobs plus `splits`, `chains` and `promote`, all `_UNSET` by default. `promote` picks the promoted split-K program (`_kc128`: each split sums its K blocks in chunks of at most 128 blocks, added in order). By default, a one-chain BF16 transposed-store plan with more than 128 K blocks in a split uses it, except `sm_107a` `5120 -> 1024` BF16 (`K1_PROMOTE_EXEMPT_ROWS`), which keeps the program without promotion. `False` never uses it. `True` uses it on every plan of this package's split-K program, at any length, and raises `ValueError` if that plan has no promoted program; a row the planner keeps on det stays on det. `promote=None` or `False` does not skip the program tables of `cake_dense_gemm_nondet_train_projection_prepare` and does not reach the det planner.
 - `cake_dense_gemm_nondet_train_router_plan(A, B, out, *, splits=None)`.
 - `CakeDenseGemmNondetProjectionPlan`.
 - `CakeDenseGemmNondetProjectionLaunch`: owns its FP32 slots and tickets, can be captured as one kernel, and has `reset_counters()`.
