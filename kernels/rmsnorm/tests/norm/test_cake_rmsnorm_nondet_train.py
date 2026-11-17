@@ -1176,7 +1176,15 @@ def _requested_bytes() -> int:
     still holds.  ``torch.cuda.memory_allocated`` counts whole allocator blocks
     instead, and the allocator can serve a request with a cached block up to
     1 MiB larger without splitting it, so the blocks it counts depend on what
-    earlier tests left in the cache."""
+    earlier tests left in the cache.  The count is a statistic of the native
+    allocator: under another backend (``cudaMallocAsync`` or a pluggable
+    allocator) the test fails here instead of trusting a count that backend
+    does not keep."""
+    backend = torch.cuda.get_allocator_backend()
+    assert backend == "native", (
+        f"the requested-bytes count needs the native CUDA caching allocator, "
+        f"not {backend!r} (PYTORCH_CUDA_ALLOC_CONF backend)"
+    )
     return torch.cuda.memory_stats()["requested_bytes.all.current"]
 
 
