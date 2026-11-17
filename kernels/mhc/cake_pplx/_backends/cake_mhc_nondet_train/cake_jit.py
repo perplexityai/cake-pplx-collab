@@ -15,18 +15,15 @@ limitations under the License.
 
 Host plan and loader glue of the Cake four-stream mHC training kernels with
 the fused-reduction backward (hidden sizes 4096, 5120 and 7168, 4 streams;
-SM100 / SM103, and SM107 at hidden 4096): the column-slab pass folds ``dfn``,
+SM100 / SM103 / SM107): the column-slab pass folds ``dfn``,
 ``dscale`` and ``dbase`` itself, so no final reduction kernel runs.
 
 This registry is a self-contained copy of the deterministic package's registry
-(``cake_pplx._backends.cake_mhc_det_train.cake_jit``) at this package's
-(architecture, hidden size) pairs, 4096 on every architecture and 5120 and 7168
-on sm_100a and sm_103a: every record, route, host rule and table below is that
-registry's under the ``cake_mhc_train_`` prefix, except what the backward's
-``bwd_finish`` route changes.  The deterministic package also serves 5120 and
-7168 on sm_107a, which this package does not: a copied record keeps only the
-architectures that serve its hidden size here, a deterministic record of those
-sizes on sm_107a alone has no copy, and sm_107a has no route of them.
+(``cake_pplx._backends.cake_mhc_det_train.cake_jit``) at its (architecture,
+hidden size) pairs, 4096, 5120 and 7168 on every architecture: every record,
+route, host rule and table below is that registry's under the
+``cake_mhc_train_`` prefix, except what the backward's ``bwd_finish`` route
+changes and the opt-in two-word programs (below).
 The deterministic column-slab records (``bwd_slab``) and final-reduction records
 (``bwd_reduce``) are absent with their selection tables and their PDL edge
 (``K7->K8``), and four programs of this package take their place:
@@ -46,33 +43,30 @@ The deterministic column-slab records (``bwd_slab``) and final-reduction records
   The grid completes only after its last CTA's wait, so the column-slab pass,
   which waits for this grid, still follows the token-owner pass;
 * ``cake_mhc_train_bwd_slab_fold__dynr`` (every architecture): the
-  deterministic dynamic-schedule column-slab form ``dynr`` (``dX`` bit for
-  bit), which stores the compensated ``dfn`` sums of every (column slab, token
-  chunk) unit, the deterministic partials of that unit, into its chunk's slots
-  of the backward workspace (``dfn_slot`` as ``[P, 24, 4H]``; units without
+  deterministic dynamic-schedule column-slab form ``dynr``, which stores the
+  FP32 ``dfn`` sums of every (column slab, token chunk) unit into its chunk's
+  slots of the backward workspace (``dfn_slot`` as ``[P, 24, 4H]``; units without
   tokens store nothing).  It draws every unit
   from the ticket, so only a running CTA holds a unit.  Each CTA adds its unit
   count to the first ``slab_cnt`` word once, after its last unit, and waits
   until the grid's count reaches every unit; the second word counts the CTAs
   done with their fold, and the last of them leaves both words zero.  The CTAs
   fold ``dfn`` element ranges in parallel: per element the slots of the chunks
-  that hold tokens in ascending chunk order as a compensated FP32 sum
-  (TwoSum), the entry value last under ``accumulate``, one rounding.  The
-  order of every addition depends on the chunk geometry alone, never on the
-  schedule or the grid.  One warp
+  that hold tokens in ascending chunk order as one FP32 sum from +0.0, the
+  entry value last under ``accumulate``.  The order of every addition depends
+  on the chunk geometry alone, never on the schedule or the grid.  One warp
   of each of the first 27 CTAs folds the parameter gradients ``dscale`` /
   ``dbase`` from the token-owner pass's rows (``prow``): the per-CTA partials
-  in the deterministic reduction's per-CTA sequence (an FP64 chain in
-  ascending order), or inside ``BWD_ROW_BANDS`` the group rows of the token
-  owner's ``_trows_dyn`` form in the deterministic group-row reduction's
-  compensated order; the carried-in value last, one rounding.  So they are
-  bitwise the deterministic package's ``dscale`` / ``dbase``;
+  in the deterministic reduction's per-CTA sequence, or inside
+  ``BWD_ROW_BANDS`` the group rows of the token owner's ``_trows_dyn`` form in
+  the deterministic group-row reduction's order; each sum one FP32 word, the
+  carried-in value last;
 * ``cake_mhc_train_bwd_slab_fold__dynr_os`` (every architecture): the same
   dynamic form with the units drawn slab-fastest (``order="slab"``: unit ``u``
   is column slab ``u % (H / 64)`` of token chunk ``u / (H / 64)``, instead of
   slab ``u / P`` of chunk ``u % P``).  The units and the kernel parameters are
   the same; only the order in which the units run changes, so every output is
-  the same bits.  :func:`bwd_slab_atomic_program` appends
+  the same bits as ``dynr``'s.  :func:`bwd_slab_atomic_program` appends
   ``_os`` to the form it picks where :func:`bwd_slab_order` (the token-count
   bands of ``BWD_SLAB_ORDER`` per hidden size and architecture, or of the
   board's cell of ``BWD_SLAB_ORDER_OVERRIDES``) names ``"slab"``.
@@ -92,17 +86,22 @@ FP64 is another draw than the deterministic package's; at hidden 4096 it
 exceeded 1.1x of it on GB300 and R200.  Every call runs the one-size chunks of
 :func:`k7_chunks`.
 
-At hidden 5120 and 7168 (sm_100a, sm_103a) the atomic fn split and the dynamic
-column slab have records per size under the deterministic suffix ``__h<H>``
-(the fn split one, the dynamic column slab one per unit order:
-``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>``,
-``cake_mhc_train_bwd_slab_fold__dynr__h<H>``,
-``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>``).  The
+At hidden 5120 and 7168 the atomic fn split and the dynamic column slab have
+records per size under the deterministic suffix ``__h<H>``: the fn split
+``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>`` (sm_100a, sm_103a) and
+``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` (sm_107a: the
+128-thread split of the size, launched as ``_dep`` -- every CTA waits for the
+token-owner pass as its last instruction; no ``_dep1`` form of these sizes is
+built), the column slab ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` (every
+architecture) and ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (sm_100a,
+sm_103a; no slab-order form of these sizes is built for sm_107a).  The
 column slab runs ``dynr`` in the ``"chunk"`` band of
 ``BWD_SLAB_ORDER`` and ``dynr_os`` in the ``"slab"`` band above it (on the
 152-SM board at 7168 in the bands of its cell of ``BWD_SLAB_ORDER_OVERRIDES``:
 ``"slab"`` also on 47 of the 48 token-count segments in 33793..63091 whose
-column-slab chunk count is at least 19; 34817..35264 keeps ``"chunk"``).
+column-slab chunk count is at least 19; 34817..35264 keeps ``"chunk"``); on
+sm_107a ``BWD_SLAB_ORDER`` names ``"chunk"`` at every token count of these
+sizes, so ``dynr__h<H>`` runs alone.
 
 So ``bwd_finish`` is the deterministic token-owner pass (with its group-row
 forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``), the fn split and the column
@@ -111,18 +110,15 @@ arrival counts (``slab_cnt``) right after the ticket region and its per-chunk
 ``dfn`` slots (``dfn_slot``, FP32 ``[min(32, ceil(T / 64)), 24, 4H]``) in place
 of the deterministic per-chunk partials (``dfn_part``).  Every
 output repeats bit for bit from run to run on one device: each sum runs in an
-order fixed by the token count and the device.  ``dX`` and every other route's
-outputs are the deterministic package's bits, and so are ``dscale`` and
-``dbase`` (the same parameter rows folded in the same order).  ``dfn`` is the
-compensated fold of at most ``P`` per-chunk slots ``x_p`` (``P <= 32``: the
-chunk count of :func:`k7_chunks`) and the entry value ``in`` under
-``accumulate``: within one FP32 rounding of ``in + sum x_p`` plus
-``O(P^2 u^2) (|in| + sum |x_p|)`` (``u = 2^-24``); no addition flushes a
-subnormal.  The chunks are the deterministic column slab's, and each slot is
-the deterministic partial of the same unit, bit for bit.  The deterministic
-package sums those partials in FP64 and rounds once, so ``dfn`` is the
-deterministic ``dfn`` except where the exact sum lies within that last term of
-an FP32 rounding boundary.
+order fixed by the token count and the device.  ``dscale`` and ``dbase`` fold
+the token-owner pass's parameter rows in a fixed order.  ``dfn`` is the FP32
+sum of at most ``P`` per-chunk slots ``x_p`` (``P <= 32``: the chunk count of
+:func:`k7_chunks`, the deterministic column slab's chunks) in ascending chunk
+order and the entry value ``in`` last under ``accumulate``: within
+``gamma_n (|in| + sum |x_p|)`` of ``in + sum x_p`` (``n`` the additions,
+``gamma_n = n u / (1 - n u)``, ``u = 2^-24``); no addition flushes a
+subnormal.  Every sum is one plain FP32 word: no FP64 arithmetic and no
+compensation word.
 The deterministic package's backward fn splits (``fn_split__tv128__t``,
 ``fn_split__tv128_t128__t``, ``fn_split__tv128__h<H>__t``) have no copy here:
 the atomic fn splits replace them.  The deterministic package's
@@ -203,11 +199,11 @@ record's ``grid_per_sm``.
 
 Every record names its hidden size (``hidden``, one of :data:`HIDDEN_SIZES`).
 The hidden sizes 5120 and 7168 are the deterministic package's (libraries
-``__h<H>`` on the routes ``<kind>_h5120`` / ``<kind>_h7168``), copied on sm_100a
-and sm_103a (this package serves sm_107a at 4096 only) under the same rule as
-hidden 4096: the deterministic ``__h<H>`` records but the backward fn split, the
-column slab and the reduction, and a ``bwd_finish`` of the deterministic token-owner
-records, the atomic fn split ``__h<H>`` and the column slab ``dynr__h<H>`` and
+``__h<H>`` on the routes ``<kind>_h5120`` / ``<kind>_h7168``), copied on every
+architecture under the same rule as hidden 4096: the deterministic ``__h<H>``
+records but the backward fn split, the column slab and the reduction, and a
+``bwd_finish`` of the deterministic token-owner records, the atomic fn split
+``__h<H>`` and the column slab ``dynr__h<H>`` and (sm_100a, sm_103a)
 ``dynr_os__h<H>``.
 Every rule takes the hidden size as its last argument and reads its tables
 through ``_tab`` as the deterministic registry's do (``H_TABLES`` spells every
@@ -1830,6 +1826,65 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "fwd",
         },
     },
+    "cake_mhc_train_fwd_map__pair": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "FNP"],
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["parameter", "T"],
+            ["parameter", "m_tiles"],
+            ["parameter", "log2_pk"],
+            ["buffer", "ticket"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "kind": "units_bounded",
+            "tile_rows": 128,
+            "units_rule": "k1_units",
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_fwd_map__pair",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_map__pair",
+        "launch": {
+            "block": (192, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 115712,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_fwd_map__pair",
+        "logical": {
+            "FNP": "fnp",
+            "T": "rows",
+            "X": "x_flat",
+            "log2_pk": "log2_pk",
+            "m_tiles": "m_tiles",
+            "qpart": "qpart",
+            "spart": "spart",
+            "ticket": "ticket",
+        },
+        "role": "fwd_map",
+        "select_rule": {
+            "above": 65536,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
     "cake_mhc_train_fwd_coef__qe_mb10_tree": {
         "arches": [
             "sm_100a",
@@ -3271,6 +3326,74 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_bwd_token__dot_ao8_pair": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_pair",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 91136,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__a3": {
         "arches": [
             "sm_100a",
@@ -3516,6 +3639,76 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": True,
         },
         "library": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_trows_dyn",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["buffer", "ticket"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 93184,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
         "logical": {
             "T": "rows",
             "X": "x",
@@ -3881,6 +4074,73 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_bwd_token__dot_ao8_l2l_pair": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_l2l_pair",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_l2l_pair",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 91136,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_l2l_pair",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_l2l",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_bwd_token__ao15_rae8_tma_ntr__a7": {
         "arches": [
             "sm_107a",
@@ -4100,6 +4360,89 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_bwd_slab_fold__dynr_pair": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["buffer", "dfn_slot"],
+            ["buffer", "slab_cnt"],
+            ["parameter", "prow"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 64,
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dfn_slot": "dfn_slot",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "prow": "prow",
+            "rpc": "rows_per_chunk",
+            "slab_cnt": "slab_cnt",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_pair",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_bwd_slab_fold__dynr_os": {
         "arches": [
             "sm_100a",
@@ -4187,6 +4530,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "fn"],
@@ -4271,10 +4615,54 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "fn"],
+            ["buffer", "fnTp"],
+            ["buffer", "dfn"],
+            ["parameter", "accumulate"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas": 640,
+            "kind": "fixed",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+        "logical": {
+            "accumulate": "accumulate",
+            "dfn": "dfn",
+            "fn": "fn",
+            "fnTp": "fnTp",
+        },
+        "role": "fn_split_bwd",
+        "select_rule": None,
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -4333,6 +4721,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -4391,6 +4780,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -4451,6 +4841,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -4511,6 +4902,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -4870,6 +5262,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -4957,10 +5350,56 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": None,
         "workspace_rule": None,
     },
+    "cake_mhc_train_fwd_finish__w1__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "b"],
+            ["buffer", "stats"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 5,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_finish__w1__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_finish__w1__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_finish__w1__h5120",
+        "logical": {
+            "T": "rows",
+            "b": "b",
+            "stats": "stats",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd_finish",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
     "cake_mhc_train_bwd_prepare__t160__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "dy"],
@@ -5012,6 +5451,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -5218,6 +5658,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -5382,6 +5823,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "fn"],
@@ -5466,10 +5908,54 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "fn"],
+            ["buffer", "fnTp"],
+            ["buffer", "dfn"],
+            ["parameter", "accumulate"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas": 896,
+            "kind": "fixed",
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
+        "logical": {
+            "accumulate": "accumulate",
+            "dfn": "dfn",
+            "fn": "fn",
+            "fnTp": "fnTp",
+        },
+        "role": "fn_split_bwd",
+        "select_rule": None,
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_fwd_map__nsx_st5_mb1__h7168": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -5528,6 +6014,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -5586,6 +6073,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -5646,6 +6134,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -5706,6 +6195,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -6065,6 +6555,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -6152,10 +6643,56 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": None,
         "workspace_rule": None,
     },
+    "cake_mhc_train_fwd_finish__w1__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "b"],
+            ["buffer", "stats"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 7,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fwd_finish__w1__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_finish__w1__h7168",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_finish__w1__h7168",
+        "logical": {
+            "T": "rows",
+            "b": "b",
+            "stats": "stats",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd_finish",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
     "cake_mhc_train_bwd_prepare__t224__h7168": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "dy"],
@@ -6207,6 +6744,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -6413,6 +6951,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -6577,6 +7116,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -6633,10 +7173,247 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "fwd",
         },
     },
+    "cake_mhc_train_fwd_coef__pfl2_qmt__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "pfl2_qmt",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__g2_el__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 16,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_coef__g2_el__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__g2_el__h5120",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 25600,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__g2_el__h5120",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "g2_el",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 6400,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "st8_lp2_tree_asel_qd",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "lp2_w8_adj_qe",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
     "cake_mhc_train_bwd_token__rt64__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -6701,10 +7478,78 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_bwd_token__dot_ao8_l2l__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_l2l__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_l2l__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 111616,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_l2l__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_l2l",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_fwd_coef__rt64__h7168": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "spart"],
@@ -6761,10 +7606,247 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "fwd",
         },
     },
+    "cake_mhc_train_fwd_coef__pfl2_qmt__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "pfl2_qmt",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__g2_el__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 16,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fwd_coef__g2_el__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__g2_el__h7168",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 25600,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__g2_el__h7168",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "g2_el",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 6400,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "st8_lp2_tree_asel_qd",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
+    "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "spart"],
+            ["buffer", "qpart"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "stats"],
+            ["parameter", "T"],
+            ["parameter", "p_k"],
+            ["parameter", "t_pad"],
+            ["parameter", "rms_eps"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "tiles",
+            "rows_per_tile": 8,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+        "logical": {
+            "T": "rows",
+            "base": "base",
+            "hc_eps": "hc_eps",
+            "p_k": "p_k",
+            "qpart": "qpart",
+            "rms_eps": "rms_eps",
+            "scale": "scale",
+            "spart": "spart",
+            "stats": "stats",
+            "t_pad": "t_pad",
+        },
+        "role": "fwd_coef",
+        "select_rule": {
+            "kind": "program",
+            "program": "lp2_w8_adj_qe",
+            "rule": "fwd_coef_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "fwd",
+        },
+    },
     "cake_mhc_train_bwd_token__rt64__h7168": {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -6823,6 +7905,73 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "run_time_iters",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__dot_ao8_l2l__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 1,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_l2l__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_l2l__h7168",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 152576,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_l2l__h7168",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_l2l",
+            "rule": "bwd_token_program",
         },
         "workspace_rule": {
             "kind": "regions",
@@ -7214,11 +8363,91 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__lp2_w8_adj_qe",
             "cake_mhc_train_fwd_coef__rt64",
         ],
+        "bwd_finish_h5120": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_l2l__h5120",
+            "cake_mhc_train_bwd_token__rt64__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr__h5120",
+        ],
+        "bwd_prepare_h5120": [
+            "cake_mhc_train_bwd_prepare__t160__h5120",
+        ],
+        "fwd_finish_h5120": [
+            "cake_mhc_train_fwd_finish__w1__h5120",
+        ],
+        "fwd_prepare_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+            "cake_mhc_train_fwd_collapse__h5120",
+        ],
+        "fwd_recompute_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+        ],
+        "bwd_finish_h7168": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168",
+            "cake_mhc_train_bwd_token__dot_ao8_l2l__h7168",
+            "cake_mhc_train_bwd_token__rt64__h7168",
+            "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
+            "cake_mhc_train_bwd_slab_fold__dynr__h7168",
+        ],
+        "bwd_prepare_h7168": [
+            "cake_mhc_train_bwd_prepare__t224__h7168",
+        ],
+        "fwd_finish_h7168": [
+            "cake_mhc_train_fwd_finish__w1__h7168",
+        ],
+        "fwd_prepare_h7168": [
+            "cake_mhc_train_fn_split__h7168",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h7168",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h7168",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h7168",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h7168",
+            "cake_mhc_train_fwd_coef__g2_el__h7168",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h7168",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+            "cake_mhc_train_fwd_coef__rt64__h7168",
+            "cake_mhc_train_fwd_collapse__h7168",
+        ],
+        "fwd_recompute_h7168": [
+            "cake_mhc_train_fn_split__h7168",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h7168",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h7168",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h7168",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h7168",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h7168",
+            "cake_mhc_train_fwd_coef__g2_el__h7168",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h7168",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
+            "cake_mhc_train_fwd_coef__rt64__h7168",
+        ],
     },
 }
 # Every hidden size the registry holds records for.  An architecture serves a
 # size when all five routes of that size exist (``supported_hidden_sizes``):
-# sm_100a and sm_103a serve all three, sm_107a serves 4096.
+# every architecture serves all three.
 HIDDEN_SIZES: tuple[int, ...] = (4096, 5120, 7168)
 
 # One verified build per architecture: B200 (``sm_100a``), B300 (``sm_103a``)
@@ -7271,7 +8500,7 @@ GSTATS_COLS = 32
 TOKP_COLS = 24
 DZP_COLS = 96  # three BF16 pieces of dz' = dz * r, 32 columns each
 PARAM_COLS = 32
-PARAM_ROW_COLS = 56  # a group row: PARAM_COLS plus the low parts of the 24 dbase sums
+PARAM_ROW_COLS = PARAM_COLS  # a group row: one FP32 word per parameter column, as a per-CTA row
 TOKEN_GROUP = 8  # tokens per group row
 TICKET_WORDS = 64  # one 256-byte region of uint32 per workspace, zero on first use; the opt-in ticket schedule of the mapping pass (forward) and the column-slab forms (backward) draw their units from word 0, the group-row token owner (backward) its groups after the first wave from word 32, and each leaves its word 0 again; the static forms leave them unread
 SLAB_CNT_WORDS = 128  # the column slab's arrival counts: word 0 counts the grid's finished units, word 1 the CTAs past the wait for them; zero on first use, and the last CTA of every launch leaves both 0 again
@@ -7318,12 +8547,12 @@ PARAM_LAYOUT: dict[str, tuple[int, int]] = {
 # backward buffer hold every word a call must find zero and leaves zero.  The
 # deterministic package's regions follow (``fnTp``, ``dzp``, ``tokp`` and the
 # parameter region ``param_partial``: the per-CTA partials ``[G6, 32]``, or the
-# group rows ``[56, ceil(T / 8)]`` inside ``BWD_ROW_BANDS``), each 512 bytes
+# group rows ``[32, ceil(T / 8)]`` inside ``BWD_ROW_BANDS``), each 512 bytes
 # past its deterministic offset; the last region is the column slab's per-chunk
 # FP32 ``dfn`` slots (``dfn_slot``, ``slot_parts x 24 x n`` with ``slot_parts =
 # min(32, ceil(T / 64))``, at least the token-holding chunks of either
 # column-slab geometry; a launch of ``P`` chunks uses its first ``P x 24 x n``
-# values as ``[P, 24, n]``: the units' compensated sums), which the grid folds
+# values as ``[P, 24, n]``: the units' FP32 sums), which the grid folds
 # into ``dfn`` once every unit has stored its slots.  The slot region depends on
 # the token count alone, never on the two-size screen, so the workspace envelope
 # never runs that screen.  A deterministic backward workspace does not serve
@@ -7737,12 +8966,12 @@ BWD_TOKEN_BANDS = {
     ),
 }
 # BWD_ROW_BANDS: the token-count bands per architecture ((above, at_most), at_most None = unbounded) in which the token
-# owner runs the "_trows_dyn" form of its program (one 56-float parameter row per 8-token group, the groups after the
+# owner runs the "_trows_dyn" form of its program (one 32-float parameter row per 8-token group, the groups after the
 # first wave claimed first-come from the backward workspace's self-resetting ticket word 32) and the column slab folds
 # those group rows (``prow = 1``): the parameter region of the backward workspace then holds the group rows
-# [56, ceil(T / 8)] instead of the per-CTA partials [G6, 32], and the column slab sums them in the deterministic
-# reduction's group-row order (8-token groups, compensated columns), so dscale and dbase are bitwise the deterministic
-# package's in the bands as outside them. dX, dfn, dzp and tokp are the per-CTA forms' bits. The deterministic package's
+# [32, ceil(T / 8)] instead of the per-CTA partials [G6, 32], and the column slab sums them in the deterministic
+# reduction's group-row order (8-token groups, one FP32 word per column). dX, dfn, dzp and tokp are the per-CTA
+# forms' bits. The deterministic package's
 # bands verbatim: sm_100a and sm_103a above 14927 tokens; sm_107a runs none. A call at a run-time Sinkhorn count runs
 # the per-CTA run-time-count token owner, so its column slab folds per-CTA rows (``prow = 0``).
 BWD_ROW_BANDS = {
@@ -7831,7 +9060,7 @@ BWD_SLAB_LPT = {"sm_100a": None, "sm_103a": None, "sm_107a": None}
 # BWD_SLAB_LPT_HIDDEN: BWD_SLAB_LPT per hidden size other than 4096 -- the same screen over the size's H / 64 slabs and
 # its k7_chunks chunks, calibrated per (architecture, hidden size); a size it does not list is a ValueError, never the
 # H 4096 value. None at every architecture, as BWD_SLAB_LPT (the column slab runs the deterministic one-size chunks);
-# sm_103a and sm_107a had no calibration of these sizes (sm_107a routes hidden 4096 only), and sm_100a's former one,
+# sm_103a and sm_107a had no calibration of these sizes (sm_107a routed hidden 4096 only then), and sm_100a's former one,
 # by the package-level A/B of BWD_SLAB_LPT on 148 SMs over 80 token counts in 1024..65536
 # (the ones that fire at keep 0.995, 8 replay groups): H 5120 (1.0, 0.99) fires at 28 of them, backward -188.5 us and
 # checkpointed step -113.4 us in sum, none slower in a 16-group rerun (20656 reads +0.1 / -0.1 us); keep 0.995 fires at
@@ -7868,7 +9097,8 @@ BWD_SLAB_LPT_HIDDEN = {
 # from 1877 and slower at none, -853..-935 us in sum per run; its slab arm also ran a banded two-size calibration, which
 # picks another geometry at 9 counts, where the slab order under the chunk arm's (0.5, 0.97) reads faster in both runs
 # as well. The 208- and 216-SM boards are not measured, so they keep the chunk order; the 212-SM board's slab order from
-# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. sm_107a routes no column slab of 5120 / 7168.
+# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. At 5120 / 7168 sm_107a has only the chunk-order record dynr__h<H> (no slab
+# order is measured or built there), so its cell is "chunk".
 # sm_100a (GB200, 152 SMs): at 4096 from 2048 (95 counts) no count is slower in both of 2 runs and only 2670 in one
 # (backward +0.6 us), backward / checkpointed step -1381..-1820 us in sum per run; below it no count is faster in either
 # run (backward +1.7..+1.8 us, checkpointed step -0.4..-0.9 us in sum). At 5120 the slab order is faster at 96 of the
@@ -8672,7 +9902,7 @@ def host_plan(
         "rows_per_cta": r6,
         "groups": groups,
         "group_rows": group_rows,
-        # the parameter region: the group rows [56, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
+        # the parameter region: the group rows [32, ceil(T / 8)] (column g = group g) inside BWD_ROW_BANDS, else the
         # per-CTA partials [G6, 32]
         "param_dim0": PARAM_ROW_COLS if group_rows else g6,
         "param_dim1": groups if group_rows else PARAM_COLS,
@@ -8982,6 +10212,105 @@ SELECT_RULE_KINDS = (
 # The roles whose compiled programs unroll the Sinkhorn chain for the count of
 # record: a call at another count needs the role's run-time-count record.
 RUN_TIME_ITERS_ROLES = ("fwd_coef", "bwd_token")
+# ----------------------------------------------------------------------------
+# Opt-in two-word accumulation
+#
+# Every kernel of record keeps each of its sums in one plain FP32 word (``accumulation="fp32"``, the default).  The
+# opt-in mode ``accumulation="fp32x2"`` runs, in place of the one-word programs a call selects for a role of
+# ``ACC_WORDS_ROLES``, one two-word program per architecture, role and parameter-row layout
+# (``ACC_WORDS_PROGRAMS``; the key ``"<role>/rows"`` where the token owner writes the group rows of
+# :func:`bwd_group_rows`): each sum of that kernel is kept as a pair of FP32 words, the running sum and its rounding
+# error (Kahan-compensated promotions in the mapping pass and the column slab, compensated partials and folds in the
+# token owner, TwoSum pairs in the column slab's parameter and ``dfn`` folds), and stored as one FP32 word.  It is a
+# compensated FP32 sum, not FP64.  The buffers between the kernels keep their one-word layouts, so the workspaces
+# and the host plan are the same, and the column slab's folds still add their words in arrival order (the mode has
+# no bit constraint, like the default).  The other passes (the fn split, the coefficients, the collapse, the
+# residual mixing, the backward prepare) run their one-word programs in both modes: no two-word form of them is
+# built.  The two-word programs are built at hidden ``ACC_WORDS_HIDDEN`` and for the Sinkhorn count of record only:
+# another hidden size or count is a ``NotImplementedError`` (:func:`check_accumulation`).  A two-word program runs at
+# every token count of its role (the token-count bands of the one-word programs do not apply); the mode exists for
+# accuracy experiments and its speed is not part of the record.  The two-word fold's record names the program key
+# ``dynr_pair``, which :func:`bwd_slab_atomic_program` never returns: only this mode selects it.
+ACCUMULATIONS = ("fp32", "fp32x2")
+ACCUMULATION = "fp32"
+ACC_WORDS_HIDDEN = 4096
+ACC_WORDS_ROLES = ("fwd_map", "bwd_token", "bwd_slab")
+ACC_WORDS_PROGRAMS: dict[str, dict[str, str]] = {
+    "fwd_map": {
+        "sm_100a": "cake_mhc_train_fwd_map__pair",
+        "sm_103a": "cake_mhc_train_fwd_map__pair",
+        "sm_107a": "cake_mhc_train_fwd_map__pair",
+    },
+    "bwd_token": {
+        "sm_100a": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "sm_103a": "cake_mhc_train_bwd_token__dot_ao8_pair",
+        "sm_107a": "cake_mhc_train_bwd_token__dot_ao8_l2l_pair",
+    },
+    "bwd_token/rows": {
+        "sm_100a": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+        "sm_103a": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_pair",
+    },
+    "bwd_slab": {
+        "sm_100a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "sm_103a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+        "sm_107a": "cake_mhc_train_bwd_slab_fold__dynr_pair",
+    },
+}
+
+
+def check_accumulation(
+    accumulation: Any,
+    hidden: Optional[int] = None,
+    sinkhorn_iters: Optional[int] = None,
+) -> str:
+    """``accumulation`` when it is one of :data:`ACCUMULATIONS` (else ``ValueError``); for ``"fp32x2"`` a
+    ``hidden`` other than :data:`ACC_WORDS_HIDDEN` or a ``sinkhorn_iters`` other than :data:`SINKHORN_ITERS`
+    (each checked when given) is a ``NotImplementedError``: no two-word program is built for them."""
+
+    if type(accumulation) is not str or accumulation not in ACCUMULATIONS:
+        raise ValueError(
+            f"accumulation must be one of {ACCUMULATIONS}, got {accumulation!r}"
+        )
+    if accumulation != ACCUMULATION:
+        if hidden is not None and int(hidden) != ACC_WORDS_HIDDEN:
+            raise NotImplementedError(
+                f"accumulation={accumulation!r} runs hidden {ACC_WORDS_HIDDEN} only (the two-word programs are "
+                f"built for that size alone); got hidden {hidden}"
+            )
+        if sinkhorn_iters is not None and int(sinkhorn_iters) != SINKHORN_ITERS:
+            raise NotImplementedError(
+                f"accumulation={accumulation!r} runs sinkhorn_iters={SINKHORN_ITERS} only (the two-word programs "
+                f"have no run-time-count form); got sinkhorn_iters={sinkhorn_iters}"
+            )
+    return accumulation
+
+
+def two_word_modules(
+    names: Sequence[str], arch: str, hidden: int, *, rows: int, sm_count: int
+) -> tuple[str, ...]:
+    """``names`` (a selection of one call) with each record of a role of :data:`ACC_WORDS_ROLES` replaced by the
+    two-word program of its architecture, role and parameter-row layout (:data:`ACC_WORDS_PROGRAMS`; the group-row
+    form where :func:`bwd_group_rows` holds for ``rows`` tokens); every other record is kept.  A role whose table has
+    no program of ``arch`` is a ``NotImplementedError``."""
+
+    check_accumulation("fp32x2", hidden)
+    group_rows = bwd_group_rows(int(rows), int(sm_count), arch, int(hidden))
+    out = []
+    for name in names:
+        role = MODULES[name]["role"]
+        if role not in ACC_WORDS_ROLES:
+            out.append(name)
+            continue
+        key = f"{role}/rows" if group_rows and f"{role}/rows" in ACC_WORDS_PROGRAMS else role
+        program = ACC_WORDS_PROGRAMS[key].get(arch)
+        if program is None:
+            raise NotImplementedError(
+                f"accumulation='fp32x2' has no two-word {key!r} program on {arch!r}"
+            )
+        out.append(program)
+    return tuple(out)
+
+
 # The host rules a ``program`` selection rule may name (the record's program key must equal the rule's value).
 PROGRAM_RULES = (
     "fwd_map_program",
@@ -9048,6 +10377,7 @@ def selected_modules(
     rows: int,
     sm_count: int,
     sinkhorn_iters: int = SINKHORN_ITERS,
+    accumulation: str = ACCUMULATION,
 ) -> tuple[str, ...]:
     """Ordered module names one public call launches on ``arch`` for ``rows`` tokens
     on a device of ``sm_count`` SMs.
@@ -9094,9 +10424,13 @@ def selected_modules(
     column-slab program (``BWD_SLAB_LPT``, ``BWD_SLAB_LPT_HIDDEN``,
     ``BWD_SLAB_ORDER``, ``BWD_SLAB_LPT_OVERRIDES``,
     ``BWD_SLAB_ORDER_OVERRIDES``) has no record on the route is a
-    ``ValueError``, never a backward without the column slab.
+    ``ValueError``, never a backward without the column slab.  With
+    ``accumulation="fp32x2"`` (:func:`check_accumulation`) the records of the
+    roles of :data:`ACC_WORDS_ROLES` are then replaced by their two-word
+    programs (:func:`two_word_modules`).
     """
 
+    check_accumulation(accumulation, hidden, sinkhorn_iters)
     rows, sinkhorn_iters = int(rows), int(sinkhorn_iters)
     route = route_modules(arch, hidden, kind)
     # At a count other than the count of record, the run-time-count record of a role replaces the role's
@@ -9151,6 +10485,8 @@ def selected_modules(
             f"the {route_key(hidden, kind)!r} route on {arch!r} selects {len(slabs)} column-slab records for "
             f"{rows} rows on {sm_count} SMs ({slabs}): the column-slab program of the call needs exactly one"
         )
+    if accumulation != ACCUMULATION:
+        names = two_word_modules(names, arch, hidden, rows=rows, sm_count=sm_count)
     return names
 
 
@@ -9655,6 +10991,13 @@ __all__ = [
     "K3_TILING",
     "K6_CTAS_PER_SM",
     "RUN_TIME_ITERS_ROLES",
+    "ACCUMULATIONS",
+    "ACCUMULATION",
+    "ACC_WORDS_HIDDEN",
+    "ACC_WORDS_ROLES",
+    "ACC_WORDS_PROGRAMS",
+    "check_accumulation",
+    "two_word_modules",
     "arch_for_capability",
     "bwd_slab_atomic_program",
     "bwd_slab_order",

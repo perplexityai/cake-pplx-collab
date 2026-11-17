@@ -117,7 +117,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 - **Concurrent work.** Work on other streams does not change the bits. Runs with a side load gave the same bits as runs without one.
 - **Checkpoint replay.** `save_stats=False`, or `torch.utils.checkpoint` around the connection, gives gradients that match the backward from saved statistics bit for bit.
 - **Mechanism.** `dfn`, `dscale` and `dbase` are reduced from per-block partials in a fixed order. Atomic operations appear only on integer work tickets; no value is accumulated atomically. Some kernels claim work units dynamically, but each unit's result and its place in every reduction do not depend on which CTA ran it.
-- **Not guaranteed.** Bits may differ between devices with different SM counts and between package versions, because the work split and reduction order may change. Accuracy is held to the test error budgets (see [Numerics](#numerics)), not to equality with earlier versions.
+- **Not guaranteed.** Bits may differ between devices with different SM counts and between package versions, because the work split and reduction order may change. Accuracy is held to the tests' naive-tier judge (see [Numerics](#numerics)), not to equality with earlier versions.
 - **Evidence.** The measurement used SM100, SM103 and SM107 boards. Each configuration ran 5 times, and every output was compared by SHA-256. It covered every supported hidden size and several token counts, each under three conditions: an idle device, a 16-CTA side load on another stream, and a side load that held every SM.
 
 ## Checkpointing and memory
@@ -147,9 +147,10 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 - The mapping GEMM has FP32 quality. `fn` is split exactly into three BF16 pieces, and the products accumulate in FP32. TF32 is not used.
 - `dX` sums the mapping, collapse and residual-mix contributions in FP32 and rounds to BF16 once.
 - `dB` is the BF16 rounding of the complete FP32 sum over the streams, with one rounding.
-- The coefficients, their gradients and the parameter reductions are all FP32.
+- The coefficients, their gradients and the parameter reductions are all FP32. By default (`accumulation="fp32"`) every reduction sums in one plain FP32 word in a fixed order, with no FP64 arithmetic and no compensation word.
+- The opt-in `accumulation="fp32x2"` of `forward_prepare`, `forward_stats`, `backward_finish` and `prepare` swaps the programs of four passes for two-word programs (`cake_jit.ACC_WORDS_PROGRAMS`): the mapping pass, the token-owner pass, the column slab and the final reduction. Each of their sums is a compensated pair of FP32 words (the running sum and its rounding error), stored as one FP32 word. It is a compensated FP32 sum, not FP64. The order of the sums stays fixed, so the outputs still repeat bit for bit. The workspaces and records are unchanged. The mode serves hidden 4096 with `sinkhorn_iters=20` only; other values raise `NotImplementedError`. The other passes have no two-word program and run their one-word programs in both modes.
 - The sigmoid tails keep their gradients where the FP32 forward sigmoid rounds to 1.
-- The tests in `tests/mhc/test_cake_mhc_det_train*.py` validate `Y`, `U`, `dX`, `dB`, `dfn`, `dscale` and `dbase` against an FP64 reference. They check activation errors and parameter-gradient errors separately. Coverage includes cancellation, saturated sigmoid tails, empty, small, large and irregular `T`, checkpoint replay, and repeated gradient accumulation.
+- The tests in `tests/mhc/test_cake_mhc_det_train*.py` judge every floating output (`U`, `Y`, `dB`, `dX`, the statistics in `stats` and `grad_stats`, `dfn`, `dscale` and `dbase`) against an FP64 reference. Over 32 random inputs of each case, the output's error in the L2 and max norms is at most 1.005 times the error of a naive PyTorch BF16 evaluation of the same function on the same inputs, in the median and the maximum, and zero wherever that error is zero. Coverage includes cancellation, saturated sigmoid tails, large logits, empty, small, large and irregular `T`, checkpoint replay, and repeated gradient accumulation. The outputs are also checked bit for bit from run to run.
 
 ## Layout of this package
 
@@ -158,7 +159,7 @@ Each output below repeats bit for bit when two calls meet all three conditions:
 | `__init__.py` | Entry points, autograd functions, host launch plans |
 | `cake_jit.py` | Host rules: module registry, routes per architecture and hidden size, token-count bands. The host plan is hand-maintained; the exporter rewrites the derived record fields. |
 | `cake_build.py` | Library loader. Serves `aot/<name>.so` when a builder compiled it from the manifest. Otherwise JIT-builds through the package's JIT shim (`_cake_pplx_jit.py`) from the same sources and flags. Written by the exporter; do not edit. |
-| `build.json` | Manifest, schema `cake-build/1`. One entry per library and architecture (`<library>_<arch>`) with package-relative sources, nvcc flags (`-gencode` for `sm_100a` / `sm_103a` / `sm_107a`), toolkit-conditional flags and SHA-256 digests. Requires CUDA toolkit >= 12.8 for SM100, >= 12.9 for SM103 and >= 13.4 for SM107, and `apache-tvm-ffi >= 0.1.11, < 0.2`. |
+| `build.json` | Manifest, schema `cake-build/1`. One entry per library and architecture (`<library>_<arch>`) with package-relative sources, nvcc flags (`-gencode` for `sm_100a` / `sm_103a` / `sm_107a`), toolkit-conditional flags and SHA-256 digests. Requires CUDA toolkit >= 12.8 for SM100, >= 12.9 for SM103 and >= 13.5 for SM107, and `apache-tvm-ffi >= 0.1.11, < 0.2`. |
 | `csrc/` | Generated CUDA: `<library>_kernel.cu` and `<library>_binding.cu` per library, plus the package-local `cake_ffi_checks.h`. Not hand-edited. |
 | `aot/` | Optional prebuilt libraries and the `build_info.json` sidecar. Not tracked. |
 

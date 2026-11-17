@@ -16,12 +16,16 @@ limitations under the License.
 Training with ``cake_pplx.cake_mhc_nondet_train`` (family ``mhc``) composed with
 the model's deterministic head ``cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det``
 (family ``mhc_head``, the stream mean of the last layer): the gradients reach
-every leaf through the head and equal the deterministic training and head's.
+every leaf through the head, and the head output and every gradient are judged
+with ``tests/cake_naive.py`` against the naive BF16 tier over 32 inputs.  The
+oracle is the whole chain (two connections, the stream mean, the loss) in
+float64 by autograd; the tier is the same chain with PyTorch in BF16 on the
+same BF16 inputs.  The non-deterministic package makes no bit promise, so
+nothing is compared bit for bit with the deterministic training.
 
 Moved from ``kernels/mhc/tests/experimental/test_cake_mhc_nondet_train_api.py``,
-which keeps the single-family checks; the helpers
-below are that module's.  Needs ``cake-pplx-mhc`` and ``cake-pplx-mhc-head``
-installed in one environment.
+which keeps the single-family checks.  Needs ``cake-pplx-mhc`` and
+``cake-pplx-mhc-head`` installed in one environment.
 """
 
 from __future__ import annotations
@@ -29,11 +33,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-import cake_pplx.cake_mhc_det_train as det_facade
 import cake_pplx.cake_mhc_nondet_train as facade
 import cake_pplx._backends.cake_mhc_nondet_train as backend
-from cake_pplx._backends.cake_mhc_det_train import cake_jit as det_loader
 from cake_pplx._backends.cake_mhc_nondet_train import cake_jit as loader
+
+from ..cake_naive import DRAWS, TIERS, TierJudge, contract, draw_seed, seed_all
 
 head_facade = pytest.importorskip(
     "cake_pplx.cake_mhc_head_det_train",
@@ -43,9 +47,9 @@ head_facade = pytest.importorskip(
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 HIDDEN_SIZES = (4096, 5120, 7168)
 SEED = 2032
-BF16 = torch.bfloat16
-# The ``dfn`` of this package's backward against the deterministic one (test_cake_mhc_nondet_train_api.py's bound).
-DFN_REL_L2_MAX = 1e-6
+STREAMS = 4
+RMS_EPS, HC_EPS, SINKHORN_ITERS = 1e-5, 1e-6, 20
+BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 
 
 def _device() -> torch.device:
@@ -60,7 +64,6 @@ def _supported() -> bool:
     return (
         torch.cuda.is_available()
         and _capability() in SUPPORTED_CAPABILITIES
-        and det_facade.is_cake_mhc_det_train_supported(_device())
         and facade.is_cake_mhc_nondet_train_supported(_device())
     )
 
@@ -75,7 +78,7 @@ requires_device = pytest.mark.skipif(
 def warmup_jit():
     if _supported():
         arch = loader.arch_for_capability(_capability())
-        for spec in [*det_loader.specs_for_arch(arch), *loader.specs_for_arch(arch)]:
+        for spec in loader.specs_for_arch(arch):
             spec.build_and_load()
     yield
 
@@ -108,33 +111,14 @@ def _inputs(T: int, seed: int = SEED, hidden: int = 4096) -> dict[str, torch.Ten
             *shape, generator=generator, device=_device(), dtype=torch.float32
         ).to(dtype)
 
-    i = {
+    return {
         "X": randn(T, 4, hidden, dtype=BF16),
         "fn": (randn(24, 4 * hidden) * 1e-2).contiguous(),
         "scale": 1.0 + 0.1 * randn(3),
         "base": 0.1 * randn(24),
         "B": randn(T, hidden, dtype=BF16),
-        "dY": randn(T, 4, hidden, dtype=BF16),
         "dU": randn(T, hidden, dtype=BF16),
     }
-    _U, i["stats"] = det_facade.cake_mhc_det_train_forward_prepare(
-        i["X"], i["fn"], i["scale"], i["base"]
-    )
-    _dB, i["gstats"] = det_facade.cake_mhc_det_train_backward_prepare(
-        i["dY"], i["B"], i["X"], i["stats"]
-    )
-    return i
-
-
-def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
-    return float((a.double() - b.double()).norm() / b.double().norm())
-
-
-def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
-    return a.dtype == b.dtype and torch.equal(
-        a.detach().contiguous().reshape(-1).view(torch.uint8),
-        b.detach().contiguous().reshape(-1).view(torch.uint8),
-    )
 
 
 def _nd_prepare(*args, **kwargs):
@@ -146,7 +130,7 @@ def _nd_finish(*args, **kwargs):
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The model's head
+# The model's head; the oracle and the naive tier of the chain
 
 
 def _head_connections(prepare, finish, i: dict, layers: list, **kwargs) -> tuple:
@@ -164,50 +148,119 @@ def _head_connections(prepare, finish, i: dict, layers: list, **kwargs) -> tuple
     return head.detach(), [X.grad, *[p.grad for layer in params for p in layer]]
 
 
+def _sinkhorn(logits: torch.Tensor, hc_eps: float, iters: int) -> torch.Tensor:
+    """``softmax`` over j, ``+ hc_eps``, one column normalisation, then ``iters - 1`` x (row, column)."""
+    C = torch.softmax(logits, dim=-1) + hc_eps
+    C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
+    for _ in range(iters - 1):
+        C = C / (C.sum(dim=2, keepdim=True) + hc_eps)
+        C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
+    return C
+
+
+def _connection(x, fn, scale, base, B0):
+    """One residual connection in the dtype of its operands: the RMS-normalised mapping, the pre / post sigmoids,
+    the Sinkhorn matrix, ``U = sum_i pre_i x_i``, the branch ``B = U + B_0`` and ``Y = post B + C^T x``."""
+    T, S, H = x.shape
+    u = x.reshape(T, S * H)
+    r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + RMS_EPS)
+    z = (u * r) @ fn.T
+    pre = torch.sigmoid(z[:, 0:4] * scale[0] + base[0:4]) + HC_EPS
+    post = 2 * torch.sigmoid(z[:, 4:8] * scale[1] + base[4:8])
+    C = _sinkhorn(
+        (z[:, 8:] * scale[2] + base[8:]).reshape(T, STREAMS, STREAMS),
+        HC_EPS,
+        SINKHORN_ITERS,
+    )
+    U = (pre.unsqueeze(-1) * x).sum(dim=1)
+    B = U + B0
+    return post.unsqueeze(-1) * B.unsqueeze(1) + torch.einsum("tij,tid->tjd", C, x)
+
+
+def _chain(i: dict, layers: list, dtype: torch.dtype) -> tuple:
+    """The chain of :func:`_head_connections` with PyTorch in ``dtype`` (float64: the oracle; BF16 on the same BF16
+    inputs: the naive tier), its backward by autograd: ``(head, [dX, *(dfn, dscale, dbase) per connection])``."""
+    with torch.enable_grad():
+        X = i["X"].detach().to(dtype).requires_grad_(True)
+        params = [
+            [p.detach().to(dtype).requires_grad_(True) for p in layer]
+            for layer in layers
+        ]
+        B0 = i["B"].to(dtype)
+        x = X
+        for fn, scale, base in params:
+            x = _connection(x, fn, scale, base, B0)
+        head = x.mean(dim=1)
+        grads = torch.autograd.grad(
+            [head],
+            [X, *[p for layer in params for p in layer]],
+            grad_outputs=[i["dU"].to(dtype)],
+        )
+    return head.detach(), list(grads)
+
+
 @requires_device
 @pytest.mark.parametrize("T", (7, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 def test_nd_training_composes_with_the_stream_mean_head(
-    T: int, save_stats: bool, hidden: int
+    T: int, save_stats: bool, hidden: int, record_property
 ) -> None:
     """Training with this package feeding the model's deterministic head
     (``cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det``, ``mean_i X[:, i, :]`` of the last connection's
     four streams), at every hidden size the device routes: two connections, the head and a loss on its output.  The
-    gradients reach every leaf through the head (finite, non-zero), the connections' handles are the backend's, and
-    the head output and the ``X`` / ``scale`` / ``base`` gradients are bitwise those of the deterministic training
-    and the same head; each ``fn`` gradient is within FP32 rounding of the deterministic one (rel-L2 <=
-    ``DFN_REL_L2_MAX``)."""
+    connections' handles are the backend's and the gradients reach every leaf through the head (non-zero).  Over 32
+    inputs, the head output and the gradients of ``X`` and of each connection's ``fn``, ``scale`` and ``base`` are
+    judged against the naive BF16 tier (contract: shapes, finite values)."""
     if not head_facade.is_cake_mhc_head_det_train_supported(_device(), hidden):
         pytest.skip(f"the head has no program of hidden {hidden} on {_arch()}")
-    i = _inputs(T, seed=SEED + 40, hidden=hidden)
-    second = _inputs(1, seed=SEED + 41, hidden=hidden)
-    layers = [[j[k] for k in ("fn", "scale", "base")] for j in (i, second)]
-    handles = []
-
-    def nd_prepare(*args, **kwargs):
-        U, handle = _nd_prepare(*args, **kwargs)
-        handles.append(handle)
-        return U, handle
-
-    head, grads = _head_connections(
-        nd_prepare, _nd_finish, i, layers, save_stats=save_stats
-    )
-    want_head, want = _head_connections(
-        det_facade.cake_mhc_det_train_prepare,
-        det_facade.cake_mhc_det_train_finish,
-        i,
-        layers,
-        save_stats=save_stats,
-    )
+    names = [
+        "head",
+        "dX",
+        *(f"{k}[{c}]" for c in range(2) for k in ("dfn", "dscale", "dbase")),
+    ]
+    judge = TierJudge(DRAWS)
+    failures: list[str] = []
     what = f"T={T} H={hidden} save_stats={save_stats}"
-    assert len(handles) == 2
-    assert all(isinstance(h, backend._MHCTrainHandle) for h in handles), what
-    assert head.shape == (T, hidden) and _same_bits(head, want_head), f"head {what}"
-    names = ["X", *(f"{k}[{c}]" for c in range(2) for k in ("fn", "scale", "base"))]
-    for name, g, w in zip(names, grads, want, strict=True):
-        assert g is not None and bool(torch.isfinite(g).all()), f"grad {name} {what}"
-        assert bool((g != 0).any()), f"grad {name} {what}: no gradient reached the leaf"
-        if name.startswith("fn"):
-            assert _rel_l2(g, w) <= DFN_REL_L2_MAX, f"grad {name} {what}"
-        else:
-            assert _same_bits(g, w), f"grad {name} {what}"
+    cuda, state = torch.cuda.get_rng_state_all(), torch.get_rng_state()
+    try:
+        for j in range(DRAWS):
+            s = draw_seed(SEED + 40, j)
+            seed_all(s)
+            i = _inputs(T, seed=s, hidden=hidden)
+            second = _inputs(1, seed=s + 1, hidden=hidden)
+            layers = [[k[n] for n in ("fn", "scale", "base")] for k in (i, second)]
+            handles = []
+
+            def nd_prepare(*args, **kwargs):
+                U, handle = _nd_prepare(*args, **kwargs)
+                handles.append(handle)
+                return U, handle
+
+            head, grads = _head_connections(
+                nd_prepare, _nd_finish, i, layers, save_stats=save_stats
+            )
+            assert len(handles) == 2
+            assert all(isinstance(h, backend._MHCTrainHandle) for h in handles), what
+            assert head.shape == (T, hidden), f"head {what}"
+            got = [head, *grads]
+            for name, g in zip(names[1:], grads, strict=True):
+                assert g is not None, f"grad {name} {what}"
+                assert bool((g != 0).any()), (
+                    f"grad {name} {what}: no gradient reached the leaf"
+                )
+            want_head, want = _chain(i, layers, F64)
+            tier_head, tier = _chain(i, layers, BF16)
+            for name, actual, expected, naive in zip(
+                names, got, [want_head, *want], [tier_head, *tier], strict=True
+            ):
+                if message := contract(name, actual, expected):
+                    failures.append(f"draw {j}: {message}")
+                    if actual.shape != expected.shape:
+                        continue
+                judge.add(name, j, actual, expected, {t: naive.to(BF16) for t in TIERS})
+    finally:
+        torch.set_rng_state(state)
+        torch.cuda.set_rng_state_all(cuda)
+    failures += judge.failures()
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)

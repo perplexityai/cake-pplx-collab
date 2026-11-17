@@ -15,7 +15,7 @@ limitations under the License.
 
 Fused-reduction backend of the Cake four-stream mHC training forward /
 backward (hidden sizes 4096, 5120 and 7168 per call, from ``X``; 4 streams;
-SM100 / SM103, and hidden 4096 on SM107; the backward's column-slab pass folds
+SM100 / SM103 / SM107; the backward's column-slab pass folds
 ``dfn``, ``dscale`` and ``dbase`` itself), one self-contained
 package (host API bodies, the ``cake_jit`` registry, the ``cake_build`` loader
 and the generated CUDA sources under ``csrc/``).  It imports nothing from other
@@ -26,27 +26,27 @@ here.
 
 Numerical contract: every output repeats bit for bit from run to run on one
 device (each sum runs in an order fixed by the token count and the device).
-Against the deterministic package: the forward, the statistics replay, the
-residual mixing and ``backward_prepare`` run copies of the deterministic
-programs (the same bits).  ``backward_finish`` runs the deterministic
-token-owner pass, the atomic fn split (beside the token-owner pass, as its
-programmatic dependent) and the column slab (see :mod:`.cake_jit`; its
-dynamic-schedule form over the deterministic package's token chunks: the
-host rule's two-size tail schedule is calibrated for no device) and no final
-reduction kernel.  ``dX`` is the deterministic package's bits, and so are
-``dscale`` and ``dbase``: the column slab folds the token-owner pass's
-parameter rows in the deterministic reduction's order.  The column slab stores
-the compensated ``dfn`` sum of every (column slab, token chunk) unit, the
-deterministic package's FP32 partial of that unit bit for bit, in its chunk's
-slots of the backward workspace, and once every unit has stored its sums the
-grid folds each element's ``P <= 32`` partials ``x_p`` into ``dfn`` in
-ascending chunk order as a compensated FP32 sum, the caller's ``dfn`` last
-under ``accumulate=True``, with one rounding: within one FP32 rounding of the
-exact sum plus ``O(P^2 u^2) (|start| + sum |x_p|)`` (``u = 2^-24``), no
-addition flushing a subnormal.  The deterministic package sums the same
-partials in FP64 and rounds once, so ``dfn`` is the deterministic package's
-``dfn`` except where the exact sum lies within that last term of an FP32
-rounding boundary.
+The forward, the statistics replay, the residual mixing and
+``backward_prepare`` run copies of the deterministic package's programs.
+``backward_finish`` runs a copy of the deterministic token-owner pass, the
+atomic fn split (beside the token-owner pass, as its programmatic dependent)
+and the column slab (see :mod:`.cake_jit`; its dynamic-schedule form over the
+deterministic package's token chunks: the host rule's two-size tail schedule
+is calibrated for no device) and no final reduction kernel.  The column slab
+folds ``dscale`` and ``dbase`` from the token-owner pass's parameter rows in a
+fixed order.  It stores the FP32 ``dfn`` sum of every (column slab, token
+chunk) unit in its chunk's slots of the backward workspace, and once every
+unit has stored its sums the grid adds each element's ``P <= 32`` partials
+``x_p`` in ascending chunk order as one FP32 sum from +0.0, the caller's
+``dfn`` last under ``accumulate=True``: within ``gamma_n (|start| + sum
+|x_p|)`` of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
+``u = 2^-24``), no addition flushing a subnormal.  By default
+(``accumulation="fp32"``) every sum is one plain FP32 word: no FP64
+arithmetic and no compensation word.  The opt-in ``accumulation="fp32x2"``
+(hidden 4096, ``sinkhorn_iters=20``) runs the two-word programs of the
+mapping pass, the token-owner pass and the column slab with its folds
+(``cake_jit.ACC_WORDS_PROGRAMS``): each of their sums is a compensated pair
+of FP32 words stored as one FP32 word, not FP64.
 
 Mode: the names keep the package's own prefix (``cake_mhc_nondet_train_*``,
 ``CakeMHCNondet*Function``); no entry point takes a ``deterministic`` keyword
@@ -73,6 +73,7 @@ from .cake_jit import (
     GSTATS_COLS,
     HC_EPS,
     HIDDEN,
+    ACCUMULATION,
     HIDDEN_SIZES,
     MAPPING_ROWS,
     RMS_EPS,
@@ -269,6 +270,12 @@ def _fast_constants(rms_eps: Any, hc_eps: Any, sinkhorn_iters: Any) -> bool:
         and 0.0 < hc_eps < math.inf
         and sinkhorn_iters in SHIPPED_SINKHORN_ITERS
     )
+
+
+def _one_word(accumulation: Any) -> bool:
+    """Whether ``accumulation`` is the default mode (``"fp32"``): the fast paths serve it alone."""
+
+    return type(accumulation) is str and accumulation == ACCUMULATION
 
 
 def _rows_of(X: Any) -> tuple[int, int, torch.device]:
@@ -790,7 +797,7 @@ class _Launch:
         self.run, self.template, self.slots = run, template, slots
 
 
-_PLANS: dict[tuple[str, str, int, int, int, str, bool], tuple[_Launch, ...]] = {}
+_PLANS: dict[tuple[str, str, int, int, int, str, bool, str], tuple[_Launch, ...]] = {}
 
 
 def _route_plan(
@@ -801,6 +808,7 @@ def _route_plan(
     device_index: int,
     path: str,
     sinkhorn_iters: int = SINKHORN_ITERS,
+    accumulation: str = ACCUMULATION,
 ) -> tuple[_Launch, ...]:
     """The launches of one route for ``rows`` tokens of hidden size ``hidden`` on
     ``device_index`` along ``path`` (one of ``cake_jit.PDL_PATHS``: with the
@@ -809,10 +817,12 @@ def _route_plan(
     than the count of record selects the run-time-count records; the count
     itself is a launch value, so one plan serves every such count.  A route that
     exports no run-time-count program raises ``NotImplementedError`` for such a
-    count (``cake_jit.selected_modules``)."""
+    count (``cake_jit.selected_modules``).  ``accumulation`` (``"fp32"`` or
+    ``"fp32x2"``) is part of the plan's key: the two-word mode selects its own
+    programs (``cake_jit.two_word_modules``)."""
 
     run_time = int(sinkhorn_iters) != SINKHORN_ITERS
-    key = (arch, kind, rows, hidden, device_index, path, run_time)
+    key = (arch, kind, rows, hidden, device_index, path, run_time, accumulation)
     plan = _PLANS.get(key)
     if plan is None:
         launches = []
@@ -824,6 +834,7 @@ def _route_plan(
             rows=rows,
             sm_count=sm_count,
             sinkhorn_iters=sinkhorn_iters,
+            accumulation=accumulation,
         ):
             record = _loader.MODULES[name]
             logical = record["logical"]
@@ -1087,9 +1098,12 @@ def _run_route(
     device: torch.device,
     path: str,
     sinkhorn_iters: int = SINKHORN_ITERS,
+    accumulation: str = ACCUMULATION,
 ) -> None:
     device_index = _device_index(device)
-    plan = _route_plan(arch, kind, rows, hidden, device_index, path, sinkhorn_iters)
+    plan = _route_plan(
+        arch, kind, rows, hidden, device_index, path, sinkhorn_iters, accumulation
+    )
     stream = _current_stream(device_index)
     with _tvm_ffi().use_raw_stream(_tvm_device(device_index), stream):
         for launch in plan:
@@ -1228,6 +1242,7 @@ def cake_mhc_nondet_train_forward_prepare(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     out: Optional[torch.Tensor] = None,
     stats_out: Optional[torch.Tensor] = None,
     workspace: Optional[torch.Tensor] = None,
@@ -1240,7 +1255,7 @@ def cake_mhc_nondet_train_forward_prepare(
         BF16 ``[T, 4, H]`` contiguous residual streams (``T`` is a runtime
         scalar; ``T == 0`` returns empty outputs without launching).  The
         hidden size ``H`` of the call is ``X.shape[2]``: 4096, 5120 or 7168
-        on SM100 / SM103, 4096 on SM107.
+        on SM100 / SM103 / SM107.
     fn : torch.Tensor
         FP32 ``[24, 4H]`` contiguous mapping matrix.
     scale : torch.Tensor
@@ -1257,6 +1272,19 @@ def cake_mhc_nondet_train_forward_prepare(
         The default runs the compiled programs, whose chain is unrolled for it;
         every other count runs the run-time-count programs of the coefficient and
         token-owner passes.  A larger count raises ``NotImplementedError``.
+    accumulation : str
+        ``"fp32"`` (default): every kernel keeps each sum in one plain FP32 word.
+        ``"fp32x2"`` (opt-in): the passes of ``cake_jit.ACC_WORDS_ROLES`` (the
+        mapping pass; in the backward also the token-owner pass and the column
+        slab with its folds) run their two-word programs, which keep each sum
+        as a compensated pair of FP32 words (the running sum and its rounding
+        error) and store one FP32 word: a compensated FP32 sum, not FP64.  The
+        workspaces and records are unchanged.  Hidden 4096 and
+        ``sinkhorn_iters=20`` only (another hidden size or count raises
+        ``NotImplementedError``).  One two-word program per pass serves every
+        token count, in place of the token-count bands of the default.  A
+        replay (``forward_stats``) and the backward of a forward take the
+        forward's mode.
     out : torch.Tensor, optional
         Preallocated BF16 ``[T, H]`` contiguous ``U``.
     stats_out : torch.Tensor, optional
@@ -1271,14 +1299,18 @@ def cake_mhc_nondet_train_forward_prepare(
     ``(U, stats)``: BF16 ``U[t, d] = BF16(sum_i pre[t, i] X[t, i, d])`` and the
     FP32 ``[T, 64]`` per-token record ``r | z[24] | pre[4] | post[4] | C[16] | pad[15]``
     (256 bytes per token) that ``forward_finish``, ``backward_prepare`` and
-    ``backward_finish`` consume, bitwise the deterministic package's.  No
+    ``backward_finish`` consume.  No
     ``[T, 4H]`` or ``[T, 4, H]`` FP32 temporary is produced.
 
     The launches run on the current torch stream of the tensors' device.
     """
 
-    fast = _fast_forward(
-        X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "fwd_prepare"
+    fast = (
+        _fast_forward(
+            X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "fwd_prepare"
+        )
+        if _one_word(accumulation)
+        else None
     )
     if fast is not None:
         rows, hidden, index, arch = fast
@@ -1301,6 +1333,7 @@ def cake_mhc_nondet_train_forward_prepare(
             return U, stats
     _check_constants(rms_eps, hc_eps, sinkhorn_iters)
     rows, hidden, device = _rows_of(X)
+    _loader.check_accumulation(accumulation, hidden, sinkhorn_iters)
     arch = _device_arch(device)
     X = _validate_tensor(
         X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
@@ -1338,6 +1371,7 @@ def cake_mhc_nondet_train_forward_prepare(
         device=device,
         path=_PATH_FORWARD,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
     )
     return U, stats
 
@@ -1351,6 +1385,7 @@ def cake_mhc_nondet_train_forward_stats(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     stats_out: Optional[torch.Tensor] = None,
     workspace: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -1363,6 +1398,9 @@ def cake_mhc_nondet_train_forward_stats(
     rms_eps, hc_eps, sinkhorn_iters : float, float, int
         As in :func:`cake_mhc_nondet_train_forward_prepare` (the epsilons are launch
         arguments; the iteration count is ``1 .. SINKHORN_ITERS_MAX``, default ``20``).
+    accumulation : str
+        As in :func:`cake_mhc_nondet_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in): the mode of the forward whose record this replays.
     stats_out : torch.Tensor, optional
         Preallocated FP32 ``[T, 64]`` contiguous statistics record.
     workspace : torch.Tensor, optional
@@ -1371,15 +1409,19 @@ def cake_mhc_nondet_train_forward_stats(
     Returns
     -------
     FP32 ``[T, 64]`` ``stats``, bitwise identical to the record
-    :func:`cake_mhc_nondet_train_forward_prepare` returns for the same inputs on the same
-    device: the route is the strict prefix of the forward (fn split, mapping
+    :func:`cake_mhc_nondet_train_forward_prepare` returns for the same inputs and mode on the
+    same device: the route is the strict prefix of the forward (fn split, mapping
     pass, coefficients) under the same work partition, without the ``U`` write.
 
     The launches run on the current torch stream of the tensors' device.
     """
 
-    fast = _fast_forward(
-        X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "fwd_recompute"
+    fast = (
+        _fast_forward(
+            X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "fwd_recompute"
+        )
+        if _one_word(accumulation)
+        else None
     )
     if fast is not None:
         rows, hidden, index, arch = fast
@@ -1402,6 +1444,7 @@ def cake_mhc_nondet_train_forward_stats(
             return stats
     _check_constants(rms_eps, hc_eps, sinkhorn_iters)
     rows, hidden, device = _rows_of(X)
+    _loader.check_accumulation(accumulation, hidden, sinkhorn_iters)
     arch = _device_arch(device)
     X = _validate_tensor(
         X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
@@ -1437,6 +1480,7 @@ def cake_mhc_nondet_train_forward_stats(
         device=device,
         path=_PATH_CHECKPOINT,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
     )
     return stats
 
@@ -1648,6 +1692,7 @@ def cake_mhc_nondet_train_backward_finish(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     accumulate: bool = False,
     workspace: Optional[torch.Tensor] = None,
     dX: Optional[torch.Tensor] = None,
@@ -1680,11 +1725,16 @@ def cake_mhc_nondet_train_backward_finish(
     rms_eps, hc_eps, sinkhorn_iters : float, float, int
         As in :func:`cake_mhc_nondet_train_forward_prepare` (the epsilons are launch
         arguments; the iteration count is ``1 .. SINKHORN_ITERS_MAX``, default ``20``).
+    accumulation : str
+        As in :func:`cake_mhc_nondet_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in: the token-owner pass and the column slab with its
+        parameter and ``dfn`` folds run their two-word programs, each fold a
+        compensated two-word FP32 sum; pass the forward's mode).
     accumulate : bool
         ``False`` (default): ``dfn``, ``dscale`` and ``dbase`` are written.
         ``True``: the caller passes all three; each fold adds the current value
-        last and rounds once (``dfn``: after its compensated sum of the chunk
-        slots; ``dscale`` / ``dbase``: in the deterministic package's order).
+        last (``dfn``: after its FP32 sum of the chunk slots; ``dscale`` /
+        ``dbase``: after the fixed-order FP32 sums of the parameter rows).
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from :func:`cake_mhc_nondet_train_backward_workspace`
         (sized for this ``H``: ``hidden=X.shape[2]``); a per-device default
@@ -1699,21 +1749,16 @@ def cake_mhc_nondet_train_backward_finish(
     -------
     ``(dX, dfn, dscale, dbase)``, each the same bits on every run on one
     device: the BF16 ``dX`` sums the mapping, collapse and residual-mixing
-    contributions in FP32 and rounds once, bitwise the deterministic package's
-    ``dX``.  ``dscale`` / ``dbase`` fold the token-owner pass's parameter rows
-    in the deterministic package's fixed order (per-CTA rows as an FP64 chain,
-    or 8-token group rows as compensated FP32 columns where that package runs
-    them: hidden 4096 above 14927 tokens on sm_100a and sm_103a; see
-    :mod:`.cake_jit`), rounded once, bitwise the deterministic package's.
-    ``dfn`` folds the per-chunk FP32 partials ``x_p`` (bitwise the
-    deterministic package's) of at most ``P <= 32`` token chunks (the
-    deterministic package's chunks per token count and device) per element in
-    ascending chunk order as a compensated FP32 sum, the caller's ``dfn`` last
-    under ``accumulate=True``, rounded once: within one FP32 rounding of the
-    exact sum plus ``O(P^2 u^2) (|start| + sum |x_p|)`` (``u = 2^-24``).
-    It is the deterministic package's ``dfn`` (an FP64 sum of the same
-    partials, rounded once) except where the exact sum lies within that last
-    term of an FP32 rounding boundary.
+    contributions in FP32 and rounds once.  ``dscale`` / ``dbase`` fold the
+    token-owner pass's parameter rows in a fixed order (per-CTA rows, or
+    8-token group rows where the deterministic package runs them: hidden 4096
+    above 14927 tokens on sm_100a and sm_103a; see :mod:`.cake_jit`), each sum
+    one FP32 word.  ``dfn`` adds the per-chunk FP32 partials ``x_p`` of at
+    most ``P <= 32`` token chunks (the deterministic package's chunks per
+    token count and device) per element in ascending chunk order as one FP32
+    sum from +0.0, the caller's ``dfn`` last under ``accumulate=True``: within
+    ``gamma_n (|start| + sum |x_p|)`` of the exact sum (``n`` the additions,
+    ``gamma_n = n u / (1 - n u)``, ``u = 2^-24``).
     With ``T == 0`` nothing is launched: ``dX`` is empty and the parameter
     gradients are zeroed (``accumulate=False``) or left untouched
     (``accumulate=True``).
@@ -1734,6 +1779,7 @@ def cake_mhc_nondet_train_backward_finish(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
         accumulate=accumulate,
         workspace=workspace,
         dX=dX,
@@ -1758,6 +1804,7 @@ def _backward_finish(
     rms_eps: float,
     hc_eps: float,
     sinkhorn_iters: int,
+    accumulation: str = "fp32",
     accumulate: bool,
     workspace: Optional[torch.Tensor],
     dX: Optional[torch.Tensor],
@@ -1771,8 +1818,10 @@ def _backward_finish(
     autograd nodes know which): the path fixes the per-call PDL argument of the
     column-slab record (:func:`cake_jit.enable_pdl`)."""
 
-    fast = _fast_forward(
-        X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "bwd_finish"
+    fast = (
+        _fast_forward(X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "bwd_finish")
+        if _one_word(accumulation)
+        else None
     )
     if fast is not None:
         rows, hidden, index, arch = fast
@@ -1824,6 +1873,7 @@ def _backward_finish(
             return dX, dfn, dscale, dbase
     _check_constants(rms_eps, hc_eps, sinkhorn_iters)
     rows, hidden, device = _rows_of(X)
+    _loader.check_accumulation(accumulation, hidden, sinkhorn_iters)
     arch = _device_arch(device)
     X = _validate_tensor(
         X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
@@ -1872,7 +1922,7 @@ def _backward_finish(
     # "slab"; no two-size lpt record ships)
     # describes the ``[T, 4, H]`` tensors as ``[T, 4H]``, reads the first
     # ``T`` rows of the padded ``dz'`` record, draws its work units from the
-    # workspace's self-resetting ticket word, stores each unit's compensated
+    # workspace's self-resetting ticket word, stores each unit's FP32
     # dfn sums in its chunk's slots, folds the slots into dfn across the grid once
     # every unit is done (the self-resetting slab_cnt words count the units and
     # the CTAs) and folds dscale / dbase from the token owner's rows.
@@ -1923,6 +1973,7 @@ def _backward_finish(
         device=device,
         path=path,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
     )
     return dX, dfn, dscale, dbase
 
@@ -1963,6 +2014,7 @@ class _MHCTrainState:
         "rms_eps",
         "hc_eps",
         "sinkhorn_iters",
+        "accumulation",
         "workspace",
         "backward_workspace",
     )
@@ -1974,6 +2026,7 @@ class _MHCTrainState:
         rms_eps: float = 1e-5,
         hc_eps: float = 1e-6,
         sinkhorn_iters: int = 20,
+        accumulation: str = "fp32",
         workspace: Optional[torch.Tensor] = None,
         backward_workspace: Optional[torch.Tensor] = None,
     ) -> None:
@@ -1982,6 +2035,7 @@ class _MHCTrainState:
         self.recorded = False
         self.save_stats = bool(save_stats)
         self.rms_eps, self.hc_eps, self.sinkhorn_iters = rms_eps, hc_eps, sinkhorn_iters
+        self.accumulation = accumulation
         self.workspace, self.backward_workspace = workspace, backward_workspace
 
     def replay(self, X: torch.Tensor) -> torch.Tensor:
@@ -1995,6 +2049,7 @@ class _MHCTrainState:
             rms_eps=self.rms_eps,
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.sinkhorn_iters,
+            accumulation=self.accumulation,
             workspace=self.workspace,
         )
 
@@ -2093,6 +2148,7 @@ class CakeMHCNondetPrepareFunction(torch.autograd.Function):
             rms_eps=state.rms_eps,
             hc_eps=state.hc_eps,
             sinkhorn_iters=state.sinkhorn_iters,
+            accumulation=state.accumulation,
             workspace=state.workspace,
         )
         state.fn, state.scale, state.base = fn.detach(), scale.detach(), base.detach()
@@ -2139,6 +2195,7 @@ class CakeMHCNondetPrepareFunction(torch.autograd.Function):
             rms_eps=state.rms_eps,
             hc_eps=state.hc_eps,
             sinkhorn_iters=state.sinkhorn_iters,
+            accumulation=state.accumulation,
             accumulate=False,
             workspace=state.backward_workspace,
             dX=None,
@@ -2222,6 +2279,7 @@ def cake_mhc_nondet_train_prepare(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     save_stats: bool = True,
     workspace: Optional[torch.Tensor] = None,
     backward_workspace: Optional[torch.Tensor] = None,
@@ -2235,6 +2293,10 @@ def cake_mhc_nondet_train_prepare(
     rms_eps, hc_eps, sinkhorn_iters : float, float, int
         As in :func:`cake_mhc_nondet_train_forward_prepare` (the epsilons are launch
         arguments; the iteration count is ``1 .. SINKHORN_ITERS_MAX``, default ``20``).
+    accumulation : str
+        As in :func:`cake_mhc_nondet_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in); the forward, its replay and the backward of this
+        node (and the finish node of its handle) run in this mode.
     save_stats : bool
         ``True`` (default): the per-token statistics are saved for the backward
         through the autograd saved tensors (an activation checkpoint frees and
@@ -2258,6 +2320,7 @@ def cake_mhc_nondet_train_prepare(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=_loader.check_accumulation(accumulation),
         workspace=workspace,
         backward_workspace=backward_workspace,
     )
