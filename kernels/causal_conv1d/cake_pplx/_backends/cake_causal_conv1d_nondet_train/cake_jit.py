@@ -40,23 +40,24 @@ and ``dx`` are the det program's, and only the cross-CTA reduction of
 ``dweight`` / ``dbias`` differs.  Instead of storing one partial row per CTA
 for a reduce program to sum in a fixed order, each CTA adds its CTA row into
 the accumulators (logical tensor ``acc``, kernel parameter ``dw_acc``) with
-unordered global reductions -- FP32 ``red.add``
-(``v4``) where the det reduce sums in FP32 (``bwd``, ``bwd_dt``,
-``bwd_bias``), FP64 ``atomicAdd`` where it sums in FP64 (the ``_fp32g``
-routes) -- then takes a ticket on its channel tile's ``work`` counter; the
-tile's last CTA reads the tile's accumulators, stores ``dw`` (and ``db``) in
-the dtypes ``flags`` names (one rounding from the accumulator), and stores
-zeros back.  So ``acc`` and ``work`` are zero before and after every launch
-(CUDA Graph replays included), the host never zeroes them again, and nothing
-synchronizes with the host.  The summation order of the cross-CTA sum depends
+unordered global reductions -- FP32 ``red.add`` (``v4``), one plain FP32
+word per sum, as the det reduce sums in FP32 on every route; the ``_fp32g``
+routes spread a tile's CTAs over ``slots`` copies of the accumulators so
+that fewer adds queue on a word -- then takes a ticket on its channel tile's
+``work`` counter; the tile's last CTA reads the tile's accumulators (with
+several copies every copy's, added in copy order in FP32), stores ``dw`` (and
+``db``) in the dtypes ``flags`` names, and stores zeros back.  So ``acc`` and
+``work`` are zero before and after every launch (CUDA Graph replays
+included), the host never zeroes them again, and nothing synchronizes with
+the host.  The summation order of the cross-CTA sum depends
 on the CTAs' timing: ``dweight`` / ``dbias`` are not bitwise reproducible run
 to run (the only relaxed property); their accuracy budget is the det
 reduction's.
 
 The backward workspace (:func:`accumulator_layout`) is one ``uint8`` buffer:
-``acc`` (``taps x C`` FP32 or FP64 words: ``[C, 4]`` taps, then ``[C]`` bias
-on the bias routes) at offset 0 and the uint32 ``work`` counters (one per
-channel tile) at the next 16-byte boundary.  Its size depends on ``C`` and the
+``acc`` (``slots x taps x C`` FP32 words: ``slots`` copies of the ``[C, 4]``
+taps, then ``[C]`` bias on the bias routes) at offset 0 and the uint32
+``work`` counters (one per channel tile) at the next 16-byte boundary.  Its size depends on ``C`` and the
 route, never on ``S`` or the grid; the public size
 (:func:`backward_workspace_bytes`) is the largest over every backward program
 of the architecture, so one zeroed buffer serves every route.
@@ -1731,14 +1732,15 @@ MODULES: dict[str, dict[str, Any]] = {
         },
     },
     # Route ``bwd_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_c8027a64ba3cc38333bf`` (the same build keywords, body and grid; the route's
+    # ``cake_causal_conv1d_det_train_e31ee9ad746b7101fdca`` (the same build keywords, body and grid; the route's
     # fallback (no ``select_rule``)).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise the det
-    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP64 accumulator
-    # ``acc`` (``[C x 4]``), takes a ticket on its channel tile's ``work`` counter (uint32 ``[n_ch_tiles]``),
-    # and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags`` names once (one rounding from
-    # FP64) and zeroes its accumulators and counter, so ``acc`` / ``work`` are zero before and after every
-    # launch.  No reduce program, no host synchronization, no cooperative launch.
-    "cake_causal_conv1d_train_c3d9c23921f5573d0577": {
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots`` FP32 copies
+    # of the accumulator ``acc`` (``[C x 4]`` each), takes a ticket on its channel tile's ``work`` counter (uint32
+    # ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32 and stores ``dw`` (and ``db``)
+    # in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its accumulators and counter, so ``acc``
+    # / ``work`` are zero before and after every launch.  No reduce program, no host synchronization, no cooperative
+    # launch.
+    "cake_causal_conv1d_train_e3ff1615646de68a1aab": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -1780,8 +1782,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_c3d9c23921f5573d0577",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_c3d9c23921f5573d0577",
+        "kernel": "cake_causal_conv1d_train_e3ff1615646de68a1aab",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_e3ff1615646de68a1aab",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -1789,7 +1791,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 66560,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_c3d9c23921f5573d0577",
+        "library": "cake_causal_conv1d_train_e3ff1615646de68a1aab",
         "logical": {
             "C": "C",
             "S": "S",
@@ -1812,22 +1814,23 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd",
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 4,
             "work": "uint32",
         },
     },
     # Route ``bwd_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_f1545adfd2bb28044419`` (the same build keywords, body and grid; the route's
+    # ``cake_causal_conv1d_det_train_f5bf4ecc39d89fc55c1c`` (the same build keywords, body and grid; the route's
     # fallback (no ``select_rule``)).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise the det
-    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP64 accumulator
-    # ``acc`` (``[C x 4]``), takes a ticket on its channel tile's ``work`` counter (uint32 ``[n_ch_tiles]``),
-    # and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags`` names once (one rounding from
-    # FP64) and zeroes its accumulators and counter, so ``acc`` / ``work`` are zero before and after every
-    # launch.  No reduce program, no host synchronization, no cooperative launch.
-    "cake_causal_conv1d_train_064063666308a8552401": {
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots`` FP32 copies
+    # of the accumulator ``acc`` (``[C x 4]`` each), takes a ticket on its channel tile's ``work`` counter (uint32
+    # ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32 and stores ``dw`` (and ``db``)
+    # in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its accumulators and counter, so ``acc``
+    # / ``work`` are zero before and after every launch.  No reduce program, no host synchronization, no cooperative
+    # launch.
+    "cake_causal_conv1d_train_c5abee01ba7440dd50b8": {
         "arches": [
             "sm_107a",
         ],
@@ -1865,8 +1868,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_064063666308a8552401",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_064063666308a8552401",
+        "kernel": "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_c5abee01ba7440dd50b8",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -1874,7 +1877,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 66560,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_064063666308a8552401",
+        "library": "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
         "logical": {
             "C": "C",
             "S": "S",
@@ -1895,22 +1898,23 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd",
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 4,
             "work": "uint32",
         },
     },
     # Route ``bwd_bias_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_149ca6f53934ba630033`` (the same build keywords, body and grid; the route's
+    # ``cake_causal_conv1d_det_train_d9bf04014f9741f50f41`` (the same build keywords, body and grid; the route's
     # fallback (no ``select_rule``)).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise the det
-    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP64 accumulator
-    # ``acc`` (``[C x 4]`` taps then ``[C]`` bias), takes a ticket on its channel tile's ``work`` counter
-    # (uint32 ``[n_ch_tiles]``), and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags``
-    # names once (one rounding from FP64) and zeroes its accumulators and counter, so ``acc`` / ``work`` are
-    # zero before and after every launch.  No reduce program, no host synchronization, no cooperative launch.
-    "cake_causal_conv1d_train_a47e12df7005fb5fb72b": {
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots`` FP32 copies
+    # of the accumulator ``acc`` (``[C x 4]`` taps then ``[C]`` bias each), takes a ticket on its channel tile's
+    # ``work`` counter (uint32 ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32 and
+    # stores ``dw`` (and ``db``) in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its
+    # accumulators and counter, so ``acc`` / ``work`` are zero before and after every launch.  No reduce program, no
+    # host synchronization, no cooperative launch.
+    "cake_causal_conv1d_train_8433ef0894e75c192d4b": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -1954,8 +1958,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_a47e12df7005fb5fb72b",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_a47e12df7005fb5fb72b",
+        "kernel": "cake_causal_conv1d_train_8433ef0894e75c192d4b",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_8433ef0894e75c192d4b",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -1963,7 +1967,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 74752,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_a47e12df7005fb5fb72b",
+        "library": "cake_causal_conv1d_train_8433ef0894e75c192d4b",
         "logical": {
             "C": "C",
             "S": "S",
@@ -1988,22 +1992,23 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd",
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 5,
             "work": "uint32",
         },
     },
     # Route ``bwd_bias_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_843c010db78c79107fd3`` (the same build keywords, body and grid; the route's
+    # ``cake_causal_conv1d_det_train_9da2f80d080a8f4e7f3c`` (the same build keywords, body and grid; the route's
     # fallback (no ``select_rule``)).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise the det
-    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP64 accumulator
-    # ``acc`` (``[C x 4]`` taps then ``[C]`` bias), takes a ticket on its channel tile's ``work`` counter
-    # (uint32 ``[n_ch_tiles]``), and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags``
-    # names once (one rounding from FP64) and zeroes its accumulators and counter, so ``acc`` / ``work`` are
-    # zero before and after every launch.  No reduce program, no host synchronization, no cooperative launch.
-    "cake_causal_conv1d_train_61b7fb3c4a7d481011eb": {
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots`` FP32 copies
+    # of the accumulator ``acc`` (``[C x 4]`` taps then ``[C]`` bias each), takes a ticket on its channel tile's
+    # ``work`` counter (uint32 ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32 and
+    # stores ``dw`` (and ``db``) in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its
+    # accumulators and counter, so ``acc`` / ``work`` are zero before and after every launch.  No reduce program, no
+    # host synchronization, no cooperative launch.
+    "cake_causal_conv1d_train_286b95d7960d16de0849": {
         "arches": [
             "sm_107a",
         ],
@@ -2043,8 +2048,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_61b7fb3c4a7d481011eb",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_61b7fb3c4a7d481011eb",
+        "kernel": "cake_causal_conv1d_train_286b95d7960d16de0849",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_286b95d7960d16de0849",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -2052,7 +2057,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 74752,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_61b7fb3c4a7d481011eb",
+        "library": "cake_causal_conv1d_train_286b95d7960d16de0849",
         "logical": {
             "C": "C",
             "S": "S",
@@ -2075,8 +2080,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd",
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 5,
             "work": "uint32",
@@ -2375,14 +2380,15 @@ MODULES: dict[str, dict[str, Any]] = {
         },
     },
     # Route ``bwd_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_170d89481a616ae977b3`` (the same build keywords, body and grid; selected
-    # from C = 512 on sm_100a, 512 on sm_103a, 1024 on sm_107a).  Every per-thread and per-CTA FP32 step and
-    # ``dx`` are bitwise the det program's; only the cross-CTA reduction differs: each CTA adds its CTA row into
-    # the FP64 accumulator ``acc`` (``[C x 4]``), takes a ticket on its channel tile's ``work`` counter (uint32
-    # ``[n_ch_tiles]``), and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags`` names once
-    # (one rounding from FP64) and zeroes its accumulators and counter, so ``acc`` / ``work`` are zero before
-    # and after every launch.  No reduce program, no host synchronization, no cooperative launch.
-    "cake_causal_conv1d_train_d542ad2292353c56bd65": {
+    # ``cake_causal_conv1d_det_train_d1ba933488aef5d736cc`` (the same build keywords, body and grid; selected from C =
+    # 512 on sm_100a, 512 on sm_103a, 1024 on sm_107a).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise
+    # the det program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots``
+    # FP32 copies of the accumulator ``acc`` (``[C x 4]`` each), takes a ticket on its channel tile's ``work`` counter
+    # (uint32 ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32 and stores ``dw`` (and
+    # ``db``) in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its accumulators and counter, so
+    # ``acc`` / ``work`` are zero before and after every launch.  No reduce program, no host synchronization, no
+    # cooperative launch.
+    "cake_causal_conv1d_train_41fcd5b4c3749107aba7": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -2426,8 +2432,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_d542ad2292353c56bd65",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_d542ad2292353c56bd65",
+        "kernel": "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_41fcd5b4c3749107aba7",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -2435,7 +2441,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 99328,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_d542ad2292353c56bd65",
+        "library": "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
         "logical": {
             "C": "C",
             "S": "S",
@@ -2466,14 +2472,14 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "channels_at_least",
         },
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 4,
             "work": "uint32",
         },
     },
-    "cake_causal_conv1d_train_ffa1f5752a2f183cd02f": {
+    "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d": {
         "arches": [
             "sm_107a",
         ],
@@ -2513,8 +2519,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_ffa1f5752a2f183cd02f",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_ffa1f5752a2f183cd02f",
+        "kernel": "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -2522,7 +2528,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 99328,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_ffa1f5752a2f183cd02f",
+        "library": "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
         "logical": {
             "C": "C",
             "S": "S",
@@ -2551,23 +2557,23 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "channels_at_least",
         },
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 4,
             "work": "uint32",
         },
     },
     # Route ``bwd_bias_fp32g``: the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_a681165b3e81204c73ff`` (the same build keywords, body and grid; selected
-    # from C = 512 on sm_100a, 512 on sm_103a, 1024 on sm_107a).  Every per-thread and per-CTA FP32 step and
-    # ``dx`` are bitwise the det program's; only the cross-CTA reduction differs: each CTA adds its CTA row into
-    # the FP64 accumulator ``acc`` (``[C x 4]`` taps then ``[C]`` bias), takes a ticket on its channel tile's
-    # ``work`` counter (uint32 ``[n_ch_tiles]``), and the tile's last CTA stores ``dw`` (and ``db``) in the
-    # dtypes ``flags`` names once (one rounding from FP64) and zeroes its accumulators and counter, so ``acc`` /
-    # ``work`` are zero before and after every launch.  No reduce program, no host synchronization, no
-    # cooperative launch.
-    "cake_causal_conv1d_train_0cc1521134686f49dbc9": {
+    # ``cake_causal_conv1d_det_train_b2c01f2bee8bcdaec6f8`` (the same build keywords, body and grid; selected from C =
+    # 512 on sm_100a, 512 on sm_103a, 1024 on sm_107a).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise
+    # the det program's; only the cross-CTA reduction differs: each CTA adds its CTA row into one of the ``slots``
+    # FP32 copies of the accumulator ``acc`` (``[C x 4]`` taps then ``[C]`` bias each), takes a ticket on its channel
+    # tile's ``work`` counter (uint32 ``[n_ch_tiles]``), and the tile's last CTA adds the copies in copy order in FP32
+    # and stores ``dw`` (and ``db``) in the dtypes ``flags`` names once (one rounding from FP32) and zeroes its
+    # accumulators and counter, so ``acc`` / ``work`` are zero before and after every launch.  No reduce program, no
+    # host synchronization, no cooperative launch.
+    "cake_causal_conv1d_train_7dd30c23ccab6ab97182": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -2613,8 +2619,8 @@ MODULES: dict[str, dict[str, Any]] = {
             },
             "kind": "occupancy",
         },
-        "kernel": "cake_causal_conv1d_train_0cc1521134686f49dbc9",
-        "kernel_symbol": "kernel_cake_causal_conv1d_train_0cc1521134686f49dbc9",
+        "kernel": "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -2622,7 +2628,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 107520,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_train_0cc1521134686f49dbc9",
+        "library": "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         "logical": {
             "C": "C",
             "S": "S",
@@ -2655,8 +2661,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "channels_at_least",
         },
         "workspace_rule": {
-            "acc": "float64",
-            "slots": 4,
+            "acc": "float32",
+            "slots": 16,
             "kind": "accumulators",
             "taps": 5,
             "work": "uint32",
@@ -2772,16 +2778,16 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_383cb5839559d5b0e72b",
         ],
         "bwd_bias_fp32g": [
-            "cake_causal_conv1d_train_a47e12df7005fb5fb72b",
-            "cake_causal_conv1d_train_0cc1521134686f49dbc9",
+            "cake_causal_conv1d_train_8433ef0894e75c192d4b",
+            "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
         ],
         "bwd_fp32g": [
-            "cake_causal_conv1d_train_c3d9c23921f5573d0577",
-            "cake_causal_conv1d_train_d542ad2292353c56bd65",
+            "cake_causal_conv1d_train_e3ff1615646de68a1aab",
+            "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2805,16 +2811,16 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_383cb5839559d5b0e72b",
         ],
         "bwd_bias_fp32g": [
-            "cake_causal_conv1d_train_a47e12df7005fb5fb72b",
-            "cake_causal_conv1d_train_0cc1521134686f49dbc9",
+            "cake_causal_conv1d_train_8433ef0894e75c192d4b",
+            "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_train_32c5625f33586925f154",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
         ],
         "bwd_fp32g": [
-            "cake_causal_conv1d_train_c3d9c23921f5573d0577",
-            "cake_causal_conv1d_train_d542ad2292353c56bd65",
+            "cake_causal_conv1d_train_e3ff1615646de68a1aab",
+            "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2841,17 +2847,17 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_fdd0d538db009e587335",
         ],
         "bwd_bias_fp32g": [
-            "cake_causal_conv1d_train_61b7fb3c4a7d481011eb",
-            "cake_causal_conv1d_train_0cc1521134686f49dbc9",
+            "cake_causal_conv1d_train_286b95d7960d16de0849",
+            "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         ],
         "bwd_dt": [
             "cake_causal_conv1d_train_d7f458b69c0249f63c37",
             "cake_causal_conv1d_train_012b6319a0cc717911b9",
         ],
         "bwd_fp32g": [
-            "cake_causal_conv1d_train_064063666308a8552401",
-            "cake_causal_conv1d_train_d542ad2292353c56bd65",
-            "cake_causal_conv1d_train_ffa1f5752a2f183cd02f",
+            "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
+            "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
+            "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
         ],
         "fwd": [
             "cake_causal_conv1d_train_f5497330bfd286211643",
@@ -2956,7 +2962,8 @@ LOGICAL_TENSORS = (
 # The workspace-rule vocabulary (``record["workspace_rule"]["kind"]``): a
 # backward program's ``accumulators`` (``{"kind": "accumulators", "taps": 4 | 5,
 # "acc": "float32" | "float64", "work": "uint32", "slots": K}``:
-# ``slots x taps x C`` accumulator words of dtype ``acc`` -- ``slots`` copies
+# ``slots x taps x C`` accumulator words of dtype ``acc``; every program of
+# this package sums in FP32, one plain FP32 word per sum -- ``slots`` copies
 # (the program's accumulator copies; required, a positive int) of the ``[C, 4]`` taps, then
 # the ``[C]`` bias on the bias routes -- and one ``work`` ticket counter per
 # channel tile,
@@ -3239,9 +3246,10 @@ def workspace_record(arch: str) -> dict[str, Any]:
     The public workspace serves every backward program of every backward route
     (:func:`workspace_owners`).  The owners share one build geometry, so for
     every ``C`` they plan one ``n_ch_tiles`` and their workspaces differ only
-    in the accumulator bytes per channel, ``taps x sizeof(acc)``: the record
-    with the most (an FP64 bias route's 40 bytes per channel; :data:`KINDS`
-    then route order break ties) bounds them all.  Owners of different
+    in the accumulator bytes per channel, ``slots x taps x sizeof(acc)``: the
+    record with the most (a bias ``_fp32g`` route's sixteen copies of five FP32
+    words, 320 bytes per channel; :data:`KINDS` then route order break ties)
+    bounds them all.  Owners of different
     geometries are a registry error (``RuntimeError``).
     """
 
@@ -4058,8 +4066,8 @@ def accumulator_layout(
 ) -> dict[str, Any]:
     """Byte layout of one backward launch's ``acc`` / ``work`` inside the ``uint8`` backward workspace.
 
-    ``acc``: ``slots x taps x C`` words of the rule's ``acc`` dtype (FP32, or
-    FP64 on the ``_fp32g`` routes) at offset 0 -- ``slots`` copies (the rule's
+    ``acc``: ``slots x taps x C`` words of the rule's ``acc`` dtype (FP32 on
+    every route) at offset 0 -- ``slots`` copies (the rule's
     required field; the program spreads its CTAs over them) of the
     ``[C, 4]`` tap accumulators, then the ``[C]`` bias accumulators on the bias
     routes, in the program's own order; ``work``: ``n_ch_tiles``
