@@ -16505,10 +16505,11 @@ def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
     """On a part of :data:`K1_WGRAD_CHANGED_ROWS`: the weight gradient of every changed row takes its route (the
     stream-K program of :data:`K1_WGRAD_SK_RULES_BY_SM` with no cached plan, or its :data:`_K1_ATOMIC_CACHE` entry:
     the cluster program, the CTA-pair program at one or two splits or in the split order of its range of
-    :data:`K1_ORDERED_RANGES_BY_SM` or :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`, or the deterministic program -- a row
-    of :data:`K1_WGRAD_DET_RULES_BY_SM` on the table's program, the template of the deterministic package's prepared
-    launch of that program) and meets the naive BF16 tier against FP64 over the draws, the first draw launched
-    ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without changed rows skips."""
+    :data:`K1_ORDERED_RANGES_BY_SM` or :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`, or the deterministic program -- the
+    deterministic package's plan of the row; a row of :data:`K1_WGRAD_DET_RULES_BY_SM` the table's program, the
+    template of the deterministic package's prepared launch of that program) and meets the naive BF16 tier against
+    FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without
+    changed rows skips."""
     device, arch, sms = _part_or_skip()
     rows = K1_WGRAD_CHANGED_ROWS.get((arch, sms), {})
     if not rows:
@@ -16558,6 +16559,16 @@ def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
                     **knobs,
                 )
                 assert launch.template == entry.det_plan.template, what
+            else:
+                # the deterministic package's own plan of the row (its weight gradient's default knobs)
+                A, B, transposed = det_backend.wgrad_views(G, X, arch=arch, out_f32=f32)
+                knobs = dict(sk="auto", cta_rows=None)
+                assert (
+                    entry.det_plan
+                    == det_backend._k1_plan(
+                        A, B, v.out, transposed_out=transposed, knobs=knobs
+                    )[0]
+                ), what
             continue
         plan = entry.plan
         assert plan is not None, what
@@ -16604,7 +16615,7 @@ def test_gpu_k1_parity_ranges_run_at_their_edges(record_property):
                 continue
             what = f"parity {d_in} {d_out} {dt} {T} {want}"
             cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-            _n5_judge_call(
+            v = _n5_judge_call(
                 record_property,
                 f"wgrad_{d_in}_{d_out}_{dt}_{T}",
                 SEED + 173,
@@ -16619,6 +16630,16 @@ def test_gpu_k1_parity_ranges_run_at_their_edges(record_property):
             ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
             if want == ():
                 assert entry.plan is None and entry.det_plan is not None, what
+                # the deterministic package's own plan of the row (its weight gradient's default knobs)
+                G, X = v.ops
+                A, B, transposed = det_backend.wgrad_views(G, X, arch=arch, out_f32=f32)
+                knobs = dict(sk="auto", cta_rows=None)
+                assert (
+                    entry.det_plan
+                    == det_backend._k1_plan(
+                        A, B, v.out, transposed_out=transposed, knobs=knobs
+                    )[0]
+                ), what
                 continue
             plan = entry.plan
             assert plan is not None and entry.k1 is not None, what
