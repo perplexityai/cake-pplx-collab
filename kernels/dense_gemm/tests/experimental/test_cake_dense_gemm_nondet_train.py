@@ -11250,48 +11250,30 @@ def _router_prepare(A, B, out, splits, arch, spec=None):
     return prepared
 
 
-def _router_segment_reference(A, B, plan):
-    """``(expected, bound)`` of a launch of ``plan``: each tile's segments' partials -- the deterministic program's
-    one-split store of the segment's K range, which this package's program reproduces bit for bit -- summed in K
-    order, and the bound of a reordering of that sum (``0`` for at most two partials: either order rounds alike)."""
-    K = int(A.shape[1])
-    partials = {}
-    per_tile = _segments(
-        plan.m_pairs,
-        plan.n_tiles,
-        plan.k_iters,
-        plan.units,
-        plan.head_spans,
-        plan.head_steps,
-    )
-    for k0, k1 in sorted({seg for segs in per_tile for seg in segs}):
-        lo, hi = (
-            k0 * cake_backend.ROUTER_BLOCK_K,
-            min(K, k1 * cake_backend.ROUTER_BLOCK_K),
-        )
-        part = torch.empty(int(A.shape[0]), int(B.shape[1]), device=A.device)
-        det_backend.cake_dense_gemm_det_train_router(
-            A[:, lo:hi], B[lo:hi, :], part, splits=1
-        )
-        partials[(k0, k1)] = part.t() if plan.swapped else part  # the launch's [M, N]
-    expected = torch.empty(plan.M, plan.N, device=A.device)
-    bound = torch.zeros(plan.M, plan.N, device=A.device, dtype=torch.float64)
-    bm, bn = 2 * cake_backend.ROUTER_BLOCK_M, cake_backend.ROUTER_BLOCK_N
-    for t, segs in enumerate(per_tile):
-        pair, col = divmod(t, plan.n_tiles)
-        rows = slice(pair * bm, min(plan.M, (pair + 1) * bm))
-        cols = slice(col * bn, min(plan.N, (col + 1) * bn))
-        if rows.start >= plan.M:
-            continue
-        tile = [partials[s][rows, cols] for s in segs]
-        acc = tile[0].clone()
-        for p in tile[1:]:
-            acc = acc + p
-        expected[rows, cols] = acc
-        if len(tile) > 2:
-            mag = sum(p.double().abs() for p in tile)
-            bound[rows, cols] = (len(tile) - 1) * 2.0**-23 * mag
-    return expected, bound
+def _n2_router_redraw(X, W, G, *outputs):
+    """``draw`` of :func:`judge_gemm` for launches bound to ``X``, ``W`` and ``G`` (``G`` may be None): writes the
+    router inputs of the draw's seed (:func:`_router_inputs` at ``X``'s token count and hidden size) in place into
+    them, and NaN into ``outputs``."""
+    T, hidden = X.shape
+
+    def draw(seed):
+        values = _router_inputs(T, X.device, seed, K=hidden)
+        for t, value in zip((X, W, G), values, strict=True):
+            if t is not None:
+                t.copy_(value)
+        nan_fill(outputs)
+
+    return draw
+
+
+def _n2_product(A, B, *names):
+    """``product`` of :func:`judge_gemm`: ``A @ B`` on the operands converted to the dtype, under each of
+    ``names``."""
+
+    def product(_, dtype):
+        return dict.fromkeys(names, A.to(dtype) @ B.to(dtype))
+
+    return product
 
 
 @pytest.mark.parametrize(
@@ -11310,24 +11292,26 @@ def _router_segment_reference(A, B, plan):
         ("wgrad", 11, None),
     ],
 )
-def test_gpu_router_d11_gate(op, splits, spec, router_rule):
-    """The router's accuracy gate, the deterministic package's shipped budget: ``rel_fro <= 2e-6`` against FP64 of
-    the exact fp32 operands, finite, worst over ``RERUNS`` launches into a NaN-poisoned ``out``; the forward's top-8
-    agrees with FP64 on every row and repeats bit for bit.  Against the deterministic program's one-split partials
-    of each segment: a whole tile is their bits, two partials their sum (either order rounds alike), more within the
-    reordering bound of their K-order sum.  One unit per tile (``splits=1``) is the deterministic program's
-    one-split result.  The profiler shows this package's program."""
-    _router_gate(op, splits, spec, router_rule, ROUTER_T, 6144, SEED + 20)
+def test_gpu_router_d11_gate(op, splits, spec, router_rule, record_property):
+    """The router's gate: the prepared launch of this package's program (head spans exactly for a head/tail
+    partition; the forward's plan reproducible) meets the naive BF16 tier against FP64 of the exact fp32 operands
+    over 32 draws written into its bound operands, the first draw over ``1 + RERUNS`` launches into a NaN-poisoned
+    ``out``, finite on every launch.  The profiler shows this package's program."""
+    _router_gate(
+        op, splits, spec, router_rule, ROUTER_T, 6144, SEED + 20, record_property
+    )
 
 
 @pytest.mark.parametrize("T", [1000, 16172, 16231, 16384])
 @pytest.mark.parametrize("spec", ["H1x4p44", "H1x5p44", "H1x4p80"])
-def test_gpu_router_head_units_at_hidden_4096(spec, T, router_rule):
+def test_gpu_router_head_units_at_hidden_4096(spec, T, router_rule, record_property):
     """The head/tail partitions with fewer head units than CTA pairs (``"H<f>x<k>p<h>"``: the hidden 4096 verdict of
     ``sm_103a`` and the hidden 6144 verdict of 152-SM ``sm_103a`` parts; 80 head units are more than a 152-SM part's CTA pairs, so there the partition is
     ``"H1x4"``'s) at hidden 4096, 256 experts, the measured token counts and a short one: the gate of
     :func:`test_gpu_router_d11_gate`, on the partition :func:`cake_backend.router_partition_of` gives the device."""
-    plan = _router_gate("wgrad", None, spec, router_rule, T, 4096, SEED + 24)
+    plan = _router_gate(
+        "wgrad", None, spec, router_rule, T, 4096, SEED + 24, record_property
+    )
     sm_count = det_backend.device_facts(torch.device("cuda")).sm_count
     m_pairs = plan.m_tiles // 2
     partition = cake_backend.router_partition_of(
@@ -11342,7 +11326,7 @@ def test_gpu_router_head_units_at_hidden_4096(spec, T, router_rule):
         assert plan.head_spans == cake_backend.router_head_pairs(spec) // plan.n_tiles
 
 
-def _router_gate(op, splits, spec, router_rule, T, hidden, seed):
+def _router_gate(op, splits, spec, router_rule, T, hidden, seed, record_property):
     """:func:`test_gpu_router_d11_gate` on ``T`` tokens of hidden size ``hidden``; returns the launch's plan."""
     device, arch = _atomic_device_or_skip()
     X, W, G = _router_inputs(T, device, seed, K=hidden)
@@ -11354,31 +11338,23 @@ def _router_gate(op, splits, spec, router_rule, T, hidden, seed):
     assert bool(plan.head_spans) == bool(cake_backend.router_head_tail(spec))
     if op == "fwd":
         assert plan.reproducible
-    ref = A.double() @ B.double()
-    expected, bound = _router_segment_reference(A, B, plan)
-    if plan.swapped:
-        expected, bound = expected.t(), bound.t()
     _assert_ran(prepared.launch, prepared.module_name)
-    first, worst = None, 0.0
-    for i in range(RERUNS):
-        out.fill_(float("nan"))
+
+    def launch(_):
         prepared.launch()
         torch.cuda.synchronize()
-        assert bool(torch.isfinite(out).all()), i
-        worst = max(worst, _rel_fro(out, ref))
-        assert bool(((out.double() - expected.double()).abs() <= bound).all()), i
-        if plan.reproducible:
-            first = out.clone() if first is None else first
-            assert torch.equal(out, first), i
-        if op == "fwd" and i == 0:
-            ref_top = torch.topk(ref, 8, dim=1).indices.sort(dim=1).values
-            top = torch.topk(out.double(), 8, dim=1).indices.sort(dim=1).values
-            assert int((top != ref_top).any(dim=1).sum()) == 0
-    assert worst <= ROUTER_REL_FRO_MAX, worst
-    if splits == 1:
-        det_out = torch.empty_like(out)
-        det_backend.cake_dense_gemm_det_train_router(A, B, det_out, splits=1)
-        assert torch.equal(out, det_out)
+        assert bool(torch.isfinite(out).all())
+        return {op: out}
+
+    judge_gemm(
+        record_property,
+        seed=seed,
+        draw=_n2_router_redraw(X, W, G, out),
+        launch=launch,
+        product=_n2_product(A, B, op),
+        launches=1 + RERUNS,
+        poison=lambda _: (out,),
+    )
     return plan
 
 
@@ -11408,19 +11384,19 @@ def _top8_rows_differ(out, ref, tie_ulps=16):
         (6144, 20480),
     ],
 )
-def test_gpu_router_tmem_head_tail_program_in_its_windows(hidden, T):
+def test_gpu_router_tmem_head_tail_program_in_its_windows(hidden, T, record_property):
     """On a part whose router table runs a head/tail window with the head/tail program with the A parts in tensor
     memory (152-SM sm_103a: hidden 4096 at 20480 to 49152 tokens, hidden 5120 at 16172 to 32768 and hidden 6144 at
     16385 to 20480, ``ROUTER_HEAD_TAIL_TEMPLATES``; 212-SM sm_107a: hidden 5120 and 6144 at 16172 to 16384 tokens,
     ``ROUTER_HEAD_TAIL_TEMPLATES_BY_SM``) the default plan of the weight gradient (at the first and the last token
-    count of each window and inside it) runs that program and meets the gate of :func:`test_gpu_router_d11_gate` over
-    ``RERUNS`` launches into a NaN-poisoned ``out``: finite, within the reordering bound of the K-order sum of the
-    deterministic program's one-split partials of its segments, relative Frobenius error against FP64 at most
-    ``ROUTER_REL_FRO_MAX``.  On whole tiles (one unit per tile) it stores the bits of the three-chunk-buffer head/tail
-    program at the same partition, which are the deterministic program's one-split result.  On a part of that
-    architecture with another SM count, where the windows do not hold (``router_rules``: :data:`ROUTER_RULES` off
-    :data:`ROUTER_SM_COUNT`, e.g. 148-SM sm_103a, or a table of its own with no window at that token count), the
-    default plan is the deterministic program.  Skips on any other device and outside the part's windows."""
+    count of each window and inside it) runs that program and meets the gate of :func:`test_gpu_router_d11_gate`:
+    the naive BF16 tier against FP64 over 32 draws written into its bound operands, the first draw over
+    ``1 + RERUNS`` launches into a NaN-poisoned ``out``, finite on every launch.  On whole tiles (one unit per tile)
+    that program and the three-chunk-buffer head/tail program at the same partition each meet the tier on the same
+    draws, launched into a NaN-poisoned ``out``.  On a part of that architecture with another SM count, where the
+    windows do not hold (``router_rules``: :data:`ROUTER_RULES` off :data:`ROUTER_SM_COUNT`, e.g. 148-SM sm_103a, or
+    a table of its own with no window at that token count), the default plan is the deterministic program.  Skips on
+    any other device and outside the part's windows."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     ts = cake_backend.router_head_tail_template(arch, sm_count)
@@ -11464,37 +11440,50 @@ def test_gpu_router_tmem_head_tail_program_in_its_windows(hidden, T):
     assert isinstance(prepared, cake_backend.CakeDenseGemmNondetRouterLaunch)
     assert prepared.plan == plan
     assert prepared.module_name == cake_jit.select_module(arch, ts)
-    ref = A.double() @ B.double()
-    expected, bound = _router_segment_reference(A, B, plan)
-    expected, bound = expected.t(), bound.t()
     _assert_ran(prepared.launch, prepared.module_name)
-    worst = 0.0
-    for i in range(RERUNS):
-        out.fill_(float("nan"))
+
+    def launch(_):
         prepared.launch()
         torch.cuda.synchronize()
-        assert bool(torch.isfinite(out).all()), i
-        worst = max(worst, _rel_fro(out, ref))
-        assert bool(((out.double() - expected.double()).abs() <= bound).all()), i
-    assert worst <= ROUTER_REL_FRO_MAX, worst
+        assert bool(torch.isfinite(out).all())
+        return {"default plan": out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 30,
+        draw=_n2_router_redraw(X, W, G, out),
+        launch=launch,
+        product=_n2_product(A, B, "default plan"),
+        launches=1 + RERUNS,
+        poison=lambda _: (out,),
+    )
     # whole tiles: no part tile, no fill of out, one segment per tile
     whole = dataclasses.replace(plan, units=plan.tiles, head_spans=0, head_steps=0)
     assert not whole.part_tiles and whole.reproducible
-    stores = {}
+    stores, whole_launches = {}, {}
     for template in (ts, c3):
         stores[template] = torch.full_like(out, float("nan"))
-        launch = cake_backend._prepare_atomic_k2(
+        whole_launches[template] = cake_backend._prepare_atomic_k2(
             dataclasses.replace(whole, template=template),
             A,
             B,
             stores[template],
             arch,
         )
-        launch.launch()
+
+    def launch_whole(_):
+        for whole_launch in whole_launches.values():
+            whole_launch.launch()
         torch.cuda.synchronize()
-    det_out = torch.empty_like(out)
-    det_backend.cake_dense_gemm_det_train_router(A, B, det_out, splits=1)
-    assert torch.equal(stores[ts], stores[c3]) and torch.equal(stores[ts], det_out)
+        return {f"whole tiles {template}": stores[template] for template in stores}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 30,
+        draw=_n2_router_redraw(X, W, G, *stores.values()),
+        launch=launch_whole,
+        product=_n2_product(A, B, *(f"whole tiles {template}" for template in stores)),
+    )
 
 
 #: The SIMT programs' tiles ``(tile_n, tile_m, slices)`` a test forces (each runs where this checkout registers it).
@@ -11521,12 +11510,15 @@ def _simt_device_or_skip(tile) -> tuple[torch.device, str, str]:
     ("hidden", "T"),
     [(4096, 1), (4096, 64), (5120, 17), (5120, 192), (6144, 255), (6144, 256)],
 )
-def test_gpu_router_simt_program_in_its_window(router_rule, tile, hidden, T):
-    """A SIMT window (forced for the row on this device) runs the SIMT program of its tile and no other program:
-    over ``RERUNS`` launches into a NaN-poisoned ``out`` the weight gradient is finite, within
-    ``ROUTER_REL_FRO_MAX`` of FP64 and the same bits every time (every element stored once, its slices added in a
-    fixed order), and the prepared launch, the cached launch of ``cake_dense_gemm_nondet_train_router``, ``cake_dense_gemm_nondet_train_router_wgrad`` (its entry
-    cache) and a padded ``out`` (written in place, its padding untouched) give those bits."""
+def test_gpu_router_simt_program_in_its_window(
+    router_rule, tile, hidden, T, record_property
+):
+    """A SIMT window (forced for the row on this device) runs the SIMT program of its tile and no other program.
+    Over 32 draws written into the bound operands, the weight gradient of the prepared launch, of the cached launch
+    of ``cake_dense_gemm_nondet_train_router``, of ``cake_dense_gemm_nondet_train_router_wgrad`` (its entry cache)
+    and of that entry into a padded ``out`` (written in place, its padding untouched) each meet the naive BF16 tier
+    against FP64, launched into NaN-poisoned outputs, the first draw ``1 + RERUNS`` times; the prepared launch's
+    output is finite on every launch."""
     device, arch, template = _simt_device_or_skip(tile)
     sm_count = det_backend.device_facts(device).sm_count
     X, W, G = _router_inputs(T, device, SEED + 40, K=hidden)
@@ -11541,48 +11533,50 @@ def test_gpu_router_simt_program_in_its_window(router_rule, tile, hidden, T):
     assert prepared.plan == plan and not prepared.fused_split
     assert prepared.module_name == cake_jit.select_module(arch, template)
     _assert_ran(prepared.launch, prepared.module_name)
-    ref = A.double() @ B.double()
-    first = None
-    for i in range(RERUNS):
-        out.fill_(float("nan"))
+    cached = torch.full_like(out, float("nan"))
+    entry = torch.full_like(out, float("nan"))
+    padded = torch.full((256, hidden + 4), float("nan"), device=device)
+    outputs = (out, cached, entry, padded)
+    names = ("prepared", "router", "router_wgrad", "padded out")
+
+    def launch(_):
         prepared.launch()
-        torch.cuda.synchronize()
-        assert bool(torch.isfinite(out).all()), i
-        if first is None:
-            first = out.clone()
-            assert _rel_fro(out, ref) <= ROUTER_REL_FRO_MAX
-        else:
-            assert torch.equal(out, first), i
-    for _ in range(2):
-        cached = torch.full_like(out, float("nan"))
         cake_backend.cake_dense_gemm_nondet_train_router(A, B, cached)
-        entry = torch.full_like(out, float("nan"))
         cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, entry)
+        cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, padded[:, :hidden])
         torch.cuda.synchronize()
-        assert torch.equal(cached, first) and torch.equal(entry, first)
+        assert bool(torch.isfinite(out).all())
+        assert bool(padded[:, hidden:].isnan().all())
+        return dict(zip(names, (out, cached, entry, padded[:, :hidden]), strict=True))
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 40,
+        draw=_n2_router_redraw(X, W, G, *outputs),
+        launch=launch,
+        product=_n2_product(A, B, *names),
+        launches=1 + RERUNS,
+        poison=lambda _: outputs,
+    )
     _assert_ran(
         lambda: cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, entry),
         prepared.module_name,
     )
-    padded = torch.full((256, hidden + 4), float("nan"), device=device)
-    cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, padded[:, :hidden])
-    torch.cuda.synchronize()
-    assert torch.equal(padded[:, :hidden], first)
-    assert bool(padded[:, hidden:].isnan().all())
 
 
 @pytest.mark.parametrize("tile", SIMT_TILES, ids=_simt_spec)
-def test_gpu_router_simt_program_replays_in_a_cuda_graph(router_rule, tile):
-    """``cake_dense_gemm_nondet_train_router_wgrad`` in a SIMT window captured into a CUDA graph (its entry cache, the prepared launch) replays the
-    eager bits into a NaN-poisoned ``out``; the activations and the gradient changed between replays are read
-    again."""
+def test_gpu_router_simt_program_replays_in_a_cuda_graph(
+    router_rule, tile, record_property
+):
+    """``cake_dense_gemm_nondet_train_router_wgrad`` in a SIMT window captured into a CUDA graph (its entry cache, the
+    prepared launch): over 32 draws of the activations and the gradient, written in place before each replay, both
+    replays into NaN-poisoned outputs meet the naive BF16 tier against FP64 of the values written, so every replay
+    reads its operands again."""
     device, arch, template = _simt_device_or_skip(tile)
     hidden, T = 5120, 128
     X, W, G = _router_inputs(T, device, SEED + 41, K=hidden)
     A, B, out = _router_case("wgrad", X, W, G)
     router_rule("wgrad", A, B, _simt_spec(tile))
-    eager = torch.empty_like(out)
-    cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, eager)
     prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(G.t(), X, out)
     assert prepared.plan.simt == tile
     entry_out = torch.empty_like(out)
@@ -11598,22 +11592,61 @@ def test_gpu_router_simt_program_replays_in_a_cuda_graph(router_rule, tile):
     with torch.cuda.graph(graph):
         cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, entry_out)
         prepared.launch()
-    for scale in (1.0, -0.5):
-        X.mul_(scale)
-        want = torch.empty_like(out)
-        cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, want)
-        entry_out.fill_(float("nan"))
-        out.fill_(float("nan"))
+
+    def replay(_):
         graph.replay()
         torch.cuda.synchronize()
-        assert torch.equal(entry_out, want) and torch.equal(out, want), scale
-    assert scale != 1.0 and not torch.equal(want, eager)
+        return {"entry replay": entry_out, "prepared replay": out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 41,
+        draw=_n2_router_redraw(X, W, G, entry_out, out),
+        launch=replay,
+        product=_n2_product(A, B, "entry replay", "prepared replay"),
+    )
 
 
-def test_gpu_router_simt_program_waits_for_an_early_producer(router_rule):
+def _n2_judge_router_chain(record_property, seed, X, W, Y, dX, dW):
+    """The router chain of this package's entry points under each PDL flag (``True``, ``False``, ``None``): the
+    forward writes ``Y = X @ W.T``, the input gradient reads it and writes ``dX = Y @ W``, the weight gradient reads
+    both and writes ``dW = Y.T @ dX``.  For each flag, over 32 draws written in place into ``X`` and ``W``, the first
+    over three launches of the chain into NaN-poisoned outputs, each output meets the naive BF16 tier (the same
+    chain in BF16 through torch) against the chain in FP64 of the draw's ``X`` and ``W``."""
+    for pdl in (True, False, None):
+        names = tuple(f"{name} enable_pdl={pdl}" for name in ("Y", "dX", "dW"))
+
+        def launch(_, pdl=pdl, names=names):
+            kw = dict(enable_pdl=pdl)
+            cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, Y, **kw)
+            cake_backend.cake_dense_gemm_nondet_train_router_dgrad(Y, W, dX, **kw)
+            cake_backend.cake_dense_gemm_nondet_train_router_wgrad(Y, dX, dW, **kw)
+            torch.cuda.synchronize()
+            return dict(zip(names, (Y, dX, dW), strict=True))
+
+        def product(_, dtype, names=names):
+            y = X.to(dtype) @ W.to(dtype).t()
+            dx = y @ W.to(dtype)
+            return dict(zip(names, (y, dx, y.t() @ dx), strict=True))
+
+        judge_gemm(
+            record_property,
+            seed=seed,
+            draw=_n2_router_redraw(X, W, None, Y, dX, dW),
+            launch=launch,
+            product=product,
+            launches=3,
+            poison=lambda _: (Y, dX, dW),
+        )
+
+
+def test_gpu_router_simt_program_waits_for_an_early_producer(
+    router_rule, record_property
+):
     """The SIMT program behind programmatic dependent launches: the forward writes ``Y``, the input gradient reads it
     and writes ``dX`` (both launched early under PDL), the weight gradient in a SIMT window reads both; launched after
-    its predecessor whatever the PDL flag, it reads every value they wrote, with every PDL flag and the same bits."""
+    its predecessor whatever the PDL flag, it reads every value they wrote: with every PDL flag, ``Y``, ``dX`` and
+    ``dW`` meet the naive BF16 tier of the chain (:func:`_n2_judge_router_chain`)."""
     device, arch = _atomic_device_or_skip()
     tile = next(
         (
@@ -11631,31 +11664,7 @@ def test_gpu_router_simt_program_waits_for_an_early_producer(router_rule):
     dX = torch.empty(T, hidden, device=device)
     dW = torch.empty(256, hidden, device=device)
     router_rule("wgrad", Y.t(), dX, _simt_spec(tile))
-    want_y = det_backend.cake_dense_gemm_det_train_router_forward(
-        X, W, enable_pdl=False
-    )
-    want_dx = det_backend.cake_dense_gemm_det_train_router_dgrad(
-        want_y, W, enable_pdl=False
-    )
-    want_dw = torch.empty_like(dW)
-    cake_backend.cake_dense_gemm_nondet_train_router_wgrad(
-        want_y, want_dx, want_dw, enable_pdl=False
-    )
-    torch.cuda.synchronize()
-    assert (
-        _rel_fro(want_dw, want_y.double().t() @ want_dx.double()) <= ROUTER_REL_FRO_MAX
-    )
-    for pdl in (True, False, None):
-        for _ in range(3):
-            for t in (Y, dX, dW):
-                t.fill_(float("nan"))
-            kw = dict(enable_pdl=pdl)
-            cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, Y, **kw)
-            cake_backend.cake_dense_gemm_nondet_train_router_dgrad(Y, W, dX, **kw)
-            cake_backend.cake_dense_gemm_nondet_train_router_wgrad(Y, dX, dW, **kw)
-            torch.cuda.synchronize()
-            assert torch.equal(Y, want_y) and torch.equal(dX, want_dx), pdl
-            assert torch.equal(dW, want_dw), pdl
+    _n2_judge_router_chain(record_property, SEED + 81, X, W, Y, dX, dW)
     assert {key[2][1][1] for key in cake_backend._K2_ATOMIC_CACHE} == {0, 1}
 
 
@@ -11677,12 +11686,16 @@ def _dgrad_simt_device_or_skip(tile) -> tuple[torch.device, str, str]:
     ("hidden", "T"),
     [(4096, 1), (4096, 128), (5120, 17), (5120, 64), (6144, 33), (6144, 231)],
 )
-def test_gpu_router_dgrad_simt_program_in_its_window(router_rule, tile, hidden, T):
+def test_gpu_router_dgrad_simt_program_in_its_window(
+    router_rule, tile, hidden, T, record_property
+):
     """An input-gradient SIMT window (forced for the row on this device) runs the SIMT program of its tile and no
-    other program: over ``RERUNS`` launches into a NaN-poisoned ``out`` the input gradient is finite (every row of a
-    partial last row tile written), within ``ROUTER_REL_FRO_MAX`` of FP64 and the same bits every time; the prepared
-    launch, the cached launch of ``cake_dense_gemm_nondet_train_router``, ``cake_dense_gemm_nondet_train_router_dgrad`` (its entry cache), operands with padded rows
-    (NaN in the padding, read in place) and a padded ``out`` (its padding untouched) give those bits."""
+    other program.  Over 32 draws written into the bound operands, the input gradient of the prepared launch, of the
+    cached launch of ``cake_dense_gemm_nondet_train_router``, of ``cake_dense_gemm_nondet_train_router_dgrad`` (its
+    entry cache) and of that entry on operands with padded rows (NaN in the padding, read in place) into a padded
+    ``out`` (its padding untouched) each meet the naive BF16 tier against FP64, launched into NaN-poisoned outputs,
+    the first draw ``1 + RERUNS`` times; the prepared launch's output is finite on every launch (every row of a
+    partial last row tile written)."""
     device, arch, template = _dgrad_simt_device_or_skip(tile)
     sm_count = det_backend.device_facts(device).sm_count
     X, W, G = _router_inputs(T, device, SEED + 140, K=hidden)
@@ -11697,53 +11710,60 @@ def test_gpu_router_dgrad_simt_program_in_its_window(router_rule, tile, hidden, 
     assert prepared.plan == plan and not prepared.fused_split
     assert prepared.module_name == cake_jit.select_module(arch, template)
     _assert_ran(prepared.launch, prepared.module_name)
-    ref = A.double() @ B.double()
-    first = None
-    for i in range(RERUNS):
-        out.fill_(float("nan"))
+    cached = torch.full_like(out, float("nan"))
+    entry = torch.full_like(out, float("nan"))
+    G_pad = torch.full((T, 256 + 4), float("nan"), device=device)
+    W_pad = torch.full((256, hidden + 8), float("nan"), device=device)
+    padded = torch.full((T, hidden + 4), float("nan"), device=device)
+    outputs = (out, cached, entry, padded)
+    names = ("prepared", "router", "router_dgrad", "padded out")
+    redraw = _n2_router_redraw(X, W, G, *outputs)
+
+    def draw(s):
+        redraw(s)
+        G_pad[:, :256] = G
+        W_pad[:, :hidden] = W
+
+    def launch(_):
         prepared.launch()
-        torch.cuda.synchronize()
-        assert bool(torch.isfinite(out).all()), i
-        if first is None:
-            first = out.clone()
-            assert _rel_fro(out, ref) <= ROUTER_REL_FRO_MAX
-        else:
-            assert torch.equal(out, first), i
-    for _ in range(2):
-        cached = torch.full_like(out, float("nan"))
         cake_backend.cake_dense_gemm_nondet_train_router(A, B, cached)
-        entry = torch.full_like(out, float("nan"))
         cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, entry)
+        cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
+            G_pad[:, :256], W_pad[:, :hidden], padded[:, :hidden]
+        )
         torch.cuda.synchronize()
-        assert torch.equal(cached, first) and torch.equal(entry, first)
+        assert bool(torch.isfinite(out).all())
+        assert bool(padded[:, hidden:].isnan().all())
+        return dict(zip(names, (out, cached, entry, padded[:, :hidden]), strict=True))
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 140,
+        draw=draw,
+        launch=launch,
+        product=_n2_product(A, B, *names),
+        launches=1 + RERUNS,
+        poison=lambda _: outputs,
+    )
     _assert_ran(
         lambda: cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, entry),
         prepared.module_name,
     )
-    G_pad = torch.full((T, 256 + 4), float("nan"), device=device)
-    G_pad[:, :256] = G
-    W_pad = torch.full((256, hidden + 8), float("nan"), device=device)
-    W_pad[:, :hidden] = W
-    padded = torch.full((T, hidden + 4), float("nan"), device=device)
-    cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
-        G_pad[:, :256], W_pad[:, :hidden], padded[:, :hidden]
-    )
-    torch.cuda.synchronize()
-    assert torch.equal(padded[:, :hidden], first)
-    assert bool(padded[:, hidden:].isnan().all())
 
 
 @pytest.mark.parametrize("tile", DGRAD_SIMT_TILES, ids=_simt_spec)
-def test_gpu_router_dgrad_simt_program_replays_in_a_cuda_graph(router_rule, tile):
-    """``cake_dense_gemm_nondet_train_router_dgrad`` in a SIMT window captured into a CUDA graph (its entry cache, the prepared launch) replays the
-    eager bits into a NaN-poisoned ``out``; the output gradient changed between replays is read again."""
+def test_gpu_router_dgrad_simt_program_replays_in_a_cuda_graph(
+    router_rule, tile, record_property
+):
+    """``cake_dense_gemm_nondet_train_router_dgrad`` in a SIMT window captured into a CUDA graph (its entry cache, the
+    prepared launch): over 32 draws of the output gradient and the router weight, written in place before each
+    replay, both replays into NaN-poisoned outputs meet the naive BF16 tier against FP64 of the values written, so
+    every replay reads its operands again."""
     device, arch, template = _dgrad_simt_device_or_skip(tile)
     hidden, T = 5120, 128
     X, W, G = _router_inputs(T, device, SEED + 141, K=hidden)
     A, B, out = _router_case("dgrad", X, W, G)
     router_rule("dgrad", A, B, _simt_spec(tile))
-    eager = torch.empty_like(out)
-    cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, eager)
     prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(G, W, out)
     assert prepared.plan.simt == tile and prepared.plan.template == template
     entry_out = torch.empty_like(out)
@@ -11759,23 +11779,29 @@ def test_gpu_router_dgrad_simt_program_replays_in_a_cuda_graph(router_rule, tile
     with torch.cuda.graph(graph):
         cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, entry_out)
         prepared.launch()
-    for scale in (1.0, -0.5):
-        G.mul_(scale)
-        want = torch.empty_like(out)
-        cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, want)
-        entry_out.fill_(float("nan"))
-        out.fill_(float("nan"))
+
+    def replay(_):
         graph.replay()
         torch.cuda.synchronize()
-        assert torch.equal(entry_out, want) and torch.equal(out, want), scale
-    assert scale != 1.0 and not torch.equal(want, eager)
+        return {"entry replay": entry_out, "prepared replay": out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 141,
+        draw=_n2_router_redraw(X, W, G, entry_out, out),
+        launch=replay,
+        product=_n2_product(A, B, "entry replay", "prepared replay"),
+    )
 
 
-def test_gpu_router_dgrad_simt_program_waits_for_an_early_producer(router_rule):
+def test_gpu_router_dgrad_simt_program_waits_for_an_early_producer(
+    router_rule, record_property
+):
     """The input gradient's SIMT program after programmatic dependent launches: the forward writes ``Y`` (launched
     early under PDL), the input gradient in a SIMT window reads it and writes ``dX``, the weight gradient reads both;
-    launched after its predecessor whatever the PDL flag, the SIMT program reads every value the forward wrote, with
-    every PDL flag and the same bits."""
+    launched after its predecessor whatever the PDL flag, the SIMT program reads every value the forward wrote: with
+    every PDL flag, ``Y``, ``dX`` and ``dW`` meet the naive BF16 tier of the chain
+    (:func:`_n2_judge_router_chain`)."""
     device, arch = _atomic_device_or_skip()
     tile = next(
         (
@@ -11793,36 +11819,7 @@ def test_gpu_router_dgrad_simt_program_waits_for_an_early_producer(router_rule):
     dX = torch.empty(T, hidden, device=device)
     dW = torch.empty(256, hidden, device=device)
     router_rule("dgrad", Y, W, _simt_spec(tile))
-    # The forward of this row's own route: in a forward SIMT window (64 tokens on
-    # 152-SM parts) the cluster program, whose bits differ from the deterministic one.
-    want_y = torch.empty_like(Y)
-    cake_backend.cake_dense_gemm_nondet_train_router_forward(
-        X, W, want_y, enable_pdl=False
-    )
-    torch.cuda.synchronize()
-    assert _rel_fro(want_y, X.double() @ W.double().T) <= ROUTER_REL_FRO_MAX
-    want_dx = torch.empty_like(dX)
-    cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
-        want_y, W, want_dx, enable_pdl=False
-    )
-    torch.cuda.synchronize()
-    assert _rel_fro(want_dx, want_y.double() @ W.double()) <= ROUTER_REL_FRO_MAX
-    want_dw = torch.empty_like(dW)
-    cake_backend.cake_dense_gemm_nondet_train_router_wgrad(
-        want_y, want_dx, want_dw, enable_pdl=False
-    )
-    torch.cuda.synchronize()
-    for pdl in (True, False, None):
-        for _ in range(3):
-            for t in (Y, dX, dW):
-                t.fill_(float("nan"))
-            kw = dict(enable_pdl=pdl)
-            cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, Y, **kw)
-            cake_backend.cake_dense_gemm_nondet_train_router_dgrad(Y, W, dX, **kw)
-            cake_backend.cake_dense_gemm_nondet_train_router_wgrad(Y, dX, dW, **kw)
-            torch.cuda.synchronize()
-            assert torch.equal(Y, want_y) and torch.equal(dX, want_dx), pdl
-            assert torch.equal(dW, want_dw), pdl
+    _n2_judge_router_chain(record_property, SEED + 142, X, W, Y, dX, dW)
     simt_keys = [
         key
         for key, e in cake_backend._K2_ATOMIC_CACHE.items()
@@ -11831,12 +11828,13 @@ def test_gpu_router_dgrad_simt_program_waits_for_an_early_producer(router_rule):
     assert {key[2][1][1] for key in simt_keys} == {0, 1}
 
 
-def test_gpu_router_input_gradient_windows_run_at_their_edges():
+def test_gpu_router_input_gradient_windows_run_at_their_edges(record_property):
     """Unforced (no split count): at 1 and 17 tokens and at the first and the last token
     count of every input-gradient SIMT window of this device's router table (``router_rules`` of its architecture and
-    SM count), and one token past the last window, ``cake_dense_gemm_nondet_train_router_dgrad`` runs the program the planner gives -- inside a
-    window the SIMT program of its tile (the prepared launch's program, within the gate, the same bits on every
-    call), outside the deterministic program's bits."""
+    SM count), and one token past the last window, ``cake_dense_gemm_nondet_train_router_dgrad`` runs the program the
+    planner gives and returns ``out`` -- inside a window the SIMT program of its tile (the prepared launch's program),
+    whose output meets the naive BF16 tier against FP64 over 32 draws, two calls into a NaN-poisoned ``out`` on the
+    first; outside, a prepared launch that is not this package's program (the deterministic program)."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     rules, holds = cake_backend.router_rules(arch, sm_count)
@@ -11864,27 +11862,49 @@ def test_gpu_router_input_gradient_windows_run_at_their_edges():
             prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(
                 G, W, torch.empty(T, hidden, device=device)
             )
-            det_out = det_backend.cake_dense_gemm_det_train_router_dgrad(G, W)
-            first = None
-            for _ in range(2):
-                out = torch.full((T, hidden), float("nan"), device=device)
-                assert (
-                    cake_backend.cake_dense_gemm_nondet_train_router_dgrad(G, W, out)
-                    is out
-                )
-                torch.cuda.synchronize()
-                if tile is None:
-                    assert torch.equal(out, det_out), (hidden, T)
-                    continue
-                assert _rel_fro(out, G.double() @ W.double()) <= ROUTER_REL_FRO_MAX
-                if first is None:
-                    first = out.clone()
-                assert torch.equal(out, first), (hidden, T)
             if tile is None:
+                for _ in range(2):
+                    out = torch.full((T, hidden), float("nan"), device=device)
+                    assert (
+                        cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
+                            G, W, out
+                        )
+                        is out
+                    )
                 assert not isinstance(prepared, atomic), (hidden, T)
                 continue
             assert isinstance(prepared, atomic), (hidden, T)
             assert tuple(prepared.plan.simt) == tile, (hidden, T)
+            name = f"dgrad hidden={hidden} T={T}"
+
+            def draw(s, T=T, hidden=hidden):
+                _, W, G = _router_inputs(T, device, s, K=hidden)
+                out = torch.full((T, hidden), float("nan"), device=device)
+                return SimpleNamespace(G=G, W=W, out=out)
+
+            def launch(v, name=name):
+                assert (
+                    cake_backend.cake_dense_gemm_nondet_train_router_dgrad(
+                        v.G, v.W, v.out
+                    )
+                    is v.out
+                ), name
+                torch.cuda.synchronize()
+                return {name: v.out}
+
+            def product(v, dtype, name=name):
+                return {name: v.G.to(dtype) @ v.W.to(dtype)}
+
+            v = judge_gemm(
+                record_property,
+                seed=SEED + 143 + T,
+                draw=draw,
+                launch=launch,
+                product=product,
+                launches=2,
+                poison=lambda v: (v.out,),
+            )
+            G, W, out = v.G, v.W, v.out
             _assert_ran(
                 lambda G=G,
                 W=W,
@@ -11923,19 +11943,19 @@ def _device_simt_windows(arch, sm_count, layout) -> list:
     return rows
 
 
-def test_gpu_router_forward_simt_windows_keep_the_fp64_rule(monkeypatch):
-    """Unforced (``cake_dense_gemm_nondet_train_router_forward(...)``, no split count), at the first and the last token count of
-    each forward SIMT window of the device's part (on a part with a router table of its own its windows,
+def test_gpu_router_forward_simt_windows_meet_the_naive_tier(
+    monkeypatch, record_property
+):
+    """Unforced (``cake_dense_gemm_nondet_train_router_forward(...)``, no split count), at the first and the last token
+    count of each forward SIMT window of the device's part (on a part with a router table of its own its windows,
     :data:`ROUTER_FWD_WINDOWS_BY_SM`; else those of the architecture, :data:`ROUTER_FWD_WINDOWS`, and on a part whose
-    SM count is not :data:`ROUTER_SM_COUNT` the measured count is set to the device's, so the program runs there too)
-    and two seeds: the planner gives the window's cluster program, which the call launches (no program of the
-    deterministic package); three calls into a NaN-poisoned ``out`` give finite values and the same bits (every element
-    stored once, the ranks' partials added in rank order); the relative Frobenius error against FP64 of the exact
-    operands is within ``ROUTER_REL_FRO_MAX``, every element within the error bound of a sum of ``K`` FP32 products in
-    any order, and the top-8 experts of every row are FP64's except near ties; a CUDA graph captured after the eager
-    call replays the same bits.  The ratio to the error of the deterministic program is printed, not checked.  A part
-    with a router table of its own and no forward window in it runs the deterministic program at the token counts of
-    the architecture's windows."""
+    SM count is not :data:`ROUTER_SM_COUNT` the measured count is set to the device's, so the program runs there too):
+    the planner gives the window's cluster program, which the call launches (no program of the deterministic
+    package).  Over 32 draws written in place into its operands, the first over three calls into a NaN-poisoned
+    ``out``, the call's output is finite and meets the naive BF16 tier against FP64 of the exact operands; a CUDA
+    graph captured after the eager calls, replayed into a NaN-poisoned ``out``, meets the tier on the same draws.  One
+    token past a window takes another spec.  A part with a router table of its own and no forward window in it runs
+    the deterministic program at the token counts of the architecture's windows."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     arch_windows = [
@@ -11962,7 +11982,7 @@ def test_gpu_router_forward_simt_windows_keep_the_fp64_rule(monkeypatch):
                 kw = dict(arch=arch, M=T, N=256, K=hidden, sm_count=sm_count)
                 assert cake_backend.router_forward_simt(**kw) is None, (hidden, T)
         print(
-            f"ROUTER_FWD_SIMT_FP64 {arch} sm_count={sm_count}: no forward window on this part"
+            f"ROUTER_FWD_SIMT {arch} sm_count={sm_count}: no forward window on this part"
         )
         return
     if not own and sm_count != cake_backend.ROUTER_SM_COUNT[arch]:
@@ -11974,77 +11994,74 @@ def test_gpu_router_forward_simt_windows_keep_the_fp64_rule(monkeypatch):
         _require_template(arch, template)
         module = cake_jit.select_module(arch, template)
         for T in sorted({first, last}):
-            for seed in (SEED + 250, SEED + 251):
-                X, W, _ = _router_inputs(T, device, seed, K=hidden)
-                A, B, out = _router_case("fwd", X, W, None)
-                plan, reason = cake_backend.plan_atomic_router(
-                    A, B, out, arch=arch, sm_count=sm_count
-                )
-                assert plan is not None, (hidden, T, reason)
-                assert plan.simt == tile and plan.template == template, (hidden, T)
-                cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-                got = None
-                for i in range(3):
-                    out.fill_(float("nan"))
+            X, W, _ = _router_inputs(T, device, SEED + 250, K=hidden)
+            A, B, out = _router_case("fwd", X, W, None)
+            plan, reason = cake_backend.plan_atomic_router(
+                A, B, out, arch=arch, sm_count=sm_count
+            )
+            assert plan is not None, (hidden, T, reason)
+            assert plan.simt == tile and plan.template == template, (hidden, T)
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            name = f"forward hidden={hidden} T={T}"
+            draw = _n2_router_redraw(X, W, None, out)
+
+            def eager(_, X=X, W=W, out=out, name=name):
+                cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, out)
+                torch.cuda.synchronize()
+                assert bool(torch.isfinite(out).all()), name
+                return {name: out}
+
+            judge_gemm(
+                record_property,
+                seed=SEED + 250,
+                draw=draw,
+                launch=eager,
+                product=_n2_product(A, B, name),
+                launches=3,
+                poison=lambda _, out=out: (out,),
+            )
+            _assert_ran(
+                lambda X=X, W=W, out=out: (
                     cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, out)
-                    torch.cuda.synchronize()
-                    assert bool(torch.isfinite(out).all()), (hidden, T, i)
-                    if got is None:
-                        got = out.clone()
-                    else:
-                        assert torch.equal(out, got), (hidden, T, i)
-                if seed == SEED + 250:
-                    _assert_ran(
-                        lambda: cake_backend.cake_dense_gemm_nondet_train_router_forward(
-                            X, W, out
-                        ),
-                        module,
-                    )
-                    graph = torch.cuda.CUDAGraph()
-                    out.fill_(float("nan"))
-                    with torch.cuda.graph(graph):
-                        cake_backend.cake_dense_gemm_nondet_train_router_forward(
-                            X, W, out
-                        )
-                    out.fill_(float("nan"))
-                    graph.replay()
-                    torch.cuda.synchronize()
-                    assert torch.equal(out, got), (hidden, T)
-                    del graph
-                ref = X.double() @ W.double().t()
-                base = det_backend.cake_dense_gemm_det_train_router_forward(X, W)
-                err, base_err = _rel_fro(got, ref), _rel_fro(base, ref)
-                assert err <= ROUTER_REL_FRO_MAX, (hidden, T, seed, err)
-                gamma = hidden * 2.0**-24 / (1 - hidden * 2.0**-24)
-                bound = gamma * (X.double().abs() @ W.double().abs().t())
-                assert bool(((got.double() - ref).abs() <= bound).all()), (hidden, T)
-                differ, ties = _top8_rows_differ(got, ref)
-                assert differ == 0, (hidden, T, differ, ties)
-                print(
-                    f"ROUTER_FWD_SIMT_FP64 {arch} sm_count={sm_count} hidden={hidden} T={T} seed={seed} {spec}: "
-                    f"rel_fro {err:.4e}, deterministic program {base_err:.4e}, ratio {err / base_err:.4f}"
-                )
-                ran += 1
+                ),
+                module,
+            )
+            graph = torch.cuda.CUDAGraph()
+            out.fill_(float("nan"))
+            with torch.cuda.graph(graph):
+                cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, out)
+
+            def replay(_, graph=graph, out=out, name=name):
+                graph.replay()
+                torch.cuda.synchronize()
+                return {f"{name} graph replay": out}
+
+            judge_gemm(
+                record_property,
+                seed=SEED + 250,
+                draw=draw,
+                launch=replay,
+                product=_n2_product(A, B, f"{name} graph replay"),
+            )
+            del graph, replay
+            ran += 1
         # one token past the window's last: another spec (the next window's, or the deterministic program)
         past = cake_backend._router_rule_spec(
             "kk", arch=arch, sm_count=sm_count, M=last + 1, N=256, K=hidden
         )
         assert past != spec, (hidden, last + 1, past)
-    assert ran == sum(2 * len({first, last}) for _, first, last, _ in windows)
+    assert ran == sum(len({first, last}) for _, first, last, _ in windows)
 
 
 @pytest.mark.parametrize("op", ["wgrad", "dgrad"])
-def test_gpu_router_shipped_simt_windows_keep_the_fp64_rule(monkeypatch, op):
+def test_gpu_router_shipped_simt_windows_meet_the_naive_tier(op, record_property):
     """Unforced (no split count), at the first and the last token count of each shipped
     SIMT window of the 148-SM tables that holds on this device (148-SM sm_100a / sm_103a parts;
-    :func:`_device_simt_windows`) and two seeds: the planner gives the window's program; three calls into a
-    NaN-poisoned ``out`` give finite values and the same bits; the relative Frobenius error against FP64 of the exact
-    operands is within ``ROUTER_REL_FRO_MAX`` (the accuracy rule of the windows) and every element within the error
-    bound of a sum of ``K`` FP32 products in any order (``gamma_K`` times the sum of the products' magnitudes).  The
-    ratio to the error of the plan the row takes without its SIMT windows (the deterministic program) is printed, not
-    checked.  One token past a window takes another plan.  On every other part no token count of these windows runs
-    a ``kahan`` SIMT program, one of a spec with a form (a 152-SM or 212-SM part may run the plain SIMT program of its
-    own window there)."""
+    :func:`_device_simt_windows`): the planner gives the window's program, and over 32 draws, the first over three
+    calls into a NaN-poisoned ``out``, the entry point's output is finite and meets the naive BF16 tier against FP64
+    of the exact operands.  One token past a window takes another plan.  On every other part no token count of these
+    windows runs a ``kahan`` SIMT program, one of a spec with a form (a 152-SM or 212-SM part may run the plain SIMT
+    program of its own window there)."""
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
     layout = "nn_t" if op == "wgrad" else "kn"
@@ -12063,14 +12080,14 @@ def test_gpu_router_shipped_simt_windows_keep_the_fp64_rule(monkeypatch, op):
             kw = dict(arch=arch, sm_count=sm_count, M=M, N=N, K=K)
             simt = cake_backend.router_simt(layout, **kw)
             assert simt is None or len(simt) == 3, (hidden, T, simt)
-        print(f"ROUTER_SIMT_FP64 {arch} sm_count={sm_count} {op}: no shipped window")
+        print(f"ROUTER_SIMT {arch} sm_count={sm_count} {op}: no shipped window")
         return
     entry = (
         cake_backend.cake_dense_gemm_nondet_train_router_wgrad
         if op == "wgrad"
         else cake_backend.cake_dense_gemm_nondet_train_router_dgrad
     )
-    rules, holds = cake_backend.router_rules(arch, sm_count)
+    _, holds = cake_backend.router_rules(arch, sm_count)
     assert holds
     ran = 0
     for hidden, first, last, spec in windows:
@@ -12078,83 +12095,89 @@ def test_gpu_router_shipped_simt_windows_keep_the_fp64_rule(monkeypatch, op):
         assert tile is not None, spec
         template = cake_backend.router_simt_template(tile, layout)
         _require_template(arch, template)
-        key = (arch, layout, hidden, 256)
-        without = (
-            tuple(w for w in rules[key] if cake_backend.router_simt_tile(w[2]) is None)
-            or None
-        )
         for T in sorted({first, last}):
-            for seed in (SEED + 240, SEED + 241):
-                X, W, G = _router_inputs(T, device, seed, K=hidden)
+            X, W, G = _router_inputs(T, device, SEED + 240, K=hidden)
+            A, B, out = _router_case(op, X, W, G)
+            plan, reason = cake_backend.plan_atomic_router(
+                A, B, out, arch=arch, sm_count=sm_count
+            )
+            assert plan is not None, (hidden, T, reason)
+            assert plan.simt == tile and plan.template == template, (hidden, T)
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            name = f"{op} hidden={hidden} T={T}"
+
+            def draw(s, T=T, hidden=hidden):
+                X, W, G = _router_inputs(T, device, s, K=hidden)
                 A, B, out = _router_case(op, X, W, G)
                 args = (G, X) if op == "wgrad" else (G, W)
-                plan, reason = cake_backend.plan_atomic_router(
-                    A, B, out, arch=arch, sm_count=sm_count
-                )
-                assert plan is not None, (hidden, T, reason)
-                assert plan.simt == tile and plan.template == template, (hidden, T)
-                cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-                got = None
-                for i in range(3):
-                    out.fill_(float("nan"))
-                    entry(*args, out)
-                    torch.cuda.synchronize()
-                    assert bool(torch.isfinite(out).all()), (hidden, T, i)
-                    if got is None:
-                        got = out.clone()
-                    else:
-                        assert torch.equal(out, got), (hidden, T, i)
-                with monkeypatch.context() as m:
-                    m.setitem(rules, key, without)
-                    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-                    base = torch.full_like(out, float("nan"))
-                    entry(*args, base)
-                    torch.cuda.synchronize()
-                cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-                ref = A.double() @ B.double()
-                err, base_err = _rel_fro(got, ref), _rel_fro(base, ref)
-                print(
-                    f"ROUTER_SIMT_FP64 {arch} sm_count={sm_count} {op} hidden={hidden} T={T} seed={seed}: "
-                    f"rel_fro {err:.4e}, without the window {base_err:.4e}, ratio {err / base_err:.4f}"
-                )
-                assert err <= ROUTER_REL_FRO_MAX, (hidden, T, err)
-                k = A.shape[-1]
-                gamma = k * 2.0**-24 / (1 - k * 2.0**-24)
-                bound = gamma * (A.double().abs() @ B.double().abs())
-                assert bool(((got.double() - ref).abs() <= bound).all()), (hidden, T)
-                ran += 1
+                return SimpleNamespace(A=A, B=B, out=out, args=args)
+
+            def launch(v, name=name):
+                entry(*v.args, v.out)
+                torch.cuda.synchronize()
+                assert bool(torch.isfinite(v.out).all()), name
+                return {name: v.out}
+
+            def product(v, dtype, name=name):
+                return {name: v.A.to(dtype) @ v.B.to(dtype)}
+
+            judge_gemm(
+                record_property,
+                seed=SEED + 240,
+                draw=draw,
+                launch=launch,
+                product=product,
+                launches=3,
+                poison=lambda v: (v.out,),
+            )
+            ran += 1
         # one token past the window: another plan
         M, N, K = _router_launch_dims(layout, hidden, 256, last + 1)
         past = cake_backend._router_rule_spec(
             layout, arch=arch, sm_count=sm_count, M=M, N=N, K=K
         )
         assert past != spec, (hidden, last + 1, past)
-    assert ran == sum(2 * len({first, last}) for _, first, last, _ in windows)
+    assert ran == sum(len({first, last}) for _, first, last, _ in windows)
 
 
-def test_gpu_router_entry_points_reach_the_stream_k_program(router_rule):
-    """``cake_dense_gemm_nondet_train_router_forward`` / ``cake_dense_gemm_nondet_train_router_wgrad`` with a verdict for each row (no forward
-    verdict ships; the weight gradient of this hidden size runs the deterministic plan): the forward repeats bit
-    for bit, and its top-8, like the deterministic forward's, is FP64's on every row but the near ties (the 8th and
-    9th logits within 16 FP32 ulps); both meet the gate."""
+def test_gpu_router_entry_points_reach_the_stream_k_program(
+    router_rule, record_property
+):
+    """``cake_dense_gemm_nondet_train_router_forward`` / ``cake_dense_gemm_nondet_train_router_wgrad`` with a verdict
+    for each row (no forward verdict ships; the weight gradient of this hidden size runs the deterministic plan):
+    over 32 draws, the first over ``1 + RERUNS`` calls, the forward and the weight gradient each meet the naive BF16
+    tier against FP64 of the exact operands; the forward's plan is this package's router plan and the profiler shows
+    its program."""
     device, arch = _atomic_device_or_skip()
     X, W, G = _router_inputs(ROUTER_T, device, SEED + 21)
     router_rule("fwd", X, W.t(), "forward")
     router_rule("wgrad", G.t(), X, "pairs")
     first = cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
-    det_fwd = det_backend.cake_dense_gemm_det_train_router_forward(X, W)
-    ref_fwd, ref_wgrad = X.double() @ W.double().t(), G.double().t() @ X.double()
-    for name, out in (("atomic", first), ("det", det_fwd)):
-        differ, ties = _top8_rows_differ(out, ref_fwd)
-        print(
-            f"ROUTER_TOP8 {arch} {name}: {differ} rows differ, {ties} near ties excluded"
-        )
-        assert differ == 0 and ties <= ROUTER_T // 100, (differ, ties)
-    for _ in range(RERUNS):
-        out = cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W)
-        assert torch.equal(out, first) and _rel_fro(out, ref_fwd) <= ROUTER_REL_FRO_MAX
-        wgrad = cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X)
-        assert _rel_fro(wgrad, ref_wgrad) <= ROUTER_REL_FRO_MAX
+
+    def draw(s):
+        X, W, G = _router_inputs(ROUTER_T, device, s)
+        return SimpleNamespace(X=X, W=W, G=G)
+
+    def launch(v):
+        return {
+            "forward": cake_backend.cake_dense_gemm_nondet_train_router_forward(
+                v.X, v.W
+            ),
+            "wgrad": cake_backend.cake_dense_gemm_nondet_train_router_wgrad(v.G, v.X),
+        }
+
+    def product(v, dtype):
+        x, w, g = (t.to(dtype) for t in (v.X, v.W, v.G))
+        return {"forward": x @ w.t(), "wgrad": g.t() @ x}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 21,
+        draw=draw,
+        launch=launch,
+        product=product,
+        launches=1 + RERUNS,
+    )
     plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(X, W.t(), first)
     assert isinstance(plan, cake_backend.CakeDenseGemmNondetRouterPlan)
     _assert_ran(
@@ -12163,11 +12186,36 @@ def test_gpu_router_entry_points_reach_the_stream_k_program(router_rule):
     )
 
 
-def test_gpu_planned_rows_run_the_programs_of_their_verdicts():
+def _n2_launch(prepared, name, out):
+    """``launch`` of :func:`judge_gemm`: one launch of ``prepared``, its output ``out`` under ``name``."""
+
+    def launch(_):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {name: out}
+
+    return launch
+
+
+def _n2_k1_redraw(G, X, out):
+    """``draw`` of :func:`judge_gemm` for a K1 weight-gradient launch bound to ``G`` and ``X``: writes BF16 inputs of
+    the draw's seed (:func:`_bf16`, ``G`` first) in place into them, and NaN into ``out``."""
+
+    def draw(seed):
+        g = torch.Generator(device=G.device).manual_seed(seed)
+        G.copy_(_bf16(G.shape, G.device, g))
+        X.copy_(_bf16(X.shape, X.device, g))
+        nan_fill((out,))
+
+    return draw
+
+
+def test_gpu_planned_rows_run_the_programs_of_their_verdicts(record_property):
     """Unforced (no split count): every K1 weight-gradient row with a verdict for this
     architecture and every measured router row prepares the program its verdict names on this device (by kernel
     name, at ``T = 16231``; a row with a range of :data:`K1_DSM_RANGES_BY_SM` there the range's cluster program, else
-    one with a range of :data:`K1_ORDERED_RANGES_BY_SM` there that range's program), and
+    one with a range of :data:`K1_ORDERED_RANGES_BY_SM` there that range's program), whose output meets the naive
+    BF16 tier against FP64 over 32 draws written into its bound operands and launched into a NaN-poisoned ``out``;
     a row whose verdict is ``None`` -- or that this device's SM count leaves to the deterministic program -- prepares
     the deterministic launch."""
     device, arch = _atomic_device_or_skip()
@@ -12220,7 +12268,14 @@ def test_gpu_planned_rows_run_the_programs_of_their_verdicts():
             ), (M, N, dt)
         _assert_ran(prepared.launch, prepared.module_name)
         torch.cuda.synchronize()
-        _k1_check(out, G.double().t() @ X.double(), f"{M} {N} {dt}")
+        name = f"k1 L={L} M={M} N={N} {dt}"
+        judge_gemm(
+            record_property,
+            seed=SEED + 90,
+            draw=_n2_k1_redraw(G, X, out),
+            launch=_n2_launch(prepared, name, out),
+            product=_n2_product(G.t(), X, name),
+        )
         ran += 1
     rules, _ = cake_backend.router_rules(arch, sm_count)
     for (rule_arch, layout, hidden, _experts), spec in sorted(
@@ -12252,7 +12307,14 @@ def test_gpu_planned_rows_run_the_programs_of_their_verdicts():
         )
         _assert_ran(prepared.launch, prepared.module_name)
         torch.cuda.synchronize()
-        assert _rel_fro(out, A.double() @ B.double()) <= ROUTER_REL_FRO_MAX
+        name = f"router {layout} hidden={hidden}"
+        judge_gemm(
+            record_property,
+            seed=SEED + 91,
+            draw=_n2_router_redraw(X, W, G, out),
+            launch=_n2_launch(prepared, name, out),
+            product=_n2_product(A, B, name),
+        )
         ran += 1
     print(
         f"PLANNED_ROWS {arch} sm_count={sm_count}: {ran} rows ran this package's programs"
