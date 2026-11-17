@@ -10997,7 +10997,7 @@ def test_gpu_k1_bound_and_unbound_launches(k1_rule, record_property):
     """A row with a verdict at two splits: the prepared launch, the convenience path's bound launch (on fresh tensors
     every draw) and the per-call ordered launch of its cache entry (``_launch_atomic_k1_unbound``) each meet the naive
     BF16 tier against FP64 over the judge's draws, each into a NaN-poisoned ``out``, the tickets zero after every
-    call."""
+    convenience call and ordered launch."""
     device, arch = _atomic_device_or_skip()
     G, X, out = _k1_wgrad_inputs("indexer_k", 4097, torch.float32, device, SEED + 90)
     k1_rule(G, X, out, 2)
