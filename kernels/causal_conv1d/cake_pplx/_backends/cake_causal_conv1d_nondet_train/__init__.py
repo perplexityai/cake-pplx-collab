@@ -1139,7 +1139,9 @@ def cake_causal_conv1d_nondet_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation, ``"fp32"`` at
+        ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and at the unrounded FP32 preactivation with a BF16
+        ``weight``, ``"fp32"`` at
         the unrounded FP32 preactivation; both accumulate in plain FP32 words.
         ``dx`` is within one BF16 ulp of exact either way, and bitwise the det
         package's.

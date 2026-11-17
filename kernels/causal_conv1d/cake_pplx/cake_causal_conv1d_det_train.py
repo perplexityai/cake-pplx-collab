@@ -38,10 +38,12 @@ FP32,
     dbias[c]      = sum_t dpre[t, c]                            # with a bias
 
 at ``p`` chosen by ``silu_grad_preactivation``: ``"bf16"`` (default), ``p =
-bf16(pre)``, the rounded value the forward stores and the boundary
-flash-linear-attention's backward uses (``dweight`` lands within about 3e-5
-rel-L2 of the exact FP64 gradient); ``"fp32"``, ``p = pre`` unrounded (a
-slower program).  Under both, every ``dweight`` / ``dbias`` sum is one plain
+bf16(pre)`` with an FP32 ``weight``, the rounded value the forward stores and
+the boundary flash-linear-attention's backward uses (``dweight`` lands within
+about 3e-5 rel-L2 of the exact FP64 gradient), and ``p = pre`` unrounded with
+a BF16 ``weight`` (there the rounding can move ``dx`` across a BF16 rounding
+midpoint); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
+program).  Under both, every ``dweight`` / ``dbias`` sum is one plain
 FP32 word: no FP64 and no compensated (two-word) sums.  ``dx`` is within one
 BF16 ulp of exact under both.  The backward is two
 ordinary launches on one stream: a persistent main program writes ``dx`` and
@@ -296,9 +298,10 @@ def cake_causal_conv1d_det_train_backward(
     dy : torch.Tensor
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation (the
-        boundary flash-linear-attention's backward uses; ``dweight`` within
-        about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
+        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
+        FP32 ``weight`` (the boundary flash-linear-attention's backward uses;
+        ``dweight`` within about 3e-5 rel-L2 of the exact FP64 gradient), at
+        the unrounded FP32 preactivation with a BF16 ``weight``.  ``"fp32"``: SiLU' at
         the unrounded FP32 preactivation (a slower program).  Both sum
         ``dweight`` / ``dbias`` in plain FP32 words.  ``dx`` is within one BF16
         ulp of exact under both.

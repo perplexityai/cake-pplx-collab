@@ -29,7 +29,8 @@ Host design (the knobs are keywords; no environment variable):
   (FLA's order).  ``dweight`` / ``dbias`` default to the parameter's dtype and
   may be preallocated as FP32 or BF16.
 - ``silu_grad_preactivation``: ``"bf16"`` (default, the shipped policy: SiLU'
-  at the BF16-rounded preactivation, the boundary FLA's backward uses) or
+  at the BF16-rounded preactivation with FP32 taps, the boundary FLA's
+  backward uses, and at the unrounded FP32 preactivation with BF16 taps) or
   ``"fp32"`` (SiLU' at the unrounded FP32 preactivation; a slower program).
   Every ``dweight`` / ``dbias`` sum is one plain FP32 word under both.
 - A call's arguments select its route (``cake_jit.forward_route`` /
@@ -752,8 +753,10 @@ def cake_causal_conv1d_det_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation (the shipped
-        policy and FLA's boundary; ``dweight`` within ~3e-5 rel-L2 of exact),
+        ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` (the shipped policy and FLA's boundary; ``dweight`` within
+        ~3e-5 rel-L2 of exact) and at the unrounded FP32 preactivation with a
+        BF16 ``weight``,
         ``"fp32"`` at the unrounded FP32 preactivation (a slower program);
         both sum in plain FP32 words.  ``dx`` is within one BF16 ulp of exact
         either way.
