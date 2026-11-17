@@ -199,6 +199,7 @@ class Calls(dict):
     leaves: list[torch.Tensor]
     dys: list[torch.Tensor]
     layer: Callable[..., tuple]
+    release: Callable[[], None]
 
 
 def autograd_calls(
@@ -241,10 +242,15 @@ def autograd_calls(
         torch.autograd.backward(list(ys), list(dys))
         return grads()
 
+    def release() -> None:
+        state.clear()
+        reset()
+
     calls = Calls(fwd=fwd, record=record, bwd=bwd, step=step, ckpt=ckpt)
     calls.leaves = list(leaves)
     calls.dys = list(dys)
     calls.layer = layer
+    calls.release = release
     return calls
 
 
@@ -502,9 +508,8 @@ def single_rank_arm(
             cake_preactivation=cake_preactivation,
             cake_taps=w.dtype,
         )
-        leaves = [
-            t.detach().clone().requires_grad_(True) for t in (x, w, b) if t is not None
-        ]
+        # The leaves share the row's storage: no arm writes its inputs.
+        leaves = [t.detach().requires_grad_(True) for t in (x, w, b) if t is not None]
         entry["env"] = env
         calls = autograd_calls(layer, leaves, [dy])
         with environment(env):

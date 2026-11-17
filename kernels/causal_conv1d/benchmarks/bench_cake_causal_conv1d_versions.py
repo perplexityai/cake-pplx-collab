@@ -172,23 +172,37 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
     result: dict = {"S": S, "C": C, "lens": lens, "route": route, "arms": {}, "timing": {}, "notes": []}
     # Arm name -> worker label; entries by full name.
     owner: dict[str, str] = {}
-    for label, worker in workers.items():
-        reply = worker.call("row", S=S, C=C, lens=lens, route=route, arms=arms_of[label], seed=args.seed)
-        for name, entry in reply["arms"].items():
-            full = f"{label}_{name}" if worker.role == "cake" else name
-            owner[full] = label
-            result["arms"][full] = {"local": name, "worker": label, **entry}
-    result["setup_s"] = time.time() - t0
+
+    def full(label: str, name: str) -> str:
+        return f"{label}_{name}" if workers[label].role == "cake" else name
+
+    gated: dict[str, dict] = {}
     if args.draws > 0:
+        # The gate, one worker at a time (its row built, judged and freed), so the float64 oracle of a large row
+        # never shares the GPU with the other workers' rows.
         t1 = time.time()
         for label, worker in workers.items():
+            worker.call("row", S=S, C=C, lens=lens, route=route, arms=arms_of[label], seed=args.seed)
             reply = worker.call("gate", draws=args.draws, seed=args.gate_seed)
+            worker.call("free")
             for name, entry in reply["arms"].items():
-                full = f"{label}_{name}" if worker.role == "cake" else name
-                result["arms"][full].update(entry)
+                gated[full(label, name)] = entry
         result["gate_s"] = time.time() - t1
     else:
         result["notes"].append("accuracy gate not run (--draws 0): no arm is eligible")
+    for label, worker in workers.items():
+        reply = worker.call("row", S=S, C=C, lens=lens, route=route, arms=arms_of[label], seed=args.seed)
+        for name, entry in reply["arms"].items():
+            owner[full(label, name)] = label
+            result["arms"][full(label, name)] = {"local": name, "worker": label, **entry}
+    for name, entry in gated.items():
+        if name in result["arms"]:
+            for key in ("gate", "eligible", "measured_deterministic"):
+                if key in entry:
+                    result["arms"][name][key] = entry[key]
+            if "unsupported" in entry and "unsupported" not in result["arms"][name]:
+                result["arms"][name]["unsupported"] = entry["unsupported"]
+    result["setup_s"] = time.time() - t0 - result.get("gate_s", 0.0)
     runnable = [name for name, e in result["arms"].items() if "unsupported" not in e]
     t2 = time.time()
     for mode in args.modes:
@@ -237,15 +251,26 @@ def time_cell(cell, phase, mode, runnable, owner, result, args, workers) -> None
     late: dict[str, int] = {n: 0 for n in timed}
     for g in range(args.groups):
         order = group_order(timed, g)
+        if not order:
+            break
         cell["group_orders"].append(order)
         for n in order:
             worker = workers[owner[n]]
             local = result["arms"][n]["local"]
+            if n not in timed:
+                continue
             if n not in iters:
                 probe = worker.call("time", arm=local, phase=phase, mode=mode, iters=3)
                 est = max(_median(probe["ms"]), 1e-3)
                 iters[n] = int(min(MAX_ITERS, max(MIN_ITERS, TARGET_MS / est)))
-            reply = worker.call("time", arm=local, phase=phase, mode=mode, iters=iters[n])
+            try:
+                reply = worker.call("time", arm=local, phase=phase, mode=mode, iters=iters[n])
+            except RuntimeError as exc:
+                if worker.proc.poll() is not None:
+                    raise
+                cell.setdefault("arm_errors", {})[n] = str(exc)[:400]
+                timed = [m for m in timed if m != n]
+                continue
             groups[n].append(_median(reply["ms"]) * 1e3)
             late[n] += reply["late"]
             cell["method"] = reply["method"]

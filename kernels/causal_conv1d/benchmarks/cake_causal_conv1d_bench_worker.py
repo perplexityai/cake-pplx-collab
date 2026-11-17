@@ -26,7 +26,8 @@ Roles:
 Requests (``cmd``): ``info``; ``row`` (build the row's tensors and arms, warm every phase up); ``gate`` (the accuracy
 gate of every built arm, ``cake_causal_conv1d_numerics.py``); ``prepare`` (per arm and phase: the eager spin length,
 or the CUDA graph of ``graph`` mode, or the reason it cannot be captured); ``time`` (``iters`` timed iterations of
-one arm, phase and mode, ``cake_causal_conv1d_timer.py``); ``drop_graphs``; ``free``; ``quit``.
+one arm, phase and mode, ``cake_causal_conv1d_timer.py``; ``graph`` mode captures the arm's graph for the request
+and drops it after); ``drop_graphs``; ``free``; ``quit``.
 """
 
 from __future__ import annotations
@@ -165,7 +166,8 @@ class Worker:
                 def layer(*t, _f=entry_point):
                     return (_f(t[0], t[1], cu, t[2] if len(t) > 2 else None, silu_grad_preactivation=policy),)
 
-                leaves = [t.detach().clone().requires_grad_(True) for t in (x, w, b) if t is not None]
+                # The leaves share the row's storage: no arm writes its inputs.
+                leaves = [t.detach().requires_grad_(True) for t in (x, w, b) if t is not None]
                 arm["calls"] = baselines.autograd_calls(layer, leaves, [dy])
                 arm["run"] = baselines.gate_run(layer, {})
                 entry.update(
@@ -189,6 +191,7 @@ class Worker:
                     for phase in PHASES:
                         calls[phase]()
                     calls["record"]()
+                arm["ys_recorded"] = True
                 torch.cuda.synchronize(self.device)
             except Exception as exc:  # noqa: BLE001 -- a failing arm is reported, the row goes on
                 arm["entry"]["unsupported"] = f"{type(exc).__name__}: {str(exc)[:300]}"
@@ -215,10 +218,25 @@ class Worker:
         torch.cuda.empty_cache()
         return {"arms": {name: _jsonable(arm["entry"]) for name, arm in row["arms"].items()}}
 
+    def _graph(self, arm: dict, phase: str) -> torch.cuda.CUDAGraph:
+        """A CUDA graph of one call of ``phase``, captured from a call table of the arm on its own leaves whose every
+        call runs on the capture stream (the forward and the backward, so the backward's kernels and the leaves'
+        gradient accumulation are on that stream).  The caller drops it after timing (one graph alive at a time)."""
+
+        calls = arm["calls"]
+        self.side.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(self.side):
+            fresh = [leaf.detach().requires_grad_(True) for leaf in calls.leaves]
+            gcalls = baselines.autograd_calls(calls.layer, fresh, calls.dys)
+            if phase == "bwd":
+                gcalls["record"]()
+        graph = timer_lib.capture_graph(gcalls[phase], self.side)
+        graph.calls = gcalls
+        return graph
+
     def prepare(self, req: dict) -> dict:
-        """Per requested ``(arm, phase)``: the eager spin, or the CUDA graph (``mode == "graph"``).  A graph is
-        captured from a second call table of the arm on fresh leaves whose every call runs on the capture stream (its
-        forward and backward, so the backward's kernels and the leaves' gradient accumulation are on that stream)."""
+        """Per requested ``(arm, phase)``: the eager spin (the arm's forward recorded again first), or a trial capture
+        of the ``graph`` mode (dropped at once; the eager state of every arm is released before it)."""
 
         row, mode, out = self.row, req["mode"], {}
         for name in req["arms"]:
@@ -226,40 +244,28 @@ class Worker:
             if arm is None or arm.get("calls") is None:
                 continue
             calls, env = arm["calls"], arm["entry"].get("env", {})
-            if mode == "graph" and "graph_calls" not in arm:
-                try:
-                    self.side.wait_stream(torch.cuda.current_stream(self.device))
-                    with torch.cuda.stream(self.side), baselines.environment(env):
-                        fresh = [leaf.detach().clone().requires_grad_(True) for leaf in calls.leaves]
-                        gcalls = baselines.autograd_calls(calls.layer, fresh, calls.dys)
-                        gcalls["record"]()
-                        for phase in PHASES:
-                            gcalls[phase]()
-                    torch.cuda.synchronize(self.device)
-                    arm["graph_calls"] = gcalls
-                except Exception as exc:  # noqa: BLE001 -- recorded: no graph mode for this arm
-                    torch.cuda.synchronize(self.device)
-                    arm["graph_calls"] = f"{type(exc).__name__}: {str(exc)[:300]}"
             for phase in req["phases"]:
                 key = f"{name}/{phase}"
                 try:
                     with baselines.environment(env):
                         if mode == "eager":
+                            if "ys_recorded" not in arm:
+                                calls["record"]()
+                                arm["ys_recorded"] = True
                             row["spins"][key] = self.timer.spin_ms(calls[phase])
                             out[key] = {"spin_ms": row["spins"][key]}
-                            continue
-                        gcalls = arm["graph_calls"]
-                        if isinstance(gcalls, str):
-                            raise RuntimeError(f"no call table on the capture stream: {gcalls}")
-                        if phase == "bwd":
-                            with torch.cuda.stream(self.side):
-                                gcalls["record"]()
-                        row["graphs"][key] = timer_lib.capture_graph(gcalls[phase], self.side)
-                        out[key] = {"graph": True}
+                        else:
+                            if arm.pop("ys_recorded", None):
+                                calls.release()
+                            graph = self._graph(arm, phase)
+                            graph.replay()
+                            del graph
+                            out[key] = {"graph": True}
                 except Exception as exc:  # noqa: BLE001 -- recorded: this arm and phase have no such mode
                     torch.cuda.synchronize(self.device)
                     out[key] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-        torch.cuda.synchronize(self.device)
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
         return {"prepared": out}
 
     def time(self, req: dict) -> dict:
@@ -268,17 +274,18 @@ class Worker:
         key = f"{name}/{phase}"
         with baselines.environment(arm["entry"].get("env", {})):
             if mode == "eager":
-                fn, spin = arm["calls"][phase], row["spins"].get(key)
-            else:
-                fn, spin = row["graphs"][key].replay, None
-            result = self.timer.times(fn, int(req["iters"]), spin)
-        return result
+                return self.timer.times(arm["calls"][phase], int(req["iters"]), row["spins"].get(key))
+            graph = self._graph(arm, phase)
+            try:
+                return self.timer.times(graph.replay, int(req["iters"]), None)
+            finally:
+                del graph
+                torch.cuda.synchronize(self.device)
+                torch.cuda.empty_cache()
 
     def drop_graphs(self, _req: dict) -> dict:
         if self.row is not None:
             self.row["graphs"].clear()
-            for arm in self.row["arms"].values():
-                arm.pop("graph_calls", None)
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         return {}
