@@ -159,9 +159,9 @@ extern "C" {
 
 __global__ __launch_bounds__(192) __cluster_dims__(2,1,1) void
 #if CAKE_WGRAD_OUT == 32
-CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows)
+CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows, int lda, int ldb)
 #else
-CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows)
+CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows, int lda, int ldb)
 #endif  // CAKE_WGRAD_OUT
 {
     const int tid = threadIdx.x;
@@ -262,8 +262,8 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             unsigned int cluster_u = (unsigned int)cluster_id;
             unsigned int _phase_mma_done = 1;
             if (elect_sync()) {
-                unsigned long long pitch_a = (unsigned long long)N * 2ull;
-                unsigned long long pitch_b = (unsigned long long)K * 2ull;
+                unsigned long long pitch_a = (unsigned long long)lda * 2ull;
+                unsigned long long pitch_b = (unsigned long long)ldb * 2ull;
                 unsigned long long a_rows = (unsigned long long)A_rows;
                 unsigned long long b_rows = (unsigned long long)B_rows;
                 unsigned int reg_end = total_tiles;

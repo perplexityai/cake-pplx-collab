@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_moe_grouped_gemm_09a336207c15c131f5dc_wgrad_out32(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows);
+extern "C" __global__ void kernel_cake_moe_grouped_gemm_09a336207c15c131f5dc_wgrad_out32(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, __nv_bfloat16* __restrict__ A_rows, __nv_bfloat16* __restrict__ B_rows, int lda, int ldb);
 
 namespace cake_binding_kernel_cake_moe_grouped_gemm_09a336207c15c131f5dc_wgrad_out32 {
 
@@ -95,7 +95,7 @@ cuuint64_t Stride(int64_t value, const char* descriptor) {
   return static_cast<cuuint64_t>(value);
 }
 
-CUtensorMap EncodeTma_A(const TensorView& t, int64_t p_N) {
+CUtensorMap EncodeTma_A(const TensorView& t, int64_t p_lda) {
   TVM_FFI_CHECK(t.ndim() >= 2, ValueError)
       << KERNEL_NAME << ": descriptor 'A' takes a source of at least 2 dims, got " << t.ndim();
   CheckUnitInnerStride(t, "A");
@@ -105,8 +105,8 @@ CUtensorMap EncodeTma_A(const TensorView& t, int64_t p_N) {
   int64_t s2 = t.stride(-2) * 2;
   TVM_FFI_CHECK((CMod(d1, 64LL) == 0LL), ValueError)
       << KERNEL_NAME << ": descriptor 'A' requires (CMod(d1, 64) == 0)";
-  TVM_FFI_CHECK((s2 == CheckedMul(static_cast<int64_t>(static_cast<int64_t>(p_N)), 2LL)), ValueError)
-      << KERNEL_NAME << ": descriptor 'A' requires (s2 == (static_cast<int64_t>(static_cast<int64_t>(p_N)) * 2))";
+  TVM_FFI_CHECK((s2 == CheckedMul(static_cast<int64_t>(static_cast<int64_t>(p_lda)), 2LL)), ValueError)
+      << KERNEL_NAME << ": descriptor 'A' requires (s2 == (static_cast<int64_t>(static_cast<int64_t>(p_lda)) * 2))";
   cuuint64_t global_dim[3] = {Extent(64LL, "A"), Extent(outer1, "A"), Extent(CDiv(d1, 64LL), "A")};
   cuuint64_t global_strides[2] = {Stride(s2, "A"), Stride(128LL, "A")};
   cuuint32_t box_dim[3] = {64u, 64u, 1u};
@@ -131,7 +131,7 @@ CUtensorMap EncodeTma_A(const TensorView& t, int64_t p_N) {
   return map;
 }
 
-CUtensorMap EncodeTma_B(const TensorView& t, int64_t p_K) {
+CUtensorMap EncodeTma_B(const TensorView& t, int64_t p_ldb) {
   TVM_FFI_CHECK(t.ndim() >= 2, ValueError)
       << KERNEL_NAME << ": descriptor 'B' takes a source of at least 2 dims, got " << t.ndim();
   CheckUnitInnerStride(t, "B");
@@ -141,8 +141,8 @@ CUtensorMap EncodeTma_B(const TensorView& t, int64_t p_K) {
   int64_t s2 = t.stride(-2) * 2;
   TVM_FFI_CHECK((CMod(d1, 64LL) == 0LL), ValueError)
       << KERNEL_NAME << ": descriptor 'B' requires (CMod(d1, 64) == 0)";
-  TVM_FFI_CHECK((s2 == CheckedMul(static_cast<int64_t>(static_cast<int64_t>(p_K)), 2LL)), ValueError)
-      << KERNEL_NAME << ": descriptor 'B' requires (s2 == (static_cast<int64_t>(static_cast<int64_t>(p_K)) * 2))";
+  TVM_FFI_CHECK((s2 == CheckedMul(static_cast<int64_t>(static_cast<int64_t>(p_ldb)), 2LL)), ValueError)
+      << KERNEL_NAME << ": descriptor 'B' requires (s2 == (static_cast<int64_t>(static_cast<int64_t>(p_ldb)) * 2))";
   cuuint64_t global_dim[3] = {Extent(64LL, "B"), Extent(outer1, "B"), Extent(CDiv(d1, 64LL), "B")};
   cuuint64_t global_strides[2] = {Stride(s2, "B"), Stride(128LL, "B")};
   cuuint32_t box_dim[3] = {64u, 64u, 1u};
@@ -167,7 +167,7 @@ CUtensorMap EncodeTma_B(const TensorView& t, int64_t p_K) {
   return map;
 }
 
-void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_offs, TensorView a_tensormap_workspace, TensorView a_partials, int64_t a_tail_splits, int64_t a_raster_rows, int64_t a_num_groups, int64_t a_sum_m, int64_t a_N, int64_t a_K, int64_t a_ldc, int64_t a_stride_e, TensorView a_A_rows, TensorView a_B_rows, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_offs, TensorView a_tensormap_workspace, TensorView a_partials, int64_t a_tail_splits, int64_t a_raster_rows, int64_t a_num_groups, int64_t a_sum_m, int64_t a_N, int64_t a_K, int64_t a_ldc, int64_t a_stride_e, TensorView a_A_rows, TensorView a_B_rows, int64_t a_lda, int64_t a_ldb, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_A.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_A, "A");
@@ -210,6 +210,12 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_offs, Tens
   check_dtype(a_A_rows, DLDataType{kDLBfloat, 16, 1}, "A_rows");
   check_cuda_tensor(a_B_rows, "B_rows");
   check_dtype(a_B_rows, DLDataType{kDLBfloat, 16, 1}, "B_rows");
+  TVM_FFI_CHECK(a_lda >= -2147483648LL && a_lda <= 2147483647LL, ValueError)
+      << KERNEL_NAME << ": 'lda' = " << a_lda
+      << " is outside the i32 range [-2147483648, 2147483647]";
+  TVM_FFI_CHECK(a_ldb >= -2147483648LL && a_ldb <= 2147483647LL, ValueError)
+      << KERNEL_NAME << ": 'ldb' = " << a_ldb
+      << " is outside the i32 range [-2147483648, 2147483647]";
   check_same_device(a_B, a_A, "B", "A");
   check_contiguous(a_C, "C");
   check_same_device(a_C, a_A, "C", "A");
@@ -241,8 +247,8 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_offs, Tens
       prepared_devices |= device_bit;
     }
   }
-  CUtensorMap v_A = EncodeTma_A(a_A, a_N);
-  CUtensorMap v_B = EncodeTma_B(a_B, a_K);
+  CUtensorMap v_A = EncodeTma_A(a_A, a_lda);
+  CUtensorMap v_B = EncodeTma_B(a_B, a_ldb);
   void* v_C = DataPtr(a_C);
   void* v_offs = DataPtr(a_offs);
   void* v_tensormap_workspace = DataPtr(a_tensormap_workspace);
@@ -257,7 +263,9 @@ void Run(TensorView a_A, TensorView a_B, TensorView a_C, TensorView a_offs, Tens
   int32_t v_stride_e = static_cast<int32_t>(a_stride_e);
   void* v_A_rows = DataPtr(a_A_rows);
   void* v_B_rows = DataPtr(a_B_rows);
-  void* kernel_args[] = {&v_A, &v_B, &v_C, &v_offs, &v_tensormap_workspace, &v_partials, &v_tail_splits, &v_raster_rows, &v_num_groups, &v_sum_m, &v_N, &v_K, &v_ldc, &v_stride_e, &v_A_rows, &v_B_rows};
+  int32_t v_lda = static_cast<int32_t>(a_lda);
+  int32_t v_ldb = static_cast<int32_t>(a_ldb);
+  void* kernel_args[] = {&v_A, &v_B, &v_C, &v_offs, &v_tensormap_workspace, &v_partials, &v_tail_splits, &v_raster_rows, &v_num_groups, &v_sum_m, &v_N, &v_K, &v_ldc, &v_stride_e, &v_A_rows, &v_B_rows, &v_lda, &v_ldb};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(192, 1, 1);
