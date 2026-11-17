@@ -291,9 +291,11 @@ def cake_dsa_sparse_attention_nondet(
         default) applies the record's size rule of the device's architecture
         -- the main stage adds into the caller's packed rows directly (no
         workspace accumulators, zero fill or cast launch) when the row has at
-        least ``dkv_direct.min_keys_per_query`` keys per query token, 4 on
-        ``sm_100a`` / ``sm_103a`` and 20 on ``sm_107a`` (whose natural-layout
-        drain is slower) --, ``1``
+        least ``dkv_direct.min_keys_per_query`` (4) keys per query token and,
+        on ``sm_100a`` / ``sm_103a``, whatever its work; on ``sm_107a``, whose
+        natural-layout drain costs extra in proportion to the main stage's
+        work, only while ``T * K_eff < 112 * S + 2**20`` with ``K_eff =
+        min(K_slots, ceil(S / num_segments))`` --, ``1``
         forces the direct path whenever the stages are registered, ``0`` always
         takes the accumulate-and-cast path; any other value raises
         ``ValueError``.  ``True`` / ``False`` select the path explicitly and
@@ -563,12 +565,14 @@ def cake_dsa_sparse_attention_nondet_nope(
         record's rule of the device's architecture -- the main stage adds
         into the buffer directly (no permuted accumulator, no cast launch)
         when the row has at least ``dkv_direct.min_keys_per_query`` keys per
-        query token: 1 for this program on ``sm_100a`` / ``sm_103a`` (every
-        row with at least as many keys as query tokens; the direct path
-        measured faster than the permuted drain on every such row), 20 on
-        ``sm_107a`` (whose natural-layout drain is slower: the permuted
-        accumulator plus cast was faster on every measured row below 20 keys
-        per query); a row below the threshold takes the cast --, ``1`` forces
+        query token, 1 for this program: on ``sm_100a`` / ``sm_103a`` every
+        row with at least as many keys as query tokens (the direct path
+        measured faster than the permuted drain on every such row); on
+        ``sm_107a``, whose natural-layout drain costs extra in proportion to
+        the main stage's work, only while ``T * K_eff < 112 * S + 2**20`` with
+        ``K_eff = min(K_slots, ceil(S / num_segments))`` (the permuted
+        accumulator plus cast was faster on the measured rows with more
+        work); any other row takes the cast --, ``1`` forces
         the direct path whenever the stages are registered, ``0`` always
         takes the accumulate-and-cast path; any
         other value raises ``ValueError``.  ``True`` / ``False`` select the path explicitly and
