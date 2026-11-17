@@ -10609,6 +10609,61 @@ def test_gpu_k1_explicit_split_counts(splits, record_property):
     )
 
 
+# The promoted-chunk programs at explicit split counts: ``(row, T, splits, block_n, promoted)``.  Two splits of 32768
+# tokens hold 256 K blocks of 64 tokens each (two chunks of 128), three splits of 65535 tokens 342 (three chunks), one
+# split of 16384 tokens 256; two splits of 16385 tokens hold 129 in the larger one (the shortest split that promotes),
+# of 16384 tokens 128 (no promotion).
+K1_PROMOTED_CASES = (
+    ("indexer_hw", 32768, 2, 64, True),
+    ("indexer_hw", 65535, 3, 64, True),
+    ("thin_48", 16385, 2, 64, True),
+    ("thin_48", 16384, 2, 64, False),
+    ("indexer_k", 32768, 2, 128, True),
+    ("wide_512", 16384, 1, 256, True),
+)
+
+
+@pytest.mark.parametrize(
+    "case", K1_PROMOTED_CASES, ids=lambda c: f"{c[0]}-T{c[1]}-s{c[2]}"
+)
+def test_gpu_k1_promoted_programs(case, record_property):
+    """Each promoted-chunk program (``..._t_kc128``, 64-, 128- and 256-wide tiles) runs where a split holds more than
+    :data:`K1_PROMOTE_BLOCKS` K blocks, at one, two and three splits, and meets the naive BF16 tier against FP64 over
+    the judge's draws, each launch into a NaN-poisoned ``out`` (three on the first draw), leaving the tickets zero; the
+    profiler shows the promoted program.  At 128 K blocks per split the same launch keeps the program without
+    promotion."""
+    device, arch = _atomic_device_or_skip()
+    row, T, splits, block_n, promoted = case
+    G, X, out = _k1_wgrad_inputs(row, T, torch.bfloat16, device, SEED + 3)
+    prepared = _k1_prepare(G, X, out, arch, splits, block_n)
+    kc = cake_backend.K1_PROMOTE_BLOCKS if promoted else 0
+    assert (prepared.template, prepared.plan.promote_blocks) == (
+        cake_backend.atomic_k1_template(block_n, False, promote_blocks=kc),
+        kc,
+    )
+    _assert_ran(prepared.launch, prepared.module_name)
+
+    def make(s):
+        return _k1_wgrad_inputs(row, T, torch.bfloat16, device, s)[:2]
+
+    def launch(v):
+        prepared.launch()
+        torch.cuda.synchronize()
+        assert prepared.counters_are_zero()
+        return {"prepared": v.out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 3,
+        draw=_n1_bound_wgrad_draw(make, G, X, out),
+        launch=launch,
+        product=_n1_wgrad_product("prepared"),
+        launches=3,
+        poison=lambda v: [v.out],
+    )
+    assert _arena_tickets_zero()
+
+
 # The 192-wide row-major program (sm_107a): ``(d_out, d_in, T, splits)``, the 4096 -> 1024 row it serves (22 column
 # tiles of ``d_in``, the last 64 columns wide: its first CTA's third 32-column B box and its second CTA lie past ``N``)
 # and a ragged one (``d_in`` 4104 cuts a B box, ``d_out`` 1032 a pair tile; two splits).
