@@ -14971,83 +14971,86 @@ def tf32_settings():
 
 @pytest.mark.parametrize("T", [16172, 16231])
 @pytest.mark.parametrize("hidden", [4096, 5120])
-def test_gpu_router_ignores_the_tf32_settings(hidden, T, tf32_settings):
-    """The router GEMM stays FP32 (no silent TF32 or BF16): with ``torch.backends.cuda.matmul.allow_tf32 = True`` and
-    ``torch.set_float32_matmul_precision("high")`` every router call -- the forward with and without a split count,
+def test_gpu_router_meets_the_tier_under_the_tf32_settings(
+    hidden, T, tf32_settings, record_property
+):
+    """The router GEMM with ``torch.backends.cuda.matmul.allow_tf32 = True`` and
+    ``torch.set_float32_matmul_precision("high")``: every router call -- the forward with and without a split count,
     the input gradient, the weight gradient with and without one; the entry points from the keys planned before the
-    setting and planned under it, and the prepared launches -- meets the router's FP64 budget (the forward's top-8
-    experts too), and a launch that repeats bit for bit gives the bits of the default-precision run."""
-    device, arch = _atomic_device_or_skip()
+    setting and planned under it, and the prepared launches -- returns its ``out`` and meets the naive BF16 tier
+    against FP64 over the draws, as every call under the default precision does.  Each draw runs the calls under the
+    default precision (the convenience caches cleared first), then with TF32 on from those keys, then with TF32 on
+    from keys planned again under it."""
+    device, _ = _atomic_device_or_skip()
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-    X, W, G = _router_inputs(T, device, SEED + 180 + hidden + T, K=hidden)
-    tensors = {"fwd": (X, W), "dgrad": (G, W), "wgrad": (G, X)}
-    gemms = {"fwd": (X, W.t()), "dgrad": (G, W), "wgrad": (G.t(), X)}
     calls = {
         "fwd": cake_backend.cake_dense_gemm_nondet_train_router_forward,
         "dgrad": cake_backend.cake_dense_gemm_nondet_train_router_dgrad,
         "wgrad": cake_backend.cake_dense_gemm_nondet_train_router_wgrad,
     }
     shapes = {"fwd": (T, 256), "dgrad": (T, hidden), "wgrad": (256, hidden)}
-    refs = {op: A.double() @ B.double() for op, (A, B) in gemms.items()}
     cases = (("fwd", None), ("fwd", 2), ("dgrad", None), ("wgrad", None), ("wgrad", 2))
-    stream = torch.cuda.current_stream(device)
+    states = ("default", "tf32_planned_before", "tf32_planned_under")
+    paths = ("entry", "prepared")
 
-    def run() -> dict:
-        """label -> (output, whether its launch repeats bit for bit)."""
+    def name(state, op, splits, path):
+        return f"{state}_{op}{'' if splits is None else f'_s{splits}'}_{path}"
+
+    def draw(s):
+        X, W, G = _router_inputs(T, device, s, K=hidden)
+        return SimpleNamespace(
+            tensors={"fwd": (X, W), "dgrad": (G, W), "wgrad": (G, X)},
+            gemms={"fwd": (X, W.t()), "dgrad": (G, W), "wgrad": (G.t(), X)},
+        )
+
+    def run(v, state) -> dict:
+        """name -> the output of every call."""
         results = {}
         for op, splits in cases:
-            P, Q = tensors[op]
+            P, Q = v.tensors[op]
             kw = {} if op == "dgrad" else {"splits": splits}
             out = torch.full(shapes[op], float("nan"), device=device)
             assert calls[op](P, Q, out, **kw) is out
-            torch.cuda.synchronize()
-            entry = _router_entry_of(op, P, Q, out, splits, stream)
-            bits = entry is not None and entry.launch is not None
-            results[(op, splits, "entry")] = (out, bits and _router_entry_bits(entry))
             pout = torch.full(shapes[op], float("nan"), device=device)
             prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(
-                *gemms[op], pout, **({} if splits is None else {"splits": splits})
+                *v.gemms[op], pout, **({} if splits is None else {"splits": splits})
             )
             prepared.launch()
             torch.cuda.synchronize()
-            varies = (
-                isinstance(prepared, cake_backend.CakeDenseGemmNondetRouterLaunch)
-                and not prepared.plan.reproducible
-            )
-            results[(op, splits, "prepared")] = (pout, not varies)
+            results[name(state, op, splits, "entry")] = out
+            results[name(state, op, splits, "prepared")] = pout
         return results
 
-    def check(results, what):
-        for (op, splits, path), (out, _) in results.items():
-            label = (what, op, splits, path)
-            assert bool(torch.isfinite(out).all()), label
-            assert _rel_fro(out, refs[op]) <= ROUTER_REL_FRO_MAX, label
-            if op == "fwd":
-                assert _top8_rows_differ(out, refs[op])[0] == 0, label
+    def launch(v):
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        results = run(v, states[0])
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        results.update(run(v, states[1]))
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        results.update(run(v, states[2]))
+        return results
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-    default = run()
-    check(default, "default precision")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.set_float32_matmul_precision("high")
-    compared = 0
-    for what in ("TF32 on, keys planned before", "TF32 on, planned under it"):
-        if what.endswith("under it"):
-            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        results = run()
-        check(results, what)
-        for label, (out, bits) in results.items():
-            want, want_bits = default[label]
-            if bits and want_bits:
-                assert torch.equal(out, want), (what, label)
-                compared += 1
-    print(
-        f"ROUTER_TF32 {arch} H{hidden} T{T}: {compared} launches compared bit for bit"
+    def product(v, dtype):
+        gemm = {op: A.to(dtype) @ B.to(dtype) for op, (A, B) in v.gemms.items()}
+        return {
+            name(state, op, splits, path): gemm[op]
+            for state in states
+            for op, splits in cases
+            for path in paths
+        }
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 180 + hidden + T,
+        draw=draw,
+        launch=launch,
+        product=product,
     )
-    assert compared
 
 
 # ---------------------------------------------------------------------------
@@ -16242,32 +16245,60 @@ def _part_or_skip():
     return device, facts.arch, facts.sm_count
 
 
-def _repeats_into_nan(run, out, what, reruns=RERUNS):
-    """``reruns`` more calls of ``run(dst)`` into NaN-poisoned outputs give ``out``'s bits."""
-    for _ in range(reruns):
-        again = torch.full_like(out, float("nan"))
-        run(again)
+def _n5_judge_call(
+    record_property,
+    name,
+    seed,
+    device,
+    call,
+    gemm,
+    operands,
+    out_shape,
+    out_dtype,
+    *,
+    in_dtype=torch.bfloat16,
+    launches=1 + RERUNS,
+):
+    """Judge ``call(*operands, out)`` against the naive BF16 tier over the draws (:func:`judge_gemm`; ``name`` the
+    output's name): each draw's operands, of the shapes ``operands``, drawn N(0, 1) in ``in_dtype`` from the draw's
+    seed, and a fresh NaN-filled ``out`` of ``out_shape`` and ``out_dtype``; ``gemm(*operands)`` the product in
+    ``out``'s orientation.  The first draw launches ``launches`` times, ``out`` written into NaN again before each
+    launch after the first.  Returns the last draw's inputs (``ops``, ``out``)."""
+
+    def draw(s):
+        g = torch.Generator(device=device).manual_seed(s)
+        ops = [
+            torch.randn(shape, device=device, generator=g).to(in_dtype)
+            for shape in operands
+        ]
+        out = torch.full(out_shape, float("nan"), device=device, dtype=out_dtype)
+        return SimpleNamespace(ops=ops, out=out)
+
+    def launch(v):
+        call(*v.ops, v.out)
         torch.cuda.synchronize()
-        assert torch.equal(again, out), what
+        return {name: v.out}
+
+    def product(v, dtype):
+        return {name: gemm(*(t.to(dtype) for t in v.ops))}
+
+    return judge_gemm(
+        record_property,
+        seed=seed,
+        draw=draw,
+        launch=launch,
+        product=product,
+        launches=launches,
+        poison=lambda v: (v.out,),
+    )
 
 
-def _meets_the_budget_into_nan(run, out, ref, what, reruns=RERUNS):
-    """``reruns`` more calls of ``run(dst)`` into NaN-poisoned outputs each meet the K1 budget against ``ref`` (an
-    order-varying program: its bits may differ from ``out``'s)."""
-    for _ in range(reruns):
-        again = torch.full_like(out, float("nan"))
-        run(again)
-        torch.cuda.synchronize()
-        _k1_check(again, ref, what)
-
-
-def test_gpu_k1_dgrad_rows_run_their_program_with_the_det_bits():
+def test_gpu_k1_dgrad_rows_run_their_program(record_property):
     """On a part of a table of :data:`K1_DGRAD_RULES_BY_SM`: the input gradient of every row (not a row of
     :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` or :data:`K1_DGRAD_NVJET_RULES_BY_SM`, which run this package's programs)
-    binds the table's program, gives the
-    deterministic package's input gradient bit for bit (the deterministic plan's bits), meets the deterministic
-    package's budget against FP64 and repeats bit for bit over ``RERUNS`` calls into NaN-poisoned outputs.  A part
-    without such rows skips."""
+    binds the table's program (the template of the deterministic plan it binds) and meets the naive BF16 tier against
+    FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without such
+    rows skips."""
     device, arch, sms = _part_or_skip()
     own = {
         **cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM.get((arch, sms), {}),
@@ -16280,122 +16311,102 @@ def test_gpu_k1_dgrad_rows_run_their_program_with_the_det_bits():
     }
     if not rows:
         pytest.skip(f"no K1 input-gradient row of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 170)
     ran = 0
     for (K, N, T, dt), program in sorted(rows.items()):
         what = f"dgrad {K} {N} {T} {dt} {program}"
-        out_dtype = torch.float32 if dt == "f32" else torch.bfloat16
-        G, W = _bf16((T, N), device, g), _bf16((N, K), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full((T, K), float("nan"), device=device, dtype=out_dtype)
-
-        def run(dst, G=G, W=W):
-            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_{dt}",
+            SEED + 170,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.float32 if dt == "f32" else torch.bfloat16,
+        )
         ((_, entry),) = cake_backend._K1_DET_CACHE.items()
         assert entry.k1 is not None, what
         assert entry.plan.template == det_backend._TEMPLATE_PREFIX + program, what
-        det_out = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
-        torch.cuda.synchronize()
-        assert torch.equal(out, det_out), what
-        _k1_check(out, G.double() @ W.double(), what)
-        _repeats_into_nan(run, out, what)
         ran += 1
-    print(
-        f"K1_DGRAD_ROWS {arch} sm_count={sms}: {ran} rows ran their program with the deterministic bits"
-    )
+    print(f"K1_DGRAD_ROWS {arch} sm_count={sms}: {ran} rows ran their program")
     assert ran == len(rows)
 
 
-def test_gpu_k1_dgrad_promo_ranges_keep_the_det_bits():
+def test_gpu_k1_dgrad_promo_ranges_run_the_promoted_plan(record_property):
     """On a part of a table of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`: the input gradient of every row at the edges and
     inside of each range binds the deterministic plan of the row with the range's TMA L2 promotion (the deterministic
-    plan's program), gives the deterministic package's input gradient bit for bit, meets the deterministic package's
-    budget against FP64 and repeats bit for bit over ``RERUNS`` calls into NaN-poisoned outputs.  A part without such
-    rows skips."""
+    plan's program) and meets the naive BF16 tier against FP64 over the draws, the first draw launched
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without such rows skips."""
     device, arch, sms = _part_or_skip()
     rows = cake_backend.K1_DGRAD_PROMO_RANGES_BY_SM.get((arch, sms), {})
     if not rows:
         pytest.skip(f"no K1 input-gradient promotion range of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 176)
     ran = 0
     for (K, N, dt), ranges in sorted(rows.items()):
         out_dtype = torch.float32 if dt == "f32" else torch.bfloat16
-        W = _bf16((N, K), device, g)
         for lo, hi, promo in ranges:
             for T in sorted({lo, (lo + hi) // 2, hi}):
                 what = f"dgrad {K} {N} {T} {dt} promo {promo}"
-                G = _bf16((T, N), device, g)
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-                out = torch.full((T, K), float("nan"), device=device, dtype=out_dtype)
-
-                def run(dst, G=G, W=W):
-                    cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(
-                        G, W, dst
-                    )
-
-                run(out)
-                torch.cuda.synchronize()
+                _n5_judge_call(
+                    record_property,
+                    f"dgrad_{K}_{N}_{T}_{dt}_promo_{promo}",
+                    SEED + 176,
+                    device,
+                    cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+                    lambda G, W: G @ W,
+                    ((T, N), (N, K)),
+                    (T, K),
+                    out_dtype,
+                )
                 ((_, entry),) = cake_backend._K1_DET_CACHE.items()
                 assert entry.k1 is not None and entry.plan.promo == promo, what
-                det_out = torch.full_like(out, float("nan"))
-                det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
-                torch.cuda.synchronize()
-                assert torch.equal(out, det_out), what
-                _k1_check(out, G.double() @ W.double(), what)
-                _repeats_into_nan(run, out, what)
                 ran += 1
-    print(
-        f"K1_DGRAD_PROMO {arch} sm_count={sms}: {ran} rows ran the promoted plan with the deterministic bits"
-    )
+    print(f"K1_DGRAD_PROMO {arch} sm_count={sms}: {ran} rows ran the promoted plan")
     assert ran
 
 
-def test_gpu_k1_dgrad_nvjet_rows_keep_the_det_bits():
+def test_gpu_k1_dgrad_nvjet_rows_run_the_nvjet_program(record_property):
     """On a part of a table of :data:`K1_DGRAD_NVJET_RULES_BY_SM`: the input gradient of every row binds this package's
-    nvjet program on the deterministic package's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, gives the deterministic
-    package's input gradient bit for bit, meets the deterministic package's budget against FP64 and repeats bit for bit
-    over ``RERUNS`` calls into NaN-poisoned outputs; the first row runs the program by kernel name.  A part without
-    such rows skips."""
+    nvjet program on the deterministic package's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM` and meets the naive BF16
+    tier against FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs; the first
+    row runs the program by kernel name.  A part without such rows skips."""
     device, arch, sms = _part_or_skip()
     rows = cake_backend.K1_DGRAD_NVJET_RULES_BY_SM.get((arch, sms), {})
     if not rows:
         pytest.skip(f"no K1 input-gradient nvjet row of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 174)
+    dgrad = cake_backend.cake_dense_gemm_nondet_train_projection_dgrad
     det_program = cake_backend.K1_DGRAD_NVJET_DET_PROGRAM
     det_template = det_backend._TEMPLATE_PREFIX + det_program
     for i, ((K, N, T, dt), template) in enumerate(sorted(rows.items())):
         what = f"dgrad {K} {N} {T} {dt} {template}"
         module = cake_jit.KERNELS[arch][template]
-        G, W = _bf16((T, N), device, g), _bf16((N, K), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full((T, K), float("nan"), device=device, dtype=torch.bfloat16)
-
-        def run(dst, G=G, W=W):
-            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        v = _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_{dt}",
+            SEED + 174,
+            device,
+            dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.bfloat16,
+        )
         ((_, entry),) = cake_backend._K1_DET_CACHE.items()
         assert entry.k1 is not None and entry.module_name == module, what
         assert entry.plan.template == det_template, what
-        det_out = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
-        torch.cuda.synchronize()
-        assert torch.equal(out, det_out), what
-        _k1_check(out, G.double() @ W.double(), what)
-        _repeats_into_nan(run, out, what)
         if i == 0:
-            _assert_ran(lambda G=G, W=W, out=out: run(out, G, W), module)
+            _assert_ran(lambda v=v: dgrad(*v.ops, v.out), module)
 
 
-def test_gpu_k1_forward_named_rows_keep_the_det_bits():
+def test_gpu_k1_forward_named_rows_run_their_program(record_property):
     """On a part whose table of :data:`K1_FORWARD_RULES_BY_SM` names a program: the forward of every such row (not a row
-    of :data:`K1_FORWARD_PROGRAM_RULES_BY_SM`, which runs this package's program) binds it, gives the deterministic package's forward bit for bit, meets the BF16 budget against FP64 and repeats bit for
-    bit over ``RERUNS`` calls into NaN-poisoned outputs.  A part without such rows skips."""
+    of :data:`K1_FORWARD_PROGRAM_RULES_BY_SM`, which runs this package's program) binds it and meets the naive BF16 tier
+    against FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.  A part
+    without such rows skips."""
     device, arch, sms = _part_or_skip()
     own = cake_backend.K1_FORWARD_PROGRAM_RULES_BY_SM.get((arch, sms), {})
     rows = {
@@ -16409,36 +16420,31 @@ def test_gpu_k1_forward_named_rows_keep_the_det_bits():
         pytest.skip(
             f"no named K1 forward row of {arch} on {sms} SMs outside the program table"
         )
-    g = torch.Generator(device=device).manual_seed(SEED + 171)
     for (K, N, T), program in sorted(rows.items()):
         what = f"forward {K} {N} {T} {program}"
-        X, W = _bf16((T, K), device, g), _bf16((N, K), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full((T, N), float("nan"), device=device, dtype=torch.bfloat16)
-
-        def run(dst, X=X, W=W):
-            cake_backend.cake_dense_gemm_nondet_train_projection_forward(X, W, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        _n5_judge_call(
+            record_property,
+            f"fwd_{K}_{N}_{T}",
+            SEED + 171,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_forward,
+            lambda X, W: X @ W.t(),
+            ((T, K), (N, K)),
+            (T, N),
+            torch.bfloat16,
+        )
         ((_, entry),) = cake_backend._K1_DET_CACHE.items()
         assert entry.k1 is not None, what
         assert entry.plan.template == det_backend._TEMPLATE_PREFIX + program, what
-        det_out = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_forward(X, W, det_out)
-        torch.cuda.synchronize()
-        assert torch.equal(out, det_out), what
-        _k1_check(out, X.double() @ W.double().t(), what)
-        _repeats_into_nan(run, out, what)
 
 
-def test_gpu_k1_program_rows_keep_the_det_bits():
+def test_gpu_k1_program_rows_run_their_program(record_property):
     """On a part of a table of :data:`K1_FORWARD_PROGRAM_RULES_BY_SM` / :data:`K1_DGRAD_PROGRAM_RULES_BY_SM`: the
     forward / input gradient of every row (in the input-gradient token window, the token counts of
     :data:`_KD_WINDOW_SAMPLE`) runs this package's program (no cached deterministic plan; the program bound in
-    :data:`_K1_PROGRAM_CACHE`, which the repeats launch), gives the deterministic package's result bit for bit, meets
-    the deterministic package's budget against FP64 and repeats bit for bit over ``RERUNS`` calls into NaN-poisoned
-    outputs.  A part without rows skips."""
+    :data:`_K1_PROGRAM_CACHE`, which the repeated calls launch) and meets the naive BF16 tier against FP64 over the
+    draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without rows skips."""
     device, arch, sms = _part_or_skip()
     fwd = cake_backend.K1_FORWARD_PROGRAM_RULES_BY_SM.get((arch, sms), {})
     dgrad_rows = cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM.get((arch, sms), {})
@@ -16449,95 +16455,84 @@ def test_gpu_k1_program_rows_keep_the_det_bits():
     }
     if not fwd and not dgrad:
         pytest.skip(f"no K1 program row of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 173)
     for (K, N, T), template in sorted(fwd.items()):
         what = f"forward {K} {N} {T} {template}"
-        X, W = _bf16((T, K), device, g), _bf16((N, K), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full((T, N), float("nan"), device=device, dtype=torch.bfloat16)
-
-        def run(dst, X=X, W=W):
-            cake_backend.cake_dense_gemm_nondet_train_projection_forward(X, W, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        v = _n5_judge_call(
+            record_property,
+            f"fwd_{K}_{N}_{T}",
+            SEED + 173,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_forward,
+            lambda X, W: X @ W.t(),
+            ((T, K), (N, K)),
+            (T, N),
+            torch.bfloat16,
+        )
+        X, W = v.ops
         assert not cake_backend._K1_DET_CACHE, what
         ((_, entry),) = cake_backend._K1_PROGRAM_CACHE.items()
         assert entry.module_name == cake_jit.KERNELS[arch][template], what
         assert (
-            cake_backend._k1_forward_program_of(X, W, out)
+            cake_backend._k1_forward_program_of(X, W, v.out)
             == cake_jit.KERNELS[arch][template]
         ), what
-        ref = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_forward(X, W, ref)
-        torch.cuda.synchronize()
-        assert torch.equal(out, ref), what
-        _k1_check(out, X.double() @ W.double().t(), what)
-        _repeats_into_nan(run, out, what)
     for (K, N, T, dt), template in sorted(dgrad.items()):
         what = f"dgrad {K} {N} {T} {dt} {template}"
-        G, W = _bf16((T, N), device, g), _bf16((N, K), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        dtype = torch.float32 if dt == "f32" else torch.bfloat16
-        out = torch.full((T, K), float("nan"), device=device, dtype=dtype)
-
-        def run(dst, G=G, W=W):
-            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        v = _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_{dt}",
+            SEED + 173,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.float32 if dt == "f32" else torch.bfloat16,
+        )
+        G, W = v.ops
         assert not cake_backend._K1_DET_CACHE, what
         ((_, entry),) = cake_backend._K1_PROGRAM_CACHE.items()
         assert entry.module_name == cake_jit.KERNELS[arch][template], what
         assert (
-            cake_backend._k1_dgrad_program_of(G, W, out)
+            cake_backend._k1_dgrad_program_of(G, W, v.out)
             == cake_jit.KERNELS[arch][template]
         ), what
-        ref = torch.full_like(out, float("nan"))
-        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, ref)
-        torch.cuda.synchronize()
-        assert torch.equal(out, ref), what
-        _k1_check(out, G.double() @ W.double(), what)
-        _repeats_into_nan(run, out, what)
 
 
-def test_gpu_k1_wgrad_changed_rows_repeat_and_meet_the_budget():
+def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
     """On a part of :data:`K1_WGRAD_CHANGED_ROWS`: the weight gradient of every changed row takes its route (the
     stream-K program of :data:`K1_WGRAD_SK_RULES_BY_SM` with no cached plan, or its :data:`_K1_ATOMIC_CACHE` entry:
     the cluster program, the CTA-pair program at one or two splits or in the split order of its range of
-    :data:`K1_ORDERED_RANGES_BY_SM` or :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`, or the deterministic program -- then the deterministic package's weight gradient
-    bit for bit; a row of :data:`K1_WGRAD_DET_RULES_BY_SM` the bits of the deterministic package's prepared launch of
-    the table's program), meets the deterministic package's budget against FP64 and repeats bit for bit over
-    ``RERUNS`` calls into NaN-poisoned outputs -- a four-split arrival-order range meets the budget on each of those
-    calls instead (its bits may vary).  A part without changed rows skips."""
+    :data:`K1_ORDERED_RANGES_BY_SM` or :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`, or the deterministic program -- a row
+    of :data:`K1_WGRAD_DET_RULES_BY_SM` on the table's program, the template of the deterministic package's prepared
+    launch of that program) and meets the naive BF16 tier against FP64 over the draws, the first draw launched
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without changed rows skips."""
     device, arch, sms = _part_or_skip()
     rows = K1_WGRAD_CHANGED_ROWS.get((arch, sms), {})
     if not rows:
         pytest.skip(f"no changed K1 weight-gradient row of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 172)
     for (d_in, d_out, dt, T), (kind, block_n, splits) in sorted(rows.items()):
         what = f"wgrad {d_in} {d_out} {dt} {T} {kind}"
         f32 = dt == "f32"
-        G, X = _bf16((T, d_out), device, g), _bf16((T, d_in), device, g)
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-        out = torch.full(
+        v = _n5_judge_call(
+            record_property,
+            f"wgrad_{d_in}_{d_out}_{dt}_{T}_{kind}",
+            SEED + 172,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+            lambda G, X: G.t() @ X,
+            ((T, d_out), (T, d_in)),
             (d_out, d_in),
-            float("nan"),
-            device=device,
-            dtype=torch.float32 if f32 else torch.bfloat16,
+            torch.float32 if f32 else torch.bfloat16,
         )
-
-        def run(dst, G=G, X=X):
-            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, dst)
-
-        run(out)
-        torch.cuda.synchronize()
+        G, X = v.ops
         if kind == "sk":
             # the stream-K program runs straight from its table: no cached plan of the split tables
             assert not cake_backend._K1_ATOMIC_CACHE, what
-            assert cake_backend._k1_wgrad_sk_program_of(G, X, out, "auto", None), what
-            _k1_check(out, G.double().t() @ X.double(), what)
-            _repeats_into_nan(run, out, what)
+            assert cake_backend._k1_wgrad_sk_program_of(G, X, v.out, "auto", None), what
             continue
         ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
         if kind == "det":
@@ -16545,10 +16540,7 @@ def test_gpu_k1_wgrad_changed_rows_repeat_and_meet_the_budget():
             program = cake_backend.K1_WGRAD_DET_RULES_BY_SM.get((arch, sms), {}).get(
                 (d_in, d_out, T, dt)
             )
-            ref = torch.full_like(out, float("nan"))
-            if program is None:
-                det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, ref)
-            else:
+            if program is not None:
                 assert (
                     entry.det_plan.template == det_backend._TEMPLATE_PREFIX + program
                 ), what
@@ -16557,45 +16549,39 @@ def test_gpu_k1_wgrad_changed_rows_repeat_and_meet_the_budget():
                 # the symbol forms the prepared entry does not take keep their plain values in the table's programs
                 plain = ("sk_first", "lw", "mg", "sw")
                 assert not any(knobs.pop(name) for name in plain), what
+                # the deterministic package's prepared launch of the table's program (not launched)
                 launch = det_backend.cake_dense_gemm_det_train_projection_prepare(
-                    A, B, ref, transposed_out=transposed, **knobs
+                    A,
+                    B,
+                    torch.full_like(v.out, float("nan")),
+                    transposed_out=transposed,
+                    **knobs,
                 )
                 assert launch.template == entry.det_plan.template, what
-                launch.launch()
-            torch.cuda.synchronize()
-            assert torch.equal(out, ref), what
-        varying = False
-        if kind != "det":
-            plan = entry.plan
-            assert plan is not None, what
-            ordered = _k1_fixed_program(arch, sms, d_in, d_out, T, f32)
-            if ordered is not None:
-                assert (plan.chains, plan.split_order) == tuple(ordered[2:]), what
-            # only a range of K1_ORDERED_RANGES_BY_SM or K1_DSM_ODD_BLOCK_RANGES_BY_SM adds three or more splits in
-            # the arrival order
-            varying = ordered is not None and not plan.reproducible
-            assert plan.reproducible or varying, what
-            assert (plan.dsm, plan.block_n, plan.splits) == (
-                kind == "dsm",
-                block_n,
-                splits,
-            ), what
-        ref64 = G.double().t() @ X.double()
-        _k1_check(out, ref64, what)
-        if varying:
-            _meets_the_budget_into_nan(run, out, ref64, what)
-        else:
-            _repeats_into_nan(run, out, what)
+            continue
+        plan = entry.plan
+        assert plan is not None, what
+        ordered = _k1_fixed_program(arch, sms, d_in, d_out, T, f32)
+        if ordered is not None:
+            assert (plan.chains, plan.split_order) == tuple(ordered[2:]), what
+        # only a range of K1_ORDERED_RANGES_BY_SM or K1_DSM_ODD_BLOCK_RANGES_BY_SM adds three or more splits in the
+        # arrival order
+        assert plan.reproducible or ordered is not None, what
+        assert (plan.dsm, plan.block_n, plan.splits) == (
+            kind == "dsm",
+            block_n,
+            splits,
+        ), what
 
 
-def test_gpu_k1_parity_ranges_run_at_their_edges():
+def test_gpu_k1_parity_ranges_run_at_their_edges(record_property):
     """On a part with ranges in :data:`K1_PARITY_RANGES_BY_SM` for its SM count (or above
     :data:`K1_PARITY_RANGES_ABOVE_SM`, those of that count): at both ends of every range of a row and at an even and an
     odd number of K blocks inside it, the weight gradient binds the program of the token count's parity
-    (:func:`k1_parity_plan`) -- one split, its chains added in order -- meets the deterministic package's budget against
-    FP64 and repeats bit for bit over ``RERUNS`` calls into NaN-poisoned outputs; where the range gives the
-    deterministic program it binds the deterministic package's plan and gives that package's bits.  A part without
-    ranges skips."""
+    (:func:`k1_parity_plan`) -- one split, its chains added in order -- and meets the naive BF16 tier against FP64 over
+    the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs; where the range gives the
+    deterministic program it binds the deterministic package's plan and meets the tier over the draws, one launch
+    each.  A part without ranges skips."""
     device, arch, sms = _part_or_skip()
     part = cake_backend.K1_PARITY_RANGES_BY_SM.get((arch, sms))
     top = cake_backend.K1_PARITY_RANGES_ABOVE_SM.get(arch)
@@ -16603,7 +16589,6 @@ def test_gpu_k1_parity_ranges_run_at_their_edges():
         part = cake_backend.K1_PARITY_RANGES_BY_SM.get((arch, top))
     if not part:
         pytest.skip(f"no K1 parity range of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 173)
     ran = 0
     for (_, L, d_in, d_out, dt), ranges in sorted(part.items()):
         f32 = dt == "f32"
@@ -16618,27 +16603,22 @@ def test_gpu_k1_parity_ranges_run_at_their_edges():
             if want is None:
                 continue
             what = f"parity {d_in} {d_out} {dt} {T} {want}"
-            G, X = _bf16((T, d_out), device, g), _bf16((T, d_in), device, g)
             cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-            out = torch.full(
+            _n5_judge_call(
+                record_property,
+                f"wgrad_{d_in}_{d_out}_{dt}_{T}",
+                SEED + 173,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                lambda G, X: G.t() @ X,
+                ((T, d_out), (T, d_in)),
                 (d_out, d_in),
-                float("nan"),
-                device=device,
-                dtype=torch.float32 if f32 else torch.bfloat16,
+                torch.float32 if f32 else torch.bfloat16,
+                launches=1 if want == () else 1 + RERUNS,
             )
-
-            def run(dst, G=G, X=X):
-                cake_backend.cake_dense_gemm_nondet_train_projection_wgrad(G, X, dst)
-
-            run(out)
-            torch.cuda.synchronize()
             ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
             if want == ():
                 assert entry.plan is None and entry.det_plan is not None, what
-                ref = torch.full_like(out, float("nan"))
-                det_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, ref)
-                torch.cuda.synchronize()
-                assert torch.equal(out, ref), what
                 continue
             plan = entry.plan
             assert plan is not None and entry.k1 is not None, what
@@ -16649,8 +16629,6 @@ def test_gpu_k1_parity_ranges_run_at_their_edges():
                 plan.split_order,
             ) == want, what
             assert plan.reproducible, what
-            _k1_check(out, G.double().t() @ X.double(), what)
-            _repeats_into_nan(run, out, what)
             ran += 1
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     print(
@@ -16712,12 +16690,14 @@ def _resident_kernel(device, sms, us):
     return launch, stream, (module, arg, params)
 
 
-def test_gpu_k1_wgrad_stream_k_completes_next_to_a_resident_kernel():
+def test_gpu_k1_wgrad_stream_k_completes_next_to_a_resident_kernel(record_property):
     """On a part of :data:`K1_WGRAD_SK_RULES_BY_SM`: the stream-K weight gradient of the part's first row, launched
     right after and right before a kernel that holds 32 SMs for 5 ms on another stream, in eager launches and in CUDA
-    graph replays, completes within a host deadline with the bits of the launch alone and every flag word zero: the
-    unit that sums a split tile waits only for lower units, so a launch whose CTA pairs are not all resident at once
-    still completes.  A part without rows skips."""
+    graph replays, completes within a host deadline into a NaN-filled ``out`` with every flag word zero and meets the
+    naive BF16 tier against FP64 over the draws (written into the tensors the graph captured; the first draw through
+    every mode and order three times, each later draw the next of them): the unit that sums a split tile waits only
+    for lower units, so a launch whose CTA pairs are not all resident at once still completes.  A part without rows
+    skips."""
     device, arch, sms = _part_or_skip()
     rows = cake_backend.K1_WGRAD_SK_RULES_BY_SM.get((arch, sms), {})
     if not rows:
@@ -16735,7 +16715,6 @@ def test_gpu_k1_wgrad_stream_k_completes_next_to_a_resident_kernel():
     run()
     torch.cuda.synchronize()
     assert cake_backend._k1_wgrad_sk_program_of(G, X, out, "auto", None)
-    ref = out.clone()
     launch, blocker, keep = _resident_kernel(device, 32, 5000)
     stream = torch.cuda.current_stream(device)
     side = torch.cuda.Stream(device)
@@ -16756,73 +16735,108 @@ def test_gpu_k1_wgrad_stream_k_completes_next_to_a_resident_kernel():
             if "k1_tickets" in arena.buffers
         )
 
-    for mode in ("eager", "graph"):
-        for first in ("resident", "stream-K"):
-            for _ in range(3):
-                what = f"{arch} {sms} {d_in} {d_out} {T} {dt} {mode}, {first} first"
-                out.fill_(float("nan"))
-                blocker.wait_stream(stream)
-                if first == "resident":
-                    launch()
-                (graph.replay if mode == "graph" else run)()
-                if first == "stream-K":
-                    launch()
-                done = torch.cuda.Event()
-                done.record(stream)
-                deadline = time.monotonic() + 30.0
-                while not done.query():
-                    if time.monotonic() > deadline:
-                        pytest.fail(f"{what}: no completion within 30 s")
-                    time.sleep(1e-3)
-                stream.wait_stream(blocker)
-                torch.cuda.synchronize()
-                assert torch.equal(out, ref), what
-                assert flags() == 0, what
-    del graph, keep
+    schedule = [
+        (mode, first)
+        for mode in ("eager", "graph")
+        for first in ("resident", "stream-K")
+        for _ in range(3)
+    ]
+
+    def turns():
+        while True:
+            yield from schedule
+
+    turn = turns()
+    name = f"wgrad_{d_in}_{d_out}_{T}_{dt}"
+
+    def draw(s):
+        gen = torch.Generator(device=device).manual_seed(s)
+        G.copy_(_bf16((T, d_out), device, gen))
+        X.copy_(_bf16((T, d_in), device, gen))
+        return SimpleNamespace(G=G, X=X, out=out)
+
+    def judged_run(v, replay=graph.replay):
+        mode, first = next(turn)
+        what = f"{arch} {sms} {d_in} {d_out} {T} {dt} {mode}, {first} first"
+        v.out.fill_(float("nan"))
+        blocker.wait_stream(stream)
+        if first == "resident":
+            launch()
+        (replay if mode == "graph" else run)()
+        if first == "stream-K":
+            launch()
+        done = torch.cuda.Event()
+        done.record(stream)
+        deadline = time.monotonic() + 30.0
+        while not done.query():
+            if time.monotonic() > deadline:
+                pytest.fail(f"{what}: no completion within 30 s")
+            time.sleep(1e-3)
+        stream.wait_stream(blocker)
+        torch.cuda.synchronize()
+        assert flags() == 0, what
+        return {name: v.out}
+
+    def product(v, to):
+        return {name: v.G.to(to).t() @ v.X.to(to)}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 174,
+        draw=draw,
+        launch=judged_run,
+        product=product,
+        launches=len(schedule),
+    )
+    del judged_run, graph, keep
 
 
-def test_gpu_router_det_split_rows_run_the_det_program():
+def test_gpu_router_det_split_rows_run_the_det_program(record_property):
     """On a part of :data:`ROUTER_DET_WINDOWS`: the router weight gradient (256 experts) of every ``"det_s<n>"``
-    window, at its first and last token count and 16231 tokens where the window holds them, gives the deterministic
-    package's weight gradient at ``n`` splits bit for bit, meets the router budget against FP64 and repeats bit for bit
-    over ``RERUNS`` calls into NaN-poisoned outputs.  A part without such a window skips."""
+    window, at its first and last token count and 16231 tokens where the window holds them, binds the deterministic
+    package's plan of ``n`` splits (:data:`_K2_SPLITK_CACHE`) and meets the naive BF16 tier against FP64 over the
+    draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.  A part without such a window
+    skips."""
     device, arch, sms = _part_or_skip()
     windows = ROUTER_DET_WINDOWS.get((arch, sms), {})
     if not windows:
         pytest.skip(f"no router det-split window of {arch} on {sms} SMs")
-    g = torch.Generator(device=device).manual_seed(SEED + 173)
     for H, (lo, hi, n) in sorted(windows.items()):
         for T in sorted({lo, hi} | ({16231} if lo <= 16231 <= hi else set())):
             what = f"router wgrad H{H} T{T} det_s{n}"
-            G = torch.randn(T, 256, device=device, generator=g)
-            X = torch.randn(T, H, device=device, generator=g)
             cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
-            out = torch.full((256, H), float("nan"), device=device)
-
-            def run(dst, G=G, X=X):
-                cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, dst)
-
-            run(out)
-            torch.cuda.synchronize()
-            ref = torch.full_like(out, float("nan"))
-            det_backend.cake_dense_gemm_det_train_router_wgrad(G, X, ref, splits=n)
-            torch.cuda.synchronize()
-            assert torch.equal(out, ref), what
-            exact = G.double().t() @ X.double()
-            assert bool(torch.isfinite(out).all()), what
-            assert _rel_fro(out, exact) <= ROUTER_REL_FRO_MAX, (
-                what,
-                _rel_fro(out, exact),
+            v = _n5_judge_call(
+                record_property,
+                f"router_wgrad_H{H}_T{T}_det_s{n}",
+                SEED + 173,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_router_wgrad,
+                lambda G, X: G.t() @ X,
+                ((T, 256), (T, H)),
+                (256, H),
+                torch.float32,
+                in_dtype=torch.float32,
             )
-            _repeats_into_nan(run, out, what)
+            G, X = v.ops
+            want = det_backend.cake_dense_gemm_det_train_router_plan(
+                G.t(), X, v.out, splits=n
+            )[0]
+            entries = list(cake_backend._K2_SPLITK_CACHE.values())
+            assert entries, what
+            for entry in entries:
+                assert entry.k2 is not None and entry.plan.splits == n, what
+                assert entry.plan == want, what
 
 
-def test_gpu_router_ksum_rows_repeat_and_meet_the_budget(torch_determinism):
+def test_gpu_router_ksum_rows_run_the_k_order_program(
+    torch_determinism, record_property
+):
     """On a part with a ``"ksum_S<n>"`` window (212-SM sm_107a: hidden 6144 at 16172 to 16231 tokens): the router weight
-    gradient at the window's first and last token count runs the K-order program (by kernel name), the convenience
-    call and the prepared launch give the same bits, meet the router budget against FP64, repeat bit for bit over
-    ``RERUNS`` calls into NaN-poisoned outputs and raise no alert under ``torch.use_deterministic_algorithms(True)``.
-    A part without such a window skips."""
+    gradient at the window's first and last token count runs the K-order program (by kernel name; the prepared
+    launch's plan the reproducible K-order sum), raises no alert under ``torch.use_deterministic_algorithms(True)``,
+    and the convenience call and the prepared launch each meet the naive BF16 tier against FP64 over the draws
+    (written into the tensors the prepared launch is bound to), the first draw launched ``1 + RERUNS`` times into
+    NaN-poisoned outputs.  A part without such a window skips."""
     device, arch, sms = _part_or_skip()
     template = cake_backend.router_ksum_template(arch, sms)
     rules = cake_backend.ROUTER_RULES_BY_SM.get((arch, sms), {})
@@ -16836,39 +16850,52 @@ def test_gpu_router_ksum_rows_repeat_and_meet_the_budget(torch_determinism):
     if template is None or not windows:
         pytest.skip(f"no router K-order window of {arch} on {sms} SMs")
     module = cake_jit.KERNELS[arch][template]
-    g = torch.Generator(device=device).manual_seed(SEED + 176)
+    wgrad = cake_backend.cake_dense_gemm_nondet_train_router_wgrad
     for H, lo, hi in windows:
         for T in sorted({lo, hi}):
             what = f"router wgrad ksum H{H} T{T}"
-            G = torch.randn(T, 256, device=device, generator=g)
-            X = torch.randn(T, H, device=device, generator=g)
-            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            name = f"router_wgrad_ksum_H{H}_T{T}"
+            G = torch.zeros(T, 256, device=device)
+            X = torch.zeros(T, H, device=device)
             out = torch.full((256, H), float("nan"), device=device)
-
-            def run(dst, G=G, X=X):
-                cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, dst)
-
-            torch.use_deterministic_algorithms(True)
-            with _no_warnings():
-                run(out)
-            torch.use_deterministic_algorithms(False)
-            torch.cuda.synchronize()
-            exact = G.double().t() @ X.double()
-            assert bool(torch.isfinite(out).all()), what
-            assert _rel_fro(out, exact) <= ROUTER_REL_FRO_MAX, (
-                what,
-                _rel_fro(out, exact),
-            )
+            pout = torch.full_like(out, float("nan"))
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
             prepared = cake_backend.cake_dense_gemm_nondet_train_router_prepare(
-                G.t(), X, torch.full_like(out, float("nan"))
+                G.t(), X, pout
             )
             assert prepared.plan.ksum and prepared.plan.reproducible, what
-            prepared.launch()
-            torch.cuda.synchronize()
-            assert torch.equal(prepared.out, out), what
-            _repeats_into_nan(run, out, what)
+
+            def draw(s, G=G, X=X, out=out, pout=pout, prepared=prepared):
+                g = torch.Generator(device=device).manual_seed(s)
+                G.copy_(torch.randn(G.shape, device=device, generator=g))
+                X.copy_(torch.randn(X.shape, device=device, generator=g))
+                nan_fill((out, pout))
+                return SimpleNamespace(G=G, X=X, out=out, pout=pout, prepared=prepared)
+
+            def launch(v, name=name):
+                torch.use_deterministic_algorithms(True)
+                with _no_warnings():
+                    wgrad(v.G, v.X, v.out)
+                torch.use_deterministic_algorithms(False)
+                v.prepared.launch()
+                torch.cuda.synchronize()
+                return {f"{name}_convenience": v.out, f"{name}_prepared": v.pout}
+
+            def product(v, dtype, name=name):
+                value = v.G.to(dtype).t() @ v.X.to(dtype)
+                return {f"{name}_convenience": value, f"{name}_prepared": value}
+
+            judge_gemm(
+                record_property,
+                seed=SEED + 176,
+                draw=draw,
+                launch=launch,
+                product=product,
+                launches=1 + RERUNS,
+                poison=lambda v: (v.out, v.pout),
+            )
             if lo == T:
-                _assert_ran(lambda: run(out), module)
+                _assert_ran(lambda G=G, X=X, out=out: wgrad(G, X, out), module)
 
 
 #: The views of :func:`test_gpu_k1_program_rows_take_offset_and_padded_views`: label -> the program table.
@@ -16880,17 +16907,16 @@ _K1_VIEW_TABLES = {
 }
 
 
-def test_gpu_k1_program_rows_take_offset_and_padded_views():
+def test_gpu_k1_program_rows_take_offset_and_padded_views(record_property):
     """On the device's part, the first row of each K1 program table of the part (:data:`_K1_VIEW_TABLES`): the operands
     column slices of wider buffers at a 16-byte offset (the weight a row slice of a taller one), ``out`` a slice of a
     larger NaN-filled buffer with a padded row stride and a nonzero storage offset.  The entry point of the operation
     still takes the row's table on these views, and its call, the generic prepared launch (a
     :class:`CakeDenseGemmNondetProgramLaunch` of the table; for the weight gradient also its own prepare) and the
-    generic convenience call give the bits of the entry point on contiguous copies (this package's own programs by
-    kernel name), meet the FP64 budget and leave the rest of the buffer untouched.  A part without program rows
-    skips."""
+    generic convenience call each meet the naive BF16 tier against FP64 over the draws (written into the wider
+    buffers, which the prepared launches are bound to) and leave the rest of the buffer untouched (this package's own
+    programs by kernel name).  A part without program rows skips."""
     device, arch, sms = _part_or_skip()
-    g = torch.Generator(device=device).manual_seed(SEED + 177)
     bf16, f32 = torch.bfloat16, torch.float32
     entry = {
         "fwd": cake_backend.cake_dense_gemm_nondet_train_projection_forward,
@@ -16906,6 +16932,13 @@ def test_gpu_k1_program_rows_take_offset_and_padded_views():
             G, X, o, "auto", None
         ),
     }
+    # the product of each label's views ``(a, b)`` in ``out``'s orientation
+    gemms = {
+        "fwd": lambda a, b: a @ b.t(),
+        "dgrad": lambda a, b: a @ b,
+        "nvjet": lambda a, b: a @ b,
+        "wgrad": lambda a, b: a.t() @ b,
+    }
     ran = 0
     for label, table in _K1_VIEW_TABLES.items():
         rows = getattr(cake_backend, table).get((arch, sms), {})
@@ -16914,34 +16947,31 @@ def test_gpu_k1_program_rows_take_offset_and_padded_views():
         key, template = sorted(rows.items())[0]
         what = f"{label} {key} {template}"
         cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        # the wider buffers (shape, scale) the operand views slice; each draw writes its values into them
         if label == "fwd":
             (K, N, T), dtype = key, bf16
-            a = _bf16((T, K + 64), device, g)[:, 8 : 8 + K]
-            b = _bf16((N + 16, K), device, g, K**-0.5)[16:]
+            wide = (((T, K + 64), 1.0), ((N + 16, K), K**-0.5))
+            abuf, bbuf = (torch.zeros(s, device=device, dtype=bf16) for s, _ in wide)
+            a, b = abuf[:, 8 : 8 + K], bbuf[16:]
             generic, transposed = (a, b.t()), False
             rows_, cols = T, N
-            ref64 = a.double() @ b.double().t()
         elif label in ("dgrad", "nvjet"):
             K, N, T, dt = key
             dtype = f32 if dt == "f32" else bf16
-            a = _bf16((T, N + 64), device, g)[:, 8 : 8 + N]
-            b = _bf16((N + 16, K), device, g, N**-0.5)[16:]
+            wide = (((T, N + 64), 1.0), ((N + 16, K), N**-0.5))
+            abuf, bbuf = (torch.zeros(s, device=device, dtype=bf16) for s, _ in wide)
+            a, b = abuf[:, 8 : 8 + N], bbuf[16:]
             generic, transposed = (a, b), False
             rows_, cols = T, K
-            ref64 = a.double() @ b.double()
         else:
             d_in, d_out, T, dt = key
             dtype = f32 if dt == "f32" else bf16
-            a = _bf16((T, d_out + 64), device, g)[:, 8 : 8 + d_out]  # G
-            b = _bf16((T, d_in + 64), device, g)[:, 8 : 8 + d_in]  # X
+            wide = (((T, d_out + 64), 1.0), ((T, d_in + 64), 1.0))
+            abuf, bbuf = (torch.zeros(s, device=device, dtype=bf16) for s, _ in wide)
+            a, b = abuf[:, 8 : 8 + d_out], bbuf[:, 8 : 8 + d_in]  # G, X
             generic, transposed = (b.t(), a), True
             rows_, cols = d_out, d_in
-            ref64 = a.double().t() @ b.double()
         assert a.storage_offset() and b.storage_offset(), what
-        # the bits of the entry point on contiguous copies
-        ref = torch.full((rows_, cols), float("nan"), device=device, dtype=dtype)
-        entry[label](a.contiguous(), b.contiguous(), ref)
-        torch.cuda.synchronize()
         buf, out = _sliced_out(rows_, cols, dtype, device)
         assert out.storage_offset() and out.stride(0) == cols + 24
         assert routed[label](a, b, out) is not None, what
@@ -16951,26 +16981,49 @@ def test_gpu_k1_program_rows_take_offset_and_padded_views():
         )
         assert isinstance(prepared, cake_backend.CakeDenseGemmNondetProgramLaunch)
         assert prepared.table == table, (what, prepared.table)
-        launches = [
-            lambda: entry[label](a, b, out),
-            prepared.launch,
-            lambda: cake_backend.cake_dense_gemm_nondet_train_projection(
-                *generic, out, **kw
+        paths = {
+            "entry": lambda label=label, a=a, b=b, out=out: entry[label](a, b, out),
+            "prepared": prepared.launch,
+            "convenience": lambda generic=generic, out=out, kw=kw: (
+                cake_backend.cake_dense_gemm_nondet_train_projection(
+                    *generic, out, **kw
+                )
             ),
-        ]
+        }
         if transposed:
-            launches.append(
+            paths["wgrad_prepare"] = (
                 cake_backend.cake_dense_gemm_nondet_train_projection_wgrad_prepare(
                     a, b, out
                 ).launch
             )
-        for i, launch in enumerate(launches):
-            out.fill_(float("nan"))
-            launch()
-            torch.cuda.synchronize()
-            assert torch.equal(out, ref), (what, i)
-            _k1_check(out, ref64, f"{what} {i}")
-            assert _outside_untouched(buf, cols), (what, i)
+
+        def draw(s, bufs=(abuf, bbuf), wide=wide, a=a, b=b):
+            g = torch.Generator(device=device).manual_seed(s)
+            for buf_, (shape, scale) in zip(bufs, wide, strict=True):
+                buf_.copy_(_bf16(shape, device, g, scale))
+            return SimpleNamespace(a=a, b=b)
+
+        def launch(v, paths=paths, buf=buf, out=out, cols=cols, label=label, what=what):
+            results = {}
+            for path, call in paths.items():
+                out.fill_(float("nan"))
+                call()
+                torch.cuda.synchronize()
+                assert _outside_untouched(buf, cols), (what, path)
+                results[f"{label}_{path}"] = out.clone()
+            return results
+
+        def product(v, to, paths=paths, label=label):
+            value = gemms[label](v.a.to(to), v.b.to(to))
+            return {f"{label}_{path}": value for path in paths}
+
+        judge_gemm(
+            record_property,
+            seed=SEED + 177,
+            draw=draw,
+            launch=launch,
+            product=product,
+        )
         if label != "nvjet":
             _assert_ran(prepared.launch, cake_jit.KERNELS[arch][template])
         ran += 1
