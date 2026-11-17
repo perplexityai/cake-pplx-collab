@@ -28,8 +28,11 @@ judge found no failure:
 
 The family's ``conftest.py`` reports a test that passed with recorded misses as xfailed, its reason listing each
 missed output and its ratios (:func:`finish`); a test that passed without judging an output listed for it fails, and
-a test that failed stays failed.  The test id is pytest's node id (``tests/experimental/<file>::<test>[<params>]``,
-the id of the ``TIER`` lines), set by the conftest around each test's call (:func:`running`).
+a test that failed stays failed.  The list is checked only through the tests that run: the entries of a test id that
+is not collected (a renamed or removed parametrization, or a run over other test ids) or whose test skips or fails on
+the architecture are not checked, and :func:`check_registry` checks the entries' form only.  The test id is pytest's
+node id (``tests/experimental/<file>::<test>[<params>]``, the id of the ``TIER`` lines), set by the conftest around each
+test's call (:func:`running`).
 
 The architecture is that of the device that ran the kernel (for the reference backend, the device of its inputs):
 ``"cpu"`` for the CPU, else ``"sm_<major><minor>"`` of that CUDA device (:func:`current_arch`).  The judge site passes

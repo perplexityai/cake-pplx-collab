@@ -1405,9 +1405,13 @@ contract and their bitwise checks: the same bytes from run to run, and the
 bit identities between the forms documented above.  Each verdict prints a
 `TIER` line in pytest's terminal summary.  The outputs that miss the tier
 today are listed per architecture in
-`tests/experimental/test_helpers/cake_lm_head_known_misses.py` (their tests
-report as xfailed), where a new miss or a listed output that meets the tier
-fails the test.
+`tests/experimental/test_helpers/cake_lm_head_known_misses.py` (a test whose
+listed outputs miss reports as xfailed).  The list is checked through the
+tests that run: a new miss fails its test, and so does a listed output that
+meets the tier or that a test passing its other checks did not judge.  The
+entries of a test that is not collected (a renamed or removed
+parametrization, or a run over other test ids) or that skips are not
+checked.
 
 Toolchain note: the package needs CUDA 12.9 or newer.  Every `sm_100a` and
 `sm_103a` entry of `build.json` has `min_cuda` 12.9
