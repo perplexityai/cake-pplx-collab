@@ -68,7 +68,7 @@ def get_compute_capability(device: torch.device) -> tuple[int, int]:
 HIDDEN_BY_CAPABILITY = {
     (10, 0): (4096, 5120, 7168),
     (10, 3): (4096, 5120, 7168),
-    (10, 7): (4096,),
+    (10, 7): (4096, 5120, 7168),
 }
 HIDDEN = (4096, 5120, 7168)
 TOKENS = (1, 2, 3, 7, 65, 129, 257, 1000, 2049, 4096, 7169)
