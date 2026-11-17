@@ -10837,8 +10837,38 @@ def _device_template(v, **knobs):
     return _plan_template(v, arch=arch_for(v["out"].device), **knobs)
 
 
+def _d2_draw_into(v, family, row, op, out_dtype, T):
+    """``draw`` of :func:`judge_gemm` for the views ``v`` of one row (:func:`_make_inputs`) that a prepared launch is
+    bound to: the row's operands at the draw's seed, written in place into the tensors of ``v``, and ``v["out"]``
+    filled with NaN."""
+    names = ("X", "W", "G") if family == "proj" else ("act", "weight", "d_out")
+
+    def draw(seed):
+        fresh = _make_inputs(family, row, op, out_dtype, T, seed=seed)
+        for name in names:
+            v[name].copy_(fresh[name])
+        nan_fill([v["out"]])
+        return v
+
+    return draw
+
+
+def _d2_product(v, dtype):
+    """``product`` of :func:`judge_gemm` for the views ``v`` of one row: ``A @ B`` on the operands converted to
+    ``dtype``, as the output ``"out"``."""
+    return {"out": torch.matmul(v["A"].to(dtype), v["B"].to(dtype))}
+
+
+def _d2_output(v, out):
+    """The output ``out`` of the views ``v`` in the orientation of :func:`_d2_product` (``out.t()`` for a transposed
+    store)."""
+    return out.t() if v.get("transposed") else out
+
+
 @pytest.mark.parametrize("row, op, out_dtype, T", GPU_ROWS)
-def test_projection_rows_match_fp64_reference(row, op, out_dtype, T):
+def test_projection_rows_match_fp64_reference(record_property, row, op, out_dtype, T):
+    """Each GPU row's prepared launch, judged against the naive BF16 tier over 32 draws written into the tensors
+    the launch is bound to."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -10855,22 +10885,30 @@ def test_projection_rows_match_fp64_reference(row, op, out_dtype, T):
         prepared = cake_dense_gemm_det_train_projection_prepare(
             v["A"], v["B"], v["out"]
         )
-    out = prepared.launch()
-    torch.cuda.synchronize()
-    assert out is v["out"]
-    expected = torch.matmul(v["A"].double(), v["B"].double())
-    _check(v["out"] if not v.get("transposed") else v["out"].t(), expected)
+
+    def launch(v):
+        out = prepared.launch()
+        torch.cuda.synchronize()
+        assert out is v["out"]
+        return {"out": _d2_output(v, out)}
+
+    judge_gemm(
+        record_property,
+        seed=SEED,
+        draw=_d2_draw_into(v, "proj", row, op, out_dtype, T),
+        launch=launch,
+        product=_d2_product,
+    )
 
 
 @pytest.mark.parametrize("T", [1001, 4100])
 @pytest.mark.parametrize(
     "key", EIGHT_WARP_ROWS, ids=lambda key: f"{key[0]}-{key[6]}x{key[7]}"
 )
-def test_eight_warp_form_rows_match_fp64_reference(key, T):
+def test_eight_warp_form_rows_match_fp64_reference(record_property, key, T):
     """The eight-warp input-gradient rows of the device's architecture (six on sm_103a, seven on sm_100a) run their
-    eight-warp program at a short T against the FP64 reference of the exact BF16 operands (the package tolerance);
-    the row's ten-warp program is launched on the same operands beside it and the two outputs are compared
-    (reported, not asserted: bitwise agreement and the largest difference).  A key of another architecture is
+    eight-warp program at a short T, and the row's ten-warp program runs on the same operands beside it; each
+    program's output is judged against the naive BF16 tier over 32 draws.  A key of another architecture is
     skipped: each device runs exactly its own architecture's rows."""
     if not _device_supported():
         pytest.skip(
@@ -10903,31 +10941,41 @@ def test_eight_warp_form_rows_match_fp64_reference(key, T):
     assert prepared.template == plan.template and "_w8" in prepared.template
     assert prepared.plan.form == ROW_RULES[key]["form"]
     assert prepared.plan.sk_units == 0 and prepared.plan.m_tiles % 2 == 0
-    result = prepared.launch()
-    torch.cuda.synchronize()
-    assert result is out
-    expected = torch.matmul(A.double(), B.double())
-    _check(out, expected)
     plain_out = torch.empty_like(out)
     plain = cake_dense_gemm_det_train_projection_prepare(A, B, plain_out, form="")
     assert plain.plan.form == "" and "_w8" not in plain.template, plain.template
-    plain.launch()
-    torch.cuda.synchronize()
-    _check(plain_out, expected)
-    diff = (out.float() - plain_out.float()).abs()
-    spacing = torch.exp2(
-        torch.floor(torch.log2(expected.abs().float().clamp_min(2.0**-126))) - 7
-    )
-    print(
-        f"eight-warp form vs the ten-warp program: {N} -> {K} T {T} {prepared.template} vs {plain.template}: "
-        f"bitwise={torch.equal(out, plain_out)} mismatches={int((out != plain_out).sum())} "
-        f"max_abs={float(diff.max()):.4g} max_bf16_ulp={float((diff / spacing).max()):.3g}"
-    )
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        A.copy_(torch.randn(T, K, device=device, generator=gen).to(torch.bfloat16))
+        B.copy_(
+            (torch.randn(K, N, device=device, generator=gen) * K**-0.5).to(
+                torch.bfloat16
+            )
+        )
+        nan_fill([out, plain_out])
+        return A, B
+
+    def launch(_):
+        result = prepared.launch()
+        plain.launch()
+        torch.cuda.synchronize()
+        assert result is out
+        return {"eight_warp": out, "ten_warp": plain_out}
+
+    def product(operands, dtype):
+        a, b = (t.to(dtype) for t in operands)
+        expected = torch.matmul(a, b)
+        return {"eight_warp": expected, "ten_warp": expected}
+
+    judge_gemm(record_property, seed=SEED, draw=draw, launch=launch, product=product)
 
 
 @pytest.mark.parametrize("row", list(MLA_ROWS))
 @pytest.mark.parametrize("op", ["fwd", "dgrad", "wgrad"])
-def test_mla_batched_rows_match_fp64_reference(row, op):
+def test_mla_batched_rows_match_fp64_reference(record_property, row, op):
+    """Each batched MLA row's prepared launch, judged against the naive BF16 tier over 32 draws written into the
+    tensors the launch is bound to; the rope part of the input-gradient slot keeps its NaN sentinel."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -10936,14 +10984,30 @@ def test_mla_batched_rows_match_fp64_reference(row, op):
     v = _make_inputs("mla", row, op, "bf16", 257, seed=SEED + 1)
     _require_program(_plan_template(v))
     prepared = cake_dense_gemm_det_train_projection_prepare(v["A"], v["B"], v["out"])
-    out = prepared.launch()
-    torch.cuda.synchronize()
-    assert out is v["out"] and prepared.plan.L == 64
-    expected = torch.matmul(v["A"].double(), v["B"].double())
-    _check(v["out"], expected, untouched=v.get("untouched"))
+
+    def launch(v):
+        out = prepared.launch()
+        torch.cuda.synchronize()
+        assert out is v["out"] and prepared.plan.L == 64
+        return {"out": out}
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 1,
+        draw=_d2_draw_into(v, "mla", row, op, "bf16", 257),
+        launch=launch,
+        product=_d2_product,
+    )
+    # no launch of any draw wrote the rope part of the slot
+    untouched = v.get("untouched")
+    if untouched is not None:
+        assert bool(torch.isnan(untouched.float()).all())
 
 
-def test_strided_views_and_storage_offsets_match_fp64_reference():
+def test_strided_views_and_storage_offsets_match_fp64_reference(record_property):
+    """A forward on strided views with storage offsets and the swapped small-N weight gradient with the transposed
+    fp32 store into a padded buffer: both outputs judged against the naive BF16 tier over 32 draws written into the
+    bound buffers; the padding of both output buffers stays NaN."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -10966,13 +11030,6 @@ def test_strided_views_and_storage_offsets_match_fp64_reference():
     out = out_buf[3:, 8 : 8 + N]
     _require_program(_plan_template(dict(A=A, B=W.t(), out=out)))
     prepared = cake_dense_gemm_det_train_projection_prepare(A, W.t(), out)
-    prepared.launch()
-    torch.cuda.synchronize()
-    _check(out, torch.matmul(A.double(), W.double().t()))
-    assert bool(torch.isnan(out_buf[:3].float()).all()) and bool(
-        torch.isnan(out_buf[3:, :8].float()).all()
-    )
-    assert bool(torch.isnan(out_buf[3:, 8 + N :].float()).all())
     # the swapped small-N weight gradient X.T @ G (both operands MN-major) with the transposed fp32
     # store into a [N, K] output that sits inside a wider buffer (padded row stride)
     Nf = 96
@@ -10985,26 +11042,57 @@ def test_strided_views_and_storage_offsets_match_fp64_reference():
     # small-N weight gradients to the 64-row family, so only that family's instance is exported there)
     v_t = dict(A=A.t(), B=Gs, out=out_t, transposed=True)
     knobs_t = _registered_knobs(v_t, {}, dict(cta_rows=64))
-    prepared = cake_dense_gemm_det_train_projection_wgrad_prepare(
+    prepared_t = cake_dense_gemm_det_train_projection_wgrad_prepare(
         Gs, A, out_t, **knobs_t
     )
-    assert prepared.plan.transposed_out and prepared.template == _plan_template(
+    assert prepared_t.plan.transposed_out and prepared_t.template == _plan_template(
         v_t, **knobs_t
     )
-    assert _nopro(prepared.template).startswith(
+    assert _nopro(prepared_t.template).startswith(
         "dense_proj_det_gemm_nn_n128"
-    ) and _nopro(prepared.template).endswith("_f32_t")
+    ) and _nopro(prepared_t.template).endswith("_f32_t")
     assert (
-        prepared.plan.l2_bytes == _l2_bytes()
-        and prepared.plan.sm_pairs == _sm_count() // 2
+        prepared_t.plan.l2_bytes == _l2_bytes()
+        and prepared_t.plan.sm_pairs == _sm_count() // 2
     )
-    prepared.launch()
-    torch.cuda.synchronize()
-    _check(out_t, torch.matmul(Gs.double().t(), A.double()))
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        a_buf.copy_(
+            torch.randn(T, K + 64, device=device, generator=gen).to(torch.bfloat16)
+        )
+        w_buf.copy_(
+            (torch.randn(N + 16, K, device=device, generator=gen) * K**-0.5).to(
+                torch.bfloat16
+            )
+        )
+        Gs.copy_(torch.randn(T, Nf, device=device, generator=gen).to(torch.bfloat16))
+        nan_fill([out, out_t])
+        return A, W, Gs
+
+    def launch(_):
+        prepared.launch()
+        prepared_t.launch()
+        torch.cuda.synchronize()
+        return {"out": out, "out_t": out_t}
+
+    def product(operands, dtype):
+        a, w, gs = (t.to(dtype) for t in operands)
+        return {"out": torch.matmul(a, w.t()), "out_t": torch.matmul(gs.t(), a)}
+
+    judge_gemm(
+        record_property, seed=SEED + 2, draw=draw, launch=launch, product=product
+    )
+    assert bool(torch.isnan(out_buf[:3].float()).all()) and bool(
+        torch.isnan(out_buf[3:, :8].float()).all()
+    )
+    assert bool(torch.isnan(out_buf[3:, 8 + N :].float()).all())
     assert bool(torch.isnan(out_t_buf[:, K:]).all())
 
 
-def test_prepared_gemm_launches_without_allocation_and_is_deterministic():
+def test_prepared_gemm_launches_without_allocation_and_is_deterministic(
+    record_property,
+):
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -11037,9 +11125,30 @@ def test_prepared_gemm_launches_without_allocation_and_is_deterministic():
             pair_tiles,
             2 * pair_tiles,
         )
-    first = prepared.launch().clone()
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        X.copy_(torch.randn(T, K, device=device, generator=gen).to(torch.bfloat16))
+        G.copy_(torch.randn(T, N, device=device, generator=gen).to(torch.bfloat16))
+        nan_fill([out])
+        return X, G
+
+    def launch(_):
+        result = prepared.launch()
+        torch.cuda.synchronize()
+        return {"out": result.t()}
+
+    def product(operands, dtype):
+        x, grad = (t.to(dtype) for t in operands)
+        return {"out": torch.matmul(x.t(), grad)}
+
+    judge_gemm(
+        record_property, seed=SEED + 3, draw=draw, launch=launch, product=product
+    )
+    # a relaunch on the last draw's operands into NaN: no allocation, the same bits
+    first = out.clone()
+    nan_fill([out])
     torch.cuda.synchronize()
-    _check(out.t(), torch.matmul(X.t().double(), G.double()))
     before = torch.cuda.memory_stats()
     prepared.launch()
     torch.cuda.synchronize()
@@ -11048,7 +11157,13 @@ def test_prepared_gemm_launches_without_allocation_and_is_deterministic():
     assert torch.equal(first, out)
 
 
-def test_convenience_path_reuses_its_planned_launch_without_allocation():
+def test_convenience_path_reuses_its_planned_launch_without_allocation(
+    record_property,
+):
+    """The convenience forward plans one entry for a geometry: its output is judged against the naive BF16 tier
+    over 32 draws of new tensors of that geometry, which all launch the one cached entry.  A call of new tensors
+    allocates nothing; on the last draw's operands the same call, the call on another stream (its own entry and
+    arena) and the prepared launch of the same binding each write the bits of the judged output into NaN."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -11069,10 +11184,34 @@ def test_convenience_path_reuses_its_planned_launch_without_allocation():
     assert facts is cake_backend.device_facts(torch.device("cuda", facts.index))
     assert (facts.sm_count, facts.l2_bytes) == (_sm_count(), _l2_bytes())
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
-    first = cake_backend.cake_dense_gemm_det_train_projection_forward(X, W, out).clone()
-    torch.cuda.synchronize()
-    _check(out, torch.matmul(X.double(), W.double().t()))
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        return SimpleNamespace(
+            X=torch.randn(T, K, device=device, generator=gen).to(torch.bfloat16),
+            W=(torch.randn(N, K, device=device, generator=gen) * K**-0.5).to(
+                torch.bfloat16
+            ),
+            out=torch.full(
+                (T, N), float("nan"), device=device, dtype=torch.bfloat16
+            ),
+        )
+
+    def launch(d):
+        cake_backend.cake_dense_gemm_det_train_projection_forward(d.X, d.W, d.out)
+        torch.cuda.synchronize()
+        return {"out": d.out}
+
+    def product(d, dtype):
+        return {"out": torch.matmul(d.X.to(dtype), d.W.to(dtype).t())}
+
+    last = judge_gemm(
+        record_property, seed=SEED + 6, draw=draw, launch=launch, product=product
+    )
+    # every draw's new tensors of the one geometry launched the one planned entry
     assert len(cake_backend._K1_CACHE) == 1
+    X, W, out = last.X, last.W, last.out
+    first = out.clone()
     # new tensors of the same geometry hit the cached plan: no planning, no allocation (``out`` is given)
     X2 = torch.randn(T, K, device=device, generator=g).to(torch.bfloat16)
     out2 = torch.empty_like(out)
@@ -11082,12 +11221,15 @@ def test_convenience_path_reuses_its_planned_launch_without_allocation():
     after = torch.cuda.memory_stats()
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
     assert len(cake_backend._K1_CACHE) == 1
-    _check(out2, torch.matmul(X2.double(), W.double().t()))
+    # the same call again, into NaN: the same bits
+    nan_fill([out])
     assert torch.equal(
         cake_backend.cake_dense_gemm_det_train_projection_forward(X, W, out), first
     )
     assert len(cake_backend._ARENAS) == 1
-    # another stream never shares an entry (nor its workspace arena)
+    # another stream never shares an entry (nor its workspace arena); it writes the same bits into NaN
+    nan_fill([out2])
+    torch.cuda.synchronize()
     with torch.cuda.stream(torch.cuda.Stream(device=device)):
         cake_backend.cake_dense_gemm_det_train_projection_forward(X, W, out2)
     torch.cuda.synchronize()
@@ -11099,7 +11241,8 @@ def test_convenience_path_reuses_its_planned_launch_without_allocation():
     assert {e.arena.key for e in (first_entry, second_entry)} == set(
         cake_backend._ARENAS
     )
-    # the prepared path of the same binding gives the same bits
+    # the prepared path of the same binding gives the same bits, into NaN
+    nan_fill([out2])
     prepared = cake_dense_gemm_det_train_projection_prepare(X, W.t(), out2)
     assert (
         prepared.template == next(iter(cake_backend._K1_CACHE.values())).plan.template
@@ -11107,10 +11250,12 @@ def test_convenience_path_reuses_its_planned_launch_without_allocation():
     assert torch.equal(prepared.launch(), first)
 
 
-def test_convenience_path_replays_a_stream_k_row_bit_exact():
+def test_convenience_path_replays_a_stream_k_row_bit_exact(record_property):
     """The cached entry carves the stream-K workspace and the slice counters out of the arena of its device
-    and stream: the second call of the same geometry reuses them without a memset (the kernel resets every
-    counter it uses), stays allocation-free and reproduces the first result bit for bit."""
+    and stream: every later call of the same geometry reuses them without a memset (the kernel resets every
+    counter it uses).  Its output is judged against the naive BF16 tier over 32 draws of new tensors of that
+    geometry (``out`` allocated by each call); on the last draw's operands a call into a NaN-filled ``out`` stays
+    allocation-free and reproduces the judged result bit for bit."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -11133,17 +11278,37 @@ def test_convenience_path_replays_a_stream_k_row_bit_exact():
     )
     knobs = _registered_knobs(v, dict(cta_rows=64), dict(cta_rows=128))
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
-    out1 = cake_backend.cake_dense_gemm_det_train_projection_wgrad(
-        G, X, **knobs
-    )  # ``out`` allocated here
-    torch.cuda.synchronize()
-    _check(out1.t(), torch.matmul(X.t().double(), G.double()))
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        return SimpleNamespace(
+            X=torch.randn(T, K, device=device, generator=gen).to(torch.bfloat16),
+            G=torch.randn(T, N, device=device, generator=gen).to(torch.bfloat16),
+            out=None,
+        )
+
+    def launch(d):
+        d.out = cake_backend.cake_dense_gemm_det_train_projection_wgrad(
+            d.G, d.X, **knobs
+        )  # ``out`` allocated here
+        torch.cuda.synchronize()
+        return {"out": d.out.t()}
+
+    def product(d, dtype):
+        return {"out": torch.matmul(d.X.to(dtype).t(), d.G.to(dtype))}
+
+    last = judge_gemm(
+        record_property, seed=SEED + 7, draw=draw, launch=launch, product=product
+    )
+    X, G, out1 = last.X, last.G, last.out
     assert len(cake_backend._K1_CACHE) == 1
     entry = next(iter(cake_backend._K1_CACHE.values()))
     # the weight-gradient swap is the caller's (``wgrad_views`` -> ``transposed_out``); the batched small-M
     # swap of the planner (``entry.swapped``) does not apply to a 2-D row
     assert entry.plan.transposed_out and not entry.swapped
     out2 = torch.empty_like(out1)
+    nan_fill([out2])
+    torch.cuda.synchronize()
     before = torch.cuda.memory_stats()
     cake_backend.cake_dense_gemm_det_train_projection_wgrad(G, X, out2, **knobs)
     torch.cuda.synchronize()
@@ -11367,10 +11532,12 @@ _BOUND_ROWS = (
 )
 
 
-def test_k1_entry_points_bound_launch_is_bit_exact():
-    """On the device the K1 entry points' bound launches give the bits of the convenience path's launch of the same
-    call: on the first call of a key, on fresh outputs of a bound key (no allocation) and after a growth of the arena
-    (the workspace converted again); the slice counters are zero after the launches."""
+def test_k1_entry_points_bound_launch_is_bit_exact(record_property):
+    """On the device the convenience path's launch of each row is judged against the naive BF16 tier over 32 draws,
+    and on the last draw's operands the K1 entry points' bound launches give the bits of the convenience path's
+    launch of the same call, each into NaN: on the first call of a key, on fresh outputs of a bound key (no
+    allocation) and after a growth of the arena (the workspace converted again); the slice counters are zero after
+    the launches."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -11378,14 +11545,19 @@ def test_k1_entry_points_bound_launch_is_bit_exact():
         )
     device = torch.device("cuda")
     arch = arch_for(device)
-    cases = []
-    for i, (row, op, out_dtype, T) in enumerate(_BOUND_ROWS):
-        v = _make_inputs("proj", row, op, out_dtype, T, seed=SEED + 61 + i)
+    names = [f"{row}_{op}_{out_dtype}" for row, op, out_dtype, _T in _BOUND_ROWS]
+
+    def draw(seed):
+        return [
+            (op, _make_inputs("proj", row, op, out_dtype, T, seed=seed + i))
+            for i, (row, op, out_dtype, T) in enumerate(_BOUND_ROWS)
+        ]
+
+    for _op, v in draw(SEED + 61):
         _require_program(_device_template(v))
-        cases.append((op, v))
 
     def convenience(op, v):
-        out = torch.empty_like(v["out"])
+        out = torch.full_like(v["out"], float("nan"))
         if op != "wgrad":
             return cake_backend._launch_cached_gemm(v["A"], v["B"], out)
         A, B, t = cake_backend.wgrad_views(
@@ -11408,19 +11580,35 @@ def test_k1_entry_points_bound_launch_is_bit_exact():
             v["G"], v["X"], out
         )
 
+    want = []
+
+    def launch(cases):
+        want[:] = [convenience(op, v) for op, v in cases]
+        torch.cuda.synchronize()
+        return {
+            name: _d2_output(v, w)
+            for name, (_op, v), w in zip(names, cases, want, strict=True)
+        }
+
+    def product(cases, dtype):
+        return {
+            name: _d2_product(v, dtype)["out"]
+            for name, (_op, v) in zip(names, cases, strict=True)
+        }
+
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
-    want = [convenience(op, v) for op, v in cases]
-    got = [entry(op, v, torch.empty_like(v["out"])) for op, v in cases]
+    cases = judge_gemm(
+        record_property, seed=SEED + 61, draw=draw, launch=launch, product=product
+    )
+    got = [entry(op, v, torch.full_like(v["out"], float("nan"))) for op, v in cases]
     torch.cuda.synchronize()
-    for (_op, v), w in zip(cases, want, strict=True):
-        _check(w.t() if v.get("transposed") else w, v["A"].double() @ v["B"].double())
     assert all(torch.equal(a, b) for a, b in zip(got, want, strict=True))
     entries = list(cake_backend._K1_BOUND_CACHE.values())
     assert len(entries) == 4 and all(
         type(b) is cake_backend._BoundGemm for b in entries
     )
     # fresh outputs of the bound keys: no allocation, the same bits
-    fresh = [torch.empty_like(w) for w in want]
+    fresh = [torch.full_like(w, float("nan")) for w in want]
     torch.cuda.synchronize()
     before = torch.cuda.memory_stats()
     for (op, v), out in zip(cases, fresh, strict=True):
@@ -11500,6 +11688,7 @@ def test_convenience_path_memory_is_bounded_across_token_counts():
     X = torch.randn(T, 6144, device=device, generator=g)
     G = torch.randn(T, 256, device=device, generator=g)
     outs = [torch.empty(T, 256, device=device) for _ in range(3)]
+    nan_fill(outs)  # the replay and the prepared launch write into NaN
     cake_backend.cake_dense_gemm_det_train_router_forward(X, W, outs[0])
     torch.cuda.synchronize()
     before = torch.cuda.memory_stats()
@@ -11513,7 +11702,7 @@ def test_convenience_path_memory_is_bounded_across_token_counts():
     assert torch.equal(outs[0], outs[1]) and torch.equal(outs[0], outs[2])
     dw = cake_backend.cake_dense_gemm_det_train_router_wgrad(G, X)
     prepared_w = cake_dense_gemm_det_train_router_prepare(
-        G.t(), X, torch.empty_like(dw), splits=6
+        G.t(), X, torch.full_like(dw, float("nan")), splits=6
     )
     assert torch.equal(dw, prepared_w.launch())
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
@@ -11522,10 +11711,11 @@ def test_convenience_path_memory_is_bounded_across_token_counts():
 
 # longer than a cold-cache JIT build; the hang this test guards against never returns
 @pytest.mark.timeout(300)
-def test_pd2_stream_k_on_an_odd_k_completes():
+def test_pd2_stream_k_on_an_odd_k_completes(record_property):
     """The dgrad of T = 1024, N = 1032, K = 1000 is one partial wave of 16 tiles of 17 K steps.  Two units per tile
     would leave the last one without a K step, and the pd 2 program waits for that unit's accumulator forever; the
-    planner plans the 31 units that hold one."""
+    planner plans the 31 units that hold one.  The launch completes, and its output is judged against the naive
+    BF16 tier over 32 draws written into the bound tensors."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -11557,9 +11747,30 @@ def test_pd2_stream_k_on_an_odd_k_completes():
         < plan.sk_iters
         < 2 * plan.tail_tiles * plan.iters_per_unit
     )
-    prepared.launch()
-    torch.cuda.synchronize()
-    _check(v["out"], G.double() @ W.double())
+
+    def draw(seed):
+        gen = torch.Generator(device=device).manual_seed(seed)
+        G.copy_(torch.randn(T, N, device=device, generator=gen).to(torch.bfloat16))
+        W.copy_(
+            (torch.randn(N, K, device=device, generator=gen) * N**-0.5).to(
+                torch.bfloat16
+            )
+        )
+        nan_fill([v["out"]])
+        return G, W
+
+    def launch(_):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"out": v["out"]}
+
+    def product(operands, dtype):
+        grad, w = (t.to(dtype) for t in operands)
+        return {"out": torch.matmul(grad, w)}
+
+    judge_gemm(
+        record_property, seed=SEED + 11, draw=draw, launch=launch, product=product
+    )
 
 
 def _router_inputs(op, T, seed, K=6144, N=256, device="cuda"):
