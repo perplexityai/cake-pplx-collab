@@ -122,6 +122,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             rc = launch(cakes[label], BENCHES[args.bench], args.world, path, out / f"g{g}-{label}.log", extra + flags)
             runs.append({"group": g, "label": label, "rc": rc, "seconds": time.time() - t0, "json": str(path)})
             print(f"group {g} {label}: rc {rc} {time.time() - t0:.0f}s", flush=True)
+            if not path.exists():
+                print(f"group {g} {label}: no JSON (see {path.with_suffix('.log')}); stopping", flush=True)
+                break
+        else:
+            continue
+        break
     values: dict[str, dict] = {label: {} for label in labels}
     for run in runs:
         try:
