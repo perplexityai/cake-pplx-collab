@@ -76,6 +76,13 @@ judges a sample of every group (the first and last 16 rows by 512 columns of
 projections (gate/up `N` 4096, `K` 6144; down `N` 6144, `K` 2048).
 On each board the fused route gives the composed route's bits.
 
+Known gaps: on B200, GB200, GB300 and VR200 some tests miss the naive tier on a
+BF16 output, in the max norm only (their L2 error meets it). They are BF16
+rounding near ties: the kernel's FP32 sum lands on the other side of a BF16
+rounding midpoint a little more often than torch's. `tests/known_gaps.py` lists
+them per GPU model, and the suites mark each one a strict xfail on that model
+only; any other failure of such a test still fails.
+
 ## Mode rules
 
 The module is the mode: this package and `cake_pplx.cake_moe_grouped_gemm_det_train`
