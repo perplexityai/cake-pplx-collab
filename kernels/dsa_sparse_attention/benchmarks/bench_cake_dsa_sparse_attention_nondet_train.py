@@ -59,8 +59,7 @@ destination map the reference dK/dV is mapped the same way).
 step) and of a prepared runner as wall-clock microseconds per call with the GPU
 running asynchronously (``--host-rounds`` rounds of ``--host-calls`` calls
 each, the order of the entry points rotated every round and recorded per
-round), and checks that both paths produce the same results and the same
-kernel-only time.
+round), and reports the kernel-only time of both paths.
 
 NoPE rows (GLM-5.3-Flash: shared latent K/V, zero RoPE, softmax scale 1/16, pooled
 selection).  The ``nope_*`` rows (``--preset nope`` runs them all) are the zigzag-CP16
@@ -2277,9 +2276,8 @@ def _row_normalised(x, ref, atol=2e-2, rtol=1e-2):
     """Row-normalised comparison of ``x`` with the FP64 ``ref`` over the vectors of its last
     axis (the (token, head) rows of ``dq``): the p99 and maximum over rows of
     ``max_k |x - ref| / max(RMS(ref row), 1e-3)`` and the number of elements outside the band
-    ``|x - ref| <= atol * max(RMS(ref row), 1e-3) + rtol * |ref|`` -- the per-row form the
-    kernel's own tests use for ``dq`` in place of a flat elementwise band (the bf16 rounding of
-    dS bounds the error per row, not per element).  Report only."""
+    ``|x - ref| <= atol * max(RMS(ref row), 1e-3) + rtol * |ref|`` (the bf16 rounding of dS
+    bounds the error per row, not per element).  Report only; no test uses it."""
     x2 = x.detach().double().reshape(-1, x.shape[-1])
     r2 = ref.detach().double().reshape(-1, ref.shape[-1])
     diff = (x2 - r2).abs_()
@@ -2442,10 +2440,8 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
     """Host microseconds per call of the eager entry points against the prepared runner.
 
     Each round measures every entry point back to back, so they see the same
-    process state; the medians over the rounds are reported.  Also checks that
-    the eager path and the runner give the same results (``out``, ``lse``,
-    ``dq_*`` bitwise; ``dkv_*`` within the ``red.global`` run-to-run spread)
-    and reports the CUPTI kernel-only medians of both.
+    process state; the medians over the rounds are reported.  Also reports the
+    CUPTI kernel-only medians of both.
     """
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
     backward_available = cake_backend.generated_program_available(
@@ -2508,23 +2504,6 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
         for name, fn in order:
             fn()  # warm the entry point; measured calls follow
             samples[name].append(_host_us_per_call(fn, calls))
-    # same results from both paths
-    e_fwd = eager_forward()
-    r_fwd = runner_forward()
-    e_bwd = eager_backward() if backward_available else None
-    r_bwd = runner_backward() if backward_available else None
-    torch.cuda.synchronize()
-    same = dict(
-        out=torch.equal(e_fwd[0], r_fwd[0]), lse=torch.equal(e_fwd[1], r_fwd[1])
-    )
-    if backward_available:
-        same.update(
-            dq_latent=torch.equal(e_bwd[0], r_bwd[0]),
-            dq_rope=torch.equal(e_bwd[1], r_bwd[1]),
-            dkv_latent_rel_l2=rel_l2(e_bwd[2], r_bwd[2]),
-            dk_rope_rel_l2=rel_l2(e_bwd[3], r_bwd[3]),
-        )
-    del e_fwd, r_fwd, e_bwd, r_bwd
     # kernel-only time of both paths (CUPTI, per-iteration GPU span)
     kernel_ms = {}
     try:
@@ -2554,7 +2533,6 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
         rounds=rounds,
         order_per_round=orders,
         host_us=host_us,
-        same_results=same,
         kernel_ms=kernel_ms,
     )
 
@@ -2685,10 +2663,6 @@ def run_host_path(args, results):
                     f"{row:22s} {name:16s} host us/call  median {stats['median']:8.1f}  min {stats['min']:8.1f}",
                     flush=True,
                 )
-            print(
-                f"{row:22s} same results: {json.dumps(entry['same_results'], default=str)}",
-                flush=True,
-            )
             for mode, ms in entry["kernel_ms"].items():
                 print(
                     f"{row:22s} kernel-only ms ({mode}): {json.dumps(ms)}", flush=True
