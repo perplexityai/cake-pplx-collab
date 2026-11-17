@@ -30,8 +30,8 @@ Host design (the knobs are keywords; no environment variable):
   may be preallocated as FP32 or BF16.
 - ``silu_grad_preactivation``: ``"bf16"`` (default, the shipped policy: SiLU'
   at the BF16-rounded preactivation, the boundary FLA's backward uses) or
-  ``"fp32"`` (SiLU' at the unrounded FP32 preactivation and an FP64 final
-  reduction of ``dweight``: a weight gradient within ~2e-7 rel-L2 of exact).
+  ``"fp32"`` (SiLU' at the unrounded FP32 preactivation; a slower program).
+  Every ``dweight`` / ``dbias`` sum is one plain FP32 word under both.
 - A call's arguments select its route (``cake_jit.forward_route`` /
   ``backward_route``): the default routes run the shipped programs unchanged;
   the other routes' programs read the ``flags`` bit mask (``cake_jit.FLAG_*``,
@@ -743,8 +743,9 @@ def cake_causal_conv1d_det_train_backward(
         Where the SiLU derivative of the weight gradient is evaluated:
         ``"bf16"`` at the BF16-rounded recomputed preactivation (the shipped
         policy and FLA's boundary; ``dweight`` within ~3e-5 rel-L2 of exact),
-        ``"fp32"`` at the unrounded FP32 preactivation with an FP64 final
-        reduction (~2e-7).  ``dx`` is within one BF16 ulp of exact either way.
+        ``"fp32"`` at the unrounded FP32 preactivation (a slower program);
+        both sum in plain FP32 words.  ``dx`` is within one BF16 ulp of exact
+        either way.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_causal_conv1d_det_train_backward_workspace`; allocated when

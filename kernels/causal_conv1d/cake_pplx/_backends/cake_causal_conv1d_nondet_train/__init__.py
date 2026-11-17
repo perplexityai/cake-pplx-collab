@@ -29,16 +29,16 @@ for bit.  The backward is ONE ordinary launch of a program built from the det
 backward body of the same route and channel rule: every per-thread and
 per-CTA FP32 step is the det program's and ``dx`` is the det ``dx`` bit for
 bit; only the cross-CTA reduction of ``dweight`` / ``dbias`` differs.  Each
-CTA adds its CTA row into an accumulator with unordered global reductions --
-FP32 where the det reduce program sums in FP32 (the ``bwd``, ``bwd_dt`` and
-``bwd_bias`` routes), FP64 where it sums in FP64 (``bwd_fp32g`` and
-``bwd_bias_fp32g``, the ``silu_grad_preactivation="fp32"`` routes, whose
-gradient is then rounded once from FP64) -- and the last CTA of each channel
-tile stores the gradients and zeroes its accumulators.  The order of that
-cross-CTA sum depends on the CTAs' timing, so ``dweight`` / ``dbias`` are not
-bitwise reproducible run to run; that is the only relaxed property (the
-accumulation dtypes, rounding boundaries and accuracy budgets are the det
-package's).  No reduce program, no host synchronization, no cooperative
+CTA adds its CTA row into an accumulator with unordered global reductions in
+plain FP32 words, as the det reduce program sums on every route (the
+``bwd_fp32g`` and ``bwd_bias_fp32g`` routes, the
+``silu_grad_preactivation="fp32"`` ones, spread the adds over sixteen
+copies of the accumulator, added in copy order at the end) -- and the last
+CTA of each channel tile stores the gradients and zeroes its accumulators.
+The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
+``dbias`` are not bitwise reproducible run to run; that is the only relaxed
+property (the accumulation dtypes, rounding boundaries and accuracy budgets
+are the det package's).  No reduce program, no host synchronization, no cooperative
 launch, no grid barrier.
 
 Numerical mode: the package is chosen by its module name and no entry point
@@ -59,7 +59,7 @@ Host design (the knobs are keywords; no environment variable):
   to the parameter's dtype and may be preallocated as FP32 or BF16 (the
   ``flags`` bit mask tells the kernels which).
 - ``silu_grad_preactivation``: ``"bf16"`` (default) or ``"fp32"`` (SiLU' at
-  the unrounded FP32 preactivation; FP64 accumulators).
+  the unrounded FP32 preactivation; sixteen FP32 accumulator copies).
 - A call's arguments select its route (``cake_jit.forward_route`` /
   ``backward_route``) and the channel count the route's program, the det
   package's rules.
@@ -694,10 +694,10 @@ def cake_causal_conv1d_nondet_train_backward_workspace_bytes(
     """Bytes of the caller-owned backward workspace for ``C`` channels on ``device``.
 
     The workspace holds the backward's accumulators and per channel tile ticket
-    counters (``cake_jit.accumulator_layout``): ``taps x C`` FP32 words (FP64
-    on the ``_fp32g`` routes; ``taps`` 5 on the bias routes) and one uint32
-    counter per channel tile, sized by the largest over every backward
-    program of every backward route of the architecture
+    counters (``cake_jit.accumulator_layout``): ``slots x taps x C`` FP32 words
+    (``slots`` 16 on the ``_fp32g`` routes, else 1; ``taps`` 5 on the bias
+    routes) and one uint32 counter per channel tile, sized by the largest
+    over every backward program of every backward route of the architecture
     (``cake_jit.backward_workspace_bytes``), so one buffer serves every route.
     It depends on ``C`` and the architecture only (``S`` is checked and
     otherwise unused): one buffer serves every token count.  ``bwd_grid_mult``
@@ -948,8 +948,8 @@ def _backward_accumulators(
     module keeps for the device and the current stream, replaced by a larger
     zeroed one when it is too small.
     Every launch leaves the bytes it uses zero, so a zeroed buffer stays zero
-    whatever ``C`` or route the next call has.  ``acc`` is a ``float32`` /
-    ``float64`` view of ``layout["acc_elems"]`` words at offset 0, ``work`` a
+    whatever ``C`` or route the next call has.  ``acc`` is a ``float32`` view
+    (the rule's dtype) of ``layout["acc_elems"]`` words at offset 0, ``work`` a
     ``uint32`` view of ``layout["work_words"]`` counters at
     ``layout["work_offset"]``; both are built once per workspace and layout
     (``_ACCUMULATOR_VIEWS``), except for the buffers of a capture.
@@ -1128,10 +1128,10 @@ def cake_causal_conv1d_nondet_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation (FP32
-        accumulators), ``"fp32"`` at the unrounded FP32 preactivation with FP64
-        accumulators (the det FP64 reduction's accuracy).  ``dx`` is within one
-        BF16 ulp of exact either way, and bitwise the det package's.
+        ``"bf16"`` at the BF16-rounded recomputed preactivation, ``"fp32"`` at
+        the unrounded FP32 preactivation; both accumulate in plain FP32 words.
+        ``dx`` is within one BF16 ulp of exact either way, and bitwise the det
+        package's.
     workspace : torch.Tensor, optional
         Caller-owned ZEROED ``uint8`` buffer from
         :func:`cake_causal_conv1d_nondet_train_backward_workspace` (the
@@ -1163,7 +1163,7 @@ def cake_causal_conv1d_nondet_train_backward(
     ``(dx, dweight)``, or ``(dx, dweight, dbias)`` when ``bias`` is given: BF16
     ``dx`` of ``x``'s shape (the det program's bits) and the ``[C, 4]`` weight
     gradient (and ``[C]`` bias gradient), accumulated across CTAs in an
-    unordered order in FP32 (FP64 under ``"fp32"``) and rounded once into the
+    unordered order in plain FP32 words and rounded once into the
     requested dtype.  ``S == 0`` returns the empty ``dx`` and zero gradients
     without launching.
     """

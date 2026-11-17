@@ -40,9 +40,10 @@ FP32,
 at ``p`` chosen by ``silu_grad_preactivation``: ``"bf16"`` (default), ``p =
 bf16(pre)``, the rounded value the forward stores and the boundary
 flash-linear-attention's backward uses (``dweight`` lands within about 3e-5
-rel-L2 of the exact FP64 gradient); ``"fp32"``, ``p = pre`` unrounded, with
-the final ``dweight`` reduction in FP64 (within about 2e-7; a slower program).
-``dx`` is within one BF16 ulp of exact under both.  The backward is two
+rel-L2 of the exact FP64 gradient); ``"fp32"``, ``p = pre`` unrounded (a
+slower program).  Under both, every ``dweight`` / ``dbias`` sum is one plain
+FP32 word: no FP64 and no compensated (two-word) sums.  ``dx`` is within one
+BF16 ulp of exact under both.  The backward is two
 ordinary launches on one stream: a persistent main program writes ``dx`` and
 one FP32 partial row of ``dweight`` (and ``dbias``) per CTA into a workspace,
 and a reduce program launched programmatically dependent on it sums the rows
@@ -94,7 +95,7 @@ Usage::
     y = cake_causal_conv1d_det_train_forward(x, weight, cu_seqlens, bias=bias)
     dx, dweight, dbias = cake_causal_conv1d_det_train_backward(x, weight, cu_seqlens, dy, bias=bias)
 
-    # SiLU' at the unrounded FP32 preactivation for a ~2e-7 rel-L2 weight gradient
+    # SiLU' at the unrounded FP32 preactivation (a slower program)
     dx, dweight = cake_causal_conv1d_det_train_backward(
         x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32"
     )
@@ -297,9 +298,9 @@ def cake_causal_conv1d_det_train_backward(
         ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation (the
         boundary flash-linear-attention's backward uses; ``dweight`` within
         about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
-        the unrounded FP32 preactivation with an FP64 final reduction (about
-        2e-7; a slower program).  ``dx`` is within one BF16 ulp of exact under
-        both.
+        the unrounded FP32 preactivation (a slower program).  Both sum
+        ``dweight`` / ``dbias`` in plain FP32 words.  ``dx`` is within one BF16
+        ulp of exact under both.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_causal_conv1d_det_train_backward_workspace` (the per-CTA FP32

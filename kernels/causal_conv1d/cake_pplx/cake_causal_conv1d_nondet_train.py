@@ -48,13 +48,13 @@ Numerical contract: only the run-to-run bitwise reproducibility of
 ``dweight`` / ``dbias`` is relaxed.  ``y`` is bitwise the deterministic
 forward's (the same programs).  ``dx`` is bitwise the deterministic backward's
 for the same route and channel count (the same per-thread FP32 arithmetic and
-one BF16 rounding).  ``dweight`` / ``dbias`` accumulate in FP32 where the
-deterministic reduce sums in FP32 (the default
+one BF16 rounding).  ``dweight`` / ``dbias`` accumulate in plain FP32 words on
+every route, as the deterministic reduce sums (the default
 ``silu_grad_preactivation="bf16"``: within about 3e-5 rel-L2 of the exact FP64
-gradient) and in FP64 on the ``silu_grad_preactivation="fp32"`` routes (the
-deterministic FP64 reduction's accuracy, about 2e-7 rel-L2), are rounded once
-into the requested dtype, and stay within the deterministic package's error
-budgets; the accumulation order across CTAs varies run to run.  The inputs,
+gradient; the ``silu_grad_preactivation="fp32"`` routes spread the adds over
+sixteen FP32 copies of the accumulators, added in copy order at the end; no
+FP64 and no compensated sums), and are rounded once into the requested dtype;
+the accumulation order across CTAs varies run to run.  The inputs,
 output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
@@ -357,9 +357,9 @@ def cake_causal_conv1d_nondet_train_backward(
     dy : torch.Tensor
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation (FP32
-        accumulators).  ``"fp32"``: at the unrounded FP32 preactivation with
-        FP64 accumulators.
+        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation.
+        ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
+        plain FP32 words.
     workspace : torch.Tensor, optional
         Caller-owned buffer from :func:`cake_causal_conv1d_nondet_train_backward_workspace`.
     dx, dweight, dbias : torch.Tensor, optional

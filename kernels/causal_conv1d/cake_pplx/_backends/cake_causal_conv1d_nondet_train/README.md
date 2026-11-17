@@ -233,19 +233,8 @@ world size, partition (CP layout) and keywords.
 | `y` | yes, for the same call | bitwise the deterministic KCP forward's | one BF16 rounding of the FP32 result |
 | `hist` (history pool) | yes, for the same call | bitwise the deterministic KCP forward's | copies of other fragments' `x_local` rows |
 | `dx` | yes, for the same call | bitwise the deterministic KCP backward's, on both backward forms (overlapped and one-program) | the deterministic KCP `dx`'s: within one BF16 ulp of an FP64 oracle |
-| `dweight` (rank-local FP32 partial) | no: the cross-CTA sum is unordered | not bitwise | the sum of the ranks' partials is within the deterministic program's budget of an FP64 oracle, `5e-2 + 1e-4 abs(dw)` |
+| `dweight` (rank-local FP32 partial) | no: the cross-CTA sum is unordered | not bitwise | an unordered sum of the CTAs' FP32 rows, every sum one plain FP32 word (no FP64 and no compensated sums) |
 | checkpoint recompute (with or without a handle) | yes | | same `y` bits; the backward from it gives the same `dx` bits |
-
-The measured `dweight` error was compared with the deterministic package's median FP64 error.
-The measurement used 5 repeats and two shapes per rank:
-
-- 32768 tokens x 10240 channels, one tensor
-- 16384 tokens x 8192 channels, three tensors
-
-It covered the contiguous, zigzag and zigzag-per-document layouts and five input cases: random and four adversarial cases.
-It ran worlds 1, 2 and 4 on GB300 (sm_103a), GB200 (sm_100a) and R200 (sm_107a), and worlds 1, 2, 4 and 8 on
-B200 (sm_100a). In the worst repeat, the rel-L2 error ratio was at most 1.023 and the worst-element error ratio
-(`max |err| / max |ref|`) was at most 1.28.
 
 The package issues no reduction collective for `dweight`. Each rank returns
 its partial, and the framework sums the partials across the ranks (for example, the
