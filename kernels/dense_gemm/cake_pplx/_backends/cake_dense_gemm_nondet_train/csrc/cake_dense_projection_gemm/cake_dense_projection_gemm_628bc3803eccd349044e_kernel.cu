@@ -92,14 +92,9 @@ kernel_cake_dense_projection_gemm_628bc3803eccd349044e(float* __restrict__ X, fl
     int ge = tid / 32 % 8;
     int gt = tid / 32 / 8;
     float acc[16];
-    float comp[16];
     #pragma unroll
     for (int o = 0; o < 16; o++) {
         acc[o] = 0.0f;
-    }
-    #pragma unroll
-    for (int o_1 = 0; o_1 < 16; o_1++) {
-        comp[o_1] = 0.0f;
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (0 < chunks) {
@@ -150,8 +145,8 @@ kernel_cake_dense_projection_gemm_628bc3803eccd349044e(float* __restrict__ X, fl
         #pragma unroll
         for (int g4 = 0; g4 < 1; g4++) {
             #pragma unroll
-            for (int o_2 = 0; o_2 < 16; o_2++) {
-                yv[o_2] = -comp[o_2];
+            for (int o_1 = 0; o_1 < 16; o_1++) {
+                yv[o_1] = 0.0f;
             }
             int col_0 = j + 32 * (g4 * 4);
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&wv[0])) : "r"(cur + (unsigned int)((ge * 144 + col_0) * 4)));
@@ -290,236 +285,159 @@ kernel_cake_dense_projection_gemm_628bc3803eccd349044e(float* __restrict__ X, fl
             yv[14] = __fmaf_rn(xv[14], wv[0], yv[14]);
             yv[15] = __fmaf_rn(xv[15], wv[0], yv[15]);
             #pragma unroll
-            for (int o_3 = 0; o_3 < 16; o_3++) {
-                float tsum = acc[o_3] + yv[o_3];
-                comp[o_3] = tsum - acc[o_3] - yv[o_3];
-                acc[o_3] = tsum;
+            for (int o_2 = 0; o_2 < 16; o_2++) {
+                acc[o_2] = acc[o_2] + yv[o_2];
             }
         }
         __syncthreads();
     }
     asm volatile("cp.async.wait_group 0;");
     #pragma unroll
-    for (int o_4 = 0; o_4 < 16; o_4++) {
-        comp[o_4] = -comp[o_4];
-    }
-    #pragma unroll
     for (int o_0 = 0; o_0 < 16; o_0++) {
-        float peer_s_0 = __shfl_xor_sync(0xFFFFFFFF, acc[o_0], 1);
-        float peer_l_0 = __shfl_xor_sync(0xFFFFFFFF, comp[o_0], 1);
-        float s2_0 = acc[o_0] + peer_s_0;
-        float bb_0 = s2_0 - acc[o_0];
-        float q2_0 = acc[o_0] - (s2_0 - bb_0) + (peer_s_0 - bb_0);
-        comp[o_0] = comp[o_0] + peer_l_0 + q2_0;
-        acc[o_0] = s2_0;
+        float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, acc[o_0], 1);
+        acc[o_0] = acc[o_0] + _shfl_xor_sync_2;
     }
     #pragma unroll
     for (int o_1_1 = 0; o_1_1 < 16; o_1_1++) {
-        float peer_s_1 = __shfl_xor_sync(0xFFFFFFFF, acc[o_1_1], 2);
-        float peer_l_1 = __shfl_xor_sync(0xFFFFFFFF, comp[o_1_1], 2);
-        float s2_1 = acc[o_1_1] + peer_s_1;
-        float bb_1 = s2_1 - acc[o_1_1];
-        float q2_1 = acc[o_1_1] - (s2_1 - bb_1) + (peer_s_1 - bb_1);
-        comp[o_1_1] = comp[o_1_1] + peer_l_1 + q2_1;
-        acc[o_1_1] = s2_1;
+        float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, acc[o_1_1], 2);
+        acc[o_1_1] = acc[o_1_1] + _shfl_xor_sync_3;
     }
     #pragma unroll
     for (int o_2_1 = 0; o_2_1 < 16; o_2_1++) {
-        float peer_s_2 = __shfl_xor_sync(0xFFFFFFFF, acc[o_2_1], 4);
-        float peer_l_2 = __shfl_xor_sync(0xFFFFFFFF, comp[o_2_1], 4);
-        float s2_2 = acc[o_2_1] + peer_s_2;
-        float bb_2 = s2_2 - acc[o_2_1];
-        float q2_2 = acc[o_2_1] - (s2_2 - bb_2) + (peer_s_2 - bb_2);
-        comp[o_2_1] = comp[o_2_1] + peer_l_2 + q2_2;
-        acc[o_2_1] = s2_2;
+        float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, acc[o_2_1], 4);
+        acc[o_2_1] = acc[o_2_1] + _shfl_xor_sync_4;
     }
     #pragma unroll
-    for (int o_3_1 = 0; o_3_1 < 16; o_3_1++) {
-        float peer_s_3 = __shfl_xor_sync(0xFFFFFFFF, acc[o_3_1], 8);
-        float peer_l_3 = __shfl_xor_sync(0xFFFFFFFF, comp[o_3_1], 8);
-        float s2_3 = acc[o_3_1] + peer_s_3;
-        float bb_3 = s2_3 - acc[o_3_1];
-        float q2_3 = acc[o_3_1] - (s2_3 - bb_3) + (peer_s_3 - bb_3);
-        comp[o_3_1] = comp[o_3_1] + peer_l_3 + q2_3;
-        acc[o_3_1] = s2_3;
+    for (int o_3 = 0; o_3 < 16; o_3++) {
+        float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, acc[o_3], 8);
+        acc[o_3] = acc[o_3] + _shfl_xor_sync_5;
     }
     #pragma unroll
-    for (int o_4_1 = 0; o_4_1 < 16; o_4_1++) {
-        float peer_s_4 = __shfl_xor_sync(0xFFFFFFFF, acc[o_4_1], 16);
-        float peer_l_4 = __shfl_xor_sync(0xFFFFFFFF, comp[o_4_1], 16);
-        float s2_4 = acc[o_4_1] + peer_s_4;
-        float bb_4 = s2_4 - acc[o_4_1];
-        float q2_4 = acc[o_4_1] - (s2_4 - bb_4) + (peer_s_4 - bb_4);
-        comp[o_4_1] = comp[o_4_1] + peer_l_4 + q2_4;
-        acc[o_4_1] = s2_4;
+    for (int o_4 = 0; o_4 < 16; o_4++) {
+        float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, acc[o_4], 16);
+        acc[o_4] = acc[o_4] + _shfl_xor_sync_6;
     }
     if (j == 0) {
         int red_o_0 = ge * 16 + gt;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_0 * 8)), "f"(acc[0]), "f"(comp[0]) : "memory");
+        smem_1[red_o_0] = acc[0];
     }
     if (j == 1) {
         int red_o_1 = ge * 16 + gt + 1;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_1 * 8)), "f"(acc[1]), "f"(comp[1]) : "memory");
+        smem_1[red_o_1] = acc[1];
     }
     if (j == 2) {
         int red_o_2 = ge * 16 + gt + 2;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_2 * 8)), "f"(acc[2]), "f"(comp[2]) : "memory");
+        smem_1[red_o_2] = acc[2];
     }
     if (j == 3) {
         int red_o_3 = ge * 16 + gt + 3;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_3 * 8)), "f"(acc[3]), "f"(comp[3]) : "memory");
+        smem_1[red_o_3] = acc[3];
     }
     if (j == 4) {
         int red_o_4 = ge * 16 + gt + 4;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_4 * 8)), "f"(acc[4]), "f"(comp[4]) : "memory");
+        smem_1[red_o_4] = acc[4];
     }
     if (j == 5) {
         int red_o_5 = ge * 16 + gt + 5;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_5 * 8)), "f"(acc[5]), "f"(comp[5]) : "memory");
+        smem_1[red_o_5] = acc[5];
     }
     if (j == 6) {
         int red_o_6 = ge * 16 + gt + 6;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_6 * 8)), "f"(acc[6]), "f"(comp[6]) : "memory");
+        smem_1[red_o_6] = acc[6];
     }
     if (j == 7) {
         int red_o_7 = ge * 16 + gt + 7;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_7 * 8)), "f"(acc[7]), "f"(comp[7]) : "memory");
+        smem_1[red_o_7] = acc[7];
     }
     if (j == 8) {
         int red_o_8 = ge * 16 + gt + 8;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_8 * 8)), "f"(acc[8]), "f"(comp[8]) : "memory");
+        smem_1[red_o_8] = acc[8];
     }
     if (j == 9) {
         int red_o_9 = ge * 16 + gt + 9;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_9 * 8)), "f"(acc[9]), "f"(comp[9]) : "memory");
+        smem_1[red_o_9] = acc[9];
     }
     if (j == 10) {
         int red_o_10 = ge * 16 + gt + 10;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_10 * 8)), "f"(acc[10]), "f"(comp[10]) : "memory");
+        smem_1[red_o_10] = acc[10];
     }
     if (j == 11) {
         int red_o_11 = ge * 16 + gt + 11;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_11 * 8)), "f"(acc[11]), "f"(comp[11]) : "memory");
+        smem_1[red_o_11] = acc[11];
     }
     if (j == 12) {
         int red_o_12 = ge * 16 + gt + 12;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_12 * 8)), "f"(acc[12]), "f"(comp[12]) : "memory");
+        smem_1[red_o_12] = acc[12];
     }
     if (j == 13) {
         int red_o_13 = ge * 16 + gt + 13;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_13 * 8)), "f"(acc[13]), "f"(comp[13]) : "memory");
+        smem_1[red_o_13] = acc[13];
     }
     if (j == 14) {
         int red_o_14 = ge * 16 + gt + 14;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_14 * 8)), "f"(acc[14]), "f"(comp[14]) : "memory");
+        smem_1[red_o_14] = acc[14];
     }
     if (j == 15) {
         int red_o_15 = ge * 16 + gt + 15;
-        asm volatile("st.shared.v2.f32 [%0], {%1,%2};" :: "r"(smem_addr + (unsigned int)(red_o_15 * 8)), "f"(acc[15]), "f"(comp[15]) : "memory");
+        smem_1[red_o_15] = acc[15];
     }
     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
-    float peer[16];
+    float peer[8];
     float res[1];
     int idx_0 = tid;
     if (idx_0 < 16) {
         int el_0 = rank;
         int tl_0 = idx_0;
-        unsigned int red_byte_0 = (unsigned int)((el_0 * 16 + tl_0) * 2 * 4);
-        uint32_t _cluster_mapa_2;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_2) : "r"(smem_addr + red_byte_0), "r"(0));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[0])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(0) + 1]))
-            : "r"(_cluster_mapa_2));
-        uint32_t _cluster_mapa_3;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_3) : "r"(smem_addr + red_byte_0), "r"(1));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[2])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(2) + 1]))
-            : "r"(_cluster_mapa_3));
-        uint32_t _cluster_mapa_4;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_4) : "r"(smem_addr + red_byte_0), "r"(2));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[4])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(4) + 1]))
-            : "r"(_cluster_mapa_4));
-        uint32_t _cluster_mapa_5;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_5) : "r"(smem_addr + red_byte_0), "r"(3));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[6])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(6) + 1]))
-            : "r"(_cluster_mapa_5));
-        uint32_t _cluster_mapa_6;
-        asm volatile(
-            "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_6) : "r"(smem_addr + red_byte_0), "r"(4));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[8])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(8) + 1]))
-            : "r"(_cluster_mapa_6));
+        unsigned int red_byte_0 = (unsigned int)((el_0 * 16 + tl_0) * 4);
         uint32_t _cluster_mapa_7;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_7) : "r"(smem_addr + red_byte_0), "r"(5));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[10])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(10) + 1]))
-            : "r"(_cluster_mapa_7));
+            : "=r"(_cluster_mapa_7) : "r"(smem_addr + red_byte_0), "r"(0));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[0])) : "r"(_cluster_mapa_7));
         uint32_t _cluster_mapa_8;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_8) : "r"(smem_addr + red_byte_0), "r"(6));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[12])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(12) + 1]))
-            : "r"(_cluster_mapa_8));
+            : "=r"(_cluster_mapa_8) : "r"(smem_addr + red_byte_0), "r"(1));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[1])) : "r"(_cluster_mapa_8));
         uint32_t _cluster_mapa_9;
         asm volatile(
             "mapa.shared::cluster.u32 %0, %1, %2;"
-            : "=r"(_cluster_mapa_9) : "r"(smem_addr + red_byte_0), "r"(7));
-        asm volatile("ld.shared::cluster.v2.b32 {%0,%1}, [%2];"
-            : "=r"(*reinterpret_cast<uint32_t*>(&peer[14])), "=r"(*reinterpret_cast<uint32_t*>(&peer[(14) + 1]))
-            : "r"(_cluster_mapa_9));
-        float tot_0 = peer[0];
-        float err_0 = peer[1];
-        float s3_0 = tot_0 + peer[2];
-        float b3_0 = s3_0 - tot_0;
-        float q3_0 = tot_0 - (s3_0 - b3_0) + (peer[2] - b3_0);
-        err_0 = err_0 + (q3_0 + peer[3]);
-        tot_0 = s3_0;
-        float s3_1 = tot_0 + peer[4];
-        float b3_1 = s3_1 - tot_0;
-        float q3_1 = tot_0 - (s3_1 - b3_1) + (peer[4] - b3_1);
-        err_0 = err_0 + (q3_1 + peer[5]);
-        tot_0 = s3_1;
-        float s3_2 = tot_0 + peer[6];
-        float b3_2 = s3_2 - tot_0;
-        float q3_2 = tot_0 - (s3_2 - b3_2) + (peer[6] - b3_2);
-        err_0 = err_0 + (q3_2 + peer[7]);
-        tot_0 = s3_2;
-        float s3_3 = tot_0 + peer[8];
-        float b3_3 = s3_3 - tot_0;
-        float q3_3 = tot_0 - (s3_3 - b3_3) + (peer[8] - b3_3);
-        err_0 = err_0 + (q3_3 + peer[9]);
-        tot_0 = s3_3;
-        float s3_4 = tot_0 + peer[10];
-        float b3_4 = s3_4 - tot_0;
-        float q3_4 = tot_0 - (s3_4 - b3_4) + (peer[10] - b3_4);
-        err_0 = err_0 + (q3_4 + peer[11]);
-        tot_0 = s3_4;
-        float s3_5 = tot_0 + peer[12];
-        float b3_5 = s3_5 - tot_0;
-        float q3_5 = tot_0 - (s3_5 - b3_5) + (peer[12] - b3_5);
-        err_0 = err_0 + (q3_5 + peer[13]);
-        tot_0 = s3_5;
-        float s3_6 = tot_0 + peer[14];
-        float b3_6 = s3_6 - tot_0;
-        float q3_6 = tot_0 - (s3_6 - b3_6) + (peer[14] - b3_6);
-        err_0 = err_0 + (q3_6 + peer[15]);
-        tot_0 = s3_6;
-        res[0] = tot_0 + err_0;
+            : "=r"(_cluster_mapa_9) : "r"(smem_addr + red_byte_0), "r"(2));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[2])) : "r"(_cluster_mapa_9));
+        uint32_t _cluster_mapa_10;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_10) : "r"(smem_addr + red_byte_0), "r"(3));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[3])) : "r"(_cluster_mapa_10));
+        uint32_t _cluster_mapa_11;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_11) : "r"(smem_addr + red_byte_0), "r"(4));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[4])) : "r"(_cluster_mapa_11));
+        uint32_t _cluster_mapa_12;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_12) : "r"(smem_addr + red_byte_0), "r"(5));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[5])) : "r"(_cluster_mapa_12));
+        uint32_t _cluster_mapa_13;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_13) : "r"(smem_addr + red_byte_0), "r"(6));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[6])) : "r"(_cluster_mapa_13));
+        uint32_t _cluster_mapa_14;
+        asm volatile(
+            "mapa.shared::cluster.u32 %0, %1, %2;"
+            : "=r"(_cluster_mapa_14) : "r"(smem_addr + red_byte_0), "r"(7));
+        asm volatile("ld.shared::cluster.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&peer[7])) : "r"(_cluster_mapa_14));
+        res[0] = peer[0];
+        res[0] = res[0] + peer[1];
+        res[0] = res[0] + peer[2];
+        res[0] = res[0] + peer[3];
+        res[0] = res[0] + peer[4];
+        res[0] = res[0] + peer[5];
+        res[0] = res[0] + peer[6];
+        res[0] = res[0] + peer[7];
         if (t0 + tl_0 < T) {
             *(reinterpret_cast<float*>(out + ((long long)(t0 + tl_0) * (long long)ldo + (long long)(e0 + el_0))) + (0)) = res[0];
         }

@@ -155,6 +155,17 @@ __device__ __forceinline__ void tma_3d_gmem2smem_cta2(
 
 
 
+__device__ __forceinline__ void tcgen05_commit_cg2_multicast(int mbar_addr, uint16_t cta_mask) {
+    asm volatile(
+        "{\n\t"
+        ".reg .b16 lo, hi;\n\t"
+        "mov.b32 {lo, hi}, %1;\n\t"
+        "tcgen05.commit.cta_group::2.mbarrier::arrive::one"
+        ".shared::cluster.multicast::cluster.b64 [%0], lo;\n\t"
+        "}\n"
+        :: "r"(mbar_addr), "r"((uint32_t)cta_mask) : "memory");
+}
+
 
 
 __device__ __forceinline__ unsigned int __as_u32(float v) {
@@ -224,18 +235,6 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
     unsigned int* clc_resp = reinterpret_cast<unsigned int*>(smem_raw + 230400);
     const int clc_resp_addr = smem + 230400;
 
-    // Kernel setup ops
-    if (tid == 0) {
-        #pragma unroll
-        for (int st = 0; st < 4; st++) {
-            mbarrier_init(mma_done_addr + (st) * 8, (int)cluster_size >> 1);
-        }
-        #pragma unroll
-        for (int st_1 = 0; st_1 < 2; st_1++) {
-            mbarrier_init(clc_empty_addr + (st_1) * 8, (((int)cluster_size >> 1) * 12 + 1) * 32);
-        }
-    }
-
     // Mbarrier init (40 barriers at smem_raw[0..320))
 
     if (warp == 0) {
@@ -247,6 +246,11 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
             mbarrier_init(smem + 8, 2);
             mbarrier_init(smem + 16, 2);
             mbarrier_init(smem + 24, 2);
+            // mma_done: 4 barriers, init_count=2
+            mbarrier_init(smem + 32, 2);
+            mbarrier_init(smem + 40, 2);
+            mbarrier_init(smem + 48, 2);
+            mbarrier_init(smem + 56, 2);
             // --- pipeline 'mainloop_pipe' ---
             // mainloop_done: 2 barriers, init_count=1
             mbarrier_init(smem + 64, 1);
@@ -258,6 +262,9 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
             // clc_full: 2 barriers, init_count=1
             mbarrier_init(smem + 96, 1);
             mbarrier_init(smem + 104, 1);
+            // clc_empty: 2 barriers, init_count=800
+            mbarrier_init(smem + 112, 800);
+            mbarrier_init(smem + 120, 800);
             // --- pipeline 'thr_pipe' ---
             // thr_full: 2 barriers, init_count=32
             mbarrier_init(smem + 128, 32);
@@ -290,7 +297,6 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
         }
     }
 
-    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     __syncwarp();
     asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
@@ -414,9 +420,9 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
                     "{\n\t"
                     ".reg .b32 remAddr32;\n\t"
                     "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                     "}"
-                    :: "r"(clc_empty_addr + (load_clc_stage) * 8), "r"(0) : "memory");
+                    :: "r"(clc_empty_addr + (load_clc_stage) * 8), "r"(0), "r"((uint32_t)((((int)cluster_size < 4) ? 2 : 1))) : "memory");
                 load_clc_stage += 1;
                 if (load_clc_stage == 2) { load_clc_stage = 0; _phase_clc_full ^= 1; }
                 if (valid == 0) {
@@ -501,7 +507,12 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
                     "@leader tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
                     "}\n"
                     :: "r"(_mma_a_lo_0), "r"(_mma_b_lo_0), "r"((tmem_accum + (mma_epi_stage * 256))), "r"(((init_flag) ? 0 : 1)) : "memory");
-                        elect_commit_cg2_multicast(mma_done_addr + (mma_tma_stage) * 8, (uint16_t)((1 << (int)cluster_size) - 1));
+                        if (elect_sync()) {
+                            tcgen05_commit_cg2_multicast(mma_done_addr + (mma_tma_stage) * 8, (uint16_t)((1 << (int)cluster_size) - 1));
+                            if ((int)cluster_size < 4) {
+                                tcgen05_commit_cg2_multicast(mma_done_addr + (mma_tma_stage) * 8, (uint16_t)(3));
+                            }
+                        }
                         mma_tma_stage += 1;
                         if (mma_tma_stage == 4) { mma_tma_stage = 0; _phase_tma_full ^= 1; }
                     }
@@ -540,9 +551,9 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
                     "{\n\t"
                     ".reg .b32 remAddr32;\n\t"
                     "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                     "}"
-                    :: "r"(clc_empty_addr + (mma_clc_stage) * 8), "r"(0) : "memory");
+                    :: "r"(clc_empty_addr + (mma_clc_stage) * 8), "r"(0), "r"((uint32_t)((((int)cluster_size < 4) ? 2 : 1))) : "memory");
                 mma_clc_stage += 1;
                 if (mma_clc_stage == 2) { mma_clc_stage = 0; _phase_clc_full_1 ^= 1; }
                 if (_clc_valid_2 == 0) {
@@ -634,9 +645,9 @@ kernel_cake_lm_head_loss_3a49c4ed930a1853c79d(const __grid_constant__ CUtensorMa
                     "{\n\t"
                     ".reg .b32 remAddr32;\n\t"
                     "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                     "}"
-                    :: "r"(clc_empty_addr + (epi_clc_stage) * 8), "r"(0) : "memory");
+                    :: "r"(clc_empty_addr + (epi_clc_stage) * 8), "r"(0), "r"((uint32_t)((((int)cluster_size < 4) ? 2 : 1))) : "memory");
                 epi_clc_stage += 1;
                 if (epi_clc_stage == 2) { epi_clc_stage = 0; _phase_clc_full_2 ^= 1; }
                 int ep_item_t = ep_tile >> 2;

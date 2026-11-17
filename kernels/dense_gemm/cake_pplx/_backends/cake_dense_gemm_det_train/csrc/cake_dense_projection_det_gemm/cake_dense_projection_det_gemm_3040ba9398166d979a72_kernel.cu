@@ -960,7 +960,7 @@ kernel_cake_dense_projection_det_gemm_3040ba9398166d979a72(const __grid_constant
                         }
                     } else {
                         int slice_id = cta_rank * 8 + (warp - 2);
-                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0 = off;
                         int nvalid = N - (off_n_1 + col0);
                         if (nvalid >= 128) {
@@ -1039,7 +1039,7 @@ kernel_cake_dense_projection_det_gemm_3040ba9398166d979a72(const __grid_constant
                         }
                     } else {
                         int slice_id_1 = cta_rank * 8 + (warp - 2);
-                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off_1 = (unsigned long long)(slab * 16 + slice_id_1) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0_1 = off_1;
                         int nvalid_1 = N - (off_n_1 + col0 + 128);
                         if (nvalid_1 >= 128) {
@@ -1091,7 +1091,7 @@ kernel_cake_dense_projection_det_gemm_3040ba9398166d979a72(const __grid_constant
                             #pragma unroll 1
                             for (int sidx = 0; sidx < nparts; sidx++) {
                                 int slice_id_2 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 8192 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_2 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_2) * 8192ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_2 = off_2;
                                 if (nvalid_2 >= 128) {
                                     #pragma unroll
@@ -1168,7 +1168,7 @@ kernel_cake_dense_projection_det_gemm_3040ba9398166d979a72(const __grid_constant
                             #pragma unroll 1
                             for (int sidx_1 = 0; sidx_1 < nparts; sidx_1++) {
                                 int slice_id_3 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 8192 + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_3 = (unsigned long long)((slab0 + sidx_1) * 16 + slice_id_3) * 8192ull + (unsigned long long)((col0 + 128 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_3 = off_3;
                                 if (nvalid_0 >= 128) {
                                     #pragma unroll

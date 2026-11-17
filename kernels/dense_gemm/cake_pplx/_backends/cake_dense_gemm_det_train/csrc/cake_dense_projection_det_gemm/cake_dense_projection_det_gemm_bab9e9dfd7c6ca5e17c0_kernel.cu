@@ -178,17 +178,18 @@ kernel_cake_dense_projection_det_gemm_bab9e9dfd7c6ca5e17c0(const __grid_constant
     int cta_rank;
     asm volatile("mov.b32 %0, %%cluster_ctarank;" : "=r"(cta_rank));
 
-    // Kernel setup ops
+    // Prologue
     __nv_bfloat16* smem_a = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
     const int smem_a_addr = smem + 1024;
     __nv_bfloat16* smem_b = reinterpret_cast<__nv_bfloat16*>(smem_raw + 9216);
     const int smem_b_addr = smem + 9216;
     unsigned int* work_response = reinterpret_cast<unsigned int*>(smem_raw + 222208);
     const int work_response_addr = smem + 222208;
+
+    // Kernel setup ops
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
-    // Mbarrier init (7 pipeline groups, 0 ordered-sequence groups, 35 barriers)
-    // Mbarriers at smem_raw[0..280)
+    // Mbarrier init (35 barriers at smem_raw[0..280))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -259,10 +260,8 @@ kernel_cake_dense_projection_det_gemm_bab9e9dfd7c6ca5e17c0(const __grid_constant
     asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
     asm volatile("griddepcontrol.wait;" ::: "memory");
 
-    const int taddr = tmem_addr_storage[0];
-
-    // Kernel post-init ops
-    const int tmem_accum = taddr;
+    const unsigned int taddr = tmem_addr_storage[0];
+    const unsigned int tmem_accum = taddr;
 
     // ---- Role: load ----
     if (warp == 0) {
@@ -668,7 +667,7 @@ kernel_cake_dense_projection_det_gemm_bab9e9dfd7c6ca5e17c0(const __grid_constant
                         }
                     } else {
                         int slice_id = cta_rank * 8 + (warp - 2);
-                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 2048 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 2048ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                         unsigned long long off_0 = off;
                         int nvalid = N - (off_n_1 + col0);
                         if (nvalid >= 64) {
@@ -720,7 +719,7 @@ kernel_cake_dense_projection_det_gemm_bab9e9dfd7c6ca5e17c0(const __grid_constant
                             #pragma unroll 1
                             for (int sidx = 0; sidx < nparts; sidx++) {
                                 int slice_id_1 = cta_rank * 8 + (warp - 2);
-                                unsigned long long off_1 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_1) * 2048 + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                                unsigned long long off_1 = (unsigned long long)((slab0 + sidx) * 16 + slice_id_1) * 2048ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
                                 unsigned long long off_0_1 = off_1;
                                 if (nvalid_1 >= 64) {
                                     #pragma unroll

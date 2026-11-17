@@ -294,7 +294,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 24576, (&B), b_col, k0, l_idx, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         }
                         load_stage += 1;
@@ -317,7 +317,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 24576, (&B), b_col, k0_1, l_idx, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         }
                         load_stage += 1;
@@ -340,7 +340,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 24576, (&B), b_col, k0_2, l_idx, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         }
                         load_stage += 1;
@@ -381,7 +381,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int k_block_3 = k_begin_1; k_block_3 < k_begin_1 + (k_end_1 - k_begin_1) / 3; k_block_3++) {
-                        mbarrier_wait(tma_full_addr + (mma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag = ((k_block_3 == k_begin_1) ? 1 : 0);
                         int a_lo = ((((smem_a_addr) >> 4) & 0x7FFF) | 0x2000000) + (mma_stage) * 1536;
@@ -431,7 +431,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int k_block_4 = k_begin_1 + (k_end_1 - k_begin_1) / 3; k_block_4 < k_begin_1 + 2 * (k_end_1 - k_begin_1) / 3; k_block_4++) {
-                        mbarrier_wait(tma_full_addr + (mma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag_1 = ((k_block_4 == k_begin_1 + (k_end_1 - k_begin_1) / 3) ? 1 : 0);
                         int a_lo_1 = ((((smem_a_addr) >> 4) & 0x7FFF) | 0x2000000) + (mma_stage) * 1536;
@@ -481,7 +481,7 @@ kernel_cake_dense_projection_det_gemm_110305dea4b2b6b7d92b(const __grid_constant
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int k_block_5 = k_begin_1 + 2 * (k_end_1 - k_begin_1) / 3; k_block_5 < k_end_1; k_block_5++) {
-                        mbarrier_wait(tma_full_addr + (mma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag_2 = ((k_block_5 == k_begin_1 + 2 * (k_end_1 - k_begin_1) / 3) ? 1 : 0);
                         int a_lo_2 = ((((smem_a_addr) >> 4) & 0x7FFF) | 0x2000000) + (mma_stage) * 1536;

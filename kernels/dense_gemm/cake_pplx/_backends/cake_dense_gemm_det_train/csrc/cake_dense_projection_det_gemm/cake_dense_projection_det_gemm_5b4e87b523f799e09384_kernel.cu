@@ -84,9 +84,9 @@ kernel_cake_dense_projection_det_gemm_5b4e87b523f799e09384(float* __restrict__ s
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     asm volatile("griddepcontrol.wait;" ::: "memory");
     unsigned long long nn = (unsigned long long)n;
-    unsigned long long e0 = (unsigned long long)(bid * 256 + tid) * 8;
-    unsigned long long e1 = e0 + 4;
-    int full = ((nn >= e0 + 8) ? 1 : 0);
+    unsigned long long e0 = (unsigned long long)(bid * 256 + tid) * 8ull;
+    unsigned long long e1 = e0 + 4ull;
+    int full = ((nn >= e0 + 8ull) ? 1 : 0);
     float x[8];
     float hi[8];
     float mid[8];
@@ -94,7 +94,7 @@ kernel_cake_dense_projection_det_gemm_5b4e87b523f799e09384(float* __restrict__ s
     if (e0 < nn) {
         unsigned long long src_bits = (unsigned long long)(src + e0);
         int src_vec = full;
-        if ((src_bits & 15) != 0) {
+        if ((src_bits & 15ull) != 0ull) {
             src_vec = 0;
         }
         if (src_vec == 1) {
@@ -150,7 +150,7 @@ kernel_cake_dense_projection_det_gemm_5b4e87b523f799e09384(float* __restrict__ s
         unsigned long long pk_off_1_0 = e0;
         unsigned long long part_bits_2_0 = (unsigned long long)(parts + pk_off_1_0);
         int part_vec_1_0 = full;
-        if ((part_bits_2_0 & 15) != 0) {
+        if ((part_bits_2_0 & 15ull) != 0ull) {
             part_vec_1_0 = 0;
         }
         if (part_vec_1_0 == 1) {
@@ -187,7 +187,7 @@ kernel_cake_dense_projection_det_gemm_5b4e87b523f799e09384(float* __restrict__ s
         unsigned long long pk_off_1_1 = nn + e0;
         unsigned long long part_bits_2_1 = (unsigned long long)(parts + pk_off_1_1);
         int part_vec_1_1 = full;
-        if ((part_bits_2_1 & 15) != 0) {
+        if ((part_bits_2_1 & 15ull) != 0ull) {
             part_vec_1_1 = 0;
         }
         if (part_vec_1_1 == 1) {
@@ -221,10 +221,10 @@ kernel_cake_dense_projection_det_gemm_5b4e87b523f799e09384(float* __restrict__ s
                 }
             }
         }
-        unsigned long long pk_off_1_2 = nn * 2 + e0;
+        unsigned long long pk_off_1_2 = nn * 2ull + e0;
         unsigned long long part_bits_2_2 = (unsigned long long)(parts + pk_off_1_2);
         int part_vec_1_2 = full;
-        if ((part_bits_2_2 & 15) != 0) {
+        if ((part_bits_2_2 & 15ull) != 0ull) {
             part_vec_1_2 = 0;
         }
         if (part_vec_1_2 == 1) {

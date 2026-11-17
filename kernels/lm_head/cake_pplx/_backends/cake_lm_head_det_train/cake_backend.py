@@ -142,7 +142,7 @@ Contract
   at the rows' positions among the valid rows (a zero-weight row's slot holds its weight, the ``+0`` / ``-0`` term
   the plain path forms) and reduces them with the plain path's chunk boundaries and ``loss_reduce`` launches, so
   ``loss`` is bitwise the call without the split; ``"regroup"`` reduces the gradient rows' terms over the split's
-  own chunks (the same FP64 sum over different chunk boundaries).  ``logp`` / ``lse`` of every row are bitwise the
+  own chunks (the same FP32 sum over different chunk boundaries).  ``logp`` / ``lse`` of every row are bitwise the
   plain path's; ``dX`` rows of ``G`` too whenever their chunk runs the same dX form and K-slice count; ``dW`` groups
   its K reduction over the split's chunk rows (within the accuracy budget; run to run bitwise).  A zero-weight row is
   treated like an ignored row for the gradients: a non-finite value in its ``X`` row, its logits or its
@@ -248,6 +248,21 @@ BACKENDS = ("cake", "reference")
 GRAD_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # ``mode`` scalar of ``row_finalize`` / ``loss_reduce``: which per-row quantities the stage forms.
 MODE_CE, MODE_POLICY, MODE_EXTERNAL, MODE_NONE = 0, 1, 2, 3
+# The loss reduction's ``loss_acc``: FP32 [LOSS_ACC_WORDS], the binary counter of the chunks'
+# loss sums (words 0 .. 30) and the chunk count (word 31). The kernel reads and writes up to
+# word 31, so every buffer the host makes for it is checked to hold at least this many words
+# (``_loss_acc``).
+LOSS_ACC_WORDS = 32
+
+
+def _loss_acc(acc: torch.Tensor) -> torch.Tensor:
+    """``acc``, once checked to be FP32 with at least ``LOSS_ACC_WORDS`` words."""
+    if acc.dtype != torch.float32 or acc.numel() < LOSS_ACC_WORDS:
+        raise ValueError(
+            f"loss_acc must be FP32 with at least {LOSS_ACC_WORDS} words, "
+            f"got {acc.dtype} [{acc.numel()}]"
+        )
+    return acc
 WORKSPACE_ALIGN = 256
 SUPPORTED_COMPUTE_CAPABILITIES = {
     (10, 0): "sm_100a",
@@ -2610,8 +2625,8 @@ def set_zero_weight_min_rows(rows: int) -> int:
 #   to their rows' positions among the valid rows, a zero-weight row's slot holding its weight (``+0`` / ``-0``, the
 #   term ``w * min(ratio, 2)`` the plain path's ``row_finalize`` forms for any ``ratio``, NaN included), and the
 #   shipped ``loss_reduce`` runs over the plain path's chunks of the valid rows (same ``rows_c``, first / last flags,
-#   FP64 accumulator and FP32 rounding) -- :func:`_zero_weight_exact_loss`.
-# * ``"regroup"``: the chunk loop's own ``loss_reduce`` over the gradient rows (the same FP64 sum of the same terms over
+#   FP32 accumulator and FP32 rounding) -- :func:`_zero_weight_exact_loss`.
+# * ``"regroup"``: the chunk loop's own ``loss_reduce`` over the gradient rows (the same FP32 sum of the same terms over
 #   the split's chunk boundaries, so the loss may differ from the plain path's in its last FP32 bits; no term
 #   placement, no extra launch).
 ZERO_WEIGHT_LOSS_MODES = ("exact", "regroup")
@@ -4352,7 +4367,7 @@ def workspace_layout(
         ("stats", rows * tiles * 2 * 4),
         ("d", rows * 4),
         ("term", rows * 4),
-        ("loss_acc", 8),  # FP64 accumulator of the fixed-order loss sum
+        ("loss_acc", 4 * LOSS_ACC_WORDS),  # FP32 [32]: the binary counter of the chunks' loss sums
         ("grad_scale", 4),
     ]
     if dx_ws_slabs:
@@ -6151,22 +6166,53 @@ class ReferenceEngine:
     @staticmethod
     def loss_reduce(values: dict[str, Any]) -> None:
         rows_c = int(values["rows_c"])
-        total = (
-            values["term"][:rows_c].double().sum().reshape(1)
-        )  # FP64 accumulation of the FP32 terms
+        term = values["term"][:rows_c]
+        # The kernel's FP32 order, every add rounded to nearest: in each block of 4096 rows thread ``i`` sums its 16
+        # terms ``i + 256 j`` (``+0`` past ``rows_c``) by a pairwise tree (``j`` and ``j + 8``, then ``j + 4``, ...)
+        # and adds the blocks' sums in block order from ``+0``; then the xor butterfly of each warp's 32 lanes and the
+        # one of the 8 warp sums (whose lanes 8 to 31 hold ``+0``).
+        lanes = torch.zeros(256, dtype=torch.float32, device=term.device)
+        for start in range(0, rows_c, 4096):
+            block = torch.zeros(4096, dtype=torch.float32, device=term.device)
+            part = term[start : start + 4096]
+            block[: part.numel()] = part
+            leaves = block.view(16, 256)
+            for width in (8, 4, 2, 1):
+                leaves = leaves[:width] + leaves[width : 2 * width]
+            lanes = lanes + leaves[0]
+        xor = torch.arange(32, device=term.device)
+        warps = lanes.view(8, 32)
+        for k in (16, 8, 4, 2, 1):
+            warps = warps + warps[:, xor ^ k]
+        sums = torch.cat((warps[:, 0], warps.new_zeros(24)))
+        for k in (16, 8, 4, 2, 1):
+            sums = sums + sums[xor ^ k]
+        total = sums[0]
+        # The chunk sums' binary counter ``loss_acc`` (FP32 [32]: word ``j`` the sum of ``2^j`` chunks, word 31 the
+        # count ``k`` of chunks summed, 0 on the first chunk): the sum is added to the words of the low run of set bits
+        # of ``k`` in ascending order and stored at the first clear bit, or on the last chunk to the words of every set
+        # bit and stored in word 0; word 31 becomes ``k + 1``.
         acc = values["loss_acc"]
-        if int(values["first_chunk"]):
-            acc.copy_(total)
-        else:
-            acc.add_(total)
-        if int(values["last_chunk"]):
-            # ``0 - acc`` as the kernel forms it (``+0`` for a zero sum of either sign; a unary minus would give ``-0``)
-            neg = torch.zeros_like(acc).sub_(acc)
-            values["loss_out"].copy_(
-                neg / float(values["loss_div"])
-                if int(values["mode"]) == MODE_CE
-                else neg
-            )  # one FP64 -> FP32 rounding
+        last = int(values["last_chunk"])
+        k = 0 if int(values["first_chunk"]) else int(acc[31])
+        top, j = 0, 0
+        while k >> j:
+            if (k >> j) & 1:
+                total = acc[j] + total
+                top = j + 1
+            elif not last:
+                break
+            j += 1
+        acc[0 if last else top] = total
+        acc[31] = k + 1
+        if last:
+            if int(values["mode"]) == MODE_CE:
+                div = torch.tensor(
+                    float(values["loss_div"]), dtype=torch.float32, device=total.device
+                )
+                total = total / div  # one FP32 division
+            # ``0 - total`` as the kernel forms it (``+0`` for a zero sum of either sign; a unary minus would give ``-0``)
+            values["loss_out"].copy_(torch.zeros_like(total).sub_(total))
 
     @staticmethod
     def row_grad(values: dict[str, Any]) -> None:
@@ -6867,7 +6913,7 @@ def prepare_lm_head_det_loss(
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))
     t["term"] = carve("term", torch.float32, (rows,))
-    t["loss_acc"] = carve("loss_acc", torch.float64, (1,))
+    t["loss_acc"] = _loss_acc(carve("loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -7311,7 +7357,7 @@ def prepare_lm_head_det_loss_temperature(
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))
     t["term"] = carve("term", torch.float32, (rows,))
-    t["loss_acc"] = carve("loss_acc", torch.float64, (1,))
+    t["loss_acc"] = _loss_acc(carve("loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
     t["unit_scale"] = torch.ones(
         (1,), dtype=torch.float32, device=device
@@ -7775,7 +7821,7 @@ class _Binding:
                 )
         t["d"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
         t["term"] = torch.empty((rows,), dtype=torch.float32, device=self.device)
-        t["loss_acc"] = torch.empty((1,), dtype=torch.float64, device=self.device)
+        t["loss_acc"] = _loss_acc(torch.empty((LOSS_ACC_WORDS,), dtype=torch.float32, device=self.device))
         t["loss"] = torch.empty((1,), dtype=torch.float32, device=self.device)
         t.update(
             _device_constants(self.device_index)
@@ -9166,9 +9212,9 @@ def _zero_weight_exact_loss(
     """The FP32 ``[1]`` loss of a zero-weight split, bitwise the loss of the same call without the split.
 
     The plain path reduces the per-row terms ``term_t = w_t * min(ratio_t, 2)`` of the valid rows in its chunks of the
-    valid rows: ``loss_reduce`` per chunk (one CTA; thread ``i`` adds ``term[i], term[i + 256], ..`` into an FP64
-    register from ``+0``, a warp butterfly and a cross-warp butterfly, then the chunk sum goes into the FP64
-    accumulator -- stored by the first chunk, added by the others -- and the last chunk stores ``float(0 - acc)``).
+    valid rows: ``loss_reduce`` per chunk (one CTA; each thread sums its 16 terms of each 4096-row block by a pairwise
+    tree, then a warp butterfly and a cross-warp butterfly, then the chunk sum goes into the binary counter of chunk
+    sums ``loss_acc`` -- a pairwise tree over the chunks -- and the last chunk stores ``0 - total``).
     This forms that array: ``term_v [T_v]`` (``T_v = |G| + |Z|``, the valid rows in ascending order) holds each
     gradient row's term -- the chunk loop's own ``row_finalize`` value (``terms``: chunk 0's in ``term``, chunk
     ``c >= 1``'s at ``loss_weights[(c - 1) C + r]``, :func:`_term_rows`) -- at its position among the valid rows,
@@ -9205,7 +9251,7 @@ def _zero_weight_exact_loss(
     else:
         term_v.copy_(weights)
     del weights
-    acc = torch.empty((1,), dtype=torch.float64, device=device)
+    acc = _loss_acc(torch.empty((LOSS_ACC_WORDS,), dtype=torch.float32, device=device))
     out = torch.empty((1,), dtype=torch.float32, device=device)
     chunks = plan_chunks(n_v, chunk)
     scalars = dict(

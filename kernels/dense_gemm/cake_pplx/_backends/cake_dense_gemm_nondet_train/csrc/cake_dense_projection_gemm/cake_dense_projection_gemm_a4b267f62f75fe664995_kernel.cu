@@ -298,7 +298,7 @@ kernel_cake_dense_projection_gemm_a4b267f62f75fe664995(const __grid_constant__ C
                                "r"(((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF)), "l"(0x12F0000000000000ULL) : "memory");
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(57344)) : "memory");
                         }
                         load_stage += 1;
@@ -339,7 +339,7 @@ kernel_cake_dense_projection_gemm_a4b267f62f75fe664995(const __grid_constant__ C
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int k_block_1 = k_begin_1; k_block_1 < k_end_1; k_block_1++) {
-                        mbarrier_wait(tma_full_addr + (mma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag = ((k_block_1 == k_begin_1) ? 1 : 0);
                         int a_lo = ((((smem_a_addr) >> 4) & 0x7FFF) | 0x2000000) + (mma_stage) * 1792;

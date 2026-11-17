@@ -304,7 +304,7 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                 int off_m_1 = (first_m_1 + (int)m_in_group_1) * 128;
                 int off_n_1 = (int)bid_n_1 * 256;
                 int row0 = off_m_1 + warp_row0;
-                mbarrier_wait(work_full_addr + (work_stage) * 8, _phase_work_full);
+                mbarrier_wait_cluster_hint(work_full_addr + (work_stage) * 8, _phase_work_full, 10000000);
                 uint32_t clc_valid = 0;
                 asm volatile(
                     "{\n\t"
@@ -538,13 +538,13 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                         }
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(65536)) : "memory");
                         }
                         load_stage += 1;
                         if (load_stage == 6) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
-                    mbarrier_wait(work_full_addr + (work_stage_1) * 8, _phase_work_full_1);
+                    mbarrier_wait_cluster_hint(work_full_addr + (work_stage_1) * 8, _phase_work_full_1, 10000000);
                     uint32_t clc_valid_1 = 0;
                     asm volatile(
                         "{\n\t"
@@ -610,14 +610,14 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                             "{\n\t"
                             ".reg .b32 remAddr32;\n\t"
                             "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                            "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
+                            "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                             "}"
                             :: "r"(work_full_addr + (sched_stage) * 8), "r"(0), "r"((uint32_t)(16)) : "memory");
                         asm volatile(
                             "{\n\t"
                             ".reg .b32 remAddr32;\n\t"
                             "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                            "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [remAddr32], %2;\n\t"
+                            "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [remAddr32], %2;\n\t"
                             "}"
                             :: "r"(work_full_addr + (sched_stage) * 8), "r"(1), "r"((uint32_t)(16)) : "memory");
                         asm volatile(
@@ -628,7 +628,7 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                             :: "r"(work_response_addr + sched_stage * 16 + 0 * 16), "r"(work_full_addr + sched_stage * 8)
                             : "memory");
                     }
-                    mbarrier_wait(work_full_addr + (sched_stage) * 8, _phase_work_full_2);
+                    mbarrier_wait_cluster_hint(work_full_addr + (sched_stage) * 8, _phase_work_full_2, 10000000);
                     uint32_t clc_valid_2 = 0;
                     asm volatile(
                         "{\n\t"
@@ -697,7 +697,7 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int iter_k_1 = 0; iter_k_1 < k_iters; iter_k_1++) {
-                        mbarrier_wait(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag = ((iter_k_1 == 0) ? 1 : 0);
 #if __CUDA_ARCH__ == 1070
@@ -748,7 +748,7 @@ kernel_cake_dense_projection_gemm_1ac557a7c04c64043ebd(const __grid_constant__ C
                     elect_commit_cg2_multicast(acc_full_addr + (mma_acc_buf) * 8, (uint16_t)(3));
                     mma_acc_buf += 1;
                     if (mma_acc_buf == 2) { mma_acc_buf = 0; _phase_acc_empty ^= 1; }
-                    mbarrier_wait(work_full_addr + (work_stage_2) * 8, _phase_work_full_3);
+                    mbarrier_wait_cluster_hint(work_full_addr + (work_stage_2) * 8, _phase_work_full_3, 10000000);
                     uint32_t clc_valid_3 = 0;
                     asm volatile(
                         "{\n\t"

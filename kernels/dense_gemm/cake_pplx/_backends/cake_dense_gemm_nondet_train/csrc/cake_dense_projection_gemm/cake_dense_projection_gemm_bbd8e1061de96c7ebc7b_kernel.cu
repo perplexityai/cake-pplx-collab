@@ -291,7 +291,7 @@ kernel_cake_dense_projection_gemm_bbd8e1061de96c7ebc7b(const __grid_constant__ C
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 32768 + 8192, (&B), b_col + 64, k0, l_idx, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         if (cta_rank == 0) {
                             asm volatile(
-                                "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+                                "mbarrier.arrive.expect_tx.relaxed.cluster.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(65536)) : "memory");
                         }
                         load_stage += 1;
@@ -332,7 +332,7 @@ kernel_cake_dense_projection_gemm_bbd8e1061de96c7ebc7b(const __grid_constant__ C
                     mbarrier_wait(acc_empty_addr + (mma_acc_buf) * 8, _phase_acc_empty);
                     #pragma unroll 1
                     for (int k_block_1 = k_begin_1; k_block_1 < k_end_1; k_block_1++) {
-                        mbarrier_wait(tma_full_addr + (mma_stage) * 8, _phase_tma_full);
+                        mbarrier_wait_cluster_hint(tma_full_addr + (mma_stage) * 8, _phase_tma_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         int init_flag = ((k_block_1 == k_begin_1) ? 1 : 0);
 #if __CUDA_ARCH__ == 1070

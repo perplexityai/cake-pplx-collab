@@ -112,6 +112,20 @@ __device__ __forceinline__ float max_noftz(float a, float b) {
 
 
 
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
+
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+}
+
+
+
 __device__ __forceinline__ void cp_async_bulk_gmem2smem(
     unsigned smem_addr, const void* gmem_ptr, unsigned bytes, int mbar_addr) {
     asm volatile(
@@ -268,14 +282,17 @@ kernel_cake_lm_head_loss_830bfe91eb5f93d7ed73(__nv_bfloat16* __restrict__ W, __n
                 #pragma unroll
                 for (int t_2 = 0; t_2 < 2; t_2++) {
                     #pragma unroll
-                    for (int r_1 = 0; r_1 < 4; r_1++) {
-                        float acc = 0.0f;
+                    for (int rp = 0; rp < 2; rp++) {
+                        float2 accp = make_float2(0.0f, 0.0f);
                         #pragma unroll
                         for (int q = 0; q < 12; q++) {
-                            acc = __fmaf_rn(__uint_as_float(wpk[r_1 * 3 * 4 + q] << 16), xf[t_2 * 3 * 8 + 2 * q], acc);
-                            acc = __fmaf_rn(__uint_as_float(wpk[r_1 * 3 * 4 + q] & 4294901760u), xf[t_2 * 3 * 8 + 2 * q + 1], acc);
+                            float xe = xf[t_2 * 3 * 8 + 2 * q];
+                            float xo = xf[t_2 * 3 * 8 + 2 * q + 1];
+                            accp = fma_f32x2_rn_noftz(make_float2(__uint_as_float(wpk[2 * rp * 3 * 4 + q] << 16), __uint_as_float(wpk[(2 * rp + 1) * 3 * 4 + q] << 16)), make_float2(xe, xe), accp);
+                            accp = fma_f32x2_rn_noftz(make_float2(__uint_as_float(wpk[2 * rp * 3 * 4 + q] & 4294901760u), __uint_as_float(wpk[(2 * rp + 1) * 3 * 4 + q] & 4294901760u)), make_float2(xo, xo), accp);
                         }
-                        pd[t_2 * 4 + r_1] = acc;
+                        pd[t_2 * 4 + 2 * rp] = accp.x;
+                        pd[t_2 * 4 + 2 * rp + 1] = accp.y;
                     }
                 }
                 bool upper_0 = (lane & 16) != 0;
@@ -342,9 +359,9 @@ kernel_cake_lm_head_loss_830bfe91eb5f93d7ed73(__nv_bfloat16* __restrict__ W, __n
                     float m_old = mrow[t_3];
                     float mx = m_old;
                     #pragma unroll
-                    for (int r_2 = 0; r_2 < 4; r_2++) {
-                        if (r_2 < nr_1) {
-                            mx = max_noftz(mx, tot[t_3 * 4 + r_2]);
+                    for (int r_1 = 0; r_1 < 4; r_1++) {
+                        if (r_1 < nr_1) {
+                            mx = max_noftz(mx, tot[t_3 * 4 + r_1]);
                         }
                     }
                     float sc = 1.0f;
@@ -354,30 +371,37 @@ kernel_cake_lm_head_loss_830bfe91eb5f93d7ed73(__nv_bfloat16* __restrict__ W, __n
                     }
                     float ps = 0.0f;
                     #pragma unroll
-                    for (int r_3 = 0; r_3 < 4; r_3++) {
+                    for (int r_2 = 0; r_2 < 4; r_2++) {
                         float p = 0.0f;
-                        if (r_3 < nr_1) {
-                            float _exp_14 = expf(tot[t_3 * 4 + r_3] - mx);
+                        if (r_2 < nr_1) {
+                            float _exp_14 = expf(tot[t_3 * 4 + r_2] - mx);
                             p = _exp_14;
                         }
-                        tot[t_3 * 4 + r_3] = p;
+                        tot[t_3 * 4 + r_2] = p;
                         ps = ps + p;
                     }
                     srow[t_3] = __fmaf_rn(srow[t_3], sc, ps);
                     mrow[t_3] = mx;
                     if (mx != m_old) {
+                        float2 sc2 = make_float2(sc, sc);
                         #pragma unroll
-                        for (int e_2 = 0; e_2 < 24; e_2++) {
-                            u[t_3 * 3 * 8 + e_2] = u[t_3 * 3 * 8 + e_2] * sc;
+                        for (int q_1 = 0; q_1 < 12; q_1++) {
+                            float2 _f32x2_mul_a_15 = make_float2(u[t_3 * 3 * 8 + 2 * q_1], u[t_3 * 3 * 8 + 2 * q_1 + 1]);
+                            float2 us;
+                            asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&us) : "l"(*(const unsigned long long*)&_f32x2_mul_a_15), "l"(*(const unsigned long long*)&sc2));
+                            u[t_3 * 3 * 8 + 2 * q_1] = us.x;
+                            u[t_3 * 3 * 8 + 2 * q_1 + 1] = us.y;
                         }
                     }
                     #pragma unroll
-                    for (int r_4 = 0; r_4 < 4; r_4++) {
-                        if (r_4 < nr_1) {
+                    for (int r_3 = 0; r_3 < 4; r_3++) {
+                        if (r_3 < nr_1) {
+                            float2 p2 = make_float2(tot[t_3 * 4 + r_3], tot[t_3 * 4 + r_3]);
                             #pragma unroll
-                            for (int q_1 = 0; q_1 < 12; q_1++) {
-                                u[t_3 * 3 * 8 + 2 * q_1] = __fmaf_rn(tot[t_3 * 4 + r_4], __uint_as_float(wpk[r_4 * 3 * 4 + q_1] << 16), u[t_3 * 3 * 8 + 2 * q_1]);
-                                u[t_3 * 3 * 8 + 2 * q_1 + 1] = __fmaf_rn(tot[t_3 * 4 + r_4], __uint_as_float(wpk[r_4 * 3 * 4 + q_1] & 4294901760u), u[t_3 * 3 * 8 + 2 * q_1 + 1]);
+                            for (int q_2 = 0; q_2 < 12; q_2++) {
+                                float2 uu = fma_f32x2_rn_noftz(p2, make_float2(__uint_as_float(wpk[r_3 * 3 * 4 + q_2] << 16), __uint_as_float(wpk[r_3 * 3 * 4 + q_2] & 4294901760u)), make_float2(u[t_3 * 3 * 8 + 2 * q_2], u[t_3 * 3 * 8 + 2 * q_2 + 1]));
+                                u[t_3 * 3 * 8 + 2 * q_2] = uu.x;
+                                u[t_3 * 3 * 8 + 2 * q_2 + 1] = uu.y;
                             }
                         }
                     }
