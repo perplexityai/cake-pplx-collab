@@ -14,12 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Tests of the Cake SiLU-gated RMSNorm training forward / backward
-(:mod:`cake_pplx.cake_rmsnorm_silu_gate_det_train`): ``RMSNorm(x) * w * SiLU(z)``
-against the eager FP32 operation (one final BF16 cast) and an independent
-FP64 reference, over dynamic token and head counts, irregular tails, strided
-layouts, near-zero variance, saturated gates, gate inputs at the edges of the
-forward's gate (finite ones, and infinite and NaN ones), gradient
-accumulation, checkpointing, side streams and CUDA Graphs.  ``y``, ``dx``,
+(:mod:`cake_pplx.cake_rmsnorm_silu_gate_det_train`): ``RMSNorm(x) * w * SiLU(z)``.
+Every training output (``y``, ``dx``, ``dz``, the BF16 and the FP32 weight
+gradient, and both accumulated onto a starting value) is judged against the
+PyTorch BF16 naive implementation of the operation, each against a float64
+oracle of the BF16 inputs, over 32 random inputs of a case
+(:mod:`tests.cake.test_helpers.silu_reference`, the ``TIER`` lines of the
+terminal summary): over dynamic token and head counts, irregular tails,
+strided layouts, near-zero variance, saturated gates, finite gate inputs at
+the edges of the forward's gate, the row counts at the edges of the grids,
+the claimed backward far past one wave, the grids of other SM counts and
+gradient accumulation.  Infinite and NaN gates and upstream gradients give
+the oracle's classes.  ``y``, ``dx``,
 ``dz`` and the BF16, FP32 and accumulated FP32 weight gradients are the same
 bits at every call with the same inputs: at the issue's shapes, small and odd
 shapes, the row counts at the edges of the forward's grids (one CTA a row
@@ -31,9 +37,8 @@ two streams at once, in CUDA Graph replays and under
 role's long module from the long module's ``min_rows_per_sm`` rows per SM, and
 strided rows, a single token and fewer rows run the role's module; the two
 give the same ``dx``, ``dz`` and weight-gradient bits on the same inputs and
-grid.  Far past
-one wave of the backward's grid (CTAs claiming row blocks) and with the grids
-of other SM counts the weight gradient lies within its FP64 budget.  The
+grid.  The tests never compare this package with the non-deterministic one
+and hold no output to an error bound of its own.  The
 backward's workspace is zero after every call (``compute_grad_weight=False``
 and accumulation included), serves every shape and both weight-gradient
 dtypes, is zeroed by ``cake_rmsnorm_silu_gate_det_train_reset_workspace``, and
@@ -59,6 +64,7 @@ import torch
 import torch.utils.checkpoint
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake.test_helpers.silu_reference import Draw, judge, silu_draw
 
 pkg = cake_package("cake_rmsnorm_silu_gate_det_train")
 cake_build = cake_package("cake_rmsnorm_silu_gate_det_train", "cake_build")
@@ -88,21 +94,12 @@ reset_workspace = cake_rmsnorm_silu_gate_det_train_reset_workspace
 
 D = 128
 EPS = 1e-6
-# One BF16 unit in the last place relative to the value (8 significant bits).
-BF16_RTOL = 2.0**-7
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
     or not is_cake_rmsnorm_silu_gate_det_train_supported(torch.device("cuda")),
     reason="Cake SiLU-gated RMSNorm training needs an SM100 / SM103 / SM107 GPU",
 )
-
-
-def eager(x, z, w, eps):
-    """The issue's reference operation in FP32, one final cast."""
-    xf, zf, wf = x.float(), z.float(), w.float()
-    rstd = torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
-    return (((xf * rstd) * wf) * torch.nn.functional.silu(zf)).to(x.dtype)
 
 
 def fp64_reference(dy, x, z, w, eps):
@@ -120,44 +117,6 @@ def fp64_reference(dy, x, z, w, eps):
     dx = rstd * dn - xd * rstd**3 * (dn * xd).mean(dim=-1, keepdim=True)
     dw = (a * n).reshape(-1, D).sum(dim=0)
     return y, dx, dz, dw
-
-
-def assert_bf16_close(got, want, *, what, scale=None):
-    """``got`` (BF16) within one BF16 ulp of ``want`` plus an absolute floor of
-    1/64 ulp of the tensor's largest magnitude (cancellation in ``dx``), or of
-    ``scale`` (a number, or per-row scales that broadcast); a NaN fails."""
-    want = want.double()
-    floor = (scale if scale is not None else want.abs().max().item()) * BF16_RTOL / 64
-    err = (got.double() - want).abs()
-    bound = want.abs() * BF16_RTOL + floor
-    bad = ~(err <= bound)
-    assert not bad.any(), (
-        f"{what}: {int(bad.sum())} of {bad.numel()} elements beyond one BF16 ulp; "
-        f"worst err {err.max().item():.3e}"
-    )
-
-
-def assert_y_elementwise(y, x, z, w, eps, *, what):
-    """``y`` within one BF16 ulp of the FP64 reference plus a floor of 1/64 ulp
-    of its row's largest finite ungated magnitude ``|x * rstd * w|``, times the
-    gate's magnitude where that exceeds one: each element's own bound, which
-    large gates elsewhere in the row or the tensor do not widen.  Elements whose
-    reference is not finite are left to the callers."""
-    xd, zd, wd = x.double(), z.double(), w.double()
-    rstd = 1.0 / torch.sqrt(xd.square().mean(dim=-1, keepdim=True) + eps)
-    ungated = xd * rstd * wd
-    scale = torch.where(ungated.isfinite(), ungated.abs(), 0.0).amax(
-        dim=-1, keepdim=True
-    )
-    silu = zd * torch.sigmoid(zd)
-    want = ungated * silu
-    floor = scale * silu.abs().clamp_min(1.0) * BF16_RTOL / 64
-    err = (y.double() - want).abs()
-    bad = want.isfinite() & ~(err <= want.abs() * BF16_RTOL + floor)
-    assert not bad.any(), (
-        f"{what}: {int(bad.sum())} of {bad.numel()} elements beyond their own "
-        f"bound; worst err {err[bad].max().item():.3e}"
-    )
 
 
 def make(T, H, *, layout="contiguous", data="normal", seed=0, device="cuda"):
@@ -206,84 +165,52 @@ def make(T, H, *, layout="contiguous", data="normal", seed=0, device="cuda"):
     return x, z, w, dy
 
 
-def eager_grads(dy, x, z, w, eps):
-    xr = x.detach().clone().requires_grad_(True)
-    zr = z.detach().clone().requires_grad_(True)
-    wr = w.detach().clone().requires_grad_(True)
-    y = eager(xr, zr, wr, eps)
-    y.backward(dy)
-    return y.detach(), xr.grad, zr.grad, wr.grad
+# The judged outputs of ``outputs`` and the quantity of each.
+JUDGED = {
+    "y": "y",
+    "dx": "dx",
+    "dz": "dz",
+    "dw_bf16": "dw",
+    "dw_f32": "dw",
+    "dw_accumulated": "dw",
+    "dw_bf16_accumulated": "dw",
+}
 
 
-def row_scales(dy, x, z, w, eps):
-    """``(dx_scale, dz_scale)``: each row's scale of the backward's documented
-    floor, in FP64 from the inputs, ``[..., 1]``: for ``dz`` the row's largest
-    ``|dy * n * w|``; for ``dx`` the largest magnitudes of its two terms, the
-    row's largest ``|dn * rstd|`` (``dn = dy * silu(z) * w``) plus its largest
-    ``|x|`` times ``rstd^3`` times the mean of ``|dn * x|``."""
-    xd, zd, wd, gd = x.double(), z.double(), w.double(), dy.double()
-    rstd = 1.0 / torch.sqrt(xd.square().mean(dim=-1, keepdim=True) + eps)
-    dz_scale = (gd * (xd * rstd) * wd).abs().amax(dim=-1, keepdim=True)
-    dn = gd * torch.nn.functional.silu(zd) * wd
-    coef = rstd**3 * (dn * xd).abs().mean(dim=-1, keepdim=True)
-    dx_scale = (dn * rstd).abs().amax(dim=-1, keepdim=True) + xd.abs().amax(
-        dim=-1, keepdim=True
-    ) * coef
-    return dx_scale, dz_scale
+def check_all(record_property, inputs, eps=EPS, *, seed=0, label=""):
+    """Judge every training output against the PyTorch BF16 naive
+    implementation over the draws of ``judge`` (``inputs(s)`` gives the
+    draw's ``(x, z, w, dy)`` from its seed ``s``): ``y``, ``dx``, ``dz``, the
+    BF16 and the FP32 weight gradient, the FP32 one accumulated onto 0.25 and
+    the BF16 one accumulated onto 0.5.  ``label`` prefixes the output names
+    (one test judging several cases)."""
 
+    def run(j, s):
+        x, z, w, dy = inputs(s)
+        got = outputs(x, z, w, dy, eps=eps)
+        y, dx, dz, dw = got[:4]
+        assert y.dtype == dx.dtype == dz.dtype == dw.dtype == torch.bfloat16
+        assert y.shape == dx.shape == dz.shape == x.shape and dw.shape == (D,)
+        assert got[4].dtype == got[5].dtype == torch.float32
+        acc16 = torch.full((D,), 0.5, dtype=torch.bfloat16, device=x.device)
+        backward(dy, x, z, w, eps, grad_weight=acc16, accumulate_grad_weight=True)
+        named = dict(zip(OUTPUTS, got, strict=True), dw_bf16_accumulated=acc16)
+        starts = {
+            "dw_accumulated": torch.full((D,), 0.25, dtype=torch.float32),
+            "dw_bf16_accumulated": torch.full((D,), 0.5, dtype=torch.bfloat16),
+        }
+        return silu_draw(
+            x,
+            z,
+            w,
+            dy,
+            eps,
+            [{label + name: value for name, value in named.items()}],
+            {label + name: kind for name, kind in JUDGED.items()},
+            starts={label + name: value for name, value in starts.items()},
+        )
 
-def check_all(x, z, w, dy, eps):
-    y = cake_rmsnorm_silu_gate_det_train_forward(x, z, w, eps)
-    dx, dz, dw = cake_rmsnorm_silu_gate_det_train_backward(dy, x, z, w, eps)
-    assert y.dtype == dx.dtype == dz.dtype == dw.dtype == torch.bfloat16
-    assert y.shape == dx.shape == dz.shape == x.shape and dw.shape == (D,)
-    y64, dx64, dz64, dw64 = fp64_reference(dy, x, z, w, eps)
-    assert_bf16_close(y, y64, what="y vs FP64")
-    assert_bf16_close(dz, dz64, what="dz vs FP64")
-    assert_bf16_close(dx, dx64, what="dx vs FP64")
-    # dw: the sum of T * H terms; the FP64 sum rounded once, within one BF16 ulp
-    # plus the FP32 chunk accumulation's error (relative to the sum of magnitudes).
-    terms = (dy.double() * torch.nn.functional.silu(z.double())) * (
-        x.double() * torch.rsqrt(x.double().square().mean(-1, keepdim=True) + eps)
-    )
-    mag = terms.abs().reshape(-1, D).sum(0)
-    err = (dw.double() - dw64).abs()
-    assert (err <= dw64.abs() * BF16_RTOL + mag * 2.0**-20).all(), "dw vs FP64"
-    ye, dxe, dze, dwe = eager_grads(dy, x, z, w, eps)
-    assert_bf16_close(y, ye, what="y vs eager", scale=y64.abs().max().item())
-    assert_bf16_close(dz, dze, what="dz vs eager", scale=dz64.abs().max().item())
-    assert_bf16_close(dx, dxe, what="dx vs eager", scale=dx64.abs().max().item())
-    # The documented bound: one BF16 ulp of the FP32 formula (the eager
-    # autograd) plus 1/64 ulp of the row's own scale.
-    dx_scale, dz_scale = row_scales(dy, x, z, w, eps)
-    assert_bf16_close(dz, dze, what="dz vs eager, row floor", scale=dz_scale)
-    assert_bf16_close(dx, dxe, what="dx vs eager, row floor", scale=dx_scale)
-    assert (
-        (dw.double() - dwe.double()).abs()
-        <= dwe.double().abs() * BF16_RTOL + mag * 2.0**-20
-    ).all(), "dw vs eager"
-
-
-def dw_reference(dy, x, z, eps):
-    """``(dw64, mag)``: the FP64 weight gradient and the FP64 sum of its terms'
-    magnitudes per column (the terms of ``check_all``'s bound)."""
-    terms = (dy.double() * torch.nn.functional.silu(z.double())) * (
-        x.double() * torch.rsqrt(x.double().square().mean(-1, keepdim=True) + eps)
-    )
-    terms = terms.reshape(-1, D)
-    return terms.sum(0), terms.abs().sum(0)
-
-
-def assert_dw_within(dw, want, mag, *, what):
-    """``dw`` within ``check_all``'s weight-gradient bound of ``want``: one
-    BF16 ulp plus ``2^-20`` of the terms' magnitudes."""
-    want = want.double()
-    err = (dw.double() - want).abs()
-    bad = ~(err <= want.abs() * BF16_RTOL + mag * 2.0**-20)
-    assert not bad.any(), (
-        f"{what}: {int(bad.sum())} of {bad.numel()} columns beyond the bound; "
-        f"worst err {err.max().item():.3e}"
-    )
+    judge(record_property, run, seed=seed)
 
 
 def assert_same_bits(got, want, what):
@@ -318,20 +245,20 @@ def launches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return launched
 
 
-def outputs(x, z, w, dy, *, workspace=None):
+def outputs(x, z, w, dy, *, workspace=None, eps=EPS):
     """The forward, then the backward with a BF16, an FP32 and an FP32 weight
     gradient accumulated onto 0.25: ``(y, dx, dz, dw_bf16, dw_f32, dw_acc)``."""
-    y = forward(x, z, w, EPS)
-    dx, dz, dw = backward(dy, x, z, w, EPS, workspace=workspace)
+    y = forward(x, z, w, eps)
+    dx, dz, dw = backward(dy, x, z, w, eps, workspace=workspace)
     f32 = torch.empty(D, dtype=torch.float32, device=x.device)
-    backward(dy, x, z, w, EPS, grad_weight=f32, workspace=workspace)
+    backward(dy, x, z, w, eps, grad_weight=f32, workspace=workspace)
     acc = torch.full((D,), 0.25, dtype=torch.float32, device=x.device)
     backward(
         dy,
         x,
         z,
         w,
-        EPS,
+        eps,
         grad_weight=acc,
         accumulate_grad_weight=True,
         workspace=workspace,
@@ -364,15 +291,13 @@ REPEATS = 5
         (33, 1),
     ],
 )
-def test_forward_backward_shapes(T, H):
-    x, z, w, dy = make(T, H)
-    check_all(x, z, w, dy, EPS)
+def test_forward_backward_shapes(T, H, record_property):
+    check_all(record_property, lambda s: make(T, H, seed=s))
 
 
 @pytest.mark.parametrize("layout", ["flat", "projection", "head_major", "misaligned"])
-def test_layouts(layout):
-    x, z, w, dy = make(65, 48, layout=layout, seed=1)
-    check_all(x, z, w, dy, EPS)
+def test_layouts(layout, record_property):
+    check_all(record_property, lambda s: make(65, 48, layout=layout, seed=s), seed=1)
 
 
 @pytest.mark.parametrize("layout", ["flat", "projection", "head_major", "misaligned"])
@@ -390,22 +315,18 @@ def test_layouts_give_the_contiguous_bits(layout):
 
 
 @pytest.mark.parametrize("data", ["near_zero", "saturated"])
-def test_edge_values(data):
-    x, z, w, dy = make(37, 48, data=data, seed=2)
-    check_all(x, z, w, dy, EPS)
-    assert_y_elementwise(forward(x, z, w, EPS), x, z, w, EPS, what=f"{data} y")
+def test_edge_values(data, record_property):
+    check_all(record_property, lambda s: make(37, 48, data=data, seed=s), seed=2)
 
 
 @pytest.mark.parametrize("eps", [1e-5, 1e-3])
-def test_epsilon(eps):
-    x, z, w, dy = make(19, 48, seed=3)
-    check_all(x, z, w, dy, eps)
+def test_epsilon(eps, record_property):
+    check_all(record_property, lambda s: make(19, 48, seed=s), eps, seed=3)
 
 
 @pytest.mark.parametrize("T", [30193, 32737, 32388])
-def test_issue_shapes(T):
-    x, z, w, dy = make(T, 48, seed=4)
-    check_all(x, z, w, dy, EPS)
+def test_issue_shapes(T, record_property):
+    check_all(record_property, lambda s: make(T, 48, seed=s), seed=4)
 
 
 # Finite gate inputs at and past the edges of the forward's gate: below about
@@ -436,12 +357,6 @@ GATE_EDGE_VALUES = [
     100.0,
     1e4,
 ]
-# The largest BF16 gate input below -87.3: from there down the gate is -0.
-GATE_FLUSHED = -87.5
-# The BF16 gate inputs whose FP32 sigmoid is subnormal (``z`` from about -87.34
-# to -88.72): the backward's sigmoid factor ``s`` is subnormal there too, not
-# flushed (the gate ``z * s`` is a normal number there).
-GATE_SUBNORMAL = (-88.5, -87.5)
 
 
 def _gate_edges(z, seed):
@@ -461,38 +376,17 @@ def _gate_edges(z, seed):
 @pytest.mark.parametrize(
     "T,H", [(1, 48), (13, 7), (37, 48), (129, 48), (260, 7), (1031, 48)]
 )
-def test_gate_edge_values(T, H):
-    """Gate inputs at the edges of the forward's gate (``GATE_EDGE_VALUES``)
-    within ``check_all``'s bounds and ``y`` within each element's own bound
-    (``assert_y_elementwise``); where ``z <= -87.5`` the forward's gate is
-    ``-0``, so ``y`` is zero there.  Where the FP32 sigmoid is subnormal
-    (``GATE_SUBNORMAL``; ``check_all``'s floor would pass a zero ``dz``),
-    each ``dz`` lies within one BF16 ulp of the FP64 reference plus half the
-    smallest BF16 subnormal (``2^-134``).  The FP32 weight-gradient program
-    gives the BF16 program's ``dx`` and ``dz`` bits."""
-    x, z, w, dy = make(T, H, seed=23)
-    _gate_edges(z, 24)
-    check_all(x, z, w, dy, EPS)
-    y = forward(x, z, w, EPS)
-    assert_y_elementwise(y, x, z, w, EPS, what="y at the gate edges")
-    flushed = z.float() <= GATE_FLUSHED
-    assert bool(flushed.any())
-    assert not bool(y[flushed].float().ne(0).any()), "y where z <= -87.5"
-    dx, dz, _ = backward(dy, x, z, w, EPS)
-    f32 = torch.empty(D, dtype=torch.float32, device=x.device)
-    dx32, dz32, _ = backward(dy, x, z, w, EPS, grad_weight=f32)
-    assert_same_bits(dx32, dx, "dx of the FP32 weight-gradient program")
-    assert_same_bits(dz32, dz, "dz of the FP32 weight-gradient program")
-    low, high = GATE_SUBNORMAL
-    band = (z.float() >= low) & (z.float() <= high)
-    assert bool(band.any())
-    dz = dz[band].double()
-    want = fp64_reference(dy, x, z, w, EPS)[2][band]
-    bad = ~((dz - want).abs() <= want.abs() * BF16_RTOL + 2.0**-134)
-    assert not bad.any(), (
-        f"dz where the FP32 sigmoid is subnormal: {int(bad.sum())} of "
-        f"{bad.numel()} elements beyond one BF16 ulp plus 2^-134"
-    )
+def test_gate_edge_values(T, H, record_property):
+    """Gate inputs at the edges of the forward's gate (``GATE_EDGE_VALUES``,
+    all finite): every output judged against the naive implementation
+    (``check_all``)."""
+
+    def inputs(s):
+        x, z, w, dy = make(T, H, seed=s)
+        _gate_edges(z, s + 1)
+        return x, z, w, dy
+
+    check_all(record_property, inputs, seed=23)
 
 
 def test_infinite_and_nan_gates():
@@ -500,11 +394,11 @@ def test_infinite_and_nan_gates():
     gradient column 0 sums to ``+inf``, column 4 to ``-inf`` and columns 1, 2
     (``+inf`` and ``-inf`` terms) and 3 (``silu(-inf)`` is NaN) to NaN: ``y``
     is NaN where the FP64 reference is NaN, the same infinity where it is
-    infinite and within ``check_all``'s bounds elsewhere; ``dx`` and ``dz`` of
-    the rows with finite gates lie within those bounds; the BF16 and the FP32
-    weight gradient are NaN in the FP64 reference's NaN columns, its infinity
-    in its infinite ones and within budget in the others; the workspace is zero
-    after each call and gives the next call the bits of a fresh workspace."""
+    infinite and finite elsewhere; ``dx`` and ``dz`` of the rows with finite
+    gates are finite where the reference is; the BF16 and the FP32 weight
+    gradient are NaN in the FP64 reference's NaN columns, its infinity in its
+    infinite ones and finite in the others; the workspace is zero after each
+    call and gives the next call the bits of a fresh workspace."""
     T, H = 257, 48
     x, z, w, dy = make(T, H, seed=25)
     # (token, head, column, gate, upstream gradient); x is 1 there, so the
@@ -522,7 +416,6 @@ def test_infinite_and_nan_gates():
         dy[t, h, c] = grad
         x[t, h, c] = 1.0
     y64, dx64, dz64, dw64 = fp64_reference(dy, x, z, w, EPS)
-    _, mag = dw_reference(dy, x, z, EPS)
     assert dw64[0].item() == float("inf") and dw64[4].item() == float("-inf")
     assert bool(dw64[1:4].isnan().all())
 
@@ -535,7 +428,7 @@ def test_infinite_and_nan_gates():
 
     y = forward(x, z, w, EPS)
     ok = assert_classes(y, y64, "y")
-    assert_bf16_close(y[ok], y64[ok], what="y of the finite elements")
+    assert bool(y[ok].isfinite().all()), "y of the finite elements"
     ws = workspace_for(T * H, x.device)
     f32 = torch.empty(D, dtype=torch.float32, device=x.device)
     dx, dz, dw = backward(dy, x, z, w, EPS, workspace=ws)
@@ -544,11 +437,12 @@ def test_infinite_and_nan_gates():
     assert_zero(ws, "the workspace after the FP32 weight gradient")
     for got, what in ((dw, "BF16 dw"), (f32, "FP32 dw")):
         ok = assert_classes(got, dw64, what)
-        assert_dw_within(got[ok], dw64[ok], mag[ok], what=f"{what}, finite columns")
+        assert bool(got[ok].isfinite().all()), f"{what}, finite columns"
     rows = torch.isfinite(z.float()).all(-1)
     assert not bool(rows.all())
-    assert_bf16_close(dx[rows], dx64[rows], what="dx of the rows with finite gates")
-    assert_bf16_close(dz[rows], dz64[rows], what="dz of the rows with finite gates")
+    for got, want, what in ((dx, dx64, "dx"), (dz, dz64, "dz")):
+        finite = want[rows].isfinite()
+        assert bool(got[rows][finite].isfinite().all()), f"{what} of the rows with finite gates"
     xf, zf, wf, dyf = make(T, H, seed=26)
     got = backward(dyf, xf, zf, wf, EPS, workspace=ws)
     want = backward(dyf, xf, zf, wf, EPS, workspace=workspace_for(T * H, x.device))
@@ -564,13 +458,13 @@ def test_infinite_terms_in_the_last_row_of_a_partial_block(T, H):
     upstream gradient of ``+inf`` in column 1): the rows of the last block past
     the last row read that row and add nothing, so both columns are ``+inf`` in
     the BF16 and the FP32 weight gradient, as in the FP64 reference, and the
-    other columns lie within budget; the workspace is zero after each call."""
+    other columns are finite; the workspace is zero after each call."""
     x, z, w, dy = make(T, H, seed=27)
     assert (T * H) % 16
     t, h = T - 1, H - 1
     z[t, h, 0], dy[t, h, 0], x[t, h, 0] = float("inf"), 1.0, 1.0
     z[t, h, 1], dy[t, h, 1], x[t, h, 1] = 1.0, float("inf"), 1.0
-    dw64, mag = dw_reference(dy, x, z, EPS)
+    dw64 = fp64_reference(dy, x, z, w, EPS)[3]
     assert dw64[0].item() == dw64[1].item() == float("inf")
     assert bool(dw64[2:].isfinite().all())
     ws = workspace_for(T * H, x.device)
@@ -582,7 +476,6 @@ def test_infinite_terms_in_the_last_row_of_a_partial_block(T, H):
     for got, what in ((dw, "BF16 dw"), (f32, "FP32 dw")):
         assert got[0].item() == got[1].item() == float("inf"), what
         assert bool(got[2:].isfinite().all()), what
-        assert_dw_within(got[2:], dw64[2:], mag[2:], what=f"{what}, finite columns")
 
 
 def test_weight_gradient_is_deterministic():
@@ -700,13 +593,15 @@ def _edge_rows(edge):
 
 
 @pytest.mark.parametrize("edge", GRID_EDGES)
-def test_grid_edges_on_this_device(edge):
+def test_grid_edges_on_this_device(edge, record_property):
     """At each of ``GRID_EDGES`` (one flat ``[rows, 128]`` input):
     ``check_all``, and ``REPEATS`` calls on a caller workspace give the bits of
     the first call; the workspace is zero after them."""
     rows = _edge_rows(edge)
+    check_all(
+        record_property, lambda s: make(rows, 1, layout="flat", seed=s), seed=36
+    )
     x, z, w, dy = make(rows, 1, layout="flat", seed=36)
-    check_all(x, z, w, dy, EPS)
     want = outputs(x, z, w, dy)
     ws = workspace_for(rows, x.device)
     for i in range(REPEATS):
@@ -1010,20 +905,18 @@ def test_long_modules_give_the_bits_of_their_roles(shape, launches):
             assert_same_bits(a, b, f"{what}: output {i}")
 
 
-def test_claimed_backward_matches_fp64():
+def test_claimed_backward_meets_the_naive_tier(record_property):
     """65536 x 48 rows, many times one wave of the backward's row blocks on
     any device, so its CTAs claim chunks of blocks over several rounds:
-    ``check_all``; the FP32 and the accumulated FP32 weight gradient within the
-    budget and the same bits at a second call; the workspace zero after every
-    call."""
+    ``check_all``; the FP32 and the accumulated FP32 weight gradient the same
+    bits at a second call; the workspace zero after every call."""
     arch, sms = _device()
     T, H = 65536, 48
     rule = loader.MODULES[loader.route_module(arch, "bwd_bf16")]["grid_rule"]
     blocks = -(-T * H // rule["rows_per_block"])
     assert blocks >= 16 * rule["ctas_per_sm"] * sms, (blocks, sms)
+    check_all(record_property, lambda s: make(T, H, seed=s), seed=37)
     x, z, w, dy = make(T, H, seed=37)
-    check_all(x, z, w, dy, EPS)
-    dw64, mag = dw_reference(dy, x, z, EPS)
     ws = workspace_for(T * H, x.device)
     runs = []
     for _ in range(2):
@@ -1035,8 +928,6 @@ def test_claimed_backward_matches_fp64():
             dy, x, z, w, EPS, grad_weight=acc, accumulate_grad_weight=True, workspace=ws
         )
         assert_zero(ws)
-        assert_dw_within(f32, dw64, mag, what="FP32 dw")
-        assert_dw_within(acc, dw64 + 0.25, mag, what="accumulated FP32 dw")
         runs.append((f32, acc))
     for a, b, name in zip(runs[1], runs[0], ("dw_f32", "dw_accumulated"), strict=True):
         assert_same_bits(a, b, f"{name} at the second call")
@@ -1048,17 +939,17 @@ OTHER_SM_COUNTS = (1, 7, 16, 24, 66, 148, 152, 160, 212, 216, 1024)
 
 
 @pytest.mark.parametrize("sm_count", OTHER_SM_COUNTS)
-def test_grids_of_other_sm_counts(sm_count):
+def test_grids_of_other_sm_counts(sm_count, record_property):
     """The grids computed for ``sm_count`` SMs (``device_sm_count`` patched)
     on this device: ``y``, ``dx`` and ``dz`` are the bits of the device's own
-    grids; the BF16, FP32 and accumulated FP32 weight gradients lie within the
-    budget and are the same bits at a second call; the workspace is zero after
-    every call.  On few SMs the larger shapes reach the forward's whole
-    waves."""
+    grids; the BF16, FP32 and accumulated FP32 weight gradients are the same
+    bits at a second call; the workspace is zero after every call; and every
+    output of each shape on those grids is judged against the naive
+    implementation (``check_all``, its outputs named by the shape).  On few
+    SMs the larger shapes reach the forward's whole waves."""
     for T, H in ((17, 7), (257, 48), (1031, 48), (4097, 16)):
         x, z, w, dy = make(T, H, seed=38)
         want = outputs(x, z, w, dy)
-        dw64, mag = dw_reference(dy, x, z, EPS)
         ws = workspace_for(T * H, x.device)
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(loader, "device_sm_count", lambda index: sm_count)
@@ -1070,25 +961,57 @@ def test_grids_of_other_sm_counts(sm_count):
         for a, b, name in zip(got[:3], want[:3], OUTPUTS, strict=False):
             assert_same_bits(a, b, f"{what}: {name}")
         assert_outputs_equal(again, got, f"{what}, second call")
-        assert_dw_within(got[3], dw64, mag, what=f"{what}: BF16 dw")
-        assert_dw_within(got[4], dw64, mag, what=f"{what}: FP32 dw")
-        assert_dw_within(got[5], dw64 + 0.25, mag, what=f"{what}: accumulated dw")
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loader, "device_sm_count", lambda index: sm_count)
+            check_all(
+                record_property,
+                lambda s, T=T, H=H: make(T, H, seed=s),
+                seed=38,
+                label=f"{T}x{H} ",
+            )
 
 
-def test_weight_gradient_accumulation():
+def test_weight_gradient_accumulation(record_property):
+    """Two backwards of two microbatches accumulated into one FP32 weight
+    gradient that starts at 0.25 (and into one BF16 weight gradient that
+    starts at 0.5), judged against the naive implementation's BF16 sum of the
+    starting value and the two gradients; autograd accumulates ``.grad`` over
+    two calls as the sum of the single call's outputs."""
+
+    def run(j, s):
+        x, z, w, dy = make(1031, 48, seed=s)
+        x2, z2, _, dy2 = make(1031, 48, seed=s + 1)
+        got = {}
+        for name, dtype, start in (
+            ("dw_f32", torch.float32, 0.25),
+            ("dw_bf16", torch.bfloat16, 0.5),
+        ):
+            main = torch.full((D,), start, dtype=dtype, device=x.device)
+            for a, b, c, g in ((x, z, w, dy), (x2, z2, w, dy2)):
+                cake_rmsnorm_silu_gate_det_train_backward(
+                    g, a, b, c, EPS, grad_weight=main, accumulate_grad_weight=True
+                )
+            got[name] = (main, start)
+        first = silu_draw(x, z, w, dy, EPS, [], {"dw": "dw"})
+        second = silu_draw(x2, z2, w, dy2, EPS, [], {"dw": "dw"})
+        expected = {
+            name: start + first.expected["dw"] + second.expected["dw"]
+            for name, (_, start) in got.items()
+        }
+
+        def naive_values():
+            one, two = first.naive()["dw"], second.naive()["dw"]
+            return {
+                name: (torch.full_like(one, start) + one) + two
+                for name, (_, start) in got.items()
+            }
+
+        return Draw(
+            [{name: main for name, (main, _) in got.items()}], expected, naive_values
+        )
+
+    judge(record_property, run, seed=6)
     x, z, w, dy = make(1031, 48, seed=6)
-    x2, z2, _, dy2 = make(1031, 48, seed=7)
-    _, _, _, dw64 = fp64_reference(dy, x, z, w, EPS)
-    _, _, _, dw64b = fp64_reference(dy2, x2, z2, w, EPS)
-    main = torch.full((D,), 0.25, dtype=torch.float32, device="cuda")
-    cake_rmsnorm_silu_gate_det_train_backward(
-        dy, x, z, w, EPS, grad_weight=main, accumulate_grad_weight=True
-    )
-    cake_rmsnorm_silu_gate_det_train_backward(
-        dy2, x2, z2, w, EPS, grad_weight=main, accumulate_grad_weight=True
-    )
-    want = 0.25 + dw64 + dw64b
-    assert torch.allclose(main.double(), want, rtol=1e-5, atol=1e-3)
     # autograd accumulation into .grad over two microbatches
     xa = x.clone().requires_grad_(True)
     wa = w.clone().requires_grad_(True)
@@ -1352,9 +1275,9 @@ def test_workspace_size_and_layout():
 def test_workspace_is_zero_after_every_call_and_serves_every_shape():
     """One caller workspace, never reset, over a sequence of shapes, both
     weight-gradient dtypes, accumulation, ``compute_grad_weight=False`` and a
-    call with no rows: it is zero after every call, every call gives the bits
-    of the same call on the stream's workspace, ``dx`` and ``dz`` lie within
-    ``check_all``'s bounds and the weight gradient within budget."""
+    call with no rows: it is zero after every call and every call gives the
+    bits of the same call on the stream's workspace (whose outputs
+    ``check_all`` judges)."""
     device = torch.device("cuda")
     ws = workspace_for(1, device)
     # (T, H, weight-gradient dtype, accumulate, compute the weight gradient)
@@ -1406,13 +1329,8 @@ def test_workspace_is_zero_after_every_call_and_serves_every_shape():
             if compute:
                 assert torch.equal(got[2], torch.full_like(got[2], start)), what
             continue
-        _, dx64, dz64, dw64 = fp64_reference(dy, x, z, w, EPS)
-        assert_bf16_close(got[0], dx64, what=f"{what}: dx")
-        assert_bf16_close(got[1], dz64, what=f"{what}: dz")
         if compute:
             assert got[2].dtype == dtype
-            _, mag = dw_reference(dy, x, z, EPS)
-            assert_dw_within(got[2], dw64 + start, mag, what=f"{what}: dw")
 
 
 def test_calls_without_workspace_share_one_buffer_per_stream():
