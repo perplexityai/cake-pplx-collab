@@ -29,11 +29,30 @@ Operations (``--ops``):
   statistics, then ``dX``, ``dfn``, ``dscale``, ``dbase``); a non-Cake arm's backward of a recorded forward;
 * ``ckpt``: the checkpointed step: Cake ``forward_prepare`` + ``forward_finish``, the statistics replay
   ``forward_stats`` and the backward; a non-Cake arm's forward without the graph, its forward with the graph and the
-  backward.
+  backward;
+* ``bwd_acc`` (not in the default ``--ops``): ``bwd`` with ``accumulate=True`` (the parameter gradients added into
+  the caller's buffers); a non-Cake arm's backward into its existing ``.grad`` tensors.
+
+``--sinkhorn-iters`` sets the Sinkhorn count of every arm and of the references (default 20; the packages run any
+other count on their run-time-count programs).
 
 Every Cake call gets caller-owned outputs and workspaces from the package's own factories.  ``--aa`` adds a second
 instance of each Cake arm (``<arm>~aa``, its own buffers), timed like any other arm: its ratio to the first instance
 is the noise band of the row.
+
+Comparisons.  The non-Cake arm of each comparison is fixed (``cake_mhc_baselines.COMPARISONS``): ``fwd-A``
+``tk_cublas``, ``fwd-B`` ``tk_deepgemm``, ``bwd`` / ``ckpt`` ``compile_max_autotune`` and the ``bwd-liger`` /
+``ckpt-liger`` columns ``liger``, the same arm on every architecture.  Each cell of a row records the arm, its time,
+the first Cake arm's time and their ratio, and a status: ``ok``, ``unsupported: <why>`` (the arm cannot run on this
+device or stack), ``different contract`` (the arm missed the judge), or ``error: <message>``.  No cell ever falls
+back to another arm, and no "fastest arm" is chosen per cell.  ``check_baselines.py`` verifies across the records of
+several architectures that each comparison used the same arm and the same versions everywhere.
+
+Determinism class.  The JSON records each arm's declared class (``cake_mhc_baselines.Arm.determinism``) and, per
+row, the measured one (``--det-runs``, 5: the same call on the row's inputs repeated, every output compared bit for
+bit with the first run).  The kernel names one eager call launches are recorded per arm, row and operation (with
+``cupti-python``): they show which programs ran (e.g. the run-time-count programs, or whether ``accumulate=True``
+selects other programs than the default).
 
 Timing.  Each call runs on an idle GPU after a cold L2 (a buffer of twice the L2 size is zeroed, then the device is
 synchronized; neither is timed).  The GPU activity records of the call (kernels, memsets and copies) come from CUPTI:
@@ -50,14 +69,15 @@ range; above 1 the Cake arm is faster).
 
 Accuracy before timing.  ``--judge-draws`` (32) draws of the case ``(--judge-tokens, H)`` for each hidden size of the
 run hold every arm to the naive-tier judge (``cake_mhc_baselines.judge_arms``); an arm that misses it is recorded as a
-different contract and is never ``best_non_cake``.  On every row each arm's outputs on the row's inputs are compared
+different contract: its comparison cells say so.  On every row each arm's outputs on the row's inputs are compared
 with the float64 oracle once (``check``: the contract and the error of each output beside the naive tier's on that
 draw); an arm that breaks the contract there is not timed on the row.
 
 The JSON (``--json``) records the device (name, SM count, clocks, driver), the software (Python, torch, CUDA,
-triton, the non-Cake libraries, ``cupti-python``), the image (``CAKE_IMAGE_TAG`` / ``CAKE_IMAGE_SHA256``), each Cake
-package's identity (distribution version, module path, the backend manifests' generator record and SHA-256), the
-protocol and every row.
+triton, the non-Cake libraries, ``cupti-python``, the loaded cuBLAS / NVRTC / CUPTI libraries), the image
+(``CAKE_IMAGE_TAG`` / ``CAKE_IMAGE_SHA256``), each arm's description (library, composite, declared determinism) and
+versions, each Cake package's identity (distribution version, module path, the backend manifests' generator record
+and SHA-256), the comparisons, the protocol and every row.
 """
 
 from __future__ import annotations
@@ -194,6 +214,37 @@ class Timer:
             out.append(_interval_stats([iv for c in corr for iv in spans.get(c, ())]))
         return out
 
+    def kernel_names(self, run: Callable[[], object], limit: int = 256) -> Optional[list]:
+        """The names of the kernels one call of ``run`` launches, in start order (``cupti-python`` only; else
+        None)."""
+        if self.backend != "cupti":
+            return None
+        from cupti import cupti
+
+        found = []
+        kind = cupti.ActivityKind.CONCURRENT_KERNEL
+
+        def requested():
+            return 8 * 1024 * 1024, 0
+
+        def completed(activities):
+            for activity in activities:
+                if activity.kind == kind:
+                    found.append((activity.start, str(getattr(activity, "name", "?"))))
+
+        torch.cuda.synchronize(self.device)
+        cupti.activity_enable(kind)
+        cupti.activity_register_callbacks(requested, completed)
+        try:
+            run()
+            torch.cuda.synchronize(self.device)
+            cupti.activity_flush_all(0)
+        finally:
+            cupti.activity_disable(kind)
+            cupti.finalize()
+        names = [n for _, n in sorted(found)]
+        return names[:limit] + ([f"... {len(names) - limit} more"] if len(names) > limit else [])
+
     def _profiler(self, run, calls: int) -> list:
         with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
             for _ in range(calls):
@@ -244,6 +295,10 @@ class CakeArm(base.Arm):
         self.name = label or f"cake_{mode}"
         self.library = f"cake_pplx.cake_mhc_{mode}_train"
         self.deterministic = mode == "det"
+        self.determinism = (
+            "deterministic by contract: run-to-run bitwise on one device" if mode == "det"
+            else "non-deterministic mode: the contract promises no run-to-run bits"
+        )
         self.mod = importlib.import_module(f"cake_pplx.cake_mhc_{mode}_train")
 
     def f(self, name: str):
@@ -316,18 +371,20 @@ class CakeArm(base.Arm):
         X, fn, scale, bse, B, dY, dU = (i[k] for k in ("X", "fn", "scale", "base", "B", "dY", "dU"))
         fp, ff, fs = self.f("forward_prepare"), self.f("forward_finish"), self.f("forward_stats")
         bp, bf = self.f("backward_prepare"), self.f("backward_finish")
+        # The default count is not passed: the call is the package's default call.
+        kw = {} if i["iters"] == base.SINKHORN_ITERS else {"sinkhorn_iters": i["iters"]}
 
         def forward(stats) -> None:
-            fp(X, fn, scale, bse, out=b["U"], stats_out=stats, workspace=b["fws"])
+            fp(X, fn, scale, bse, out=b["U"], stats_out=stats, workspace=b["fws"], **kw)
             ff(X, B, stats, out=b["Y"])
 
-        def backward(stats) -> None:
+        def backward(stats, accumulate: bool = False) -> None:
             bp(dY, B, X, stats, dB=b["dB"], grad_stats_out=b["G"])
             bf(X, dY, dU, B, fn, scale, bse, stats, b["G"], workspace=b["bws"], dX=b["dX"], dfn=b["dfn"],
-               dscale=b["dscale"], dbase=b["dbase"])
+               dscale=b["dscale"], dbase=b["dbase"], **kw, **({"accumulate": True} if accumulate else {}))
 
         def replay(stats) -> None:
-            fs(X, fn, scale, bse, stats_out=stats, workspace=b["fws"])
+            fs(X, fn, scale, bse, stats_out=stats, workspace=b["fws"], **kw)
 
         return forward, backward, replay
 
@@ -347,6 +404,11 @@ class CakeArm(base.Arm):
             forward(b["S"])
 
             return lambda: backward(b["S"])
+        if op == "bwd_acc":
+            forward(b["S"])
+            backward(b["S"])  # dfn, dscale, dbase hold a gradient before the first accumulation
+
+            return lambda: backward(b["S"], accumulate=True)
         if op == "ckpt":
 
             def call() -> None:
@@ -389,7 +451,29 @@ def device_record(device: torch.device) -> dict:
     return rec
 
 
+def loaded_libraries() -> dict:
+    """The CUDA libraries mapped into this process (path per library name: cuBLAS, cuBLASLt, NVRTC, the runtime,
+    CUPTI, cuDNN)."""
+    found: dict = {}
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                parts = line.split()
+                path = parts[-1] if len(parts) >= 6 else ""
+                for lib in ("libcublas.so", "libcublasLt.so", "libnvrtc.so", "libnvrtc-builtins", "libcudart.so",
+                            "libcupti.so", "libcudnn.so", "libnvJitLink.so"):
+                    if f"/{lib}" in path:
+                        found.setdefault(lib, path)
+    except OSError as exc:
+        found["error"] = str(exc)
+    return found
+
+
 def software_record(timer: Timer) -> dict:
+    # A small GEMM first, so that the cuBLAS library is loaded and its version can be read.
+    a = torch.ones(64, 64, device="cuda")
+    torch.mm(a, a)
+    torch.cuda.synchronize()
     rec = {
         "python": platform.python_version(),
         "executable": sys.executable,
@@ -409,9 +493,12 @@ def software_record(timer: Timer) -> dict:
         rec["deep_gemm.__version__"] = getattr(deep_gemm, "__version__", None)
     except Exception:  # noqa: BLE001
         pass
+    rec["cublas"] = base.cublas_version()
+    rec["libraries"] = loaded_libraries()
     rec["env"] = {k: os.environ.get(k) for k in (
         "CUDA_VISIBLE_DEVICES", "NVIDIA_TF32_OVERRIDE", "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "TRITON_F32_DEFAULT",
-        "CAKE_PPLX_CACHE_DIR", "CAKE_PPLX_JIT_WORKERS", "CAKE_IMAGE_TAG", "CAKE_IMAGE_SHA256")}
+        "CAKE_PPLX_CACHE_DIR", "CAKE_PPLX_JIT_WORKERS", "CAKE_IMAGE_TAG", "CAKE_IMAGE_SHA256", "CUDA_HOME",
+        "LD_PRELOAD", "TRITON_PTXAS_PATH", "TRITON_PTXAS_BLACKWELL_PATH", "CAKE_BENCH_STACK")}
     rec["tf32"] = {"matmul": torch.backends.cuda.matmul.allow_tf32, "cudnn": torch.backends.cudnn.allow_tf32,
                    "float32_matmul_precision": torch.get_float32_matmul_precision()}
     return rec
@@ -492,6 +579,12 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
                                 "trace": traceback.format_exc(limit=4)[-1500:]}
             _free()
     names = list(runs)
+    if mode == "eager" and getattr(args, "kernel_names", True):
+        for n in names:
+            try:
+                result.setdefault(n, {})["kernels"] = timer.kernel_names(runs[n])
+            except Exception as exc:  # noqa: BLE001 - the names are a record, not a measurement
+                result.setdefault(n, {})["kernels_error"] = _err(exc)
     samples = {n: [] for n in names}
     for g in range(args.groups):
         if not names:
@@ -504,16 +597,17 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
             try:
                 samples[n].append(timer.times(runs[n], args.calls, args.dry))
             except Exception as exc:  # noqa: BLE001
-                result[n] = {"error": f"group {g}: " + _err(exc, f"{n} {op} {mode} group {g}"),
-                             "trace": traceback.format_exc(limit=4)[-1500:]}
+                result.setdefault(n, {}).update({"error": f"group {g}: " + _err(exc, f"{n} {op} {mode} group {g}"),
+                                                 "trace": traceback.format_exc(limit=4)[-1500:]})
                 runs.pop(n, None)
         names = [n for n in names if n in runs]
     for n, groups in samples.items():
-        if n in result:
+        if "error" in result.get(n, {}) or not groups:
             continue
-        result[n] = {"active_us": _summary(groups, "active_us"), "span_us": _summary(groups, "span_us"),
-                     "sum_us": _summary(groups, "sum_us"),
-                     "records_per_call": statistics.median(s["records"] for g in groups for s in g)}
+        result.setdefault(n, {}).update({
+            "active_us": _summary(groups, "active_us"), "span_us": _summary(groups, "span_us"),
+            "sum_us": _summary(groups, "sum_us"),
+            "records_per_call": statistics.median(s["records"] for g in groups for s in g)})
     cake = next((a.name for a in arms if a.cake and a.name in samples and "active_us" in result.get(a.name, {})), None)
     if cake:
         ref = [statistics.median(s["active_us"] for s in g) for g in samples[cake]]
@@ -529,10 +623,10 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
 
 
 def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, device, eligible: dict) -> dict:
-    row: dict = {"hidden": hidden, "tokens": tokens, "seed": args.seed + 7919 * hidden + tokens, "arms": {},
-                 "ops": {}}
+    row: dict = {"hidden": hidden, "tokens": tokens, "seed": args.seed + 7919 * hidden + tokens,
+                 "iters": args.sinkhorn_iters, "arms": {}, "ops": {}}
     t0 = time.time()
-    i = base.make_inputs(tokens, hidden, seed=row["seed"], device=device)
+    i = base.make_inputs(tokens, hidden, seed=row["seed"], device=device, iters=args.sinkhorn_iters)
     live = []
     for arm in arms:
         ok, note = arm.available(device, hidden)
@@ -566,24 +660,62 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
             if any(isinstance(v, dict) and v.get("contract") for v in rep.values()):
                 failed.add(name)
         live = [a for a in live if a.name not in failed]
+    if args.det_runs > 1:
+        for arm in live:
+            if arm.name.endswith("~aa"):
+                continue
+            try:
+                row["arms"][arm.name]["determinism"] = base.determinism_runs(arm, i, args.det_runs)
+            except Exception as exc:  # noqa: BLE001 - recorded; the timing continues
+                row["arms"][arm.name]["determinism"] = {"error": _err(exc, f"{arm.name} determinism")}
+            _free()
     for op in args.ops:
         participants = [a for a in live if op in a.ops]
         for mode in args.modes:
             res = time_op(participants, i, op, mode, args, timer, device)
-            best = None
-            for arm in participants:
-                r = res.get(arm.name, {})
-                if arm.cake or "active_us" not in r or eligible.get((hidden, arm.name)) is False:
-                    continue
-                if best is None or r["active_us"]["median"] < res[best]["active_us"]["median"]:
-                    best = arm.name
-            res["best_non_cake"] = best
+            res["comparisons"] = comparisons(arms, row, res, op, hidden, eligible)
             row["ops"].setdefault(op, {})[mode] = res
             _print_line(hidden, tokens, op, mode, participants, res)
     row["seconds"] = round(time.time() - t0, 1)
     del i
     _free()
     return row
+
+
+def comparisons(arms: list, row: dict, res: dict, op: str, hidden: int, eligible: dict) -> dict:
+    """The fixed comparisons of ``op`` on a row (see the module docstring): per comparison the arm, its status, its
+    time, the first Cake arm's time and ``speedup`` (the arm's time over the Cake arm's: above 1 the Cake arm is
+    faster) with the median per-group ratio ``paired``.  Empty when the run has no non-Cake arm."""
+    if not any(not a.cake for a in arms):
+        return {}
+    by_name = {a.name: a for a in arms}
+    cake = next((a.name for a in arms if a.cake and "active_us" in res.get(a.name, {})), None)
+    out = {}
+    for cname, aname in base.comparisons_for(op):
+        cell: dict = {"arm": aname, "label": by_name[aname].label() if aname in by_name else aname, "reference": cake,
+                      "judge": eligible.get((hidden, aname))}
+        rec = row["arms"].get(aname)
+        r = res.get(aname, {})
+        if aname not in by_name:
+            cell["status"] = "not run: the arm was not selected"
+        elif not rec or not rec.get("available"):
+            cell["status"] = "unsupported: " + ((rec or {}).get("note") or "not available")
+        elif rec.get("error"):
+            cell["status"] = "error: " + rec["error"]
+        elif any(isinstance(v, dict) and v.get("contract") for v in (rec.get("check") or {}).values()):
+            cell["status"] = "different contract: the arm breaks the contract on this row's inputs"
+        elif "active_us" not in r:
+            cell["status"] = "error: " + str(r.get("error") or "not timed")
+        elif eligible.get((hidden, aname)) is False:
+            cell["status"] = "different contract: the arm misses the naive-tier judge"
+        else:
+            cell["status"] = "ok"
+        if "active_us" in r and cake:
+            arm_us, cake_us = r["active_us"]["median"], res[cake]["active_us"]["median"]
+            cell.update({"arm_us": arm_us, "cake_us": cake_us, "speedup": arm_us / cake_us,
+                         "paired": (r.get(f"over_{cake}") or {}).get("median")})
+        out[cname] = cell
+    return out
 
 
 def _print_line(hidden, tokens, op, mode, arms, res) -> None:
@@ -594,8 +726,9 @@ def _print_line(hidden, tokens, op, mode, arms, res) -> None:
             cells.append(f"{arm.name} {r['active_us']['median']:.2f}")
         else:
             cells.append(f"{arm.name} ERR")
-    print(f"H={hidden} T={tokens} {op} {mode} | " + " | ".join(cells) + f" | best_non_cake {res.get('best_non_cake')}",
-          flush=True)
+    comp = "; ".join(f"{k} {v['arm']} {v['status'][:40]}" + (f" x{v['speedup']:.2f}" if "speedup" in v else "")
+                     for k, v in res.get("comparisons", {}).items())
+    print(f"H={hidden} T={tokens} {op} {mode} | " + " | ".join(cells) + (f" || {comp}" if comp else ""), flush=True)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -623,7 +756,13 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     p.add_argument("--shapes", nargs="*", default=None, help="HxT items, e.g. 4096x1024,7168x65536")
     p.add_argument("--hidden", type=int, nargs="*", default=None)
     p.add_argument("--tokens", type=int, nargs="*", default=None)
-    p.add_argument("--ops", default="fwd,bwd,ckpt")
+    p.add_argument("--ops", default="fwd,bwd,ckpt", help="comma-separated: fwd, bwd, ckpt, bwd_acc")
+    p.add_argument("--sinkhorn-iters", type=int, default=base.SINKHORN_ITERS,
+                   help="Sinkhorn count of every arm and reference (default 20; 1..64 for the Cake packages)")
+    p.add_argument("--det-runs", type=int, default=5,
+                   help="runs of each arm per row compared bit for bit with the first (0: no determinism check)")
+    p.add_argument("--no-kernel-names", dest="kernel_names", action="store_false",
+                   help="do not record the kernel names of one eager call per arm, row and operation")
     p.add_argument("--modes", default="eager,graph")
     p.add_argument("--groups", type=int, default=8)
     p.add_argument("--calls", type=int, default=32)
@@ -682,9 +821,10 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
         "protocol": {"groups": args.groups, "calls": args.calls, "warmup": args.warmup, "dry": args.dry,
                      "ops": args.ops, "modes": args.modes, "flush_bytes": timer.flush_bytes,
                      "statistic": "median of group medians of per-call CUPTI active time (us)",
-                     "judge_draws": args.judge_draws, "judge_tokens": args.judge_tokens, "check": args.check},
-        "arms": {a.name: {"library": a.library, "cake": a.cake, "deterministic": a.deterministic,
-                          "ops": list(a.ops)} for a in arms},
+                     "judge_draws": args.judge_draws, "judge_tokens": args.judge_tokens, "check": args.check,
+                     "sinkhorn_iters": args.sinkhorn_iters, "det_runs": args.det_runs},
+        "comparisons": [{"name": n, "ops": list(o), "arm": a} for n, o, a in base.COMPARISONS],
+        "arms": {a.name: a.describe() for a in arms},
         "versions": {},
         "judge": {},
         "rows": [],
@@ -721,7 +861,8 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                 ok, note = arm.available(device, hidden)
                 if ok:
                     try:
-                        arm.prepare_shape(base.make_inputs(args.judge_tokens, hidden, seed=args.seed, device=device))
+                        arm.prepare_shape(base.make_inputs(args.judge_tokens, hidden, seed=args.seed, device=device,
+                                                           iters=args.sinkhorn_iters))
                         candidates[arm.name] = arm
                     except Exception as exc:  # noqa: BLE001
                         record["judge"].setdefault(str(hidden), {})[arm.name] = {"error": "prepare: " + _err(exc),
@@ -729,7 +870,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                 else:
                     record["judge"].setdefault(str(hidden), {})[arm.name] = {"unavailable": note}
             verdicts = base.judge_arms(candidates, hidden, device=device, judge=judge, draws=args.judge_draws,
-                                       tokens=args.judge_tokens, seed=args.seed)
+                                       tokens=args.judge_tokens, seed=args.seed, iters=args.sinkhorn_iters)
             record["judge"].setdefault(str(hidden), {}).update(verdicts)
             for name, v in verdicts.items():
                 eligible[(hidden, name)] = bool(v.get("meets_contract"))

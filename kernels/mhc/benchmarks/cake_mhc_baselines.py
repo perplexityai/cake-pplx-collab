@@ -25,7 +25,8 @@ The function is the packages' contract (``docs/API.md``, "mhc"): four BF16 strea
     U = BF16(sum_i pre_i X_i);   Y[:, j] = BF16(post_j B + sum_i C_ij X_i)
 
 and its backward from BF16 ``dY [T, 4, H]`` and ``dU [T, H]``: BF16 ``dX`` and ``dB``, FP32 ``dfn``, ``dscale``,
-``dbase``.
+``dbase``.  The Sinkhorn count is the inputs' ``iters`` (:func:`make_inputs`, default 20; the packages run counts other
+than 20 on their run-time-count programs), the same for every arm and for the references.
 
 :func:`reference` evaluates the function by autograd in any dtype: float64 is the oracle (in row blocks of
 :data:`BLOCK_TOKENS` tokens), bfloat16 the naive tier of the accuracy judge (``tests/cake_naive.py``: the same ops in
@@ -55,10 +56,24 @@ The non-Cake arms (each ``available()`` says why it cannot run on a device or so
   on the TF32-rounded ``fn`` and on its remainder ``fn - tf32(fn)`` (``X`` is exact in TF32, so the two partial
   products carry the FP32 GEMM's accuracy); the remainder's squared norms are discarded.
 
+``tk_cublas`` and ``tk_deepgemm`` are compositions of this harness, not a library's entry point: no library ships the
+whole forward on these kernels.  Each arm's :attr:`Arm.composite` says what was composed, and the reports label the
+arm as a composite.
+
 Every arm computes the whole function from the same inputs: the forward gives ``U`` and ``Y``; the backward the five
 gradients.  The PyTorch, compiled and Liger arms record the autograd graph in the forward; ``bwd`` is the backward of a
 recorded forward; ``ckpt`` is a forward without the graph, the forward again with it and the backward (the
-recomputation of ``torch.utils.checkpoint``).
+recomputation of ``torch.utils.checkpoint``); ``bwd_acc`` is ``bwd`` adding into the existing parameter gradients
+(the Cake ``accumulate=True``; autograd's accumulation into an existing ``.grad``).
+
+The comparisons (:data:`COMPARISONS`) are fixed: each one names a single non-Cake arm, the same arm on every
+architecture, and never the fastest arm of a cell.  The forward has two, ``fwd-A`` (``tk_cublas``, every
+architecture) and ``fwd-B`` (``tk_deepgemm``, where DeepGEMM runs; elsewhere the cell says why it is unsupported); the
+backward and the checkpointed step compare with ``compile_max_autotune`` and, in a second column, with ``liger``.
+
+Determinism class.  Each arm declares what is known about its run-to-run bits (:attr:`Arm.determinism`), and
+:func:`determinism_runs` measures it: the same call on the same inputs several times, every output compared bit for
+bit with the first run's.
 """
 
 from __future__ import annotations
@@ -93,8 +108,54 @@ BACKWARD_OUTPUTS = ("dX", "dfn", "dscale", "dbase", "dB")
 OUTPUTS = FORWARD_OUTPUTS + BACKWARD_OUTPUTS
 PER_TOKEN_OUTPUTS = ("U", "Y", "dX", "dB")
 PARAMETER_OUTPUTS = ("dfn", "dscale", "dbase")
-OPS = ("fwd", "bwd", "ckpt")
+OPS = ("fwd", "bwd", "ckpt", "bwd_acc")
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
+
+#: The fixed comparisons: ``(name, operations, non-Cake arm)``.  The arm is the same on every architecture; where it
+#: cannot run, the cell records why (``unsupported``) instead of another arm.
+COMPARISONS = (
+    ("fwd-A", ("fwd",), "tk_cublas"),
+    ("fwd-B", ("fwd",), "tk_deepgemm"),
+    ("bwd", ("bwd", "bwd_acc"), "compile_max_autotune"),
+    ("bwd-liger", ("bwd", "bwd_acc"), "liger"),
+    ("ckpt", ("ckpt",), "compile_max_autotune"),
+    ("ckpt-liger", ("ckpt",), "liger"),
+)
+
+
+def comparisons_for(op: str) -> list:
+    """The ``(name, arm)`` of every fixed comparison of operation ``op``."""
+    return [(name, arm) for name, ops, arm in COMPARISONS if op in ops]
+
+
+def cublas_version() -> Optional[str]:
+    """``major.minor.patch (path)`` of the cuBLAS library loaded in this process (``cublasGetProperty``), or None
+    when none is loaded yet."""
+    import ctypes
+
+    path = None
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                name = line.split()[-1] if line.split() else ""
+                if "/libcublas.so" in name:
+                    path = name
+                    break
+    except OSError:
+        return None
+    if path is None:
+        return None
+    try:
+        lib = ctypes.CDLL(path)
+        parts = []
+        for prop in (0, 1, 2):  # MAJOR_VERSION, MINOR_VERSION, PATCH_LEVEL
+            value = ctypes.c_int()
+            if lib.cublasGetProperty(prop, ctypes.byref(value)) != 0:
+                return None
+            parts.append(str(value.value))
+        return ".".join(parts) + f" ({path})"
+    except (OSError, AttributeError):
+        return None
 
 
 def set_ieee_fp32() -> None:
@@ -115,9 +176,9 @@ def dist_version(name: str) -> Optional[str]:
 # Inputs and the reference arithmetic
 
 
-def make_inputs(T: int, hidden: int, *, seed: int, device: torch.device) -> dict:
+def make_inputs(T: int, hidden: int, *, seed: int, device: torch.device, iters: int = SINKHORN_ITERS) -> dict:
     """``X, B, dY, dU ~ N(0, 1)`` BF16, ``fn ~ 1e-2 N(0, 1)``, ``scale ~ 1 + 0.1 N``, ``base ~ 0.1 N`` (FP32), from a
-    device generator seeded with ``seed``."""
+    device generator seeded with ``seed``; ``iters`` is the Sinkhorn count of every arm on these inputs."""
     g = torch.Generator(device=device).manual_seed(seed)
 
     def randn(*shape: int) -> torch.Tensor:
@@ -130,7 +191,8 @@ def make_inputs(T: int, hidden: int, *, seed: int, device: torch.device) -> dict
     B = randn(T, hidden).to(BF16)
     dY = randn(T, STREAMS, hidden).to(BF16)
     dU = randn(T, hidden).to(BF16)
-    return {"X": X, "fn": fn, "scale": scale, "base": base, "B": B, "dY": dY, "dU": dU, "T": T, "hidden": hidden}
+    return {"X": X, "fn": fn, "scale": scale, "base": base, "B": B, "dY": dY, "dU": dU, "T": T, "hidden": hidden,
+            "iters": int(iters)}
 
 
 def sinkhorn(logits: torch.Tensor, hc_eps: float = HC_EPS, iters: int = SINKHORN_ITERS) -> torch.Tensor:
@@ -143,8 +205,9 @@ def sinkhorn(logits: torch.Tensor, hc_eps: float = HC_EPS, iters: int = SINKHORN
     return C
 
 
-def mhc_forward(X, fn, scale, base, B, *, dtype: torch.dtype):
-    """``(U, Y)`` of the function in ``dtype`` arithmetic (an autograd graph when the inputs require grad)."""
+def mhc_forward(X, fn, scale, base, B, *, dtype: torch.dtype, iters: int = SINKHORN_ITERS):
+    """``(U, Y)`` of the function in ``dtype`` arithmetic with ``iters`` Sinkhorn iterations (an autograd graph when
+    the inputs require grad)."""
     T = X.shape[0]
     Xd = X.to(dtype)
     u = Xd.reshape(T, -1)
@@ -154,7 +217,7 @@ def mhc_forward(X, fn, scale, base, B, *, dtype: torch.dtype):
     b = base.to(dtype)
     pre = torch.sigmoid(z[:, 0:4] * s[0] + b[0:4]) + HC_EPS
     post = POST_MULT * torch.sigmoid(z[:, 4:8] * s[1] + b[4:8])
-    C = sinkhorn((z[:, 8:] * s[2] + b[8:]).reshape(T, STREAMS, STREAMS))
+    C = sinkhorn((z[:, 8:] * s[2] + b[8:]).reshape(T, STREAMS, STREAMS), iters=iters)
     U = (pre.unsqueeze(-1) * Xd).sum(dim=1)
     Y = post.unsqueeze(-1) * B.to(dtype).unsqueeze(1) + torch.einsum("tij,tid->tjd", C, Xd)
     return U, Y
@@ -167,7 +230,7 @@ def _reference_block(i: dict, lo: int, hi: int, dtype: torch.dtype) -> dict:
             t.detach().to(dtype).requires_grad_(True)
             for t in (i["X"][lo:hi], i["fn"], i["scale"], i["base"], i["B"][lo:hi])
         ]
-        U, Y = mhc_forward(*leaves, dtype=dtype)
+        U, Y = mhc_forward(*leaves, dtype=dtype, iters=i.get("iters", SINKHORN_ITERS))
         grads = torch.autograd.grad(
             [U, Y], leaves, grad_outputs=[i["dU"][lo:hi].to(dtype), i["dY"][lo:hi].to(dtype)]
         )
@@ -270,7 +333,7 @@ def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_T
 
 def judge_arms(
     arms: dict, hidden: int, *, device: torch.device, judge, draws: int = JUDGE_DRAWS,
-    tokens: int = JUDGE_TOKENS, seed: int = 0,
+    tokens: int = JUDGE_TOKENS, seed: int = 0, iters: int = SINKHORN_ITERS,
 ) -> dict:
     """Hold each arm (``{name: arm}``, each with ``run_once``) to the naive-tier judge over ``draws`` draws of the case
     ``(tokens, hidden)``: per arm the verdict of every output, the failures (empty: the arm meets the contract) and the
@@ -281,7 +344,7 @@ def judge_arms(
     for j in range(draws):
         s = judge.draw_seed(seed, j)
         judge.seed_all(s)
-        i = make_inputs(tokens, hidden, seed=s, device=device)
+        i = make_inputs(tokens, hidden, seed=s, device=device, iters=iters)
         oracle = reference(i, F64)
         naive = reference(i, BF16)
         for name, arm in arms.items():
@@ -317,25 +380,64 @@ def judge_arms(
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# Determinism
+
+
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    """``t``'s storage as integers of the same width (a bit-for-bit comparison: NaN payloads and signed zeros
+    included)."""
+    width = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[t.element_size()]
+    return t.detach().contiguous().view(width)
+
+
+def determinism_runs(arm: "Arm", i: dict, runs: int) -> dict:
+    """Run ``arm.run_once(i)`` ``runs`` times on the same inputs and compare every output bit for bit with the first
+    run's: ``{"runs", "bitwise", "differs": {output: [runs that differ]}}``."""
+    first = {k: v.detach().clone() for k, v in arm.run_once(i).items()}
+    differs: dict = {}
+    for r in range(1, runs):
+        outs = arm.run_once(i)
+        for k, v in outs.items():
+            if not torch.equal(_bits(v), _bits(first[k])):
+                differs.setdefault(k, []).append(r)
+        del outs
+    return {"runs": runs, "bitwise": not differs, "differs": differs}
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # Arms
 
 
 class Arm:
     """One implementation of the function.  ``make(i, op)`` returns the timed callable of an operation on the
     inputs ``i`` (its buffers and state allocated once, outside the timing); ``run_once(i)`` returns every output it
-    computes on ``i``."""
+    computes on ``i``.
+
+    ``composite``: None for a library's (or the PyTorch reference's) own code path, else what this harness composed.
+    ``determinism``: what the implementation declares about its run-to-run bits (the benchmarks also measure it)."""
 
     name = "base"
     library = ""
     ops: tuple = OPS
     cake = False
     deterministic: Optional[bool] = None
+    composite: Optional[str] = None
+    determinism = "not declared (measured by the benchmarks)"
 
     def available(self, device: torch.device, hidden: int) -> tuple[bool, str]:
         return True, ""
 
     def versions(self) -> dict:
         return {}
+
+    def label(self) -> str:
+        """The arm's name in reports: composites carry the suffix ``(composite)``."""
+        return f"{self.name} (composite)" if self.composite else self.name
+
+    def describe(self) -> dict:
+        return {"library": self.library, "cake": self.cake, "deterministic": self.deterministic,
+                "determinism_declared": self.determinism, "composite": self.composite, "label": self.label(),
+                "ops": list(self.ops)}
 
     def prepare_shape(self, i: dict, timer=None) -> dict:
         """Per-shape setup before the check and the timing (e.g. compile trials); returns what to record."""
@@ -361,7 +463,7 @@ class AutogradArm(Arm):
             i["B"].detach().requires_grad_(True),
         ]
 
-    def forward(self, leaves: list):
+    def forward(self, leaves: list, iters: int):
         raise NotImplementedError
 
     def gradients(self, leaves: list) -> dict:
@@ -370,7 +472,7 @@ class AutogradArm(Arm):
 
     def run_once(self, i: dict) -> dict:
         leaves = self.leaves(i)
-        U, Y = self.forward(leaves)
+        U, Y = self.forward(leaves, i["iters"])
         torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
         out = {"U": U.detach(), "Y": Y.detach()}
         out.update(self.gradients(leaves))
@@ -378,7 +480,7 @@ class AutogradArm(Arm):
 
     def make(self, i: dict, op: str) -> Callable[[], None]:
         leaves = self.leaves(i)
-        dU, dY = i["dU"], i["dY"]
+        dU, dY, iters = i["dU"], i["dY"], i["iters"]
         forward = self.forward
 
         def clear() -> None:
@@ -388,22 +490,28 @@ class AutogradArm(Arm):
         if op == "fwd":
 
             def call() -> None:
-                forward(leaves)
+                forward(leaves, iters)
 
-        elif op == "bwd":
-            U, Y = forward(leaves)
+        elif op in ("bwd", "bwd_acc"):
+            U, Y = forward(leaves, iters)
+            if op == "bwd":
 
-            def call() -> None:
-                clear()
-                torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
+                def call() -> None:
+                    clear()
+                    torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
+
+            else:
+                # The gradients accumulate into the existing ``.grad`` tensors (the first, warm-up call creates them).
+                def call() -> None:
+                    torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
 
         elif op == "ckpt":
 
             def call() -> None:
                 clear()
                 with torch.no_grad():
-                    forward(leaves)
-                U, Y = forward(leaves)
+                    forward(leaves, iters)
+                U, Y = forward(leaves, iters)
                 torch.autograd.backward([U, Y], [dU, dY])
 
         else:
@@ -411,8 +519,8 @@ class AutogradArm(Arm):
         return call
 
 
-def _fp32_mhc(X, fn, scale, base, B):
-    U, Y = mhc_forward(X, fn, scale, base, B, dtype=F32)
+def _fp32_mhc(X, fn, scale, base, B, iters: int = SINKHORN_ITERS):
+    U, Y = mhc_forward(X, fn, scale, base, B, dtype=F32, iters=iters)
     return U.to(BF16), Y.to(BF16)
 
 
@@ -420,12 +528,13 @@ class EagerFP32(AutogradArm):
     name = "eager_fp32"
     library = "PyTorch eager FP32 (TF32 off)"
     deterministic = None
+    determinism = "not declared by PyTorch for this graph (measured by the benchmarks)"
 
     def versions(self) -> dict:
-        return {"torch": torch.__version__}
+        return {"torch": torch.__version__, "torch_cuda": torch.version.cuda, "cublas": cublas_version()}
 
-    def forward(self, leaves):
-        return _fp32_mhc(*leaves)
+    def forward(self, leaves, iters):
+        return _fp32_mhc(*leaves, iters)
 
 
 def _fresh_function(fn: Callable, tag: str) -> Callable:
@@ -436,6 +545,8 @@ def _fresh_function(fn: Callable, tag: str) -> Callable:
 
 class Compiled(AutogradArm):
     """``torch.compile`` of :func:`_fp32_mhc`; ``trials`` fresh compiles per shape, the fastest one timed."""
+
+    determinism = "not declared: the generated Triton kernels may split reductions (measured by the benchmarks)"
 
     def __init__(self, name: str, mode: Optional[str], trials: int = 1) -> None:
         self.name = name
@@ -456,8 +567,9 @@ class Compiled(AutogradArm):
     def versions(self) -> dict:
         import triton
 
-        return {"torch": torch.__version__, "triton": triton.__version__, "mode": self.mode or "default",
-                "trials": self.trials, "donated_buffer": False}
+        return {"torch": torch.__version__, "torch_cuda": torch.version.cuda, "triton": triton.__version__,
+                "mode": self.mode or "default", "trials": self.trials, "donated_buffer": False,
+                "cublas": cublas_version()}
 
     def _compile(self) -> Callable:
         # The ``bwd`` operation runs the backward of one recorded forward repeatedly (``retain_graph=True``), which a
@@ -471,10 +583,10 @@ class Compiled(AutogradArm):
             kwargs["mode"] = self.mode
         return torch.compile(_fresh_function(_fp32_mhc, f"{self.name}_{self._count}"), **kwargs)
 
-    def forward(self, leaves):
+    def forward(self, leaves, iters):
         if self._fn is None:
             self._fn = self._compile()
-        return self._fn(*leaves)
+        return self._fn(*leaves, iters)
 
     def prepare_shape(self, i: dict, timer=None) -> dict:
         """Compile for this shape; with several trials, time one group of training steps (forward + backward) of each
@@ -496,7 +608,7 @@ class Compiled(AutogradArm):
                 def step(fn=fn, leaves=leaves) -> None:
                     for t in leaves:
                         t.grad = None
-                    U, Y = fn(*leaves)
+                    U, Y = fn(*leaves, i["iters"])
                     torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
 
                 for _ in range(3):
@@ -516,6 +628,7 @@ class Liger(AutogradArm):
     name = "liger"
     library = "Liger Kernel mHC (liger_kernel.ops.mhc, allow_fp32=True)"
     deterministic = False
+    determinism = "declared non-deterministic: its backward adds FP32 partials with atomics"
 
     def available(self, device, hidden):
         try:
@@ -528,7 +641,7 @@ class Liger(AutogradArm):
     def versions(self) -> dict:
         import triton
 
-        return {"liger-kernel": dist_version("liger-kernel"), "triton": triton.__version__,
+        return {"liger-kernel": dist_version("liger-kernel"), "triton": triton.__version__, "torch": torch.__version__,
                 "TRITON_F32_DEFAULT": os.environ.get("TRITON_F32_DEFAULT")}
 
     def leaves(self, i: dict) -> list:
@@ -553,12 +666,12 @@ class Liger(AutogradArm):
             "dB": B.grad,
         }
 
-    def forward(self, leaves):
+    def forward(self, leaves, iters):
         from liger_kernel.ops.mhc import LigerMHCCoeffsFunction, LigerMHCPostResFunction, LigerMHCPreFunction
 
         X, phi, base, s0, s1, s2, B = leaves
         h_pre, h_post, h_res = LigerMHCCoeffsFunction.apply(
-            X, phi, base, s0, s1, s2, True, SINKHORN_ITERS, RMS_EPS, HC_EPS, HC_EPS, POST_MULT
+            X, phi, base, s0, s1, s2, True, iters, RMS_EPS, HC_EPS, HC_EPS, POST_MULT
         )
         U = LigerMHCPreFunction.apply(X, h_pre)
         Y = LigerMHCPostResFunction.apply(X, B, h_post, h_res.transpose(-1, -2))
@@ -566,10 +679,12 @@ class Liger(AutogradArm):
 
 
 class TileKernels(Arm):
-    """TileKernels' fused pre kernel and post kernel after a prenorm GEMM (forward only)."""
+    """TileKernels' fused pre kernel and post kernel after a prenorm GEMM (forward only): a composition of this
+    harness."""
 
     ops = ("fwd",)
-    deterministic = True
+    deterministic = None
+    determinism = "not declared by TileKernels or the GEMM library (measured by the benchmarks)"
 
     def __init__(self, gemm: str, splits: int = 16) -> None:
         if gemm not in ("cublas", "deepgemm"):
@@ -580,6 +695,14 @@ class TileKernels(Arm):
         self.library = (
             "TileKernels mhc_pre_big_fuse_fwd + mhc_post_fwd after "
             + ("cuBLAS FP32 GEMM (TF32 off)" if gemm == "cublas" else "DeepGEMM tf32_hc_prenorm_gemm hi/lo")
+        )
+        self.composite = (
+            "harness composition: FP32 copy of X, cuBLAS FP32 GEMM float(X) @ fn.T and PyTorch squared row norms, then "
+            "TileKernels mhc_pre_big_fuse_fwd and mhc_post_fwd"
+            if gemm == "cublas" else
+            "harness composition: fn split into its TF32 part and the remainder (PyTorch), DeepGEMM "
+            "tf32_hc_prenorm_gemm on each part (16 K-splits each), then TileKernels mhc_pre_big_fuse_fwd over the 32 "
+            "partials and mhc_post_fwd"
         )
 
     def available(self, device, hidden):
@@ -602,14 +725,18 @@ class TileKernels(Arm):
             return False, f"{type(exc).__name__}: {exc}"
 
     def versions(self) -> dict:
-        out = {"tile-kernels": dist_version("tile-kernels"), "tilelang": dist_version("tilelang")}
+        out = {"tile-kernels": dist_version("tile-kernels"), "tilelang": dist_version("tilelang"),
+               "torch": torch.__version__}
         if self.gemm == "deepgemm":
-            import deep_gemm
+            try:
+                import deep_gemm
 
-            out["deep-gemm"] = getattr(deep_gemm, "__version__", None)
+                out["deep-gemm"] = getattr(deep_gemm, "__version__", None)
+            except Exception as exc:  # noqa: BLE001
+                out["deep-gemm"] = f"unavailable: {type(exc).__name__}"
             out["deep-gemm-dist"] = dist_version("deep_gemm") or dist_version("deep-gemm")
         else:
-            out["torch"] = torch.__version__
+            out["cublas"] = cublas_version()
         return out
 
     def _buffers(self, i: dict) -> dict:
@@ -648,7 +775,7 @@ class TileKernels(Arm):
         X2 = X.view(T, STREAMS * H)
         b = self._buffers(i)
         fused = dict(rms_eps=RMS_EPS, mhc_pre_eps=HC_EPS, mhc_sinkhorn_eps=HC_EPS, mhc_post_mult_value=POST_MULT,
-                     sinkhorn_repeat=SINKHORN_ITERS)
+                     sinkhorn_repeat=i["iters"])
 
         def tail(n_splits: int) -> None:
             mhc_pre_big_fuse_fwd(b["mul"], b["sq"], scale, base, X, b["post"], b["comb"], b["U"], **fused,
