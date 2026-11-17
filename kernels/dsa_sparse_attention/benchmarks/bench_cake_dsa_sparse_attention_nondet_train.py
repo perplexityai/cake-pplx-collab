@@ -113,6 +113,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cake_pplx.cake_dsa_sparse_attention_nondet_train import (  # noqa: E402
+    _dkv_direct_from_environment,
     cake_dsa_sparse_attention_nondet,
     cake_dsa_sparse_attention_nondet_varlen,
 )
@@ -1299,19 +1300,19 @@ class ArmCakeNope:
 
     def versions(self):
         inp = self.inp
+        row = (inp.q.device, inp.total_q, inp.total_k, inp.topk, inp.num_segments)
+        # the arm passes no ``dkv_direct``: the entry resolves ``CAKE_PPLX_DSA_DKV_DIRECT``
+        # (``auto``: the record's rule of this device; ``1`` / ``0``: forced)
+        forced = _dkv_direct_from_environment()
         return dict(
             module=self.program,
             entry="cake_dsa_sparse_attention_nondet_nope_varlen",
-            # the record's rule on this device for the whole row: the entry's default (the
-            # arm passes no ``dkv_direct``; ``CAKE_PPLX_DSA_DKV_DIRECT=0`` / ``1`` overrides it)
+            # the route the whole-row backward takes (the environment override resolved)
             dkv_direct=_record_dkv_direct(
-                inp.q.device,
-                inp.total_q,
-                inp.total_k,
-                inp.topk,
-                inp.num_segments,
-                program=self.program,
+                *row, program=self.program, dkv_direct=forced
             ),
+            # the record's rule for the whole row, whatever the environment says
+            dkv_direct_rule=_record_dkv_direct(*row, program=self.program),
         )
 
     def _call(self, q, kv, dkv_acc):
