@@ -25,9 +25,10 @@ limitations under the License.
 # * every host plan has the deterministic plan's fields (scan program, split, grid, unit, capacity, check period,
 #   sampling, segment order, pair, staging and workspace bytes, ticket decisions), the deterministic package's
 #   rank-fused merge being the plain merge here;
-# * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) of a BF16 call are this
-#   package's own (``_OWN_SAMPLING``: its ``sample_class_rule`` and the ``sample_long_rule`` the deterministic record
-#   has no field for), so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.
+# * on sm_107a the sampled first threshold's launch scalars (tile count and rank shift) of a BF16 call can differ
+#   (``_OWN_SAMPLING_ARCHES``): both records carry the same ``sample_class_rule`` / ``sample_long_rule``, but this
+#   package's ``sample_class_for`` applies the class shift (keeping the tile count) where the deterministic package
+#   skips the class rule, so that no rank input of the ratio-4 pooled selection runs slower with sampling on than off.
 #   Whether a call samples, and every other decision, stays the deterministic one; an FP8 call (whose record sets
 #   neither rule on sm_107a) has every decision of the deterministic FP8 plan;
 # * on a device, the calls of a list of operator geometries (random, packed, forced split, pooled, sink, exact cases,
@@ -72,10 +73,10 @@ P1_CU_SEQLENS_K = (0, 1777, 58619, 60742, 128665, 130788, 198711, 200834, 268757
 P2_T, P2_TKV = 16172, 267520
 
 
-# the policy fields this package sets on its own: the deterministic record has no ``sample_long_rule``, and on sm_107a
-# the sampled tile count and rank shift follow this package's class and long-unit rules
-_OWN_FIELDS = ("sample_long_rule",)
-_OWN_SAMPLING = {"sm_107a": ("sample_class_rule", "sample_long_rule")}
+# the architectures where the sampled launch scalars of a BF16 call can differ: both records carry the same
+# ``sample_class_rule`` / ``sample_long_rule``; on sm_107a this package's ``sample_class_for`` applies the class shift
+# (keeping the tile count) where the deterministic package skips the class rule, so the launch scalars can differ
+_OWN_SAMPLING_ARCHES = ("sm_107a",)
 
 
 def _nondet_name(det_name: str) -> str:
@@ -174,26 +175,17 @@ def test_program_keys_are_the_deterministic_scan_keys_and_the_plain_merge():
 
 def test_policy_records_are_the_deterministic_records_restricted():
     """Every architecture's dispatch record holds exactly the fields this package's policy reads, with the
-    deterministic record's values: the same scan, capacity, check-period, split, pair, sampling and ticket rules,
-    but the sm_107a sampling rules of this package (``_OWN_SAMPLING``); ``sample_long_rule`` is set on sm_107a
-    only.  The FP8 dispatch records (``POLICY_FP8``) are the deterministic package's."""
+    deterministic record's values: the same scan, capacity, check-period, split, pair, sampling and ticket rules
+    (``sample_class_rule`` and ``sample_long_rule`` included; ``sample_long_rule`` is set on sm_107a only).  The FP8
+    dispatch records (``POLICY_FP8``) are the deterministic package's."""
     assert set(cake_jit.POLICY) == set(det_jit.POLICY)
     assert cake_jit.POLICY_FP8 == det_jit.POLICY_FP8
     for arch, record in cake_jit.POLICY.items():
         det_record = det_jit.POLICY[arch]
         assert set(record) == set(cake_policy.POLICY_FIELDS), arch
-        shared = set(cake_policy.POLICY_FIELDS) - set(_OWN_FIELDS)
-        assert shared <= set(det_record), arch
-        own = _OWN_SAMPLING.get(arch, ())
-        assert (record["sample_long_rule"] is not None) == (
-            "sample_long_rule" in own
-        ), arch
-        expected = {
-            field: det_record[field] if field in shared else record[field]
-            for field in record
-            if field not in own
-        }
-        assert {f: v for f, v in record.items() if f not in own} == expected, arch
+        assert set(record) <= set(det_record), arch
+        assert (record["sample_long_rule"] is not None) == (arch == "sm_107a"), arch
+        assert record == {field: det_record[field] for field in record}, arch
 
 
 # ---------------------------------------------------------------------------
@@ -202,11 +194,12 @@ def test_policy_records_are_the_deterministic_records_restricted():
 
 
 def _assert_same_decisions(arch, plan, det_plan, where, *, own_sampling=True) -> None:
-    # sm_107a: the sampled tile count and rank shift of a BF16 call are this package's own (launch scalars only;
-    # ``_OWN_SAMPLING``), whether the call samples is not; ``own_sampling=False`` (an FP8 call) compares them too
+    # sm_107a: the sampled tile count and rank shift of a BF16 call can differ (launch scalars only;
+    # ``_OWN_SAMPLING_ARCHES``), whether the call samples does not; ``own_sampling=False`` (an FP8 call) compares
+    # them too
     own = (
         ("sample_tiles_max", "sample_shift_permille")
-        if own_sampling and arch in _OWN_SAMPLING
+        if own_sampling and arch in _OWN_SAMPLING_ARCHES
         else ()
     )
     assert (plan.sample_tiles_max > 0) == (det_plan.sample_tiles_max > 0), where

@@ -207,7 +207,10 @@ s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j, d])
   the fields of `cake_jit.POLICY_FP8[arch]` replaced
   (`cake_policy.fp8_policy_record`); `POLICY_FP8` names every architecture's
   FP8 `static_scan_kinds` itself, and the record is the deterministic
-  package's FP8 record.  `cake_policy.select_fp8_program` runs the BF16
+  package's FP8 record.  On `sm_100a` and `sm_103a` `POLICY_FP8` also sets
+  `wide_wave_rule`, so the FP8 form chooses its wide unit by waves of the
+  persistent grid (the unit geometry rule in "Host dispatch").
+  `cake_policy.select_fp8_program` runs the BF16
   decision procedure under it and maps the decided kind to a registered FP8
   kind: its own where an FP8 program of it is registered, else its fallback
   (`FP8_KIND_FALLBACK`: `wide` / `pair_wide` / `pair_l6` -> `l6`,
@@ -318,14 +321,18 @@ mapping are described in "FP8 form").  These rules are the deterministic
 package's rules without its finalize and rank rules.  A BF16 call therefore
 gets the same scan program, candidate capacity, check period,
 split count, CTA pair and ticket plan that the deterministic package picks for
-it.  One exception is on `sm_107a`: the sampled tile count and rank
-shift follow this package's own `sample_class_rule` and `sample_long_rule`
-(whether a call samples does not change).  Most rules use one estimate, the
+it.  One exception is on `sm_107a`: both packages' records carry the same
+`sample_class_rule` and `sample_long_rule`, but on a non-wide program of the
+tiny dispatch class whose mean unit holds at most the class rule's tile
+count, this package's `cake_policy.sample_class_for` takes the class rule's
+rank shift and keeps the tile count, where the deterministic package skips
+the class rule.  So the sampled rank shift can differ (whether a call samples
+does not change).  Most rules use one estimate, the
 mean key tiles per work unit: `(Tkv - T / (2 ratio)) / S / 128`.
 
 | decision | rule (record fields) |
 |---|---|
-| unit geometry | `block_q_wide` queries per unit first where the record sets `wide_first_rule` (sm_103a: `[512.0]`), the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it; no record of this package sets it |
+| unit geometry | `block_q_wide` queries per unit first where the record sets `wide_first_rule` (sm_103a: `[512.0]`), the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it.  No BF16 record sets it; the FP8 records of `sm_100a` and `sm_103a` do (`POLICY_FP8`), so the FP8 form chooses its wide unit by waves of the persistent grid |
 | key-range split | `n_split = max(1, min(grid // units, mean tiles // split_min_range_tiles, split_max))`.  Where `n_split` is 1, a record with `split_wave_rule` splits in two when the units are long (at least `split_wave_rule[0]` and `2 x split_min_range_tiles` mean tiles) and the split raises the share of busy CTAs over the call's rounds by at least `split_wave_rule[1]`.  Where the record sets `split_wave_scope` (sm_107a: `[["narrow"], 1, true]`), that two-way split applies only to its unit geometries, on calls of at most its segment count, and with its third item on sampled calls only.  Only a unit geometry of `split_units` (the units whose split program the architecture registers) splits; any other unit runs unsplit.  A call that this rule splits takes `split_resident_rule` (sm_100a, sm_103a): `min(grid // units, 49152 // top_k, 32, max(8, n_fit if n_fit x top_k <= 32768 else 32))` splits, at least 2.  Here `n_fit = ceil(mean unit keys / top_k)`, rounded up to whole 4096-entry merge chunks, so the merge keeps its staged entries in shared memory.  Elsewhere `split_fit_rule` raises the count to `n_fit` where that fits `split_max` and the grid |
 | CTA pair | the two-CTA multicast program when the mean unit tiles lie in `pair_rule[0..1]`, `top_k >= pair_rule[2]`, the grid has at least two CTAs, the call is not split (grid made even) and the unit geometry is one of `pair_units` (the units whose pair program the architecture registers) |
 | unpaired wide unit | where the record sets `wide_pair_snake_only` (sm_107a), a sampled call keeps the CTA pair of the wide unit only where the pair program walks the snake order; elsewhere it runs the unpaired wide program when that program is registered |
