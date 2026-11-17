@@ -111,11 +111,11 @@ record, and ``LAST_CALL["fwd"]`` / ``LAST_CALL["fwd_multi"]`` record the form a 
 
 Numerics: ``y`` and ``hist`` are the det KCP forward's bits; ``dx`` is the det
 KCP backward's bits on both backward forms (same per-thread FP32 steps, same
-tail fold, one BF16 rounding); ``dweight`` is the rank's FP32 partial, within
-the det program's budget of an FP64 oracle (``5e-2 + 1e-4 |dw|``) but not
+tail fold, one BF16 rounding); ``dweight`` is the rank's FP32 partial, an
+unordered sum of the CTAs' FP32 rows (every sum one plain FP32 word), not
 bitwise reproducible run to run (the cross-CTA sum is unordered; the only
-relaxed property).  The
-cross-rank reduction of ``dweight`` stays the framework's.
+relaxed property).  The cross-rank reduction of ``dweight`` stays the
+framework's.
 
 Numerical mode: the package is chosen by its module name and no entry takes a
 mode keyword (the deterministic KCP package is
