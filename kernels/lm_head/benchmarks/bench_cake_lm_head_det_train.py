@@ -76,11 +76,12 @@ per-token temperature (``scalar``: a Python number; ``constant``: the
 ``[T]`` tensor of that value; ``hetero``: a log-uniform ``[T]`` tensor in
 [0.25, 4] with some rows at 1.0).  On those rows ``torch_unchunked`` is the
 non-Cake baseline ``log_softmax(X @ W^T / tau)`` with autograd and
-``torch_chunked`` / ``cake`` take the same temperature; an arm without a
-temperature form is reported unsupported.  On the loss rows only
-``cake_logprob`` takes the temperature (the loss entry has none): the other
-arms run the same inputs without it.  ``--accuracy`` has no oracle for the
-loss-row objective with a temperature (``cake_logprob`` there is timing only).
+``torch_chunked`` / ``cake`` / ``cake_nd`` take the same temperature; an arm
+without a temperature form is reported unsupported.  On the loss rows only
+``cake_logprob`` / ``cake_nd_logprob`` take the temperature (the loss entry
+has none): the other arms run the same inputs without it.  ``--accuracy`` has
+no oracle for the loss-row objective with a temperature (``cake_logprob`` /
+``cake_nd_logprob`` there are timing only).
 
 Memory form (``--memory-mode default|fast|budget``): the ``memory_mode`` the
 ``cake`` / ``cake_logprob`` / ``cake_nd`` / ``cake_nd_logprob`` arms pass
@@ -1087,7 +1088,8 @@ def measure_perf(arm, steps):
     (:meth:`ArmAutograd.ckpt_step`: the checkpointed forward + the step's backward, which recomputes it) timed like
     ``step`` (the forward state of the timed backward still alive, the bindings remembered); ``None`` with the arm's
     ``ckpt_unsupported`` reason when it has none, or with ``ckpt_error`` when it raised.  ``ckpt_saved_gib`` /
-    ``ckpt_peak_gib`` / ``ckpt_peak_over_b``: :func:`_ckpt_memory` after the step peaks (the bindings remembered)."""
+    ``ckpt_peak_gib`` / ``ckpt_peak_over_b``: :func:`_ckpt_memory` after the remembered-binding step peak and before
+    the caches are cleared for the other one (the checkpointed step's bindings remembered by the timed ``ckpt``)."""
     saved = [
         arm.forward()
     ]  # the forward state the timed backward consumes; released before the memory probes
@@ -1136,15 +1138,17 @@ def measure_perf(arm, steps):
     bwd_peak = torch.cuda.max_memory_allocated() - base_bwd
     del grads, st
     step_peak_hit = _step_peak(arm)
-    _clear_binding_caches()
-    step_peak_miss = _step_peak(arm)
-    step_peak = None if step_peak_hit is None else max(step_peak_hit, step_peak_miss)
+    # the checkpointed step's memory from the remembered bindings: before the caches are cleared (its loss entry's
+    # checkpointed forward has a binding of its own, which the step after the clear would not form again)
     ckpt_saved = ckpt_peak = None
     if ckpt is not None and ckpt_error is None:
         try:
             ckpt_saved, ckpt_peak = _ckpt_memory(arm)
         except Exception as exc:  # reported per op; the arm's other ops stand
             ckpt_error = f"memory probe: {type(exc).__name__}: {exc}"
+    _clear_binding_caches()
+    step_peak_miss = _step_peak(arm)
+    step_peak = None if step_peak_hit is None else max(step_peak_hit, step_peak_miss)
     head = _head_bytes(arm.inp)
 
     def over_b(nbytes):
@@ -1448,7 +1452,8 @@ def main():
         "--memory-mode",
         default="default",
         choices=("default", "fast", "budget"),
-        help="memory_mode of the cake arms (default: none passed, the entries' automatic form)",
+        help="memory_mode of the cake arms (default: none passed; the deterministic entries take their automatic "
+        "form, the non-deterministic entries their fast form)",
     )
     parser.add_argument(
         "--ignore-frac",
