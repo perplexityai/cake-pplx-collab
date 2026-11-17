@@ -1400,7 +1400,11 @@ vocabularies where a test's route needs them, and one call per entry at T
 entries at their own shapes.  Calls at the production shape keep their
 contract and their bitwise checks: the same bytes from run to run, and the
 bit identities between the forms documented above.  Each verdict prints a
-`TIER` line in pytest's terminal summary.
+`TIER` line in pytest's terminal summary.  The outputs that miss the tier
+today are listed per architecture in
+`tests/experimental/test_helpers/cake_lm_head_known_misses.py` (their tests
+report as xfailed), where a new miss or a listed output that meets the tier
+fails the test.
 
 Toolchain note: the package needs CUDA 12.9 or newer.  Every `sm_100a` and
 `sm_103a` entry of `build.json` has `min_cuda` 12.9

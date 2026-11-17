@@ -861,7 +861,11 @@ entries at their own shapes.  Calls at the production shape keep their
 contract, exact zeros and the one-feature bit checks documented above (one
 option against another on the same inputs); no test asserts run-to-run bit
 equality.  No test compares an output with the deterministic package.  Each
-verdict prints a `TIER` line in pytest's terminal summary.
+verdict prints a `TIER` line in pytest's terminal summary.  The outputs that
+miss the tier today are listed per architecture in
+`tests/experimental/test_helpers/cake_lm_head_known_misses.py` (their tests
+report as xfailed), where a new miss or a listed output that meets the tier
+fails the test.
 
 Toolchain: the deterministic package's rules apply unchanged (CUDA 12.9 or
 newer; the `sm_100a` 2-CTA producer loops issue the stage's

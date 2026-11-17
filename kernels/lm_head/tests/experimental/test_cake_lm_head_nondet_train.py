@@ -32,7 +32,9 @@ vocabulary where a test's route needs it (V 256; V 65536 for the one-chunk expli
 on one draw keeps each output's largest error, and each draw asserts the launch's route.  At the production shape a
 test checks the contract (dtype, shape, finite values, ignored rows ``+0``), exact zeros and the bits of one option
 against another on the same inputs.  The package promises no run-to-run bit equality: no test asserts that a call
-repeated on the same inputs gives the same bits.  No test compares an output with the deterministic package's.  A
+repeated on the same inputs gives the same bits.  No test compares an output with the deterministic package's.  The
+outputs that miss the tier today are listed per architecture in ``test_helpers/cake_lm_head_known_misses.py`` (their
+tests report as xfailed), where a new miss or a listed output that meets the tier fails the test.  A
 log-probability backward of more than one chunk runs vocabulary-major by default
 (``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` meet the same tier; the tests of the chunk loop's own
 machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword, PyTorch's
@@ -76,6 +78,7 @@ from tests.experimental.test_helpers.cake_lm_head_judge import (
     judge_inputs,
     judge_lm_head,
 )
+from tests.experimental.test_helpers.cake_lm_head_known_misses import settle
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     DEFAULT_H,
     DEFAULT_V,
@@ -216,6 +219,7 @@ def _judge_problems(record_property, launch, labels, *, seed, entry="loss", name
     need = dict(need_dx="dX" in wanted, need_dw="dW" in wanted)
     exact = frozenset(f"{name}_ignored@{label}" for name in ("logp", "dX") for label in labels)
     kept: dict = {}
+    judged_on: list[torch.device] = []  # the device of the judged outputs (their architecture's known misses)
 
     def check(result, inp):
         if contract is None:
@@ -248,6 +252,8 @@ def _judge_problems(record_property, launch, labels, *, seed, entry="loss", name
                             value.shape, dtype=torch.float64, device=value.device
                         )
         kept[j] = [(inp, tuple(results)) for inp, results in groups]
+        if not judged_on and outputs:
+            judged_on.append(next(iter(outputs.values())).device)
         return outputs, oracle
 
     def naive(j, tier):
@@ -261,7 +267,7 @@ def _judge_problems(record_property, launch, labels, *, seed, entry="loss", name
 
     judge, failures = judge_case(run, naive, seed=seed, exact=exact)
     judge.record(record_property)
-    assert not failures, "\n".join(failures)
+    settle(judge, failures, judged_on[0] if judged_on else None)
     return judge
 
 

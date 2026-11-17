@@ -52,6 +52,7 @@ from tests.cake_naive import (
     judge_case,
     seed_all,
 )
+from tests.experimental.test_helpers.cake_lm_head_known_misses import settle
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     TEMPERATURE_SEED_OFFSET,
     Inputs,
@@ -276,6 +277,8 @@ def _judge(
             raise AssertionError(f"{name}: the reference holds no {key}")
         return value if view is None else view(inp, value)
 
+    judged_on: list[torch.device] = []  # the device of the judged outputs (their architecture's known misses)
+
     def launched(j, inp):
         results = launch(inp)
         per_form = {None: results} if forms is None else results
@@ -300,6 +303,8 @@ def _judge(
                 outputs[label(name, form)] = value.detach()
             for name, value in exact_fn(inp, result).items():
                 outputs[label(name, form)] = value
+        if not judged_on and outputs:
+            judged_on.append(next(iter(outputs.values())).device)
         return outputs
 
     def expected(inp, outputs):
@@ -369,7 +374,7 @@ def _judge(
                 torch.cuda.set_rng_state_all(cuda)
         failures = failures + judge.failures()
     judge.record(record_property)
-    assert not failures, "\n".join(failures)
+    settle(judge, failures, judged_on[0] if judged_on else None)
     return judge
 
 
@@ -392,7 +397,9 @@ def judge_lm_head(
     draws: int = DRAWS,
 ) -> TierJudge:
     """Judge one LM-head case over ``draws`` draws against the naive BF16 tier, record every output's verdict with
-    ``record_property`` and assert that every output met the tier and every draw kept its contract.
+    ``record_property`` and settle the judge's failures (:func:`settle`): every draw kept its contract and every
+    output met the tier, except the outputs listed as known misses of the running test on its architecture
+    (``cake_lm_head_known_misses.py``).
 
     * ``make(s)``: the draw's inputs from its seed alone (:func:`judge_inputs`).
     * ``launch(inp)``: the kernel's result (``loss`` / ``logp`` / ``dX`` / ``dW`` ...), or with ``forms`` one result

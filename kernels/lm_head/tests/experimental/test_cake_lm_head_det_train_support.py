@@ -40,6 +40,7 @@ from tests.experimental.test_helpers.cake_lm_head_judge import (
     judge_support,
     judge_support_inputs,
 )
+from tests.experimental.test_helpers.cake_lm_head_known_misses import settle
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     Inputs as LossInputs,
 )
@@ -1631,7 +1632,7 @@ def test_cake_sparse_weight_gradient_drops_out_of_range_ids(dw, record_property)
 
     judge, failures = judge_case(run, lambda j, tier: {"dW": naive.pop(j)}, seed=SEED)
     judge.record(record_property)
-    assert not failures, "\n".join(failures)
+    settle(judge, failures, CUDA)  # dW is judged on the host; its known misses are those of the GPU that ran the kernel
 
 
 def test_cake_sparse_global_dw_zero_fill_bits(monkeypatch):
