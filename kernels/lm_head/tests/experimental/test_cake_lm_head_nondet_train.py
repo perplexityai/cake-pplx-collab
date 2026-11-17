@@ -1427,9 +1427,10 @@ def test_tail_fold_plan_rules():
 def test_dx_launches_come_from_the_dx_helper():
     """Every dX launch of a plan is planned by ``_dx_keys``: for a chunk of more than one slice the K-sliced reduction
     (``gemm_dx_red*``), which stores its slices into the call's slab, and right after it the slab sum
-    (``dx_slab_sum``), which stores their sum into the chunk's rows (no host reduction chain); a chunk of one slice is
-    one plain-store launch.  Nothing fills ``dX_acc``: the sequence starts with chunk 0's logits GEMM and holds no host
-    step."""
+    (``dx_slab_sum``), which stores their sum into the chunk's rows (no host reduction chain) and folds the rows' FP32
+    label residuals; a chunk of one slice is one plain-store launch and the slab sum as the fold alone.  Nothing fills
+    ``dX_acc``: the sequence starts with chunk 0's logits GEMM, and its one host step zeroes the label residuals right
+    before chunk 0's row gradient."""
     plan = _plan(16231, hidden=7168, vocab=129280, tuning={"dx": {"k_slices": 2}})
     for i in range(plan.num_chunks):
         stage = plan.dx_stage_of(i)
@@ -1452,22 +1453,31 @@ def test_dx_launches_come_from_the_dx_helper():
     assert set(slab_sums) & set(plan.stages) == {cake_backend.DX_SLAB_SUM_STAGE}
     assert cake_backend.DX_SLAB_SUM_ACC_STAGE not in plan.stages
     assert keys[0] == (plan.forward_logits_stage(0), 0), keys
-    assert not any(key[0] in cake_backend.HOST_STAGES for key in keys), keys
+    assert [key for key in keys if key[0] in cake_backend.HOST_STAGES] == [
+        (cake_backend.RLAB_ZERO_STAGE, None)
+    ], keys
+    assert keys[keys.index((cake_backend.RLAB_ZERO_STAGE, None)) + 1] == ("row_grad", 0)
     assert plan.dx_sliced
     plain = _plan(16231, hidden=7168, vocab=129280, tuning={"dx": {"k_slices": None}})
     for i in range(plain.num_chunks):
-        assert plain.dx_slab_sum_stage_of(i) is None
-        assert cake_backend._dx_keys(plain, i) == [(plain.dx_stage_of(i), i)]
-    assert not set(cake_backend.DX_SLAB_SUM_STAGES) & set(plain.stages)
+        assert plain.dx_slab_sum_stage_of(i) == cake_backend.DX_SLAB_SUM_STAGE
+        assert cake_backend._dx_keys(plain, i) == [
+            (plain.dx_stage_of(i), i),
+            (cake_backend.DX_SLAB_SUM_STAGE, i),
+        ]
+    assert set(cake_backend.DX_SLAB_SUM_STAGES) & set(plain.stages) == {
+        cake_backend.DX_SLAB_SUM_STAGE
+    }
     assert not plain.dx_sliced
 
 
 def test_slab_sum_binds_the_k_sliced_launch_slab(record_property):
     """The slab sum of a K-sliced chunk (forced two slices, reference backend) is bound right behind the chunk's
     ``gemm_dx_red`` launch to the chunk's rows of ``dX_acc`` and the call's slab that launch writes, at its
-    ``m_tiles`` / ``ldc``: ``ws_slab = m_tiles * 128 * ldc``, ``num_vecs = rows_c * H / cast_vec``, ``n_slabs = 2``.
-    The slab sum of a chunk the plan does not slice is refused, and the reference engine's store-then-sum ``dX``
-    meets the naive tier."""
+    ``m_tiles`` / ``ldc``: ``ws_slab = m_tiles * 128 * ldc``, ``num_vecs = rows_c * H / cast_vec``, ``n_slabs = 2``,
+    plus the fold's operands (the chunk's ``labels`` / ``rlab`` rows, the head ``W``, ``V``, ``lr = 1``).  The slab sum
+    of a chunk the plan does not slice is the fold alone (``n_slabs = ws_slab = 0``, the FP32 dummy as ``ws``), and the
+    reference engine's store-then-sum ``dX`` meets the naive tier."""
     inp = _host_inputs(37)
     kw = dict(loss_div=1.0, chunk_size=16, backend="reference")
     with _forced_dx_slices():
@@ -1487,14 +1497,101 @@ def test_slab_sum_binds_the_k_sliced_launch_slab(record_property):
         assert v["ws_slab"] == gemm["m_tiles"] * 128 * gemm["ldc"]
         assert v["num_vecs"] == rows_c * H_HOST // plan.geometry.cast_vec
         assert v["n_slabs"] == 2
+        _assert_fold_operands(v, t, plan, row0, rows_c)
     plain = cake_backend.prepare_lm_head_loss(inp.X, inp.W, inp.labels, **kw)
     assert plain.plan.dx_slices_of(0) == 1
-    with pytest.raises(ValueError, match="slab sum"):
-        cake_backend.stage_values(
-            cake_backend.DX_SLAB_SUM_STAGE, plain.tensors, plain.plan, 0
+    order = plain.forward_order
+    for i, (row0, rows_c) in enumerate(plain.plan.chunks):
+        sum_key = (cake_backend.DX_SLAB_SUM_STAGE, i)
+        assert order[order.index((plain.plan.dx_stage_of(i), i)) + 1] == sum_key, order
+        v = cake_backend.stage_values(
+            cake_backend.DX_SLAB_SUM_STAGE, plain.tensors, plain.plan, i
         )
+        assert v["n_slabs"] == 0 and v["ws_slab"] == 0
+        assert v["ws"] is plain.tensors["f32_dummy"]
+        assert v["dx"].data_ptr() == plain.tensors["dx_acc"][row0:].data_ptr()
+        assert v["num_vecs"] == rows_c * H_HOST // plain.plan.geometry.cast_vec
+        _assert_fold_operands(v, plain.tensors, plain.plan, row0, rows_c)
     with _forced_dx_slices():
         _judge_host(record_property, 37, lambda draw: _run(draw, 16))
+
+
+def _assert_fold_operands(v, t, plan, row0, rows_c) -> None:
+    """A slab sum's fold operands: the chunk's rows of ``labels`` / ``rlab``, the head ``W``, ``V``, the vectors of one
+    row and ``lr = 1``."""
+    for name in ("labels", "rlab"):
+        assert v[name].data_ptr() == t[name][row0:].data_ptr(), name
+        assert tuple(v[name].shape) == (rows_c,), name
+    assert v["W"] is t["W"] and v["V"] == plan.problem.vocab and v["lr"] == 1
+    assert v["row_vecs"] == plan.problem.hidden // plan.geometry.cast_vec
+
+
+def test_reference_slab_sum_folds_the_label_residual():
+    """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
+    each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a
+    label at or beyond ``V`` and a zero residual keep the row's bits (``-0.0`` included); ``lr = 0`` folds nothing."""
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 3)
+    rows, cols, slabs, pitch, V = 7, 16, 3, 128, 9
+    W = torch.randn(V, cols, generator=gen).bfloat16()
+    ws = torch.randn(slabs * pitch, generator=gen)
+    base = torch.randn(rows, cols, generator=gen)
+    base[6] = -0.0
+    labels = torch.tensor([3, -100, V, 0, 8, 2, 4])
+    rlab = torch.randn(rows, generator=gen) * 2.0**-9
+    rlab[6] = 0.0
+    for n_slabs in (0, slabs):
+        total = base.clone()
+        if n_slabs:
+            total = None
+            for s in range(n_slabs):
+                part = ws[s * pitch : s * pitch + rows * cols].view(rows, cols)
+                total = part if total is None else total + part
+        want = total.clone()
+        for j in (0, 3, 4, 5):
+            want[j] = total[j] + rlab[j] * W[int(labels[j])].float()
+        for stage in cake_backend.DX_SLAB_SUM_STAGES:
+            for lr in (1, 0):
+                dx = base.clone()
+                getattr(cake_backend.ReferenceEngine, stage)(
+                    dict(
+                        dx=dx,
+                        ws=ws,
+                        ws_slab=pitch,
+                        n_slabs=n_slabs,
+                        labels=labels,
+                        rlab=rlab,
+                        W=W,
+                        V=V,
+                        lr=lr,
+                    )
+                )
+                expect = want if lr else total
+                assert _same_bits(dx, expect), (n_slabs, stage, lr)
+
+
+def test_dx_slab_sum_operands_without_a_fold():
+    """:func:`dx_slab_sum_operands` without the fold's operands (the support entries): ``lr = 0`` and unread views of
+    the slab's head typed as the bindings check them (int64 ``labels``, FP32 ``rlab``, BF16 ``W``); a launch of one
+    slice without them (neither slab adds nor a fold) is refused.  With them, one slice is the fold alone."""
+    slab = torch.zeros(4 * 128 * 16)
+    dx = torch.zeros(5, 16)
+    v = cake_backend.dx_slab_sum_operands(dx, slab, k_slices=4, m_tiles=1, ldc=16, cast_vec=8)
+    assert v["lr"] == 0 and v["V"] == 0 and v["n_slabs"] == 4 and v["ws_slab"] == 128 * 16
+    assert (v["labels"].dtype, v["rlab"].dtype, v["W"].dtype) == (
+        torch.int64,
+        torch.float32,
+        torch.bfloat16,
+    )
+    for name in ("labels", "rlab", "W"):
+        assert v[name].data_ptr() == slab.data_ptr() and v[name].is_contiguous(), name
+    with pytest.raises(ValueError, match="fold alone"):
+        cake_backend.dx_slab_sum_operands(dx, slab, k_slices=1, m_tiles=1, ldc=16, cast_vec=8)
+    labels, rlab, W = torch.zeros(5, dtype=torch.int64), torch.zeros(5), torch.zeros(9, 16).bfloat16()
+    one = cake_backend.dx_slab_sum_operands(
+        dx, slab, k_slices=1, m_tiles=0, ldc=16, cast_vec=8, labels=labels, rlab=rlab, W=W, vocab=9
+    )
+    assert (one["n_slabs"], one["ws_slab"], one["lr"], one["V"], one["row_vecs"]) == (0, 0, 1, 9, 2)
+    assert one["labels"] is labels and one["rlab"] is rlab and one["W"] is W
 
 
 def test_reference_slab_sum_stores_without_reading_dx():
@@ -1516,6 +1613,131 @@ def test_reference_slab_sum_stores_without_reading_dx():
         assert _same_bits(dx, want), stage
 
 
+def _slab_sum_emulation(v: dict, rows: int, cols: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The FP32 torch form of a slab sum over the host values ``v`` of its key, from snapshots taken before it runs:
+    the slabs' sum in slice order (slab ``s`` at ``s * ws_slab`` of the flat ``ws``), or, with ``n_slabs`` 0, the rows
+    as they are; then, on each row whose label ``y`` lies in ``[0, V)`` and whose residual ``r`` is nonzero,
+    ``A + r * f32(W[y])`` (the product exact: the kernel's ``fma``).  Returns the rows and the mask of the rows it
+    folds."""
+    want, pitch = None, int(v["ws_slab"])
+    for s in range(int(v["n_slabs"])):
+        part = v["ws"][s * pitch : s * pitch + rows * cols].view(rows, cols)
+        want = part.clone() if want is None else want + part
+    if want is None:
+        want = v["dx"].clone()
+    y, r = v["labels"].long(), v["rlab"].clone()
+    fold = (r != 0) & (y >= 0) & (y < int(v["V"]))
+    w = v["W"].index_select(0, torch.where(fold, y, torch.zeros_like(y))).float()
+    return torch.where(fold[:, None], want + r[:, None] * w, want), fold
+
+
+def _check_label_residual(dz: torch.Tensor, rlab: torch.Tensor, labels: torch.Tensor, V: int, case) -> None:
+    """The producers' label residual on the BF16 ``dz`` rows they stored: on every row whose label lies in ``[0, V)``,
+    ``bf16(f32(dz[j, y]) + rlab[j]) == dz[j, y]`` (the residual is what the BF16 store dropped from the label column's
+    FP32 gradient); 0 on every other row."""
+    y = labels.long()
+    valid = (y >= 0) & (y < V)
+    col = dz.gather(1, torch.where(valid, y, torch.zeros_like(y))[:, None]).squeeze(1)
+    assert torch.equal((col.float() + rlab).bfloat16()[valid], col[valid]), case
+    assert torch.all(rlab[~valid] == 0), case
+
+
+def test_device_slab_sum_folds_the_label_residual(glm_weight):
+    """The generated ``dx_slab_sum`` against an FP32 torch emulation (:func:`_slab_sum_emulation`), bit for bit: the
+    prepared loss runner (4097 rows at chunk 4096, the slice rule's slices; then every chunk held to one slice by
+    :func:`set_dx_red_min_rows`, whose slab sums are the fold alone) stopped right before each chunk's slab-sum key.
+    At that point the chunk buffer holds the chunk's ``dz``, whose label column and ``rlab`` give back the FP32
+    gradient (:func:`_check_label_residual`)."""
+    _require_program(entry="loss")
+    inp = make_inputs(4097, seed=SEED + 52, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    V, H = int(glm_weight.shape[0]), int(glm_weight.shape[1])
+    folded, alone = 0, 0
+    for floor in (None, 1 << 20):
+        previous = None if floor is None else cake_backend.set_dx_red_min_rows(floor)
+        try:
+            runner = cake_backend.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                objective="ce",
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                backend="cake",
+            )
+        finally:
+            if floor is not None:
+                cake_backend.set_dx_red_min_rows(previous)
+        plan, t, order = runner.plan, runner.tensors, runner.forward_order
+        done = 0
+        for i, (row0, rows_c) in enumerate(plan.chunks):
+            key = (plan.dx_slab_sum_stage_of(i), i)
+            pos = order.index(key)
+            runner._run(order[done:pos])
+            torch.cuda.synchronize()
+            v = runner.values[key]
+            want, fold = _slab_sum_emulation(v, rows_c, H)
+            _check_label_residual(
+                t["logits"][:rows_c], v["rlab"], v["labels"], V, (floor, i)
+            )
+            runner._run(order[pos : pos + 1])
+            torch.cuda.synchronize()
+            assert _same_bits(v["dx"], want), (floor, i)
+            folded += int(fold.sum())
+            alone += int(v["n_slabs"]) == 0
+            done = pos + 1
+        runner._run(order[done:])
+        torch.cuda.synchronize()
+        del runner
+    assert folded > 0 and alone > 0, (folded, alone)
+
+
+def test_device_logprob_arms_store_the_same_label_residual(glm_weight):
+    """The log-probability ``dz`` arm (``logprob_dz``) and ``row_grad`` store the same BF16 ``dz`` and the same FP32
+    label residuals bit for bit (signed zeros included) on a one-chunk backward, with ignored rows (``-100`` and other
+    negative labels) and labels at and beyond the last vocabulary column; the residuals meet
+    :func:`_check_label_residual`.  The arms' ``dX`` equality rests on it."""
+    _require_program(entry="logprob")
+    name, _ = cake_backend.record_for(CUDA)
+    if "gemm_logits_dz" not in set(cake_backend.registered_stages(name)):
+        pytest.skip("the registered program has no log-probability dz arm")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -7, V - 1, 0, V, V + 5, 2 * V, 2**40], device=CUDA)
+    for T, ignore in ((1500, 0.05), (1500, 0.0), (3100, 0.5)):
+        inp = make_inputs(T, seed=SEED + 90 + T, device=CUDA, W=glm_weight, ignore_frac=ignore)
+        labels = inp.labels.clone()
+        labels[: edge.numel()] = edge
+        out = {}
+        for arm in (True, False):
+            lp = cake_backend.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                labels,
+                chunk_size=4096,
+                entry="logprob",
+                backend="cake",
+                dlogp=inp.dlogp,
+                logprob_dz=arm,
+                logprob_lbl=False,
+            )
+            assert lp.plan.num_chunks == 1 and bool(lp.plan.logprob_dz) == arm
+            lp.forward()
+            lp.backward()
+            torch.cuda.synchronize()
+            rows = lp.plan.rows
+            out[arm] = (
+                lp.tensors["logits"][:rows].clone(),
+                lp.tensors["rlab"][:rows].clone(),
+                lp.tensors["labels"][:rows].clone(),
+            )
+            del lp
+        case = (T, ignore)
+        assert _same_bits(out[True][0], out[False][0]), case
+        assert _same_bits(out[True][1], out[False][1]), case
+        dz, rlab, rows_labels = out[True]
+        _check_label_residual(dz, rlab, rows_labels, V, case)
+        assert bool((rlab != 0).any()), case
+
+
 def _det_sliced(stage: str) -> bool:
     """A deterministic K-sliced dX stage name (``gemm_dx_s`` and its forms; ``gemm_dx_st3`` is the plain store)."""
     return stage == "gemm_dx_s" or stage.startswith("gemm_dx_s_")
@@ -1532,12 +1754,13 @@ def test_no_slab_path_remains():
     assert slab_sums == {"dx_slab_sum", "dx_slab_sum_dcnt"}
     assert slab_sums <= stages and slab_sums <= set(cake_jit.ROW_STAGES)
     assert not slab_sums & set(cake_jit.GEMM_STAGES)
-    assert cake_backend.STAGE_TENSORS["dx_slab_sum"] == ("dx", "ws")
-    assert cake_backend.STAGE_TENSORS["dx_slab_sum_dcnt"] == ("dx", "ws", "CNT")
+    fold = ("labels", "rlab", "W")  # the label residual fold's operands
+    assert cake_backend.STAGE_TENSORS["dx_slab_sum"] == ("dx", "ws") + fold
+    assert cake_backend.STAGE_TENSORS["dx_slab_sum_dcnt"] == ("dx", "ws") + fold + ("CNT",)
     # the accumulating slab sum of the support path's later vocabulary blocks: not one of the plans' slab sums
     assert cake_backend.DX_SLAB_SUM_ACC_STAGE == "dx_slab_sum_acc"
     assert cake_backend.DX_SLAB_SUM_ACC_STAGE not in slab_sums
-    assert cake_backend.STAGE_TENSORS["dx_slab_sum_acc"] == ("dx", "ws")
+    assert cake_backend.STAGE_TENSORS["dx_slab_sum_acc"] == ("dx", "ws") + fold
     for name in ("_DX_TILE_COUNTERS", "_dx_tile_counters", "DX_TILE_COLS"):
         assert not hasattr(cake_backend, name), name
     red = {
@@ -1549,8 +1772,8 @@ def test_no_slab_path_remains():
         "gemm_dx_red_swab",
     }
     assert red <= stages and red <= set(cake_jit.GEMM_STAGES)
-    assert set(cake_backend.HOST_STAGES) == {"gather_rows"}
-    assert set(opt_in.HOST_STAGES) == {"gather_rows", "save_row_grad"}
+    assert set(cake_backend.HOST_STAGES) == {"gather_rows", "rlab_zero"}
+    assert set(opt_in.HOST_STAGES) == {"gather_rows", "save_row_grad", "rlab_zero"}
     for name in ("DX_REDUCE_STAGES", "DX_SLICED_STAGE", "_dx_reduce"):
         assert not hasattr(cake_backend, name), name
     assert "slab_sum" not in cake_backend.STAGE_TENSORS
@@ -2093,17 +2316,19 @@ def test_k_sliced_plans_start_their_sequences_with_chunk_0():
     """``Plan.dx_sliced``: the call needs ``dX`` and has a chunk of more than one slice.  The slab sum is the only
     writer of a sliced chunk's ``dX_acc`` rows, so no launch sequence of a K-sliced plan holds a step ahead of its
     chunk loop: the loss forward, the log-probability backward's recompute and the opt-in forward start with chunk 0's
-    launches and (no compaction) hold no host step.  A one-slice chunk keeps the plain-store form and has no slab
-    sum."""
+    launches and (no compaction) hold one host step, the zero fill of the label residuals right before chunk 0's
+    first row-gradient producer.  A one-slice chunk keeps the plain-store form and its slab sum is the fold alone."""
     mixed = _plan(7711)
     assert mixed.dx_slices == (4, 1) and mixed.dx_sliced
     assert mixed.dx_stage_of(0).startswith(cake_backend.DX_RED_STAGE)
     assert not mixed.dx_stage_of(1).startswith(cake_backend.DX_RED_STAGE)
     assert mixed.dx_slab_sum_stage_of(0) == cake_backend.DX_SLAB_SUM_STAGE
-    assert mixed.dx_slab_sum_stage_of(1) is None
+    assert mixed.dx_slab_sum_stage_of(1) == cake_backend.DX_SLAB_SUM_STAGE
     keys = cake_backend.forward_keys(mixed)
     assert keys[0] == (mixed.forward_logits_stage(0), 0), keys
-    assert not any(key[0] in cake_backend.HOST_STAGES for key in keys), keys
+    assert [key for key in keys if key[0] in cake_backend.HOST_STAGES] == [
+        (cake_backend.RLAB_ZERO_STAGE, None)
+    ], keys
     plain = _plan(2168)
     assert plain.dx_slices == (1,) and not plain.dx_sliced
     assert not _plan(7711, need_dx=False).dx_sliced
@@ -2111,8 +2336,12 @@ def test_k_sliced_plans_start_their_sequences_with_chunk_0():
     logprob = _plan(7711, entry="logprob")
     assert logprob.dx_sliced
     recompute = cake_backend.recompute_keys(logprob)
-    assert recompute[0][1] == 0, recompute
-    assert not any(key[0] in cake_backend.HOST_STAGES for key in recompute), recompute
+    zero = recompute.index((cake_backend.RLAB_ZERO_STAGE, None))
+    assert recompute[zero + 1][0] in cake_backend.DZ_PRODUCER_STAGES, recompute
+    assert recompute[zero + 1][1] == 0 and all(key[1] == 0 for key in recompute[:zero])
+    assert [key for key in recompute if key[0] in cake_backend.HOST_STAGES] == [
+        recompute[zero]
+    ], recompute
     opt_plan = opt_in.make_plan(
         mixed.problem,
         need_dx=True,
