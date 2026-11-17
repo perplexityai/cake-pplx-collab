@@ -58,7 +58,6 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 import torch
-import tvm_ffi
 
 from . import cake_build, cake_jit
 
@@ -207,8 +206,9 @@ def _launch(stage: str, name: str, values: Mapping[str, Any], dims: Mapping[str,
         except KeyError:
             raise ValueError(f"record {name} needs argument {key!r}") from None
     grid = cake_jit.grid(stage, dims["B"], dims["H"], dims["Sq"], dims["Skv"])
-    with torch.cuda.device(index), tvm_ffi.use_torch_stream():
-        _entry(name, arch)(*args, int(grid[0]), int(grid[1]), int(grid[2]))
+    # tvm-ffi runs the call on the current torch stream of the device of its first CUDA tensor argument (every
+    # buffer is on ``device``), and the binding makes that device current for the launch.
+    _entry(name, arch)(*args, int(grid[0]), int(grid[1]), int(grid[2]))
 
 
 def _fp32(value: float) -> float:
