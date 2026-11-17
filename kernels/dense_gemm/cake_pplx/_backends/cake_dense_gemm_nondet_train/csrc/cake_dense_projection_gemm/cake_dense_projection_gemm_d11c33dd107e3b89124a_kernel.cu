@@ -883,7 +883,7 @@ kernel_cake_dense_projection_gemm_d11c33dd107e3b89124a(const __grid_constant__ C
                         if (col_part == 0) {
                             #pragma unroll
                             for (int q_0 = 0; q_0 < 8; q_0++) {
-                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + (q_0 ^ local_row & 7) * 16))), "f"(run[4 * q_0]), "f"(run[4 * q_0 + 1]), "f"(run[4 * q_0 + 2]), "f"(run[4 * q_0 + 3]) : "memory");
+                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + q_0 * 16 ^ (local_row * 128 + q_0 * 16 >> 7 & 7) << 4))), "f"(run[4 * q_0]), "f"(run[4 * q_0 + 1]), "f"(run[4 * q_0 + 2]), "f"(run[4 * q_0 + 3]) : "memory");
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -903,7 +903,7 @@ kernel_cake_dense_projection_gemm_d11c33dd107e3b89124a(const __grid_constant__ C
                         if (col_part == 0) {
                             #pragma unroll
                             for (int q_1_1 = 0; q_1_1 < 8; q_1_1++) {
-                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + (q_1_1 ^ local_row & 7) * 16))), "f"(run[32 + 4 * q_1_1]), "f"(run[32 + 4 * q_1_1 + 1]), "f"(run[32 + 4 * q_1_1 + 2]), "f"(run[32 + 4 * q_1_1 + 3]) : "memory");
+                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + q_1_1 * 16 ^ (local_row * 128 + q_1_1 * 16 >> 7 & 7) << 4))), "f"(run[32 + 4 * q_1_1]), "f"(run[32 + 4 * q_1_1 + 1]), "f"(run[32 + 4 * q_1_1 + 2]), "f"(run[32 + 4 * q_1_1 + 3]) : "memory");
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -923,7 +923,7 @@ kernel_cake_dense_projection_gemm_d11c33dd107e3b89124a(const __grid_constant__ C
                         if (col_part == 1) {
                             #pragma unroll
                             for (int q_2 = 0; q_2 < 8; q_2++) {
-                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + (q_2 ^ local_row & 7) * 16))), "f"(run[4 * q_2]), "f"(run[4 * q_2 + 1]), "f"(run[4 * q_2 + 2]), "f"(run[4 * q_2 + 3]) : "memory");
+                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + q_2 * 16 ^ (local_row * 128 + q_2 * 16 >> 7 & 7) << 4))), "f"(run[4 * q_2]), "f"(run[4 * q_2 + 1]), "f"(run[4 * q_2 + 2]), "f"(run[4 * q_2 + 3]) : "memory");
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -943,7 +943,7 @@ kernel_cake_dense_projection_gemm_d11c33dd107e3b89124a(const __grid_constant__ C
                         if (col_part == 1) {
                             #pragma unroll
                             for (int q_3 = 0; q_3 < 8; q_3++) {
-                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + (q_3 ^ local_row & 7) * 16))), "f"(run[32 + 4 * q_3]), "f"(run[32 + 4 * q_3 + 1]), "f"(run[32 + 4 * q_3 + 2]), "f"(run[32 + 4 * q_3 + 3]) : "memory");
+                                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((box_addr + (unsigned int)(local_row * 128 + q_3 * 16 ^ (local_row * 128 + q_3 * 16 >> 7 & 7) << 4))), "f"(run[32 + 4 * q_3]), "f"(run[32 + 4 * q_3 + 1]), "f"(run[32 + 4 * q_3 + 2]), "f"(run[32 + 4 * q_3 + 3]) : "memory");
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -1203,6 +1203,7 @@ kernel_cake_dense_projection_gemm_d11c33dd107e3b89124a(const __grid_constant__ C
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                        __syncwarp();
                         if (elect_sync()) {
                             asm volatile(
                                 "mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];"

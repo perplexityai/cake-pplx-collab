@@ -1191,6 +1191,7 @@ kernel_cake_dense_projection_gemm_d2a44f7c9244b89772a2(const __grid_constant__ C
                             }
                         }
                         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                        __syncwarp();
                         if (elect_sync()) {
                             asm volatile(
                                 "mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];"
