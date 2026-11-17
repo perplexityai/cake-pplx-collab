@@ -20,27 +20,37 @@ Times the *complete operator* of both packages on the rows of
 ``benchmarks/bench_cake_dsa_indexer_det_train.py`` (loaded by path: its row
 definitions, input builders, CUPTI timer and deterministic arm are reused
 unchanged; ``--rows`` takes its row and group names, ``iid`` / ``sink`` /
-``pool`` / ``all`` / ``fp8``, the last measured in the BF16 form here):
+``pool`` / ``all`` / ``fp8``) in the input form of ``--form``:
 
 * ``det``: ``cake_pplx._backends.cake_dsa_indexer_det_train`` -- the
   scan, the split merge where the dispatch splits the key ranges, and the
   ordering pass that writes every row in ascending id order;
 * ``nondet``: ``cake_pplx._backends.cake_dsa_indexer_nondet_train``
   -- the same scan programs and the plain split merge, without an ordering
-  pass: every row holds the same set of (id, score bits) pairs in no
-  specified slot order.
+  pass: every row holds its selection in no specified slot order.
+
+With ``--form bf16`` (the default) every arm runs the BF16 form.  With
+``--form fp8`` every arm runs the FP8 form of its package on the
+deterministic benchmark's FP8 inputs (``build_fp8_inputs``: float8_e4m3fn
+``q`` / ``k`` with per-key FP32 ``k_scale``, amax scaling per (query, head)
+and per key, the query and softmax scales folded into ``w``) of the plain iid
+rows; ``--rows fp8`` (the default of the mode) is its FP8 shape set:
+``P1``, ``glm2k_16k`` (2048 queries over 16384 keys), ``s1_8k_on_64k`` (8192
+over 73728), ``s2_4x2k_packed`` (four segments of 2048 queries over 18432,
+43008, 67584 and 100352 keys) and ``s3_cold16k`` (16384 over 16384), top-k
+2048, causal.
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
 A/A band) and ``det_nosample`` / ``nondet_nosample`` run with the sampled
-first threshold off (``sample_tiles_max=0``).  The arms are compared as sets
-(``same_sets``: per row the valid count and the sorted (id, score bits)
-pairs), never slot by slot.  Every arm's plan is recorded;
-``same_scan_program`` says whether ``det`` and ``nondet`` dispatched the same
-scan key and split.  A row whose arms select different sets, whose output
-breaks the reference's structure checks (rows put in ascending id order) or,
-with ``--verify``, that fails the reference is flagged ``FAILED``: it gets no
-``det / nondet`` ratio, and the script exits non-zero after writing its JSON.
+first threshold off (``sample_tiles_max=0``).  Every arm's output is checked
+on its own, never against another arm's: the reference's structure checks on
+its rows put in ascending id order (unique visible ids, ``min(top_k,
+visible)`` valid slots per row, ``-1`` / ``-inf`` padding).  Every arm's plan
+is recorded; ``same_scan_program`` says whether ``det`` and ``nondet``
+dispatched the same scan key and split.  A row where an arm's output breaks
+the structure checks is flagged ``FAILED``: it gets no ``det / nondet`` ratio,
+and the script exits non-zero after writing its JSON.
 
 Timing: the deterministic benchmark's ``gpu_times``, CUPTI activity tracing
 through ``torch.profiler`` with a cold L2 between iterations (per-iteration GPU
@@ -51,10 +61,12 @@ reverse order (``BA``) and interleaved one call at a time (``IL``) -- and the
 medians of each phase and of all samples are reported with the wall time, the
 peak extra device memory and the workspace bytes.  Per row the script prints
 ``det`` ms, ``nondet`` ms and ``det / nondet`` (above 1: the non-deterministic
-package is faster), and a summary table at the end.  ``--verify`` judges every
-arm, its rows put in ascending id order first, against the FP64 / FP32
-reference of ``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
-only).
+package is faster), and a summary table at the end.  ``--verify`` compares
+every arm, its rows put in ascending id order first, with the FP64 selection of
+``tests/experimental/test_helpers/cake_dsa_indexer_reference.py`` (small rows
+only): the structure checks, and the number of rows whose ids equal the FP64
+selection's, as information (on Gaussian inputs the FP32 rounding may reorder
+keys whose FP64 scores are near-tied).
 
 Usage::
 
@@ -62,11 +74,12 @@ Usage::
         [--reps 20] [--strided-k] [--verify] [--cupti-required] [--json out.json]
     python benchmarks/bench_cake_dsa_indexer_nondet_train.py --rows sink --arms det,nondet,det_aa,nondet_aa
         --cupti-required --json out.json
+    python benchmarks/bench_cake_dsa_indexer_nondet_train.py --form fp8 --arms det,nondet,det_aa,nondet_aa
+        --cupti-required --json out.json
 """
 
 import argparse
 import importlib.util
-import itertools
 import json
 import math
 import statistics
@@ -100,28 +113,8 @@ det_backend = det_bench.cake_backend
 
 
 # ---------------------------------------------------------------------------
-# Rows as sets
+# Rows in ascending id order
 # ---------------------------------------------------------------------------
-
-
-def row_pairs(out) -> torch.Tensor:
-    """int64 ``[T, K]``: every slot as ``id << 32 | score bits``, each row sorted (the row's multiset of pairs)."""
-    ids, scores = out
-    bits = scores.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    return ((ids.to(torch.int64) << 32) | bits).sort(dim=1).values
-
-
-def valid_counts(indices) -> torch.Tensor:
-    return (indices >= 0).sum(dim=1)
-
-
-def same_sets(a, b) -> bool:
-    """Per row the same valid count and the same (id, score bits) pairs; slot order and padding positions free."""
-    if tuple(a[0].shape) != tuple(b[0].shape) or tuple(a[1].shape) != tuple(b[1].shape):
-        return False
-    return bool(torch.equal(valid_counts(a[0]), valid_counts(b[0]))) and bool(
-        torch.equal(row_pairs(a), row_pairs(b))
-    )
 
 
 def canonical(out):
@@ -147,6 +140,7 @@ def nondet_plan_record(inputs, knobs: dict) -> dict:
         ratio=inputs.ratio,
         device=inputs.device,
         **det_bench.row_extra(inputs),
+        **det_bench.form_extra(inputs),
         **knobs,
     )
     return dict(
@@ -185,6 +179,7 @@ class NondetArm(det_bench.Arm):
                 top_k=inputs.top_k,
                 ratio=inputs.ratio,
                 device=dev,
+                **det_bench.form_extra(inputs),
             )
         )
         self.workspace = torch.empty(
@@ -236,7 +231,7 @@ def _nondet(name, knobs=None):
 
 
 # name -> factory(inputs) -> Arm.  ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process A/A
-# band); the ``_nosample`` arms run the same programs with the sampled first threshold off: the same sets.
+# band); the ``_nosample`` arms run the same programs with the sampled first threshold off.
 ARMS = {
     "det": _det("det"),
     "nondet": _nondet("nondet"),
@@ -321,25 +316,19 @@ def measure_row(name, inputs, arms, args):
         )
         record["gpu_ms"]["all"] = statistics.median(every)
         result["arms"][arm_name] = record
-    # set identity of every pair of arms: the contract says every arm selects the same set per row
-    result["same_sets"] = {
-        f"{a}|{b}": same_sets(outputs[a], outputs[b])
-        for a, b in itertools.combinations(outputs, 2)
-    }
-    result["all_arms_same_sets"] = (
-        all(result["same_sets"].values()) if result["same_sets"] else None
-    )
     if args.verify:
         reference = ref.select_reference(inputs)
         for arm_name, out in outputs.items():
-            verdict = ref.judge(canonical(out), reference)
-            result["arms"][arm_name]["verdict"] = str(verdict).splitlines()[0]
-            result["arms"][arm_name]["verdict_passed"] = bool(verdict.passed)
-    # a row is correct when every pair of arms selects the same sets, no arm breaks the output structure and, with
-    # --verify, every arm passes the reference; no speedup is published for a row that is not
-    failures = [
-        f"same_sets {key}" for key, same in result["same_sets"].items() if not same
-    ]
+            failures, rows, same = ref.compare_selection(canonical(out), reference)
+            result["arms"][arm_name]["verdict"] = (
+                f"structure {failures[0]}"
+                if failures
+                else f"{same}/{rows} rows hold the FP64 selection's ids"
+            )
+            result["arms"][arm_name]["verdict_passed"] = not failures
+    # a row is correct when no arm breaks the output structure (each arm checked on its own, never against another
+    # arm); no speedup is published for a row that is not
+    failures = []
     for arm_name, rec in result["arms"].items():
         if rec["structure_failures"]:
             failures.append(f"{arm_name}: structure {rec['structure_failures'][0]}")
@@ -387,12 +376,6 @@ def print_row(result):
             f"  [{result['row']}] FAILED (no speedup published): {result['failures']}",
             flush=True,
         )
-    differing = [key for key, same in result["same_sets"].items() if not same]
-    tail = f"; DIFFER {differing}" if differing else ""
-    print(
-        f"  [{result['row']}] same_sets: {len(result['same_sets']) - len(differing)}/{len(result['same_sets'])} pairs{tail}",
-        flush=True,
-    )
 
 
 def print_summary(results):
@@ -400,13 +383,13 @@ def print_summary(results):
     rows = [r for r in results if "det_ms" in r]
     if not rows:
         return
-    print("\n| row | T | Tkv | top_k | det ms | nondet ms | det / nondet | same sets |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+    print("\n| row | T | Tkv | top_k | det ms | nondet ms | det / nondet |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for r in rows:
         ratio = "FAILED" if r["failures"] else f"{r['det_over_nondet']:.3f}"
         print(
             f"| {r['row']} | {r['T']} | {r['Tkv']} | {r['top_k']} | {r['det_ms']:.3f} | {r['nondet_ms']:.3f} | "
-            f"{ratio} | {r['all_arms_same_sets']} |"
+            f"{ratio} |"
         )
     ratios = [r["det_over_nondet"] for r in rows if not r["failures"]]
     if ratios:
@@ -426,11 +409,18 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
+        "--form",
+        choices=det_bench.FORMS,
+        default="bf16",
+        help="input form of every arm: bf16 (default) or fp8 (float8_e4m3fn q / k with per-key scales on the plain "
+        "iid rows; see the module docstring)",
+    )
+    parser.add_argument(
         "--rows",
         nargs="*",
         default=None,
-        help="rows of the deterministic benchmark to measure (default: its default rows; the group names iid / sink / "
-        "pool / all / fp8 expand)",
+        help="rows of the deterministic benchmark to measure (default: its default rows with --form bf16, its fp8 "
+        "group with --form fp8; the group names iid / sink / pool / all / fp8 expand)",
     )
     parser.add_argument(
         "--arms",
@@ -452,7 +442,7 @@ def main():
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="judge every arm against the FP64 / FP32 reference (small rows)",
+        help="compare every arm with the FP64 selection: structure, rows identical (small rows)",
     )
     parser.add_argument(
         "--cupti-required",
@@ -476,31 +466,34 @@ def main():
         raise SystemExit(
             f"an arm may be named once; use det_aa / nondet_aa for an A/A pair: {arms}"
         )
-    rows = det_bench.expand_rows(
-        det_bench.DEFAULT_ROWS if args.rows is None else args.rows
-    )
+    fp8 = args.form == "fp8"
+    if args.rows is None:
+        args.rows = det_bench.FP8_ROWS if fp8 else det_bench.DEFAULT_ROWS
+    rows = det_bench.expand_rows(args.rows)
     unknown_rows = [r for r in rows if r not in det_bench.ROWS]
     if unknown_rows:
         raise SystemExit(
             f"unknown rows {unknown_rows}; known: {sorted(det_bench.ROWS)} and the groups {sorted(det_bench.ROW_GROUPS)}"
         )
+    dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
     for package, backend in (("det", det_backend), ("nondet", nondet_backend)):
         used = any(a.split("_")[0] == package for a in arms)
-        if used and not backend.generated_program_available(device):
+        if used and not backend.generated_program_available(device, dtype=dtype):
             raise SystemExit(
-                f"generated {package} programs not registered for this device"
+                f"generated {package} programs of the {args.form} form not registered for this device"
             )
     print(
         f"{props.name} ({props.multi_processor_count} SMs, cc {props.major}.{props.minor}, CUDA {torch.version.cuda}), "
-        f"rows {rows}, arms {arms}"
+        f"rows {rows}, arms {arms}, form {args.form}"
     )
     print(f"timing boundary: {TIMING_BOUNDARY}", flush=True)
     results = []
     for name in rows:
-        inputs = det_bench.build_inputs(name, device, args.strided_k)
+        build = det_bench.build_fp8_inputs if fp8 else det_bench.build_inputs
+        inputs = build(name, device, args.strided_k)
         print(
             f"[{name}] T={inputs.num_queries} Tkv={inputs.num_keys} segments={inputs.num_segments} "
-            f"top_k={inputs.top_k} ratio={inputs.ratio}: {det_bench.ROWS[name]['note']}",
+            f"top_k={inputs.top_k} ratio={inputs.ratio} form={args.form}: {det_bench.ROWS[name]['note']}",
             flush=True,
         )
         result = measure_row(name, inputs, arms, args)
@@ -529,6 +522,7 @@ def main():
                     warmup=args.warmup,
                     reps=args.reps,
                     strided_k=args.strided_k,
+                    form=args.form,
                     timing_boundary=TIMING_BOUNDARY,
                 ),
                 indent=1,

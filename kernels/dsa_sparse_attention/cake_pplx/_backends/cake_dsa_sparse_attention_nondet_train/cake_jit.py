@@ -32,7 +32,12 @@ from . import cake_build
 # entry per stage: the ``library`` stem of its ``build.json`` entries
 # (``<library>_<arch>``, see ``cake_build``), the FFI entry and the launch
 # geometry the binding bakes in (block, cluster, cooperative launch, dynamic
-# shared memory, programmatic dependent launch).  Two records may name one
+# shared memory, programmatic dependent launch).  A stage entry may narrow the
+# record's architectures with its own ``arches``: its library ships for those
+# only.  On ``sm_107a`` each forward runs its scanner-warp build, the stage
+# ``SCAN_STAGES`` names (``arches`` ``["sm_107a"]``), in place of the forward
+# (whose ``arches`` are the other two): ``library_name`` resolves the forward
+# there to the scanner stage's library.  Two records may name one
 # library (the rope-independent delta, compaction and cast stages serve both
 # programs); their launch dicts then agree.  What each library compiles --
 # translation units, nvcc flags, digests -- is recorded in ``build.json`` only;
@@ -52,6 +57,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "bwd_main_pass",
             "bwd_main_pass_natural",
             "bwd_cast",
+            "fwd_scan",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -87,6 +93,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "fwd": {
             "library": "cake_dsa_h64_train_c949a885132a772bdb53",
             "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
             "launch": {
                 "block": [384, 1, 1],
                 "cluster": [1, 1, 1],
@@ -172,6 +179,18 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": False,
             },
         },
+        "fwd_scan": {
+            "library": "cake_dsa_h64_train_491a3b1d55552281da1a",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [416, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
     },
     # The native zero-RoPE (NoPE) training program: shared latent K = V of 512
     # dimensions, no rope operands, one combined FP32 dK + dV gradient of 2048 B
@@ -208,6 +227,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_main_pass",
             "nope_bwd_main_pass_natural",
             "nope_bwd_cast",
+            "nope_fwd_scan",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -232,6 +252,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "nope_fwd": {
             "library": "cake_dsa_h64_nope_train_46cdc056c891876ed545",
             "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
             "launch": {
                 "block": [320, 1, 1],
                 "cluster": [1, 1, 1],
@@ -317,6 +338,18 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": False,
             },
         },
+        "nope_fwd_scan": {
+            "library": "cake_dsa_h64_nope_train_d13be3d78a70edab8c99",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [352, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
     },
 }
 
@@ -339,7 +372,15 @@ FORWARD_STAGES = ("fwd",)
 STAGE_PREFIX = {PROGRAM: "", NOPE_PROGRAM: "nope_"}
 NOPE_STAGES = tuple(f"{STAGE_PREFIX[NOPE_PROGRAM]}{stage}" for stage in STAGES)
 NOPE_FORWARD_STAGES = NOPE_STAGES[:1]
-STAGES_OF = {PROGRAM: STAGES, NOPE_PROGRAM: NOPE_STAGES}
+# The scanner-warp builds of the two forwards: on the architectures of their
+# stage entries' ``arches`` (``sm_107a``) the host runs them in place of the
+# forward stage; the device's architecture alone chooses.  Same arguments,
+# grid and outputs as the forward they replace.
+SCAN_STAGES = {"fwd": "fwd_scan", "nope_fwd": "nope_fwd_scan"}
+STAGES_OF = {
+    PROGRAM: STAGES + (SCAN_STAGES["fwd"],),
+    NOPE_PROGRAM: NOPE_STAGES + (SCAN_STAGES["nope_fwd"],),
+}
 
 
 def stage_name(stage: str, program: str = PROGRAM) -> str:
@@ -373,8 +414,28 @@ def registered_stages(program: str = PROGRAM) -> tuple[str, ...]:
     return present
 
 
+def stage_arches(stage: str, program: str = PROGRAM) -> tuple[str, ...]:
+    """The architectures ``stage`` of ``program`` ships for: its entry's own ``arches``, else the record's."""
+    rec = record(program)
+    return tuple(rec[stage].get("arches", rec["arches"]))
+
+
+def stage_for(stage: str, arch: str, program: str = PROGRAM) -> str:
+    """The stage that runs ``stage`` of ``program`` on ``arch``: its scanner-warp build
+    (``SCAN_STAGES``) where that ships for ``arch``, else ``stage`` itself."""
+    scan = SCAN_STAGES.get(stage)
+    if (
+        scan is not None
+        and scan in record(program)
+        and arch in stage_arches(scan, program)
+    ):
+        return scan
+    return stage
+
+
 def library_name(stage: str, arch: str, program: str = PROGRAM) -> str:
-    """The ``build.json`` entry of ``stage`` of ``program`` on ``arch``: ``<library>_<arch>``."""
+    """The ``build.json`` entry that runs ``stage`` of ``program`` on ``arch``: ``<library>_<arch>``
+    of the stage, or of its scanner-warp build where that ships for ``arch`` (``stage_for``)."""
     rec = record(program)
     if arch not in rec["arches"]:
         raise RuntimeError(
@@ -385,6 +446,12 @@ def library_name(stage: str, arch: str, program: str = PROGRAM) -> str:
         raise NotImplementedError(
             f"stage {stage!r} of the generated DSA training program {program!r} is not "
             f"registered in this checkout (registered: {registered_stages(program)})"
+        )
+    stage = stage_for(stage, arch, program)
+    if arch not in stage_arches(stage, program):
+        raise RuntimeError(
+            f"stage {stage!r} of the DSA training program {program!r} ships for "
+            f"{list(stage_arches(stage, program))} only, not {arch!r}"
         )
     return f"{rec[stage]['library']}_{arch}"
 

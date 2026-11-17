@@ -56,8 +56,9 @@ walking the blocks ``b``, ``b + grid``, ``b + 2 * grid``, ... and loading each
 next block while it computes the current one.  The backward launches
 ``min(blocks, ctas_per_sm * SMs)`` CTAs of ``rows_per_block``-row blocks; past
 one block per CTA its CTAs claim the blocks in chunks whose rows are fixed by
-the row count and the grid, and add each chunk's weight-gradient terms exactly
-into fixed-point digits, so the weight gradient's bits depend on the rows and
+the row count and the grid, add each thread's FP32 runs of rows into plain
+FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
+so the weight gradient's bits depend on the rows and
 the SM count only, not on which CTA runs a chunk.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two
@@ -316,7 +317,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
@@ -406,7 +407,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
@@ -488,7 +489,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
@@ -578,7 +579,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 26368,
+            "dynamic_smem_bytes": 18176,
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",

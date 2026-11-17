@@ -14,21 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Independent reference for the DSA indexer top-k contract: input generators, an FP64 / FP32 scorer, the
-exact global selection with the contract's tie rule, the accumulation-error
-bound and the judgement of a result against the reference.  Shared by
-``tests/experimental/test_cake_dsa_indexer_det_train.py``,
-``tests/experimental/test_cake_dsa_indexer_det_train_fp8.py``,
-``tests/experimental/test_cake_dsa_indexer_det_train_api.py`` and
-``benchmarks/bench_cake_dsa_indexer_det_train.py``.
+exact global selection with the contract's tie rule, the scores of given keys in a chosen dtype and the
+structure checks of a result.  Shared by
+``tests/experimental/test_helpers/cake_dsa_indexer_naive.py`` (the training-accuracy judge of the operator tests),
+the operator suites under ``tests/experimental/``, ``benchmarks/bench_cake_dsa_indexer_det_train.py`` and
+``benchmarks/bench_cake_dsa_indexer_nondet_train.py``.
 
 Nothing here knows how the kernels partition queries or keys.
 
-Input generators.  ``make_random_inputs`` draws iid Gaussian ``q`` / ``k``
-(optionally ``peaked``); ``make_sink_inputs`` draws the attention-sink +
-local-band statistics (key 0 boosted along a
-shared direction, log-spaced sinusoid position features shared by every query
-and its nearby keys, positive ``w``), the distribution on which the sampled
-first threshold of the generated program is stress-tested.
+Input generators.  ``make_integer_inputs`` draws small integers: ``q`` / ``k`` uniform in ``[-2, 2]`` (BF16), ``w``
+uniform in ``[-2, 2]`` (FP32) and ``softmax_scale = 1/16`` (optionally ``peaked``); every head logit is then an
+integer and every score a multiple of ``1/16`` far below ``2**24`` of them, so every score is exact in FP32 under any
+summation order (:func:`exact_inputs`).  ``make_integer_fp8_inputs`` holds the same integers as float8_e4m3fn with
+per-key scales ``(1 + m / 2**21) * 2**e`` (``m`` odd, ``e`` in -3..3: never a power of two, below BF16's precision):
+the head sum stays an exact integer and the one scale multiply rounds once.  ``make_integer_sink_inputs`` is an
+integer analogue of the attention-sink + local-band statistics.  ``make_random_inputs`` / ``make_fp8_inputs`` /
+``make_sink_inputs`` draw the Gaussian (and amax-quantized e4m3) inputs of a serving stack, on which the FP32
+summation order rounds; ``make_sink_inputs`` holds the recorded attention-sink + local-band statistics
+(key 0 boosted along a shared direction, log-spaced sinusoid position features shared by every query and its nearby
+keys, positive ``w``), the distribution on which the sampled first threshold of the generated program is
+stress-tested.  The packed, tile-boundary and non-finite generators build on the integer inputs.
 
 Scoring.  For every visible (query, key) pair the FP64 score is treated as
 exact and an independent FP32 scorer that follows the generated program's
@@ -47,44 +52,30 @@ c_3)) * 0.5)``.  Because every chain starts from ``+0.0`` and
 all zero scores ``+0.0``: ``-0.0`` cannot arise from this reduction (the
 program's ``zero_sign_policy = "positive_accumulator"``).  ``order="matmul"``
 uses ``torch.matmul`` (TF32 disabled for FP32) for the dot products: much
-faster, but its bits depend on the operand shapes, so it is used only for
-bound-based comparisons; ``order="auto"`` picks ``sequential`` up to
+faster, but its bits depend on the operand shapes; ``order="auto"`` picks ``sequential`` up to
 ``SEQUENTIAL_PAIR_LIMIT`` visible pairs.
 
-Accumulation bound.  Two independent FP32 evaluations of one score differ by
-at most ``gamma_n * A`` with ``n = 2D + 4H + 4``, ``u = 2**-24``, ``gamma_n = n u
-/ (1 - n u)`` and ``A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|``
-(Higham: a sum or dot product of ``m`` terms evaluated in any order has
-forward error at most ``gamma_m(u) * sum |terms|``; one evaluation spends at
-most ``D`` roundings on the dot product, one on the scale, none on the
-monotone 1-Lipschitz relu, ``H`` on the head products and ``H`` on the head
-sum, plus one spare: ``D + 2H + 2``; two evaluations give ``2D + 4H + 4``.
-A tensor-core accumulation that truncates instead of rounding has unit
-roundoff ``2u``, and ``gamma_m(2u) <= gamma_2m(u)``, so the same ``n`` covers
-the kernel-versus-FP64 comparison).
-
-FP8 form.  Inputs with ``k_scale`` (``make_fp8_inputs``) hold float8_e4m3fn
+FP8 form.  Inputs with ``k_scale`` hold float8_e4m3fn
 ``q`` / ``k`` and score ``s = k_scale[j] * sum_h w_h relu(x_h)`` (``softmax_scale
 = 1``).  The product of two e4m3 values is exact and every partial sum of
 128 of them is a multiple of ``2**-18`` below ``2**25``, so the FP64 logits
 are exact in any order (``order="auto"`` picks ``matmul``); the head sum is
 FP64 and ``k_scale[j]`` multiplies it once.  The FP32 scorer rounds that head
 sum to FP32 and multiplies by ``k_scale[j]`` (one rounding each); it is not a
-model of a program's reduction, so FP8 judgements are bound-based only.  The
-bound keeps ``n = 2D + 4H + 4`` with ``A = |k_scale[j]| * sum_h |w_h| sum_d
-|q_hd k_jd|``.
+model of a program's reduction.
 
-Judgement.  Structure (shapes, dtypes, padding, uniqueness, ascending order,
-visibility and segment membership) is always exact.  Returned score bits must
-lie within the bound of both the FP64 score and the FP32 scorer
-(``exact_bits=True``: bitwise equal to the FP32 scorer, modulo the documented
-zero-sign policy).  Selected id sets must agree with the reference wherever
-the score separation exceeds the numerical uncertainty: in every differing
-row each key the result lacks must have an error interval ``[s - b, s + b]``
-that overlaps the interval of every key the result holds instead; a lacking
-key whose lower bound exceeds the upper bound of a held key is a clearly
-better key and fails the row.  ``exact_bits=True`` makes any id difference a
-failure.
+Selection.  :func:`select_reference` ranks every visible key by its FP64 score.  :func:`exact_selection` takes inputs
+whose scores are exact in FP32 (:func:`exact_inputs`) and ranks by the FP32 score the contract defines (the exact
+score, or for the FP8 form the exact head sum times ``k_scale`` rounded once): the top ``min(top_k, visible)`` keys
+by score descending, then by segment-local id descending (``+0 == -0``), in ascending id order, then ``(-1, -inf)``
+padding.  On such inputs that selection is the one result every program must return, so the ids and the counts
+compare exactly.  :func:`scores_at` scores given keys in FP64 (the oracle) or in BF16 (the naive tier: the einsum in
+BF16, the FP32 ``w`` and ``k_scale`` as stored, the result rounded to BF16).
+
+Structure.  :func:`structure_failures` checks shapes, dtypes, padding, uniqueness, ascending order, visibility and
+segment membership exactly.  :func:`compare_selection` reports, without a bound, how many rows of a result hold the
+reference's ids (benchmarks); on Gaussian inputs a row may differ where the FP32 rounding reorders keys whose FP64
+scores are near-tied, so the count is information there, not a verdict.
 """
 
 from __future__ import annotations
@@ -105,30 +96,15 @@ EXACT_SCALE = 2.0**-3
 TRAINER_KEY_ROW_STRIDE = 704
 PAD_ID = -1
 PAD_SCORE = float("-inf")
-FP32_UNIT_ROUNDOFF = 2.0**-24
 SEQUENTIAL_PAIR_LIMIT = 1 << 25
 CHUNK_BYTES = 1 << 30
 INT64_MAX = (1 << 63) - 1
-ZERO_SIGN_POLICIES = ("positive_accumulator", "ieee_sum")
 _GEN_ROWS = 1 << 17
-
-
-# ---------------------------------------------------------------------------
-# Bound
-# ---------------------------------------------------------------------------
-
-
-def accumulation_terms(num_heads: int = NUM_HEADS, head_dim: int = HEAD_DIM) -> int:
-    """``n = 2D + 4H + 4`` (module docstring)."""
-    return 2 * head_dim + 4 * num_heads + 4
-
-
-def gamma_bound(n: int, unit_roundoff: float = FP32_UNIT_ROUNDOFF) -> float:
-    """Higham's ``gamma_n = n u / (1 - n u)``."""
-    nu = n * unit_roundoff
-    if nu >= 1.0:
-        raise ValueError(f"gamma_n undefined for n u >= 1 (n = {n})")
-    return nu / (1.0 - nu)
+# the integer inputs: values uniform in [-INTEGER_RANGE, INTEGER_RANGE], softmax_scale INTEGER_SCALE (a power of two)
+INTEGER_RANGE = 2
+INTEGER_SCALE = 2.0**-4
+# exact_inputs: every partial sum of a score, counted in its smallest step, stays below this (FP32 holds 2**24)
+EXACT_SUM_LIMIT = 1 << 23
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +361,139 @@ def make_random_inputs(
     )
 
 
+def _integers(shape, gen, device, low: int, high: int) -> torch.Tensor:
+    """Uniform integers in ``[low, high]`` as FP32, drawn in row blocks (bounded int64 scratch)."""
+    out = torch.empty(shape, dtype=torch.float32, device=device)
+    rows = max(1, (1 << 24) // max(1, math.prod(shape[1:])))
+    for r0 in range(0, shape[0], rows):
+        r1 = min(shape[0], r0 + rows)
+        out[r0:r1].copy_(
+            torch.randint(low, high + 1, (r1 - r0, *shape[1:]), generator=gen, device=device)
+        )
+    return out
+
+
+def make_integer_inputs(
+    seg_q_len,
+    seg_k_len,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    seed: int = 0,
+    device="cuda",
+    peaked: bool = False,
+    ratio: int = 1,
+    q_causal_offsets=None,
+    k_row_stride: Optional[int] = None,
+    hot_keys_per_segment: int = 16,
+    label: str = "",
+) -> IndexerInputs:
+    """Seeded integer inputs whose every score is exact in FP32 under any summation order (:func:`exact_inputs`):
+    ``q`` / ``k`` uniform in ``[-2, 2]`` (BF16), signed ``w`` uniform in ``[-2, 2]`` (FP32), ``softmax_scale = 1/16``.
+    Equal scores are common, so the id rule of the contract decides many rows.
+
+    ``peaked=True`` adds a shared +-1 direction to every query and twice that direction to a few keys per segment, so
+    those keys dominate most rows (heavy-tailed scores).  ``k_row_stride`` returns ``k`` as the leading ``[:, :128]``
+    view of a wider packed ``[Tkv, k_row_stride]`` tensor.
+    """
+    device = torch.device(device)
+    gen = torch.Generator(device=device).manual_seed(int(seed))
+    seg_q_len = [int(x) for x in seg_q_len]
+    seg_k_len = [int(x) for x in seg_k_len]
+    T, Tkv = sum(seg_q_len), sum(seg_k_len)
+    r = INTEGER_RANGE
+    q = _integers((T, NUM_HEADS, HEAD_DIM), gen, device, -r, r)
+    w = _integers((T, NUM_HEADS), gen, device, -r, r)
+    width = HEAD_DIM if k_row_stride is None else int(k_row_stride)
+    if width < HEAD_DIM:
+        raise ValueError("k_row_stride must be >= 128")
+    k = _integers((Tkv, width), gen, device, -r, r)
+    if peaked:
+        direction = (
+            torch.randint(0, 2, (HEAD_DIM,), generator=gen, device=device) * 2 - 1
+        ).to(torch.float32)
+        q.add_(direction.view(1, 1, HEAD_DIM))
+        k_start = 0
+        for lk in seg_k_len:
+            n_hot = min(int(hot_keys_per_segment), lk)
+            if n_hot:
+                hot = torch.randperm(lk, generator=gen, device=device)[:n_hot] + k_start
+                k[hot, :HEAD_DIM] += 2.0 * direction.view(1, HEAD_DIM)
+            k_start += lk
+    k = k.to(torch.bfloat16)
+    return build_inputs(
+        q.to(torch.bfloat16),
+        k if k_row_stride is None else k[:, :HEAD_DIM],
+        w,
+        seg_q_len,
+        seg_k_len,
+        top_k=top_k,
+        softmax_scale=INTEGER_SCALE,
+        q_causal_offsets=q_causal_offsets,
+        ratio=ratio,
+        label=label,
+    )
+
+
+def integer_key_scales(n: int, gen, device) -> torch.Tensor:
+    """Per-key FP8 scales ``(1 + m / 2**21) * 2**e``, ``m`` odd in ``[1, 2**21)``, ``e`` in -3..3: exact in FP32,
+    never a power of two, and below BF16's precision, so two keys of equal integer head sums score differently and the
+    one scale multiply of a score rounds."""
+    m = torch.randint(0, 2**20, (n,), generator=gen, device=device) * 2 + 1
+    e = torch.randint(-3, 4, (n,), generator=gen, device=device)
+    return ((1 + m.double() / 2**21) * torch.pow(2.0, e.double())).float()
+
+
+def make_integer_fp8_inputs(
+    seg_q_len,
+    seg_k_len,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    seed: int = 0,
+    device="cuda",
+    ratio: int = 1,
+    q_causal_offsets=None,
+    k_row_stride: Optional[int] = None,
+    label: str = "",
+) -> IndexerInputs:
+    """FP8 inputs exact up to the scale multiply: ``q`` / ``k`` uniform integers in ``[-2, 2]`` as float8_e4m3fn
+    (exact), signed ``w`` uniform in ``[-2, 2]`` (FP32), ``softmax_scale = 1`` and per-key scales
+    :func:`integer_key_scales`.  Every head sum is an exact integer; the score is that sum times ``k_scale[j]``
+    rounded once (:func:`exact_selection`).  ``k_row_stride`` returns ``k`` as the leading ``[:, :128]`` view of a
+    wider ``[Tkv, k_row_stride]`` e4m3 tensor."""
+    base = make_integer_inputs(
+        seg_q_len,
+        seg_k_len,
+        top_k=top_k,
+        seed=seed,
+        device=device,
+        ratio=ratio,
+        q_causal_offsets=q_causal_offsets,
+        label=label,
+    )
+    device = base.device
+    gen = torch.Generator(device=device).manual_seed(int(seed) + 7919)
+    width = HEAD_DIM if k_row_stride is None else int(k_row_stride)
+    if width < HEAD_DIM:
+        raise ValueError("k_row_stride must be >= 128")
+    packed = torch.zeros((base.num_keys, width), dtype=torch.uint8, device=device).view(
+        torch.float8_e4m3fn
+    )
+    packed[:, :HEAD_DIM] = base.k.to(torch.float32).to(torch.float8_e4m3fn)
+    return build_inputs(
+        base.q.to(torch.float32).to(torch.float8_e4m3fn),
+        packed if k_row_stride is None else packed[:, :HEAD_DIM],
+        base.w,
+        base.seg_q_len,
+        base.seg_k_len,
+        top_k=top_k,
+        softmax_scale=1.0,
+        q_causal_offsets=q_causal_offsets,
+        ratio=ratio,
+        label=label,
+        k_scale=integer_key_scales(base.num_keys, gen, device),
+    )
+
+
 E4M3_MAX = 448.0
 
 
@@ -573,6 +682,76 @@ def make_sink_inputs(
         seg_k_len,
         top_k=top_k,
         softmax_scale=DEFAULT_SCALE,
+        q_causal_offsets=q_causal_offsets,
+        ratio=1,
+        label=label,
+    )
+
+
+def make_integer_sink_inputs(
+    seg_q_len,
+    seg_k_len,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+    seed: int = SINK_SEED,
+    device="cuda",
+    q_causal_offsets=None,
+    n_freq: int = SINK_NUM_FREQUENCIES,
+    label: str = "",
+) -> IndexerInputs:
+    """Integer attention-sink + local-band inputs, exact in FP32 (:func:`exact_inputs`).
+
+    Query ``u`` of a segment sits at document position ``offset + u`` (``offset`` the segment's causal offset,
+    ``Lk - Lq`` by default), key ``j`` at position ``j``.  Dims 0..63 carry the band: ``round(2 cos)`` and
+    ``round(2 sin)`` of ``pos * omega + phi`` for 32 random-phase frequencies ``2**-3 .. 2**-17`` (the position
+    features of :func:`make_sink_inputs` quantised to ``-2..2``), identical for a query and the keys at its position,
+    decaying with the log distance as the high frequencies decohere.  Dims 64..127 carry the sink: every query gets a
+    shared ``+-1`` direction, key 0 of every segment twice that direction.  Both get uniform ``-1..1`` noise; ``w`` is
+    1 or 2 (positive, like :func:`make_sink_inputs`).  With ``softmax_scale = 1/16`` every head logit is an integer of
+    magnitude at most 2560.  ``ratio`` is 1."""
+    device = torch.device(device)
+    seg_q_len = [int(x) for x in seg_q_len]
+    seg_k_len = [int(x) for x in seg_k_len]
+    if len(seg_q_len) != len(seg_k_len):
+        raise ValueError("query and key segment lists must have the same length")
+    offsets = effective_offsets(seg_q_len, seg_k_len, q_causal_offsets, 1)
+    q_pos = torch.cat(
+        [
+            torch.arange(off, off + lq, dtype=torch.int64)
+            for off, lq in zip(offsets, seg_q_len, strict=True)
+        ]
+    ).to(device)
+    k_pos = torch.cat([torch.arange(0, lk, dtype=torch.int64) for lk in seg_k_len]).to(
+        device
+    )
+    T, Tkv = int(q_pos.numel()), int(k_pos.numel())
+    gen = torch.Generator(device=device).manual_seed(int(seed))
+    omega = torch.logspace(-3, -17, n_freq, base=2.0, device=device, dtype=torch.float64)
+    phi = torch.rand(n_freq, generator=gen, device=device, dtype=torch.float64) * 2 * torch.pi
+    band_dims = 2 * n_freq
+    direction = (
+        torch.randint(0, 2, (HEAD_DIM - band_dims,), generator=gen, device=device) * 2 - 1
+    ).to(torch.float32)
+
+    def band(pos):
+        ang = pos.double()[:, None] * omega + phi
+        return torch.round(2 * torch.cat((ang.cos(), ang.sin()), 1)).to(torch.float32)
+
+    q = _integers((T, NUM_HEADS, HEAD_DIM), gen, device, -1, 1)
+    q[:, :, :band_dims] += band(q_pos)[:, None, :]
+    q[:, :, band_dims:] += direction
+    k = _integers((Tkv, HEAD_DIM), gen, device, -1, 1)
+    k[:, :band_dims] += band(k_pos)
+    k[:, band_dims:] += (k_pos == 0).to(torch.float32)[:, None] * 2 * direction
+    w = _integers((T, NUM_HEADS), gen, device, 1, 2)
+    return build_inputs(
+        q.to(torch.bfloat16),
+        k.to(torch.bfloat16),
+        w,
+        seg_q_len,
+        seg_k_len,
+        top_k=top_k,
+        softmax_scale=INTEGER_SCALE,
         q_causal_offsets=q_causal_offsets,
         ratio=1,
         label=label,
@@ -976,7 +1155,8 @@ def make_packed_inputs(
     """A packed geometry, optionally followed by ``extra_segments`` iid segments of ``extra_segment_queries``
     queries over ``extra_segment_keys`` keys (same ``top_k`` and ``ratio``; each appended segment sees all of its
     keys from its last query on, i.e. offset ``ratio * keys - queries``) so a call runs long enough for benchmark
-    timing to resolve small differences while the geometry's own segments stay exactly as declared."""
+    timing to resolve small differences while the geometry's own segments stay exactly as declared.  The values are
+    :func:`make_integer_inputs`'s (exact in FP32)."""
     spec = dict(PACKED_GEOMETRIES[name])
     seg_q_len = list(spec.pop("seg_q_len"))
     seg_k_len = list(spec.pop("seg_k_len"))
@@ -996,7 +1176,7 @@ def make_packed_inputs(
             )
         seg_q_len += [lq] * extra_segments
         seg_k_len += [lk] * extra_segments
-    return make_random_inputs(
+    return make_integer_inputs(
         seg_q_len,
         seg_k_len,
         device=device,
@@ -1010,8 +1190,9 @@ def make_packed_inputs(
 def make_boundary_inputs(
     lq: int, lk: int, *, top_k: int, device="cuda", seed: int = 7
 ) -> IndexerInputs:
-    """One segment of ``lq`` queries at the tail of ``lk`` keys (default offset ``lk - lq``)."""
-    return make_random_inputs(
+    """One segment of ``lq`` queries at the tail of ``lk`` keys (default offset ``lk - lq``), integer values
+    (:func:`make_integer_inputs`)."""
+    return make_integer_inputs(
         [lq],
         [lk],
         top_k=top_k,
@@ -1024,8 +1205,9 @@ def make_boundary_inputs(
 def make_nonfinite_inputs(
     device="cuda", *, seed: int = 11, top_k: int = 64
 ) -> IndexerInputs:
-    """Three segments: [0] finite, [1] NaN queries and infinite keys, [2] BF16-max values whose products overflow FP32."""
-    inputs = make_random_inputs(
+    """Three segments: [0] finite (integer values, :func:`make_integer_inputs`), [1] NaN queries and infinite keys,
+    [2] BF16-max values whose products overflow FP32."""
+    inputs = make_integer_inputs(
         [200, 64, 40],
         [200, 260, 40],
         top_k=top_k,
@@ -1049,6 +1231,26 @@ def make_nonfinite_inputs(
 def clean_rows(inputs: IndexerInputs) -> torch.Tensor:
     """Rows of the finite segment of :func:`make_nonfinite_inputs`."""
     return torch.arange(0, inputs.seg_q_len[0], dtype=torch.int64, device=inputs.device)
+
+
+def clean_segment(inputs: IndexerInputs) -> IndexerInputs:
+    """The finite first segment of :func:`make_nonfinite_inputs` as a problem of its own: its rows and keys come
+    first, so its rows and segment-local ids are the same in both problems."""
+    lq, lk = inputs.seg_q_len[0], inputs.seg_k_len[0]
+    return build_inputs(
+        inputs.q[:lq],
+        inputs.k[:lk],
+        inputs.w[:lq],
+        [lq],
+        [lk],
+        top_k=inputs.top_k,
+        softmax_scale=inputs.softmax_scale,
+        q_causal_offsets=None
+        if inputs.q_causal_offsets is None
+        else [int(inputs.q_causal_offsets[0])],
+        ratio=inputs.ratio,
+        label=f"{inputs.label}_clean",
+    )
 
 
 def dirty_rows(inputs: IndexerInputs) -> torch.Tensor:
@@ -1129,8 +1331,7 @@ def _fma_fp32(c: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor
     """``fl32(c + a * b)``: the product of two FP32 values is exact in FP64 and the
     FP64 sum is rounded once to FP32 (a double rounding differs from the fused
     operation only when the FP64 sum lands on an FP32 halfway point; the
-    bit-exact cases are exactly representable and never do, the bound-based
-    checks absorb it)."""
+    exactly representable cases never do)."""
     return (c.to(torch.float64) + a.to(torch.float64) * b.to(torch.float64)).to(
         torch.float32
     )
@@ -1193,58 +1394,32 @@ def score_block(
     scale: float,
     *,
     order: str = "sequential",
-    with_bound: bool = False,
     k_scale_rows: Optional[torch.Tensor] = None,
 ):
     """Scores of every (query, key) pair: ``q_rows [c, H, D]`` bf16, ``w_rows [c, H]`` fp32, ``k_rows [n, D]`` bf16.
 
-    Returns ``(s64 [c, n], s32 [c, n], A64 [c, n] or None)`` where ``A`` is the bound base of the module docstring.
-    ``k_scale_rows [n]`` (fp32): the FP8 form, with e4m3 ``q_rows`` / ``k_rows``.
+    Returns ``(s64 [c, n], s32 [c, n])``.  ``k_scale_rows [n]`` (fp32): the FP8 form, with e4m3 ``q_rows`` /
+    ``k_rows``.
     """
     if k_scale_rows is not None:
         q64, k64 = _fp64_values(q_rows), _fp64_values(k_rows)
-        s64, s32 = _fp8_scores(
-            _logits(q64, k64, order, batched=False), w_rows, k_scale_rows
-        )
-        bound_base = None
-        if with_bound:
-            abs_logits = torch.matmul(q64.abs(), k64.abs().t())
-            bound_base = (
-                torch.bmm(
-                    w_rows.to(torch.float64).abs().unsqueeze(1), abs_logits
-                ).squeeze(1)
-                * k_scale_rows.to(torch.float64).abs()
-                * scale
-            )
-        return s64, s32, bound_base
+        return _fp8_scores(_logits(q64, k64, order, batched=False), w_rows, k_scale_rows)
     q64, k64 = q_rows.to(torch.float64), k_rows.to(torch.float64)
     q32, k32 = q_rows.to(torch.float32), k_rows.to(torch.float32)
-    s64, s32 = _finish_scores(
+    return _finish_scores(
         _logits(q64, k64, order, batched=False),
         _logits(q32, k32, order, batched=False),
         w_rows,
         scale,
     )
-    bound_base = None
-    if with_bound:
-        abs_logits = torch.matmul(
-            q64.abs(), k64.abs().t()
-        )  # [c, H, n]; any order is fine for a bound
-        bound_base = (
-            torch.bmm(w_rows.to(torch.float64).abs().unsqueeze(1), abs_logits).squeeze(
-                1
-            )
-            * scale
-        )
-    return s64, s32, bound_base
 
 
 def score_selected(
     inputs: IndexerInputs, ids: torch.Tensor, *, rows=None, order: str = "sequential"
 ):
-    """Scores at a ``[R, K]`` table of segment-local ids (``-1`` = padding -> ``-inf`` / ``-inf`` / ``0``).
+    """Scores at a ``[R, K]`` table of segment-local ids (``-1`` = padding -> ``-inf`` / ``-inf``).
 
-    Returns ``(s64, s32, A64)`` of shape ``[R, K]`` for the rows ``rows`` (default: all rows).
+    Returns ``(s64, s32)`` of shape ``[R, K]`` for the rows ``rows`` (default: all rows).
     """
     device = inputs.device
     if rows is None:
@@ -1252,23 +1427,14 @@ def score_selected(
     R, K = int(rows.numel()), int(ids.shape[1])
     s64 = torch.full((R, K), PAD_SCORE, dtype=torch.float64, device=device)
     s32 = torch.full((R, K), PAD_SCORE, dtype=torch.float32, device=device)
-    a64 = torch.zeros((R, K), dtype=torch.float64, device=device)
     if R == 0 or K == 0 or inputs.num_keys == 0:
-        return s64, s32, a64
-    k_starts = torch.tensor(inputs.key_starts()[:-1], dtype=torch.int64, device=device)
-    seg = segment_of_rows(inputs)
+        return s64, s32
     per_row = K * (HEAD_DIM * 12 + NUM_HEADS * 40 + 64)
     chunk = max(1, min(R, CHUNK_BYTES // per_row))
     for r0 in range(0, R, chunk):
         r1 = min(R, r0 + chunk)
         rr = rows[r0:r1]
-        local = ids[r0:r1].to(torch.int64)
-        valid = local >= 0
-        # a padding id in a trailing empty key segment would point one past the last key: clamp it (``valid``
-        # discards its score)
-        global_ids = (k_starts[seg[rr]].unsqueeze(1) + local.clamp_min(0)).clamp_max(
-            inputs.num_keys - 1
-        )
+        global_ids, valid = _global_keys(inputs, rr, ids[r0:r1])
         wb = inputs.w.index_select(0, rr)
         if inputs.fp8:
             qb = _rows_of(inputs.q, rr)
@@ -1280,35 +1446,32 @@ def score_selected(
             )
             q64, k64 = _fp64_values(qb), _fp64_values(kb)
             b64, b32 = _fp8_scores(_logits(q64, k64, order, batched=True), wb, ksb)
-            abs_logits = torch.matmul(q64.abs(), k64.abs().transpose(1, 2))
-            base = (
-                torch.bmm(wb.to(torch.float64).abs().unsqueeze(1), abs_logits).squeeze(
-                    1
-                )
-                * ksb.to(torch.float64).abs()
-                * inputs.softmax_scale
+        else:
+            qb = inputs.q.index_select(0, rr)
+            kb = inputs.k.index_select(0, global_ids.reshape(-1)).reshape(
+                r1 - r0, K, HEAD_DIM
             )
-            s64[r0:r1] = torch.where(valid, b64, s64[r0:r1])
-            s32[r0:r1] = torch.where(valid, b32, s32[r0:r1])
-            a64[r0:r1] = torch.where(valid, base, a64[r0:r1])
-            continue
-        qb = inputs.q.index_select(0, rr)
-        kb = inputs.k.index_select(0, global_ids.reshape(-1)).reshape(
-            r1 - r0, K, HEAD_DIM
-        )
-        q64, k64 = qb.to(torch.float64), kb.to(torch.float64)
-        l64 = _logits(q64, k64, order, batched=True)
-        l32 = _logits(qb.to(torch.float32), kb.to(torch.float32), order, batched=True)
-        b64, b32 = _finish_scores(l64, l32, wb, inputs.softmax_scale)
-        abs_logits = torch.matmul(q64.abs(), k64.abs().transpose(1, 2))
-        base = (
-            torch.bmm(wb.to(torch.float64).abs().unsqueeze(1), abs_logits).squeeze(1)
-            * inputs.softmax_scale
-        )
+            l64 = _logits(qb.to(torch.float64), kb.to(torch.float64), order, batched=True)
+            l32 = _logits(qb.to(torch.float32), kb.to(torch.float32), order, batched=True)
+            b64, b32 = _finish_scores(l64, l32, wb, inputs.softmax_scale)
         s64[r0:r1] = torch.where(valid, b64, s64[r0:r1])
         s32[r0:r1] = torch.where(valid, b32, s32[r0:r1])
-        a64[r0:r1] = torch.where(valid, base, a64[r0:r1])
-    return s64, s32, a64
+    return s64, s32
+
+
+def _global_keys(inputs: IndexerInputs, rows: torch.Tensor, ids: torch.Tensor):
+    """``(global key rows [R, K], valid [R, K])`` of a ``[R, K]`` table of segment-local ids of the query rows
+    ``rows``.  A padding id (``-1``) is clamped onto a real key row (``valid`` discards it): one in a trailing empty
+    key segment would point one past the last key."""
+    k_starts = torch.tensor(
+        inputs.key_starts()[:-1], dtype=torch.int64, device=inputs.device
+    )
+    seg = segment_of_rows(inputs).index_select(0, rows)
+    local = ids.to(torch.int64)
+    global_ids = (k_starts[seg].unsqueeze(1) + local.clamp_min(0)).clamp_max(
+        max(0, inputs.num_keys - 1)
+    )
+    return global_ids, local >= 0
 
 
 def score_pairs(
@@ -1318,16 +1481,9 @@ def score_pairs(
     *,
     order: str = "sequential",
 ):
-    """Scores of arbitrary ``(row, local id)`` pairs (int64 ``[n]`` each): ``(s64 [n], s32 [n], A64 [n])``."""
-    s64, s32, a64 = score_selected(inputs, ids.view(-1, 1), rows=rows, order=order)
-    return s64[:, 0], s32[:, 0], a64[:, 0]
-
-
-def pair_bound(inputs: IndexerInputs, bound_base: torch.Tensor) -> torch.Tensor:
-    """``gamma_n * A`` for a tensor of bound bases ``A``."""
-    return bound_base * gamma_bound(
-        accumulation_terms(inputs.q.shape[1], inputs.q.shape[2])
-    )
+    """Scores of arbitrary ``(row, local id)`` pairs (int64 ``[n]`` each): ``(s64 [n], s32 [n])``."""
+    s64, s32 = score_selected(inputs, ids.view(-1, 1), rows=rows, order=order)
+    return s64[:, 0], s32[:, 0]
 
 
 def count_visible_pairs(inputs: IndexerInputs) -> int:
@@ -1352,7 +1508,74 @@ def resolve_order(inputs: IndexerInputs, order: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Exact selection
+# Structure
+# ---------------------------------------------------------------------------
+
+
+def structure_failures(
+    inputs: IndexerInputs,
+    indices: torch.Tensor,
+    scores: torch.Tensor,
+    *,
+    rows=None,
+    finite_domain: bool = True,
+) -> list[str]:
+    """Exact structural checks: shapes, dtypes, padding, uniqueness, ascending order, visibility."""
+    failures: list[str] = []
+    T, K = inputs.num_queries, inputs.top_k
+    if tuple(indices.shape) != (T, K):
+        failures.append(f"indices shape {tuple(indices.shape)} != {(T, K)}")
+    if tuple(scores.shape) != (T, K):
+        failures.append(f"scores shape {tuple(scores.shape)} != {(T, K)}")
+    if indices.dtype != torch.int32:
+        failures.append(f"indices dtype {indices.dtype} != int32")
+    if scores.dtype != torch.float32:
+        failures.append(f"scores dtype {scores.dtype} != float32")
+    if failures:
+        return failures
+    device = indices.device
+    visible = visible_rows(inputs, device)
+    selected = visible.clamp(max=K)
+    if rows is not None:
+        rows = rows.to(device=device, dtype=torch.int64)
+        indices, scores, visible, selected = (
+            indices[rows],
+            scores[rows],
+            visible[rows],
+            selected[rows],
+        )
+    if indices.shape[0] == 0:
+        return failures
+    slot = torch.arange(K, dtype=torch.int64, device=device).unsqueeze(0)
+    valid = slot < selected.unsqueeze(1)
+    ids = indices.to(torch.int64)
+
+    def first(mask: torch.Tensor, what: str) -> None:
+        if bool(mask.any()):
+            r, c = mask.nonzero()[0].tolist()
+            row = int(rows[r].item()) if rows is not None else r
+            failures.append(
+                f"{what} at row {row} slot {c} (id={int(ids[r, c])}, score={float(scores[r, c])!r})"
+            )
+
+    first(
+        valid & ((ids < 0) | (ids >= visible.unsqueeze(1))),
+        "invisible or out-of-segment id in a valid slot",
+    )
+    first((~valid) & (ids != PAD_ID), "padding slot without id -1")
+    first((~valid) & ~torch.isneginf(scores), "padding slot without -inf score")
+    if K > 1:
+        first(
+            valid[:, 1:] & ~(ids[:, 1:] > ids[:, :-1]),
+            "ids not strictly ascending (duplicate or unsorted)",
+        )
+    if finite_domain:
+        first(valid & ~torch.isfinite(scores), "non-finite score in a valid slot")
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# Selection by the FP64 score
 # ---------------------------------------------------------------------------
 
 
@@ -1410,12 +1633,13 @@ def select_reference(
     key_chunk: Optional[int] = None,
     chunk_bytes: int = CHUNK_BYTES,
 ) -> ReferenceSelection:
-    """Exact global selection per row with the contract's tie rule, memory-bounded over keys.
+    """Global selection per row by the FP64 score with the contract's tie rule, memory-bounded over keys.
 
     Ranking uses the FP64 score.  ``query_chunk`` / ``key_chunk`` change only
     the work partition: with ``order="sequential"`` the result is bitwise
     identical for every partition, with ``"matmul"`` only up to the BLAS
-    rounding of the dot products (bound-based comparisons only).
+    rounding of the dot products.  On inputs whose scores are exact in FP32
+    (:func:`exact_inputs`) it is :func:`exact_selection`'s selection.
     """
     order = resolve_order(inputs, order)
     device = inputs.device
@@ -1452,7 +1676,7 @@ def select_reference(
             best_s64 = torch.empty((c, 0), dtype=torch.float64, device=device)
             for j0 in range(0, j_end, ck):
                 j1 = min(j_end, j0 + ck)
-                s64, s32, _ = score_block(
+                s64, s32 = score_block(
                     qb,
                     wb,
                     inputs.k[k0 + j0 : k0 + j1],
@@ -1545,267 +1769,185 @@ def bruteforce_rows(inputs: IndexerInputs) -> tuple[list[list[int]], list[list[f
 
 
 # ---------------------------------------------------------------------------
-# Judgement
+# Exact selection on inputs exact in FP32, and the scores of given keys
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class Judgement:
-    passed: bool
-    failures: list[str]
-    rows: int
-    rows_identical: int
-    rows_within_uncertainty: int
-    max_fp64_error_over_bound: float
-    max_fp32_error_over_bound: float
-    details: dict[str, Any] = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        head = "PASS" if self.passed else "FAIL"
-        text = (
-            f"{head}: rows={self.rows} identical={self.rows_identical} within_uncertainty={self.rows_within_uncertainty} "
-            f"max|err64|/bound={self.max_fp64_error_over_bound:.3g} max|err32|/bound={self.max_fp32_error_over_bound:.3g}"
-        )
-        if self.failures:
-            text += "\n  " + "\n  ".join(self.failures[:20])
-            if len(self.failures) > 20:
-                text += f"\n  ... {len(self.failures) - 20} more"
-        return text
+def _values32(x: torch.Tensor) -> torch.Tensor:
+    """FP32 values of BF16 / e4m3 / FP32 elements (exact)."""
+    return x.to(torch.float32)
 
 
-def structure_failures(
+def _dyadic_step(w: torch.Tensor) -> Optional[int]:
+    """The smallest ``e`` in ``0 .. 12`` with every ``w * 2**e`` an integer, or None."""
+    for e in range(13):
+        v = w * float(2**e)
+        if bool((v == v.round()).all()):
+            return e
+    return None
+
+
+def exact_inputs(inputs: IndexerInputs) -> Optional[str]:
+    """Why the scores of ``inputs`` are not exact in FP32 under every summation order, or None when they are.
+
+    They are when ``q`` and ``k`` hold integers, every ``w`` is a multiple of ``2**-e`` (``e <= 12``),
+    ``softmax_scale`` is a power of two (the FP8 form: 1) and the head sum of every row, counted in its step
+    ``softmax_scale * 2**-e``, stays below :data:`EXACT_SUM_LIMIT` in magnitude for twice the largest head terms (the
+    program's ``r_h = 2 relu(x_h)``).  Then every product, partial sum and final score of a (query, key) pair is an
+    FP32 value, the FP8 form's one ``k_scale`` multiply aside (rounded once, as the contract defines it)."""
+    q, k, w = _values32(inputs.q), _values32(inputs.k), inputs.w.to(torch.float32)
+    for name, x in (("q", q), ("k", k), ("w", w)):
+        if not bool(torch.isfinite(x).all()):
+            return f"{name} holds a non-finite value"
+    if not bool((q == q.round()).all()) or not bool((k == k.round()).all()):
+        return "q and k must hold integers"
+    step = _dyadic_step(w)
+    if step is None:
+        return "every w must be a multiple of 2**-12"
+    mantissa, _ = math.frexp(inputs.softmax_scale)
+    if inputs.softmax_scale <= 0 or mantissa != 0.5:
+        return f"softmax_scale {inputs.softmax_scale} is not a power of two"
+    if inputs.fp8 and not bool(torch.isfinite(inputs.k_scale).all()):
+        return "k_scale holds a non-finite value"
+    if inputs.num_queries == 0 or inputs.num_keys == 0:
+        return None
+    k_max = k.abs().amax(dim=0)  # [D]: the largest |k| of every dimension
+    logit_max = (q.abs() * k_max).sum(dim=-1)  # [T, H]: a bound on every |x_h| of the row
+    head_max = (w.abs() * logit_max).sum(dim=-1).max()  # the largest head sum of any row
+    units = float(head_max) * 2 * 2**step
+    if units >= EXACT_SUM_LIMIT:
+        return f"a head sum reaches {units:.0f} steps of 2**-{step}: not exact in FP32"
+    return None
+
+
+def order_key(scores32: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+    """The contract's order as a non-negative int64: ``key32 << 31 | id`` with ``key32`` the FP32 score's bits mapped
+    to an unsigned order (``-0.0`` as ``+0.0``, NaN lowest); a larger key ranks first (score descending, then id
+    descending)."""
+    m = scores32.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    m = torch.where((m & 0x7FFFFFFF) == 0, torch.zeros_like(m), m)
+    key32 = torch.where(m & 0x80000000 != 0, ~m & 0xFFFFFFFF, m | 0x80000000)
+    key32 = torch.where((m & 0x7FFFFFFF) > 0x7F800000, torch.zeros_like(key32), key32)
+    return (key32 << 31) | ids.to(torch.int64)
+
+
+def exact_selection(inputs: IndexerInputs, *, chunk_elems: int = 1 << 27) -> ReferenceSelection:
+    """The exact top-``min(top_k, visible)`` of every row of inputs whose scores are exact in FP32
+    (:func:`exact_inputs`, else ``ValueError``): ranked by the FP32 score the contract defines (score descending,
+    segment-local id descending, ``+0 == -0``), ids in ascending order, then ``(-1, -inf)`` padding.  ``scores`` holds
+    the FP32 scores of the kept keys and ``scores_fp64`` their FP64 scores (:func:`scores_at`).  The logits run in FP32
+    with TF32 off, ``chunk_elems`` logits at a time (exact on these inputs in any order)."""
+    reason = exact_inputs(inputs)
+    if reason is not None:
+        raise ValueError(f"exact_selection needs inputs exact in FP32: {reason}")
+    device = inputs.device
+    T, K = inputs.num_queries, inputs.top_k
+    out_ids = torch.full((T, K), PAD_ID, dtype=torch.int32, device=device)
+    out_s32 = torch.full((T, K), PAD_SCORE, dtype=torch.float32, device=device)
+    visible = visible_rows(inputs)
+    q_starts, k_starts = inputs.query_starts(), inputs.key_starts()
+    q32, w32 = _values32(inputs.q), inputs.w.to(torch.float32)
+    with fp32_ieee_matmul():
+        for s in range(inputs.num_segments):
+            q0, lq = q_starts[s], inputs.seg_q_len[s]
+            k0, lk = k_starts[s], inputs.seg_k_len[s]
+            if lq == 0 or lk == 0:
+                continue
+            keep = min(K, lk)
+            keys = _values32(inputs.k[k0 : k0 + lk])
+            scale = (
+                inputs.k_scale[k0 : k0 + lk].to(torch.float32)
+                if inputs.fp8
+                else inputs.softmax_scale
+            )
+            ids = torch.arange(lk, dtype=torch.int64, device=device).unsqueeze(0)
+            step = max(1, min(lq, chunk_elems // (NUM_HEADS * lk)))
+            for t0 in range(q0, q0 + lq, step):
+                t1 = min(q0 + lq, t0 + step)
+                logits = torch.matmul(q32[t0:t1], keys.t())  # [c, H, lk], exact
+                head = (logits.clamp_min(0) * w32[t0:t1].unsqueeze(-1)).sum(dim=1)
+                s32 = head * scale + 0.0  # exact, or the FP8 form's one rounding; -0.0 -> +0.0
+                key = order_key(s32, ids.expand(t1 - t0, -1))
+                key = torch.where(ids < visible[t0:t1].unsqueeze(1), key, torch.full_like(key, -1))
+                best = key.topk(keep, dim=1)
+                chosen = torch.where(best.values >= 0, best.indices, torch.full_like(best.indices, -1))
+                order = torch.where(chosen >= 0, chosen, torch.full_like(chosen, INT64_MAX)).argsort(dim=1)
+                chosen = chosen.gather(1, order)
+                picked = s32.gather(1, chosen.clamp_min(0))
+                out_ids[t0:t1, :keep] = chosen.to(torch.int32)
+                out_s32[t0:t1, :keep] = torch.where(chosen >= 0, picked, torch.full_like(picked, PAD_SCORE))
+    return ReferenceSelection(
+        inputs=inputs,
+        indices=out_ids,
+        scores=out_s32,
+        scores_fp64=scores_at(inputs, out_ids, torch.float64),
+        visible=visible,
+        selected_count=visible.clamp(max=K),
+        order="exact",
+    )
+
+
+def _stored(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """``x`` as a computation in ``dtype`` reads it: cast to ``dtype`` when ``x`` is stored no wider, else as is (the
+    FP32 ``w`` and ``k_scale`` stay FP32 in a BF16 computation)."""
+    return x.to(dtype) if x.dtype.itemsize <= dtype.itemsize else x
+
+
+def scores_at(
     inputs: IndexerInputs,
-    indices: torch.Tensor,
-    scores: torch.Tensor,
+    ids: torch.Tensor,
+    dtype: torch.dtype,
     *,
     rows=None,
-    finite_domain: bool = True,
-) -> list[str]:
-    """Exact structural checks: shapes, dtypes, padding, uniqueness, ascending order, visibility."""
-    failures: list[str] = []
-    T, K = inputs.num_queries, inputs.top_k
-    if tuple(indices.shape) != (T, K):
-        failures.append(f"indices shape {tuple(indices.shape)} != {(T, K)}")
-    if tuple(scores.shape) != (T, K):
-        failures.append(f"scores shape {tuple(scores.shape)} != {(T, K)}")
-    if indices.dtype != torch.int32:
-        failures.append(f"indices dtype {indices.dtype} != int32")
-    if scores.dtype != torch.float32:
-        failures.append(f"scores dtype {scores.dtype} != float32")
-    if failures:
-        return failures
-    device = indices.device
-    visible = visible_rows(inputs, device)
-    selected = visible.clamp(max=K)
-    if rows is not None:
-        rows = rows.to(device=device, dtype=torch.int64)
-        indices, scores, visible, selected = (
-            indices[rows],
-            scores[rows],
-            visible[rows],
-            selected[rows],
-        )
-    if indices.shape[0] == 0:
-        return failures
-    slot = torch.arange(K, dtype=torch.int64, device=device).unsqueeze(0)
-    valid = slot < selected.unsqueeze(1)
-    ids = indices.to(torch.int64)
-
-    def first(mask: torch.Tensor, what: str) -> None:
-        if bool(mask.any()):
-            r, c = mask.nonzero()[0].tolist()
-            row = int(rows[r].item()) if rows is not None else r
-            failures.append(
-                f"{what} at row {row} slot {c} (id={int(ids[r, c])}, score={float(scores[r, c])!r})"
-            )
-
-    first(
-        valid & ((ids < 0) | (ids >= visible.unsqueeze(1))),
-        "invisible or out-of-segment id in a valid slot",
-    )
-    first((~valid) & (ids != PAD_ID), "padding slot without id -1")
-    first((~valid) & ~torch.isneginf(scores), "padding slot without -inf score")
-    if K > 1:
-        first(
-            valid[:, 1:] & ~(ids[:, 1:] > ids[:, :-1]),
-            "ids not strictly ascending (duplicate or unsorted)",
-        )
-    if finite_domain:
-        first(valid & ~torch.isfinite(scores), "non-finite score in a valid slot")
-    return failures
+    chunk_elems: int = 1 << 25,
+) -> torch.Tensor:
+    """The scores ``sum_h w_h relu(x_h) * scale`` of a ``[R, K]`` table of segment-local ids of the query rows ``rows``
+    (default: all rows) in ``dtype`` (``-inf`` at padding ids): ``q`` and ``k`` in ``dtype`` (exact from BF16 and
+    e4m3), the einsum, ReLU and weighted head sum in torch in ``dtype`` with the FP32 ``w`` and ``k_scale`` as stored
+    (:func:`_stored`), ``scale`` the softmax scale (the FP8 form: ``k_scale[j]``), the result rounded to ``dtype``.
+    ``torch.float64`` gives the oracle; ``torch.bfloat16`` the naive tier."""
+    device = inputs.device
+    if rows is None:
+        rows = torch.arange(inputs.num_queries, dtype=torch.int64, device=device)
+    rows = rows.to(device=device, dtype=torch.int64)
+    R, K = int(rows.numel()), int(ids.shape[1])
+    out = torch.full((R, K), PAD_SCORE, dtype=dtype, device=device)
+    if R == 0 or K == 0 or inputs.num_keys == 0:
+        return out
+    step = max(1, chunk_elems // (K * HEAD_DIM))
+    for r0 in range(0, R, step):
+        r1 = min(R, r0 + step)
+        rr = rows[r0:r1]
+        keys, valid = _global_keys(inputs, rr, ids[r0:r1])
+        q = _values32(_rows_of(inputs.q, rr)).to(dtype)
+        k = _values32(_rows_of(inputs.k, keys.reshape(-1))).to(dtype).reshape(r1 - r0, K, HEAD_DIM)
+        logits = torch.einsum("rhd,rkd->rhk", q, k)
+        head = (logits.relu() * _stored(inputs.w.index_select(0, rr), dtype).unsqueeze(-1)).sum(dim=1)
+        if inputs.fp8:
+            scale = _stored(inputs.k_scale.index_select(0, keys.reshape(-1)).reshape(r1 - r0, K), dtype)
+        else:
+            scale = inputs.softmax_scale
+        value = (head * scale).to(dtype)
+        out[r0:r1] = torch.where(valid, value, torch.full_like(value, PAD_SCORE))
+    return out
 
 
-def judge(
-    result,
-    reference: ReferenceSelection,
-    *,
-    exact_bits: bool = False,
-    zero_sign_policy: str = "positive_accumulator",
-    rows=None,
-    bound=None,
-) -> Judgement:
-    """Judge ``result = (indices, scores)`` against the reference under the near-tie rule (module docstring).
-
-    ``bound``: ``None`` -> ``gamma_n * A`` per pair; a float -> uniform absolute bound.  ``exact_bits=True``
-    demands id equality and bitwise equality with the FP32 scorer (exactly representable problems).  The scorer
-    follows the positive-accumulator reduction of the generated program (module docstring), so that is the only
-    ``zero_sign_policy`` it can judge bit-exactly; a program declaring another policy needs its own model.
-    """
-    if zero_sign_policy not in ZERO_SIGN_POLICIES:
-        raise ValueError(
-            f"zero_sign_policy must be one of {ZERO_SIGN_POLICIES}, got {zero_sign_policy!r}"
-        )
-    if zero_sign_policy != "positive_accumulator":
-        raise NotImplementedError(
-            f"the reference models the positive-accumulator reduction; no model for {zero_sign_policy!r}"
-        )
-    inputs, order = reference.inputs, reference.order
-    if exact_bits and inputs.fp8:
-        raise ValueError(
-            "the FP8 form has no FP32 program model: judge it against the bound"
-        )
+def compare_selection(result, reference: ReferenceSelection, *, rows=None) -> tuple[list[str], int, int]:
+    """``(structure failures, rows compared, rows whose ids equal the reference's)`` of ``result = (indices,
+    scores)`` with rows in ascending id order.  No bound: on inputs exact in FP32 every row must hold the reference's
+    ids; on Gaussian inputs the FP32 rounding may reorder keys whose FP64 scores are near-tied, so the count is
+    reported as information (benchmarks)."""
     indices, scores = result
-    failures = structure_failures(inputs, indices, scores, rows=rows)
+    failures = structure_failures(reference.inputs, indices, scores, rows=rows)
     if failures:
-        return Judgement(
-            False, failures, 0, 0, 0, math.inf, math.inf, {"stage": "structure"}
-        )
-    device = indices.device
-    T, K = inputs.num_queries, inputs.top_k
-    rows = (
-        torch.arange(T, dtype=torch.int64, device=device)
-        if rows is None
-        else rows.to(device=device, dtype=torch.int64)
-    )
-    R = int(rows.numel())
-    got_ids = indices.index_select(0, rows).to(torch.int64)
-    got_scores = scores.index_select(0, rows)
-    ref_ids = reference.indices.index_select(0, rows).to(torch.int64)
-    selected = reference.selected_count.index_select(0, rows)
-    slot = torch.arange(K, dtype=torch.int64, device=device).unsqueeze(0)
-    valid = slot < selected.unsqueeze(1)
-
-    def bound_of(base: torch.Tensor) -> torch.Tensor:
-        return (
-            pair_bound(inputs, base)
-            if bound is None
-            else torch.full_like(base, float(bound))
-        )
-
-    # 1. returned score bits against the exact score and the independent FP32 scorer
-    s64, s32, base = score_selected(inputs, got_ids, rows=rows, order=order)
-    b = bound_of(base)
-    got64 = got_scores.to(torch.float64)
-    zero = torch.zeros((), dtype=torch.float64, device=device)
-    err64 = torch.where(valid, (got64 - s64).abs(), zero)
-    err32 = torch.where(valid, (got64 - s32.to(torch.float64)).abs(), zero)
-    safe = torch.where(b > 0, b, torch.ones_like(b))
-    inf = torch.full_like(b, math.inf)
-    ratio64 = torch.where(b > 0, err64 / safe, torch.where(err64 > 0, inf, zero))
-    ratio32 = torch.where(b > 0, err32 / safe, torch.where(err32 > 0, inf, zero))
-    max64 = float(ratio64.max().item()) if R else 0.0
-    max32 = float(ratio32.max().item()) if R else 0.0
-    for mask, what in (
-        (valid & (err64 > b), "score outside the bound of the exact FP64 score"),
-        (valid & (err32 > b), "score outside the bound of the FP32 scorer"),
-    ):
-        if bool(mask.any()):
-            r, c = mask.nonzero()[0].tolist()
-            failures.append(
-                f"{what} at row {int(rows[r])} slot {c}: id={int(got_ids[r, c])} got={float(got_scores[r, c]):.9g} "
-                f"exact={float(s64[r, c]):.9g} fp32={float(s32[r, c]):.9g} bound={float(b[r, c]):.3g}"
-            )
-    if exact_bits:
-        expected32 = s32  # the program model never produces -0.0; zero bits are compared as computed
-        got_bits = got_scores.contiguous().view(torch.int32)
-        exp_bits = expected32.contiguous().view(torch.int32)
-        mismatch = valid & (got_bits != exp_bits)
-        if bool(mismatch.any()):
-            r, c = mismatch.nonzero()[0].tolist()
-            failures.append(
-                f"score bits differ from the FP32 scorer at row {int(rows[r])} slot {c}: id={int(got_ids[r, c])} "
-                f"got=0x{int(got_bits[r, c]) & 0xFFFFFFFF:08x} ({float(got_scores[r, c])!r}) "
-                f"expected=0x{int(exp_bits[r, c]) & 0xFFFFFFFF:08x} ({float(expected32[r, c])!r}) [{zero_sign_policy}]"
-            )
-
-    # 2. selected id sets
-    identical = (got_ids == ref_ids).all(dim=1)
-    rows_identical = int(identical.sum().item())
-    differing = (~identical).nonzero().squeeze(1)
-    rows_within = 0
-    details: dict[str, Any] = {"differing_rows": int(differing.numel()), "order": order}
-    if differing.numel():
-        if exact_bits:
-            r = int(differing[0])
-            failures.append(
-                f"selected ids differ (exact case) at row {int(rows[r])}: got={got_ids[r, : min(K, 16)].tolist()} "
-                f"reference={ref_ids[r, : min(K, 16)].tolist()}"
-            )
-        gd, rd, vd = got_ids[differing], ref_ids[differing], valid[differing]
-        # Row-unique tags make membership a flat isin: tag = differing-row index << 32 | id.
-        tag_g = (differing.unsqueeze(1) << 32) | gd.clamp_min(0)
-        tag_r = (differing.unsqueeze(1) << 32) | rd.clamp_min(0)
-        lacking = vd & ~torch.isin(tag_r, tag_g[vd])
-        held = vd & ~torch.isin(tag_g, tag_r[vd])
-        details["lacking_pairs"] = int(lacking.sum().item())
-        details["held_instead_pairs"] = int(held.sum().item())
-        if details["lacking_pairs"] != details["held_instead_pairs"]:
-            failures.append(
-                "internal: lacking / held counts differ although the structure passed"
-            )
-        l_row, l_slot = lacking.nonzero(as_tuple=True)
-        h_row, h_slot = held.nonzero(as_tuple=True)
-        l64, _, l_base = score_pairs(
-            inputs, rows[differing[l_row]], rd[l_row, l_slot], order=order
-        )
-        h64, _, h_base = score_pairs(
-            inputs, rows[differing[h_row]], gd[h_row, h_slot], order=order
-        )
-        lower = l64 - bound_of(
-            l_base
-        )  # lacking keys: optimistic lower bound of their exact score
-        upper = h64 + bound_of(h_base)  # held keys: pessimistic upper bound
-        n = int(differing.numel())
-        row_lower = torch.full((n,), float("-inf"), dtype=torch.float64, device=device)
-        row_upper = torch.full((n,), float("inf"), dtype=torch.float64, device=device)
-        row_lower = row_lower.scatter_reduce(
-            0, l_row, lower, reduce="amax", include_self=True
-        )
-        row_upper = row_upper.scatter_reduce(
-            0, h_row, upper, reduce="amin", include_self=True
-        )
-        violated = row_lower > row_upper
-        rows_within = int((~violated).sum().item())
-        row_l = torch.full(
-            (n,), float("-inf"), dtype=torch.float64, device=device
-        ).scatter_reduce(0, l_row, l64, reduce="amax", include_self=True)
-        row_h = torch.full(
-            (n,), float("inf"), dtype=torch.float64, device=device
-        ).scatter_reduce(0, h_row, h64, reduce="amin", include_self=True)
-        details["max_lacking_minus_held_exact"] = (
-            float((row_l - row_h).max().item()) if n else 0.0
-        )
-        details["max_bound_at_disagreements"] = (
-            float(torch.cat([bound_of(l_base), bound_of(h_base)]).max().item())
-            if l64.numel()
-            else 0.0
-        )
-        if bool(violated.any()):
-            v = int(violated.nonzero()[0])
-            r_abs = int(rows[differing[v]])
-            li = (l_row == v).nonzero().squeeze(1)
-            hi = (h_row == v).nonzero().squeeze(1)
-            li = li[lower[li].argmax()]
-            hi = hi[upper[hi].argmin()]
-            failures.append(
-                f"clearly better key lacking at row {r_abs}: reference id {int(rd[l_row[li], l_slot[li]])} exact "
-                f"{float(l64[li]):.9g} (bound {float(bound_of(l_base)[li]):.3g}) ranks above held id "
-                f"{int(gd[h_row[hi], h_slot[hi]])} exact {float(h64[hi]):.9g} (bound {float(bound_of(h_base)[hi]):.3g}); "
-                f"{int(violated.sum())} row(s) violate the near-tie rule"
-            )
-    return Judgement(
-        not failures, failures, R, rows_identical, rows_within, max64, max32, details
-    )
+        return failures, 0, 0
+    if rows is None:
+        rows = torch.arange(indices.shape[0], dtype=torch.int64, device=indices.device)
+    rows = rows.to(device=indices.device, dtype=torch.int64)
+    got = indices.index_select(0, rows)
+    want = reference.indices.to(indices.device).index_select(0, rows)
+    same = int((got == want).all(dim=1).sum().item())
+    return failures, int(rows.numel()), same
 
 
 def same_bits(a, b) -> bool:
@@ -1828,8 +1970,10 @@ __all__ = [
     "E4M3_MAX",
     "EXACT_CASES",
     "EXACT_SCALE",
-    "FP32_UNIT_ROUNDOFF",
+    "EXACT_SUM_LIMIT",
     "HEAD_DIM",
+    "INTEGER_RANGE",
+    "INTEGER_SCALE",
     "NUM_HEADS",
     "PACKED_GEOMETRIES",
     "PAD_ID",
@@ -1838,40 +1982,44 @@ __all__ = [
     "SINK_NUM_FREQUENCIES",
     "SINK_SEED",
     "TRAINER_KEY_ROW_STRIDE",
-    "ZERO_SIGN_POLICIES",
     "IndexerInputs",
-    "Judgement",
     "ReferenceSelection",
-    "accumulation_terms",
     "bruteforce_rows",
     "build_inputs",
     "clean_rows",
+    "clean_segment",
+    "compare_selection",
     "count_visible_pairs",
     "cumulative",
     "dequantized_bf16",
     "dirty_rows",
     "effective_offsets",
     "exact_closed_form",
+    "exact_inputs",
+    "exact_selection",
     "fp32_ieee_matmul",
-    "gamma_bound",
-    "judge",
+    "integer_key_scales",
     "make_boundary_inputs",
     "make_exact_case",
     "make_exact_inputs",
     "make_fp8_inputs",
+    "make_integer_fp8_inputs",
+    "make_integer_inputs",
+    "make_integer_sink_inputs",
     "make_nonfinite_inputs",
     "make_packed_inputs",
     "make_random_inputs",
     "make_sink_inputs",
     "mixed_weights",
     "negative_weights",
-    "pair_bound",
+    "order_key",
     "plan_chunks",
     "resolve_order",
     "same_bits",
     "score_block",
     "score_pairs",
     "score_selected",
+    "scores_at",
     "segment_of_rows",
     "select_reference",
     "structure_failures",

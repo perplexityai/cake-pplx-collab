@@ -18,8 +18,9 @@ Tests of the public entry points of the non-deterministic Cake DSA indexer top-k
 ``cake_pplx.cake_dsa_indexer_nondet_train.cake_dsa_indexer_nondet_train_topk``
 and ``cake_dsa_indexer_nondet_train_topk_workspace_size`` against the backend
 package, and their stable-API contract (no experimental warning).  A row's slot
-order may differ between two calls, so results are compared as sets: per row the
-valid count and the sorted (id, score bits) pairs.  The backend contract itself
+order may differ between two calls, so results are compared as sets: on integer
+inputs every call holds the exact selection's ids and valid count per row, in any
+slot order (``naive.assert_exact`` with ``ordered=False``).  The backend contract itself
 (registry, dispatch policy, validation, binding, the reference and the operator
 tests) lives in ``test_cake_dsa_indexer_nondet_train.py``, which imports only the
 package; the naming rules live in ``test_cake_dsa_indexer_nondet_train_names.py``.
@@ -46,6 +47,7 @@ from cake_pplx._backends.cake_dsa_indexer_nondet_train.cake_backend import (
     generated_program_available,
 )
 
+from tests.experimental.test_helpers import cake_dsa_indexer_naive as naive
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref
 
 ALERT = "does not have a deterministic implementation"
@@ -65,7 +67,7 @@ def _require_program():
 
 
 def _run(inputs: ref.IndexerInputs, **extra):
-    """The backend call whose per-row sets the public entry point must reproduce bit for bit."""
+    """The backend call that the public entry point wraps."""
     out = cake_backend.cake_dsa_indexer_nondet_train_topk(
         inputs.q,
         inputs.k,
@@ -88,31 +90,6 @@ def _public(inputs: ref.IndexerInputs, **extra):
         inputs.cu_seqlens_k,
         **inputs.kwargs(),
         **extra,
-    )
-
-
-def _row_pairs(result) -> torch.Tensor:
-    """int64 ``[T, K]``: every slot as ``id << 32 | score bits``, each row sorted."""
-    ids, scores = result
-    bits = scores.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    return ((ids.to(torch.int64) << 32) | bits).sort(dim=1).values
-
-
-def _canonical(result):
-    """``result`` with every row in the reference's slot order (the valid slots by ascending id with their scores,
-    then the padding), for ``ref.judge``; a per-row permutation that keeps the row's pairs."""
-    ids, scores = result
-    key = torch.where(ids >= 0, ids.to(torch.int64), 1 << 32)
-    order = key.sort(dim=1, stable=True).indices
-    return ids.gather(1, order), scores.gather(1, order)
-
-
-def _same_sets(a, b) -> bool:
-    """Per row the same valid count and the same (id, score bits) pairs; slot order and padding positions free."""
-    if tuple(a[0].shape) != tuple(b[0].shape) or tuple(a[1].shape) != tuple(b[1].shape):
-        return False
-    return bool(torch.equal((a[0] >= 0).sum(dim=1), (b[0] >= 0).sum(dim=1))) and bool(
-        torch.equal(_row_pairs(a), _row_pairs(b))
     )
 
 
@@ -141,10 +118,11 @@ def test_public_api_is_stable(fn):
 
 def test_public_entry_point_matches_backend_without_warning():
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [200, 300], [200, 2500], top_k=128, seed=70, device="cuda"
     )
     expected = _run(inputs)
+    reference = naive.assert_exact(expected, inputs, ordered=False)
     with warnings.catch_warnings():
         # no warning at all (cake_api is a no-op decorator)
         warnings.simplefilter("error")
@@ -155,15 +133,13 @@ def test_public_entry_point_matches_backend_without_warning():
             max_seqlen_k=max(inputs.seg_k_len),
         )
         indices_only = _public(inputs, return_scores=False)
-    assert _same_sets(got, expected)
-    assert _same_sets(again, expected)
+    naive.assert_exact(got, inputs, reference, ordered=False)
+    naive.assert_exact(again, inputs, reference, ordered=False)
     assert indices_only[1] is None
     # the ids of every row as a set (a row's ids are unique; its padding is -1)
     assert torch.equal(
-        indices_only[0].sort(dim=1).values, expected[0].sort(dim=1).values
+        indices_only[0].sort(dim=1).values, reference.indices.sort(dim=1).values
     )
-    verdict = ref.judge(_canonical(got), ref.select_reference(inputs))
-    assert verdict.passed, str(verdict)
     assert cake_dsa_indexer_nondet_train_topk_workspace_size(
         inputs.num_queries,
         inputs.num_keys,
@@ -192,8 +168,8 @@ def _bf16_host_args():
 def test_public_entry_point_host_argument_rules():
     """The facade's own checks (before any device rule): segment boundaries are required, ``scores`` goes with
     ``return_scores=True``, and neither the keywords of the SM120 serving form (``backend``, ``q_scale``,
-    ``block_table``, ``context_lens``, ``enable_pdl``) nor the deterministic package's FP8 ``k_scale`` nor a
-    ``deterministic`` switch are parameters of this entry point."""
+    ``block_table``, ``context_lens``, ``enable_pdl``) nor a ``deterministic`` switch are parameters of this entry
+    point."""
     q, k, w, cu_q, cu_k = _bf16_host_args()
     with pytest.raises(ValueError, match="cu_seqlens_q and cu_seqlens_k"):
         cake_dsa_indexer_nondet_train_topk(q, k, w, None, cu_k, top_k=4)
@@ -214,7 +190,6 @@ def test_public_entry_point_host_argument_rules():
         "block_table",
         "context_lens",
         "enable_pdl",
-        "k_scale",
         "deterministic",
     ):
         with pytest.raises(TypeError, match=keyword):
@@ -226,24 +201,26 @@ def test_public_entry_point_host_argument_rules():
         cake_dsa_indexer_nondet_train_topk(q, k, w, cu_q, cu_k, top_k=4)
 
 
-def test_public_signatures_take_no_k_scale():
-    """v1 ships the BF16 form only: no public or backend entry point names ``k_scale``; the workspace bound keeps
-    the deterministic package's ``dtype`` keyword (default ``torch.bfloat16``)."""
+def test_public_signatures_take_k_scale():
+    """Every public and backend entry point takes the FP8 form's ``k_scale`` (default None, for BF16 calls) and no
+    ``deterministic`` switch; the workspace bound takes the input form by its ``dtype`` keyword (default
+    ``torch.bfloat16``)."""
     for fn in (
         cake_dsa_indexer_nondet_train_topk,
-        cake_dsa_indexer_nondet_train_topk_workspace_size,
         cake_backend.cake_dsa_indexer_nondet_train_topk,
-        cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
         cake_backend.prepare_dsa_indexer_nondet_topk,
         cake_backend.validate_dsa_indexer_nondet_inputs,
     ):
         parameters = inspect.signature(fn).parameters
-        assert "k_scale" not in parameters, fn.__qualname__
+        assert parameters["k_scale"].default is None, fn.__qualname__
         assert "deterministic" not in parameters, fn.__qualname__
-    parameters = inspect.signature(
-        cake_dsa_indexer_nondet_train_topk_workspace_size
-    ).parameters
-    assert parameters["dtype"].default is torch.bfloat16
+    for fn in (
+        cake_dsa_indexer_nondet_train_topk_workspace_size,
+        cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
+    ):
+        parameters = inspect.signature(fn).parameters
+        assert "k_scale" not in parameters and "deterministic" not in parameters
+        assert parameters["dtype"].default is torch.bfloat16, fn.__qualname__
 
 
 def _fp8_host_args():
@@ -255,35 +232,91 @@ def _fp8_host_args():
     return q, k, w, cu_q, cu_k
 
 
-def test_public_entry_point_rejects_the_fp8_form():
-    """float8_e4m3fn q / k (one of them or both) raise ``ValueError`` saying this package offers the BF16 form only,
-    before the device rule (host tensors here); the workspace bound raises the same for ``dtype=float8_e4m3fn``,
-    before it reads a device, and names ``bfloat16`` for any other dtype."""
+def test_public_entry_point_fp8_argument_rules():
+    """The FP8 form takes ``k_scale`` for float8_e4m3fn q / k with ``softmax_scale=None``, before the device rule
+    (host tensors here); a BF16 call takes no ``k_scale``, mixed q / k dtypes are rejected, and ``q_scale`` (the
+    MXFP4 form of the SM120 serving entry) is not a parameter here.  The workspace bound takes
+    ``dtype=float8_e4m3fn`` and names ``bfloat16`` for any other dtype, before it reads a device."""
     fq, fk, w, cu_q, cu_k = _fp8_host_args()
     q, k, *_ = _bf16_host_args()
-    for pair in ((fq, fk), (fq, k), (q, fk)):
-        with pytest.raises(ValueError, match="BF16 form only"):
-            cake_dsa_indexer_nondet_train_topk(*pair, w, cu_q, cu_k, top_k=4)
-    with pytest.raises(ValueError, match="BF16 form only"):
-        cake_dsa_indexer_nondet_train_topk_workspace_size(
-            6, 10, 2, top_k=4, dtype=torch.float8_e4m3fn
+    k_scale = torch.ones(10, dtype=torch.float32)
+    with pytest.raises(ValueError, match="CUDA"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, fk, w, cu_q, cu_k, top_k=4, k_scale=k_scale
         )
+    with pytest.raises(TypeError, match="q_scale"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq,
+            fk,
+            w,
+            cu_q,
+            cu_k,
+            top_k=4,
+            k_scale=k_scale,
+            q_scale=torch.ones((6, 32), dtype=torch.int32),
+        )
+    with pytest.raises(ValueError, match="softmax_scale=None"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, fk, w, cu_q, cu_k, top_k=4, k_scale=k_scale, softmax_scale=0.5
+        )
+    with pytest.raises(ValueError, match="need k_scale"):
+        cake_dsa_indexer_nondet_train_topk(fq, fk, w, cu_q, cu_k, top_k=4)
+    with pytest.raises(ValueError, match="bfloat16 q / k take none"):
+        cake_dsa_indexer_nondet_train_topk(
+            q, k, w, cu_q, cu_k, top_k=4, k_scale=k_scale
+        )
+    with pytest.raises(ValueError, match="k must be float8_e4m3fn"):
+        cake_dsa_indexer_nondet_train_topk(
+            fq, k, w, cu_q, cu_k, top_k=4, k_scale=k_scale
+        )
+    with pytest.raises(ValueError, match="k must be bfloat16"):
+        cake_dsa_indexer_nondet_train_topk(q, fk, w, cu_q, cu_k, top_k=4)
     with pytest.raises(ValueError, match="bfloat16"):
         cake_dsa_indexer_nondet_train_topk_workspace_size(
             6, 10, 2, top_k=4, dtype=torch.float16
         )
 
 
+def test_public_entry_point_fp8_matches_backend():
+    """The FP8 form through the public entry point: on integer e4m3 inputs the backend call and the public call each
+    hold the exact selection's ids and valid count per row, in any slot order, and both workspace bounds of the FP8
+    form agree."""
+    _require_program()
+    if not generated_program_available(torch.device("cuda"), dtype=torch.float8_e4m3fn):
+        pytest.skip("generated FP8 DSA indexer programs not registered for this device")
+    inputs = ref.make_integer_fp8_inputs(
+        [200, 300], [200, 2500], top_k=128, seed=71, device="cuda"
+    )
+    reference = naive.assert_exact(_run(inputs), inputs, ordered=False)
+    naive.assert_exact(_public(inputs), inputs, reference, ordered=False)
+    sizes = [
+        fn(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=128,
+            device=inputs.device,
+            dtype=torch.float8_e4m3fn,
+        )
+        for fn in (
+            cake_dsa_indexer_nondet_train_topk_workspace_size,
+            cake_backend.cake_dsa_indexer_nondet_train_topk_workspace_size,
+        )
+    ]
+    assert sizes[0] == sizes[1]
+
+
 def test_public_entry_point_under_torch_deterministic_mode():
     """Under ``torch.use_deterministic_algorithms(True)`` the public entry point raises PyTorch's ``RuntimeError``
     naming the backend's eager entry (no deterministic package named as a fallback); with ``warn_only=True`` it warns
-    once, pointing at this file through the facade and its logging decorator, and returns the sets of a call outside
-    the mode.  The workspace bound never alerts."""
+    once, pointing at this file through the facade and its logging decorator, and returns the exact selection's sets
+    (integer inputs), like a call outside the mode.  The workspace bound never alerts."""
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [200, 300], [200, 2500], top_k=128, seed=72, device="cuda"
     )
     expected = _run(inputs)
+    reference = naive.assert_exact(expected, inputs, ordered=False)
     size = cake_dsa_indexer_nondet_train_topk_workspace_size(
         inputs.num_queries, inputs.num_keys, inputs.num_segments, top_k=128
     )
@@ -308,4 +341,4 @@ def test_public_entry_point_under_torch_deterministic_mode():
     alerts = [w for w in record if str(w.message).startswith(f"{TOPK_ENTRY} {ALERT}")]
     assert len(alerts) == 1, [str(w.message) for w in record]
     assert Path(alerts[0].filename).name == Path(__file__).name, alerts[0].filename
-    assert _same_sets(got, expected)
+    naive.assert_exact(got, inputs, reference, ordered=False)

@@ -17,10 +17,10 @@ Non-deterministic Cake DSA indexer top-k for training (SM100 / SM103 / SM107).
 
 Every public name carries the mode word ``nondet``; no entry point takes a
 ``deterministic=`` keyword.  The deterministic
-counterpart is ``cake_pplx.cake_dsa_indexer_det_train``: it selects the same
-set per row and returns it in ascending id order.  This package implements the
-set-equality semantics: per row the
-selected set repeats bit for bit, the slot order does not.
+counterpart is ``cake_pplx.cake_dsa_indexer_det_train``: it writes every row in
+ascending id order.  This package implements the set-equality semantics: a
+row's selected ids are a set, written in no specified slot order, and no output
+is promised to repeat bit for bit between calls.
 
 Thin entry points: validation of the backend contract, the host dispatch and
 workspace policy, the launch binding, JIT registration and the generated
@@ -64,9 +64,10 @@ def cake_dsa_indexer_nondet_train_topk(
     indices: Optional[torch.Tensor] = None,
     scores: Optional[torch.Tensor] = None,
     return_scores: bool = True,
+    k_scale: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r"""Fused DSA indexer scoring and exact top-k selection with set-equality
-    repeatability (DeepSeek Sparse Attention indexer, training), SM100 / SM103 /
+    semantics (DeepSeek Sparse Attention indexer, training), SM100 / SM103 /
     SM107 only.
 
     For query ``t`` and key ``j`` of the same packed segment
@@ -74,28 +75,35 @@ def cake_dsa_indexer_nondet_train_topk(
     ``s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])``
 
     with FP32 products, accumulation and score arithmetic (no BF16 intermediate
-    rounding; the reduction scheme is fixed and documented in
+    rounding; the reduction scheme is documented in
     ``cake_pplx/_backends/cake_dsa_indexer_nondet_train/README.md``).
     Every row selects the exact global top ``min(top_k, visible)`` keys of its
     visible prefix, ranked by score descending then key id descending
-    (``+0.0 == -0.0`` for ranking), and returns them with aligned scores (the
-    computed bits) in no specified slot order.  The scores are those of
-    ``cake_pplx.cake_dsa_indexer_det_train`` (the same scan programs), so a
-    row holds the ids and score bits that package returns for it.
+    (``+0.0 == -0.0`` for ranking), and returns them with aligned scores in
+    no specified slot order.
 
-    This package offers the BF16 form only: float8_e4m3fn ``q`` / ``k`` raise
-    ``ValueError`` (the FP8 form is an opt-in form of the deterministic
-    package).
+    The FP8 form is selected by float8_e4m3fn ``q`` and ``k`` with a per-key
+    FP32 ``k_scale``:
+
+    ``s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j, d])``
+
+    where ``w`` carries every other scale (``softmax_scale`` must be ``None``).
+    The e4m3 products are exact and accumulate in FP32 on the tensor cores:
+    four K = 32 steps on SM100 / SM103 and two K = 64 steps on SM107.  Every
+    FP8 program of one architecture selects the same set; selection,
+    visibility and outputs follow the BF16 form.
 
     Parameters
     ----------
     q : torch.Tensor
-        BF16 ``[T, 32, 128]`` indexer queries after RoPE (contiguous).
+        BF16 ``[T, 32, 128]`` indexer queries after RoPE (contiguous);
+        float8_e4m3fn for the FP8 form.
     k : torch.Tensor
         BF16 ``[Tkv, 128]`` packed indexer keys after normalization and RoPE.  A
         row-strided view (for example ``packed[:, :128]`` of a ``[Tkv, 704]``
         tensor) is read in place; the row stride must be a multiple of 8
-        elements.
+        elements.  The FP8 form: float8_e4m3fn (the same dtype as ``q``), a
+        row stride that is a multiple of 16 elements.
     w : torch.Tensor
         FP32 ``[T, 32]`` signed head weights, already scaled by ``32 ** -0.5``.
     cu_seqlens_q, cu_seqlens_k : torch.Tensor
@@ -106,6 +114,7 @@ def cake_dsa_indexer_nondet_train_topk(
         Output slots per query, ``1 <= top_k <= 4096`` (default 2048).
     softmax_scale : Optional[float]
         Positive scale applied to the per-head logits; defaults to ``128 ** -0.5``.
+        The FP8 form takes ``None`` (the scale is folded into ``w``).
     q_causal_offsets : Optional[torch.Tensor]
         int64 ``[S]`` per-segment query offsets on the device.  Key ``j`` is
         visible to the query at segment-local position ``u`` iff ``j < Lk`` and
@@ -137,6 +146,9 @@ def cake_dsa_indexer_nondet_train_topk(
     return_scores : bool
         ``False``: indices only; ``scores`` must be omitted and ``None`` is
         returned in its place (the scores are still computed internally).
+    k_scale : Optional[torch.Tensor]
+        FP32 ``[Tkv]`` per-key dequantization scale of the FP8 form
+        (contiguous).  BF16 keys take none.
 
     Returns
     -------
@@ -146,16 +158,14 @@ def cake_dsa_indexer_nondet_train_topk(
         slots, in no specified slot order.
     scores : Optional[torch.Tensor]
         ``None`` with ``return_scores=False``; else FP32 ``[T, top_k]`` scores
-        aligned with ``indices`` (a selected ``-0.0`` stays ``-0.0``); the
-        slots of ``-1`` ids hold ``-inf``.
+        aligned with ``indices``; the slots of ``-1`` ids hold ``-inf``.
 
-    For identical inputs and configuration (same device, SM count and
-    arguments) the set of ``(id, score bits)`` pairs of every row, and with it
-    the row's number of valid (non ``-1``) slots, repeats bit for bit; the slot
-    order within a row and the positions of the ``-1`` / ``-inf`` padding
-    slots may vary between calls.  The internal query / key partition and the
-    program the host dispatches for the geometry never change the selected
-    set.  Under ``torch.use_deterministic_algorithms(True)`` a call with
+    Every row holds the exact selection above in its ``min(top_k, visible)``
+    valid (non ``-1``) slots; the slot order within a row and the positions of
+    the ``-1`` / ``-inf`` padding slots may vary between calls, and no output
+    is promised to repeat bit for bit.  The internal query / key partition and
+    the program the host dispatches for the geometry never change the selected
+    ids.  Under ``torch.use_deterministic_algorithms(True)`` a call with
     queries and keys raises ``RuntimeError`` before it allocates or launches
     anything (with ``warn_only=True`` it warns and runs).  The call never
     materializes a ``[T, Tkv]`` matrix, and no call synchronizes with the
@@ -184,6 +194,7 @@ def cake_dsa_indexer_nondet_train_topk(
         workspace_buffer=workspace_buffer,
         indices=indices,
         scores=scores,
+        k_scale=k_scale,
     )
     return indices, cake_scores if return_scores else None
 
@@ -212,10 +223,10 @@ def cake_dsa_indexer_nondet_train_topk_workspace_size(
     bytes of staging when the dispatch splits the key ranges -- the bound of
     ``cake_pplx.cake_dsa_indexer_det_train`` for the same call.  Size a
     reused buffer for the largest bound over the geometries it serves.
-    ``dtype`` is the q / k dtype: ``torch.bfloat16``, the only form of this
-    package (``torch.float8_e4m3fn`` raises ``ValueError``).  Raises
-    ``NotImplementedError`` while no generated program is registered for the
-    device's architecture.  The bound never consults
+    ``dtype`` is the q / k dtype: ``torch.float8_e4m3fn`` bounds the FP8
+    form, whose programs differ.  Raises ``NotImplementedError`` while no
+    generated program of the form is registered for the device's
+    architecture.  The bound never consults
     ``torch.use_deterministic_algorithms``.
 
     Parameters
@@ -236,7 +247,7 @@ def cake_dsa_indexer_nondet_train_topk_workspace_size(
         The device whose SM count and architecture select the scan program;
         the current CUDA device when omitted.
     dtype : torch.dtype
-        The q / k dtype: ``torch.bfloat16`` (default; the only form).
+        The q / k dtype: ``torch.bfloat16`` (default) or ``torch.float8_e4m3fn``.
 
     Returns
     -------

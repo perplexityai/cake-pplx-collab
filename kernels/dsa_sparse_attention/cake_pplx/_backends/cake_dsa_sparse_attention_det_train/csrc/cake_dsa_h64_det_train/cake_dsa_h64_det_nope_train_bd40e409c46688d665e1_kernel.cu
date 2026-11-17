@@ -97,7 +97,7 @@ kernel_cake_dsa_h64_det_nope_train_bd40e409c46688d665e1(unsigned long long* boun
     if (row < num_rows) {
 #endif
         int exps[1];
-        long long bbase = (long long)row * (long long)bound_stride;
+        long long bbase = (long long)row * (long long)(dkv_stride >> 1);
         unsigned long long pairs = bound[bbase + (long long)part_stride];
         unsigned long long b0 = bound[bbase];
         int blen0 = 0;
