@@ -438,6 +438,79 @@ def _check(
     return {"B": B, "H": H, "Sq": Sq, "Skv": Skv, "D": D}, scale
 
 
+def _accepted(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    softmax_scale: Optional[float],
+    causal: bool,
+) -> Optional[tuple[int, int, int, int, int, float]]:
+    """``(B, H, Sq, Skv, D, softmax_scale)`` of a call that passes every check of :func:`_check`, found with the
+    cheapest tests in one pass; ``None`` when any of them fails (or an operand is a ``torch.Tensor`` subclass), and then
+    :func:`_check` runs and raises its error."""
+    tensor = torch.Tensor
+    if not (
+        type(q) is tensor
+        and type(k) is tensor
+        and type(v) is tensor
+        and type(out) is tensor
+        and type(lse) is tensor
+        and type(dout) is tensor
+    ):
+        return None
+    bf16 = torch.bfloat16
+    if not (
+        q.dtype is bf16
+        and k.dtype is bf16
+        and v.dtype is bf16
+        and out.dtype is bf16
+        and dout.dtype is bf16
+        and lse.dtype is torch.float32
+    ):
+        return None
+    if not (q.is_cuda and k.is_cuda and v.is_cuda and out.is_cuda and lse.is_cuda and dout.is_cuda):
+        return None
+    index = q.get_device()
+    if not (
+        k.get_device() == index
+        and v.get_device() == index
+        and out.get_device() == index
+        and lse.get_device() == index
+        and dout.get_device() == index
+    ):
+        return None
+    shape = q.shape
+    kv_shape = k.shape
+    if len(shape) != 4 or len(kv_shape) != 4 or out.shape != shape or dout.shape != shape or v.shape != kv_shape:
+        return None
+    B, Sq, H, D = shape
+    Skv = kv_shape[1]
+    if kv_shape[0] != B or kv_shape[2] != H or kv_shape[3] != D or lse.shape != (B, H, Sq):
+        return None
+    if not (
+        q.is_contiguous()
+        and k.is_contiguous()
+        and v.is_contiguous()
+        and out.is_contiguous()
+        and lse.is_contiguous()
+        and dout.is_contiguous()
+    ):
+        return None
+    if D not in HEAD_DIMS or H < 1 or Sq < BLOCK or Sq % BLOCK or Skv < BLOCK or Skv % BLOCK:
+        return None
+    if (causal and Sq != Skv) or B > _MAX_GRID_YZ or H > _MAX_GRID_YZ or B * H * max(Sq, Skv) * D >= _MAX_ELEMENTS:
+        return None
+    if (q.data_ptr() | k.data_ptr() | v.data_ptr() | out.data_ptr() | dout.data_ptr()) % 16 or lse.data_ptr() % 4:
+        return None
+    scale = D**-0.5 if softmax_scale is None else float(softmax_scale)
+    if not math.isfinite(scale):
+        return None
+    return B, H, Sq, Skv, D, scale
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Backward
 
@@ -468,8 +541,13 @@ def cake_fmha_nondet_train_backward(
     (``warn_only=True``: one ``UserWarning``, then it runs).  An empty batch returns empty gradients without an
     alert.  The kernels run on the current stream of the operands' device; nothing synchronizes.
     """
-    dims, scale = _check(q, k, v, out, lse, dout, softmax_scale, bool(causal))
-    B, H, Sq, Skv, D = dims["B"], dims["H"], dims["Sq"], dims["Skv"], dims["D"]
+    causal = bool(causal)
+    accepted = _accepted(q, k, v, out, lse, dout, softmax_scale, causal)
+    if accepted is None:
+        dims, scale = _check(q, k, v, out, lse, dout, softmax_scale, causal)
+        B, H, Sq, Skv, D = dims["B"], dims["H"], dims["Sq"], dims["Skv"], dims["D"]
+    else:
+        B, H, Sq, Skv, D, scale = accepted
     device = q.device
     if B == 0:
         # No query row: nothing to launch and nothing to alert.
