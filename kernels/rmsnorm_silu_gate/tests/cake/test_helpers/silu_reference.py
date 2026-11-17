@@ -34,11 +34,7 @@ the draws at most :data:`NEAR_TIE` times the naive implementation's, and 0
 on every draw where the naive implementation's is 0.  A launch that runs
 again on a draw's inputs (a weight gradient whose last bits may vary from
 run to run) is judged on every launch: the judge keeps the larger error.
-Every output is also held to its contract (:func:`contract`).  A BF16
-weight gradient of one row is held to its contract only: each element is one
-product (plus the starting value), so the kernel's and the naive
-implementation's errors are both about one BF16 rounding and their ratio is
-noise.
+Every output is also held to its contract (:func:`contract`).
 
 Only torch is imported.
 """
@@ -153,20 +149,17 @@ def naive(
 class Draw:
     """One draw of a case: ``launches``, the kernel's outputs by name, one
     mapping per launch on the draw's inputs; ``expected``, the oracle of every
-    name; ``naive()``, the BF16 naive value of every name; ``contract_only``,
-    the names held to their contract alone."""
+    name; ``naive()``, the BF16 naive value of every name."""
 
     def __init__(
         self,
         launches: Sequence[Mapping[str, torch.Tensor]],
         expected: Mapping[str, torch.Tensor],
         naive: Callable[[], Mapping[str, torch.Tensor]],
-        contract_only: Iterable[str] = (),
     ) -> None:
         self.launches = launches
         self.expected = expected
         self.naive = naive
-        self.contract_only = frozenset(contract_only)
 
 
 def silu_draw(
@@ -184,8 +177,7 @@ def silu_draw(
     BF16 inputs: ``kinds`` maps each output name to its quantity (``y``,
     ``dx``, ``dz`` or ``dw``), ``starts`` the name of an accumulated weight
     gradient to its starting value (a copy taken before the call: the oracle
-    adds it in float64, the naive implementation in BF16).  A BF16 weight
-    gradient of one row is contract only (the module)."""
+    adds it in float64, the naive implementation in BF16)."""
     starts = dict(starts or {})
     used = set(kinds.values())
     reference = oracle(x, z, w, dy, eps, used)
@@ -195,17 +187,6 @@ def silu_draw(
         if name in starts:
             value = starts[name].to(device=value.device, dtype=torch.float64) + value
         expected[name] = value
-    rows = x.numel() // D
-    contract_only = {
-        name
-        for name, kind in kinds.items()
-        if kind == "dw"
-        and rows == 1
-        and any(
-            name in outputs and outputs[name].dtype == torch.bfloat16
-            for outputs in launches
-        )
-    }
 
     def naive_values() -> dict[str, torch.Tensor]:
         values = naive(x, z, w, dy, eps, used)
@@ -217,7 +198,7 @@ def silu_draw(
             found[name] = value
         return found
 
-    return Draw(launches, expected, naive_values, contract_only)
+    return Draw(launches, expected, naive_values)
 
 
 def judge(
@@ -235,8 +216,7 @@ def judge(
     :func:`draw_seed` of ``seed`` and ``j``, and ``run(j, s)`` (``s`` that
     seed, which the case's inputs take) makes the draw's inputs, launches the
     kernels and returns its :class:`Draw`.  Every output of every launch is
-    held to its :func:`contract`, and every one not ``contract_only`` is
-    recorded in the judge (a second launch on a draw keeps the larger error).
+    held to its :func:`contract` and recorded in the judge (a second launch on a draw keeps the larger error).
     The random state is restored after the last draw.  Fails with every
     contract failure and every output that missed the naive tier."""
     tiers = TierJudge(draws)
@@ -256,8 +236,6 @@ def judge(
                         failures.append(f"draw {j}: {message}")
                         if actual.shape != want.shape:
                             continue
-                    if name in draw.contract_only:
-                        continue
                     if values is None:
                         values = draw.naive()
                     tiers.add(

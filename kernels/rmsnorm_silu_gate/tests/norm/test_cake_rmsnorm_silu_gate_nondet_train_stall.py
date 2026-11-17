@@ -223,10 +223,12 @@ does not depend on the grid or on the CTA that claimed it, the sum of the
 partials is exact, and a small-row backward sums in a fixed order: the
 repeatable backward's ``dw`` among them); every
 ``dw`` holds its contract against a float64 oracle (finite where the oracle
-is; the fused and the row-claims backwards' ``dw`` is checked so only: the
-order of its FP32 atomic adds follows the blocks each CTA claimed; the
-backend suite judges every band's ``dw`` against the PyTorch BF16 naive
-implementation), and the workspace is zero after every call.  The
+is), the fused and the row-claims backwards' ``dw`` (the order of its FP32
+atomic adds follows the blocks each CTA claimed, so it is not compared bit for
+bit) is held on every call, alone and busy, to the PyTorch BF16 naive
+implementation's error against that oracle (at most ``NEAR_TIE`` times it in
+the L2 and in the max norm, and 0 where it is 0), and the workspace is zero
+after every call.  The
 small-row backward's ``dx`` and ``dz`` are not compared with another
 program's: each backward program sums a row's squares and dot on the FMA
 chains its kernel takes on the architecture, so two programs' last bits may
@@ -246,9 +248,9 @@ import statistics
 import pytest
 import torch
 
-from tests.cake.test_helpers.cake_naive import contract
+from tests.cake.test_helpers.cake_naive import NEAR_TIE, contract, norm_errors
 from tests.cake.test_helpers.cake_package import cake_package
-from tests.cake.test_helpers.silu_reference import oracle
+from tests.cake.test_helpers.silu_reference import naive, oracle
 
 pkg = cake_package("cake_rmsnorm_silu_gate_nondet_train")
 loader = cake_package("cake_rmsnorm_silu_gate_nondet_train", "cake_jit")
@@ -692,11 +694,29 @@ def _interleaved_paired_medians(calls, spin: _Spin, runs: int):
 
 
 def _dw_reference(dy, x, z):
-    """The float64 oracle of the weight gradient of the BF16 inputs
-    (:func:`tests.cake.test_helpers.silu_reference.oracle`; the weight
-    gradient does not depend on the weight, taken as ones)."""
+    """``(oracle, naive)``: the float64 oracle and the PyTorch BF16 naive
+    implementation's weight gradient of the BF16 inputs
+    (:func:`tests.cake.test_helpers.silu_reference.oracle` and
+    :func:`~tests.cake.test_helpers.silu_reference.naive`; the weight gradient
+    does not depend on the weight, taken as ones)."""
     ones = torch.ones(D, dtype=x.dtype, device=x.device)
-    return oracle(x, z, ones, dy, EPS, ("dw",))["dw"]
+    return (
+        oracle(x, z, ones, dy, EPS, ("dw",))["dw"],
+        naive(x, z, ones, dy, EPS, ("dw",))["dw"],
+    )
+
+
+def _naive_tier_message(name: str, actual, reference) -> str | None:
+    """``None`` when ``actual``'s error against the float64 oracle is at most
+    ``NEAR_TIE`` times the PyTorch BF16 naive implementation's in the L2 and in
+    the max norm, and 0 where the naive implementation's is 0 (``reference`` =
+    ``(oracle, naive)``, :func:`_dw_reference`); else what missed."""
+    expected, naive_value = reference
+    for norm in ("l2", "max"):
+        (ours, theirs), _ = norm_errors(expected, [actual, naive_value], norm)
+        if ours > NEAR_TIE * theirs or (theirs == 0 and ours != 0):
+            return f"{name}: {norm} error {ours:.6g} > {NEAR_TIE} x naive {theirs:.6g}"
+    return None
 
 
 def _device() -> tuple[str, int]:
@@ -764,8 +784,9 @@ def _check_outputs(
     """``y`` (forward) or ``dx`` and ``dz`` (backward) of every call of one
     entry point and module bitwise those of its first call alone, and so its
     ``dw`` where the backward ``module`` repeats it (``_dw_repeats``); every
-    backward ``dw`` holds its contract against the float64 oracle
-    ``dw_reference`` (finite where it is, :func:`contract`)."""
+    backward ``dw`` holds its contract against the float64 oracle of
+    ``dw_reference`` (finite where it is, :func:`contract`), and where it does
+    not repeat, the naive tier (:func:`_naive_tier_message`)."""
     assert stage == "forward" or module is not None, "the backward's module"
     first = alone[0][1]
     for _t, out in alone + busy:
@@ -774,10 +795,14 @@ def _check_outputs(
             continue
         assert torch.equal(out[0], first[0]), f"dx tokens={tokens}"
         assert torch.equal(out[1], first[1]), f"dz tokens={tokens}"
+        name = f"dw tokens={tokens} {out[2].dtype}"
         if _dw_repeats(module):
-            assert torch.equal(out[2], first[2]), f"dw tokens={tokens} {out[2].dtype}"
-        message = contract(f"dw tokens={tokens} {out[2].dtype}", out[2], dw_reference)
+            assert torch.equal(out[2], first[2]), name
+        message = contract(name, out[2], dw_reference[0])
         assert message is None, message
+        if not _dw_repeats(module):
+            message = _naive_tier_message(name, out[2], dw_reference)
+            assert message is None, message
 
 
 @pytest.mark.parametrize("tokens", ALL_SM_TOKENS)
