@@ -16,7 +16,7 @@ limitations under the License.
 Cake mHC training head, non-deterministic mode: the stream mean
 ``Y = mean_i X[:, i, :]`` of the last layer's four residual streams of the
 four-stream mHC training layers (:mod:`cake_pplx.cake_mhc_nondet_train`) and
-its gradient, for hidden sizes 4096, 5120 and 7168 on SM100 / SM103 and 4096 on
+its gradient, for hidden sizes 4096, 5120 and 7168 on SM100 / SM103 /
 SM107.  The function, the tensor contracts and the autograd wiring are those of
 the deterministic head module :mod:`cake_pplx.cake_mhc_head_det_train`::
 
