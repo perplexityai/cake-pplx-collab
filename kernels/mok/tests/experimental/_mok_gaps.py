@@ -40,7 +40,8 @@ MXFP8_D_SCORES = pytest.mark.xfail(
     reason=(
         "known gap: the MXFP8 kernels' score gradient (the fused form sum(dh * hidden) / score) misses the naive "
         "tier (dY * y_route).sum(-1) on every architecture; L2 error ratio, median / largest: single GPU "
-        "1.46-1.83 / 1.44-1.86, EP1 and EP4 1.71-1.73 / 1.71-1.75 (sm_103a).  A follow-up kernel change fixes it."
+        "1.46-1.84 / 1.45-1.86 (sm_103a) and 1.44-1.84 / 1.46-1.84 (sm_107a), EP1 and EP4 1.71-1.72 / 1.70-1.73 "
+        "(sm_107a).  A follow-up kernel change fixes it."
     ),
 )
 
@@ -50,8 +51,9 @@ BF16_STRADDLE_DW = pytest.mark.xfail(
     reason=(
         "known gap: with BF16 weight gradients the kernel rounds a routed expert's dW to BF16 per macrobatch and "
         "adds the parts in BF16, so an expert whose rows cross a macrobatch boundary misses the naive tier (one "
-        "GEMM per expert); L2 error ratio, median / largest: 1.034-1.035 / 1.033-1.070 (sm_103a), and 0.93-0.97 "
-        "against a per-macrobatch naive.  A follow-up kernel change (an FP32 carry for straddling experts) fixes it."
+        "GEMM per expert): in the L2 norm, error ratio median / largest 1.033-1.038 / 1.033-1.072, or with its L2 "
+        "below the tier's in the max norm, median ratio 1.05-1.14 (sm_103a, sm_107a); its L2 error is 0.92-0.97 "
+        "times a per-macrobatch naive's.  A follow-up kernel change (an FP32 carry for straddling experts) fixes it."
     ),
 )
 

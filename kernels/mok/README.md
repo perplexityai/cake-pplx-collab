@@ -40,7 +40,76 @@ runs in a fixed order; atomics act on integers only.
 | EP sizes | 1, 4, 8, 16, 32, 64 (EP1 uses plain tensors) |
 | Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8 |
 
+## Builds
+
+`build.json` lists 152 builds of 52 kernels: 50 kernels for each of `sm_100a`, `sm_103a` and `sm_107a`, and two
+more for `sm_107a` only. Every build is generated from one kernel source revision.
+
+| Group | Kernels |
+|---|---|
+| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients) |
+| MXFP8 fused | forward, context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); `sm_107a` only: the multi-macrobatch forward (plain, clamped) |
+| Scheduler | count and rows per scheduler layout, pad per EP size |
+| Layout | the expert layout, zero |
+| Communication | barrier, gather |
+| Epilogues | forward and backward, top-k 2 and 8 |
+
 The locality-domain (`_domain`) builds of the MoK kernels, which split work over the two dies of an
-`sm_107a` GPU, are not shipped in this package.
+`sm_107a` GPU, are not part of this package.
+
+## MXFP8 weights
+
+MXFP8 routed experts read caller-prequantized weights. `quantize_mok_mxfp8_weights(gate, up, down)` (BF16, gate
+and up `[E, I, H]`, down `[E, H, I]`) returns `(forward_weights, backward_weights)`. Callers may pass their own
+MXFP8 weights in this layout instead:
+
+- `forward_weights` = `((gate, gate_scales), (up, up_scales), (down, down_scales))`: E4M3 data
+  (`torch.float8_e4m3fn`) in the weight's own shape, quantized along its last dimension.
+- `backward_weights` = `((gate, gate_scales, gate_t, gate_scales_t), (up, up_scales, up_t, up_scales_t),
+  (down_t, down_scales_t))`: the `_t` pairs quantize the transposed weight (`[E, H, I]` for gate and up,
+  `[E, I, H]` for down) the same way.
+- Each 32 consecutive elements along the quantized dimension share one UE8M0 scale byte:
+  `byte = round_up(max(amax * 0.002232142857, 1e-12))` (the FP32 exponent field, plus one when the mantissa is not
+  zero), saturated to 254; the data is `satfinite_e4m3(x * 2**(127 - byte))`.
+- Scales of an `[E, rows, cols]` weight are uint8 `[E * rows / 128, cols / 128, 32, 16]`: in each 128 x 128 tile, the
+  byte of row `r` and 32-column block `k` is at `(r % 32) * 16 + (r // 32) * 4 + k`. Experts are concatenated along
+  the first dimension.
+
+The bundled quantizer runs PyTorch operations on the BF16 weights (no Triton dependency). Requantize after every
+weight update. Measured cost of `quantize_mok_mxfp8_weights` on GB300 (`sm_103a`), median of 10 calls after 3 warm-up
+calls (CUDA events), with the peak memory it allocates beyond the inputs (its outputs included):
+
+| Routed weights (E, I, H) | Time | Peak memory beyond the inputs |
+|---|---|---|
+| 64, 2048, 6144 | 51.6 ms | 5.64 GiB |
+| 36, 1024, 4096 | 9.76 ms | 1.30 GiB |
+
+## Precision tests
+
+`tests/experimental/test_mok_accuracy.py` (single GPU) and `tests/experimental/test_mok_distributed.py` (EP1 and EP4)
+judge every floating output of the fused kernels (`tests/cake_naive.py`):
+
+- Oracle: the layer and its gradients in float64 on the kernel's own inputs (BF16 `x`, `dY` and weights, FP32
+  scores). With MXFP8 routed experts the routed GEMMs read `x` and the weights through the MXFP8 recipe.
+- Naive implementation: the standard PyTorch BF16 layer (autograd ops in BF16, one cuBLAS GEMM per expert and weight
+  gradient, `d_scores = (dY * y_route).sum(-1)`); MXFP8 adds only the recipe's quantization points.
+- Rule: over 32 random inputs per case, the kernel's error against the oracle, in the L2 and in the max norm, has a
+  median and a largest value at most 1.005 times the naive implementation's, and is 0 wherever the naive error is 0.
+  `x`'s E4M3 codes and scales are exact against the recipe.
+
+Known gaps are judged in test items of their own under a strict expected-failure marker that states the measured
+ratios. A fix makes such an item pass, and the strict marker then fails the item until the marker is removed. Every
+other output of the same case stays judged in the case's main item. Ratios are kernel error / naive error, median /
+largest over the inputs:
+
+| Outputs | Items | `sm_103a` (GB300) | `sm_107a` (VR200) |
+|---|---|---|---|
+| MXFP8 `d_scores` | every MXFP8 case, single GPU | L2 1.46-1.84 / 1.45-1.86 | L2 1.44-1.84 / 1.46-1.84 |
+| MXFP8 `d_scores` | every MXFP8 case, EP1 and EP4 | not measured | L2 1.71-1.72 / 1.70-1.73 |
+| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 (gate, up, down); EP1 clamped cases (down) | L2 1.034-1.035 / 1.033-1.035 (unequal sources) | L2 1.033-1.038 / 1.033-1.072 |
+| same | single-GPU empty-experts cases with 768-row macrobatches; EP1 plain recompute (gate, up, down) | max 1.05-1.14 / 0.85-1.25 (single GPU) | max 1.05-1.14 / 0.93-1.25 |
+
+The MXFP8 score gradient is formed as `sum(dh * hidden) / score` from the kernel's own intermediate values, and the
+BF16 routed weight gradient is rounded to BF16 per macrobatch; follow-up kernel changes remove both gaps.
 
 The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
