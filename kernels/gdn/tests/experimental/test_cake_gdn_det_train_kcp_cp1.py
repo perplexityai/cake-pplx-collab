@@ -1039,6 +1039,8 @@ def test_eager_pools_and_tickets_are_sized_after_the_first_launch(
     forward and backward, their workspace bytes and the CUDA peak above the inputs are those of the package with
     the sizing done in ``ensure`` (``defer=False``), the peak within the allocator's block rounding; every run
     repeats bitwise."""
+    import gc
+
     from torch.utils.checkpoint import checkpoint
 
     kcp = importlib.import_module(
@@ -1083,7 +1085,11 @@ def test_eager_pools_and_tickets_are_sized_after_the_first_launch(
             def fn(*xs):
                 return gdn_api.cake_gdn_det_kcp(*xs, ctx, **knobs)
 
+            # every measured step starts from an empty cache: the blocks that earlier tests of this process (or an
+            # earlier step) left cached change how the allocator splits and rounds this step's blocks
+            gc.collect()
             torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
             base = torch.cuda.memory_allocated(device)
             torch.cuda.reset_peak_memory_stats(device)
             out = checkpoint(fn, *leaves, use_reentrant=False) if ckpt else fn(*leaves)
@@ -1125,8 +1131,8 @@ def test_eager_pools_and_tickets_are_sized_after_the_first_launch(
     for n in TENSORS:
         assert torch.equal(got[n], ref[n]), n
     assert got_log == ref_log
-    # the same tensors are live at every moment; the caching allocator may round a reused block differently when
-    # the allocation order changes (a large block keeps an unsplit remainder below 1 MiB)
+    # the same tensors are live at every moment; from the same empty cache the caching allocator may still round a
+    # reused block differently when the allocation order changes (a large block keeps an unsplit remainder below 1 MiB)
     assert abs(got_peak - ref_peak) <= 4 << 20, (got_peak, ref_peak)
     again, again_log, _ = step(True)
     for n in TENSORS:
