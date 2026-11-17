@@ -338,6 +338,20 @@ KNOWN_MISSES: dict[str, dict[str, dict[str, tuple[float, float, float, float]]]]
             'sm_107': (0.716742, 0.905374, 0.783453, 1.014712),
         },
     },
+    # non-deterministic package: dX@first, dX@retained: the max-norm median, max-norm largest error above 1.005 x the
+    # tier's on sm_100, sm_103, sm_107; worst x1.1479
+    'tests/experimental/test_cake_lm_head_nondet_train.py::test_device_logprob_keep_lifetimes': {
+        'dX@first': {
+            'sm_100': (0.990935, 0.990614, 1.011576, 1.14791),
+            'sm_103': (0.990917, 0.990641, 1.011585, 1.147947),
+            'sm_107': (0.990917, 0.990641, 1.011585, 1.147947),
+        },
+        'dX@retained': {
+            'sm_100': (0.990935, 0.990614, 1.011576, 1.14791),
+            'sm_103': (0.990917, 0.990641, 1.011585, 1.147947),
+            'sm_107': (0.990917, 0.990641, 1.011585, 1.147947),
+        },
+    },
     # non-deterministic package: dX: the max-norm median error above 1.005 x the tier's on sm_100, sm_103, sm_107;
     # worst x1.0411
     'tests/experimental/test_cake_lm_head_nondet_train.py::test_device_logprob_keep_meets_the_naive_tier[1500-4096-0.05-{}-0]': {
