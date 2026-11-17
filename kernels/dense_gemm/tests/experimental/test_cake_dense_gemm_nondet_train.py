@@ -3172,17 +3172,24 @@ def test_k1_chain_programs_are_registered():
 K1_PROMOTED_TEMPLATES = tuple(
     f"dense_proj_gemm_atomic_nn_n{bn}_t_kc128" for bn in (64, 128, 256)
 )
+#: The rows the promotion rule leaves without promotion, restated: ``sm_107a`` ``5120 -> 1024`` BF16 (one split of
+#: 256-wide tiles), whose output without promotion met the naive BF16 tier and whose promoted program was slower.
+K1_PROMOTE_EXEMPT_ROWS = frozenset({("sm_107a", 1, 5120, 1024, "bf16")})
 
 
-def _k1_template_at(arch, block_n, f32, T, splits, chains=1, order="arrival"):
+def _k1_template_at(
+    arch, block_n, f32, T, splits, chains=1, order="arrival", key=None
+):
     """``(template, promote_blocks)`` of this package's CTA-pair plan of ``block_n`` / ``splits`` / ``chains`` at ``T``
     tokens on ``arch``, by the rule of :data:`K1_PROMOTE_BLOCKS` restated here: the promoted program where the plan
     has one chain, BF16 out and the transposed store, its largest split holds more than 128 K blocks of 64 tokens and
-    this checkout registers the promoted template for ``arch``; else the program without promotion."""
+    this checkout registers the promoted template for ``arch``; else, and for a row ``key`` of
+    :data:`K1_PROMOTE_EXEMPT_ROWS`, the program without promotion."""
     kc = cake_backend.K1_PROMOTE_BLOCKS
     promoted = cake_backend.atomic_k1_template(block_n, f32, chains, order, kc)
     if (
-        chains == 1
+        key not in K1_PROMOTE_EXEMPT_ROWS
+        and chains == 1
         and not f32
         and block_n not in cake_backend.K1_ROW_MAJOR_BLOCK_N
         and -(-_k1_blocks(T) // splits) > kc
@@ -3417,6 +3424,53 @@ def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
     assert fields(plan_of(row)) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
     with pytest.raises(ValueError, match="not registered"):
         cake_backend.plan_atomic_gemm(*row, promote=True, **kw)
+
+
+def test_k1_promote_exempt_rows_keep_the_program_without_promotion(monkeypatch):
+    """The rows of :data:`K1_PROMOTE_EXEMPT_ROWS` (``sm_107a`` ``5120 -> 1024`` BF16) keep the one-split 256-wide
+    program without promotion where the promotion rule names the promoted one: on 212 SMs at 8193 and 12288 tokens
+    (the row's range there; 129 and 192 K blocks), on 216 SMs at 16172 and 16384 tokens (its verdict) and at 65536,
+    as the planner's choice and with the same knobs given explicitly.  ``promote=True`` runs the promoted program
+    there; the row's FP32 output and the same explicit plan of another row (``4096 -> 1024`` BF16) are unchanged by
+    the table, and the rule itself (:func:`k1_promote_blocks`) still names the promoted program."""
+    assert cake_backend.K1_PROMOTE_EXEMPT_ROWS == K1_PROMOTE_EXEMPT_ROWS
+    arch = "sm_107a"
+    _register_k1(monkeypatch, arch)
+    _register(monkeypatch, arch, *K1_PROMOTED_TEMPLATES)
+    plain = ("dense_proj_gemm_atomic_nn_n256_t", 256, 1, 1, 0)
+    promoted = ("dense_proj_gemm_atomic_nn_n256_t_kc128", 256, 1, 1, 128)
+
+    def fields(T, d_in, d_out, sm_count, **knobs):
+        plan, *_, reason = cake_backend.plan_atomic_gemm(
+            *_wgrad_views(T, d_in, d_out),
+            transposed_out=True,
+            arch=arch,
+            sm_count=sm_count,
+            **knobs,
+        )
+        assert plan is not None and reason == "", reason
+        return (
+            plan.template,
+            plan.block_n,
+            plan.splits,
+            plan.chains,
+            plan.promote_blocks,
+        )
+
+    for sm_count, T in ((212, 8193), (212, 12288), (216, 16172), (216, 16384), (216, 65536)):
+        what = (sm_count, T)
+        assert fields(T, 5120, 1024, sm_count) == plain, what
+        assert fields(T, 5120, 1024, sm_count, splits=1, block_n=256) == plain, what
+        assert fields(T, 5120, 1024, sm_count, promote=True) == promoted, what
+        assert fields(T, 4096, 1024, sm_count, splits=1, block_n=256) == promoted, what
+        assert (
+            cake_backend.k1_promote_blocks(
+                arch=arch, K=T, block_n=256, splits=1, chains=1, out_f32=False
+            )
+            == 128
+        ), what
+    # at 128 K blocks the row's plan is the same program either way
+    assert fields(8192, 5120, 1024, 212) == plain
 
 
 def test_k1_promote_reaches_the_planner_from_the_plan_and_prepare_entries(
@@ -12783,7 +12837,7 @@ def test_gpu_k1_sm_count_overrides_run_their_programs(record_property):
             assert (
                 prepared.template,
                 prepared.plan.promote_blocks,
-            ) == _k1_template_at(arch, block_n, f32, T, splits), (key, T)
+            ) == _k1_template_at(arch, block_n, f32, T, splits, key=key), (key, T)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
             what = f"{M} {N} {dt} {T}"
@@ -13122,7 +13176,7 @@ def test_gpu_k1_sm_count_token_ranges_run_at_their_edges(
             assert (
                 prepared.template,
                 prepared.plan.promote_blocks,
-            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains), (key, T)
+            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains, key=key), (key, T)
             _assert_ran(prepared.launch, prepared.module_name)
             torch.cuda.synchronize()
             ran += 1
@@ -13195,7 +13249,7 @@ def test_gpu_k1_sm_count_token_ranges_through_the_convenience_binding(
             assert (
                 entry.plan.template,
                 entry.plan.promote_blocks,
-            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains), (key, T)
+            ) == _k1_template_at(arch, plan[0], f32, T, plan[1], chains, key=key), (key, T)
         else:
             assert entry.plan is None and entry.det_plan is not None, (key, T)
         what = f"{M} {N} {dt} {T}"
@@ -13291,7 +13345,7 @@ def test_gpu_k1_152_sm_one_split_ranges_run_at_their_edges(
                 assert (
                     prepared.template,
                     prepared.plan.promote_blocks,
-                ) == _k1_template_at(arch, block_n, f32, T, 1), what
+                ) == _k1_template_at(arch, block_n, f32, T, 1, key=key), what
                 _assert_ran(prepared.launch, prepared.module_name)
                 torch.cuda.synchronize()
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()

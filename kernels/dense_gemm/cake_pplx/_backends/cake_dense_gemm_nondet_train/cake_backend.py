@@ -44,8 +44,8 @@ The module selects the mode: no entry point takes a mode argument.  Every entry 
   whole tiles, and the rows of
   :data:`K1_WGRAD_DET_RULES_BY_SM` run another fixed-order program of the deterministic package.  A one-chain
   BF16 transposed-store plan whose largest split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks runs the
-  promoted program (:func:`k1_promote_blocks`): the same splits and split sum, each split's K blocks summed in chunks
-  of at most that many, added in order;
+  promoted program (:func:`k1_promote_blocks`; not the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`): the same splits and
+  split sum, each split's K blocks summed in chunks of at most that many, added in order;
 * the K1 weight gradient of the FP32 rows of :data:`K1_DSM_RANGES_BY_SM` (thin ``d_out`` on 148-SM and 152-SM
   ``sm_100a``, 152-SM ``sm_103a`` and 212-SM ``sm_107a`` parts, in that table's token ranges; the odd numbers of K
   blocks of :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM` take that table's 64-wide four-CTA tile), before every other K1
@@ -356,9 +356,20 @@ K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
 #: an accumulator of its own, and adds the chunk sums in FP32 registers in chunk order.  The split sum, its order, the
 #: workspace and the launch arguments are those of the program without promotion; at one chunk (``n <= 128``) its bits
 #: are that program's.  :func:`plan_atomic_gemm` runs it where :func:`k1_promote_blocks` names it (one chain, BF16
-#: out, the transposed store, more than this many K blocks in the largest split).  Not the TMA L2 promotion of
-#: :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
+#: out, the transposed store, more than this many K blocks in the largest split), except on the rows of
+#: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
 K1_PROMOTE_BLOCKS = 128
+#: Rows whose plans the planner's promotion rule (:func:`k1_promote_blocks`) leaves without promotion, keys as in
+#: :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles (on 212 SMs from 512 to
+#: 12288 tokens, on 216 SMs and more at every token count of its verdict); the verdicts were measured without
+#: promotion.  Measured on a 212-SM VR200 part: without promotion its output met the naive BF16 tier at 10240,
+#: 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and the max norm, its median
+#: and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to 1.015 times its time at
+#: 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20 launches).  The row
+#: keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
+K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
+    {("sm_107a", 1, 5120, 1024, "bf16")}
+)
 
 # ---------------------------------------------------------------------------
 # K1 planner: the measured verdicts
@@ -2791,7 +2802,8 @@ def plan_atomic_gemm(
     more, at one split, in the arrival order, and never the cluster program.
     Once the tile width, splits, chains and split order are settled (by the planner or explicitly), a CTA-pair plan
     runs the promoted program of :func:`k1_promote_blocks` (``promote_blocks``, template ``..._kc<n>``) where that rule
-    names one; ``promote=False`` never runs it, ``promote=True`` runs it at any length.  ``promote`` does not choose
+    names one, except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`; ``promote=False`` never runs it,
+    ``promote=True`` runs it at any length (on those rows too).  ``promote`` does not choose
     between this package's program and the deterministic one.
     Raises ``ValueError`` for inconsistent shapes (as the deterministic planner does), for an explicit choice the
     program cannot run, and for ``promote=True`` on a plan without a promoted program (more than one chain, FP32 out,
@@ -2950,6 +2962,8 @@ def plan_atomic_gemm(
             out_f32=out_f32,
             split_order=order,
         )
+        if (arch, L, M_, N_, "f32" if out_f32 else "bf16") in K1_PROMOTE_EXEMPT_ROWS:
+            kc = 0
     elif promote:
         refusal = _k1_promote_refusal(arch, bn, c, out_f32, order)
         if refusal:

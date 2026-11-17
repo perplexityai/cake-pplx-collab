@@ -116,7 +116,7 @@ On some rows this module runs the deterministic package's fixed-order programs:
 | property | contract |
 |---|---|
 | operands and accumulation | BF16 operands with FP32 accumulation (K1; a promoted program, `_kc128`, sums each split's K blocks in contiguous chunks of at most 128 K blocks, each in an accumulator of its own, and adds the chunk sums in FP32 in chunk order); FP32 operands split exactly into three BF16 terms with FP32 accumulation (K2), except in a K2 SIMT window (forward, input and weight gradient): the FP32 operands as they are on the CUDA cores, one FFMA per product, every sum one plain FP32 word (in the forward's `kg4` windows per lane and output one FP32 sum, each group of four columns one FMA chain from +0 that one FP32 add puts into it; no compensation; the slices -- in the forward the lanes and the cluster's CTAs -- add one FP32 value per output), no BF16x3 split.  No silent TF32 or BF16 for the router |
-| accuracy | the deterministic package's budgets against FP64 of the exact operands, worst over repeated runs: BF16 out `atol = rtol = 1e-2`; FP32 out relative Frobenius error `<= 5e-5` and max error `<= 1e-3 * max abs(ref)`; router `<= 2e-6` relative Frobenius error and no row whose top-8 experts differ from FP64 (outside near ties of the 8th and 9th logits).  At the largest token counts some thin K1 rows miss the BF16 (FP32) budget with the deterministic program and with this package's program without promotion alike (the promoted program was not measured against these budgets).  FP32 output: the row keeps its route (the deterministic program for the rows of the odd-block K1 table at an odd number of K blocks from 98305 tokens up).  BF16 output: the split rows of `sm_100a` `4096 -> 32`, `4096 -> 48`, `4096 -> 64`, `5120 -> 32`, `5120 -> 48` and of `sm_103a` `4096 -> 32`, `4096 -> 48`, `5120 -> 32`, `5120 -> 48`, `5120 -> 64`, `5120 -> 128` run the promoted program (`_kc128`, the planner rules below) there, which met the naive BF16 tier against FP64 at every measured point, where the deterministic program missed it at most points (the K1 token tables below).  A row without a split program at a token count runs the deterministic program, whose BF16 output misses the naive BF16 tier at some long token counts: measured at 32768 to 131072 tokens on a B200, a GB300 and a 212-SM R200 part, in every such row measured but `4096 -> 1024` and `5120 -> 1024` |
+| accuracy | the deterministic package's budgets against FP64 of the exact operands, worst over repeated runs: BF16 out `atol = rtol = 1e-2`; FP32 out relative Frobenius error `<= 5e-5` and max error `<= 1e-3 * max abs(ref)`; router `<= 2e-6` relative Frobenius error and no row whose top-8 experts differ from FP64 (outside near ties of the 8th and 9th logits).  At the largest token counts some thin K1 rows miss the BF16 (FP32) budget with the deterministic program and with this package's program without promotion alike (the promoted program was not measured against these budgets).  FP32 output: the row keeps its route (the deterministic program for the rows of the odd-block K1 table at an odd number of K blocks from 98305 tokens up).  BF16 output: the split rows of `sm_100a` `4096 -> 32`, `4096 -> 48`, `4096 -> 64`, `5120 -> 32`, `5120 -> 48` and of `sm_103a` `4096 -> 32`, `4096 -> 48`, `5120 -> 32`, `5120 -> 48`, `5120 -> 64`, `5120 -> 128` run the promoted program (`_kc128`, the planner rules below) there, which met the naive BF16 tier against FP64 at every measured point, where the deterministic program missed it at most points (the K1 token tables below).  A row without a split program at a token count runs the deterministic program, whose BF16 output misses the naive BF16 tier at some long token counts: on a B200, a GB300 and a 212-SM R200 part every measured row of at most 576 outputs missed it at one or more token counts from 24576 up (worst 1.060 times the tier, `8192 -> 128` on the B200 at 131072 tokens), and `4096 -> 1024`, `5120 -> 1024` and `4096 -> 4096` met it at every measured point |
 | rounding | each output element is rounded once, from its complete FP32 sum |
 | subnormals | kept: K1 adds the partials with IEEE round-to-nearest adds, K2 reduces with the TMA reduce-add; a K2 SIMT window (forward, input and weight gradient) accumulates with round-to-nearest FMAs and adds, adds the sums of a CTA's slices in a fixed order through shared memory (the forward: the sums of a cluster's eight CTAs, through distributed shared memory) and stores every element of `out` once, with no reduce-add; nothing flushes to zero |
 | `torch.use_deterministic_algorithms(True)` | PyTorch's alert right before an order-varying launch: the K1 CTA-pair program at three or more splits in the arrival order (a caller's `splits >= 3`), K2 stream-K with more than two partials per element (a caller's `splits >= 3` on `nn_t`); no default plan of the shipped tables is such a launch.  `RuntimeError`, or a `UserWarning` with `warn_only=True` and then the launch.  The alert is checked on every launch (prepared and convenience), never at plan or prepare time.  A launch captured into a CUDA graph is checked at capture, not at replay.  The two-split K1 rows, the mirror order, the K1 cluster program (`K1_DSM_RANGES_BY_SM` and `K1_DSM_ODD_BLOCK_RANGES_BY_SM`, its splits added in cluster-rank order), the K2 forward, the K2 SIMT, K-order and `"waves"` windows and every deterministic program run without an alert |
@@ -205,17 +205,22 @@ than the table's largest count take that count's ranges, `K1_PARITY_RANGES_ABOVE
 CTA-pair program, its split order included, at its token ranges on parts of exactly its SM count (`k1_ordered_plan`).
 Once a table, or the caller's `splits` / `block_n` / `chains`, settles a CTA-pair plan, `plan_atomic_gemm` runs its
 promoted program (FP32 chunk sums; not the TMA L2 promotion of `K1_DGRAD_PROMO_RANGES_BY_SM`) where
-`k1_promote_blocks` names it: one chain, BF16 `out`, the transposed store, more than
-`K1_PROMOTE_BLOCKS` (128) 64-token K blocks in the largest split (`ceil(ceil(T / 64) / splits)`), and the program
-registered for the architecture.  One FP32 accumulator that adds a split's whole long token range is less accurate
-than the reference; the promoted program sums chunks of at most 128 blocks and adds them in order.  The rule reads
-the split's length only, no row or token table.  Measured on a B200 part: at one chunk the output has the bits of
-the program without promotion; at more chunks it met the naive BF16 tier in all 117 cases tested, at the same
-time within noise (median ratio 1.001).  The naive BF16 tier is the error against FP64 of PyTorch's BF16 product
-of the same operands: an output meets it when, in the L2 and the max norm, its median and largest error over a
-case's random draws are at most 1.005 times the tier's.  `promote=False` keeps the program without promotion.
-`promote=True` runs the promoted program at any length on every CTA-pair plan and raises `ValueError` where
-the plan has none; a row the planner keeps on the deterministic program stays there.
+`k1_promote_blocks` names it: one chain, BF16 `out`, the transposed store, more than `K1_PROMOTE_BLOCKS` (128) 64-token
+K blocks in the largest split (`ceil(ceil(T / 64) / splits)`), and the program registered for the architecture.  One
+FP32 accumulator that adds a split's whole long token range is less accurate than the reference; the promoted program
+sums chunks of at most 128 blocks and adds them in order.  The rule reads the split's length only, no token table, and
+the planner skips the rows of `K1_PROMOTE_EXEMPT_ROWS`: `sm_107a` `5120 -> 1024` BF16 (one split of 256-wide tiles, its
+verdicts measured without promotion) keeps the program of version 0.2.0.  On a 212-SM VR200 part its output without
+promotion met the naive BF16 tier (below) from 10240 to 131072 tokens, with the errors of PyTorch BF16, and the promoted
+program took 1.012 to 1.015 times its time at 10240 and 12288 tokens.  Measured on a B200 part: at one chunk the output
+has the bits of the program without promotion, and the program met the naive BF16 tier in all 117 cases tested (13 rows
+at 32768, 65535 and 131072 tokens and one, two and four splits; 13 of the cases hold one chunk per split).  In those
+single CUDA-event runs, without a control arm, its time was 0.933 to 1.048 times that of the program without promotion
+(median 1.001); the paired measurements of the K1 token tables below are the controlled comparison.  The naive BF16 tier
+is the error against FP64 of PyTorch's BF16 product of the same operands: an output meets it when, in the L2 and the max
+norm, its median and largest error over a case's random draws are at most 1.005 times the tier's.  `promote=False` keeps
+the program without promotion.  `promote=True` runs the promoted program at any length on every CTA-pair plan and raises
+`ValueError` where the plan has none; a row the planner keeps on the deterministic program stays there.
 A K1 program runs only at token counts where its output met the deterministic package's budgets against FP64 (the
 accuracy row above) on every measured seed; the ratio of its FP64 relative Frobenius error to the deterministic
 program's on the same operands (q) is reported in the tables below as data, not as a rule.  Where both programs miss the
@@ -259,7 +264,8 @@ hold, the token count takes the next window that holds it.  The measured parts h
 | `K1_SPLIT_RANGE_OVERRIDES_BY_SM` | `(arch, sm_count)`, then a key of that part's table in `K1_SPLIT_RULES_BY_SM` | `((min_tokens, max_tokens, (block_n, num_splits)), ...)`: on a part of exactly `sm_count` SMs below the row's floor, a token count from `min_tokens` to `max_tokens` runs that program, except the token counts of `K1_SPLIT_RULE_EXCLUDED_TOKENS`; a range lies outside `K1_SPLIT_RULES_BY_SM_TOKENS` and the row's `K1_SPLIT_RULES_BY_SM_TOKEN_RANGES` (`sm_107a`: 212 SMs, the 212-SM K1 token-range table below) |
 | `K1_TWO_SPLIT_RANGES_BY_SM` | `(arch, sm_count)`, then a key as in `K1_SPLIT_RULES` (below the row's floor: a key of that part's table in `K1_SPLIT_RULES_BY_SM`) | `((min_tokens, max_tokens, (block_n, num_splits)), ...)`: on a part of exactly `sm_count` SMs, below the row's floor or at or above it, a token count from `min_tokens` to `max_tokens` runs that program at either number of 64-token K blocks, except the token counts of `K1_SPLIT_RULE_EXCLUDED_TOKENS`; a range lies outside `K1_SPLIT_RULES_BY_SM_TOKENS` and the row's ranges in `K1_SPLIT_RULES_BY_SM_TOKEN_RANGES` and `K1_SPLIT_RANGE_OVERRIDES_BY_SM` (`sm_107a`: 212 SMs, the two-split rows of the 212-SM K1 token-range table below, `4096 -> 128` FP32 without a verdict in the part's table of `K1_SPLIT_RULES_BY_SM`; `sm_100a` / `sm_103a`: 152 SMs, the 152-SM two-split table below) |
 | `K1_SPLIT_OVERRIDES_BY_SM` | `(arch, sm_count)` | verdicts (keys and values as in `K1_SPLIT_RULES`) that replace a row's `K1_SPLIT_RULES` verdict on parts of exactly `sm_count` SMs at or above the row's floor, at the token counts of `K1_SPLIT_RULES_BY_SM_TOKENS` only, except the token counts of `K1_SPLIT_RULE_EXCLUDED_TOKENS`; every other token count and SM count keeps the `K1_SPLIT_RULES` verdict (`sm_107a`: 216 SMs, `4096 -> 1024` FP32 (192, 1), the row-major-store program) |
-| `K1_PROMOTE_BLOCKS` | -- | `128`: the K blocks of one promoted chunk; a one-chain BF16 transposed-store plan whose largest split holds more K blocks runs the promoted program `..._t_kc128` (`k1_promote_blocks`), after every table |
+| `K1_PROMOTE_BLOCKS` | -- | `128`: the K blocks of one promoted chunk; a one-chain BF16 transposed-store plan whose largest split holds more K blocks runs the promoted program `..._t_kc128` (`k1_promote_blocks`), after every table, except the rows of `K1_PROMOTE_EXEMPT_ROWS` |
+| `K1_PROMOTE_EXEMPT_ROWS` | a key of `K1_SPLIT_RULES` | the rows whose plans keep the program without promotion where `k1_promote_blocks` names the promoted one (`promote=True` still runs it): `sm_107a` `5120 -> 1024` BF16 |
 | `K1_CHAIN_RANGES_BY_SM` | `(arch, sm_count)`, then a key of `K1_SPLIT_RULES` | `((min_tokens, max_tokens, (block_n, chains)), ...)`: on a part of exactly `sm_count` SMs, a token count from `min_tokens` to `max_tokens` runs this package's one-split program of that tile width with that many accumulation chains (`k1_chain_plan`; the chain counts this package ships are `K1_CHAINS_CHOICES`), before every table above, `K1_TWO_SPLIT_RANGES_BY_SM` included (`sm_107a`: 212 and 216 SMs, the K1 accumulation-chain table below) |
 | `K1_PARITY_RANGES_BY_SM` | `(arch, sm_count)`, then a key as in `K1_SPLIT_RULES` | `((min_tokens, max_tokens, even, odd), ...)`: on a part of exactly `sm_count` SMs (or of more SMs than every count of the architecture there: the ranges of `K1_PARITY_RANGES_ABOVE_SM`), a token count from `min_tokens` to `max_tokens` runs `even` at an even number of 64-token K blocks and `odd` at an odd number, each a `(block_n, splits, chains, order)` of this package's CTA-pair program, `()` for the deterministic program or `None` for the other tables (`k1_parity_plan`), before every table but the cluster ranges (`sm_107a` FP32 `4096 / 5120 -> 512 / 1024`: 208, 212, 216 and more SMs from 961 tokens) |
 | `K1_ONE_SPLIT_RANGES_BY_SM` | `(arch, sm_count)`, then a key as in `K1_SPLIT_RULES` | `((min_tokens, max_tokens, block_n), ...)`: on a part of exactly `sm_count` SMs, a token count from `min_tokens` to `max_tokens` runs this package's one-split program of that tile width and one accumulation chain, at an even and an odd number of 64-token K blocks alike, before every table above except `K1_CHAIN_RANGES_BY_SM` (`sm_100a` / `sm_103a`: 152 SMs, the 152-SM one-split table below) |
@@ -389,12 +395,15 @@ tokens (the first item below).  The changes:
   window.
 - The cluster tables below keep their measurements; their three-CTA rows now run as described above.
 - K1 weight gradient, every one-chain BF16 plan of the transposed-store program whose largest split holds more than
-  128 K blocks of 64 tokens (`K1_PROMOTE_BLOCKS`, `k1_promote_blocks`): one FP32 accumulator per split missed the
-  naive BF16 tier against FP64 at long token counts (148-SM `sm_100a` `4096 -> 64` at 65535 tokens: two splits of
-  512 K blocks).  These plans now run the promoted program `dense_proj_gemm_atomic_nn_n<64|128|256>_t_kc128`: the
-  same splits and split sum, each split's K blocks in chunks of at most 128, each chunk in an accumulator of its own,
-  the chunks added in order.  On a B200 part it met the tier in all 117 cases tested at the same time within noise
-  (median ratio 1.001); at one chunk it has the bits of the program without promotion.
+  128 K blocks of 64 tokens (`K1_PROMOTE_BLOCKS`, `k1_promote_blocks`): one FP32 accumulator per split missed the naive
+  BF16 tier against FP64 at long token counts (148-SM `sm_100a` `4096 -> 64` at 65535 tokens: two splits of 512 K
+  blocks).  These plans now run the promoted program `dense_proj_gemm_atomic_nn_n<64|128|256>_t_kc128`: the same splits
+  and split sum, each split's K blocks in chunks of at most 128, each chunk in an accumulator of its own, the chunks
+  added in order.  On a B200 part it met the tier in all 117 cases tested (13 of them at one chunk per split), at 0.933
+  to 1.048 times the time of the program without promotion in single runs without a control arm (median 1.001); at one
+  chunk it has the bits of the program without promotion.  `sm_107a` `5120 -> 1024` BF16 keeps its one-split program
+  without promotion (`K1_PROMOTE_EXEMPT_ROWS`): on a 212-SM VR200 part the promoted program took 1.012 to 1.015 times
+  its time at 10240 and 12288 tokens, and the program without promotion met the tier from 10240 to 131072 tokens.
 
 | K1 row `d_in -> d_out` | `sm_100a` BF16 | `sm_100a` FP32 | `sm_103a` BF16 | `sm_103a` FP32 |
 |---|---|---|---|---|
@@ -913,9 +922,11 @@ tokens with the same protocol on a node of four parts, twice with the parts' lau
 than the deterministic plan in every run up to 12288 tokens, with the FP64 error of the deterministic program on every
 seed; at 32768 tokens it failed the K1 rule in every run (0.1 to 0.6 % faster than the deterministic plan alone), and
 its checkpointed step measured 2.5 to 4.3 % slower, as did a second deterministic launch against the first there (1.9 to
-4.4 %).  On 212 SMs `4096 -> 1024` FP32 keeps the 192-wide program at 512 tokens: the 256-wide program is 15 % faster
-alone and leaves the backward pass 4 to 6 % faster, but the checkpointed step 0.2 to 1.2 % slower in graph replays
-(median of the paired ratios, ratio of the medians).*
+4.4 %).  In the timing runs of version 0.3.0 on a 212-SM VR200 part (CUPTI, cold L2, the arms interleaved in one
+process) the deterministic plan took 0.93 and 0.96 times this program's time at 10240 and 12288 tokens; the range was
+not re-measured with the protocol above.  On 212 SMs `4096 -> 1024` FP32 keeps the 192-wide program at 512 tokens: the
+256-wide program is 15 % faster alone and leaves the backward pass 4 to 6 % faster, but the checkpointed step 0.2 to
+1.2 % slower in graph replays (median of the paired ratios, ratio of the medians).*
 
 | K1 row `d_in -> d_out`, FP32 out | 212 SMs: `(block_n, chains)`, token ranges | 216 SMs: `(block_n, chains)`, token ranges |
 |---|---|---|
@@ -1422,7 +1433,7 @@ not accepted can still be a shipped verdict.
 
 ## Tested versions
 
-The benchmark of this package (every row, eager and CUDA graph, with the tables of this version) ran on these GPUs:
+The benchmark of this package (every row, eager and CUDA graph, with the tables of version 0.2.0) ran on these GPUs:
 
 | GPU | architecture | SMs | driver (CUDA driver API) |
 |---|---|---|---|
@@ -1437,6 +1448,15 @@ Software: CUDA toolkit 13.4 (`nvcc` V13.4.92, builds the programs), PyTorch 2.14
 and cuBLASLt 13.8.0 (the benchmark's library arms), Python 3.12.15, apache-tvm-ffi 0.1.15.post0, cuda-bindings
 13.5.0 and cupti-python 13.4.0 (the benchmark's timer).  The minimum toolkits per architecture are in the
 architectures row of the table above.
+
+Version 0.3.0 (the promoted K1 programs and the K1 token tables without open-ended BF16 entries) keeps the tables of
+0.2.0 for every other row.  Its changed rows -- the BF16 weight-gradient rows that run a promoted program at 32768,
+65535 and 131072 tokens -- were timed against the deterministic package, the program without promotion, the cuDNN
+frontend and cuBLASLt, and the test suite ran, on an NVIDIA B200 (`sm_100a`, 148 SMs, driver 580.82.07), an NVIDIA GB300
+(`sm_103a`, 152 SMs, driver 580.159.03) and an NVIDIA VR200 (`sm_107a`, 212 SMs, driver 620.70.06) with CUDA toolkit
+13.5.  The row `sm_107a` `5120 -> 1024` BF16, which keeps the program of 0.2.0, was timed with and without promotion at
+10240 and 12288 tokens and judged against the naive BF16 tier from 10240 to 131072 tokens on the VR200.  GB200 and B300
+parts and `sm_107a` parts of 216 or more SMs were not measured for this version.
 
 ## Helpers of this package
 
