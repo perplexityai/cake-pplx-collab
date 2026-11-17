@@ -38,7 +38,7 @@ are `@cake_api` functions.  This package, under `cake_pplx._backends`, is its
 backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
-CUDA 13.4 or newer.  The feature does not
+CUDA 13.5 or newer.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
 JIT-built by the package's JIT shim (`_cake_pplx_jit.py`) from the sources and
@@ -267,7 +267,7 @@ per-stream ones.
 
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
-- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.4 or newer).
+- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
 
 ## Names
 
