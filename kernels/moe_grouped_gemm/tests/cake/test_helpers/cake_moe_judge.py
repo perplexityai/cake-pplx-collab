@@ -341,14 +341,17 @@ def judge_draws(
     judge.
 
     ``then()`` runs after the draws and before anything is raised: the test's later
-    checks, whatever the verdicts.  A failure of ``then``, of an output's contract, of an
-    exact output, an output not judged on every draw or two draws with the same oracle
-    values raises a plain :class:`AssertionError` listing every failure, the misses of
-    the naive tier too.  When those misses are the only failures, :class:`NaiveTierMiss`
-    is raised (a skip in ``then``, whose checks do not apply on this device, does not
-    hide them).  A test that judges in a loop passes ``misses`` (a list) instead of
-    ``then``: such a :class:`NaiveTierMiss` is appended to it, not raised, and the test
-    raises the collected misses last with :func:`raise_misses`."""
+    checks, whatever the verdicts.  A failure of ``then`` (an :class:`Exception` it
+    raises other than a :class:`NaiveTierMiss`, also when it is the only failure; it is
+    kept as the ``__cause__``), of an output's contract, of an exact output, an output not
+    judged on every draw or two draws with the same oracle values raises a plain
+    :class:`AssertionError` listing every failure, the misses of the naive tier too.  A
+    :class:`NaiveTierMiss` of ``then`` (a judgment it ran) joins the misses.  When those
+    misses are the only failures, :class:`NaiveTierMiss` is raised (a skip in ``then``,
+    whose checks do not apply on this device, does not hide them).  A test that judges in
+    a loop passes ``misses`` (a list) instead of ``then``: such a :class:`NaiveTierMiss`
+    is appended to it, not raised, and the test raises the collected misses last with
+    :func:`raise_misses`."""
     if then is not None and misses is not None:
         raise TypeError("judge_draws takes then or misses, not both")
     judge = TierJudge(draws)
@@ -372,9 +375,7 @@ def judge_draws(
         except pytest.skip.Exception:
             if not failures and not missed:
                 raise
-        except Exception as error:
-            if not failures and not missed:
-                raise
+        except Exception as error:  # alone too: a plain AssertionError, its cause kept
             failures.append(f"then: {type(error).__name__}: {error}")
             cause = error
     if failures:

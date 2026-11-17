@@ -211,6 +211,15 @@ def test_a_failure_of_then_fails_the_test():
     alone = _failure(["meets"], then=then)
     assert type(alone) is AssertionError and "bits differ" in str(alone)
 
+    def broken():
+        raise RuntimeError("launch failed (synthetic)")
+
+    for names in (["meets"], ["max_only"]):
+        error = _failure(names, then=broken)
+        assert type(error) is AssertionError and type(error.__cause__) is RuntimeError
+        assert "then: RuntimeError: launch failed" in str(error)
+        assert not known_gaps.covers(error, frozenset(names))
+
 
 def test_a_skip_in_then_leaves_the_miss():
     def then():
