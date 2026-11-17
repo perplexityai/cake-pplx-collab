@@ -34,7 +34,11 @@ Single-rank arms (the packed documents as one ``B = 1`` batch):
   its default atomic weight gradient (``CAUSAL_CONV1D_DETERMINISTIC`` unset);
 * ``dao_det``: the same with ``CAUSAL_CONV1D_DETERMINISTIC=1`` (an ordered weight-gradient reduction);
 * ``cudnn_fe``: the cuDNN frontend's ``cudnn.ops.causal_conv1d`` on the channel-last view with ``cu_seqlens`` (its
-  CuTe DSL route; with ``torch`` deterministic algorithms off, an atomic weight gradient).
+  default route; with ``torch`` deterministic algorithms off, an atomic weight gradient);
+* ``cudnn_fe_det``: the same with ``torch.use_deterministic_algorithms(True)`` held around its calls (bias-free rows
+  only: the library's deterministic weight gradient);
+* ``torch_compile``: ``torch.compile`` of the document-local formula in FP32 (FP32 taps and accumulation, SiLU' at the
+  FP32 preactivation, one BF16 rounding of ``y``), the token shifts masked at the document boundaries.
 
 Context-parallel arms (the benchmark's process group; the halo exchange is part of every phase):
 
@@ -46,13 +50,16 @@ Context-parallel arms (the benchmark's process group; the halo exchange is part 
   Its taps must have the activations' dtype, so it runs BF16 taps against the FP32 taps of the Cake rows.
 
 Each arm records the library version (``fla.__version__``, ``causal_conv1d.__version__``, ``cudnn.__version__``;
-Attention Gym has none, so ``ATTN_GYM_COMMIT`` names its commit), its determinism, and its feature match against
-the Cake route of the row: ``exact``, ``more_precise`` (SiLU' at the FP32 preactivation where the Cake route takes
-the BF16-rounded one) or ``less_precise`` (the BF16-rounded preactivation against the Cake ``fp32`` policy, or BF16
-taps against FP32 taps).  One untimed call per arm checks its numerics against the Cake non-deterministic result
-(relative L2 error of ``y``, ``dx``, ``dweight``, ``dbias`` below ``NUMERICS_REL_L2``).  An arm is ``eligible`` for
-the best baseline when it is an exact or more precise match and passes the check.  A row an arm cannot run is
-reported with the concrete reason.
+Attention Gym has none, so ``ATTN_GYM_COMMIT`` names its commit), its determinism claim, and its features against the
+Cake route of the row: ``exact``; ``more_precise`` / ``other_policy`` (SiLU' at the FP32 preactivation where the Cake
+route takes the BF16-rounded one, or the other way round); ``less_precise`` (BF16 taps against FP32 taps: another
+operation, never compared).  The accuracy gate (``cake_causal_conv1d_numerics.py``) judges every arm as the training
+tests judge a kernel: its own error against a float64 oracle beside the error of PyTorch BF16, over 32 random inputs
+(:func:`single_rank_gate`, :func:`kcp_gate`); it never compares an arm with a Cake result.  An arm is ``eligible``
+for the best baseline when its taps match the Cake route and it passes the gate; a SiLU' policy that differs from the
+Cake route's is a note, since the gate decides whether its precision qualifies.  The gate also records whether the
+arm's outputs were the same bytes run to run on the row (``run_to_run_bitwise``); a ``det`` comparison counts an arm
+only when it claims and shows that.  A row an arm cannot run is reported with the concrete reason.
 """
 
 from __future__ import annotations
@@ -61,15 +68,23 @@ import contextlib
 import importlib
 import importlib.metadata
 import os
+import sys
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 import torch
 from torch.utils.checkpoint import checkpoint
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import cake_causal_conv1d_numerics as numerics  # noqa: E402
+import cake_naive  # noqa: E402
+
 WIDTH = 4
-NUMERICS_REL_L2 = 1e-2
-SINGLE_RANK_ARMS = ("fla", "fla_gluon", "dao", "dao_det", "cudnn_fe")
+SINGLE_RANK_ARMS = ("fla", "fla_gluon", "dao", "dao_det", "cudnn_fe", "cudnn_fe_det", "torch_compile")
 KCP_ARMS = ("fla_cp_triton", "fla_cp_cuda", "attn_gym_cp")
+# The arms whose library claims an ordered (run-to-run bitwise) weight gradient.
+DETERMINISTIC_CLAIM = ("fla", "fla_gluon", "dao_det", "cudnn_fe_det", "fla_cp_triton")
 FLA_ENTRY = "fla.modules.causal_conv1d.causal_conv1d"
 DAO_ENTRY = "causal_conv1d.causal_conv1d_fn"
 CUDNN_ENTRY = "cudnn.ops.causal_conv1d"
@@ -88,11 +103,20 @@ class Unsupported(Exception):
     """The arm cannot run the row; the message is the concrete reason."""
 
 
+# Not an environment variable: while an arm's ``env`` holds this key with a true value, torch deterministic
+# algorithms are on (``cudnn_fe_det``).
+TORCH_DETERMINISTIC = "torch.use_deterministic_algorithms"
+
+
 @contextlib.contextmanager
 def environment(values: dict[str, Optional[str]]) -> Iterator[None]:
-    """Set (or unset, for ``None``) environment variables for the block, then restore them."""
+    """Set (or unset, for ``None``) environment variables for the block, then restore them; the
+    :data:`TORCH_DETERMINISTIC` key sets torch deterministic algorithms instead."""
 
+    values = dict(values)
+    torch_det = values.pop(TORCH_DETERMINISTIC, None)
     saved = {key: os.environ.get(key) for key in values}
+    saved_det = torch.are_deterministic_algorithms_enabled()
 
     def apply(settings: dict[str, Optional[str]]) -> None:
         for key, value in settings.items():
@@ -102,10 +126,14 @@ def environment(values: dict[str, Optional[str]]) -> Iterator[None]:
                 os.environ[key] = value
 
     apply(values)
+    if torch_det is not None:
+        torch.use_deterministic_algorithms(bool(torch_det))
     try:
         yield
     finally:
         apply(saved)
+        if torch_det is not None:
+            torch.use_deterministic_algorithms(saved_det)
 
 
 def dtype_name(dtype: Optional[torch.dtype]) -> Optional[str]:
@@ -146,9 +174,9 @@ def feature(
 
     match, notes = "exact", []
     if preactivation != cake_preactivation:
-        match = "more_precise" if preactivation == "fp32" else "less_precise"
+        match = "more_precise" if preactivation == "fp32" else "other_policy"
         notes.append(
-            f"SiLU' at the {preactivation} preactivation (Cake route: {cake_preactivation})"
+            f"SiLU' at the {preactivation} preactivation (Cake route: {cake_preactivation}); the gate decides"
         )
     if taps != cake_taps:
         match = "less_precise"
@@ -164,11 +192,19 @@ def feature(
     }
 
 
+class Calls(dict):
+    """An arm's call table (``{name: fn}``) with the ``leaves`` and the output gradients ``dys`` its calls read
+    (the accuracy gate refills them in place with each draw's inputs)."""
+
+    leaves: list[torch.Tensor]
+    dys: list[torch.Tensor]
+
+
 def autograd_calls(
     layer: Callable[..., tuple],
     leaves: Sequence[torch.Tensor],
     dys: Sequence[torch.Tensor],
-) -> dict[str, Callable[[], object]]:
+) -> Calls:
     """``{name: fn}`` of an arm through autograd: the timed phases ``fwd`` / ``bwd`` / ``step`` / ``ckpt`` and
     ``record`` (the forward ``bwd`` replays the backward of)."""
 
@@ -204,33 +240,44 @@ def autograd_calls(
         torch.autograd.backward(list(ys), list(dys))
         return grads()
 
-    return {
-        "fwd": fwd,
-        "record": record,
-        "bwd": bwd,
-        "step": step,
-        "ckpt": ckpt,
-    }
+    calls = Calls(fwd=fwd, record=record, bwd=bwd, step=step, ckpt=ckpt)
+    calls.leaves = list(leaves)
+    calls.dys = list(dys)
+    return calls
 
 
-def _sums(
-    out: torch.Tensor, ref: torch.Tensor
-) -> tuple[float, float]:  # (sum (out - ref)^2, sum ref^2)
-    diff = out.detach().double() - ref.detach().double()
-    return float((diff * diff).sum()), float(ref.detach().double().square().sum())
+def gate_run(layer: Callable[..., tuple], env: dict) -> numerics.ArmRun:
+    """The accuracy gate's run of a single-rank arm: its forward and backward on fresh leaves of one draw."""
+
+    def run(x, w, b, dy):
+        leaves = [t.detach().clone().requires_grad_(True) for t in (x, w, b) if t is not None]
+        with environment(env):
+            (y,) = layer(*leaves)
+            torch.autograd.backward([y], [dy])
+        grads = [leaf.grad for leaf in leaves]
+        return {
+            "y": y.detach(),
+            "dx": grads[0],
+            "dweight": grads[1],
+            "dbias": grads[2] if b is not None else None,
+        }
+
+    return run
 
 
-def _rel(sums: tuple[float, float]) -> float:
-    err, norm = sums
-    return (err / norm) ** 0.5 if norm > 0 else (0.0 if err == 0 else float("inf"))
+def apply_gate(entry: dict, verdict: dict) -> None:
+    """Record the gate's ``verdict`` on an arm's ``entry`` and set ``eligible`` (taps match and the gate passed) and
+    ``measured_deterministic`` (claimed and run-to-run bitwise on the row)."""
 
-
-def _numerics(rel: dict[str, float]) -> dict:
-    return {
-        "rel_l2": rel,
-        "ok": all(value < NUMERICS_REL_L2 for value in rel.values()),
-        "budget": NUMERICS_REL_L2,
-    }
+    entry["gate"] = verdict
+    entry["eligible"] = (
+        "unsupported" not in entry
+        and entry.get("feature", {}).get("match") != "less_precise"
+        and bool(verdict.get("passed"))
+    )
+    entry["measured_deterministic"] = bool(
+        entry.get("name") in DETERMINISTIC_CLAIM and verdict.get("run_to_run_bitwise")
+    )
 
 
 def _bias(leaves: Sequence[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -330,6 +377,37 @@ def _cudnn_layer(cu: torch.Tensor) -> tuple[Callable[..., tuple], Callable[[], A
     return layer, ops._get_causal_conv1d_last_route
 
 
+def _compile_layer(x: torch.Tensor, lens: Sequence[int]) -> Callable[..., tuple]:
+    """``torch.compile`` of the document-local formula in FP32 (one BF16 rounding of ``y``)."""
+
+    ids = torch.repeat_interleave(
+        torch.arange(len(lens), device=x.device), torch.tensor(list(lens), device=x.device)
+    )
+    # same[k][t]: token t - k exists and is of token t's document.
+    same = [None] + [
+        torch.cat([torch.zeros(k, dtype=torch.bool, device=x.device), ids[k:] == ids[:-k]]).unsqueeze(1)
+        for k in range(1, WIDTH)
+    ]
+
+    def formula(xb, w, b, m1, m2, m3):
+        xf = xb.float()
+        wf = w.float()
+        pre = xf * wf[:, WIDTH - 1]
+        for k, m in ((1, m1), (2, m2), (3, m3)):
+            shifted = torch.nn.functional.pad(xf[:-k], (0, 0, k, 0)) * m
+            pre = pre + shifted * wf[:, WIDTH - 1 - k]
+        if b is not None:
+            pre = pre + b.float()
+        return (pre * torch.sigmoid(pre)).to(xb.dtype)
+
+    compiled = torch.compile(formula, dynamic=False)
+
+    def layer(*t: torch.Tensor) -> tuple:
+        return (compiled(t[0], t[1], _bias(t), same[1], same[2], same[3]),)
+
+    return layer
+
+
 def single_rank_arm(
     name: str,
     *,
@@ -340,14 +418,13 @@ def single_rank_arm(
     cu: torch.Tensor,
     lens: Sequence[int],
     cake_preactivation: str,
-    reference: Sequence[Optional[torch.Tensor]],
-) -> tuple[dict, Optional[dict[str, Callable[[], object]]]]:
-    """``(entry, calls)`` of one single-rank arm on a row: ``entry`` describes it (library, version, determinism,
-    features, numerics and ``env``, the environment to hold around its calls; or ``unsupported`` with the reason);
-    ``calls`` (``None`` when unsupported) are its :func:`autograd_calls`, recorded once.  ``reference`` is the Cake
-    non-deterministic ``(y, dx, dweight, dbias)`` of the row."""
+) -> tuple[dict, Optional[Calls], Optional[numerics.ArmRun]]:
+    """``(entry, calls, run)`` of one single-rank arm on a row: ``entry`` describes it (library, version,
+    determinism claim, features and ``env``, the environment to hold around its calls; or ``unsupported`` with the
+    reason); ``calls`` (``None`` when unsupported) are its :func:`autograd_calls` on the row's tensors, recorded
+    once; ``run`` is its accuracy-gate run (:func:`gate_run`).  ``eligible`` is set by :func:`apply_gate`."""
 
-    entry: dict = {"name": name}
+    entry: dict = {"name": name, "eligible": False}
     try:
         env: dict[str, Optional[str]] = {}
         route_of: Optional[Callable[[], Any]] = None
@@ -378,14 +455,20 @@ def single_rank_arm(
                 )
             env = _DAO_DET_ENV if name == "dao_det" else _DAO_ENV
             layer = _dao_layer(x, lens)
-        elif name == "cudnn_fe":
+        elif name in ("cudnn_fe", "cudnn_fe_det"):
             entry.update(
                 library=_library("cudnn", "nvidia-cudnn-frontend"),
                 cutlass_dsl=_distribution("nvidia-cutlass-dsl"),
                 entry=CUDNN_ENTRY + " (channel-last view, cu_seqlens)",
-                determinism="non-deterministic (atomic dweight; torch deterministic algorithms off)",
-                preactivation="fp32",
+                determinism="deterministic dweight (torch deterministic algorithms on, bias-free)"
+                if name == "cudnn_fe_det"
+                else "non-deterministic (atomic dweight; torch deterministic algorithms off)",
+                preactivation="unverified",
             )
+            if name == "cudnn_fe_det":
+                if b is not None:
+                    raise Unsupported("cuDNN-FE's deterministic weight gradient is bias-free only")
+                env = {TORCH_DETERMINISTIC: "1"}
             arch = importlib.import_module("cudnn._causal_conv1d_arch")
             capability = tuple(torch.cuda.get_device_capability(x.device))
             if not arch.is_functional_arch(capability):
@@ -400,6 +483,14 @@ def single_rank_arm(
             if b is not None and b.dtype != torch.bfloat16:
                 raise Unsupported("cuDNN-FE's packed route takes a BF16 bias only")
             layer, route_of = _cudnn_layer(cu)
+        elif name == "torch_compile":
+            entry.update(
+                library=f"torch {torch.__version__}",
+                entry="torch.compile(document-local conv + SiLU in FP32)",
+                determinism="unverified (Inductor kernels; the gate records run-to-run bits)",
+                preactivation="fp32",
+            )
+            layer = _compile_layer(x, lens)
         else:
             raise ValueError(f"unknown single-rank arm {name!r}")
         entry["feature"] = feature(
@@ -415,31 +506,39 @@ def single_rank_arm(
         entry["env"] = env
         calls = autograd_calls(layer, leaves, [dy])
         with environment(env):
-            (y,) = calls["record"]()
+            calls["record"]()
             if route_of is not None:
                 entry["route"] = route_of()
-            grads = calls["bwd"]()
+            calls["bwd"]()
             torch.cuda.synchronize(x.device)
-        names = ("y", "dx", "dweight", "dbias")
-        outs = [y, *grads]
-        entry["numerics"] = _numerics(
-            {
-                key: _rel(_sums(out, ref))
-                for key, out, ref in zip(names, outs, reference, strict=False)
-                if out is not None and ref is not None
-            }
-        )
-        entry["eligible"] = (
-            entry["feature"]["match"] in ("exact", "more_precise")
-            and entry["numerics"]["ok"]
-        )
-        return entry, calls
+        return entry, calls, gate_run(layer, env)
     except Unsupported as exc:
         entry["unsupported"] = str(exc)
     except Exception as exc:  # noqa: BLE001 -- a failing library is reported, the row goes on
         entry["unsupported"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     entry["eligible"] = False
-    return entry, None
+    return entry, None, None
+
+
+def single_rank_gate(
+    runs: dict[str, numerics.ArmRun],
+    entries: dict[str, dict],
+    *,
+    cu: torch.Tensor,
+    S: int,
+    C: int,
+    weight_dtype: torch.dtype,
+    bias_dtype: Optional[torch.dtype],
+    draws: int = cake_naive.DRAWS,
+    seed: int = 0,
+) -> None:
+    """Run the accuracy gate on every built arm of a row and record it on their entries (:func:`apply_gate`)."""
+
+    verdicts = numerics.gate(
+        runs, S=S, C=C, cu=cu, weight_dtype=weight_dtype, bias_dtype=bias_dtype, draws=draws, seed=seed
+    )
+    for name, verdict in verdicts.items():
+        apply_gate(entries[name], verdict)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -621,11 +720,12 @@ def kcp_arm(
         else:
             raise ValueError(f"unknown KCP arm {name!r}")
         taps = torch.bfloat16 if entry["taps_used"] == "bfloat16" else torch.float32
+        # The Cake KCP backward evaluates SiLU' at the FP32 preactivation (its policy B).
         entry["feature"] = feature(
             preactivation=entry["preactivation"],
             taps=taps,
             bias=None,
-            cake_preactivation="bf16",
+            cake_preactivation="fp32",
             cake_taps=torch.float32,
         )
         return entry, (autograd_calls(layer, leaves, local_dys), rows)
@@ -636,44 +736,122 @@ def kcp_arm(
     return entry, None
 
 
-def kcp_numerics(
-    calls: dict[str, Callable[[], object]],
-    rows: torch.Tensor,
-    references: Sequence[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
-    all_reduce: Callable[[torch.Tensor], torch.Tensor],
-) -> dict:
-    """One recorded forward and backward of a KCP arm against the whole-pack Cake non-deterministic reference
-    ``(y, dx, dweight)`` per convolution: ``y`` and ``dx`` on the arm's own rows (padding excluded), ``dweight`` as
-    the sum of the ranks' partials; the squared sums are reduced over the ranks (``all_reduce``: a sum)."""
+def kcp_gate(
+    arms: dict[str, tuple[Calls, torch.Tensor, dict]],
+    *,
+    cu: Sequence[int],
+    channels: int,
+    tensors: int,
+    device: torch.device,
+    all_reduce: Callable[[torch.Tensor, str], torch.Tensor],
+    draws: int = cake_naive.DRAWS,
+    seed: int = 0,
+) -> dict[str, dict]:
+    """The accuracy gate of context-parallel arms (``cake_causal_conv1d_numerics.py``): per draw every rank draws the
+    whole pack (``tensors`` convolutions, FP32 taps, no bias) from the same seed, computes the float64 oracle and the
+    PyTorch BF16 values of the whole pack, refills each arm's leaves and output gradients in place with its rows of
+    the draw (``arms[name] = (calls, rows, env)``; ``rows``: the global token of each local row, past the pack: zero
+    padding), and runs its recorded forward and backward.  ``y`` / ``dx`` are judged on the arm's rows (padding
+    excluded) with the errors reduced over the ranks, ``dweight`` as the FP32 sum of the ranks' partials.
+    ``all_reduce(t, op)`` reduces ``t`` in place over the ranks (``op``: ``"sum"`` or ``"max"``) and returns it;
+    every rank must run every arm in the same order.  Returns per arm the gate's verdict (see
+    ``cake_causal_conv1d_numerics.gate``)."""
 
-    ys = calls["record"]()
-    grads = calls["bwd"]()
-    n = len(references)
-    dxs, dws = grads[:n], grads[n:]
-    device = ys[0].device
-    rows = rows.to(device)
-    totals = torch.zeros(4, dtype=torch.float64, device=device)
-    dw_rel = 0.0
-    for (y_ref, dx_ref, dw_ref), y, dx, dw in zip(
-        references, ys, dxs, dws, strict=True
-    ):
-        valid = rows < y_ref.shape[0]
-        index = rows[valid]
-        for slot, (out, ref) in enumerate(((y, y_ref), (dx, dx_ref))):
-            err, norm = _sums(out[valid], ref[index])
-            totals[2 * slot] += err
-            totals[2 * slot + 1] += norm
-        dw_sum = all_reduce(dw.detach().double().clone())
-        dw_rel = max(dw_rel, _rel(_sums(dw_sum, dw_ref)))
-    totals = all_reduce(totals)
-    values = totals.tolist()
-    return _numerics(
-        {
-            "y": _rel((values[0], values[1])),
-            "dx": _rel((values[2], values[3])),
-            "dweight": dw_rel,
+    total = int(cu[-1])
+    cu_t = torch.tensor(list(cu), dtype=torch.int32, device=device)
+    world = dist_world(all_reduce, device)
+    names = list(arms)
+    judges = {name: numerics.ReducedJudge(draws) for name in names}
+    failed: dict[str, str] = {}
+    contract_bad = {name: 0.0 for name in names}
+    bitwise = {name: None for name in names}
+    outputs = [f"{o}[{i}]" if tensors > 1 else o for i in range(tensors) for o in ("y", "dx", "dweight")]
+    for j in range(draws):
+        generator = torch.Generator(device=device).manual_seed(cake_naive.draw_seed(seed, j))
+        xs, ws, dys = [], [], []
+        for _ in range(tensors):
+            xs.append(torch.randn(total, channels, device=device, generator=generator, dtype=torch.bfloat16))
+            ws.append(torch.randn(channels, WIDTH, device=device, generator=generator) * 0.5)
+            dys.append(torch.randn(total, channels, device=device, generator=generator, dtype=torch.bfloat16))
+        wants = [numerics.oracle(x, w, cu_t, None, dy) for x, w, dy in zip(xs, ws, dys, strict=True)]
+        naives = [numerics.naive_bf16(x, w, cu_t, None, dy) for x, w, dy in zip(xs, ws, dys, strict=True)]
+        for name in names:
+            if name in failed:
+                continue
+            calls, rows, env = arms[name]
+            rows_d = rows.to(device)
+            valid = rows_d < total
+            index = rows_d[valid]
+            error = None
+            stats = torch.zeros(len(outputs), 6, dtype=torch.float64, device=device)
+            bad = torch.zeros(1, dtype=torch.float64, device=device)
+            same = torch.ones(1, dtype=torch.float64, device=device)
+            try:
+                with torch.no_grad():
+                    for i in range(tensors):
+                        calls.leaves[i].copy_(_take(xs[i], rows))
+                        calls.leaves[tensors + i].copy_(ws[i])
+                        calls.dys[i].copy_(_take(dys[i], rows))
+                with environment(env):
+                    ys = calls["record"]()
+                    grads = calls["bwd"]()
+                    if j == 0:
+                        first = [t.detach().clone() for t in (*ys, *grads)]
+                        for _ in range(numerics.REPEATS):
+                            again = [*calls["record"](), *calls["bwd"]()]
+                            if not all(torch.equal(a, b) for a, b in zip(first, again, strict=True)):
+                                same[0] = 0.0
+                        del first
+                torch.cuda.synchronize(device)
+                for i in range(tensors):
+                    y, dx, dw = ys[i].detach()[valid], grads[i][valid], grads[tensors + i]
+                    want, naive = wants[i], naives[i]
+                    for k, (actual, key) in enumerate(((y, "y"), (dx, "dx"))):
+                        expected = want[key].index_select(0, index)
+                        bad[0] += float((expected.isfinite() & ~actual.isfinite()).sum())
+                        stats[3 * i + k] = numerics.local_norms(actual, expected, naive[key].index_select(0, index))
+                    dw_sum = all_reduce(dw.detach().float().clone(), "sum")
+                    bad[0] += float((~dw_sum.isfinite()).sum())
+                    stats[3 * i + 2] = numerics.local_norms(dw_sum, want["dweight"], naive["dweight"])
+                    # Every rank holds the same summed dweight: divide what the reduction below adds up.
+                    stats[3 * i + 2, [0, 1, 2, 5]] /= world
+            except Exception as exc:  # noqa: BLE001 -- a failing arm is reported, the others go on
+                error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            flag = all_reduce(torch.tensor([1.0 if error else 0.0], dtype=torch.float64, device=device), "max")
+            if float(flag[0]):
+                failed[name] = error or "failed on another rank"
+                continue
+            maxima = all_reduce(stats[:, [3, 4]].clone(), "max")
+            stats = all_reduce(stats, "sum")
+            stats[:, [3, 4]] = maxima
+            contract_bad[name] += float(all_reduce(bad, "sum")[0])
+            if j == 0:
+                bitwise[name] = int(all_reduce(same, "sum")[0]) == world
+            for k, out_name in enumerate(outputs):
+                judges[name].add_reduced(out_name, j, stats[k].tolist())
+        del xs, ws, dys, wants, naives
+    results: dict[str, dict] = {}
+    for name in names:
+        if name in failed:
+            results[name] = {"passed": False, "error": failed[name], "draws": draws}
+            continue
+        found = judges[name].failures()
+        if contract_bad[name]:
+            found.insert(0, f"{int(contract_bad[name])} elements not finite where the oracle is (all draws)")
+        results[name] = {
+            "passed": not found,
+            "failures": found[:20],
+            "draws": draws,
+            "outputs": numerics.summarize(judges[name]),
+            "run_to_run_bitwise": bitwise[name],
         }
-    )
+    return results
+
+
+def dist_world(all_reduce: Callable[[torch.Tensor, str], torch.Tensor], device: torch.device) -> int:
+    """The number of ranks ``all_reduce`` spans."""
+
+    return int(all_reduce(torch.ones(1, dtype=torch.float64, device=device), "sum")[0])
 
 
 def best_baseline(
@@ -711,14 +889,20 @@ def describe(entry: dict) -> str:
 
     if "unsupported" in entry:
         return f"{entry['name']}: unsupported ({entry['unsupported']})"
-    numerics = entry.get("numerics", {})
-    rel = " ".join(f"{k} {v:.1e}" for k, v in numerics.get("rel_l2", {}).items())
+    verdict = entry.get("gate", {})
+    ratios = " ".join(
+        f"{out} {v['norms']['l2']['ours_over_bf16'][1]:.3f}"
+        for out, v in verdict.get("outputs", {}).items()
+        if v["norms"]["l2"]["ours_over_bf16"]
+    )
     route = f" route {entry['route']}" if entry.get("route") else ""
-    notes = "; ".join(entry["feature"]["notes"])
+    notes = "; ".join(entry.get("feature", {}).get("notes", []))
     return (
-        f"{entry['name']}: {entry['library']}, {entry['determinism']}, match {entry['feature']['match']}"
+        f"{entry['name']}: {entry.get('library')}, {entry.get('determinism')}, "
+        f"match {entry.get('feature', {}).get('match')}"
         + (f" ({notes})" if notes else "")
-        + f", numerics {'ok' if numerics.get('ok') else 'FAIL'} [{rel}]{route}"
+        + f", gate {'pass' if verdict.get('passed') else 'FAIL'} [largest l2 / bf16: {ratios}]"
+        + f", run-to-run bitwise {verdict.get('run_to_run_bitwise')}{route}"
         + ("" if entry.get("eligible") else ", not eligible")
     )
 
@@ -757,16 +941,17 @@ def ineligible_reason(entry: dict) -> Optional[str]:
     if "unsupported" in entry:
         return entry["unsupported"]
     reasons = []
-    if entry["feature"]["match"] not in ("exact", "more_precise"):
+    if entry.get("feature", {}).get("match") == "less_precise":
         reasons.append(
             f"feature mismatch ({entry['feature']['match']}: "
             + "; ".join(entry["feature"]["notes"])
             + ")"
         )
-    numerics = entry.get("numerics", {})
-    if not numerics.get("ok"):
+    verdict = entry.get("gate", {})
+    if not verdict.get("passed"):
         reasons.append(
-            f"numerics above the {NUMERICS_REL_L2:g} relative L2 budget {numerics.get('rel_l2')}"
+            "accuracy gate not passed: "
+            + (verdict.get("error") or "; ".join(verdict.get("failures", [])[:3]) or "not run")
         )
     return "; ".join(reasons) or None
 
