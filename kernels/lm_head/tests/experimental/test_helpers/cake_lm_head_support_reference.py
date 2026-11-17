@@ -46,22 +46,11 @@ from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     IGNORE_INDEX,
     _randn_rows,
     make_weight,
-    rel_l2,
 )
 
 OUTPUTS = ("packed", "selected", "kl")
 TAU_FORMS = ("none", "scalar", "constant", "hetero")
 SUPPORT_KINDS = ("ind", "shr", "heavy", "full")
-# Accuracy gates against the FP64 oracle: at most 1.05x the error of B0 on the same inputs plus a floor
-# per metric (the values of tests/experimental/test_cake_lm_head_det_train.py, logp-scale floors for KL).
-GATE_MARGIN = 1.05
-GATE_TINY = dict(
-    packed_max_abs=1e-5,
-    selected_max_abs=1e-5,
-    kl_max_abs=1e-5,
-    dX_rel_l2=1e-3,
-    dW_rel_l2=1e-3,
-)
 _TAU_SEED_OFFSET = (
     2000003  # the temperature's own generator (the #7637 rule): other draws do not move
 )
@@ -646,42 +635,3 @@ def naive_support_bf16(
         else (torch.zeros_like(inp.W) if need_dw else None)
     )
     return res
-
-
-def support_error_report(result: dict, oracle: dict, inp: SupportInputs) -> dict:
-    """Errors of ``result`` against the FP64 ``oracle``: ``packed_max_abs``, ``selected_max_abs`` (labelled rows),
-    ``kl_max_abs``, ``dX_rel_l2`` / ``dW_rel_l2`` where both sides carry them, plus ``selected_ignored_zero`` and
-    ``nan`` (any non-finite value)."""
-    report: dict = {}
-    nan = False
-    for name in ("packed", "selected", "kl"):
-        got, ref = result.get(name), oracle.get(name)
-        if got is None or ref is None:
-            continue
-        got = got.detach().double()
-        nan |= not bool(torch.isfinite(got).all())
-        diff = (got - ref).abs()
-        if name == "selected" and inp.labels is not None:
-            lab = inp.labels.to(diff.device) != IGNORE_INDEX
-            report["selected_ignored_zero"] = bool((got[~lab] == 0).all())
-            diff = diff[lab]
-        report[f"{name}_max_abs"] = float(diff.max()) if diff.numel() else 0.0
-    for name in ("dX", "dW"):
-        got, ref = result.get(name), oracle.get(name)
-        if got is not None and ref is not None:
-            report[f"{name}_rel_l2"] = rel_l2(got, ref)
-            nan |= not bool(torch.isfinite(got.detach().float()).all())
-    report["nan"] = bool(nan)
-    return report
-
-
-def gate_failures(errors: dict, b0_errors: dict) -> list[str]:
-    """Metrics whose error exceeds ``GATE_MARGIN * B0 + GATE_TINY`` (empty: every gate holds)."""
-    bad = []
-    for key, tiny in GATE_TINY.items():
-        if key in errors and key in b0_errors:
-            if not errors[key] <= GATE_MARGIN * b0_errors[key] + tiny:
-                bad.append(
-                    f"{key}={errors[key]:.3e} > {GATE_MARGIN} x {b0_errors[key]:.3e} + {tiny:.0e}"
-                )
-    return bad

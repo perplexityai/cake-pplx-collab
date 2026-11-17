@@ -79,13 +79,11 @@ from tests.experimental.test_helpers.cake_lm_head_judge import (
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     DEFAULT_H,
     DEFAULT_V,
-    error_report,
     make_inputs,
     make_temperature,
     make_weight,
     naive_bf16,
     reference_fp64,
-    reference_unchunked,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -105,11 +103,6 @@ CUDA = torch.device("cuda")
 SEED = 20261031
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# The accuracy budgets: at most 1.05x the error of the unchunked PyTorch path on the same inputs plus a floor per
-# metric, and below twice the production-geometry errors of that path.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
 # Repeated runs of the worst-case tests (at least 20).
 REPEATS = 20
 # Seconds a two-thread test waits for a barrier or a thread before it fails
@@ -383,32 +376,6 @@ def _run(
     if DEV.type == "cuda":
         torch.cuda.synchronize()
     return dict(loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad, X=X, W=W)
-
-
-def _check_against_references(result, inp, *, entry="loss", ceiling=False):
-    """The deterministic suite's gates, unchanged: every metric at most ``GATE_MARGIN`` times the unchunked path's
-    error against the FP64 oracle plus ``GATE_TINY``; with ``ceiling`` also below twice ``PRODUCTION_B0``; exact zeros
-    on the ignored rows."""
-    oracle = reference_fp64(inp, entry=entry)
-    b0 = reference_unchunked(inp, entry=entry)
-    errors = error_report(result, oracle, inp.labels)
-    b0_errors = error_report(b0, oracle, inp.labels)
-    assert not errors["nan"]
-    for key, tiny in GATE_TINY.items():
-        if key in errors:
-            assert errors[key] <= GATE_MARGIN * b0_errors[key] + tiny, (
-                f"{key}: {errors[key]:.3e} vs unchunked {b0_errors[key]:.3e}"
-            )
-    if ceiling:
-        for key, measured in PRODUCTION_B0.items():
-            if key in errors:
-                assert errors[key] <= 2.0 * measured, (
-                    f"{key}: {errors[key]:.3e} above twice the production-geometry unchunked error"
-                )
-    assert errors["logp_ignored_zero"]
-    if result.get("dX") is not None:
-        assert errors["dX_ignored_zero"]
-    return errors, b0_errors
 
 
 def _bits(t: torch.Tensor) -> torch.Tensor:
@@ -15551,7 +15518,7 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
         assert frozen["dX"] is None and _same_bits(frozen["dW"], vm["dW"]), case
         if tau is None:
             # the kept logits keep their own chunk loop: the default call's logp bits; dX / dW round differently
-            # (another summation order) and pass the same unchanged gates
+            # (another summation order), held to the contract here and judged as kept_T<rows> below
             calls.clear()
             kept = _run(inp, C, entry="logprob", backend="cake", keep=True)
             assert not calls, case

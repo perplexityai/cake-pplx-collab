@@ -100,13 +100,6 @@ DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEED = 20260930
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# The former accuracy gates against the FP64 oracle (at most 1.05x the error of the unchunked PyTorch path on the same
-# inputs plus a floor per metric) and the unchunked path's errors at the production geometry (H = 6144, V = 154880).
-# No test of this file reads them: every output is judged against the naive BF16 tier.  The non-deterministic suite's
-# ``_det_suite_constants`` still reads them from this source.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
 # Host values every stage may name (the kernels' own argument names, see ``stage_values``).
 _GEMM_VALUES = {"A", "B", "C", "STATS_OUT", "WS", *cake_backend.GEMM_SCALARS}
 _STAGE_VALUES = {
