@@ -37,9 +37,8 @@ is the noise band of the row.
 
 Timing.  Each call runs on an idle GPU after a cold L2 (a buffer of twice the L2 size is zeroed, then the device is
 synchronized; neither is timed).  The GPU activity records of the call (kernels, memsets and copies) come from CUPTI:
-``cupti-python`` (attached once for the whole run: the kernels of a CUDA graph instantiated while CUPTI is detached
-are not traced), the records matched to the call's own runtime / driver API calls by correlation id, or, without it,
-``torch.profiler`` with one-cycle spin kernels marking the calls.  Per call three times are recorded: ``active``
+``cupti-python``, the records matched to the call's own runtime / driver API calls by correlation id, or, without
+it, ``torch.profiler`` with one-cycle spin kernels marking the calls.  Per call three times are recorded: ``active``
 (the union of the records' intervals: GPU busy time, the statistic of the tables), ``span`` (first start to last
 end, the gaps between launches included) and ``sum`` (the records' durations added).  Modes (``--modes``): ``eager``
 (the call launched each time) and ``graph`` (the call captured once in a CUDA graph on a side stream and replayed).
@@ -64,7 +63,6 @@ protocol and every row.
 from __future__ import annotations
 
 import argparse
-import atexit
 import bisect
 import collections
 import datetime
@@ -139,47 +137,6 @@ class Timer:
         if backend not in ("cupti", "profiler"):
             raise ValueError(backend)
         self.backend = backend
-        self._cupti = None
-        if backend == "cupti":
-            self._start_cupti()
-
-    def _start_cupti(self) -> None:
-        """Attach CUPTI once, before any CUDA graph of the run is instantiated, and keep it attached: the kernels of a
-        graph instantiated while CUPTI is detached produce no activity records.  Records arriving outside a timed
-        window are dropped."""
-        from cupti import cupti
-
-        self._spans: dict = collections.defaultdict(list)
-        self._launches: list = []
-        self._collecting = False
-        self._gpu_kinds = (cupti.ActivityKind.CONCURRENT_KERNEL, cupti.ActivityKind.MEMSET, cupti.ActivityKind.MEMCPY)
-        self._api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
-
-        def requested():
-            return 8 * 1024 * 1024, 0
-
-        def completed(activities):
-            if not self._collecting:
-                return
-            for activity in activities:
-                if activity.kind in self._gpu_kinds:
-                    self._spans[activity.correlation_id].append((activity.start, activity.end))
-                elif activity.kind in self._api_kinds:
-                    self._launches.append((activity.start, activity.correlation_id))
-
-        cupti.activity_register_callbacks(requested, completed)
-        for kind in self._api_kinds + self._gpu_kinds:
-            cupti.activity_enable(kind)
-        self._cupti = cupti
-        atexit.register(self.close)
-
-    def close(self) -> None:
-        cupti, self._cupti = self._cupti, None
-        if cupti is None:
-            return
-        for kind in self._api_kinds + self._gpu_kinds:
-            cupti.activity_disable(kind)
-        cupti.finalize()
 
     def times(self, run: Callable[[], object], calls: Optional[int] = None, dry: Optional[int] = None) -> list:
         calls = calls or self.default_calls
@@ -192,12 +149,27 @@ class Timer:
         return self._profiler(run, calls)
 
     def _cupti(self, run, calls: int) -> list:
-        cupti = self._cupti
-        torch.cuda.synchronize(self.device)
-        cupti.activity_flush_all(0)  # earlier records (dry calls, untimed work) are dropped
-        self._spans.clear()
-        self._launches.clear()
-        self._collecting = True
+        from cupti import cupti
+
+        launches = []
+        spans = collections.defaultdict(list)
+        gpu_kinds = (cupti.ActivityKind.CONCURRENT_KERNEL, cupti.ActivityKind.MEMSET, cupti.ActivityKind.MEMCPY)
+        api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
+
+        def requested():
+            return 8 * 1024 * 1024, 0
+
+        def completed(activities):
+            for activity in activities:
+                if activity.kind in gpu_kinds:
+                    spans[activity.correlation_id].append((activity.start, activity.end))
+                elif activity.kind in api_kinds:
+                    launches.append((activity.start, activity.correlation_id))
+
+        kinds = api_kinds + gpu_kinds
+        for kind in kinds:
+            cupti.activity_enable(kind)
+        cupti.activity_register_callbacks(requested, completed)
         stamps = []
         try:
             for _ in range(calls):
@@ -210,11 +182,10 @@ class Timer:
             torch.cuda.synchronize(self.device)
             cupti.activity_flush_all(0)
         finally:
-            self._collecting = False
-        launches = sorted(self._launches)
-        spans = dict(self._spans)
-        self._spans.clear()
-        self._launches.clear()
+            for kind in kinds:
+                cupti.activity_disable(kind)
+            cupti.finalize()
+        launches.sort()
         starts = [s for s, _ in launches]
         out = []
         for begin, end in stamps:
@@ -455,7 +426,11 @@ def _free() -> None:
     torch.cuda.empty_cache()
 
 
-def _err(exc: BaseException) -> str:
+def _err(exc: BaseException, where: str = "") -> str:
+    """The recorded message of a caught failure; with ``where``, the traceback also goes to stderr."""
+    if where:
+        print(f"FAILED {where}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        traceback.print_exc(limit=8, file=sys.stderr)
     return f"{type(exc).__name__}: {str(exc)[:500]}"
 
 
@@ -490,8 +465,12 @@ def _build(arm: base.Arm, i: dict, op: str, mode: str, warmup: int, device) -> C
         call()
     torch.cuda.synchronize(device)
 
-    def run() -> None:  # the closure keeps the graph (and its memory pool) alive
-        graph.replay()
+    # The graph replays into the buffers ``call`` owns: they must live as long as the graph (capturing the next
+    # graph empties the allocator's cache, so a freed buffer would be unmapped under a later replay).
+    keep = (graph, call)
+
+    def run() -> None:
+        keep[0].replay()
 
     run()
     torch.cuda.synchronize(device)
@@ -506,10 +485,11 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
         try:
             runs[arm.name] = _build(arm, i, op, mode, args.warmup, device)
         except torch.cuda.OutOfMemoryError as exc:
-            result[arm.name] = {"error": "out of memory: " + _err(exc)}
+            result[arm.name] = {"error": "out of memory: " + _err(exc, f"{arm.name} {op} {mode} build")}
             _free()
         except Exception as exc:  # noqa: BLE001 - recorded per arm; the other arms continue
-            result[arm.name] = {"error": _err(exc), "trace": traceback.format_exc(limit=4)[-1500:]}
+            result[arm.name] = {"error": _err(exc, f"{arm.name} {op} {mode} build"),
+                                "trace": traceback.format_exc(limit=4)[-1500:]}
             _free()
     names = list(runs)
     samples = {n: [] for n in names}
@@ -524,7 +504,8 @@ def time_op(arms: list, i: dict, op: str, mode: str, args, timer: Timer, device)
             try:
                 samples[n].append(timer.times(runs[n], args.calls, args.dry))
             except Exception as exc:  # noqa: BLE001
-                result[n] = {"error": f"group {g}: " + _err(exc), "trace": traceback.format_exc(limit=4)[-1500:]}
+                result[n] = {"error": f"group {g}: " + _err(exc, f"{n} {op} {mode} group {g}"),
+                             "trace": traceback.format_exc(limit=4)[-1500:]}
                 runs.pop(n, None)
         names = [n for n in names if n in runs]
     for n, groups in samples.items():
@@ -561,7 +542,7 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
         try:
             rec["prepare"] = arm.prepare_shape(i, timer)
         except Exception as exc:  # noqa: BLE001
-            rec["error"] = "prepare: " + _err(exc)
+            rec["error"] = "prepare: " + _err(exc, f"{arm.name} prepare H={hidden} T={tokens}")
             _free()
             continue
         live.append(arm)
@@ -571,7 +552,7 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
             try:
                 outputs[arm.name] = arm.run_once(i)
             except Exception as exc:  # noqa: BLE001
-                row["arms"][arm.name]["error"] = "check run: " + _err(exc)
+                row["arms"][arm.name]["error"] = "check run: " + _err(exc, f"{arm.name} check run H={hidden} T={tokens}")
                 failed.add(arm.name)
                 _free()
         try:
@@ -761,7 +742,13 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
             dump()
     if not args.judge_only:
         for hidden, tokens in shapes:
-            record["rows"].append(run_row(hidden, tokens, arms, args, timer, judge, device, eligible))
+            try:
+                record["rows"].append(run_row(hidden, tokens, arms, args, timer, judge, device, eligible))
+            except Exception as exc:  # noqa: BLE001 - e.g. a sticky CUDA error: the process cannot continue
+                record["fatal"] = {"hidden": hidden, "tokens": tokens, "error": _err(exc, f"row H={hidden} T={tokens}"),
+                                   "trace": traceback.format_exc(limit=8)[-3000:]}
+                dump()
+                return 3
             dump()
     dump()
     return 0

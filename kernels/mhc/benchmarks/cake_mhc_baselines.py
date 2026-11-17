@@ -441,7 +441,7 @@ class Compiled(AutogradArm):
         self.name = name
         self.mode = mode
         self.trials = max(1, int(trials))
-        self.library = f"torch.compile (mode={mode or 'default'}, fullgraph, static shapes, TF32 off)"
+        self.library = f"torch.compile (mode={mode or 'default'}, fullgraph, static shapes, TF32 off, no buffer donation)"
         self._fn: Optional[Callable] = None
         self._count = 0
 
@@ -457,9 +457,14 @@ class Compiled(AutogradArm):
         import triton
 
         return {"torch": torch.__version__, "triton": triton.__version__, "mode": self.mode or "default",
-                "trials": self.trials}
+                "trials": self.trials, "donated_buffer": False}
 
     def _compile(self) -> Callable:
+        # The ``bwd`` operation runs the backward of one recorded forward repeatedly (``retain_graph=True``), which a
+        # compiled backward that donates its saved buffers refuses: donation is turned off for the compiled arms.
+        import torch._functorch.config as functorch_config
+
+        functorch_config.donated_buffer = False
         self._count += 1
         kwargs = {"fullgraph": True, "dynamic": False}
         if self.mode:
