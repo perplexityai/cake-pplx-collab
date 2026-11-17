@@ -48,11 +48,13 @@ in a fixed order, and the slot order does not depend on the order in which the
 units arrive, so every output of this package repeats bit for bit for the same
 inputs, shapes, device SM count and configuration.  The k512 weight gradient's
 bits depend on the SM count and the tail split; a split tail tile can differ
-from the deterministic package's, whose tail plan and group order differ,
-within that package's error budget.  The operands (bf16), the accumulation
-(fp32), the one round-to-nearest rounding to bf16 (or the fp32 store), the
-layouts, the ``offs`` contract and the exact zeros of empty groups are the
-deterministic package's.  No launch of the shipped registry and constants
+from the deterministic package's bits, whose tail plan and group order differ.
+The operands (bf16), the accumulation (fp32), the one round-to-nearest
+rounding to bf16 (or the fp32 store), the layouts, the ``offs`` contract and
+the exact zeros of empty groups are the deterministic package's; the tests
+judge every output against a naive BF16 implementation, with the float64
+product of the BF16 operands as the oracle (see the README's Accuracy
+section).  No launch of the shipped registry and constants
 alerts under ``torch.use_deterministic_algorithms(True)``.  The alert stays as
 an extension point for an order-varying launch
 (``CakeMoEGroupedGemmNondetLaunch.order_varying``: a weight gradient with a
