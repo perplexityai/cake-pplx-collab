@@ -28,9 +28,11 @@ and 4097 with documents of lengths 1, 2 and 3 and empty documents before, betwee
 32-multiple divisor, take the forward's and the backward's own fallback tiles), the ``[1, S, C]`` layout
 (bitwise the packed one), document isolation, bitwise run-to-run gradients, CUDA Graph capture and replay of
 changing shapes (bitwise eager), argument validation, the workspace helpers and one ``S x C > 2^31`` case guarded
-by free device memory.  Beside the default routes the suite covers the routes for BF16 taps and / or a BF16
-``dweight`` (``*_dt``), an FP32 or BF16 bias with its gradient (``*_bias``), SiLU' at the unrounded FP32
-preactivation (``bwd_fp32g``, judged at the perf size too) and their combination -- each with a NaN-poisoned
+by free device memory.  Beside the default routes the suite covers the routes for BF16 taps (``fwd_dt``) and a
+BF16 ``dweight`` with FP32 taps (``bwd_dt``), an FP32 or BF16 bias with its gradient (``*_bias``), SiLU' at the
+unrounded FP32 preactivation (``bwd_fp32g``, judged at the perf size too), their combination and the backward
+routes of BF16 taps (``bwd_dt_bf16_taps``, ``bwd_bias_bf16_taps``: the ``bwd_dt`` / ``bwd_bias`` programs with
+SiLU' at the unrounded FP32 preactivation) -- each with a NaN-poisoned
 workspace, run-to-run bitwise gradients and graph replay; a route an architecture has not rendered yet skips its
 tests, and the registry test fails until every route's libraries are in ``build.json``.  An architecture whose
 route ships several programs (every backward route; the forward routes on sm_107a) selects one by the channel
@@ -254,24 +256,44 @@ NARROW_CASES = (
     (4097, 1016, (1000, 0, 3, 3094)),
 )
 # The call settings that resolve to each backward route (the forward route
-# follows: fwd, fwd_dt, fwd_bias, fwd, fwd_bias).
+# follows: fwd, fwd, fwd_bias, fwd, fwd_bias, fwd_dt, fwd_bias).  ``dweight_dtype``
+# is the dtype of the preallocated ``dweight`` out a call of the route passes
+# (``None``: none, the taps' dtype): ``bwd_dt`` is FP32 taps with a BF16
+# ``dweight`` out (:func:`_backward` with ``kind`` allocates a fresh one per call).
 ROUTE_SETTINGS = {
-    "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16"),
-    "bwd_dt": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16"),
-    "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16"),
-    "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32"),
-    "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32"),
+    "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=None),
+    "bwd_dt": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=BF16),
+    "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16", dweight_dtype=None),
+    "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32", dweight_dtype=None),
+    "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32", dweight_dtype=None),
+    "bwd_dt_bf16_taps": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None),
+    "bwd_bias_bf16_taps": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
 }
-NEW_BWD_KINDS = ("bwd_dt", "bwd_bias", "bwd_fp32g", "bwd_bias_fp32g")
+NEW_BWD_KINDS = (
+    "bwd_dt",
+    "bwd_bias",
+    "bwd_fp32g",
+    "bwd_bias_fp32g",
+    "bwd_dt_bf16_taps",
+    "bwd_bias_bf16_taps",
+)
+# The backward routes the autograd entry reaches: it returns ``dweight`` in the
+# taps' dtype, so ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out) is a route
+# of direct backward calls only.
+AUTOGRAD_KINDS = tuple(
+    kind for kind, settings in ROUTE_SETTINGS.items() if settings["dweight_dtype"] is None
+)
 # The opt-in backward grid multiples beside the default 1 (``bwd_grid_mult``).
 OPT_IN_GRID_MULTS = (2, 3, 4)
 # The forward route each backward route's inputs select.
 FORWARD_OF = {
     "bwd": "fwd",
-    "bwd_dt": "fwd_dt",
+    "bwd_dt": "fwd",
     "bwd_bias": "fwd_bias",
     "bwd_fp32g": "fwd",
     "bwd_bias_fp32g": "fwd_bias",
+    "bwd_dt_bf16_taps": "fwd_dt",
+    "bwd_bias_bf16_taps": "fwd_bias",
 }
 
 
@@ -581,9 +603,31 @@ def _route_check(S: int, C: int, docs, kind: str, **kwargs) -> None:
     _check(S, C, docs, **ROUTE_SETTINGS[kind], **kwargs)
 
 
-def _backward(x, w, cu, dy, b, policy, **kwargs):
-    """``(dx, dweight, dbias_or_None)`` of one backward call."""
+def _call_route(w, b, policy, dweight=None) -> str:
+    """The backward route of a call with taps ``w``, bias ``b``, SiLU' ``policy`` and ``dweight`` out (``None``: the
+    taps' dtype)."""
 
+    return loader.backward_route(
+        bias=b is not None,
+        fp32_grad=policy == "fp32",
+        bf16_taps=w.dtype == BF16,
+        bf16_dweight=(w.dtype if dweight is None else dweight.dtype) == BF16,
+    )
+
+
+def _backward(x, w, cu, dy, b, policy, *, kind=None, **kwargs):
+    """``(dx, dweight, dbias_or_None)`` of one backward call.  With ``kind`` (a backward route of
+    :data:`ROUTE_SETTINGS`) and no ``dweight`` out passed, the call writes a fresh NaN-filled ``dweight`` out of the
+    route's ``dweight_dtype`` when it names one (``bwd_dt``), and the call's arguments must resolve to ``kind``."""
+
+    if kind is not None:
+        dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"]
+        if kwargs.get("dweight") is None and dweight_dtype is not None:
+            kwargs["dweight"] = torch.full(
+                (w.shape[0], WIDTH), float("nan"), dtype=dweight_dtype, device=w.device
+            )
+        route = _call_route(w, b, policy, kwargs.get("dweight"))
+        assert route == kind, f"the call resolves to route {route}, not {kind}"
     grads = cake_causal_conv1d_det_train_backward(
         x, w, cu, dy, bias=b, silu_grad_preactivation=policy, **kwargs
     )
@@ -672,7 +716,15 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     geometry = {"threads": 128, "vec": 8}
     assert loader.NARROW_TILE_ROUTES == {
         "fwd": ("fwd", "fwd_dt", "fwd_bias"),
-        "bwd": ("bwd", "bwd_dt", "bwd_bias", "bwd_fp32g", "bwd_bias_fp32g"),
+        "bwd": (
+            "bwd",
+            "bwd_dt",
+            "bwd_bias",
+            "bwd_fp32g",
+            "bwd_bias_fp32g",
+            "bwd_dt_bf16_taps",
+            "bwd_bias_bf16_taps",
+        ),
     }
     assert loader.NARROW_TILE_WIDTHS == {"fwd": FWD_NARROW_WIDTHS, "bwd": {}}
     assert loader.NARROW_WIDTH_FLOORS == {"fwd": FWD_NARROW_FLOORS, "bwd": {}}
@@ -797,8 +849,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
 # The whole-rank trim of the backward main grid (``cake_jit.main_grid``) at 128
 # threads x 8 channels: ``(arch, co-resident grid, S, C) -> grid`` on the
 # routes the arch's rule trims (sm_103a: ``bwd`` at 304 CTAs; sm_100a: ``bwd``
-# / ``bwd_dt`` / ``bwd_fp32g`` at 296; sm_107a: none); every other route keeps
-# the co-resident grid.  The rows are the kernel module's rules-test rows.
+# / ``bwd_dt`` / ``bwd_fp32g`` / ``bwd_dt_bf16_taps`` at 296; sm_107a: none);
+# every other route keeps the co-resident grid.  The rows are the kernel
+# module's rules-test rows.
 MAIN_GRID_TABLE = (
     # sm_103a, 304 CTAs: C % 32, 1 < tiles <= {32: 27, 64: 9}, S >= 98304 and
     # a last tile of at least {32: 15, 64: 49} vectors
@@ -863,7 +916,7 @@ MAIN_GRID_TABLE = (
     ("sm_107a", 296, 250340, 1160, 296),
 )
 MAIN_GRID_TRIMMED_ROUTES = {
-    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
+    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
     "sm_103a": ("bwd",),
     "sm_107a": (),
 }
@@ -890,7 +943,7 @@ def test_main_grid_literal_table() -> None:
         "sm_107a": {},
     }
     assert loader.TILE_ALIGNED_CLASS_ROUTES == {
-        "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
+        "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
         "sm_103a": (),
         "sm_107a": (),
     }
@@ -1211,20 +1264,46 @@ def test_route_tables() -> None:
     assert loader.forward_route(bias=False, bf16_taps=True) == "fwd_dt"
     assert loader.forward_route(bias=True, bf16_taps=False) == "fwd_bias"
     assert loader.forward_route(bias=True, bf16_taps=True) == "fwd_bias"
-    for bias, fp32, dt, kind in (
-        (False, False, False, "bwd"),
-        (False, False, True, "bwd_dt"),
-        (False, True, False, "bwd_fp32g"),
-        (False, True, True, "bwd_fp32g"),
-        (True, False, False, "bwd_bias"),
-        (True, False, True, "bwd_bias"),
-        (True, True, False, "bwd_bias_fp32g"),
-        (True, True, True, "bwd_bias_fp32g"),
-    ):
+    # (bias, fp32_grad, bf16_taps, bf16_dweight) -> route, every combination.
+    table = (
+        (False, False, False, False, "bwd"),
+        (False, False, False, True, "bwd_dt"),
+        (False, False, True, False, "bwd_dt_bf16_taps"),
+        (False, False, True, True, "bwd_dt_bf16_taps"),
+        (False, True, False, False, "bwd_fp32g"),
+        (False, True, False, True, "bwd_fp32g"),
+        (False, True, True, False, "bwd_fp32g"),
+        (False, True, True, True, "bwd_fp32g"),
+        (True, False, False, False, "bwd_bias"),
+        (True, False, False, True, "bwd_bias"),
+        (True, False, True, False, "bwd_bias_bf16_taps"),
+        (True, False, True, True, "bwd_bias_bf16_taps"),
+        (True, True, False, False, "bwd_bias_fp32g"),
+        (True, True, False, True, "bwd_bias_fp32g"),
+        (True, True, True, False, "bwd_bias_fp32g"),
+        (True, True, True, True, "bwd_bias_fp32g"),
+    )
+    assert {row[:4] for row in table} == set(itertools.product((False, True), repeat=4))
+    for bias, fp32, taps, dweight, kind in table:
         assert (
-            loader.backward_route(bias=bias, fp32_grad=fp32, bf16_taps_or_dweight=dt)
+            loader.backward_route(
+                bias=bias, fp32_grad=fp32, bf16_taps=taps, bf16_dweight=dweight
+            )
             == kind
-        )
+        ), (bias, fp32, taps, dweight)
+    assert {row[4] for row in table} == set(ROUTE_SETTINGS)
+    # Every entry of ROUTE_SETTINGS resolves to its route.
+    for kind, settings in ROUTE_SETTINGS.items():
+        dweight_dtype = settings["dweight_dtype"] or settings["weight_dtype"]
+        assert (
+            loader.backward_route(
+                bias=settings["bias_dtype"] is not None,
+                fp32_grad=settings["policy"] == "fp32",
+                bf16_taps=settings["weight_dtype"] == BF16,
+                bf16_dweight=dweight_dtype == BF16,
+            )
+            == kind
+        ), kind
     assert set(loader.KINDS) == {"fwd", "fwd_dt", "fwd_bias", *ROUTE_SETTINGS}
     assert set(loader.REQUIRED_KINDS) == {"fwd", "bwd"}
     for kind in loader.KINDS:
@@ -1541,7 +1620,7 @@ def test_preallocated_bias_outputs_are_written_in_place() -> None:
     _require_route("bwd_bias")
     S, C, docs = 1000, 512, "perf"
     x, w, cu, dy, b, policy = _route_inputs(S, C, docs, "bwd_bias")
-    dx_ref, dw_ref, db_ref = _backward(x, w, cu, dy, b, policy)
+    dx_ref, dw_ref, db_ref = _backward(x, w, cu, dy, b, policy, kind="bwd_bias")
     dx = torch.full((S, C), float("nan"), dtype=torch.bfloat16, device=_device())
     dw = torch.full((C, WIDTH), float("nan"), dtype=torch.float32, device=_device())
     db = torch.full((C,), float("nan"), dtype=torch.float32, device=_device())
@@ -1563,10 +1642,13 @@ def _capture_and_replay(cases, kind: str, *, key: int) -> int:
     for S, C, docs in cases:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=key)
         eager_y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
-        eager = (eager_y, *_backward(x, w, cu, dy, b, policy))
+        eager = (eager_y, *_backward(x, w, cu, dy, b, policy, kind=kind))
         y = torch.empty_like(x)
         dx = torch.empty_like(x)
-        dw = torch.empty(C, WIDTH, dtype=w.dtype, device=device)
+        dw = torch.empty(
+            C, WIDTH, dtype=ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype, device=device
+        )
+        assert _call_route(w, b, policy, dw) == kind
         db = None if b is None else torch.empty(C, dtype=b.dtype, device=device)
         workspace = cake_causal_conv1d_det_train_backward_workspace(S, C, device)
 
@@ -1643,7 +1725,8 @@ def test_cuda_graph_replays_match_eager() -> None:
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_cuda_graph_replays_match_eager_per_route(kind) -> None:
-    """Graph capture and replay of the dt, bias and fp32g routes (BF16 gradient outs and the dbias output included)."""
+    """Graph capture and replay of the dt, bias, fp32g and bf16_taps routes (BF16 gradient outs and the dbias output
+    included)."""
 
     _require_route(kind)
     replays = _capture_and_replay(ROUTE_CASES, kind, key=11)
@@ -1816,10 +1899,11 @@ def test_zero_tokens_return_empty_outputs() -> None:
     )
 
 
-@pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
+@pytest.mark.parametrize("kind", AUTOGRAD_KINDS)
 def test_autograd_end_to_end(kind) -> None:
     """``cake_causal_conv1d_det`` returns the forward's bits and its backward the fused kernel's gradients, in the
-    parameters' dtypes, under every route; a non-contiguous incoming gradient is materialized."""
+    parameters' dtypes, under every route the autograd entry reaches; a non-contiguous incoming gradient is
+    materialized."""
 
     _require_route(kind)
     S, C, docs = 1000, 512, "perf"
@@ -1832,7 +1916,7 @@ def test_autograd_end_to_end(kind) -> None:
         y.detach(), cake_causal_conv1d_det_train_forward(x0, w0, cu, bias=b0)
     )
     y.backward(dy)
-    dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, policy)
+    dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, policy, kind=kind)
     assert x.grad.dtype == torch.bfloat16 and torch.equal(x.grad, dx_ref)
     assert w.grad.dtype == w0.dtype and torch.equal(w.grad, dw_ref)
     if b is not None:
@@ -1874,13 +1958,14 @@ def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
 @pytest.mark.parametrize("dweight_dtype", (F32, BF16), ids=_dtype_id)
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
 def test_bf16_taps_and_bf16_dweight(case, weight_dtype, dweight_dtype) -> None:
-    """BF16 taps (``fwd_dt`` / ``bwd_dt``) and a BF16 ``dweight`` out (``bwd_dt``), in every combination with
-    FP32; the FP32 / FP32 combination is the default route and is not this test's."""
+    """BF16 taps (``fwd_dt`` / ``bwd_dt_bf16_taps``, either ``dweight`` dtype) and a BF16 ``dweight`` out with FP32
+    taps (``bwd_dt``), in every combination with FP32; the FP32 / FP32 combination is the default route and is not
+    this test's."""
 
     if weight_dtype == F32 and dweight_dtype == F32:
         pytest.skip("FP32 taps and dweight run the default routes")
-    _require_route("bwd_dt" if weight_dtype == BF16 else "bwd")
-    _require_route("bwd_dt")
+    # The backward route brings its forward route along (fwd_dt for BF16 taps, fwd for FP32 taps).
+    _require_route("bwd_dt_bf16_taps" if weight_dtype == BF16 else "bwd_dt")
     S, C, docs = case
     _check(S, C, docs, weight_dtype=weight_dtype, dweight_dtype=dweight_dtype)
 
@@ -1894,7 +1979,10 @@ def test_bias_routes(case, weight_dtype, bias_dtype, policy) -> None:
     ``dweight`` and ``dbias`` judged against the naive tier (the bias added after the four taps), and BF16 gradient
     outs for the BF16 parameters."""
 
-    _require_route("bwd_bias" if policy == "bf16" else "bwd_bias_fp32g")
+    if policy == "fp32":
+        _require_route("bwd_bias_fp32g")
+    else:
+        _require_route("bwd_bias_bf16_taps" if weight_dtype == BF16 else "bwd_bias")
     S, C, docs = case
     _check(S, C, docs, weight_dtype=weight_dtype, bias_dtype=bias_dtype, policy=policy)
     # Preallocated gradient outs in the other dtype than the parameter's.
@@ -1910,13 +1998,39 @@ def test_bias_routes(case, weight_dtype, bias_dtype, policy) -> None:
     )
 
 
+# BF16 taps without a bias (bwd_dt_bf16_taps) and with a BF16 bias (bwd_bias_bf16_taps) under the "bf16" policy, at
+# keys whose draws put dx, dweight or dbias past the naive tier when SiLU' is evaluated at the BF16-rounded
+# preactivation (C 512 runs other programs on sm_107a than on sm_100a / sm_103a; each architecture misses on some of
+# these keys).
+BF16_TAPS_KEYS = (
+    ("bwd_dt_bf16_taps", None, 51),
+    ("bwd_dt_bf16_taps", None, 55),
+    ("bwd_bias_bf16_taps", BF16, 17),
+    ("bwd_bias_bf16_taps", BF16, 29),
+)
+
+
+@pytest.mark.parametrize(
+    "kind, bias_dtype, key",
+    BF16_TAPS_KEYS,
+    ids=[f"{kind}-b{_dtype_id(bias)}-key{key}" for kind, bias, key in BF16_TAPS_KEYS],
+)
+def test_bf16_taps_routes_match_reference(kind, bias_dtype, key) -> None:
+    """BF16 taps under the "bf16" policy at S = 1000, C = 512 ("perf" documents): forward and backward judged against
+    the naive tier."""
+
+    _require_route(kind)
+    _check(1000, 512, "perf", weight_dtype=BF16, bias_dtype=bias_dtype, policy="bf16", key=key,
+           label=f"{kind} BF16 taps key {key}")
+
+
 @pytest.mark.parametrize("weight_dtype", (F32, BF16), ids=_dtype_id)
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
 def test_fp32_grad_route(case, weight_dtype) -> None:
     """``silu_grad_preactivation="fp32"`` (``bwd_fp32g``): ``y``, ``dx`` and ``dweight`` judged against the naive
     tier, with FP32 and BF16 taps (the route reads the tap dtype from ``flags``) and a BF16 ``dweight`` out."""
 
-    _require_route("bwd_fp32g", "bwd_dt" if weight_dtype == BF16 else "bwd")
+    _require_route("bwd_fp32g", "fwd_dt" if weight_dtype == BF16 else "fwd")
     S, C, docs = case
     _check(S, C, docs, weight_dtype=weight_dtype, policy="fp32")
     _check(S, C, docs, weight_dtype=weight_dtype, policy="fp32", dweight_dtype=BF16)
@@ -1977,7 +2091,7 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
         with monkeypatch.context() as m:
             m.setattr(pkg, "run_modules", record_launches)
             m.setattr(pkg, "run_module", record_launch)
-            _backward(x, w, cu, dy, b, policy)
+            _backward(x, w, cu, dy, b, policy, kind=kind)
             cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
         bwd_values, fwd_values = launched[0], launched[1]
         for values, route, role in (
@@ -2008,8 +2122,8 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
             got = (values["ct_vec"], values["n_sub"], values["n_ch_tiles"])
             assert got == want, (kind, route, C, got, want)
         y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
-        grads = _backward(x, w, cu, dy, b, policy)
-        again = _backward(x, w, cu, dy, b, policy)
+        grads = _backward(x, w, cu, dy, b, policy, kind=kind)
+        again = _backward(x, w, cu, dy, b, policy, kind=kind)
         for got, first in zip(again, grads, strict=True):
             if first is not None:
                 assert torch.equal(_bits(got), _bits(first)), (kind, S, C)
@@ -2023,7 +2137,7 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
                 m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
                 _clear_tile_rule_caches()
                 y_one = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
-                one = _backward(x, w, cu, dy, b, policy)
+                one = _backward(x, w, cu, dy, b, policy, kind=kind)
         finally:
             _clear_tile_rule_caches()
         assert torch.equal(_bits(y), _bits(y_one)), (kind, S, C, "y")
@@ -2032,8 +2146,8 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_nan_poisoned_workspace_per_route(kind) -> None:
-    """Every backward program of the dt, bias and fp32g routes rewrites every partial row it reduces, the dbias
-    slab included: a NaN-filled workspace (sized for the whole architecture) leaves finite gradients that are
+    """Every backward program of the dt, bias, fp32g and bf16_taps routes rewrites every partial row it reduces, the
+    dbias slab included: a NaN-filled workspace (sized for the whole architecture) leaves finite gradients that are
     judged against the naive tier and equal the gradients of a fresh workspace."""
 
     _require_route(kind)
@@ -2041,9 +2155,9 @@ def test_nan_poisoned_workspace_per_route(kind) -> None:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
         workspace = cake_causal_conv1d_det_train_backward_workspace(S, C, _device())
         _route_check(S, C, docs, kind, workspace=workspace)
-        fresh = _backward(x, w, cu, dy, b, policy)
+        fresh = _backward(x, w, cu, dy, b, policy, kind=kind)
         workspace.view(torch.float32).fill_(float("nan"))
-        poisoned = _backward(x, w, cu, dy, b, policy, workspace=workspace)
+        poisoned = _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace)
         for got, expected, name in zip(
             poisoned, fresh, ("dx", "dweight", "dbias"), strict=True
         ):
@@ -2055,14 +2169,15 @@ def test_nan_poisoned_workspace_per_route(kind) -> None:
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_gradients_are_bitwise_reproducible_per_route(kind) -> None:
-    """Three launches of each dt, bias and fp32g route give bitwise equal ``dx``, ``dweight`` and ``dbias``."""
+    """Three launches of each dt, bias, fp32g and bf16_taps route give bitwise equal ``dx``, ``dweight`` and
+    ``dbias``."""
 
     _require_route(kind)
     for S, C, docs in ROUTE_CASES:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
-        first = _backward(x, w, cu, dy, b, policy)
+        first = _backward(x, w, cu, dy, b, policy, kind=kind)
         for _repeat in range(2):
-            again = _backward(x, w, cu, dy, b, policy)
+            again = _backward(x, w, cu, dy, b, policy, kind=kind)
             for got, expected in zip(again, first, strict=True):
                 if expected is not None:
                     assert torch.equal(got, expected), (kind, S, C)
@@ -2410,7 +2525,7 @@ def test_bwd_grid_mult_launches_k_times_the_untrimmed_grid(kind, monkeypatch) ->
         untrimmed = loader.launch_grid(record, device_index=device.index)[0]
         for k in (1, *OPT_IN_GRID_MULTS):
             launched.clear()
-            _backward(x, w, cu, dy, b, policy, bwd_grid_mult=k)
+            _backward(x, w, cu, dy, b, policy, kind=kind, bwd_grid_mult=k)
             ((launches, values),) = launched
             assert [name for name, _ in launches] == [main, record["reduce"]]
             grid = launches[0][1]
@@ -2441,7 +2556,7 @@ def test_bwd_grid_mult_gradients(kind, bwd_grid_mult) -> None:
     for S, C, docs in ROUTE_CASES:
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
         _route_check(S, C, docs, kind, bwd_grid_mult=k)
-        default = _backward(x, w, cu, dy, b, policy)
+        default = _backward(x, w, cu, dy, b, policy, kind=kind)
         workspace = cake_causal_conv1d_det_train_backward_workspace(
             S, C, _device(), bwd_grid_mult=k
         )
@@ -2449,9 +2564,9 @@ def test_bwd_grid_mult_gradients(kind, bwd_grid_mult) -> None:
         for _repeat in range(3):
             workspace.view(torch.float32).fill_(float("nan"))
             runs.append(
-                _backward(x, w, cu, dy, b, policy, workspace=workspace, bwd_grid_mult=k)
+                _backward(x, w, cu, dy, b, policy, kind=kind, workspace=workspace, bwd_grid_mult=k)
             )
-        runs.append(_backward(x, w, cu, dy, b, policy, bwd_grid_mult=k))
+        runs.append(_backward(x, w, cu, dy, b, policy, kind=kind, bwd_grid_mult=k))
         assert torch.equal(runs[0][0], default[0]), (kind, S, C, k, "dx")
         for run in runs[1:]:
             for got, expected, name in zip(
@@ -2478,7 +2593,7 @@ def test_autograd_passes_bwd_grid_mult(kind) -> None:
         cake_causal_conv1d_det(
             x, w, cu, b, silu_grad_preactivation=policy, bwd_grid_mult=k
         ).backward(dy)
-        dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, policy, bwd_grid_mult=k)
+        dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, policy, kind=kind, bwd_grid_mult=k)
         assert torch.equal(x.grad, dx_ref) and torch.equal(w.grad, dw_ref), (kind, k)
         if b is not None:
             assert torch.equal(b.grad, db_ref), (kind, k)
@@ -2506,8 +2621,8 @@ FORWARD_WORKSPACE_CASES = (
     (65, 256, (64, 1)),
     (5, 1536, (2, 0, 3)),
 )
-# The backward route settings whose inputs select each forward route.
-FORWARD_ROUTE_SETTINGS = {"fwd": "bwd", "fwd_dt": "bwd_dt", "fwd_bias": "bwd_bias"}
+# The backward route settings whose inputs select each forward route (their taps' dtype is the forward route's).
+FORWARD_ROUTE_SETTINGS = {"fwd": "bwd", "fwd_dt": "bwd_dt_bf16_taps", "fwd_bias": "bwd_bias"}
 
 
 def _forward_tiles(C: int) -> int:
@@ -2593,7 +2708,7 @@ def test_forward_reuses_one_workspace_over_calls_and_routes() -> None:
     )
     problems = []
     for kind, settings in FORWARD_ROUTE_SETTINGS.items():
-        _require_route(settings)
+        _require_route(kind)
         for S, C, docs in FORWARD_WORKSPACE_CASES:
             x, w, cu, _, b, _ = _route_inputs(S, C, docs, settings, key=13)
             assert (
@@ -2731,7 +2846,7 @@ def test_forward_cuda_graph_with_and_without_workspace() -> None:
     device = _device()
     cache = pkg._FORWARD_WORKSPACES
     for kind, settings in FORWARD_ROUTE_SETTINGS.items():
-        _require_route(settings)
+        _require_route(kind)
         S, C, docs = 4097, 1344, (1000, 0, 3, 3094)
         x, w, cu, _, b, _ = _route_inputs(S, C, docs, settings, key=23)
         eager = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
