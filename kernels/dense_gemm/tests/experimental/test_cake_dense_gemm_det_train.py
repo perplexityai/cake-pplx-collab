@@ -12601,8 +12601,9 @@ def test_swapped_forward_is_bitwise_repeatable():
 def test_swapped_forward_pdl_waits_for_an_early_producer(T, record_property):
     """A chain of programmatic dependent launches whose producer triggers its dependents at entry: the first
     projection (K = 16384, long) writes the activation the second reads.  The second starts while the first runs
-    (its weights load ahead of the wait) and must still read every token the first wrote: its output is judged
-    against the naive BF16 tier of the two products over 32 draws, three chains on the first."""
+    (its weights load ahead of the wait) and must still read every token the first wrote: both outputs are judged
+    against the naive BF16 tier over 32 draws, three chains on the first, the second on the activation the first
+    wrote."""
     _require_swap()
     G, D1, R1, R2 = 8, 16384, 1024, 2048
 
@@ -12640,11 +12641,13 @@ def test_swapped_forward_pdl_waits_for_an_early_producer(T, record_property):
         )
         torch.cuda.synchronize()
         assert bool(torch.isfinite(v.mid).all()) and bool(torch.isfinite(v.y).all())
-        return {"y": v.O2}
+        return {"mid": v.O1, "y": v.O2}
 
     def product(v, dtype):
-        mid = torch.einsum("gtd,gdr->gtr", v.A1.to(dtype), v.B1.to(dtype))
-        return {"y": torch.einsum("gtd,gdr->gtr", mid, v.B2.to(dtype))}
+        return {
+            "mid": torch.einsum("gtd,gdr->gtr", v.A1.to(dtype), v.B1.to(dtype)),
+            "y": torch.einsum("gtd,gdr->gtr", v.A2.to(dtype), v.B2.to(dtype)),
+        }
 
     judge_gemm(
         record_property,
@@ -12653,6 +12656,7 @@ def test_swapped_forward_pdl_waits_for_an_early_producer(T, record_property):
         launch=launch,
         product=product,
         launches=3,
+        after_launch=True,
     )
 
 
@@ -12662,8 +12666,9 @@ def test_swapped_forward_default_waits_for_an_early_producer_writing_b(
 ):
     """The default (``enable_pdl`` on, ``weights_static`` off) never reads ``B`` before the preceding kernel
     completes: a long planner GEMM on a few CTAs (K = 65536) that triggers its dependents at entry writes the weights
-    the swapped forward reads next, and the forward sees every weight it wrote: its output is judged against the
-    naive BF16 tier of the two products over 32 draws, three chains on the first.  (The ``weights_static`` programs
+    the swapped forward reads next, and the forward sees every weight it wrote: both outputs are judged against the
+    naive BF16 tier over 32 draws, three chains on the first, the forward on the weights the producer wrote.  (The
+    ``weights_static`` programs
     read the NaN the weights were poisoned with in this chain: that is what the keyword states cannot happen.)"""
     _require_swap()
     G, D, R, Kp = 2, 256, 256, 65536
@@ -12697,11 +12702,13 @@ def test_swapped_forward_default_waits_for_an_early_producer_writing_b(
         cake_backend.cake_dense_gemm_det_train_projection(v.A, v.B, v.O)
         torch.cuda.synchronize()
         assert bool(torch.isfinite(v.w).all())
-        return {"out": v.O}
+        return {"w": v.w, "out": v.O}
 
     def product(v, dtype):
-        w = torch.matmul(v.y.to(dtype), v.z.to(dtype).transpose(1, 2))
-        return {"out": torch.einsum("gtd,gdr->gtr", v.A.to(dtype), w.transpose(1, 2))}
+        return {
+            "w": torch.matmul(v.y.to(dtype), v.z.to(dtype).transpose(1, 2)),
+            "out": torch.einsum("gtd,gdr->gtr", v.A.to(dtype), v.B.to(dtype)),
+        }
 
     judge_gemm(
         record_property,
@@ -12710,6 +12717,7 @@ def test_swapped_forward_default_waits_for_an_early_producer_writing_b(
         launch=launch,
         product=product,
         launches=3,
+        after_launch=True,
     )
 
 
@@ -12750,7 +12758,7 @@ def test_weights_static_runs_the_weights_early_program(record_property):
 def test_swapped_forward_replays_in_a_cuda_graph_with_pdl(record_property):
     """The swapped launch allocates nothing: a PDL chain captured into a CUDA graph replays on new values written
     into the bound views.  Each draw writes its operands into the bound views and replays the graph; both outputs
-    are judged against the naive BF16 tier over 32 draws, the second against the tier of the two products."""
+    are judged against the naive BF16 tier over 32 draws, the second on the first's output as the replay wrote it."""
     _require_swap()
     A, B, out = _swap_views(96, seed=SEED + 4)
     _, B2, out2 = _swap_views(96, R=4096, D=1024, seed=SEED + 5)
@@ -12774,7 +12782,7 @@ def test_swapped_forward_replays_in_a_cuda_graph_with_pdl(record_property):
         A.copy_(first[0])
         B.copy_(first[1])
         B2.copy_(second[1])
-        return A, B, B2
+        return A, B, B2, A2
 
     def launch(_operands):
         nan_fill([out, out2])
@@ -12783,12 +12791,19 @@ def test_swapped_forward_replays_in_a_cuda_graph_with_pdl(record_property):
         return {"out": out, "out2": out2}
 
     def product(operands, dtype):
-        a, b, b2 = (t.to(dtype) for t in operands)
-        first = torch.einsum("gtd,gdr->gtr", a, b)
-        return {"out": first, "out2": torch.einsum("gtd,gdr->gtr", first, b2)}
+        a, b, b2, a2 = (t.to(dtype) for t in operands)
+        return {
+            "out": torch.einsum("gtd,gdr->gtr", a, b),
+            "out2": torch.einsum("gtd,gdr->gtr", a2, b2),
+        }
 
     judge_gemm(
-        record_property, seed=SEED + 4, draw=draw, launch=launch, product=product
+        record_property,
+        seed=SEED + 4,
+        draw=draw,
+        launch=launch,
+        product=product,
+        after_launch=True,
     )
 
 
@@ -12843,10 +12858,12 @@ def _pdl_chain_inputs(T, D1, R1, R2, seed):
 
 
 def _d3_pdl_chain_product(v, dtype):
-    """The judge's ``product`` of a PDL chain on the operands ``v.x``, ``v.w1`` and ``v.w2``: ``mid = x @ w1.T`` and
-    ``y = mid @ w2.T`` in ``dtype``."""
-    mid = v.x.to(dtype) @ v.w1.to(dtype).t()
-    return {"mid": mid, "y": mid @ v.w2.to(dtype).t()}
+    """The judge's ``product`` (``after_launch``) of a PDL chain: ``mid = x @ w1.T`` on the operands ``v.x`` and
+    ``v.w1``, and ``y = mid @ w2.T`` on the ``v.mid`` the first projection wrote and ``v.w2``, in ``dtype``."""
+    return {
+        "mid": v.x.to(dtype) @ v.w1.to(dtype).t(),
+        "y": v.mid.to(dtype) @ v.w2.to(dtype).t(),
+    }
 
 
 @pytest.mark.parametrize("T", [256, 4096])
@@ -12856,8 +12873,8 @@ def test_planner_pdl_waits_for_an_early_producer(T, record_property):
     runs and must still read every row the first wrote, and at 256 rows both run stream-K out of one workspace arena
     (the slabs and slice counters of the stream), which the second may touch only after the first completes.  Both
     outputs are judged against the naive BF16 tier over 32 draws, three chains into NaN outputs on the first (the
-    second output against the tier of the two products); on the last draw the default ``enable_pdl`` gives the bits
-    of the explicit one."""
+    second on the activation the first wrote); on the last draw the default ``enable_pdl`` gives the bits of the
+    explicit one."""
     if not _device_supported():
         pytest.skip("requires a device with a registered generated instance")
 
@@ -12885,6 +12902,7 @@ def test_planner_pdl_waits_for_an_early_producer(T, record_property):
         launch=launch,
         product=_d3_pdl_chain_product,
         launches=3,
+        after_launch=True,
     )
     # the default (the device supports PDL) gives the same bits
     first = v.y.clone()
@@ -12899,7 +12917,7 @@ def test_prepared_pdl_chain_replays_in_a_cuda_graph(record_property):
     """Prepared launches fix ``enable_pdl`` at prepare time: a PDL chain of two prepared projections (the second reading the
     first's output) captured into a CUDA graph replays on new values written into the bound views.  Each draw writes
     its operands into the bound views and replays the graph; both outputs are judged against the naive BF16 tier over
-    32 draws, the second against the tier of the two products."""
+    32 draws, the second on the activation the first wrote."""
     if not _device_supported():
         pytest.skip("requires a device with a registered generated instance")
     T = 512
@@ -12921,7 +12939,7 @@ def test_prepared_pdl_chain_replays_in_a_cuda_graph(record_property):
     with torch.cuda.graph(graph, stream=stream):
         first()
         second()
-    operands = SimpleNamespace(x=x, w1=w1, w2=w2)
+    operands = SimpleNamespace(x=x, w1=w1, w2=w2, mid=mid)
 
     def draw(seed):
         fresh = _pdl_chain_inputs(T, 4096, 2048, 1024, seed)
@@ -12941,6 +12959,7 @@ def test_prepared_pdl_chain_replays_in_a_cuda_graph(record_property):
         draw=draw,
         launch=launch,
         product=_d3_pdl_chain_product,
+        after_launch=True,
     )
 
 

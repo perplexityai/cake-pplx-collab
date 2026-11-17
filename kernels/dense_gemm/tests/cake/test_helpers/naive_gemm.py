@@ -29,8 +29,9 @@ The case supplies three callables:
   it (``out.t()`` for a transposed store, a view without the padding of a padded output).
 - ``product(inputs, dtype)`` returns the same names: the GEMM of each output on the operands converted to ``dtype``.
   float64 gives the oracle and bfloat16 the naive tier, so one formula serves both.  It is called on the draw's
-  inputs before the draw's first launch, so it reads only operands that the launches do not write; a chain of
-  GEMMs is the product of the whole chain on the draw's inputs, not of a kernel's intermediate output.
+  inputs before the draw's first launch, so it reads only operands that the launches do not write.  With
+  ``after_launch`` it is called after each launch instead, so a GEMM of a chain is judged on the operands it read:
+  the earlier GEMM's output as that launch wrote it (itself judged against its own operands).
 
 ``launches`` launches the kernel that many times on the first draw (an output is written into NaN again before each
 launch after the first when ``poison`` is given); the judge keeps the largest error of a draw's launches.
@@ -67,6 +68,7 @@ def judge_gemm(
     product: Callable[[Any, torch.dtype], Mapping[str, torch.Tensor]],
     launches: int = 1,
     poison: Callable[[Any], Iterable[torch.Tensor]] | None = None,
+    after_launch: bool = False,
     draws: int = DRAWS,
 ) -> Any:
     """Judge one case over ``draws`` inputs against the naive BF16 tier and assert it met the tier.
@@ -87,12 +89,16 @@ def judge_gemm(
             s = draw_seed(seed, j)
             seed_all(s)
             inputs = draw(s)
-            oracle = dict(product(inputs, torch.float64))
-            naive = dict(product(inputs, torch.bfloat16))
+            if not after_launch:
+                oracle = dict(product(inputs, torch.float64))
+                naive = dict(product(inputs, torch.bfloat16))
             for k in range(launches if j == 0 else 1):
                 if k and poison is not None:
                     nan_fill(poison(inputs))
                 outputs = dict(launch(inputs))
+                if after_launch:
+                    oracle = dict(product(inputs, torch.float64))
+                    naive = dict(product(inputs, torch.bfloat16))
                 if set(outputs) != set(oracle):
                     raise ValueError(f"launch gave outputs {sorted(outputs)}, product gave {sorted(oracle)}")
                 for name, actual in outputs.items():
