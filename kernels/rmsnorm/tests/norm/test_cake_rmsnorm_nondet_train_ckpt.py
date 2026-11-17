@@ -37,9 +37,9 @@ bit for bit as the plain autograd call, with the kernel's FP32 ``dw`` (not
 bitwise reproducible) judged against the naive tier; checkpointed micro-batches
 sharing one weight accumulate into existing ``.grad`` tensors exactly as
 autograd adds them; and a checkpointed forward keeps nothing on the device
-beyond its outputs (measured with ``torch.cuda.memory_allocated``; the plain
-forward also keeps the FP32 ``rstd``), while the backward leaves only the
-gradients.
+beyond its outputs (counted in bytes requested from the CUDA caching
+allocator; the plain forward also keeps the FP32 ``rstd``), while the backward
+leaves only the gradients.
 
 This suite imports only this package (through ``tests.cake.test_helpers.cake_package``);
 it runs unchanged against a vendored copy with or without the deterministic
@@ -70,9 +70,6 @@ VIEWS = {"query": 24, "key": 4}
 # Irregular and large token counts of the per-head views (rows = tokens * heads).
 VIEW_TOKENS = (1, 7, 1000, 4097, 16385, 65536)
 VIEW_REPEATS = 3
-# Retained device memory beyond the outputs: the caching allocator rounds every
-# block up to 512 bytes.
-ALLOCATOR_SLACK = 2048
 
 
 def _device() -> torch.device:
@@ -473,6 +470,23 @@ def test_checkpointed_micro_batches_accumulate_into_existing_grads(
     print(f"CKPT_ACCUM {_arch()} {name} w={w} micro_batches=3 exact=True")
 
 
+def _requested_bytes() -> int:
+    """Device bytes this process requested from the CUDA caching allocator and
+    still holds.  ``torch.cuda.memory_allocated`` counts whole allocator blocks
+    instead: every request rounded up to a multiple of 512 bytes, and a cached
+    block up to 1 MiB larger served without splitting it, so the blocks it
+    counts depend on what earlier tests left in the cache.  The count is a
+    statistic of the native allocator: under another backend
+    (``cudaMallocAsync`` or a pluggable allocator) the test fails here instead
+    of trusting a count that backend does not keep."""
+    backend = torch.cuda.get_allocator_backend()
+    assert backend == "native", (
+        f"the requested-bytes count needs the native CUDA caching allocator, "
+        f"not {backend!r} (PYTORCH_CUDA_ALLOC_CONF backend)"
+    )
+    return torch.cuda.memory_stats()["requested_bytes.all.current"]
+
+
 def _retained_cases():
     for w in W_DTYPES:
         for name in ("query", "key", "h5120", "h5120_nd", "res_h6144_nd"):
@@ -482,10 +496,10 @@ def _retained_cases():
 @pytest.mark.parametrize(("name", "w"), list(_retained_cases()))
 def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> None:
     """Device memory held after a checkpointed forward is its outputs (``y`` and,
-    with a residual, ``h_new``) to the allocator's rounding: 0 MiB beyond them
-    (no ``rstd``, no workspace, no copy of an input).  The plain forward holds
-    the outputs and the FP32 ``rstd``.  After the backward and once the outputs
-    are dropped, only the gradients remain."""
+    with a residual, ``h_new``) and not one requested byte more (no ``rstd``, no
+    workspace, no copy of an input).  The plain forward holds the outputs and
+    the FP32 ``rstd``.  After the backward and once the outputs are dropped,
+    only the gradients remain."""
     tokens = 4097
     hidden, residual, x, u, g, g_h, weight = _ckpt_inputs(name, w, tokens, key=7)
     _skip_unless_route(hidden, residual, w)
@@ -505,7 +519,7 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
             return out if ut is not None else (out,)
 
         torch.cuda.synchronize()
-        base = torch.cuda.memory_allocated()
+        base = _requested_bytes()
         if checkpointed:
             outs = torch.utils.checkpoint.checkpoint(
                 step, xa, wa, ua, use_reentrant=False
@@ -513,14 +527,16 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
         else:
             outs = step(xa, wa, ua)
         torch.cuda.synchronize()
-        held = torch.cuda.memory_allocated() - base
+        held = _requested_bytes() - base
         outputs_bytes = sum(o.untyped_storage().nbytes() for o in outs)
         beyond = held - outputs_bytes
         torch.cuda.reset_peak_memory_stats()
-        peak_base = torch.cuda.memory_allocated()
+        peak_base = _requested_bytes()
         torch.autograd.backward(outs, (g, g_h) if residual else (g,))
         torch.cuda.synchronize()
-        backward_peak = torch.cuda.max_memory_allocated() - peak_base
+        backward_peak = (
+            torch.cuda.memory_stats()["requested_bytes.all.peak"] - peak_base
+        )
         del outs
         _DW_BUFFERS.clear()
         torch.cuda.synchronize()
@@ -531,20 +547,21 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
                 for t in grads
             }.values()
         )
-        left = torch.cuda.memory_allocated() - base - grads_bytes
+        left = _requested_bytes() - base - grads_bytes
         report[checkpointed] = (held, outputs_bytes, beyond, backward_peak, left)
         label = f"{name} w={w} rows={rows} checkpointed={checkpointed}"
+        # requested bytes are not rounded to allocator blocks: no slack
         if checkpointed:
-            assert beyond <= ALLOCATOR_SLACK, (
+            assert beyond <= 0, (
                 f"{label}: a checkpointed forward holds {beyond} bytes beyond its "
                 f"outputs ({outputs_bytes} bytes)"
             )
         else:
-            assert beyond <= 4 * rows + ALLOCATOR_SLACK, (
+            assert beyond <= 4 * rows, (
                 f"{label}: the forward holds {beyond} bytes beyond its outputs "
                 f"(the FP32 rstd is {4 * rows})"
             )
-        assert left <= ALLOCATOR_SLACK, f"{label}: {left} bytes left after the backward"
+        assert left <= 0, f"{label}: {left} bytes left after the backward"
         del xa, ua, wa, grads
     mib = 1 / (1 << 20)
     (
