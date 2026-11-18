@@ -35,10 +35,7 @@ and ``cake_moe_grouped_gemm_nondet`` of the package, and the module
 argument.  The deterministic entries are those of the module
 ``cake_pplx.cake_moe_grouped_gemm_det_train``; nothing here routes to them.
 ``fwd``, ``dgrad`` and the weight gradient with the 256-wide k tile run this
-package's copies of the deterministic programs and give their bits (the
-256-wide k tile's ``main_wave`` program is the same kernel rendered from a newer
-source: it takes two more buffer arguments, ``A_rows`` / ``B_rows``, which its
-sm_100a / sm_103a builds never read, and it has no sm_107a build).  The
+package's copies of the deterministic programs and give their bits.  The
 weight gradient with the 512-wide k tile runs the builds of the deterministic
 package's k512 forms whose split tail (the tiles of the last partial wave, cut
 into ``tail_splits`` k-step units over the clusters) is finished in the same
@@ -51,11 +48,13 @@ in a fixed order, and the slot order does not depend on the order in which the
 units arrive, so every output of this package repeats bit for bit for the same
 inputs, shapes, device SM count and configuration.  The k512 weight gradient's
 bits depend on the SM count and the tail split; a split tail tile can differ
-from the deterministic package's, whose tail plan and group order differ,
-within that package's error budget.  The operands (bf16), the accumulation
-(fp32), the one round-to-nearest rounding to bf16 (or the fp32 store), the
-layouts, the ``offs`` contract and the exact zeros of empty groups are the
-deterministic package's.  No launch of the shipped registry and constants
+from the deterministic package's bits, whose tail plan and group order differ.
+The operands (bf16), the accumulation (fp32), the one round-to-nearest
+rounding to bf16 (or the fp32 store), the layouts, the ``offs`` contract and
+the exact zeros of empty groups are the deterministic package's; the tests
+judge every output against a naive BF16 implementation, with the float64
+product of the BF16 operands as the oracle (see the README's Accuracy
+section).  No launch of the shipped registry and constants
 alerts under ``torch.use_deterministic_algorithms(True)``.  The alert stays as
 an extension point for an order-varying launch
 (``CakeMoEGroupedGemmNondetLaunch.order_varying``: a weight gradient with a
@@ -1247,6 +1246,8 @@ HOST_ARGUMENTS: dict[str, frozenset[str]] = {
             "K",
             "ldc",
             "stride_e",
+            "lda",
+            "ldb",
             "wave_mode",
         )
     ),
@@ -1268,19 +1269,14 @@ HOST_ARGUMENTS: dict[str, frozenset[str]] = {
 }
 # Row-base buffers: a program may take the base of an operand again under this name, besides its TMA
 # descriptor.  The kernel build reads rows through it only in its sm_107a override (``ROW_BASE_READ_ARCHS``),
-# which takes the row pitch to be the row width, so the operand must have dense rows there.  On another
-# architecture the build never reads it, and the host binds a one-element view of the operand: no copy, any
-# row stride, safe under CUDA graph capture.  (Today only the 256-wide k tile's ``main_wave`` program on
-# sm_100a / sm_103a takes row bases, and it does not read them.)
+# at the row pitches ``lda`` / ``ldb`` (the operands' row strides, which the weight-gradient binding passes):
+# the host binds the operand itself when its rows are dense, else the flat span of its rows.  On another
+# architecture the build never reads it, and the host binds a one-element view of the operand.  Either way: no
+# copy, any row stride, safe under CUDA graph capture.  (The 256-wide k tile's ``main`` and ``main_wave``
+# programs take row bases; only the ``main`` build for sm_107a reads them.)
 ROW_BASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
 GRID_ARGUMENTS = ("grid_x", "grid_y", "grid_z")
-# The caller's names of the operands ``A`` / ``B`` per operation, for error messages.
-_OPERAND_NAMES = {
-    "fwd": {"A": "x", "B": "w"},
-    "dgrad": {"A": "g", "B": "w"},
-    "wgrad": {"A": "g", "B": "x"},
-}
 
 
 def host_binding(op: str, stage: str) -> str:
@@ -1298,22 +1294,18 @@ def bindable_arguments(op: str, stage: str) -> frozenset[str]:
     return host | set(STREAM_WORKSPACES) | rows | set(GRID_ARGUMENTS)
 
 
-def _row_base(
-    t: torch.Tensor, op: str, operand: str, program: str, stage: str, arch: str
-) -> torch.Tensor:
-    """The row-base argument of ``operand`` (``t``, two or more dimensions) for a launch on ``arch``: ``t``
-    itself where the build reads rows through it (``ROW_BASE_READ_ARCHS``), refused unless its rows are dense
-    (row stride = row width; a single row has any stride); else a one-element view at ``t``'s first element."""
+def _row_base(t: torch.Tensor, arch: str) -> torch.Tensor:
+    """The row-base argument of an operand ``t`` (two or more dimensions) for a launch on ``arch``.  Where the
+    build reads rows through it (``ROW_BASE_READ_ARCHS``): ``t`` itself when its rows are dense (row stride =
+    row width; a single row has any stride), else the flat span of its rows (``(rows - 1) * row stride + row
+    width`` elements from ``t``'s first element), which the build addresses at the row pitch the binding passes
+    with it (``lda`` / ``ldb``; the binding refuses a pitch the build cannot take, as the TMA descriptor of the
+    operand does).  Elsewhere a one-element view at ``t``'s first element."""
     if arch not in ROW_BASE_READ_ARCHS:
         return t.as_strided((1,), (1,))
-    if t.size(-2) > 1 and t.stride(-2) != t.size(-1):
-        label = _OPERAND_NAMES.get(op, {}).get(operand, operand)
-        raise ValueError(
-            f"{op}: {label} must have dense rows (row stride {t.size(-1)}, got {t.stride(-2)}): the {arch} "
-            f"build of the {stage!r} stage ({program}) also reads its rows through a plain pointer; pass "
-            f"{label}.contiguous()"
-        )
-    return t
+    if t.size(-2) <= 1 or t.stride(-2) == t.size(-1):
+        return t
+    return t.as_strided(((t.size(-2) - 1) * t.stride(-2) + t.size(-1),), (1,))
 
 
 # Stream workspaces (module docstring): one buffer per (kind, device index,
@@ -1816,16 +1808,7 @@ def _bind(
             slots.append((len(arguments), kinds.get(arg, arg), size))
             arguments.append(None)
         elif kind == "buffer" and arg in ROW_BASES and ROW_BASES[arg] in kwargs:
-            arguments.append(
-                _row_base(
-                    kwargs[ROW_BASES[arg]],
-                    op,
-                    ROW_BASES[arg],
-                    binding["program"],
-                    stage,
-                    arch,
-                )
-            )
+            arguments.append(_row_base(kwargs[ROW_BASES[arg]], arch))
         elif arg in kwargs:
             arguments.append(kwargs[arg])
         else:
@@ -2330,6 +2313,8 @@ def _prepare_wgrad(
         K=k,
         ldc=int(target.stride(1)),
         stride_e=int(target.stride(0)),
+        lda=int(g.stride(0)),
+        ldb=int(x.stride(0)),
         wave_mode=plan["wave_mode"],
         grid=plan["grid"],
     )

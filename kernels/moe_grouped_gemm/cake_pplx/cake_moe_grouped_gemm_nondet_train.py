@@ -57,12 +57,14 @@ is ``dW`` wherever the 256-wide k tile runs or the 512-wide k tile does not
 split its tail.  Every whole tile of ``dW`` is reduced by one CTA pair over the
 group's rows in a fixed order, and the units of a split tail tile are summed
 in slot order; the tail plan and group order differ from the deterministic
-package's, so such a tile can differ from its bits, within its error budgets.
+package's, so such a tile can differ from its bits.
 The operands (bf16), the accumulation (fp32), the one round-to-nearest
 rounding to bf16 (or the fp32 store), the layouts, the device-resident
 ``offs`` contract (no host synchronisation, no padding), the exact zeros of
-empty groups, the error budgets and the fixes the deterministic package
-carries are unchanged.  The split tail's fp32 slots and tickets are workspaces
+empty groups and the fixes the deterministic package carries are unchanged.
+The tests judge every output against a naive BF16 implementation, with the
+float64 product of the BF16 operands as the oracle (see the package README's
+Accuracy section).  The split tail's fp32 slots and tickets are workspaces
 kept per (device, CUDA stream); only the tickets rest at zero (every launch
 leaves them zero), and the slots, ``tail_splits`` per tail tile, need no value
 between launches.  A CUDA-graph capture takes buffers of its own.

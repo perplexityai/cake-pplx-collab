@@ -13,38 +13,35 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Reproducibility of the non-deterministic Cake MoE grouped GEMM against the
+Reproducibility of the non-deterministic Cake MoE grouped GEMM over the
+benchmark rows and the edge cases, and the structure it shares with the
 deterministic package.
 
-Over the 58 MoE projection rows of the benchmark and the edge cases of the
-deterministic package's determinism suite (seeded fixed inputs per case):
+Over the 58 MoE projection rows of the benchmark, the queue walk's uneven rows and
+the edge cases of the determinism suites (seeded fixed inputs per case):
 
-* the module ``cake_pplx.cake_moe_grouped_gemm_nondet_train`` gives the
-  deterministic package's bits for ``fwd`` and ``dgrad``;
-* ``fwd`` and ``dgrad`` of the non-deterministic package give the deterministic
-  package's bits, the data gradient's own sm_100a L2 evict-first build included
-  (it runs where the deterministic package launches its wide tile);
-* the non-deterministic weight gradient, launched ``REPEATS`` times into an
-  output filled with zero bytes and ``REPEATS`` times into one filled with
-  ``FILL_BYTE`` (the split-tail slots poisoned with ``FILL_BYTE`` before every
-  launch), gives the bits of its own first launch every time and stays within
-  the deterministic package's budget of the deterministic weight gradient; a
-  case without a split one-launch tail gives the deterministic bits (``REPRO``
-  lines report the comparison);
-* with the tail split switched off in both packages, the 512-wide k tile's
-  ordered one-launch tail builds give the deterministic builds' bits (every
-  whole tile is reduced in the deterministic order);
-* the cases reach the ordered split tail on this device for both output dtypes;
-* on the one-group E1 rows (``E1_SUM_M``), where the deterministic package's own
-  fp32 weight gradient exceeds ``FP32_REL_L2``, the non-deterministic fp32 weight
-  gradient's rel-L2 and worst / max |ref| against the fp64 reference are each at
-  most ``DET_ERROR_RATIO`` times the deterministic package's at the same inputs;
-* row-padded ``g`` and ``x`` on the shape of the 256-wide k tile's ``main_wave``
-  weight gradient give the deterministic package's bits.
+* the module ``cake_pplx.cake_moe_grouped_gemm_nondet_train`` gives this package's
+  bits for ``fwd`` and ``dgrad``, and ``fwd`` / ``dgrad`` give the same bits
+  whatever the output held;
+* the weight gradient, launched ``REPEATS`` times into an output filled with zero
+  bytes and ``REPEATS`` times into one filled with ``FILL_BYTE`` (the split-tail
+  slots poisoned with ``FILL_BYTE`` before every launch), gives the bits of its own
+  first launch every time, with exact-zero empty groups;
+* every output is judged against the naive BF16 tier over ``cake_naive.DRAWS``
+  inputs (``tests/cake/test_helpers/cake_moe_judge.py``: its error against the
+  float64 oracle in the L2 and the max norm, median and largest over the draws, at
+  most ``cake_naive.NEAR_TIE`` times the tier's; sampled rows above
+  ``cake_moe_judge.FULL_ORACLE_MACS``), and so are the data gradient's L2
+  evict-first build (which also gives the bits of the plain wide and the 256-column
+  tiles), row-padded ``g`` and ``x`` on the 256-wide k tile's ``main_wave`` shape,
+  the one-group E1 fp32 rows and the queue walk's rows (bf16, fp32, fused
+  accumulate);
+* the cases reach the ordered split tail on this device for both output dtypes.
 
-On the CPU, the registry mirrors the deterministic package's routes and stages,
-and the host plan constants are the deterministic package's but for those of
-``OWN_CONSTANTS``.
+No output is compared with the deterministic package's (the owner's rule: no
+deterministic-vs-non-deterministic comparisons).  On the CPU, the registry mirrors
+the deterministic package's routes and stages, and the host plan constants are the
+deterministic package's but for those of ``OWN_CONSTANTS``.
 """
 
 import dataclasses
@@ -58,6 +55,8 @@ import torch
 pytest.importorskip("tvm_ffi")
 
 import cake_pplx.cake_moe_grouped_gemm_nondet_train as facade
+from tests.cake.test_helpers.cake_moe_judge import judge_draws, product
+from tests.cake.test_helpers.cake_naive import draw_seed
 from tests.cake.test_helpers.cake_package import cake_package
 
 cb = cake_package("cake_moe_grouped_gemm_nondet_train", "cake_backend")
@@ -69,15 +68,8 @@ HOST_PLAN_CONSTANTS = cake_jit.HOST_PLAN_CONSTANTS
 REPEATS = 10  # launches per output pre-state (zero bytes, then FILL_BYTE)
 RACE_REPEATS = 50  # the #6570 race shape
 FILL_BYTE = 0x5A
-ATOL = RTOL = 1e-2  # bf16 outputs
-FP32_REL_L2 = 1e-4  # fp32 weight gradient
-# The #5678 E1 customer rows reduce 112,576 / 136,064 rows in one group.  There the
-# deterministic package's own fp32 weight gradient has rel-L2 1.17e-4 / 1.41e-4
-# against the fp64 reference on GB300, above FP32_REL_L2, so these rows use the
-# deterministic package's error at the same inputs as the bar: per output, rel-L2 and
-# worst / max |ref| each at most DET_ERROR_RATIO times the deterministic package's.
+# The #5678 E1 customer rows reduce 112,576 / 136,064 rows in one group.
 E1_SUM_M = (112576, 136064)
-DET_ERROR_RATIO = 1.1
 
 # The 58 MoE projection rows of benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py.
 BENCH_PROJ = {"gate_up": (4096, 6144), "down": (6144, 2048)}
@@ -283,11 +275,6 @@ def edge_cases():
 CASES = bench_cases() + edge_cases() + queue_cases()
 CASE_BY_LABEL = {case.label: case for case in CASES}
 assert len(CASE_BY_LABEL) == len(CASES)
-K512_LABELS = [
-    case.label
-    for case in CASES
-    if case.op == "wgrad" and sum(case.sizes) and case.k % 512 == 0
-]
 
 
 # ---------------------------------------------------------------------------
@@ -306,20 +293,22 @@ def _device():
 
 def _require_programs(case, device):
     out_dtype = case.out_dtype if case.op == "wgrad" else None
-    for backend in (cb, det_cb):
-        if not backend.generated_program_available(
-            device, op=case.op, out_dtype=out_dtype
-        ):
-            pytest.skip(
-                f"no generated program for {case.op} registered for "
-                f"{backend.arch_for(device)} in {backend.__name__}"
-            )
+    if not cb.generated_program_available(device, op=case.op, out_dtype=out_dtype):
+        pytest.skip(
+            f"no generated program for {case.op} registered for "
+            f"{cb.arch_for(device)} in {cb.__name__}"
+        )
 
 
-def _inputs(case, device):
-    """Fixed inputs of ``case``: seeded from its label."""
+def _seed(case):
+    """The seed of ``case``'s own inputs (draw 0 of its judge): from its label."""
+    return zlib.crc32(case.label.encode())
+
+
+def _operands(case, device, seed):
+    """The operands ``(a, b)`` of ``case`` drawn from ``seed``."""
     gen = torch.Generator(device=device)
-    gen.manual_seed(zlib.crc32(case.label.encode()))
+    gen.manual_seed(seed)
     sum_m, num_groups = sum(case.sizes), len(case.sizes)
     scale = 1.0 / math.sqrt(case.k)
 
@@ -327,19 +316,53 @@ def _inputs(case, device):
         t = torch.randn(*shape, generator=gen, device=device, dtype=torch.float32)
         return t.mul_(scale).to(torch.bfloat16)
 
+    if case.op == "fwd":
+        return randn(sum_m, case.k, scale=scale), randn(
+            num_groups, case.n, case.k, scale=scale
+        )
+    if case.op == "dgrad":
+        return randn(sum_m, case.n), randn(num_groups, case.n, case.k, scale=scale)
+    return randn(sum_m, case.n), randn(sum_m, case.k, scale=scale)
+
+
+def _inputs(case, device):
+    """Fixed inputs of ``case``: seeded from its label (``_seed``)."""
     offs = torch.tensor(case.sizes, dtype=torch.int32, device=device).cumsum(
         0, dtype=torch.int32
     )
-    if case.op == "fwd":
-        a = randn(sum_m, case.k, scale=scale)
-        b = randn(num_groups, case.n, case.k, scale=scale)
-    elif case.op == "dgrad":
-        a = randn(sum_m, case.n)
-        b = randn(num_groups, case.n, case.k, scale=scale)
-    else:
-        a = randn(sum_m, case.n)
-        b = randn(sum_m, case.k, scale=scale)
-    return a, b, offs
+    return (*_operands(case, device, _seed(case)), offs)
+
+
+OUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
+
+
+def _judge(
+    record_property, case, launch, a, b, out, device, *, start_of=None, fill=None, then=None
+):
+    """Judge ``launch``'s whole ``out`` (sampled rows above ``FULL_ORACLE_MACS``) against
+    the naive BF16 tier over ``cake_naive.DRAWS`` inputs: draw ``j`` writes the operands
+    of ``draw_seed(_seed(case), j)`` into ``a`` and ``b`` (a prepared launch stays valid
+    when its operands are rewritten in place), sets ``out`` (``start_of(d)``: an
+    accumulate's start, copied in; else filled with ``fill`` bytes when given), poisons
+    the split-tail slots and launches.  Draw 0, the last, is the case's own inputs.
+    ``then``: the test's later checks (``judge_draws``)."""
+
+    def draw(d):
+        na, nb = _operands(case, device, d.seed)
+        a.copy_(na)
+        b.copy_(nb)
+        del na, nb
+        start = None if start_of is None else start_of(d)
+        if start is not None:
+            out.copy_(start)
+        elif fill is not None:
+            out.view(torch.uint8).fill_(fill)
+        _poison_tail_sums(device)
+        launch.launch()
+        name = OUT_NAMES[case.op] if start is None else "main_grad"
+        d.op(name, out, case.op, a, b, case.sizes, start=start)
+
+    judge_draws(record_property, draw, seed=_seed(case), then=then)
 
 
 def _out(case, device):
@@ -394,19 +417,6 @@ def _poison_tail_sums(device):
     buffer = cb.stream_workspace("tail_sums", device)
     if buffer is not None:
         buffer.view(torch.uint8).fill_(FILL_BYTE)
-
-
-def _budget(out, ref, out_dtype):
-    """Error of ``out`` against ``ref`` in the budget's unit: the worst
-    ``|out - ref| / (atol + rtol |ref|)`` for bf16 (<= 1 passes), the rel-L2 over
-    ``FP32_REL_L2`` for fp32 (<= 1 passes)."""
-    out, ref = out.float(), ref.float()
-    if out_dtype == torch.bfloat16:
-        return float(((out - ref).abs() / (ATOL + RTOL * ref.abs())).max())
-    norm = float(ref.norm())
-    if norm == 0.0:
-        return 0.0 if float(out.norm()) == 0.0 else math.inf
-    return float((out - ref).norm()) / norm / FP32_REL_L2
 
 
 def _plan_record(launch):
@@ -601,25 +611,49 @@ def test_host_plan_constants_mirror_the_deterministic_package():
 
 
 @pytest.mark.parametrize("label", list(CASE_BY_LABEL))
-def test_against_the_deterministic_package(label, record_property):
+def test_repeat_launches_and_naive_tier(label, record_property):
+    """One case: ``fwd`` / ``dgrad`` give the same bits whatever the output held, and the
+    module's call gives this package's bits; the weight gradient, ``case.repeats``
+    launches per pre-state (zero bytes, ``FILL_BYTE``; the split-tail slots poisoned
+    before each), gives the first launch's bits, is not ``order_varying`` and leaves
+    empty groups exact zeros; the output is judged against the naive BF16 tier over the
+    draws (``_judge``)."""
     case = CASE_BY_LABEL[label]
     device = _device()
     _require_programs(case, device)
     a, b, offs = _inputs(case, device)
-    det_out = _out(case, device)
-    det = _prepare(det_cb, case, a, b, offs, det_out)
-    det_out.view(torch.uint8).fill_(0)
-    det.launch()
+    out = _out(case, device)
+    launch = _prepare(cb, case, a, b, offs, out)
+    repeats = 1 if case.op != "wgrad" else case.repeats
+    first = None
+    launches = mismatches = worst_elems = 0
+    for fill in (0, FILL_BYTE):
+        for _ in range(repeats):
+            _poison_tail_sums(device)
+            out.view(torch.uint8).fill_(fill)
+            launch.launch()
+            launches += 1
+            if first is None:
+                first = out.clone()
+                continue
+            if not torch.equal(_bits(out), _bits(first)):
+                mismatches += 1
+                worst_elems = max(worst_elems, int((_bits(out) != _bits(first)).sum()))
+    torch.cuda.synchronize(device)
     if case.op != "wgrad":
-        # The facade runs this package; its fwd / dgrad give the deterministic bits.
+        # The facade runs this package: its fwd / dgrad give the package's bits.
         facade_out = _out(case, device)
         facade_out.view(torch.uint8).fill_(FILL_BYTE)
         _facade(case, a, b, offs, facade_out)
         torch.cuda.synchronize(device)
-        assert torch.equal(_bits(facade_out), _bits(det_out)), "facade fwd / dgrad"
+        assert torch.equal(_bits(facade_out), _bits(first)), "facade fwd / dgrad"
         del facade_out
-    out = _out(case, device)
-    launch = _prepare(cb, case, a, b, offs, out)
+    else:
+        # Empty groups are exact zeros in every launch's output (checked on the last).
+        ends = [sum(case.sizes[: i + 1]) for i in range(len(case.sizes))]
+        for e, (s, t) in enumerate(zip([0] + ends[:-1], ends, strict=True)):
+            if t == s:
+                assert int(_bits(out[e]).count_nonzero()) == 0, f"empty group {e}"
     record = dict(
         case=label,
         op=case.op,
@@ -627,75 +661,18 @@ def test_against_the_deterministic_package(label, record_property):
         sm_count=cb.sm_count(device),
         record_name=launch.record_name,
         stages=list(launch.stages),
-        det_stages=list(det.stages),
         plan=_plan_record(launch),
         sizes_e=len(case.sizes),
         sum_m=sum(case.sizes),
         n=case.n,
         k=case.k,
         out_dtype=str(case.out_dtype).replace("torch.", ""),
-    )
-    if case.op != "wgrad":
-        # fwd / dgrad: the deterministic package's stages and programs' bits.
-        assert list(launch.stages) == list(det.stages), (launch.stages, det.stages)
-        for fill in (0, FILL_BYTE):
-            out.view(torch.uint8).fill_(fill)
-            launch.launch()
-            torch.cuda.synchronize(device)
-            assert torch.equal(_bits(out), _bits(det_out)), f"fill 0x{fill:02x}"
-        record.update(equal_to_det=True)
-        print("REPRO " + json.dumps(record, sort_keys=True))
-        record_property("repro", json.dumps(record, sort_keys=True))
-        return
-    first = None
-    launches = mismatches = differ_from_det = 0
-    worst_vs_det = worst_vs_first = 0.0
-    worst_elems = 0
-    for fill in (0, FILL_BYTE):
-        for _ in range(case.repeats):
-            _poison_tail_sums(device)
-            out.view(torch.uint8).fill_(fill)
-            launch.launch()
-            launches += 1
-            worst_vs_det = max(worst_vs_det, _budget(out, det_out, case.out_dtype))
-            if not torch.equal(_bits(out), _bits(det_out)):
-                differ_from_det += 1
-            if first is None:
-                first = out.clone()
-                continue
-            if not torch.equal(_bits(out), _bits(first)):
-                mismatches += 1
-                worst_elems = max(worst_elems, int((_bits(out) != _bits(first)).sum()))
-                worst_vs_first = max(
-                    worst_vs_first, _budget(out, first, case.out_dtype)
-                )
-    torch.cuda.synchronize(device)
-    # Empty groups are exact zeros in every launch's output (checked on the last).
-    ends = [sum(case.sizes[: i + 1]) for i in range(len(case.sizes))]
-    for e, (s, t) in enumerate(zip([0] + ends[:-1], ends, strict=True)):
-        if t == s:
-            assert int(_bits(out[e]).count_nonzero()) == 0, f"empty group {e}"
-    # Where the two packages' ``k512_min_rows_per_group`` differ, the deterministic
-    # package may take the 512-wide k tile where this package takes the 256-wide one.
-    tile, det_tile = int(launch.plan["tile_k"]), int(det.plan["tile_k"])
-    same_tile = tile == det_tile
-    if not same_tile:
-        arch = cb.arch_for(device)
-        avg = sum(case.sizes) // max(len(case.sizes), 1)
-        det_min = int(det_jit.HOST_PLAN_CONSTANTS["k512_min_rows_per_group"][arch])
-        own_min = int(HOST_PLAN_CONSTANTS["k512_min_rows_per_group"][arch])
-        assert (det_tile, tile) == (512, 256), (det_tile, tile)
-        assert det_min <= avg < own_min, (det_min, avg, own_min)
-    record.update(
-        same_tile_as_det=same_tile,
         launches=launches,
         run_to_run_mismatches=mismatches,
         worst_diff_elems=worst_elems,
-        worst_vs_first_budget=worst_vs_first,
-        launches_differing_from_det=differ_from_det,
-        worst_vs_det_budget=worst_vs_det,
         exercised=bool(
-            (launch.plan["ordered_tail"] or launch.plan["unordered_tail"])
+            case.op == "wgrad"
+            and (launch.plan["ordered_tail"] or launch.plan["unordered_tail"])
             and launch.plan["tail_splits"] > 1
         ),
         order_varying=launch.order_varying,
@@ -704,25 +681,21 @@ def test_against_the_deterministic_package(label, record_property):
     record_property("repro", json.dumps(record, sort_keys=True))
     assert not launch.order_varying, record
     # Every launch gives the bits of the first, whatever the output and the slots held.
-    assert mismatches == 0 and worst_vs_first == 0.0, record
-    if not record["exercised"] and same_tile:
-        # No split one-launch tail: the deterministic programs' order, the same bits.
-        assert differ_from_det == 0, record
-    # A split tail's bits may differ from the deterministic package's (another tail
-    # plan and group order), within its budget.
-    assert worst_vs_det <= 1.0, record
+    assert mismatches == 0, record
+    if sum(case.sizes):
+        _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE)
 
 
 @pytest.mark.parametrize("label,sizes,n,k", EF_CASES, ids=[c[0] for c in EF_CASES])
-def test_dgrad_evict_first_gives_the_deterministic_bits(
-    label, sizes, n, k, monkeypatch
+def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
+    label, sizes, n, k, monkeypatch, record_property
 ):
     """Where ``dgrad_evict_first`` holds, the data gradient launches the L2 evict-first
-    twin of its wide tile (``main_wide_ef``), as the deterministic package does.  The
-    cache policy changes no arithmetic: over a one-row group, an empty group and group sizes
-    off every tile multiple, dX has the bits of the deterministic package's data
-    gradient, of this package's wide tile (``main_wide``) and of its 256-column tile
-    (``main``), whatever bytes the output held."""
+    twin of its wide tile (``main_wide_ef``).  Over a one-row group, an empty group and
+    group sizes off every tile multiple, dX has the same bits whatever bytes the output
+    held, is judged against the naive BF16 tier over the draws, and (the cache policy
+    changes no arithmetic) has the bits of this package's wide tile (``main_wide``) and
+    of its 256-column tile (``main``)."""
     device = _device()
     case = Case(f"dgrad_ef_{label}", "dgrad", n, k, tuple(sizes), torch.bfloat16)
     _require_programs(case, device)
@@ -737,10 +710,6 @@ def test_dgrad_evict_first_gives_the_deterministic_bits(
     assert k % int(c["wide_block_n"]) == 0, label
     assert any(size % 128 for size in sizes), label
     a, b, offs = _inputs(case, device)
-    det_out = _out(case, device)
-    det = _prepare(det_cb, case, a, b, offs, det_out)
-    det_out.view(torch.uint8).fill_(0)
-    det.launch()
     out = _out(case, device)
     launch = _prepare(cb, case, a, b, offs, out)
     name = launch.record_name
@@ -768,94 +737,46 @@ def test_dgrad_evict_first_gives_the_deterministic_bits(
         if wide
         else "main"
     )
-    assert list(det.stages) == list(launch.stages), (det.stages, launch.stages)
+    first = None
     for fill in (0, FILL_BYTE):
         out.view(torch.uint8).fill_(fill)
         launch.launch()
         torch.cuda.synchronize(device)
-        assert torch.equal(_bits(out), _bits(det_out)), f"fill 0x{fill:02x}"
+        if first is None:
+            first = out.clone()
+        assert torch.equal(_bits(out), _bits(first)), f"fill 0x{fill:02x}"
     ends = [sum(sizes[: i + 1]) for i in range(groups)]
     for s, t in zip([0] + ends[:-1], ends, strict=True):
         if t == s + 1:
             assert int(_bits(out[s:t]).count_nonzero()) > 0, label
-    if not ef:
-        pytest.skip(f"no evict-first data-gradient tile on {arch}")
-    monkeypatch.setitem(
-        c,
-        "dgrad_evict_first_min_rows",
-        dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
-    )
-    plain_out = _out(case, device)
-    plain = _prepare(cb, case, a, b, offs, plain_out)
-    assert plain.stages[0] == "main_wide", plain.stages
-    assert plain.plan["tile_n"] == launch.plan["tile_n"]
-    plain_out.view(torch.uint8).fill_(FILL_BYTE)
-    plain.launch()
-    torch.cuda.synchronize(device)
-    assert torch.equal(_bits(plain_out), _bits(out)), "main_wide"
-    del plain_out
-    monkeypatch.setitem(c, "wide_dgrad_archs", [])
-    narrow_out = _out(case, device)
-    narrow = _prepare(cb, case, a, b, offs, narrow_out)
-    assert narrow.stages[0] == "main", narrow.stages
-    narrow_out.view(torch.uint8).fill_(FILL_BYTE)
-    narrow.launch()
-    torch.cuda.synchronize(device)
-    assert torch.equal(_bits(narrow_out), _bits(out)), "main"
 
-
-def _queue_as_selected(launch, det, case, device):
-    """``launch.stages`` with a bound queue-walk stage replaced by the main stage it stands
-    in for (the deterministic launch's first stage, which both packages select alike),
-    after checking that a ``queue_walk`` rule names that stage, the output and the group
-    count on this device."""
-    stages = tuple(launch.stages)
-    if not stages or stages[0] not in QUEUE_STAGES:
-        return stages
-    selected = det.stages[0].removesuffix(cb.ACC_SUFFIX)
-    fused = stages[0].endswith(cb.ACC_SUFFIX)
-    output = (
-        "accumulate"
-        if fused
-        else {torch.bfloat16: "bfloat16", torch.float32: "float32"}[case.out_dtype]
-    )
-    assert cb.wgrad_queue_walk(
-        selected,
-        output,
-        cb.arch_for(device),
-        cb.sm_count(device),
-        len(case.sizes),
-    ), (stages, det.stages)
-    return (selected + (cb.ACC_SUFFIX if fused else ""),) + stages[1:]
-
-
-@pytest.mark.parametrize("label", K512_LABELS)
-def test_unsplit_k512_builds_give_the_deterministic_bits(label, monkeypatch):
-    """With the tail split switched off in both packages (``max_splits`` 1), a weight
-    gradient on the 512-wide k tile runs every tile whole in both, and the ordered
-    one-launch tail build gives the deterministic build's bits for every form the case
-    selects, the queue walk included where a ``queue_walk`` rule binds it (it keeps
-    every tile's k-step order)."""
-    case = CASE_BY_LABEL[label]
-    device = _device()
-    _require_programs(case, device)
-    monkeypatch.setitem(HOST_PLAN_CONSTANTS["atomic_tail_plan"], "max_splits", 1)
-    monkeypatch.setitem(det_jit.HOST_PLAN_CONSTANTS["tail_plan"], "max_splits", 1)
-    a, b, offs = _inputs(case, device)
-    det_out, out = _out(case, device), _out(case, device)
-    det = _prepare(det_cb, case, a, b, offs, det_out)
-    launch = _prepare(cb, case, a, b, offs, out)
-    if launch.plan["tile_k"] != 512:
-        pytest.skip("the case takes the 256-wide k tile on this device")
-    assert _queue_as_selected(launch, det, case, device) == det.stages
-    assert launch.plan["tail_splits"] == det.plan["tail_splits"] == 1
-    for fill in (0, FILL_BYTE):
-        out.view(torch.uint8).fill_(fill)
-        det_out.view(torch.uint8).fill_(fill ^ 0xFF)
-        launch.launch()
-        det.launch()
+    def after():
+        if not ef:
+            pytest.skip(f"no evict-first data-gradient tile on {arch}")
+        monkeypatch.setitem(
+            c,
+            "dgrad_evict_first_min_rows",
+            dict.fromkeys(c["dgrad_evict_first_min_rows"], 1 << 30),
+        )
+        plain_out = _out(case, device)
+        plain = _prepare(cb, case, a, b, offs, plain_out)
+        assert plain.stages[0] == "main_wide", plain.stages
+        assert plain.plan["tile_n"] == launch.plan["tile_n"]
+        plain_out.view(torch.uint8).fill_(FILL_BYTE)
+        plain.launch()
         torch.cuda.synchronize(device)
-        assert torch.equal(_bits(out), _bits(det_out)), (label, launch.stages)
+        assert torch.equal(_bits(plain_out), _bits(out)), "main_wide"
+        del plain_out
+        monkeypatch.setitem(c, "wide_dgrad_archs", [])
+        narrow_out = _out(case, device)
+        narrow = _prepare(cb, case, a, b, offs, narrow_out)
+        assert narrow.stages[0] == "main", narrow.stages
+        narrow_out.view(torch.uint8).fill_(FILL_BYTE)
+        narrow.launch()
+        torch.cuda.synchronize(device)
+        assert torch.equal(_bits(narrow_out), _bits(out)), "main"
+
+    _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE, then=after)
 
 
 def _row_padded(t):
@@ -869,11 +790,11 @@ def _row_padded(t):
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
-def test_row_padded_wgrad_gives_the_deterministic_bits(out_dtype):
+def test_row_padded_wgrad_meets_the_naive_tier(out_dtype, record_property):
     """Row-padded ``g`` and ``x`` (the leading columns of wider NaN-filled tensors) on the
     shape of the 256-wide k tile's ``main_wave`` weight gradient (sm_100a / sm_103a;
-    ``main`` on sm_107a): both packages take the same stages, and the non-deterministic
-    package gives the deterministic package's bits."""
+    ``main`` on sm_107a): the launch takes that stage and its output (the NaN columns
+    never read) is judged against the naive BF16 tier over the draws."""
     case = _case(
         "k256_wave_row_padded", "wgrad", K256_WAVE_NK, K256_WAVE_SIZES, out_dtype
     )
@@ -881,30 +802,21 @@ def test_row_padded_wgrad_gives_the_deterministic_bits(out_dtype):
     _require_programs(case, device)
     a, b, offs = _inputs(case, device)
     a, b = _row_padded(a), _row_padded(b)
-    out, det_out = _out(case, device), _out(case, device)
+    out = _out(case, device)
     launch = _prepare(cb, case, a, b, offs, out)
-    det = _prepare(det_cb, case, a, b, offs, det_out)
     wave = cb.arch_for(device) in HOST_PLAN_CONSTANTS["wave_sync_archs"][256]
     assert launch.plan["tile_k"] == 256, launch.plan
     assert launch.stages[0] == ("main_wave" if wave else "main"), launch.stages
-    assert launch.stages == det.stages
-    out.view(torch.uint8).fill_(FILL_BYTE)
-    det_out.view(torch.uint8).fill_(FILL_BYTE ^ 0xFF)
-    launch.launch()
-    det.launch()
-    torch.cuda.synchronize(device)
-    assert torch.equal(_bits(out), _bits(det_out))
+    _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE)
 
 
 @pytest.mark.parametrize("sum_m", E1_SUM_M)
 @pytest.mark.parametrize("proj", list(BENCH_PROJ))
-def test_e1_fp32_wgrad_error_within_det(proj, sum_m, record_property):
-    """The fp32 weight gradient of an E1 customer row (one group of ``sum_m`` rows):
-    against the fp64 reference, its rel-L2 and worst / max |ref| are each at most
-    ``DET_ERROR_RATIO`` times the deterministic package's at the same inputs, and a
-    repeat (output refilled, split-tail slots poisoned) gives the first launch's bits.
-    On a supported GPU a missing program of either package fails instead of skipping,
-    and a deterministic output that is not finite fails the comparison."""
+def test_e1_fp32_wgrad_meets_the_naive_tier(proj, sum_m, record_property):
+    """The fp32 weight gradient of an E1 customer row (one group of ``sum_m`` rows): a
+    repeat (output refilled, split-tail slots poisoned) gives the first launch's bits,
+    and the output (sampled rows) is judged against the naive BF16 tier over the draws.
+    On a supported GPU a missing program fails instead of skipping."""
     device = _device()
     case = _case(
         f"{proj}_e1_m{sum_m}_balanced",
@@ -913,17 +825,10 @@ def test_e1_fp32_wgrad_error_within_det(proj, sum_m, record_property):
         [sum_m],
         out_dtype=torch.float32,
     )
-    for backend in (cb, det_cb):
-        assert backend.generated_program_available(
-            device, op="wgrad", out_dtype=torch.float32
-        ), f"no fp32 wgrad program for {backend.arch_for(device)} in {backend.__name__}"
+    assert cb.generated_program_available(
+        device, op="wgrad", out_dtype=torch.float32
+    ), f"no fp32 wgrad program for {cb.arch_for(device)} in {cb.__name__}"
     a, b, offs = _inputs(case, device)
-    # The per-group fp64 reference, rounded to fp32 (one group).
-    ref = (a.double().T @ b.double()).float().unsqueeze(0)
-    det_out = _out(case, device)
-    det = _prepare(det_cb, case, a, b, offs, det_out)
-    det_out.fill_(float("nan"))
-    det.launch()
     out = _out(case, device)
     launch = _prepare(cb, case, a, b, offs, out)
     first = None
@@ -936,133 +841,72 @@ def test_e1_fp32_wgrad_error_within_det(proj, sum_m, record_property):
         else:
             assert torch.equal(_bits(out), _bits(first)), f"fill 0x{fill:02x}"
     torch.cuda.synchronize(device)
-    ref64 = ref.double()
-    ref_max = float(ref64.abs().max())
-
-    def errors(t):
-        diff = t.double() - ref64
-        return float(diff.norm() / ref64.norm()), float(diff.abs().max()) / ref_max
-
-    rel_l2, worst = errors(first)
-    det_rel_l2, det_worst = errors(det_out)
     record = dict(
         case=case.label,
         arch=cb.arch_for(device),
         sm_count=cb.sm_count(device),
         stages=list(launch.stages),
-        det_stages=list(det.stages),
         plan=_plan_record(launch),
-        rel_l2=rel_l2,
-        det_rel_l2=det_rel_l2,
-        worst=worst,
-        det_worst=det_worst,
-        equal_to_det=bool(torch.equal(_bits(first), _bits(det_out))),
     )
-    print("E1VSDET " + json.dumps(record, sort_keys=True))
-    record_property("e1_vs_det", json.dumps(record, sort_keys=True))
-    assert math.isfinite(det_rel_l2) and math.isfinite(det_worst), record
-    assert det_rel_l2 > 0.0 and det_worst > 0.0, record
-    assert rel_l2 <= DET_ERROR_RATIO * det_rel_l2, record
-    assert worst <= DET_ERROR_RATIO * det_worst, record
+    print("E1 " + json.dumps(record, sort_keys=True))
+    record_property("e1", json.dumps(record, sort_keys=True))
+    del first
+    _judge(record_property, case, launch, a, b, out, device, fill=FILL_BYTE)
 
 
-# The accuracy bar of the queue walk's uneven rows against the deterministic package
-# at the same inputs (``test_queue_rows_error_within_det``): rel-L2 and worst / max |ref|
-# against the fp64 reference at most these multiples of the deterministic package's.
-QUEUE_REL_L2_RATIO = 1.1
-QUEUE_WORST_RATIO = 1.5
-# The tiny-scale variant: g and x drawn same-sign and scaled by 2^-TINY_LOG2, so the
-# products and the fp32 partial sums of the split tail fall near and below the
-# smallest normal fp32 value.
-TINY_LOG2 = 62
 QUEUE_OUTPUTS = ("bfloat16", "float32", "accumulate")
 
 
-@pytest.mark.parametrize("scale", ["normal", "tiny"])
 @pytest.mark.parametrize("output", QUEUE_OUTPUTS)
 @pytest.mark.parametrize("label", list(QUEUE_SIZES))
-def test_queue_rows_error_within_det(label, output, scale, record_property):
+def test_queue_rows_meet_the_naive_tier(label, output, record_property):
     """The down projection's weight gradient over the queue walk's uneven rows (skewed
     and one-empty, E8 / E16 / E32), as a bf16 or fp32 overwrite or a fused fp32
-    accumulate into a random fp32 ``main_grad``, with normal or tiny-scale inputs:
-    against the fp64 reference, its rel-L2 and worst / max |ref| are at most
-    ``QUEUE_REL_L2_RATIO`` / ``QUEUE_WORST_RATIO`` times the deterministic package's at
-    the same inputs, and a repeat gives the first launch's bits.  On a device whose
-    ``queue_walk`` rules name the row, the launch binds the queue walk; elsewhere the
-    row checks the stage it selects."""
+    accumulate into a random fp32 ``main_grad``: a repeat gives the first launch's bits,
+    and the output is judged against the naive BF16 tier over the draws.  On a device
+    whose ``queue_walk`` rules name the row, the launch binds the queue walk; elsewhere
+    the row checks the stage it selects.  (No tiny-scale inputs: the owner's rule, no
+    subnormal / extreme-value tests.)"""
     device = _device()
     sizes = QUEUE_SIZES[label]
     n, k = BENCH_PROJ["down"]
     out_dtype = torch.bfloat16 if output == "bfloat16" else torch.float32
     accumulate = output == "accumulate"
-    case = _case(f"down_{label}_{scale}", "wgrad", (n, k), sizes, out_dtype=out_dtype)
-    for backend in (cb, det_cb):
-        assert backend.generated_program_available(
-            device, op="wgrad", out_dtype=out_dtype
-        ), (
-            f"no {output} wgrad program for {backend.arch_for(device)} in {backend.__name__}"
-        )
+    case = _case(f"down_{label}_normal", "wgrad", (n, k), sizes, out_dtype=out_dtype)
+    assert cb.generated_program_available(device, op="wgrad", out_dtype=out_dtype), (
+        f"no {output} wgrad program for {cb.arch_for(device)} in {cb.__name__}"
+    )
     a, b, offs = _inputs(case, device)
-    if scale == "tiny":
-        a = (a.float().abs() * 2.0**-TINY_LOG2).to(torch.bfloat16)
-        b = (b.float().abs() * 2.0**-TINY_LOG2).to(torch.bfloat16)
-    ref = torch.zeros(len(sizes), n, k, dtype=torch.float64, device=device)
-    start = 0
-    for e, rows in enumerate(sizes):
-        if rows:
-            ref[e] = (
-                a[start : start + rows].double().T @ b[start : start + rows].double()
-            )
-        start += rows
-    base = None
-    if accumulate:
-        gen = torch.Generator(device=device).manual_seed(zlib.crc32(label.encode()))
-        scale_mg = float(ref.abs().max()) or 1.0
-        base = torch.randn(
+
+    def main_grad0(seed, a, b):
+        # A random fp32 main_grad at the scale of the largest |dW| (fp32 product).
+        gen = torch.Generator(device=device).manual_seed(seed)
+        scale_mg = float(product("wgrad", a, b, sizes, torch.float32).abs().max()) or 1.0
+        return torch.randn(
             len(sizes), n, k, generator=gen, device=device, dtype=torch.float32
         ).mul_(scale_mg)
-        ref += base.double()
 
-    def run(backend):
-        out = (
-            base.clone()
-            if accumulate
-            else torch.full(
-                (len(sizes), n, k), float("nan"), dtype=out_dtype, device=device
-            )
-        )
-        if backend is det_cb:
-            launch = det_cb.cake_moe_grouped_gemm_det_train_prepare_wgrad(
-                a, b, offs, out=out, out_dtype=out_dtype, accumulate=accumulate
-            )
-        else:
-            launch = cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad(
-                a, b, offs, out=out, out_dtype=out_dtype, accumulate=accumulate
-            )
-        launch.launch()
-        return launch, out
-
-    det, det_out = run(det_cb)
-    launch, out = run(cb)
+    start = main_grad0(zlib.crc32(label.encode()), a, b) if accumulate else None
+    out = (
+        start.clone()
+        if accumulate
+        else torch.full((len(sizes), n, k), float("nan"), dtype=out_dtype, device=device)
+    )
+    launch = cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad(
+        a, b, offs, out=out, out_dtype=out_dtype, accumulate=accumulate
+    )
+    launch.launch()
     first = out.clone()
     # A repeat: the output refilled (main_grad restored), the split-tail slots poisoned.
     _poison_tail_sums(device)
     if accumulate:
-        out.copy_(base)
+        out.copy_(start)
     else:
         out.view(torch.uint8).fill_(FILL_BYTE)
     launch.launch()
     torch.cuda.synchronize(device)
     assert torch.equal(_bits(out), _bits(first)), "repeat"
-    ref_max = float(ref.abs().max())
-    ref_norm = float(ref.norm())
-
-    def errors(t):
-        diff = t.double() - ref
-        return float(diff.norm()) / ref_norm, float(diff.abs().max()) / ref_max
-
-    rel_l2, worst = errors(first)
-    det_rel_l2, det_worst = errors(det_out)
+    del first
     arch, sms = cb.arch_for(device), cb.sm_count(device)
     queue = any(stage.startswith(cb.QUEUE_STAGE) for stage in launch.stages)
     record = dict(
@@ -1071,17 +915,11 @@ def test_queue_rows_error_within_det(label, output, scale, record_property):
         arch=arch,
         sm_count=sms,
         stages=list(launch.stages),
-        det_stages=list(det.stages),
         queue_walk=queue,
         plan=_plan_record(launch),
-        rel_l2=rel_l2,
-        det_rel_l2=det_rel_l2,
-        worst=worst,
-        det_worst=det_worst,
-        equal_to_det=bool(torch.equal(_bits(first), _bits(det_out))),
     )
-    print("QUEUEVSDET " + json.dumps(record, sort_keys=True))
-    record_property("queue_vs_det", json.dumps(record, sort_keys=True))
+    print("QUEUE " + json.dumps(record, sort_keys=True))
+    record_property("queue", json.dumps(record, sort_keys=True))
     tile_k = int(launch.plan["tile_k"])
     if tile_k == 512:
         selected, _wave = cb.select_wgrad_stage(
@@ -1099,10 +937,24 @@ def test_queue_rows_error_within_det(label, output, scale, record_property):
             selected, kind, arch, sms, len(sizes)
         ) and cake_jit.stage_served(launch.record_name, stage, arch)
         assert queue == want, record
-    assert math.isfinite(det_rel_l2) and math.isfinite(det_worst), record
-    assert det_rel_l2 > 0.0 and det_worst > 0.0, record
-    assert rel_l2 <= QUEUE_REL_L2_RATIO * det_rel_l2, record
-    assert worst <= QUEUE_WORST_RATIO * det_worst, record
+    start_of = None
+    if accumulate:
+        seed0 = zlib.crc32(label.encode())
+
+        def start_of(d):
+            return main_grad0(draw_seed(seed0, d.index), a, b)
+
+    _judge(
+        record_property,
+        case,
+        launch,
+        a,
+        b,
+        out,
+        device,
+        start_of=start_of,
+        fill=None if accumulate else FILL_BYTE,
+    )
 
 
 def test_cases_exercise_the_ordered_tail(record_property):
