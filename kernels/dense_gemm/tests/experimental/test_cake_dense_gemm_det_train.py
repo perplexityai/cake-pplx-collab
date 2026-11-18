@@ -9904,20 +9904,58 @@ def test_gpu_promoted_programs(case):
     assert torch.equal(outs[True], outs[False])
 
 
-# Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T).  Each row is a weight gradient the planner
-# runs on that twin on some part of the twin's architectures, at a token count where its longest segment holds more
-# than 256 K blocks there; the test forces the twin's program (``_template_knobs``), so it runs on any SM count.  The
+# Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T, the architectures).  Each row is a weight
+# gradient the planner runs on that twin on the listed architectures (a plan enumeration over the benchmark rows and
+# part sizes), at a token count where its longest segment holds more than 256 K blocks there; the test forces the
+# twin's program (``_template_knobs``), so it runs on any SM count of those architectures.  A twin's other registered
+# architectures plan another program for these rows (the row's rule adds its own split or orientation there).  The
 # synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
 # ``PROMOTED_GPU_CASES`` does not reach.
 PROMOTED_TWIN_GPU_CASES = (
-    ("dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15", 32, 5120, 65535),
-    ("dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro7", 32, 6144, 32768),
-    ("dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7", 32, 5120, 32768),
-    ("dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15", 512, 5120, 32768),
-    ("dense_proj_det_gemm_nn_n192_hee_t_tma1_kc128_pro7", 576, 6144, 32768),
-    ("dense_proj_det_gemm_nn_n128_hen_t_skx_kc128_pro7", 32, 6144, 65535),
-    ("dense_proj_det_gemm_nn_n128_m64_hen_t_skx_kc128_pro15", 32, 4096, 65535),
-    ("dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt_kc128_pro15", 576, 6144, 32768),
+    ("dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15", 32, 5120, 65535, ("sm_100a",)),
+    (
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro7",
+        32,
+        6144,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7",
+        32,
+        5120,
+        32768,
+        ("sm_103a", "sm_107a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15",
+        512,
+        5120,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_hee_t_tma1_kc128_pro7",
+        576,
+        6144,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    ("dense_proj_det_gemm_nn_n128_hen_t_skx_kc128_pro7", 32, 6144, 65535, ("sm_107a",)),
+    (
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_skx_kc128_pro15",
+        32,
+        4096,
+        65535,
+        ("sm_107a",),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt_kc128_pro15",
+        576,
+        6144,
+        32768,
+        ("sm_107a",),
+    ),
 )
 
 
@@ -9931,7 +9969,8 @@ def test_promoted_twin_gpu_cases_cover_every_twin():
     }
     assert len(forced) == len(PROMOTED_TWIN_GPU_CASES) and not forced & planned
     assert forced | planned == set(PROMOTED_TWINS)
-    for twin in forced:
+    for twin, *_, arches in PROMOTED_TWIN_GPU_CASES:
+        assert arches and set(arches) <= set(PROMOTED_TWINS[twin]), twin
         knobs = cake_backend._template_knobs(twin)
         assert knobs is not None and knobs["promote"] is True, twin
 
@@ -9942,7 +9981,7 @@ def test_promoted_twin_gpu_cases_cover_every_twin():
     ids=lambda c: f"{c[0].removeprefix('dense_proj_det_gemm_')}-{c[1]}x{c[2]}-T{c[3]}",
 )
 def test_gpu_promoted_twin_forms(case):
-    """On each of its architectures, the twin ``case[0]`` forced by its knobs (``promote=True`` among them) plans
+    """On each architecture of ``case``, the twin ``case[0]`` forced by its knobs (``promote=True`` among them) plans
     itself for the weight gradient of ``case``, with a longest segment of more than one chunk; it meets the naive BF16
     tier against FP64 over the judge's draws, each launch into a NaN-poisoned output (three on the first draw), and
     writes the same bits on three more launches."""
@@ -9953,11 +9992,9 @@ def test_gpu_promoted_twin_forms(case):
         )
     device = torch.device("cuda")
     arch = arch_for(device)
-    twin, d_out, d_in, T = case
-    if arch not in PROMOTED_TWINS[twin]:
-        pytest.skip(
-            f"{twin} ships on {list(PROMOTED_TWINS[twin])}; the device is {arch}"
-        )
+    twin, d_out, d_in, T, arches = case
+    if arch not in arches:
+        pytest.skip(f"a case of {list(arches)}; the device is {arch}")
     knobs = cake_backend._template_knobs(twin)
     assert knobs.pop("kser", 0) == 0 and knobs["promote"] is True, twin
     # the symbol's knobs the prepare call takes; the rest (``sk_first``, ``lw``, ``mg``, ``sw``) are off in every twin
