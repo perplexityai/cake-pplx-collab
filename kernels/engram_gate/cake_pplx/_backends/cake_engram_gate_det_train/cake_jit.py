@@ -155,8 +155,9 @@ CLUSTER_CTAS = 4
 # CTAs per SM the persistent grid fills, per stage.  The grid is sized from the
 # SM count only (no device query and no host synchronization per call).
 CTAS_PER_SM = {"fwd": 4, "bwd": 2}
-# Columns of the [4, 5120] weight gradient one thread of ``dw_reduce`` writes.
-DW_REDUCE_COLUMNS_PER_THREAD = 4
+# Columns of the flattened [4 * 5120] weight gradient one CTA of ``dw_reduce``
+# sums (32 lanes of four columns; its eight warps split the partial rows).
+DW_REDUCE_COLUMNS_PER_CTA = 128
 
 
 def record(stage: str, acc: str) -> str:
@@ -180,10 +181,9 @@ def clusters(stage: str, tokens: int, sm_count: int) -> int:
 
 def grid(record_name: str, tokens: int, sm_count: int) -> tuple[int, int, int]:
     """The launch grid of ``record_name`` for ``tokens >= 1`` tokens: ``(4 *
-    clusters, 1, 1)`` for ``fwd`` and ``bwd``; for ``dw_reduce`` one thread per
-    ``DW_REDUCE_COLUMNS_PER_THREAD`` columns of the ``[4, 5120]`` gradient."""
+    clusters, 1, 1)`` for ``fwd`` and ``bwd``; for ``dw_reduce`` one CTA per
+    ``DW_REDUCE_COLUMNS_PER_CTA`` columns of the ``[4, 5120]`` gradient."""
     stage = MODULES[record_name]["stage"]
     if stage == "dw_reduce":
-        per_cta = MODULES[record_name]["launch"]["block"][0] * DW_REDUCE_COLUMNS_PER_THREAD
-        return (-(-STREAMS * HIDDEN // per_cta), 1, 1)
+        return (STREAMS * HIDDEN // DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
     return (CLUSTER_CTAS * clusters(stage, tokens, sm_count), 1, 1)
