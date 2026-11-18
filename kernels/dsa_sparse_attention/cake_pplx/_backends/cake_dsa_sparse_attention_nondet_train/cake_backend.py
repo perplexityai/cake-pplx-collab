@@ -398,9 +398,10 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # architecture without a rule (or ``None``, no CUDA device) takes the base.  An
 # architecture rule weighs what each path adds to the backward.  The cast path
 # adds a zero fill and a cast over the S accumulator rows plus two launches, a
-# cost proportional to S; the natural drain of an architecture with a rule
-# (``sm_107a``, where it is slower than the permuted one) adds a cost
-# proportional to the main stage's work, its T x K_eff (query, selected slot)
+# cost proportional to S; the rule models the extra cost of the natural drain
+# of an architecture with a rule (``sm_107a``, where it is slower than the
+# permuted one) as proportional to the main stage's work (a fit to measured
+# backward crossovers), its T x K_eff (query, selected slot)
 # pairs, where K_eff = min(K_slots, ceil(S / num_segments)) bounds the keys a
 # query can select by the mean key count of a packed segment (``num_segments``
 # as the planners receive it for ``key_pass_policy``).  So the rule keeps the
@@ -410,7 +411,7 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # main-stage work and keep the natural drain whatever their S / T.  A rule's
 # optional key cap ``cast_max_keys`` limits the work test to S <= cast_max_keys
 # (natural drain above it; no cap without the field): on long single-segment
-# rows the cast path's advantage shrinks as S grows and turns into a measured
+# rows the cast path's advantage is smaller at the largest key counts and turns into a measured
 # loss (see the README).  The cap reads the total S, not
 # S / num_segments: the planners do not know the longest segment, and a packed
 # row can hold one long segment next to short ones.  The registered records
@@ -542,7 +543,7 @@ class DkvDirectPolicy:
         and, under a rule of ``arch``, also ``T * K_eff < cast_slots_per_key * S + cast_min_slots`` with
         ``K_eff = min(K_slots, ceil(S / num_segments))`` (equality takes the cast path) or ``S > cast_max_keys``
         (only when the rule carries that key cap).  The base reads neither ``topk`` nor ``num_segments``; a rule
-        refuses ``num_segments < 1`` (``ValueError``)."""
+        refuses ``num_segments < 1`` (``ValueError``) on a row that passes its base test."""
         T, S = int(num_queries), int(num_kv)
         rule = self.rule_for(arch)
         if rule is None:
@@ -1333,8 +1334,8 @@ def _plan_nope_direct(
     with ``K_eff = min(K_slots, ceil(S / num_segments))``, on rows of at most 131,072 keys (``cast_max_keys``):
     there the natural drain, slower on that target, costs more than the cast path's zero fill and cast; above
     the cap the natural drain serves every row with at least one key per query (on long single-segment rows the
-    cast path's advantage shrinks as S grows and turns into a loss: at ``T`` 32,768 it measured faster at 131,072
-    keys and slower at 163,840; see the README).
+    cast path's advantage is smaller at the largest key counts and turns into a loss: at ``T`` 32,768 it measured
+    faster at 131,072 keys and slower at 163,840 in both runs; see the README).
     A row with fewer keys than query tokens, an ``sm_107a`` row of at most 131,072 keys on the cast side of the
     work test, or ``dkv_direct=False`` uses the permuted accumulator and the cast.
     Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.

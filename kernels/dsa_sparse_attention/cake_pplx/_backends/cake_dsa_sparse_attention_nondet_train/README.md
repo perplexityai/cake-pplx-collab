@@ -299,8 +299,10 @@ permuted build's.
 
 The rule weighs what each path adds to the backward.  The cast path adds a
 zero fill and a cast over the `S` accumulator rows plus two launches, a cost
-proportional to `S`.  The natural drain adds a cost proportional to the main
-stage's work: its `T * K_eff` (query, selected slot) pairs, where
+proportional to `S`.  The rule models the natural drain's extra cost as
+proportional to the main stage's work (a fit to the measured backward
+crossovers; the stages were not timed separately): its `T * K_eff` (query,
+selected slot) pairs, where
 `K_eff = min(K_slots, ceil(S / num_segments))` bounds the keys a query can
 select by the mean key count of a packed segment.  So the `sm_107a` rule of
 both records keeps the base test and also takes the cast path where
@@ -345,8 +347,9 @@ the bound to `S / T` 16 at `T = 8192` and 8 at `T = 16,384` (131,072 keys).
 The NoPE rule also carries a key cap, `cast_max_keys` 131,072: a NoPE row
 with more keys (and at least one key per query) takes the natural drain
 whatever its work.  On long single-segment rows the cast path's advantage
-shrinks as `S` grows and turns into a loss: at `T = 32,768` the cast path
-is faster up to 131,072 keys and slower at 163,840 keys; at `T = 16,384` it
+is smaller at the largest key counts and turns into a loss: at `T = 32,768`
+the cast path is faster up to 131,072 keys and slower at 163,840 keys in both
+runs; at `T = 16,384` it
 is faster at 163,840 keys, at parity at 196,608 and 229,376 keys and slower
 from 262,144 keys on.  The backward times below are what was measured; the
 stages behind them were not timed separately.  Backward medians of the two

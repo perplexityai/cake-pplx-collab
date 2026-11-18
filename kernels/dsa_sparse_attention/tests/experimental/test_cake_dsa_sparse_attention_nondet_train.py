@@ -463,10 +463,11 @@ def test_plan_dkv_direct_rule_and_env():
 
 
 # The registered direct-accumulation rule per program, written out apart from the parser: the base
-# ``min_keys_per_query`` (4 RoPE, 1 NoPE) everywhere; on sm_107a, whose natural-layout drain costs extra in proportion
-# to the main stage's query x selected-slot work, the record's ``rules["sm_107a"]`` adds the work test -- the cast
-# path when T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) -- and, on the NoPE record
-# only, the key cap: above S = 131,072 keys (the total, whatever the segment count) the natural drain.
+# ``min_keys_per_query`` (4 RoPE, 1 NoPE) everywhere; on sm_107a, whose natural-layout drain the rule models as
+# costing extra in proportion to the main stage's query x selected-slot work, the record's ``rules["sm_107a"]`` adds
+# the work test -- the cast path when T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) --
+# and, on the NoPE record only, the key cap: above S = 131,072 keys (the total, whatever the segment count) the
+# natural drain.
 _DKV_DIRECT_BASE = {cake_jit.PROGRAM: 4, cake_jit.NOPE_PROGRAM: 1}
 _DKV_DIRECT_SM107A = dict(cast_slots_per_key=112, cast_min_slots=1 << 20)
 _DKV_DIRECT_SM107A_CAP = {cake_jit.PROGRAM: None, cake_jit.NOPE_PROGRAM: 131072}
@@ -3464,11 +3465,11 @@ def test_registry_programs_are_well_formed(program):
     direct = cake_backend.DkvDirectPolicy.from_record(record)
     assert direct is not None
     if program == NOPE_PROGRAM:
-        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured
-        # faster than the permuted drain on every row there); on sm_107a (its natural-layout drain costs extra in
-        # proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 131,072 keys (the key
-        # cap: on long single-segment rows the cast path measured slower at 163,840 keys with T = 32,768); and one
-        # pass by default (measured fastest on every row): no per-arch key-pass rules
+        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured faster
+        # than the permuted drain on every row there); on sm_107a (the rule models its natural-layout drain as
+        # costing extra in proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 131,072
+        # keys (the key cap: on long single-segment rows the cast path measured slower at 163,840 keys with T =
+        # 32,768 in both runs); and one pass by default (measured fastest on every row): no per-arch key-pass rules
         assert direct.min_keys_per_query == 1
         assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
             "sm_100a": 1,
