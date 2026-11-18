@@ -17,34 +17,59 @@ Benchmark of the Cake routed-expert clamped SwiGLU training kernels (``cake_pplx
 ``h = bf16(w silu(min(g, L)) clamp(u, -L, L))`` and its backward, ``I = 2304``) against the comparators of the same
 operation, each when it imports.
 
-Arms (``--arms``; default: every arm):
+Arms (``--arms``; default: every arm; ``cake`` always runs first, since the other arms' outputs are compared with its
+outputs):
 
 * ``cake``: ``cake_clamped_swiglu_det_train_forward`` / ``_backward`` (one kernel each).
-* ``te``: Transformer Engine ``transformer_engine_torch.scaled_clamped_swiglu`` / ``scaled_clamped_dswiglu`` with
-  ``limit=L``, ``alpha=1``, ``glu_linear_offset=0`` and ``glu_interleave_size=0`` (halves): the same masks, one BF16
-  rounding of ``w a`` and the FP32 ``d_weight = sum dh a`` from the unweighted ``a``.  It takes the merged ``[R, 2I]``
-  layout and a route weight only; other rows print it as unavailable.
-* ``torch_compile``: ``torch.compile`` (Inductor, ``dynamic=False``) of the explicit FP32 forward and backward formulas
-  with explicit inclusive masks (``torch.where``), one compiled function each, so the backward fuses ``d_gate``,
-  ``d_up`` and ``d_weight`` as Inductor chooses.
-* ``eager``: the same formulas in eager PyTorch.
+* ``te``: Transformer Engine on the merged ``[R, 2I]`` layout (the gate is the first half, the up the second half)
+  with ``limit=L``, ``alpha=1`` and ``glu_linear_offset=0``: ``silu(min(g, L)) clamp(u, -L, L)`` with the same
+  inclusive masks.  With a route weight it runs ``transformer_engine_torch.scaled_clamped_swiglu`` /
+  ``scaled_clamped_dswiglu`` (``glu_interleave_size=0``): one BF16 rounding of ``w a`` and the FP32
+  ``d_weight = sum dh a`` from the unweighted ``a``.  Without one (``--unweighted``) it runs ``clamped_swiglu`` /
+  ``clamped_dswiglu`` with no quantizer (BF16 outputs).  Split rows print it as unavailable.
+* ``torch_compile``: ``torch.compile`` (Inductor, ``fullgraph=True``, ``dynamic=False``) of the forward and backward
+  formulas of the ``eager`` arm, so the backward fuses ``d_gate``, ``d_up`` and ``d_weight`` as Inductor chooses; in
+  the merged layout the compiled backward graph ends in the ``torch.cat`` of the two gradient halves.  Every row calls
+  ``torch._dynamo.reset()`` and compiles fresh code objects, one per calling context (the direct forward and
+  backward, and the forward and backward inside the autograd function), with
+  ``torch._dynamo.config.fail_on_recompile_limit_hit`` set: a call that would fall back to eager raises instead, and
+  its stage prints as unavailable with the reason.  A stage times only when every code object it runs holds a
+  compiled Dynamo cache entry after its untimed call (the counts are in the stage and in the arm's ``compile``
+  record); if Dynamo compiles a graph while the timers run, the stage is timed again, and prints as unavailable if
+  it compiles again.
+* ``eager``: the explicit FP32 formulas in eager PyTorch: ``torch.clamp`` for ``min(g, L)`` and ``clamp(u, -L, L)``,
+  ``torch.where`` for the inclusive gradient masks, and in the merged layout ``torch.cat`` (a separate copy) of the
+  two gradient halves.
 * ``cudnn``: a cuDNN frontend pointwise graph (``min``, ``max``, ``swish``, ``mul``; FP32 compute, BF16 output) for
   the forward.  For the backward the benchmark first builds one graph (pointwise ``d_gate`` / ``d_up`` with the masks
   as ``binary_select`` on BOOLEAN comparisons, and with a route weight the per-row ``reduction`` (ADD) of
   ``d_weight``), then, if a weighted one is refused, a pointwise graph for ``d_gate`` / ``d_up`` plus a pointwise +
-  ``reduction`` graph for ``d_weight`` (a composite that reads the inputs twice).  A stage no graph builds prints as
-  unavailable with the error.
+  ``reduction`` graph for ``d_weight`` (a composite that reads the inputs twice).  Each graph takes the plans of the
+  heuristics modes A, B and FALLBACK (if refused: A and FALLBACK) and builds all of them
+  (``build_plan_policy.ALL``); each plan's 10 calls are captured in one CUDA graph and replayed, timed with CUDA
+  events (warm L2, the median of 5 samples after one warm-up sample), and the fastest plan is kept.  A plan the
+  capture refuses is timed over 10 eager calls instead (which include the host's issue time) and is kept only when no
+  plan captures.  The arm's ``plans`` record holds the number of candidates, each one's time, timer or error, the
+  timer that ranked them, and the chosen plan's index and name.  If every build of all plans is refused, the graph
+  runs the first plan of the modes A and FALLBACK that builds; if the frontend has no indexed plan calls or no
+  candidate runs, it runs the frontend's selected plan; the record says why.  The composite's two graphs are also
+  timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints as unavailable with the error.
 
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
-route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor and one
-``[R, 2I]`` gradient) and ``split`` (two ``[R, I]`` tensors and gradients).  Every arm allocates its outputs inside the
-timed call; compilation, graph and plan building happen before timing.  Each arm's outputs are compared with Cake's
-(largest absolute difference and the share of elements whose bits differ).
+route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
+of every row to ``-88`` (BF16): every group of columns that Cake's kernels vote over holds one, so Cake runs its exact
+sigmoid path everywhere.  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor and one ``[R, 2I]`` gradient) and
+``split`` (two ``[R, I]`` tensors and gradients).  Every arm allocates its outputs inside the timed call; compilation,
+graph and plan building happen before timing.  Each arm's outputs are compared with Cake's: the largest absolute
+difference, the share of elements whose values differ (``values_differ``, with ``+0 == -0`` and ``NaN == NaN``), the
+share that differ only in the sign of a zero (``zero_sign_only``), and the share whose bits differ (``bits_differ``).
 
 Stages: ``fwd`` (one forward), ``bwd`` (one backward from ``gate``, ``up``, ``weight`` and ``dh``), ``fwd+bwd`` (the
 two in sequence), and ``ckpt`` (an autograd step under ``torch.utils.checkpoint(..., use_reentrant=False,
 preserve_rng_state=False)``: the forward, then the backward that replays it; nothing here draws random numbers), for
-the arms with an autograd form.
+the arms with an autograd form.  Every stage runs once untimed (compilation, plans, caches) before its timers; for
+``torch_compile`` the record also holds the Dynamo cache entries of the stage's code objects and the graphs Dynamo
+compiled while the kept timers ran (0; a stage timed again says how many the first timing compiled).
 
 Timers (``--timers``):
 
@@ -90,6 +115,12 @@ I = 2304
 ARMS = ("cake", "te", "torch_compile", "eager", "cudnn")
 STAGES = ("fwd", "bwd", "fwd+bwd", "ckpt")
 TIMERS = ("cupti", "eager", "graph")
+# ``--deep-gate``: one gate below -87 in each group of columns the Cake kernels vote over (the forward votes over the
+# whole row, the backward over columns [768k, 768k + 768)).
+DEEP_GATE_COLUMNS = (0, 768, 1536)
+DEEP_GATE = -88.0
+# cuDNN plan selection: warm-up samples, timed samples and calls per sample of every candidate plan.
+PLAN_WARMUP, PLAN_ROUNDS, PLAN_LOOP = 1, 5, 10
 
 
 class Unavailable(Exception):
@@ -159,6 +190,23 @@ def _events_ms(run: Callable[[], object], loop: int, warmup: int, rounds: int) -
     return float(statistics.median(samples))
 
 
+def _graph_ms(fn: Callable[[], object], loop: int, warmup: int, rounds: int) -> float:
+    """Median per-call milliseconds of ``loop`` calls of ``fn`` captured in one CUDA graph and replayed, timed with CUDA
+    events, warm L2."""
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(3):
+            fn()  # libraries, plans and allocator pools before the capture
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for _ in range(loop):
+            fn()
+    return _events_ms(graph.replay, loop, warmup, rounds)
+
+
 def time_stage(fn: Callable[[], object], timers: tuple[str, ...], args: argparse.Namespace) -> dict[str, Any]:
     """``{timer: milliseconds or the reason it did not run}`` of one stage call ``fn``."""
     found: dict[str, Any] = {}
@@ -174,19 +222,7 @@ def time_stage(fn: Callable[[], object], timers: tuple[str, ...], args: argparse
 
                 found[timer] = _events_ms(run, args.loop, args.warmup, args.rounds)
             elif timer == "graph":
-                side = torch.cuda.Stream()
-                side.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(side):
-                    for _ in range(3):
-                        fn()  # libraries, plans and allocator pools before the capture
-                torch.cuda.current_stream().wait_stream(side)
-                torch.cuda.synchronize()
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    for _ in range(args.loop):
-                        fn()
-                found[timer] = _events_ms(graph.replay, args.loop, args.warmup, args.rounds)
-                del graph
+                found[timer] = _graph_ms(fn, args.loop, args.warmup, args.rounds)
         except Unavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - a timer that cannot run this call is reported, not fatal
@@ -200,9 +236,13 @@ def time_stage(fn: Callable[[], object], timers: tuple[str, ...], args: argparse
 # Inputs
 
 
-def make_inputs(rows: int, layout: str, weighted: bool, limit: float, seed: int) -> types.SimpleNamespace:
+def make_inputs(
+    rows: int, layout: str, weighted: bool, limit: float, seed: int, deep_gate: bool = False
+) -> types.SimpleNamespace:
     gen = torch.Generator(device="cuda").manual_seed(seed)
     gate_up = (6.0 * torch.randn(rows, 2 * I, device="cuda", generator=gen)).bfloat16()
+    if deep_gate:
+        gate_up[:, list(DEEP_GATE_COLUMNS)] = DEEP_GATE  # gate columns: the gate is the first half
     weight = 1.5 * torch.rand(rows, device="cuda", generator=gen) if weighted else None
     dh = torch.randn(rows, I, device="cuda", generator=gen).bfloat16()
     x = types.SimpleNamespace(R=rows, layout=layout, L=float(torch.tensor(limit, dtype=torch.float32)), weight=weight)
@@ -221,12 +261,20 @@ def make_inputs(rows: int, layout: str, weighted: bool, limit: float, seed: int)
 
 
 def dram_bytes(x: types.SimpleNamespace, stage: str, *, writes_weight_grad: bool) -> int:
-    """The bytes a stage moves to and from DRAM when each input is read once and each output written once."""
+    """The bytes a stage (or one graph of the cuDNN composite backward) moves to and from DRAM when each input is read
+    once and each output written once."""
     bf16_rows = x.R * I * 2
     weight = x.R * 4 if x.weight is not None else 0
     forward = 3 * bf16_rows + weight  # gate, up, weight in; h out
     backward = 5 * bf16_rows + weight + (x.R * 4 if writes_weight_grad else 0)  # gate, up, dh, weight in; grads out
-    return {"fwd": forward, "bwd": backward, "fwd+bwd": forward + backward, "ckpt": 2 * forward + backward}[stage]
+    return {
+        "fwd": forward,
+        "bwd": backward,
+        "fwd+bwd": forward + backward,
+        "ckpt": 2 * forward + backward,
+        "bwd pointwise": 5 * bf16_rows + weight,  # gate, up, dh, weight in; d_gate, d_up out
+        "bwd reduction": 3 * bf16_rows + x.R * 4,  # gate, up, dh in; d_weight out
+    }[stage]
 
 
 def _outputs(x: types.SimpleNamespace, h: Optional[torch.Tensor], grads: Optional[tuple]) -> dict[str, torch.Tensor]:
@@ -260,8 +308,8 @@ def cake_arm(x: types.SimpleNamespace) -> dict[str, Any]:
 def _formula_forward(g: torch.Tensor, u: torch.Tensor, w: Optional[torch.Tensor], L: float) -> torch.Tensor:
     """``h = bf16(w silu(min(g, L)) clamp(u, -L, L))`` in FP32, one rounding."""
     gf, uf = g.float(), u.float()
-    gc = torch.where(gf <= L, gf, L)
-    uc = torch.where(uf > L, L, torch.where(uf < -L, -L, uf))
+    gc = torch.clamp(gf, max=L)
+    uc = torch.clamp(uf, -L, L)
     a = (gc * torch.sigmoid(gc)) * uc
     if w is not None:
         a = w[:, None] * a
@@ -270,10 +318,10 @@ def _formula_forward(g: torch.Tensor, u: torch.Tensor, w: Optional[torch.Tensor]
 
 def _formula_backward(dh, g, u, w, L: float, merged: bool):
     """``(d_first, d_up or None, d_weight or None)`` in FP32 with the inclusive masks, each BF16 output rounded once;
-    a merged layout's gradient as one ``[R, 2I]`` tensor."""
+    a merged layout's gradient as one ``[R, 2I]`` tensor, the ``torch.cat`` of the two halves."""
     gf, uf, d = g.float(), u.float(), dh.float()
-    gc = torch.where(gf <= L, gf, L)
-    uc = torch.where(uf > L, L, torch.where(uf < -L, -L, uf))
+    gc = torch.clamp(gf, max=L)
+    uc = torch.clamp(uf, -L, L)
     s = torch.sigmoid(gc)
     silu = gc * s
     dws = d if w is None else d * w[:, None]
@@ -289,26 +337,96 @@ def _halves(first: torch.Tensor, second: Optional[torch.Tensor]) -> tuple[torch.
     return (first[:, :I], first[:, I:]) if second is None else (first, second)
 
 
+def _fresh_function(fn: Callable, tag: str) -> Callable:
+    """A copy of ``fn`` with its own code object, so that ``torch.compile`` compiles it anew (Dynamo keeps its compiled
+    code and guards per code object)."""
+    code = fn.__code__.replace(co_name=f"{fn.__name__}_{tag}")
+    return types.FunctionType(code, fn.__globals__, code.co_name, fn.__defaults__, fn.__closure__)
+
+
+def _reset_dynamo() -> dict[str, Any]:
+    """Clears Dynamo's compiled code and makes a call past the recompile limit raise instead of running eagerly;
+    returns the settings for the arm's record."""
+    import torch._dynamo
+
+    torch._dynamo.reset()
+    config = torch._dynamo.config
+    raises = hasattr(config, "fail_on_recompile_limit_hit")
+    if raises:
+        config.fail_on_recompile_limit_hit = True
+    return {
+        "code": "fresh code objects per row and calling context (fwd, bwd, autograd fwd, autograd bwd)",
+        "fullgraph": True,
+        "dynamic": False,
+        "dynamo_reset": True,
+        "fail_on_recompile_limit_hit": True if raises else "unavailable: torch._dynamo.config has no such setting",
+        "recompile_limit": getattr(config, "recompile_limit", None),
+        "suppress_errors": getattr(config, "suppress_errors", None),
+    }
+
+
+def _compiled(fn: Callable, tag: str) -> Callable:
+    """``torch.compile`` (``fullgraph=True``, ``dynamic=False``) of a fresh copy of ``fn``, with that copy's code object
+    as ``.code``.  A Dynamo or Inductor error (a refused recompile, a failed compile) raises :class:`Unavailable`, so
+    its stage prints as unavailable."""
+    fresh = _fresh_function(fn, tag)
+    compiled = torch.compile(fresh, fullgraph=True, dynamic=False)
+
+    def call(*args):
+        try:
+            return compiled(*args)
+        except Exception as exc:
+            if type(exc).__module__.startswith(("torch._dynamo", "torch._inductor")):
+                raise Unavailable(f"torch.compile does not run {tag}: {type(exc).__name__}: {str(exc)[:240]}") from None
+            raise
+
+    call.code = fresh.__code__
+    return call
+
+
+def _dynamo_graphs() -> int:
+    """The number of graphs Dynamo has compiled in this process."""
+    return int(torch._dynamo.utils.counters["stats"]["unique_graphs"])
+
+
+def _cache_entries(code: types.CodeType) -> Optional[int]:
+    """The number of compiled entries Dynamo holds for ``code`` (0: it never compiled it), or None when this torch has
+    no lookup."""
+    import torch._dynamo.eval_frame
+
+    lookup = getattr(torch._dynamo.eval_frame, "_debug_get_cache_entry_list", None)
+    return None if lookup is None else len(lookup(code))
+
+
 def _formula_arm(x: types.SimpleNamespace, compiled: bool) -> dict[str, Any]:
-    fwd, bwd = _formula_forward, _formula_backward
+    fwd = autograd_fwd = _formula_forward
+    bwd = autograd_bwd = _formula_backward
+    notes: dict[str, Any] = {}
+    codes: dict[str, types.CodeType] = {}
     if compiled:
-        for knob in ("cache_size_limit", "recompile_limit"):  # one compile per row count, layout and weight flag
-            if hasattr(torch._dynamo.config, knob):
-                setattr(torch._dynamo.config, knob, max(getattr(torch._dynamo.config, knob), 64))
-        fwd = torch.compile(_formula_forward, dynamic=False)
-        bwd = torch.compile(_formula_backward, dynamic=False)
+        notes["compile"] = _reset_dynamo()
+        row = f"R{x.R}_{x.layout}_{'weighted' if x.weight is not None else 'unweighted'}"
+        fwd = _compiled(_formula_forward, f"{row}_fwd")
+        bwd = _compiled(_formula_backward, f"{row}_bwd")
+        autograd_fwd = _compiled(_formula_forward, f"{row}_autograd_fwd")
+        autograd_bwd = _compiled(_formula_backward, f"{row}_autograd_bwd")
+        functions = {"fwd": fwd, "bwd": bwd, "autograd fwd": autograd_fwd, "autograd bwd": autograd_bwd}
+        codes = {name: function.code for name, function in functions.items()}
+    if x.second is None:
+        where = "inside the compiled backward graph" if compiled else "a separate copy"
+        notes["merged_gradient"] = f"torch.cat of d_gate and d_up ({where})"
 
     class Formula(torch.autograd.Function):
         @staticmethod
         def forward(ctx, first, second, weight, L):
             ctx.save_for_backward(first, second, weight)
             ctx.L = L
-            return fwd(*_halves(first, second), weight, L)
+            return autograd_fwd(*_halves(first, second), weight, L)
 
         @staticmethod
         def backward(ctx, dh):
             first, second, weight = ctx.saved_tensors
-            d_first, d_up, d_weight = bwd(dh, *_halves(first, second), weight, ctx.L, second is None)
+            d_first, d_up, d_weight = autograd_bwd(dh, *_halves(first, second), weight, ctx.L, second is None)
             return d_first, d_up, d_weight, None
 
     def backward(x):
@@ -320,14 +438,15 @@ def _formula_arm(x: types.SimpleNamespace, compiled: bool) -> dict[str, Any]:
         "autograd": lambda first, second, weight, L=x.L: Formula.apply(first, second, weight, L),
         "writes_weight_grad": x.weight is not None,
         "version": f"torch {torch.__version__}" + (f", triton {_version('triton')}" if compiled else ""),
+        "compiled": compiled,
+        "codes": codes,
+        "notes": notes,
     }
 
 
 def te_arm(x: types.SimpleNamespace) -> dict[str, Any]:
     if x.layout != "merged":
-        raise Unavailable("TE's scaled clamped SwiGLU takes the merged [R, 2I] layout only (a split call needs a copy)")
-    if x.weight is None:
-        raise Unavailable("TE's scaled clamped SwiGLU needs a route weight (its unweighted form is another op)")
+        raise Unavailable("TE's clamped SwiGLU ops take the merged [R, 2I] layout only (a split call needs a copy)")
     try:
         import transformer_engine
         import transformer_engine.pytorch  # noqa: F401  (loads the transformer_engine_torch extension)
@@ -335,6 +454,8 @@ def te_arm(x: types.SimpleNamespace) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise Unavailable(f"transformer_engine_torch does not import: {type(exc).__name__}: {exc}") from None
     version = getattr(transformer_engine, "__version__", None) or _version("transformer-engine")
+    if x.weight is None:
+        return _te_unweighted(tex, version, x)
     if not hasattr(tex, "scaled_clamped_swiglu") or not hasattr(tex, "scaled_clamped_dswiglu"):
         raise Unavailable(f"Transformer Engine {version} has no scaled_clamped_swiglu (added in 2.18)")
 
@@ -368,6 +489,48 @@ def te_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         "autograd": lambda first, second, weight, L=x.L: Scaled.apply(first, weight, L),
         "writes_weight_grad": True,
         "version": f"transformer_engine {version}",
+        "notes": {
+            "ops": "transformer_engine_torch.scaled_clamped_swiglu / scaled_clamped_dswiglu (limit=L, alpha=1, "
+            "glu_linear_offset=0, glu_interleave_size=0, compute_scale_grad=True, no quantizer)"
+        },
+    }
+
+
+def _te_unweighted(tex: Any, version: Optional[str], x: types.SimpleNamespace) -> dict[str, Any]:
+    """The ``te`` arm without a route weight: ``clamped_swiglu`` / ``clamped_dswiglu`` on the merged layout."""
+    if not hasattr(tex, "clamped_swiglu") or not hasattr(tex, "clamped_dswiglu"):
+        raise Unavailable(f"Transformer Engine {version} has no clamped_swiglu")
+
+    # (input, quantizer, limit, alpha, glu_linear_offset) and the backward's
+    # (grad, fwd_input, quantizer, limit, alpha, glu_linear_offset); no quantizer: outputs of the input's type.
+    def forward(x):
+        return tex.clamped_swiglu(x.gate_up, None, x.L, 1.0, 0.0)
+
+    def backward(x):
+        return tex.clamped_dswiglu(x.dh, x.gate_up, None, x.L, 1.0, 0.0), None, None
+
+    class Clamped(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, gate_up, L):
+            ctx.save_for_backward(gate_up)
+            ctx.L = L
+            return tex.clamped_swiglu(gate_up, None, L, 1.0, 0.0)
+
+        @staticmethod
+        def backward(ctx, dh):
+            (gate_up,) = ctx.saved_tensors
+            return tex.clamped_dswiglu(dh.contiguous(), gate_up, None, ctx.L, 1.0, 0.0), None
+
+    return {
+        "forward": forward,
+        "backward": backward,
+        "autograd": lambda first, second, weight, L=x.L: Clamped.apply(first, L),
+        "writes_weight_grad": False,
+        "version": f"transformer_engine {version}",
+        "notes": {
+            "ops": "transformer_engine_torch.clamped_swiglu / clamped_dswiglu (limit=L, alpha=1, glu_linear_offset=0, "
+            "no quantizer)"
+        },
     }
 
 
@@ -385,7 +548,7 @@ class _Declared(dict):
 
 class CudnnGraphs:
     """The cuDNN frontend graphs of one row: the forward, and the backward as one graph or as a two-graph
-    composite."""
+    composite, each run with the fastest of its plans."""
 
     def __init__(self, x: types.SimpleNamespace) -> None:
         try:
@@ -401,6 +564,7 @@ class CudnnGraphs:
         self.values: dict[str, Any] = {"gate": x.gate, "up": x.up, "dh": x.dh, "w": x.weight}
         self.values.update({name: torch.full((1, 1, 1), v, dtype=torch.float32) for name, v in scalar.items()})
         self.errors: dict[str, str] = {}
+        self.plans: dict[str, dict[str, Any]] = {}
         self.forward_graph = self._try_build("fwd", self._forward_ops)
         self.backward_graphs: Optional[list] = None
         self.backward_kind: Optional[str] = None
@@ -483,35 +647,168 @@ class CudnnGraphs:
 
         return ops
 
-    def _try_build(self, what: str, ops) -> Optional[tuple]:
-        """``(graph, inputs, outputs, workspace)``, or None with the error recorded under ``what``."""
-        c = self.c
-        try:
-            g = c.pygraph(
-                io_data_type=c.data_type.BFLOAT16,
-                intermediate_data_type=c.data_type.FLOAT,
-                compute_data_type=c.data_type.FLOAT,
-                handle=self.handle,
-            )
-            t = _Declared(lambda name: self._declare(g, name))
-            outs = ops(g, t)
-            g.validate()
-            g.build_operation_graph()
-            g.create_execution_plans([c.heur_mode.A, c.heur_mode.FALLBACK])
-            g.check_support()
-            g.build_plans()
-            workspace = torch.empty(max(int(g.get_workspace_size()), 1), dtype=torch.uint8, device="cuda")
-        except Exception as exc:  # noqa: BLE001 - a graph no engine builds is reported with its error
-            self.errors[what] = f"{type(exc).__name__}: {str(exc)[:300]}"
-            return None
-        return g, t, outs, workspace
+    def _try_build(self, what: str, ops) -> Optional[types.SimpleNamespace]:
+        """The graph of ``ops`` built and set to its fastest plan, or None with the error recorded under ``what``.
 
-    def _execute(self, built, outputs: dict[str, torch.Tensor]) -> None:
-        g, t, outs, workspace = built
-        pack = {tensor: self.values[name] for name, tensor in t.items()}
-        pack.update({tensor: outputs[name] for name, tensor in outs.items()})
+        The first attempt builds every plan of the heuristics modes A, B and FALLBACK and times them, the second (if
+        the first is refused) every plan of the modes A and FALLBACK; the last builds the first plan of the modes A and
+        FALLBACK that builds (the frontend's default policy).  The record under ``self.plans[what]`` holds the
+        refusals."""
+        c = self.c
+        all_plans = getattr(getattr(c, "build_plan_policy", None), "ALL", None)
+        attempts = [(("A", "FALLBACK"), None)]
+        if all_plans is not None:
+            attempts.insert(0, (("A", "FALLBACK"), all_plans))
+            if hasattr(c.heur_mode, "B"):
+                attempts.insert(0, (("A", "B", "FALLBACK"), all_plans))
+        refused = []
+        for modes, policy in attempts:
+            try:
+                built = self._build(ops, modes, policy)
+            except Exception as exc:  # noqa: BLE001 - a graph no engine builds is reported with its error
+                how = "default" if policy is None else "ALL"
+                refused.append(f"modes {'+'.join(modes)}, policy {how}: {type(exc).__name__}: {str(exc)[:300]}")
+                continue
+            record: dict[str, Any] = {"heuristics": list(modes), "policy": "default" if policy is None else "ALL"}
+            if refused:
+                record["refused"] = refused
+            if policy is None:
+                record["selection"] = "none: " + (
+                    "building every plan was refused" if refused else "the frontend has no build_plan_policy.ALL"
+                )
+            else:
+                record.update(self._select_plan(built))
+            self.plans[what] = record
+            return built
+        self.errors[what] = "; ".join(refused)
+        return None
+
+    def _build(self, ops, modes: tuple[str, ...], policy: Any) -> types.SimpleNamespace:
+        """The graph of ``ops`` with the plans of the heuristics ``modes`` built under ``policy`` (None: the frontend's
+        default, the first plan that builds)."""
+        c = self.c
+        g = c.pygraph(
+            io_data_type=c.data_type.BFLOAT16,
+            intermediate_data_type=c.data_type.FLOAT,
+            compute_data_type=c.data_type.FLOAT,
+            handle=self.handle,
+        )
+        t = _Declared(lambda name: self._declare(g, name))
+        outs = ops(g, t)
+        g.validate()
+        g.build_operation_graph()
+        g.create_execution_plans([getattr(c.heur_mode, mode) for mode in modes])
+        g.check_support()
+        if policy is None:
+            g.build_plans()
+        else:
+            g.build_plans(policy)
+        workspace = torch.empty(max(int(g.get_workspace_size()), 1), dtype=torch.uint8, device="cuda")
+        return types.SimpleNamespace(graph=g, inputs=t, outputs=outs, workspace=workspace, index=None)
+
+    def _select_plan(self, built: types.SimpleNamespace) -> dict[str, Any]:
+        """Times every plan of ``built`` and sets ``built.index`` and ``built.workspace`` to the fastest one's; returns
+        the record (the number of candidates, each one's time, timer or error, the timer that ranked them, the chosen
+        index and name).  The plans that run in a CUDA graph are ranked by their replay time (GPU time); a plan that
+        does not is ranked by its eager time only when no plan does.  When the selection cannot run, ``built.index``
+        stays None (the frontend's selected plan runs) and the record says why."""
+        g = built.graph
+        calls = ("get_execution_plan_count", "get_workspace_size_plan_at_index", "execute_plan_at_index")
+        missing = [name for name in calls if not hasattr(g, name)]
+        if missing:
+            return {"selection": f"none: the frontend has no {', '.join(missing)}; the default plan runs"}
+        try:
+            outputs = (
+                {"h": torch.empty(self.x.R, I, dtype=torch.bfloat16, device="cuda")} if "h" in built.outputs else {}
+            )
+            outputs.update(self._gradients(self.x, "d_gate" in built.outputs, "d_weight" in built.outputs)[3])
+            count = int(g.get_execution_plan_count())
+        except Exception as exc:  # noqa: BLE001 - the default plan runs, with the reason recorded
+            if isinstance(exc, torch.OutOfMemoryError):
+                raise
+            return {"selection": f"none: {type(exc).__name__}: {str(exc)[:200]}; the default plan runs"}
+        candidates = []
+        for index in range(count):
+            entry: dict[str, Any] = {"index": index}
+            with contextlib.suppress(Exception):
+                entry["name"] = str(g.get_plan_name_at_index(index))
+            try:
+                entry.update(self._time_plan(built, outputs, index))
+            except Exception as exc:  # noqa: BLE001 - a plan that does not build or run is recorded and skipped
+                entry["unavailable"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            candidates.append(entry)
+        timed = [entry for entry in candidates if "us" in entry]
+        captured = [entry for entry in timed if entry["timer"] == "graph"]
+        record: dict[str, Any] = {"candidates": count, "timed": len(timed), "candidate_us": candidates}
+        if not timed:
+            record["selection"] = "none: no candidate plan ran; the default plan runs"
+            return record
+        record["ranked_by"] = (
+            f"CUDA graph replay of {PLAN_LOOP} calls (GPU time)"
+            if captured
+            else f"{PLAN_LOOP} eager calls (no plan runs in a CUDA graph; includes the host's issue time)"
+        )
+        best = min(captured or timed, key=lambda entry: entry["us"])
+        built.index = best["index"]
+        built.workspace = torch.empty(max(best["workspace_bytes"], 1), dtype=torch.uint8, device="cuda")
+        record.update(chosen_index=best["index"], chosen_name=best.get("name"), chosen_us=best["us"])
+        return record
+
+    def _time_plan(self, built: types.SimpleNamespace, outputs: dict[str, torch.Tensor], index: int) -> dict[str, Any]:
+        """The workspace bytes and warm per-call microseconds of the plan ``index``: ``PLAN_LOOP`` calls captured in
+        one CUDA graph and replayed (``timer: graph``), or, if the capture fails, ``PLAN_LOOP`` eager calls (``timer:
+        eager``, with the capture's error under ``graph_unavailable``)."""
+        size = int(built.graph.get_workspace_size_plan_at_index(index))
+        workspace = torch.empty(max(size, 1), dtype=torch.uint8, device="cuda")
+        found: dict[str, Any] = {"workspace_bytes": size}
+
+        def call():
+            self._execute(built, outputs, index=index, workspace=workspace)
+
+        try:
+            found.update(us=_graph_ms(call, PLAN_LOOP, PLAN_WARMUP, PLAN_ROUNDS) * 1e3, timer="graph")
+        except Exception as exc:  # noqa: BLE001 - a plan the capture refuses is timed over eager calls
+            found["graph_unavailable"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+
+            def run():
+                for _ in range(PLAN_LOOP):
+                    call()
+
+            found.update(us=_events_ms(run, PLAN_LOOP, PLAN_WARMUP, PLAN_ROUNDS) * 1e3, timer="eager")
+        return found
+
+    def _execute(
+        self,
+        built: types.SimpleNamespace,
+        outputs: dict[str, torch.Tensor],
+        *,
+        index: Optional[int] = None,
+        workspace: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Runs ``built`` with the plan ``index`` (default: the chosen one; none chosen: the graph's default plan)."""
+        pack = {tensor: self.values[name] for name, tensor in built.inputs.items()}
+        pack.update({tensor: outputs[name] for name, tensor in built.outputs.items()})
         self.c.set_stream(handle=self.handle, stream=torch.cuda.current_stream().cuda_stream)
-        g.execute(pack, workspace, handle=self.handle)
+        index = built.index if index is None else index
+        workspace = built.workspace if workspace is None else workspace
+        if index is None:
+            built.graph.execute(pack, workspace, handle=self.handle)
+        else:
+            built.graph.execute_plan_at_index(pack, workspace, index, handle=self.handle)
+
+    def _gradients(self, x, pointwise: bool, reduce: bool) -> tuple:
+        """Fresh ``(d_first, d_up, d_weight, {graph output name: tensor})``: ``d_gate`` / ``d_up`` when ``pointwise``
+        (views of one ``[R, 2I]`` ``d_first`` in the merged layout), ``d_weight`` when ``reduce``."""
+        d_first = d_up = d_weight = None
+        outputs = {}
+        if pointwise:
+            merged = x.second is None
+            d_first = torch.empty(x.R, 2 * I if merged else I, dtype=torch.bfloat16, device="cuda")
+            d_up = None if merged else torch.empty(x.R, I, dtype=torch.bfloat16, device="cuda")
+            outputs["d_gate"], outputs["d_up"] = (d_first[:, :I], d_first[:, I:]) if merged else (d_first, d_up)
+        if reduce:
+            d_weight = outputs["d_weight"] = torch.empty(x.R, dtype=torch.float32, device="cuda")
+        return d_first, d_up, d_weight, outputs
 
     def forward(self, x) -> torch.Tensor:
         if self.forward_graph is None:
@@ -523,15 +820,29 @@ class CudnnGraphs:
     def backward(self, x):
         if self.backward_graphs is None:
             raise Unavailable(f"no cuDNN backward graph builds: {self.errors}")
-        merged = x.second is None
-        d_first = torch.empty(x.R, 2 * I if merged else I, dtype=torch.bfloat16, device="cuda")
-        d_up = None if merged else torch.empty(x.R, I, dtype=torch.bfloat16, device="cuda")
-        d_gate_view, d_up_view = (d_first[:, :I], d_first[:, I:]) if merged else (d_first, d_up)
-        d_weight = torch.empty(x.R, dtype=torch.float32, device="cuda") if self.weighted else None
-        outputs = {"d_gate": d_gate_view, "d_up": d_up_view, "d_weight": d_weight}
+        d_first, d_up, d_weight, outputs = self._gradients(x, True, self.weighted)
         for built in self.backward_graphs:
             self._execute(built, outputs)
         return d_first, d_up, d_weight
+
+    def backward_parts(self) -> dict[str, Callable]:
+        """The graphs of a composite backward as separate calls (``pointwise``: ``d_gate`` and ``d_up``;
+        ``reduction``: ``d_weight``), each allocating its outputs; empty for a one-graph backward."""
+        if self.backward_graphs is None or len(self.backward_graphs) < 2:
+            return {}
+        pointwise, reduction = self.backward_graphs
+
+        def run_pointwise(x):
+            d_first, d_up, _, outputs = self._gradients(x, True, False)
+            self._execute(pointwise, outputs)
+            return d_first, d_up
+
+        def run_reduction(x):
+            _, _, d_weight, outputs = self._gradients(x, False, True)
+            self._execute(reduction, outputs)
+            return d_weight
+
+        return {"pointwise": run_pointwise, "reduction": run_reduction}
 
 
 def cudnn_arm(x: types.SimpleNamespace) -> dict[str, Any]:
@@ -542,7 +853,8 @@ def cudnn_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         "autograd": None,
         "writes_weight_grad": x.weight is not None,
         "version": graphs.version,
-        "notes": {"backward": graphs.backward_kind, "errors": graphs.errors},
+        "bwd_parts": graphs.backward_parts(),
+        "notes": {"backward": graphs.backward_kind, "errors": graphs.errors, "plans": graphs.plans},
     }
 
 
@@ -609,27 +921,93 @@ def _compare(found: dict[str, torch.Tensor], cake: dict[str, torch.Tensor]) -> d
             out[name] = f"shape {tuple(got.shape)} != {tuple(want.shape)}"
             continue
         diff = (got.float() - want.float()).abs()
+        got = got.to(want.dtype)
         view = torch.int16 if want.dtype == torch.bfloat16 else torch.int32
-        same = got.to(want.dtype).contiguous().view(view) == want.contiguous().view(view)
+        same_bits = got.contiguous().view(view) == want.contiguous().view(view)
+        same_value = (got == want) | (torch.isnan(got) & torch.isnan(want))  # +0 == -0, NaN == NaN
+        zero_sign = (got == 0) & (want == 0) & ~same_bits
+        n = want.numel()
         out[name] = {
-            "max_abs_diff": float(diff.max()) if diff.numel() else 0.0,
-            "bits_differ": float((~same).float().mean()) if same.numel() else 0.0,
+            "max_abs_diff": float(diff.max()) if n else 0.0,
+            "values_differ": int(torch.count_nonzero(~same_value)) / n if n else 0.0,
+            "zero_sign_only": int(torch.count_nonzero(zero_sign)) / n if n else 0.0,
+            "bits_differ": int(torch.count_nonzero(~same_bits)) / n if n else 0.0,
         }
     return out
 
 
-# The first calls a stage needs: a stage times only when each of them ran once.
-NEEDS = {"fwd": ("fwd",), "bwd": ("bwd",), "fwd+bwd": ("fwd", "bwd"), "ckpt": ("fwd", "bwd")}
+# The first calls a stage needs: a stage times only when each of them ran once (``autograd``: the autograd forward
+# that measures the saved bytes).
+NEEDS = {"fwd": ("fwd",), "bwd": ("bwd",), "fwd+bwd": ("fwd", "bwd"), "ckpt": ("fwd", "bwd", "autograd")}
+# The code objects of a compiled arm each stage runs: a stage times only when each holds a compiled Dynamo entry.
+CODES = {"fwd": ("fwd",), "bwd": ("bwd",), "fwd+bwd": ("fwd", "bwd"), "ckpt": ("autograd fwd", "autograd bwd")}
+
+
+def _first(fn: Callable[[], Any], missing: dict[str, str], what: str) -> Any:
+    """``fn()``, or None with the reason it did not run under ``missing[what]`` (an out-of-memory error raises)."""
+    try:
+        return fn()
+    except Unavailable as exc:
+        missing[what] = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, torch.OutOfMemoryError):
+            raise
+        missing[what] = f"first call: {type(exc).__name__}: {str(exc)[:300]}"
+    return None
+
+
+def _time_call(
+    call: Callable[[], object], stage: str, arm: dict[str, Any], x: types.SimpleNamespace, args: argparse.Namespace
+) -> dict[str, Any]:
+    """The entry of one stage call: ``ms`` per timer, the DRAM bytes and the ``cupti`` bandwidth, or the reason it is
+    unavailable.  One untimed call (compilation, plans, caches) precedes the timers.  For a compiled arm the stage
+    times only when each code object it runs holds a compiled Dynamo entry after that call (the counts are in the
+    entry); if Dynamo compiles a graph while the timers run, the stage is timed again, and is unavailable if it
+    compiles again."""
+    missing: dict[str, str] = {}
+    _first(lambda: (call(), torch.cuda.synchronize()), missing, "call")
+    if missing:
+        return {"unavailable": missing["call"]}
+    codes = arm.get("codes") or {}
+    entries = {name: _cache_entries(codes[name]) for name in CODES.get(stage, ()) if name in codes}
+    eager = [name for name, count in entries.items() if count == 0]
+    if eager:
+        return {"unavailable": f"torch.compile ran {', '.join(eager)} without a compiled graph (no Dynamo cache entry)"}
+    graphs = _dynamo_graphs if arm.get("compiled") else lambda: 0
+    compiled_while: list[int] = []  # the graphs Dynamo compiled during each timing that is repeated
+    for _ in range(2):
+        before = graphs()
+        try:
+            times = time_stage(call, tuple(args.timers), args)
+        except Unavailable as exc:
+            return {"unavailable": str(exc)}
+        if graphs() == before:
+            break
+        compiled_while.append(graphs() - before)
+    else:
+        counts = " and ".join(str(count) for count in compiled_while)
+        return {"unavailable": f"Dynamo compiled {counts} graph(s) while the timers ran, in both timings"}
+    moved = dram_bytes(x, stage, writes_weight_grad=arm["writes_weight_grad"])
+    entry: dict[str, Any] = {"ms": times, "dram_bytes": moved}
+    if isinstance(times.get("cupti"), float):
+        entry["cupti_gbs"] = moved / times["cupti"] / 1e6
+    if arm.get("compiled"):
+        entry["dynamo_graphs_compiled_while_timing"] = 0
+        entry["dynamo_cache_entries"] = entries
+        if compiled_while:
+            entry["retimed_after_dynamo_compiled"] = compiled_while[0]
+    return entry
 
 
 def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any]:
-    x = make_inputs(rows, layout, not args.unweighted, args.limit, args.seed)
+    x = make_inputs(rows, layout, not args.unweighted, args.limit, args.seed, args.deep_gate)
     result: dict[str, Any] = {
         "R": rows,
         "I": I,
         "layout": layout,
         "weighted": x.weight is not None,
         "L": x.L,
+        "deep_gate": args.deep_gate,
         "arms": {},
     }
     reference = None
@@ -651,21 +1029,14 @@ def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any
         first: dict[str, Any] = {}
         missing: dict[str, str] = {}
         for stage, call in (("fwd", arm["forward"]), ("bwd", arm["backward"])):
-            try:
-                first[stage] = call(x)
-            except Unavailable as exc:
-                missing[stage] = str(exc)
-            except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, torch.OutOfMemoryError):
-                    raise
-                missing[stage] = f"first call: {type(exc).__name__}: {str(exc)[:300]}"
+            first[stage] = _first(lambda call=call: call(x), missing, stage)
         outputs = _outputs(x, first.get("fwd"), first.get("bwd"))
         if name == "cake":
             reference = outputs
         elif reference is not None:
             row["vs_cake"] = _compare(outputs, reference)
         del first
-        row["saved_bytes"] = _saved_bytes(arm, x) if not missing else None
+        row["saved_bytes"] = _first(lambda: _saved_bytes(arm, x), missing, "autograd") if not missing else None
         row["workspace_bytes"] = 0 if name == "cake" else None
         row["stages"] = {}
         for stage, call in _stage_calls(arm, x).items():
@@ -673,18 +1044,16 @@ def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any
             if reasons:
                 row["stages"][stage] = {"unavailable": "; ".join(reasons)}
                 continue
-            try:
-                times = time_stage(call, tuple(args.timers), args)
-            except Unavailable as exc:
-                row["stages"][stage] = {"unavailable": str(exc)}
-                continue
-            moved = dram_bytes(x, stage, writes_weight_grad=arm["writes_weight_grad"])
-            entry: dict[str, Any] = {"ms": times, "dram_bytes": moved}
-            if isinstance(times.get("cupti"), float):
-                entry["cupti_gbs"] = moved / times["cupti"] / 1e6
-            row["stages"][stage] = entry
+            entry = row["stages"][stage] = _time_call(call, stage, arm, x, args)
+            if stage == "bwd" and "ms" in entry and arm.get("bwd_parts"):
+                entry["parts"] = {
+                    part: _time_call(lambda fn=fn: fn(x), f"bwd {part}", arm, x, args)
+                    for part, fn in arm["bwd_parts"].items()
+                }
         if "ckpt" not in row["stages"]:
             row["stages"]["ckpt"] = {"unavailable": "no autograd form"}
+        if arm.get("codes"):
+            row["compile"]["cache_entries"] = {name: _cache_entries(code) for name, code in arm["codes"].items()}
     cake = result["arms"].get("cake", {}).get("stages", {})
     for row in result["arms"].values():
         for stage, entry in row.get("stages", {}).items():
@@ -710,6 +1079,7 @@ def format_row(result: dict[str, Any], timers: tuple[str, ...]) -> list[str]:
     head = (
         f"R={result['R']} I={result['I']} layout={result['layout']} "
         f"{'weighted' if result['weighted'] else 'unweighted'} L={result['L']:g}"
+        + (" deep gate" if result.get("deep_gate") else "")
     )
     lines = [f"### {head}", ""]
     cols = " | ".join(f"{timer} us (baseline/cake)" for timer in timers)
@@ -724,24 +1094,46 @@ def format_row(result: dict[str, Any], timers: tuple[str, ...]) -> list[str]:
         saved = row.get("saved_bytes")
         saved_text = f"{saved / 2**20:.1f}" if isinstance(saved, int) else "-"
         for stage, entry in row["stages"].items():
-            if "unavailable" in entry:
-                lines.append(f"| {name} | {stage} | " + " | ".join("unavailable" for _ in timers) + " | - | - |")
-                notes.append(f"- {name} {stage}: unavailable: {entry['unavailable']}")
-                continue
-            gbs = entry.get("cupti_gbs")
-            gbs_text = f"{gbs:.0f}" if gbs is not None else "-"
-            cells = " | ".join(_cell(entry, timer) for timer in timers)
-            lines.append(f"| {name} | {stage} | {cells} | {gbs_text} | {saved_text} |")
-            for timer, value in entry["ms"].items():
-                if isinstance(value, str):
-                    notes.append(f"- {name} {stage} {timer}: {value}")
+            parts = [(f"{stage} {part} graph", part_entry) for part, part_entry in entry.get("parts", {}).items()]
+            for label, item in [(stage, entry), *parts]:
+                if "unavailable" in item:
+                    lines.append(f"| {name} | {label} | " + " | ".join("unavailable" for _ in timers) + " | - | - |")
+                    notes.append(f"- {name} {label}: unavailable: {item['unavailable']}")
+                    continue
+                gbs = item.get("cupti_gbs")
+                gbs_text = f"{gbs:.0f}" if gbs is not None else "-"
+                cells = " | ".join(_cell(item, timer) for timer in timers)
+                lines.append(f"| {name} | {label} | {cells} | {gbs_text} | {saved_text if item is entry else '-'} |")
+                for timer, value in item["ms"].items():
+                    if isinstance(value, str):
+                        notes.append(f"- {name} {label} {timer}: {value}")
+                if item.get("retimed_after_dynamo_compiled"):
+                    count = item["retimed_after_dynamo_compiled"]
+                    notes.append(f"- {name} {label}: Dynamo compiled {count} graph(s) while timing; timed again")
         if "vs_cake" in row:
             notes.append(f"- {name} outputs vs cake: {json.dumps(row['vs_cake'])}")
-        for key in ("backward", "errors"):
+        for key in ("ops", "compile", "merged_gradient", "backward", "errors"):
             if row.get(key):
                 notes.append(f"- {name} {key}: {row[key]}")
+        for graph, plan in row.get("plans", {}).items():
+            notes.append(f"- {name} plan {graph}: {_plan_text(plan)}")
         notes.append(f"- {name} version: {row.get('version')}")
     return lines + [""] + notes + [""]
+
+
+def _plan_text(plan: dict[str, Any]) -> str:
+    """One line of a cuDNN graph's plan record."""
+    text = f"heuristics {'+'.join(plan['heuristics'])}, policy {plan['policy']}"
+    if "chosen_index" in plan:
+        text += (
+            f", {plan['timed']} of {plan['candidates']} candidates timed, ranked by {plan.get('ranked_by')}, chosen "
+            f"[{plan['chosen_index']}] {plan.get('chosen_name')} ({plan['chosen_us']:.1f} us warm)"
+        )
+    if "selection" in plan:
+        text += f", selection {plan['selection']}"
+    if "refused" in plan:
+        text += f"; refused: {plan['refused']}"
+    return text
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -804,6 +1196,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--timers", nargs="+", default=list(TIMERS), choices=list(TIMERS))
     parser.add_argument("--limit", type=float, default=10.0)
     parser.add_argument("--unweighted", action="store_true", help="no route weight (a shared expert)")
+    parser.add_argument(
+        "--deep-gate",
+        action="store_true",
+        help="gates at columns 0, 768 and 1536 of every row are -88 (Cake's exact sigmoid path everywhere)",
+    )
     parser.add_argument("--loop", type=int, default=20, help="calls per eager / graph sample")
     parser.add_argument("--warmup", type=int, default=5, help="eager / graph samples before timing")
     parser.add_argument("--rounds", type=int, default=15, help="eager / graph samples timed")
@@ -811,9 +1208,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--copy-bw", action="store_true", help="also time a 2 GiB device-to-device copy")
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
-    if "cake" not in args.arms:
-        args.arms = ["cake", *args.arms]
+    args.arms = list(dict.fromkeys(["cake", *args.arms]))  # cake first: the other arms are compared with its outputs
     ident = identity()
+    ident["deep_gate"] = {"columns": list(DEEP_GATE_COLUMNS), "value": DEEP_GATE} if args.deep_gate else None
     print(
         f"# {ident['gpu']} (sm_{ident['cc'][0]}{ident['cc'][1]}, {ident['sms']} SMs), torch {ident['torch']} "
         f"(CUDA {ident['torch_cuda']}), driver/power/max clock {ident.get('driver_power_maxclock')}"
