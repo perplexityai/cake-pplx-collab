@@ -27,7 +27,8 @@ chunks).  The first wave runs the last piece and the ``P_d - 2`` middle pieces o
 one piece runs whole there), the second wave the other ``P_d - 1`` pieces, which fit too.  The table depends on the
 chunk counts, ``HV`` and the SM count of the launching device alone: no occupancy query, no tensor contents and no
 fixed virtual SM count, so a device with more SMs gets shorter pieces.  Whether a call runs the split or the serial
-scan is each scan's priced choice; both read the same table.
+scan is each scan's priced choice; both read the same table, except where the backward takes the longer pieces of
+``cake_chain.bwd_one_wave_table`` (the one-stream rows on the devices of ``cake_chain.ONE_WAVE_TABLE_DEVICES``).
 """
 
 from __future__ import annotations
