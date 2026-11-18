@@ -50,7 +50,7 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
     return result;
 }
 
-#define LAUNCH_MIN_BLOCKS 4
+#define LAUNCH_MIN_BLOCKS 8
 
 #include <math_constants.h>
 
@@ -102,8 +102,8 @@ __device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 
 
 extern "C" {
 
-__global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d(__nv_bfloat16* __restrict__ dy, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ z, __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dz, unsigned long long* __restrict__ acc, unsigned int* __restrict__ flags, unsigned int* __restrict__ done, __nv_bfloat16* __restrict__ dw, int rows, CakeFastDivmod heads, long long dy_tok, long long dy_head, long long x_tok, long long x_head, long long z_tok, long long z_head, float eps, int accumulate, int weight_grad)
+__global__ __launch_bounds__(128, LAUNCH_MIN_BLOCKS) void
+kernel_cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79(__nv_bfloat16* __restrict__ dy, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ z, __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dz, unsigned long long* __restrict__ acc, unsigned int* __restrict__ flags, unsigned int* __restrict__ done, __nv_bfloat16* __restrict__ dw, int rows, CakeFastDivmod heads, long long dy_tok, long long dy_head, long long x_tok, long long x_head, long long z_tok, long long z_head, float eps, int accumulate, int weight_grad)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -118,7 +118,7 @@ kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d(__nv_bfloat16* __restri
     // === Task calls (declaration order) ===
     int group = tid >> 4;
     int col = (tid & 15) * 8;
-    int nblocks = (rows + 15) / 16;
+    int nblocks = (rows + 7) / 8;
     unsigned int wbits[4];
     {
         uint4 _uv4_0 = *reinterpret_cast<const uint4*>(w + col + 0);
@@ -143,21 +143,33 @@ kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d(__nv_bfloat16* __restri
         }
     }
     int s_ahead = 0;
-    if ((nblocks - 1) / num_bids + 1 <= 64) {
+    if ((long long)nblocks <= 64ll * (long long)num_bids) {
         s_ahead = 1;
     }
     if (bid < nblocks) {
-        int s_count = (nblocks - 1 - bid) / num_bids + 1;
+        int s_count = 1;
+        if (nblocks - bid > num_bids) {
+            s_count = (nblocks - 1 - bid) / num_bids + 1;
+        }
         #pragma unroll 1
         for (int i = 0; i < s_count; i++) {
             int u = bid + i * num_bids;
-            int row = u * 16 + group;
+            int row = u * 8 + group;
             int src = ((row) < (rows - 1) ? (row) : (rows - 1));
-            uint32_t tq = (heads.divisor != 1) ? (__umulhi((uint32_t)((unsigned int)src), heads.multiplier) >> heads.shift_right) : (uint32_t)((unsigned int)src);
-            uint32_t th = (uint32_t)((unsigned int)src) - tq * (uint32_t)(heads.divisor);
-            long long goff = (long long)tq * dy_tok + (long long)th * dy_head + (long long)col;
-            long long xoff = (long long)tq * x_tok + (long long)th * x_head + (long long)col;
-            long long zoff = (long long)tq * z_tok + (long long)th * z_head + (long long)col;
+            long long goff = 0ll;
+            long long xoff = 0ll;
+            long long zoff = 0ll;
+            if (packed != 0) {
+                goff = (long long)src * 128ll + (long long)col;
+                xoff = goff;
+                zoff = goff;
+            } else {
+                uint32_t tq = (heads.divisor != 1) ? (__umulhi((uint32_t)((unsigned int)src), heads.multiplier) >> heads.shift_right) : (uint32_t)((unsigned int)src);
+                uint32_t th = (uint32_t)((unsigned int)src) - tq * (uint32_t)(heads.divisor);
+                goff = (long long)tq * dy_tok + (long long)th * dy_head + (long long)col;
+                xoff = (long long)tq * x_tok + (long long)th * x_head + (long long)col;
+                zoff = (long long)tq * z_tok + (long long)th * z_head + (long long)col;
+            }
             float gr[8];
             float xr[8];
             float zr[8];
@@ -207,15 +219,15 @@ kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d(__nv_bfloat16* __restri
                 if (i + 1 < s_count) {
                     if (packed != 0) {
                         if (tid == 0) {
-                            int nfirst = (u + num_bids) * 16;
-                            int _min_4 = ((rows - nfirst) < (16) ? (rows - nfirst) : (16));
+                            int nfirst = (u + num_bids) * 8;
+                            int _min_4 = ((rows - nfirst) < (8) ? (rows - nfirst) : (8));
                             int nbytes = _min_4 * 256;
                             asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(dy + (long long)nfirst * 128ll), "r"((uint32_t)(nbytes)) : "memory");
                             asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(x + (long long)nfirst * 128ll), "r"((uint32_t)(nbytes)) : "memory");
                             asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(z + (long long)nfirst * 128ll), "r"((uint32_t)(nbytes)) : "memory");
                         }
                     } else {
-                        int nrow = (((u + num_bids) * 16 + group) < (rows - 1) ? ((u + num_bids) * 16 + group) : (rows - 1));
+                        int nrow = (((u + num_bids) * 8 + group) < (rows - 1) ? ((u + num_bids) * 8 + group) : (rows - 1));
                         uint32_t nq = (heads.divisor != 1) ? (__umulhi((uint32_t)((unsigned int)nrow), heads.multiplier) >> heads.shift_right) : (uint32_t)((unsigned int)nrow);
                         uint32_t nh = (uint32_t)((unsigned int)nrow) - nq * (uint32_t)(heads.divisor);
                         asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dy + ((long long)nq * dy_tok + (long long)nh * dy_head + (long long)col))));
