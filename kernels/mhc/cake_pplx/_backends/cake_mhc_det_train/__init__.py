@@ -38,6 +38,7 @@ from .cake_jit import (
     ARCH_BY_CAPABILITY,
     ARCHES,
     GSTATS_COLS,
+    HANDOFF_KINDS,
     HC_EPS,
     HIDDEN,
     HIDDEN_SIZES,
@@ -50,6 +51,7 @@ from .cake_jit import (
     STATS_COLS,
     STREAMS,
     arch_for_capability,
+    handoff_hidden_sizes,
     route_applies,
     selected_modules,
     supported_hidden_sizes,
@@ -127,6 +129,22 @@ def is_cake_mhc_det_train_supported(
     if hidden is None:
         return bool(supported_hidden_sizes(arch))
     return int(hidden) in supported_hidden_sizes(arch)
+
+
+def is_cake_mhc_det_train_handoff_supported(
+    device: torch.device, hidden: Optional[int] = None
+) -> bool:
+    """Whether ``device`` (and optionally ``hidden``) has the pre-handoff routes and the standalone collapse."""
+
+    device = torch.device(device)
+    if device.type != "cuda":
+        return False
+    arch = arch_for_capability(tuple(torch.cuda.get_device_capability(device)))
+    if arch is None:
+        return False
+    if hidden is None:
+        return bool(handoff_hidden_sizes(arch))
+    return int(hidden) in handoff_hidden_sizes(arch)
 
 
 # ----------------------------------------------------------------------------
@@ -314,9 +332,14 @@ def _check_route(device: torch.device, arch: str, kind: str, hidden: int) -> Non
         hidden=hidden,
         kind=kind,
     ):
+        sizes = (
+            handoff_hidden_sizes(arch)
+            if kind in HANDOFF_KINDS
+            else supported_hidden_sizes(arch)
+        )
         raise ValueError(
             f"no exported Cake mHC training route {cake_mhc_det_train_route_key(hidden, kind)!r} on {arch}; "
-            f"supported hidden sizes: {supported_hidden_sizes(arch)}"
+            f"supported hidden sizes: {sizes}"
         )
     _ROUTES_CHECKED.add((arch, kind, hidden))
 
@@ -849,6 +872,42 @@ _CALL_VALUES: dict[str, tuple[str, ...]] = {
         "dbase",
         "accumulate",
     ),
+    # The pre handoff: the standard route's values, then the handoff operands.
+    "fwd_prepare_handoff": (
+        "fn",
+        "x",
+        "x_flat",
+        "scale",
+        "base",
+        "stats",
+        "rms_eps",
+        "hc_eps",
+        "u",
+        "pre_in",
+        "pre_next",
+    ),
+    "bwd_finish_handoff": (
+        "fn",
+        "x",
+        "du",
+        "stats",
+        "gstats",
+        "scale",
+        "base",
+        "hc_eps",
+        "x_flat",
+        "dy_flat",
+        "dx_flat",
+        "dfn",
+        "dscale",
+        "dbase",
+        "accumulate",
+        "pre_in",
+        "dpre_next",
+        "dpre_in",
+    ),
+    "collapse_forward": ("x", "pre_in", "u"),
+    "collapse_backward": ("x", "pre_in", "du", "dx", "dpre_in"),
 }
 # Logical workspace values -> region names.  The forward fn split writes the
 # forward operand layout only and the backward one the transposed layout; the
@@ -861,35 +920,45 @@ _FWD_WORKSPACE_VALUES = (
     ("qpart", "qpart"),
     ("ticket", "ticket"),
 )
+_BWD_WORKSPACE_VALUES = (
+    ("fnTp", "fnTp"),
+    ("fnp", "fnTp"),
+    ("dzp", "dzp"),
+    ("tokp", "tokp"),
+    ("param_partial", "param_partial"),
+    ("dzp_rows", "dzp_rows"),
+    ("dfn_part", "dfn_part"),
+    ("ticket", "ticket"),
+)
 _WORKSPACE_VALUES: dict[str, tuple[tuple[str, str], ...]] = {
     "fwd_prepare": _FWD_WORKSPACE_VALUES,
     "fwd_recompute": _FWD_WORKSPACE_VALUES,
     "fwd_finish": (),
     "bwd_prepare": (),
-    "bwd_finish": (
-        ("fnTp", "fnTp"),
-        ("fnp", "fnTp"),
-        ("dzp", "dzp"),
-        ("tokp", "tokp"),
-        ("param_partial", "param_partial"),
-        ("dzp_rows", "dzp_rows"),
-        ("dfn_part", "dfn_part"),
-        ("ticket", "ticket"),
-    ),
+    "bwd_finish": _BWD_WORKSPACE_VALUES,
+    "fwd_prepare_handoff": _FWD_WORKSPACE_VALUES,
+    "bwd_finish_handoff": _BWD_WORKSPACE_VALUES,
+    "collapse_forward": (),
+    "collapse_backward": (),
 }
+_BWD_HOST_VALUES = (
+    "t_pad",
+    "rows_per_cta",
+    "parts",
+    "rows_per_chunk",
+    "chunks",
+    "groups",
+)
 _HOST_VALUES: dict[str, tuple[str, ...]] = {
     "fwd_prepare": ("m_tiles", "log2_pk", "p_k", "t_pad"),
     "fwd_recompute": ("m_tiles", "log2_pk", "p_k", "t_pad"),
     "fwd_finish": (),
     "bwd_prepare": (),
-    "bwd_finish": (
-        "t_pad",
-        "rows_per_cta",
-        "parts",
-        "rows_per_chunk",
-        "chunks",
-        "groups",
-    ),
+    "bwd_finish": _BWD_HOST_VALUES,
+    "fwd_prepare_handoff": ("m_tiles", "log2_pk", "p_k", "t_pad"),
+    "bwd_finish_handoff": _BWD_HOST_VALUES,
+    "collapse_forward": (),
+    "collapse_backward": (),
 }
 # The checkpoint carry (``cake_jit.FN_SPLIT_CARRY``): the replay's dual-layout fn
 # split writes the transposed layout into a caller buffer, the call value ``fnTp``,
@@ -1956,6 +2025,602 @@ def _backward_finish(
 
 
 # ----------------------------------------------------------------------------
+# Pre handoff and standalone collapse
+#
+# A sublayer of the pre handoff collapses its streams with the ``pre`` of the
+# previous sublayer (``pre_in``, FP32 ``[T, 4]``) instead of its own, and hands
+# its own ``pre`` (the coefficient pass's, ``stats`` columns 25..28) on as
+# ``pre_next``; its backward takes the gradient of ``pre_next`` from its
+# consumer (``dpre_next``) for the coefficient VJP and returns the gradient of
+# ``pre_in`` (``dpre_in``).  The routes are the standard routes with the
+# collapse and the token-owner forms of the handoff (``cake_jit.HANDOFF_KINDS``);
+# ``fwd_recompute``, ``fwd_finish`` and ``backward_prepare`` serve both
+# contracts.  The standalone collapse runs ``(X, pre_in) -> U`` and its VJP
+# alone (the final collapse before the model's head).
+
+
+def _require_pre(tensor: Any, name: str, rows: int, device: torch.device) -> torch.Tensor:
+    return _validate_tensor(
+        tensor, name, shape=(rows, STREAMS), device=device, dtype=_F32
+    )
+
+
+def cake_mhc_det_train_handoff_forward_prepare(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    out: Optional[torch.Tensor] = None,
+    pre_next_out: Optional[torch.Tensor] = None,
+    stats_out: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""Forward mapping and coefficients of ``X``, collapse with the incoming ``pre_in``: ``(U, pre_next, stats)``.
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        BF16 ``[T, 4, H]`` contiguous residual streams (``T == 0`` returns empty
+        outputs without launching; ``H`` one of :func:`cake_jit.handoff_hidden_sizes`
+        of the device's architecture, else ``ValueError``).
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` contiguous ``pre`` of the previous sublayer (its
+        ``pre_next``; a one-hot ``[1, 0, 0, 0]`` row for the first sublayer).
+    fn, scale, base : torch.Tensor
+        As in :func:`cake_mhc_det_train_forward_prepare`.
+    rms_eps, hc_eps, sinkhorn_iters, accumulation : float, float, int, str
+        As in :func:`cake_mhc_det_train_forward_prepare` (``"fp32x2"`` serves
+        hidden 4096 only, so it raises ``NotImplementedError`` here).
+    out : torch.Tensor, optional
+        Preallocated BF16 ``[T, H]`` contiguous ``U``.
+    pre_next_out : torch.Tensor, optional
+        Preallocated FP32 ``[T, 4]`` contiguous ``pre_next``.
+    stats_out : torch.Tensor, optional
+        Preallocated FP32 ``[T, 64]`` contiguous statistics record.
+    workspace : torch.Tensor, optional
+        Caller-owned forward workspace (:func:`cake_mhc_det_train_forward_workspace`,
+        ``hidden=X.shape[2]``); a per-device default when omitted.
+
+    Returns
+    -------
+    ``(U, pre_next, stats)``: BF16 ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])``
+    (one FP32 sum, one rounding), FP32 ``pre_next [T, 4]`` (this sublayer's
+    ``pre = sigmoid(.) + hc_eps``, the values of ``stats`` columns 25..28, written
+    by the collapse) and the ``[T, 64]`` record of
+    :func:`cake_mhc_det_train_forward_prepare` (it does not depend on
+    ``pre_in``: ``forward_stats`` replays it, ``forward_finish`` and
+    ``backward_prepare`` consume it).
+
+    The launches run on the current torch stream of the tensors' device.
+    """
+
+    fast = (
+        _fast_forward(
+            X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "fwd_prepare_handoff"
+        )
+        if _one_word(accumulation)
+        else None
+    )
+    if fast is not None:
+        rows, hidden, index, arch = fast
+        pre_shape = (rows, STREAMS)
+        if (
+            _fast_tensor(pre_in, pre_shape, _F32, index)
+            and (out is None or _fast_tensor(out, (rows, hidden), _BF16, index))
+            and (
+                pre_next_out is None
+                or _fast_tensor(pre_next_out, pre_shape, _F32, index)
+            )
+            and (
+                stats_out is None
+                or _fast_tensor(stats_out, (rows, STATS_COLS), _F32, index)
+            )
+        ):
+            U = _empty((rows, hidden), _BF16, X) if out is None else out
+            pre_next = _empty(pre_shape, _F32, X) if pre_next_out is None else pre_next_out
+            stats = (
+                _empty((rows, STATS_COLS), _F32, X) if stats_out is None else stats_out
+            )
+            route = _fast_route(
+                arch, "fwd_prepare_handoff", rows, hidden, index, _PATH_FORWARD
+            )
+            views = _fast_workspace(workspace, "fwd", rows, hidden, index, X)
+            _launch_route(
+                route,
+                (
+                    fn,
+                    X,
+                    X.view(route.x_flat),
+                    scale,
+                    base,
+                    stats,
+                    rms_eps,
+                    hc_eps,
+                    U,
+                    pre_in,
+                    pre_next,
+                )
+                + route.workspace(views),
+                index,
+            )
+            return U, pre_next, stats
+    _check_constants(rms_eps, hc_eps, sinkhorn_iters)
+    rows, hidden, device = _rows_of(X)
+    _loader.check_accumulation(accumulation, hidden, sinkhorn_iters)
+    arch = _device_arch(device)
+    X = _validate_tensor(
+        X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
+    )
+    pre_in = _require_pre(pre_in, "pre_in", rows, device)
+    fn, scale, base = _parameters(fn, scale, base, device, hidden)
+    _check_route(device, arch, "fwd_prepare_handoff", hidden)
+    U = _output(out, "out", shape=(rows, hidden), device=device, dtype=_BF16)
+    pre_next = _output(
+        pre_next_out, "pre_next_out", shape=(rows, STREAMS), device=device, dtype=_F32
+    )
+    stats = _output(
+        stats_out, "stats_out", shape=(rows, STATS_COLS), device=device, dtype=_F32
+    )
+    if rows == 0:
+        return U, pre_next, stats
+    ws = _workspace_for(workspace, "fwd", rows, hidden, device)
+    values = _forward_values(
+        X,
+        fn,
+        scale,
+        base,
+        stats,
+        ws,
+        rows=rows,
+        hidden=hidden,
+        device=device,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+    )
+    values.update(u=U, pre_in=pre_in, pre_next=pre_next)
+    _run_route(
+        arch,
+        "fwd_prepare_handoff",
+        values,
+        rows=rows,
+        hidden=hidden,
+        device=device,
+        path=_PATH_FORWARD,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
+    )
+    return U, pre_next, stats
+
+
+def cake_mhc_det_train_handoff_backward_finish(
+    X: torch.Tensor,
+    dY: torch.Tensor,
+    dU: torch.Tensor,
+    pre_in: torch.Tensor,
+    dpre_next: torch.Tensor,
+    B: Optional[torch.Tensor],
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    stats: torch.Tensor,
+    grad_stats: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    accumulate: bool = False,
+    workspace: Optional[torch.Tensor] = None,
+    dX: Optional[torch.Tensor] = None,
+    dpre_in: Optional[torch.Tensor] = None,
+    dfn: Optional[torch.Tensor] = None,
+    dscale: Optional[torch.Tensor] = None,
+    dbase: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""Backward of one pre-handoff sublayer: ``(dX, dpre_in, dfn, dscale, dbase)``.
+
+    Parameters
+    ----------
+    X, dY, dU, B, fn, scale, base, stats, grad_stats : torch.Tensor
+        As in :func:`cake_mhc_det_train_backward_finish` (``stats`` of
+        :func:`cake_mhc_det_train_handoff_forward_prepare` or its replay
+        ``forward_stats``; ``grad_stats`` of ``backward_prepare``).
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` contiguous ``pre_in`` of the forward.
+    dpre_next : torch.Tensor
+        FP32 ``[T, 4]`` contiguous gradient of ``pre_next`` from its consumer
+        (zeros when ``pre_next`` reached no loss).
+    rms_eps, hc_eps, sinkhorn_iters, accumulation, accumulate, workspace : as in
+        :func:`cake_mhc_det_train_backward_finish`.
+    dX : torch.Tensor, optional
+        Preallocated BF16 ``[T, 4, H]`` contiguous output.
+    dpre_in : torch.Tensor, optional
+        Preallocated FP32 ``[T, 4]`` contiguous output.
+    dfn, dscale, dbase : torch.Tensor, optional
+        As in :func:`cake_mhc_det_train_backward_finish`.
+
+    Returns
+    -------
+    ``(dX, dpre_in, dfn, dscale, dbase)``, bitwise reproducible for a given
+    token count on a given device.
+    ``dX = BF16(dX_coef + pre_in_i dU + sum_j C_ij dY_j)``: one FP32 sum, one
+    rounding; the coefficient VJP ``dX_coef`` and the parameter gradients take
+    ``dpre_next`` (with ``dpost`` and ``dC`` of ``grad_stats``) and do not depend
+    on ``dU``.  ``dpre_in[t, i] = sum_d dU[t, d] X[t, i, d]`` is one FP32 sum per
+    element in a fixed order (no FP64, no atomics); it is written whether or not
+    the caller needs it.  The parameter gradients are the fixed-order reductions
+    of :func:`cake_mhc_det_train_backward_finish` (``accumulate`` applies to them
+    alone).  With ``T == 0`` nothing is launched: ``dX`` and ``dpre_in`` are
+    empty and the parameter gradients are zeroed (``accumulate=False``) or left
+    untouched.
+
+    The launches run on the current torch stream of the tensors' device.
+    """
+
+    return _handoff_backward_finish(
+        X,
+        dY,
+        dU,
+        pre_in,
+        dpre_next,
+        B,
+        fn,
+        scale,
+        base,
+        stats,
+        grad_stats,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
+        accumulate=accumulate,
+        workspace=workspace,
+        dX=dX,
+        dpre_in=dpre_in,
+        dfn=dfn,
+        dscale=dscale,
+        dbase=dbase,
+        path=_PATH_BACKWARD,
+    )
+
+
+def _handoff_backward_finish(
+    X: torch.Tensor,
+    dY: torch.Tensor,
+    dU: torch.Tensor,
+    pre_in: torch.Tensor,
+    dpre_next: torch.Tensor,
+    B: Optional[torch.Tensor],
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    stats: torch.Tensor,
+    grad_stats: torch.Tensor,
+    *,
+    rms_eps: float,
+    hc_eps: float,
+    sinkhorn_iters: int,
+    accumulation: str = "fp32",
+    accumulate: bool,
+    workspace: Optional[torch.Tensor],
+    dX: Optional[torch.Tensor],
+    dpre_in: Optional[torch.Tensor],
+    dfn: Optional[torch.Tensor],
+    dscale: Optional[torch.Tensor],
+    dbase: Optional[torch.Tensor],
+    path: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """:func:`cake_mhc_det_train_handoff_backward_finish` along ``path`` (as
+    :func:`_backward_finish`)."""
+
+    fast = (
+        _fast_forward(
+            X, fn, scale, base, rms_eps, hc_eps, sinkhorn_iters, "bwd_finish_handoff"
+        )
+        if _one_word(accumulation)
+        else None
+    )
+    if fast is not None:
+        rows, hidden, index, arch = fast
+        fn_shape = _FN_SHAPES[hidden]
+        pre_shape = (rows, STREAMS)
+        if (
+            _fast_tensor(dY, (rows, STREAMS, hidden), _BF16, index)
+            and _fast_tensor(dU, (rows, hidden), _BF16, index)
+            and _fast_tensor(pre_in, pre_shape, _F32, index)
+            and _fast_tensor(dpre_next, pre_shape, _F32, index)
+            and (B is None or _fast_tensor(B, (rows, hidden), _BF16, index))
+            and _fast_tensor(stats, (rows, STATS_COLS), _F32, index)
+            and _fast_tensor(grad_stats, (rows, GSTATS_COLS), _F32, index)
+            and not (accumulate and (dfn is None or dscale is None or dbase is None))
+            and (dX is None or _fast_tensor(dX, (rows, STREAMS, hidden), _BF16, index))
+            and (dpre_in is None or _fast_tensor(dpre_in, pre_shape, _F32, index))
+            and (dfn is None or _fast_tensor(dfn, fn_shape, _F32, index))
+            and (dscale is None or _fast_tensor(dscale, _SCALE_SHAPE, _F32, index))
+            and (dbase is None or _fast_tensor(dbase, _BASE_SHAPE, _F32, index))
+        ):
+            if dX is None:
+                dX = _empty((rows, STREAMS, hidden), _BF16, X)
+            if dpre_in is None:
+                dpre_in = _empty(pre_shape, _F32, X)
+            if dfn is None:
+                dfn = _empty(fn_shape, _F32, X)
+            if dscale is None:
+                dscale = _empty(_SCALE_SHAPE, _F32, X)
+            if dbase is None:
+                dbase = _empty(_BASE_SHAPE, _F32, X)
+            route = _fast_route(
+                arch, "bwd_finish_handoff", rows, hidden, index, path, False
+            )
+            views = _fast_workspace(workspace, "bwd", rows, hidden, index, X)
+            _launch_route(
+                route,
+                (
+                    fn,
+                    X,
+                    dU,
+                    stats,
+                    grad_stats,
+                    scale,
+                    base,
+                    hc_eps,
+                    X.view(route.x_flat),
+                    dY.view(route.x_flat),
+                    dX.view(route.x_flat),
+                    dfn,
+                    dscale,
+                    dbase,
+                    1 if accumulate else 0,
+                    pre_in,
+                    dpre_next,
+                    dpre_in,
+                )
+                + route.workspace(views),
+                index,
+            )
+            return dX, dpre_in, dfn, dscale, dbase
+    _check_constants(rms_eps, hc_eps, sinkhorn_iters)
+    rows, hidden, device = _rows_of(X)
+    _loader.check_accumulation(accumulation, hidden, sinkhorn_iters)
+    arch = _device_arch(device)
+    X = _validate_tensor(
+        X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
+    )
+    dY = _validate_tensor(
+        dY, "dY", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
+    )
+    dU = _validate_tensor(dU, "dU", shape=(rows, hidden), device=device, dtype=_BF16)
+    pre_in = _require_pre(pre_in, "pre_in", rows, device)
+    dpre_next = _require_pre(dpre_next, "dpre_next", rows, device)
+    if B is not None:
+        _validate_tensor(B, "B", shape=(rows, hidden), device=device, dtype=_BF16)
+    fn, scale, base = _parameters(fn, scale, base, device, hidden)
+    stats = _validate_tensor(
+        stats, "stats", shape=(rows, STATS_COLS), device=device, dtype=_F32
+    )
+    grad_stats = _validate_tensor(
+        grad_stats, "grad_stats", shape=(rows, GSTATS_COLS), device=device, dtype=_F32
+    )
+    _check_route(device, arch, "bwd_finish_handoff", hidden)
+    if accumulate and (dfn is None or dscale is None or dbase is None):
+        raise ValueError(
+            "accumulate=True needs the dfn, dscale and dbase buffers to accumulate into"
+        )
+    dX = _output(dX, "dX", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16)
+    dpre_in = _output(
+        dpre_in, "dpre_in", shape=(rows, STREAMS), device=device, dtype=_F32
+    )
+    dfn = _output(
+        dfn, "dfn", shape=(MAPPING_ROWS, STREAMS * hidden), device=device, dtype=_F32
+    )
+    dscale = _output(dscale, "dscale", shape=(3,), device=device, dtype=_F32)
+    dbase = _output(dbase, "dbase", shape=(MAPPING_ROWS,), device=device, dtype=_F32)
+    if rows == 0:
+        if not accumulate:
+            dfn.zero_()
+            dscale.zero_()
+            dbase.zero_()
+        return dX, dpre_in, dfn, dscale, dbase
+    ws = _workspace_for(workspace, "bwd", rows, hidden, device)
+    plan = _loader.host_plan(
+        rows, _loader.sm_count(_device_index(device)), _device_arch(device), hidden
+    )
+    # The values of _backward_finish (no checkpoint carry at the handoff's hidden
+    # sizes), then the handoff operands.
+    values: dict[str, Any] = {
+        "fn": fn,
+        "fnTp": ws["fnTp"],
+        "fnp": ws["fnTp"],
+        "x": X,
+        "du": dU,
+        "stats": stats,
+        "gstats": grad_stats,
+        "scale": scale,
+        "base": base,
+        "dzp": ws["dzp"],
+        "tokp": ws["tokp"],
+        "param_partial": ws["param_partial"],
+        "rows": rows,
+        "t_pad": plan["t_pad"],
+        "rows_per_cta": plan["rows_per_cta"],
+        "hc_eps": float(hc_eps),
+        "sinkhorn_iters": int(sinkhorn_iters),
+        "x_flat": X.view(rows, STREAMS * hidden),
+        "dy_flat": dY.view(rows, STREAMS * hidden),
+        "dzp_rows": ws["dzp_rows"],
+        "dx_flat": dX.view(rows, STREAMS * hidden),
+        "dfn_part": ws["dfn_part"],
+        "ticket": ws["ticket"],
+        "parts": plan["parts"],
+        "rows_per_chunk": plan["rows_per_chunk"],
+        "dfn": dfn,
+        "dscale": dscale,
+        "dbase": dbase,
+        "chunks": plan["chunks"],
+        "groups": plan["groups"],
+        "accumulate": 1 if accumulate else 0,
+        "pre_in": pre_in,
+        "dpre_next": dpre_next,
+        "dpre_in": dpre_in,
+    }
+    _run_route(
+        arch,
+        "bwd_finish_handoff",
+        values,
+        rows=rows,
+        hidden=hidden,
+        device=device,
+        path=path,
+        sinkhorn_iters=sinkhorn_iters,
+        carry=False,
+        accumulation=accumulation,
+    )
+    return dX, dpre_in, dfn, dscale, dbase
+
+
+def cake_mhc_det_train_collapse_forward(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    r"""Standalone collapse: ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])``.
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        BF16 ``[T, 4, H]`` contiguous residual streams (``H`` one of
+        :func:`cake_jit.handoff_hidden_sizes` of the device's architecture).
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` contiguous weights (the last sublayer's ``pre_next``).
+    out : torch.Tensor, optional
+        Preallocated BF16 ``[T, H]`` contiguous ``U``.
+
+    Returns
+    -------
+    BF16 ``U`` of shape ``[T, H]``: the collapse of
+    :func:`cake_mhc_det_train_handoff_forward_prepare` (one FP32 sum, one
+    rounding), without parameters or workspace.  ``T == 0`` launches nothing.
+    """
+
+    fast = _fast_rows(X, "collapse_forward")
+    if fast is not None:
+        rows, hidden, index, arch = fast
+        if _fast_tensor(pre_in, (rows, STREAMS), _F32, index) and (
+            out is None or _fast_tensor(out, (rows, hidden), _BF16, index)
+        ):
+            U = _empty((rows, hidden), _BF16, X) if out is None else out
+            _launch_route(
+                _fast_route(arch, "collapse_forward", rows, hidden, index, _PATH_FORWARD),
+                (X, pre_in, U),
+                index,
+            )
+            return U
+    rows, hidden, device = _rows_of(X)
+    arch = _device_arch(device)
+    X = _validate_tensor(
+        X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
+    )
+    pre_in = _require_pre(pre_in, "pre_in", rows, device)
+    _check_route(device, arch, "collapse_forward", hidden)
+    U = _output(out, "out", shape=(rows, hidden), device=device, dtype=_BF16)
+    if rows == 0:
+        return U
+    _run_route(
+        arch,
+        "collapse_forward",
+        {"x": X, "pre_in": pre_in, "u": U, "rows": rows},
+        rows=rows,
+        hidden=hidden,
+        device=device,
+        path=_PATH_FORWARD,
+    )
+    return U
+
+
+def cake_mhc_det_train_collapse_backward(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    dU: torch.Tensor,
+    *,
+    dX: Optional[torch.Tensor] = None,
+    dpre_in: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""VJP of the standalone collapse: ``(dX, dpre_in)``.
+
+    Parameters
+    ----------
+    X, pre_in : torch.Tensor
+        The inputs of :func:`cake_mhc_det_train_collapse_forward`.
+    dU : torch.Tensor
+        BF16 ``[T, H]`` contiguous gradient of ``U``.
+    dX : torch.Tensor, optional
+        Preallocated BF16 ``[T, 4, H]`` contiguous output.
+    dpre_in : torch.Tensor, optional
+        Preallocated FP32 ``[T, 4]`` contiguous output.
+
+    Returns
+    -------
+    ``(dX, dpre_in)``: ``dX[t, i, d] = BF16(pre_in[t, i] dU[t, d])`` (one FP32
+    product, one rounding) and ``dpre_in[t, i] = sum_d dU[t, d] X[t, i, d]``,
+    one FP32 sum per element in a fixed order (no FP64, no atomics).  ``T == 0``
+    launches nothing.
+    """
+
+    fast = _fast_rows(X, "collapse_backward")
+    if fast is not None:
+        rows, hidden, index, arch = fast
+        pre_shape = (rows, STREAMS)
+        if (
+            _fast_tensor(pre_in, pre_shape, _F32, index)
+            and _fast_tensor(dU, (rows, hidden), _BF16, index)
+            and (dX is None or _fast_tensor(dX, (rows, STREAMS, hidden), _BF16, index))
+            and (dpre_in is None or _fast_tensor(dpre_in, pre_shape, _F32, index))
+        ):
+            if dX is None:
+                dX = _empty((rows, STREAMS, hidden), _BF16, X)
+            if dpre_in is None:
+                dpre_in = _empty(pre_shape, _F32, X)
+            _launch_route(
+                _fast_route(arch, "collapse_backward", rows, hidden, index, _PATH_BACKWARD),
+                (X, pre_in, dU, dX, dpre_in),
+                index,
+            )
+            return dX, dpre_in
+    rows, hidden, device = _rows_of(X)
+    arch = _device_arch(device)
+    X = _validate_tensor(
+        X, "X", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16
+    )
+    pre_in = _require_pre(pre_in, "pre_in", rows, device)
+    dU = _validate_tensor(dU, "dU", shape=(rows, hidden), device=device, dtype=_BF16)
+    _check_route(device, arch, "collapse_backward", hidden)
+    dX = _output(dX, "dX", shape=(rows, STREAMS, hidden), device=device, dtype=_BF16)
+    dpre_in = _output(
+        dpre_in, "dpre_in", shape=(rows, STREAMS), device=device, dtype=_F32
+    )
+    if rows == 0:
+        return dX, dpre_in
+    _run_route(
+        arch,
+        "collapse_backward",
+        {"x": X, "pre_in": pre_in, "du": dU, "dx": dX, "dpre_in": dpre_in, "rows": rows},
+        rows=rows,
+        hidden=hidden,
+        device=device,
+        path=_PATH_BACKWARD,
+    )
+    return dX, dpre_in
+
+
+# ----------------------------------------------------------------------------
 # Autograd
 
 
@@ -2302,6 +2967,148 @@ class CakeMHCDetFinishFunction(torch.autograd.Function):
         return (None, dB, None) + (None,) * edges
 
 
+def _as_operand(
+    grad: Optional[torch.Tensor],
+    *,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """A gradient autograd delivers, as a kernel operand: zeros for ``None``; else of ``dtype``, contiguous (a
+    zero-stride expanded gradient is materialized) and 32-byte aligned (copied when it is not)."""
+
+    if grad is None:
+        return torch.zeros(shape, dtype=dtype, device=device)
+    if grad.dtype is not dtype or not grad.is_contiguous():
+        grad = grad.contiguous().to(dtype)
+    if grad.numel() and grad.data_ptr() % TENSOR_ALIGNMENT_BYTES:
+        grad = grad.clone()
+    return grad
+
+
+class CakeMHCDetHandoffPrepareFunction(torch.autograd.Function):
+    """Autograd node of ``handoff_forward_prepare``: ``forward(X, pre_in, fn, scale, base, state) -> (U, pre_next,
+    *edges)``.
+
+    The pre-handoff counterpart of :class:`CakeMHCDetPrepareFunction`: the same state, edges and handle (the
+    finish is :class:`CakeMHCDetFinishFunction`, unchanged).  Its backward is ``handoff_backward_finish``: it
+    receives ``dU`` from the external branch, ``dpre_next`` from the consumer of ``pre_next`` (``None``: zeros) and,
+    on the edges, ``dY`` and the gradient statistics from the finish node's backward; it returns ``dX``, ``dpre_in``
+    (``None`` when ``pre_in`` needs no gradient) and the parameter gradients, bitwise reproducible for a given token
+    count on a given device.  ``dU`` and ``dpre_next`` are
+    normalized first (:func:`_as_operand`: dtype, contiguity, alignment).  It saves ``X``, ``pre_in`` (the previous
+    node's ``pre_next``: no new memory) and, with ``save_stats``, ``stats``.
+    """
+
+    @staticmethod
+    def forward(ctx, X, pre_in, fn, scale, base, state):
+        U, pre_next, stats = cake_mhc_det_train_handoff_forward_prepare(
+            X,
+            pre_in,
+            fn,
+            scale,
+            base,
+            rms_eps=state.rms_eps,
+            hc_eps=state.hc_eps,
+            sinkhorn_iters=state.sinkhorn_iters,
+            accumulation=state.accumulation,
+            workspace=state.workspace,
+        )
+        state.fn, state.scale, state.base = fn.detach(), scale.detach(), base.detach()
+        state.stats = stats  # read and released by the finish forward
+        if state.save_stats:
+            ctx.save_for_backward(X, pre_in, stats)
+        else:
+            ctx.save_for_backward(X, pre_in)
+        ctx.state = state
+        ctx.set_materialize_grads(False)
+        # No checkpoint carry: its dual-layout fn split serves no handoff hidden size.
+        return (U, pre_next) + _edges(
+            X.shape[0], X.shape[2], X.device, state.save_stats, False
+        )
+
+    @staticmethod
+    def backward(ctx, dU, dpre_next, dY, grad_stats, stats=None):
+        X, pre_in, *saved = ctx.saved_tensors
+        state = ctx.state
+        held = state.take()
+        state.fn_key = None  # no checkpoint carry at the handoff's hidden sizes
+        if dY is None:
+            dY, grad_stats, stats = held
+        rows, hidden = int(X.shape[0]), int(X.shape[2])
+        if saved:
+            stats = saved[0]
+        elif stats is None:
+            stats = state.replay(X)
+        if dY is None:
+            dY = torch.zeros_like(X)
+        if grad_stats is None:
+            grad_stats = torch.zeros((rows, GSTATS_COLS), dtype=_F32, device=X.device)
+        dX, dpre_in, dfn, dscale, dbase = _handoff_backward_finish(
+            X,
+            dY,
+            _as_operand(dU, shape=(rows, hidden), dtype=_BF16, device=X.device),
+            pre_in,
+            _as_operand(dpre_next, shape=(rows, STREAMS), dtype=_F32, device=X.device),
+            None,  # ``B``: validated when given, not read
+            state.fn,
+            state.scale,
+            state.base,
+            stats,
+            grad_stats,
+            rms_eps=state.rms_eps,
+            hc_eps=state.hc_eps,
+            sinkhorn_iters=state.sinkhorn_iters,
+            accumulation=state.accumulation,
+            accumulate=False,
+            workspace=state.backward_workspace,
+            dX=None,
+            dpre_in=None,
+            dfn=None,
+            dscale=None,
+            dbase=None,
+            path=_PATH_BACKWARD if saved else _PATH_CHECKPOINT,
+        )
+        return (
+            dX,
+            dpre_in if ctx.needs_input_grad[1] else None,
+            dfn,
+            dscale,
+            dbase,
+            None,
+        )
+
+
+class CakeMHCDetCollapseFunction(torch.autograd.Function):
+    """Autograd node of the standalone collapse: ``forward(X, pre_in) -> U``, backward ``collapse_backward``.
+
+    It saves ``X`` and ``pre_in``; ``dU`` is normalized like the handoff node's (:func:`_as_operand`), and a
+    ``None`` ``dU`` (``U`` reached no loss) gives no gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, X, pre_in):
+        U = cake_mhc_det_train_collapse_forward(X, pre_in)
+        ctx.save_for_backward(X, pre_in)
+        ctx.set_materialize_grads(False)
+        return U
+
+    @staticmethod
+    def backward(ctx, dU):
+        if dU is None:
+            return None, None
+        X, pre_in = ctx.saved_tensors
+        dX, dpre_in = cake_mhc_det_train_collapse_backward(
+            X,
+            pre_in,
+            _as_operand(dU, shape=(X.shape[0], X.shape[2]), dtype=_BF16, device=X.device),
+        )
+        return (
+            dX if ctx.needs_input_grad[0] else None,
+            dpre_in if ctx.needs_input_grad[1] else None,
+        )
+
+
 def cake_mhc_det_train_prepare(
     X: torch.Tensor,
     fn: torch.Tensor,
@@ -2393,26 +3200,89 @@ def cake_mhc_det_train_finish(
     return CakeMHCDetFinishFunction.apply(X, B, handle.state, *edges)
 
 
+def cake_mhc_det_train_handoff_prepare(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    save_stats: bool = True,
+    workspace: Optional[torch.Tensor] = None,
+    backward_workspace: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, _MHCTrainHandle]:
+    """Autograd-enabled ``handoff_forward_prepare``: ``(U, pre_next, handle)``; pass ``handle`` to
+    :func:`cake_mhc_det_train_finish` and ``pre_next`` to the next sublayer (or the final collapse).
+
+    Parameters
+    ----------
+    X, pre_in, fn, scale, base : torch.Tensor
+        As in :func:`cake_mhc_det_train_handoff_forward_prepare` (``X``, ``pre_in`` and the parameters may
+        require gradients).
+    rms_eps, hc_eps, sinkhorn_iters, accumulation, save_stats, workspace, backward_workspace :
+        As in :func:`cake_mhc_det_train_prepare`.
+
+    Returns
+    -------
+    ``(U, pre_next, handle)``: BF16 ``U``, FP32 ``pre_next`` and the handle of this node for one
+    :func:`cake_mhc_det_train_finish` (see :class:`CakeMHCDetHandoffPrepareFunction`).
+    """
+
+    state = _MHCTrainState(
+        save_stats=save_stats,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=_loader.check_accumulation(accumulation),
+        workspace=workspace,
+        backward_workspace=backward_workspace,
+    )
+    out = CakeMHCDetHandoffPrepareFunction.apply(X, pre_in, fn, scale, base, state)
+    U, pre_next = out[0], out[1]
+    state.recorded = U.requires_grad
+    return U, pre_next, _MHCTrainHandle(state, out[2:] if state.recorded else ())
+
+
+def cake_mhc_det_train_collapse(X: torch.Tensor, pre_in: torch.Tensor) -> torch.Tensor:
+    """Autograd-enabled standalone collapse: ``U = BF16(sum_i pre_in_i X_i)`` (:class:`CakeMHCDetCollapseFunction`);
+    its backward is :func:`cake_mhc_det_train_collapse_backward`."""
+
+    return CakeMHCDetCollapseFunction.apply(X, pre_in)
+
+
 __all__ = [
     "ARCHES",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "TENSOR_ALIGNMENT_BYTES",
     "WORKSPACE_ALIGNMENT_BYTES",
+    "CakeMHCDetCollapseFunction",
     "CakeMHCDetFinishFunction",
+    "CakeMHCDetHandoffPrepareFunction",
     "CakeMHCDetPrepareFunction",
     "cake_mhc_det_train_backward_finish",
     "cake_mhc_det_train_backward_prepare",
     "cake_mhc_det_train_backward_workspace",
     "cake_mhc_det_train_backward_workspace_bytes",
+    "cake_mhc_det_train_collapse",
+    "cake_mhc_det_train_collapse_backward",
+    "cake_mhc_det_train_collapse_forward",
     "cake_mhc_det_train_finish",
     "cake_mhc_det_train_forward_finish",
     "cake_mhc_det_train_forward_prepare",
     "cake_mhc_det_train_forward_stats",
     "cake_mhc_det_train_forward_workspace",
     "cake_mhc_det_train_forward_workspace_bytes",
+    "cake_mhc_det_train_handoff_backward_finish",
+    "cake_mhc_det_train_handoff_forward_prepare",
+    "cake_mhc_det_train_handoff_prepare",
     "cake_mhc_det_train_prepare",
     "cake_mhc_det_train_reset_workspace",
     "cake_mhc_det_train_route_key",
     "cake_mhc_det_train_route_modules",
+    "is_cake_mhc_det_train_handoff_supported",
     "is_cake_mhc_det_train_supported",
 ]
