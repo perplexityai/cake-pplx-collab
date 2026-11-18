@@ -561,6 +561,7 @@ kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMa
                 float dz_d = dlogp[d_off + rin_r];
                 int dz_skip = ((rin_lbl < 0ll) ? 1 : 0);
                 int dz_col = (int)rin_lbl - ep_off_n;
+                int dz_res = (((unsigned long long)rin_lbl < (unsigned long long)ldc) ? 1 : 0);
                 int live_rows_2 = CNT[0];
                 int live_2 = (((bid_m_2 >> 1) * 256 < live_rows_2) ? k_iters : 0);
                 int ep_steps = live_2;
@@ -651,7 +652,7 @@ kernel_cake_lm_head_loss_755db75b43d51ae3662f(const __grid_constant__ CUtensorMa
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
                                 :: "l"((void*)(C + (row_out + (unsigned long long)col))), "r"(_raw_stv8_4[0]), "r"(_raw_stv8_4[1]), "r"(_raw_stv8_4[2]), "r"(_raw_stv8_4[3]), "r"(_raw_stv8_4[4]), "r"(_raw_stv8_4[5]), "r"(_raw_stv8_4[6]), "r"(_raw_stv8_4[7]) : "memory");
                         }
-                        if (dz_skip == 0) {
+                        if (dz_res != 0) {
                             if ((unsigned int)(dz_col - col) < 16) {
                                 rlab[rin_t] = dzf_r;
                             }

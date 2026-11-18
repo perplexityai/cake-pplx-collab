@@ -566,6 +566,7 @@ kernel_cake_lm_head_loss_f9bdd4cff5189fe26c30(const __grid_constant__ CUtensorMa
                 dz_d = _fdiv_0;
                 int dz_skip = ((rin_lbl < 0ll) ? 1 : 0);
                 int dz_col = (int)rin_lbl - ep_off_n;
+                int dz_res = (((unsigned long long)rin_lbl < (unsigned long long)ldc) ? 1 : 0);
                 int live_rows_2 = CNT[0];
                 int live_2 = (((bid_m_2 >> 1) * 256 < live_rows_2) ? k_iters : 0);
                 int ep_steps = live_2;
@@ -625,7 +626,7 @@ kernel_cake_lm_head_loss_f9bdd4cff5189fe26c30(const __grid_constant__ CUtensorMa
                             }
                         }
                         if (global_row < M) {
-                            if (dz_skip == 0) {
+                            if (dz_res != 0) {
                                 if ((unsigned int)(dz_col - fcol) < 16) {
                                     rlab[rin_t] = dzf_r;
                                 }
