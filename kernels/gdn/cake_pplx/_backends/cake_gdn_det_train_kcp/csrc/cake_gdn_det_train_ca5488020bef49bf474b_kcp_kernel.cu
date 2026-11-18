@@ -404,10 +404,10 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                 mbarrier_wait(tiles_full_addr + (ls) * 8, _phase_tiles_full);
                 unsigned int words[4];
                 float wide[8];
-                int col_3_0 = w_col + ch * 4 * 8;
+                int col_1 = w_col + ch * 4 * 8;
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
-                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_3_0 / 64 * 8192 + w_row * 128 + col_3_0 % 64 * 2 ^ (col_3_0 / 64 * 8192 + w_row * 128 + col_3_0 % 64 * 2 >> 7 & 7) << 4))));
+                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_1 / 64 * 8192 + w_row * 128 + col_1 % 64 * 2 ^ (col_1 / 64 * 8192 + w_row * 128 + col_1 % 64 * 2 >> 7 & 7) << 4))));
                 wide[0] = __uint_as_float(words[0] << 16);
                 wide[1] = __uint_as_float(words[0] & mask_hi);
                 wide[2] = __uint_as_float(words[1] << 16);
@@ -416,12 +416,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                 wide[5] = __uint_as_float(words[2] & mask_hi);
                 wide[6] = __uint_as_float(words[3] << 16);
                 wide[7] = __uint_as_float(words[3] & mask_hi);
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_3_0 / 32 * 8192 + w_row * 128 + col_3_0 % 32 * 4 ^ (col_3_0 / 32 * 8192 + w_row * 128 + col_3_0 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_3_0 + 4) / 32 * 8192 + w_row * 128 + (col_3_0 + 4) % 32 * 4 ^ ((col_3_0 + 4) / 32 * 8192 + w_row * 128 + (col_3_0 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
-                int col_3_1 = w_col + (ch * 4 + 1) * 8;
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_1 / 32 * 8192 + w_row * 128 + col_1 % 32 * 4 ^ (col_1 / 32 * 8192 + w_row * 128 + col_1 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_1 + 4) / 32 * 8192 + w_row * 128 + (col_1 + 4) % 32 * 4 ^ ((col_1 + 4) / 32 * 8192 + w_row * 128 + (col_1 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
+                int col_2 = w_col + (ch * 4 + 1) * 8;
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
-                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_3_1 / 64 * 8192 + w_row * 128 + col_3_1 % 64 * 2 ^ (col_3_1 / 64 * 8192 + w_row * 128 + col_3_1 % 64 * 2 >> 7 & 7) << 4))));
+                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_2 / 64 * 8192 + w_row * 128 + col_2 % 64 * 2 ^ (col_2 / 64 * 8192 + w_row * 128 + col_2 % 64 * 2 >> 7 & 7) << 4))));
                 wide[0] = __uint_as_float(words[0] << 16);
                 wide[1] = __uint_as_float(words[0] & mask_hi);
                 wide[2] = __uint_as_float(words[1] << 16);
@@ -430,12 +430,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                 wide[5] = __uint_as_float(words[2] & mask_hi);
                 wide[6] = __uint_as_float(words[3] << 16);
                 wide[7] = __uint_as_float(words[3] & mask_hi);
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_3_1 / 32 * 8192 + w_row * 128 + col_3_1 % 32 * 4 ^ (col_3_1 / 32 * 8192 + w_row * 128 + col_3_1 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_3_1 + 4) / 32 * 8192 + w_row * 128 + (col_3_1 + 4) % 32 * 4 ^ ((col_3_1 + 4) / 32 * 8192 + w_row * 128 + (col_3_1 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
-                int col_3_2 = w_col + (ch * 4 + 2) * 8;
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_2 / 32 * 8192 + w_row * 128 + col_2 % 32 * 4 ^ (col_2 / 32 * 8192 + w_row * 128 + col_2 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_2 + 4) / 32 * 8192 + w_row * 128 + (col_2 + 4) % 32 * 4 ^ ((col_2 + 4) / 32 * 8192 + w_row * 128 + (col_2 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
+                int col_3 = w_col + (ch * 4 + 2) * 8;
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
-                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_3_2 / 64 * 8192 + w_row * 128 + col_3_2 % 64 * 2 ^ (col_3_2 / 64 * 8192 + w_row * 128 + col_3_2 % 64 * 2 >> 7 & 7) << 4))));
+                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_3 / 64 * 8192 + w_row * 128 + col_3 % 64 * 2 ^ (col_3 / 64 * 8192 + w_row * 128 + col_3 % 64 * 2 >> 7 & 7) << 4))));
                 wide[0] = __uint_as_float(words[0] << 16);
                 wide[1] = __uint_as_float(words[0] & mask_hi);
                 wide[2] = __uint_as_float(words[1] << 16);
@@ -444,12 +444,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                 wide[5] = __uint_as_float(words[2] & mask_hi);
                 wide[6] = __uint_as_float(words[3] << 16);
                 wide[7] = __uint_as_float(words[3] & mask_hi);
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_3_2 / 32 * 8192 + w_row * 128 + col_3_2 % 32 * 4 ^ (col_3_2 / 32 * 8192 + w_row * 128 + col_3_2 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_3_2 + 4) / 32 * 8192 + w_row * 128 + (col_3_2 + 4) % 32 * 4 ^ ((col_3_2 + 4) / 32 * 8192 + w_row * 128 + (col_3_2 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
-                int col_3_3 = w_col + (ch * 4 + 3) * 8;
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_3 / 32 * 8192 + w_row * 128 + col_3 % 32 * 4 ^ (col_3 / 32 * 8192 + w_row * 128 + col_3 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_3 + 4) / 32 * 8192 + w_row * 128 + (col_3 + 4) % 32 * 4 ^ ((col_3 + 4) / 32 * 8192 + w_row * 128 + (col_3 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
+                int col_4 = w_col + (ch * 4 + 3) * 8;
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
-                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_3_3 / 64 * 8192 + w_row * 128 + col_3_3 % 64 * 2 ^ (col_3_3 / 64 * 8192 + w_row * 128 + col_3_3 % 64 * 2 >> 7 & 7) << 4))));
+                    : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_4 / 64 * 8192 + w_row * 128 + col_4 % 64 * 2 ^ (col_4 / 64 * 8192 + w_row * 128 + col_4 % 64 * 2 >> 7 & 7) << 4))));
                 wide[0] = __uint_as_float(words[0] << 16);
                 wide[1] = __uint_as_float(words[0] & mask_hi);
                 wide[2] = __uint_as_float(words[1] << 16);
@@ -458,8 +458,8 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                 wide[5] = __uint_as_float(words[2] & mask_hi);
                 wide[6] = __uint_as_float(words[3] << 16);
                 wide[7] = __uint_as_float(words[3] & mask_hi);
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_3_3 / 32 * 8192 + w_row * 128 + col_3_3 % 32 * 4 ^ (col_3_3 / 32 * 8192 + w_row * 128 + col_3_3 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
-                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_3_3 + 4) / 32 * 8192 + w_row * 128 + (col_3_3 + 4) % 32 * 4 ^ ((col_3_3 + 4) / 32 * 8192 + w_row * 128 + (col_3_3 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_4 / 32 * 8192 + w_row * 128 + col_4 % 32 * 4 ^ (col_4 / 32 * 8192 + w_row * 128 + col_4 % 32 * 4 >> 7 & 7) << 4))), "f"(wide[0]), "f"(wide[1]), "f"(wide[2]), "f"(wide[3]) : "memory");
+                asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_4 + 4) / 32 * 8192 + w_row * 128 + (col_4 + 4) % 32 * 4 ^ ((col_4 + 4) / 32 * 8192 + w_row * 128 + (col_4 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide[4]), "f"(wide[5]), "f"(wide[6]), "f"(wide[7]) : "memory");
                 int krow_1_0 = k_row0 + ch * 4 * 8;
                 asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                     : "=r"(*reinterpret_cast<uint32_t*>(&words[0])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words[(0) + 3]))
@@ -750,21 +750,21 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
                         :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col)), "r"(lo[0]), "r"(lo[1]), "r"(lo[2]), "r"(lo[3]), "r"(lo[4]), "r"(lo[5]), "r"(lo[6]), "r"(lo[7]), "r"(lo[8]), "r"(lo[9]), "r"(lo[10]), "r"(lo[11]), "r"(lo[12]), "r"(lo[13]), "r"(lo[14]), "r"(lo[15]), "r"(lo[16]), "r"(lo[17]), "r"(lo[18]), "r"(lo[19]), "r"(lo[20]), "r"(lo[21]), "r"(lo[22]), "r"(lo[23]), "r"(lo[24]), "r"(lo[25]), "r"(lo[26]), "r"(lo[27]), "r"(lo[28]), "r"(lo[29]), "r"(lo[30]), "r"(lo[31]));
                     int col_0 = hcol + 32;
-                    unsigned int hi_1[32];
-                    unsigned int lo_2[32];
+                    unsigned int hi_0[32];
+                    unsigned int lo_0[32];
                     #pragma unroll
                     for (int j_3 = 0; j_3 < 32; j_3++) {
-                        hi_1[j_3] = __as_u32(_tmem_load_0[32 + j_3]) + half_tf32 & mask_tf32;
-                        lo_2[j_3] = __as_u32(_tmem_load_0[32 + j_3] - __uint_as_float(hi_1[j_3])) + half_tf32 & mask_tf32;
+                        hi_0[j_3] = __as_u32(_tmem_load_0[32 + j_3]) + half_tf32 & mask_tf32;
+                        lo_0[j_3] = __as_u32(_tmem_load_0[32 + j_3] - __uint_as_float(hi_0[j_3])) + half_tf32 & mask_tf32;
                     }
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
-                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)col_0), "r"(hi_1[0]), "r"(hi_1[1]), "r"(hi_1[2]), "r"(hi_1[3]), "r"(hi_1[4]), "r"(hi_1[5]), "r"(hi_1[6]), "r"(hi_1[7]), "r"(hi_1[8]), "r"(hi_1[9]), "r"(hi_1[10]), "r"(hi_1[11]), "r"(hi_1[12]), "r"(hi_1[13]), "r"(hi_1[14]), "r"(hi_1[15]), "r"(hi_1[16]), "r"(hi_1[17]), "r"(hi_1[18]), "r"(hi_1[19]), "r"(hi_1[20]), "r"(hi_1[21]), "r"(hi_1[22]), "r"(hi_1[23]), "r"(hi_1[24]), "r"(hi_1[25]), "r"(hi_1[26]), "r"(hi_1[27]), "r"(hi_1[28]), "r"(hi_1[29]), "r"(hi_1[30]), "r"(hi_1[31]));
+                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)col_0), "r"(hi_0[0]), "r"(hi_0[1]), "r"(hi_0[2]), "r"(hi_0[3]), "r"(hi_0[4]), "r"(hi_0[5]), "r"(hi_0[6]), "r"(hi_0[7]), "r"(hi_0[8]), "r"(hi_0[9]), "r"(hi_0[10]), "r"(hi_0[11]), "r"(hi_0[12]), "r"(hi_0[13]), "r"(hi_0[14]), "r"(hi_0[15]), "r"(hi_0[16]), "r"(hi_0[17]), "r"(hi_0[18]), "r"(hi_0[19]), "r"(hi_0[20]), "r"(hi_0[21]), "r"(hi_0[22]), "r"(hi_0[23]), "r"(hi_0[24]), "r"(hi_0[25]), "r"(hi_0[26]), "r"(hi_0[27]), "r"(hi_0[28]), "r"(hi_0[29]), "r"(hi_0[30]), "r"(hi_0[31]));
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
-                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_0)), "r"(lo_2[0]), "r"(lo_2[1]), "r"(lo_2[2]), "r"(lo_2[3]), "r"(lo_2[4]), "r"(lo_2[5]), "r"(lo_2[6]), "r"(lo_2[7]), "r"(lo_2[8]), "r"(lo_2[9]), "r"(lo_2[10]), "r"(lo_2[11]), "r"(lo_2[12]), "r"(lo_2[13]), "r"(lo_2[14]), "r"(lo_2[15]), "r"(lo_2[16]), "r"(lo_2[17]), "r"(lo_2[18]), "r"(lo_2[19]), "r"(lo_2[20]), "r"(lo_2[21]), "r"(lo_2[22]), "r"(lo_2[23]), "r"(lo_2[24]), "r"(lo_2[25]), "r"(lo_2[26]), "r"(lo_2[27]), "r"(lo_2[28]), "r"(lo_2[29]), "r"(lo_2[30]), "r"(lo_2[31]));
+                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_0)), "r"(lo_0[0]), "r"(lo_0[1]), "r"(lo_0[2]), "r"(lo_0[3]), "r"(lo_0[4]), "r"(lo_0[5]), "r"(lo_0[6]), "r"(lo_0[7]), "r"(lo_0[8]), "r"(lo_0[9]), "r"(lo_0[10]), "r"(lo_0[11]), "r"(lo_0[12]), "r"(lo_0[13]), "r"(lo_0[14]), "r"(lo_0[15]), "r"(lo_0[16]), "r"(lo_0[17]), "r"(lo_0[18]), "r"(lo_0[19]), "r"(lo_0[20]), "r"(lo_0[21]), "r"(lo_0[22]), "r"(lo_0[23]), "r"(lo_0[24]), "r"(lo_0[25]), "r"(lo_0[26]), "r"(lo_0[27]), "r"(lo_0[28]), "r"(lo_0[29]), "r"(lo_0[30]), "r"(lo_0[31]));
                     asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
                     if (chu == 0) {
                         asm volatile("tcgen05.fence::before_thread_sync;");
@@ -799,49 +799,7 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         mbarrier_wait(tiles_full_addr + (ls) * 8, _phase_tiles_full);
                         unsigned int words_1[4];
                         float wide_1[8];
-                        int col_1 = w_col + chu * 4 * 8;
-                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_1 / 64 * 8192 + w_row * 128 + col_1 % 64 * 2 ^ (col_1 / 64 * 8192 + w_row * 128 + col_1 % 64 * 2 >> 7 & 7) << 4))));
-                        wide_1[0] = __uint_as_float(words_1[0] << 16);
-                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
-                        wide_1[2] = __uint_as_float(words_1[1] << 16);
-                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
-                        wide_1[4] = __uint_as_float(words_1[2] << 16);
-                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
-                        wide_1[6] = __uint_as_float(words_1[3] << 16);
-                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_1 / 32 * 8192 + w_row * 128 + col_1 % 32 * 4 ^ (col_1 / 32 * 8192 + w_row * 128 + col_1 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_1 + 4) / 32 * 8192 + w_row * 128 + (col_1 + 4) % 32 * 4 ^ ((col_1 + 4) / 32 * 8192 + w_row * 128 + (col_1 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
-                        int col_2 = w_col + (chu * 4 + 1) * 8;
-                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_2 / 64 * 8192 + w_row * 128 + col_2 % 64 * 2 ^ (col_2 / 64 * 8192 + w_row * 128 + col_2 % 64 * 2 >> 7 & 7) << 4))));
-                        wide_1[0] = __uint_as_float(words_1[0] << 16);
-                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
-                        wide_1[2] = __uint_as_float(words_1[1] << 16);
-                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
-                        wide_1[4] = __uint_as_float(words_1[2] << 16);
-                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
-                        wide_1[6] = __uint_as_float(words_1[3] << 16);
-                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_2 / 32 * 8192 + w_row * 128 + col_2 % 32 * 4 ^ (col_2 / 32 * 8192 + w_row * 128 + col_2 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_2 + 4) / 32 * 8192 + w_row * 128 + (col_2 + 4) % 32 * 4 ^ ((col_2 + 4) / 32 * 8192 + w_row * 128 + (col_2 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
-                        int col_4 = w_col + (chu * 4 + 2) * 8;
-                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_4 / 64 * 8192 + w_row * 128 + col_4 % 64 * 2 ^ (col_4 / 64 * 8192 + w_row * 128 + col_4 % 64 * 2 >> 7 & 7) << 4))));
-                        wide_1[0] = __uint_as_float(words_1[0] << 16);
-                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
-                        wide_1[2] = __uint_as_float(words_1[1] << 16);
-                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
-                        wide_1[4] = __uint_as_float(words_1[2] << 16);
-                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
-                        wide_1[6] = __uint_as_float(words_1[3] << 16);
-                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_4 / 32 * 8192 + w_row * 128 + col_4 % 32 * 4 ^ (col_4 / 32 * 8192 + w_row * 128 + col_4 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_4 + 4) / 32 * 8192 + w_row * 128 + (col_4 + 4) % 32 * 4 ^ ((col_4 + 4) / 32 * 8192 + w_row * 128 + (col_4 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
-                        int col_5 = w_col + (chu * 4 + 3) * 8;
+                        int col_5 = w_col + chu * 4 * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
                             : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_5 / 64 * 8192 + w_row * 128 + col_5 % 64 * 2 ^ (col_5 / 64 * 8192 + w_row * 128 + col_5 % 64 * 2 >> 7 & 7) << 4))));
@@ -855,6 +813,48 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
                         asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_5 / 32 * 8192 + w_row * 128 + col_5 % 32 * 4 ^ (col_5 / 32 * 8192 + w_row * 128 + col_5 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
                         asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_5 + 4) / 32 * 8192 + w_row * 128 + (col_5 + 4) % 32 * 4 ^ ((col_5 + 4) / 32 * 8192 + w_row * 128 + (col_5 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
+                        int col_6 = w_col + (chu * 4 + 1) * 8;
+                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_6 / 64 * 8192 + w_row * 128 + col_6 % 64 * 2 ^ (col_6 / 64 * 8192 + w_row * 128 + col_6 % 64 * 2 >> 7 & 7) << 4))));
+                        wide_1[0] = __uint_as_float(words_1[0] << 16);
+                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
+                        wide_1[2] = __uint_as_float(words_1[1] << 16);
+                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
+                        wide_1[4] = __uint_as_float(words_1[2] << 16);
+                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
+                        wide_1[6] = __uint_as_float(words_1[3] << 16);
+                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_6 / 32 * 8192 + w_row * 128 + col_6 % 32 * 4 ^ (col_6 / 32 * 8192 + w_row * 128 + col_6 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_6 + 4) / 32 * 8192 + w_row * 128 + (col_6 + 4) % 32 * 4 ^ ((col_6 + 4) / 32 * 8192 + w_row * 128 + (col_6 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
+                        int col_7 = w_col + (chu * 4 + 2) * 8;
+                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_7 / 64 * 8192 + w_row * 128 + col_7 % 64 * 2 ^ (col_7 / 64 * 8192 + w_row * 128 + col_7 % 64 * 2 >> 7 & 7) << 4))));
+                        wide_1[0] = __uint_as_float(words_1[0] << 16);
+                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
+                        wide_1[2] = __uint_as_float(words_1[1] << 16);
+                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
+                        wide_1[4] = __uint_as_float(words_1[2] << 16);
+                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
+                        wide_1[6] = __uint_as_float(words_1[3] << 16);
+                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_7 / 32 * 8192 + w_row * 128 + col_7 % 32 * 4 ^ (col_7 / 32 * 8192 + w_row * 128 + col_7 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_7 + 4) / 32 * 8192 + w_row * 128 + (col_7 + 4) % 32 * 4 ^ ((col_7 + 4) / 32 * 8192 + w_row * 128 + (col_7 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
+                        int col_8 = w_col + (chu * 4 + 3) * 8;
+                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                            : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_8 / 64 * 8192 + w_row * 128 + col_8 % 64 * 2 ^ (col_8 / 64 * 8192 + w_row * 128 + col_8 % 64 * 2 >> 7 & 7) << 4))));
+                        wide_1[0] = __uint_as_float(words_1[0] << 16);
+                        wide_1[1] = __uint_as_float(words_1[0] & mask_hi);
+                        wide_1[2] = __uint_as_float(words_1[1] << 16);
+                        wide_1[3] = __uint_as_float(words_1[1] & mask_hi);
+                        wide_1[4] = __uint_as_float(words_1[2] << 16);
+                        wide_1[5] = __uint_as_float(words_1[2] & mask_hi);
+                        wide_1[6] = __uint_as_float(words_1[3] << 16);
+                        wide_1[7] = __uint_as_float(words_1[3] & mask_hi);
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_8 / 32 * 8192 + w_row * 128 + col_8 % 32 * 4 ^ (col_8 / 32 * 8192 + w_row * 128 + col_8 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[0]), "f"(wide_1[1]), "f"(wide_1[2]), "f"(wide_1[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_8 + 4) / 32 * 8192 + w_row * 128 + (col_8 + 4) % 32 * 4 ^ ((col_8 + 4) / 32 * 8192 + w_row * 128 + (col_8 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_1[4]), "f"(wide_1[5]), "f"(wide_1[6]), "f"(wide_1[7]) : "memory");
                         int krow_1_4 = k_row0 + chu * 4 * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_1[(0) + 3]))
@@ -1204,29 +1204,29 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                     for (int j_9 = 0; j_9 < 64; j_9++) {
                         _tmem_load_0_1[j_9] = _tmem_load_0_1[j_9] + _tmem_load_1_1[j_9];
                     }
-                    int col_3 = hcol_1;
-                    unsigned int hi_2[32];
+                    int col_9 = hcol_1;
+                    unsigned int hi_1[32];
                     unsigned int lo_1[32];
                     #pragma unroll
                     for (int j_10 = 0; j_10 < 32; j_10++) {
-                        hi_2[j_10] = __as_u32(_tmem_load_0_1[j_10]) + half_tf32 & mask_tf32;
-                        lo_1[j_10] = __as_u32(_tmem_load_0_1[j_10] - __uint_as_float(hi_2[j_10])) + half_tf32 & mask_tf32;
+                        hi_1[j_10] = __as_u32(_tmem_load_0_1[j_10]) + half_tf32 & mask_tf32;
+                        lo_1[j_10] = __as_u32(_tmem_load_0_1[j_10] - __uint_as_float(hi_1[j_10])) + half_tf32 & mask_tf32;
                     }
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
-                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)col_3), "r"(hi_2[0]), "r"(hi_2[1]), "r"(hi_2[2]), "r"(hi_2[3]), "r"(hi_2[4]), "r"(hi_2[5]), "r"(hi_2[6]), "r"(hi_2[7]), "r"(hi_2[8]), "r"(hi_2[9]), "r"(hi_2[10]), "r"(hi_2[11]), "r"(hi_2[12]), "r"(hi_2[13]), "r"(hi_2[14]), "r"(hi_2[15]), "r"(hi_2[16]), "r"(hi_2[17]), "r"(hi_2[18]), "r"(hi_2[19]), "r"(hi_2[20]), "r"(hi_2[21]), "r"(hi_2[22]), "r"(hi_2[23]), "r"(hi_2[24]), "r"(hi_2[25]), "r"(hi_2[26]), "r"(hi_2[27]), "r"(hi_2[28]), "r"(hi_2[29]), "r"(hi_2[30]), "r"(hi_2[31]));
+                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)col_9), "r"(hi_1[0]), "r"(hi_1[1]), "r"(hi_1[2]), "r"(hi_1[3]), "r"(hi_1[4]), "r"(hi_1[5]), "r"(hi_1[6]), "r"(hi_1[7]), "r"(hi_1[8]), "r"(hi_1[9]), "r"(hi_1[10]), "r"(hi_1[11]), "r"(hi_1[12]), "r"(hi_1[13]), "r"(hi_1[14]), "r"(hi_1[15]), "r"(hi_1[16]), "r"(hi_1[17]), "r"(hi_1[18]), "r"(hi_1[19]), "r"(hi_1[20]), "r"(hi_1[21]), "r"(hi_1[22]), "r"(hi_1[23]), "r"(hi_1[24]), "r"(hi_1[25]), "r"(hi_1[26]), "r"(hi_1[27]), "r"(hi_1[28]), "r"(hi_1[29]), "r"(hi_1[30]), "r"(hi_1[31]));
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
-                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_3)), "r"(lo_1[0]), "r"(lo_1[1]), "r"(lo_1[2]), "r"(lo_1[3]), "r"(lo_1[4]), "r"(lo_1[5]), "r"(lo_1[6]), "r"(lo_1[7]), "r"(lo_1[8]), "r"(lo_1[9]), "r"(lo_1[10]), "r"(lo_1[11]), "r"(lo_1[12]), "r"(lo_1[13]), "r"(lo_1[14]), "r"(lo_1[15]), "r"(lo_1[16]), "r"(lo_1[17]), "r"(lo_1[18]), "r"(lo_1[19]), "r"(lo_1[20]), "r"(lo_1[21]), "r"(lo_1[22]), "r"(lo_1[23]), "r"(lo_1[24]), "r"(lo_1[25]), "r"(lo_1[26]), "r"(lo_1[27]), "r"(lo_1[28]), "r"(lo_1[29]), "r"(lo_1[30]), "r"(lo_1[31]));
+                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_9)), "r"(lo_1[0]), "r"(lo_1[1]), "r"(lo_1[2]), "r"(lo_1[3]), "r"(lo_1[4]), "r"(lo_1[5]), "r"(lo_1[6]), "r"(lo_1[7]), "r"(lo_1[8]), "r"(lo_1[9]), "r"(lo_1[10]), "r"(lo_1[11]), "r"(lo_1[12]), "r"(lo_1[13]), "r"(lo_1[14]), "r"(lo_1[15]), "r"(lo_1[16]), "r"(lo_1[17]), "r"(lo_1[18]), "r"(lo_1[19]), "r"(lo_1[20]), "r"(lo_1[21]), "r"(lo_1[22]), "r"(lo_1[23]), "r"(lo_1[24]), "r"(lo_1[25]), "r"(lo_1[26]), "r"(lo_1[27]), "r"(lo_1[28]), "r"(lo_1[29]), "r"(lo_1[30]), "r"(lo_1[31]));
                     int col_0_1 = hcol_1 + 32;
                     unsigned int hi_1_1[32];
-                    unsigned int lo_2_1[32];
+                    unsigned int lo_1_1[32];
                     #pragma unroll
                     for (int j_11 = 0; j_11 < 32; j_11++) {
                         hi_1_1[j_11] = __as_u32(_tmem_load_0_1[32 + j_11]) + half_tf32 & mask_tf32;
-                        lo_2_1[j_11] = __as_u32(_tmem_load_0_1[32 + j_11] - __uint_as_float(hi_1_1[j_11])) + half_tf32 & mask_tf32;
+                        lo_1_1[j_11] = __as_u32(_tmem_load_0_1[32 + j_11] - __uint_as_float(hi_1_1[j_11])) + half_tf32 & mask_tf32;
                     }
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
@@ -1235,7 +1235,7 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                     asm volatile(
                         "tcgen05.st.sync.aligned.32x32b.x32.b32"
                         " [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};"
-                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_0_1)), "r"(lo_2_1[0]), "r"(lo_2_1[1]), "r"(lo_2_1[2]), "r"(lo_2_1[3]), "r"(lo_2_1[4]), "r"(lo_2_1[5]), "r"(lo_2_1[6]), "r"(lo_2_1[7]), "r"(lo_2_1[8]), "r"(lo_2_1[9]), "r"(lo_2_1[10]), "r"(lo_2_1[11]), "r"(lo_2_1[12]), "r"(lo_2_1[13]), "r"(lo_2_1[14]), "r"(lo_2_1[15]), "r"(lo_2_1[16]), "r"(lo_2_1[17]), "r"(lo_2_1[18]), "r"(lo_2_1[19]), "r"(lo_2_1[20]), "r"(lo_2_1[21]), "r"(lo_2_1[22]), "r"(lo_2_1[23]), "r"(lo_2_1[24]), "r"(lo_2_1[25]), "r"(lo_2_1[26]), "r"(lo_2_1[27]), "r"(lo_2_1[28]), "r"(lo_2_1[29]), "r"(lo_2_1[30]), "r"(lo_2_1[31]));
+                        :: "r"(taddr + 128 + (unsigned int)row_base + (unsigned int)(128 + col_0_1)), "r"(lo_1_1[0]), "r"(lo_1_1[1]), "r"(lo_1_1[2]), "r"(lo_1_1[3]), "r"(lo_1_1[4]), "r"(lo_1_1[5]), "r"(lo_1_1[6]), "r"(lo_1_1[7]), "r"(lo_1_1[8]), "r"(lo_1_1[9]), "r"(lo_1_1[10]), "r"(lo_1_1[11]), "r"(lo_1_1[12]), "r"(lo_1_1[13]), "r"(lo_1_1[14]), "r"(lo_1_1[15]), "r"(lo_1_1[16]), "r"(lo_1_1[17]), "r"(lo_1_1[18]), "r"(lo_1_1[19]), "r"(lo_1_1[20]), "r"(lo_1_1[21]), "r"(lo_1_1[22]), "r"(lo_1_1[23]), "r"(lo_1_1[24]), "r"(lo_1_1[25]), "r"(lo_1_1[26]), "r"(lo_1_1[27]), "r"(lo_1_1[28]), "r"(lo_1_1[29]), "r"(lo_1_1[30]), "r"(lo_1_1[31]));
                     asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
                     if (chu == 0) {
                         asm volatile("tcgen05.fence::before_thread_sync;");
@@ -1249,7 +1249,7 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                     for (int j_12 = 0; j_12 < 32; j_12++) {
                         xd_1[j_12] = _tmem_load_0_1[j_12] * decay;
                     }
-                    tmem_st_x32_f32(taddr + (unsigned int)row_base + (unsigned int)col_3, xd_1);
+                    tmem_st_x32_f32(taddr + (unsigned int)row_base + (unsigned int)col_9, xd_1);
                     float xd_3_1[32];
                     #pragma unroll
                     for (int j_13 = 0; j_13 < 32; j_13++) {
@@ -1269,10 +1269,10 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         mbarrier_wait(tiles_full_addr + (ls) * 8, _phase_tiles_full);
                         unsigned int words_3[4];
                         float wide_3[8];
-                        int col_6 = w_col + chu * 4 * 8;
+                        int col_9_1 = w_col + chu * 4 * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_6 / 64 * 8192 + w_row * 128 + col_6 % 64 * 2 ^ (col_6 / 64 * 8192 + w_row * 128 + col_6 % 64 * 2 >> 7 & 7) << 4))));
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_9_1 / 64 * 8192 + w_row * 128 + col_9_1 % 64 * 2 ^ (col_9_1 / 64 * 8192 + w_row * 128 + col_9_1 % 64 * 2 >> 7 & 7) << 4))));
                         wide_3[0] = __uint_as_float(words_3[0] << 16);
                         wide_3[1] = __uint_as_float(words_3[0] & mask_hi);
                         wide_3[2] = __uint_as_float(words_3[1] << 16);
@@ -1281,12 +1281,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         wide_3[5] = __uint_as_float(words_3[2] & mask_hi);
                         wide_3[6] = __uint_as_float(words_3[3] << 16);
                         wide_3[7] = __uint_as_float(words_3[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_6 / 32 * 8192 + w_row * 128 + col_6 % 32 * 4 ^ (col_6 / 32 * 8192 + w_row * 128 + col_6 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_6 + 4) / 32 * 8192 + w_row * 128 + (col_6 + 4) % 32 * 4 ^ ((col_6 + 4) / 32 * 8192 + w_row * 128 + (col_6 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
-                        int col_7 = w_col + (chu * 4 + 1) * 8;
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_9_1 / 32 * 8192 + w_row * 128 + col_9_1 % 32 * 4 ^ (col_9_1 / 32 * 8192 + w_row * 128 + col_9_1 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_9_1 + 4) / 32 * 8192 + w_row * 128 + (col_9_1 + 4) % 32 * 4 ^ ((col_9_1 + 4) / 32 * 8192 + w_row * 128 + (col_9_1 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
+                        int col_10 = w_col + (chu * 4 + 1) * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_7 / 64 * 8192 + w_row * 128 + col_7 % 64 * 2 ^ (col_7 / 64 * 8192 + w_row * 128 + col_7 % 64 * 2 >> 7 & 7) << 4))));
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_10 / 64 * 8192 + w_row * 128 + col_10 % 64 * 2 ^ (col_10 / 64 * 8192 + w_row * 128 + col_10 % 64 * 2 >> 7 & 7) << 4))));
                         wide_3[0] = __uint_as_float(words_3[0] << 16);
                         wide_3[1] = __uint_as_float(words_3[0] & mask_hi);
                         wide_3[2] = __uint_as_float(words_3[1] << 16);
@@ -1295,12 +1295,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         wide_3[5] = __uint_as_float(words_3[2] & mask_hi);
                         wide_3[6] = __uint_as_float(words_3[3] << 16);
                         wide_3[7] = __uint_as_float(words_3[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_7 / 32 * 8192 + w_row * 128 + col_7 % 32 * 4 ^ (col_7 / 32 * 8192 + w_row * 128 + col_7 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_7 + 4) / 32 * 8192 + w_row * 128 + (col_7 + 4) % 32 * 4 ^ ((col_7 + 4) / 32 * 8192 + w_row * 128 + (col_7 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
-                        int col_8 = w_col + (chu * 4 + 2) * 8;
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_10 / 32 * 8192 + w_row * 128 + col_10 % 32 * 4 ^ (col_10 / 32 * 8192 + w_row * 128 + col_10 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_10 + 4) / 32 * 8192 + w_row * 128 + (col_10 + 4) % 32 * 4 ^ ((col_10 + 4) / 32 * 8192 + w_row * 128 + (col_10 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
+                        int col_11 = w_col + (chu * 4 + 2) * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_8 / 64 * 8192 + w_row * 128 + col_8 % 64 * 2 ^ (col_8 / 64 * 8192 + w_row * 128 + col_8 % 64 * 2 >> 7 & 7) << 4))));
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_11 / 64 * 8192 + w_row * 128 + col_11 % 64 * 2 ^ (col_11 / 64 * 8192 + w_row * 128 + col_11 % 64 * 2 >> 7 & 7) << 4))));
                         wide_3[0] = __uint_as_float(words_3[0] << 16);
                         wide_3[1] = __uint_as_float(words_3[0] & mask_hi);
                         wide_3[2] = __uint_as_float(words_3[1] << 16);
@@ -1309,12 +1309,12 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         wide_3[5] = __uint_as_float(words_3[2] & mask_hi);
                         wide_3[6] = __uint_as_float(words_3[3] << 16);
                         wide_3[7] = __uint_as_float(words_3[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_8 / 32 * 8192 + w_row * 128 + col_8 % 32 * 4 ^ (col_8 / 32 * 8192 + w_row * 128 + col_8 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_8 + 4) / 32 * 8192 + w_row * 128 + (col_8 + 4) % 32 * 4 ^ ((col_8 + 4) / 32 * 8192 + w_row * 128 + (col_8 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
-                        int col_9 = w_col + (chu * 4 + 3) * 8;
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_11 / 32 * 8192 + w_row * 128 + col_11 % 32 * 4 ^ (col_11 / 32 * 8192 + w_row * 128 + col_11 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_11 + 4) / 32 * 8192 + w_row * 128 + (col_11 + 4) % 32 * 4 ^ ((col_11 + 4) / 32 * 8192 + w_row * 128 + (col_11 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
+                        int col_12 = w_col + (chu * 4 + 3) * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))
-                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_9 / 64 * 8192 + w_row * 128 + col_9 % 64 * 2 ^ (col_9 / 64 * 8192 + w_row * 128 + col_9 % 64 * 2 >> 7 & 7) << 4))));
+                            : "r"((w_land_addr + ls * 16384 + (unsigned int)(col_12 / 64 * 8192 + w_row * 128 + col_12 % 64 * 2 ^ (col_12 / 64 * 8192 + w_row * 128 + col_12 % 64 * 2 >> 7 & 7) << 4))));
                         wide_3[0] = __uint_as_float(words_3[0] << 16);
                         wide_3[1] = __uint_as_float(words_3[0] & mask_hi);
                         wide_3[2] = __uint_as_float(words_3[1] << 16);
@@ -1323,8 +1323,8 @@ kernel_cake_gdn_det_train_ca5488020bef49bf474b_kcp(const __grid_constant__ CUten
                         wide_3[5] = __uint_as_float(words_3[2] & mask_hi);
                         wide_3[6] = __uint_as_float(words_3[3] << 16);
                         wide_3[7] = __uint_as_float(words_3[3] & mask_hi);
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_9 / 32 * 8192 + w_row * 128 + col_9 % 32 * 4 ^ (col_9 / 32 * 8192 + w_row * 128 + col_9 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_9 + 4) / 32 * 8192 + w_row * 128 + (col_9 + 4) % 32 * 4 ^ ((col_9 + 4) / 32 * 8192 + w_row * 128 + (col_9 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)(col_12 / 32 * 8192 + w_row * 128 + col_12 % 32 * 4 ^ (col_12 / 32 * 8192 + w_row * 128 + col_12 % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[0]), "f"(wide_3[1]), "f"(wide_3[2]), "f"(wide_3[3]) : "memory");
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"((wf_addr + fs * 32768 + (unsigned int)((col_12 + 4) / 32 * 8192 + w_row * 128 + (col_12 + 4) % 32 * 4 ^ ((col_12 + 4) / 32 * 8192 + w_row * 128 + (col_12 + 4) % 32 * 4 >> 7 & 7) << 4))), "f"(wide_3[4]), "f"(wide_3[5]), "f"(wide_3[6]), "f"(wide_3[7]) : "memory");
                         int krow_1_8 = k_row0 + chu * 4 * 8;
                         asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                             : "=r"(*reinterpret_cast<uint32_t*>(&words_3[0])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&words_3[(0) + 3]))

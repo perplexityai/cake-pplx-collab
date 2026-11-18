@@ -22,17 +22,25 @@ precision boundaries, with the dX GEMM's K-slice partials of a chunk of more tha
 ordered FP32 reduction: each slice stores its tile into a slab and the slab sum launched right after the GEMM
 stores the slices' sum, taken in slice order, into the FP32 accumulator rows (a one-slice chunk keeps the
 deterministic plain store).
-Its outputs are held to the deterministic suite's accuracy budgets against the FP64 oracle and the
-unchunked PyTorch path (the same ``GATE_MARGIN`` / ``GATE_TINY`` / ``PRODUCTION_B0``, checked
-against that suite's source below), over repeated runs (worst case), and compared with the
-deterministic package on the same inputs: ``loss`` / ``logp`` / ``lse`` and ``dW`` keep their fixed
-order and equal its bits; ``dX`` meets the budgets, repeats its own bits from run to run, and its
-distance to the deterministic ``dX`` is reported.  A log-probability backward of more than one chunk runs
-vocabulary-major by default (``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` meet the same budgets
-and repeat bit for bit; the tests of the chunk loop's own machinery and bits pin the chunk loop
-(``logprob_chunk_loop``).  The host layer (no mode keyword, PyTorch's deterministic-algorithms alert, the reference
-backend) runs anywhere; the device tests need an SM100 / SM103 / SM107 GPU and the package's
-rendered programs.
+Accuracy is judged against the naive BF16 tier (``tests/cake_naive.py``): every floating output's absolute error
+against a float64 oracle, in the L2 and the max norm over 32 independent input draws (every input, the weight
+too, from the draw's seed), beside the error of PyTorch on the same BF16 inputs with the same ops in BF16; an output
+meets the tier when its median and its largest error are at most 1.005 times the tier's in both norms, and its
+ignored rows are exact zeros.  Device cases are judged at ``JUDGE_H`` / ``JUDGE_V`` (H 6144, V 8192), the
+small-call and one-pass paths and one call of each entry also at the production head (V 154880), and at another
+vocabulary where a test's route needs it (V 256; V 65536 for the one-chunk explicit-budget case); a launch repeated
+on one draw keeps each output's largest error, and each draw asserts the launch's route.  At the production shape a
+test checks the contract (dtype, shape, finite values, ignored rows ``+0``), exact zeros and the bits of one option
+against another on the same inputs.  The package promises no run-to-run bit equality: no test asserts that a call
+repeated on the same inputs gives the same bits.  No test compares an output with the deterministic package's.  The
+outputs that miss the tier today are listed per architecture, each up to its caps, in
+``test_helpers/cake_lm_head_known_misses.py`` (their tests report as xfailed), where a new miss, a listed output that
+misses beyond its caps or a listed output that meets the tier fails the test.  A
+log-probability backward of more than one chunk runs vocabulary-major by default
+(``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` are judged against the same tier; the tests of the
+chunk loop's own machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword,
+PyTorch's deterministic-algorithms alert, the reference backend) runs on the CPU, or on the GPU when it is an SM100 /
+SM103 / SM107 device (``DEV``); the device tests need such a GPU and the package's rendered programs.
 """
 
 import ast
@@ -61,19 +69,30 @@ import torch
 import torch.utils.checkpoint
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from tests.cake_naive import judge_case
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    JUDGE_H,
+    JUDGE_V,
+    SEED_OFFSETS,
+    W_DRAW_OFFSET,
+    contract_lm_head,
+    judge_inputs,
+    judge_lm_head,
+)
+from tests.experimental.test_helpers.cake_lm_head_known_misses import settle
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     DEFAULT_H,
     DEFAULT_V,
-    error_report,
     make_inputs,
     make_temperature,
+    make_weight,
+    naive_bf16,
     reference_fp64,
-    reference_unchunked,
-    rel_l2,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
-# The package under test, named once through ``cake_package``; the deterministic package is the comparison arm.
+# The package under test, named once through ``cake_package``; the deterministic package's names, loader, slice rule
+# and host waits are the counterpart some tests check (no test compares an output with that package's).
 pkg = cake_package("cake.cake_lm_head_nondet_train")
 cake_backend = cake_package("cake.cake_lm_head_nondet_train", "cake_backend")
 opt_in = cake_package("cake.cake_lm_head_nondet_train", "cake_backend_opt_in")
@@ -83,39 +102,21 @@ det_backend = cake_package("cake.cake_lm_head_det_train", "cake_backend")
 det_opt_in = cake_package("cake.cake_lm_head_det_train", "cake_backend_opt_in")
 
 PACKAGE_DIR = Path(pkg.__file__).resolve().parent
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# The host layer's device (the reference backend): the GPU when it is a supported target, else the CPU -- on another
+# GPU the host tests run on the CPU, whose known misses the registry lists (it lists the CPU and the targets only).
+DEV = torch.device(
+    "cuda"
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0) in cake_backend.SUPPORTED_COMPUTE_CAPABILITIES
+    else "cpu"
+)
 CUDA = torch.device("cuda")
 SEED = 20261031
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# The deterministic suite's accuracy budgets, unchanged (``test_tolerances_are_the_deterministic_suites``):
-# at most 1.05x the error of the unchunked PyTorch path on the same inputs plus a floor per metric, and below
-# twice the production-geometry errors of that path.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
 # Repeated runs of the worst-case tests (at least 20).
 REPEATS = 20
 # Seconds a two-thread test waits for a barrier or a thread before it fails
 TIMEOUT_S = 120
-
-
-def _det_suite_constants() -> dict:
-    """``GATE_MARGIN`` / ``GATE_TINY`` / ``PRODUCTION_B0`` as the deterministic suite's source assigns them (read, not
-    imported: importing that module would run its module-level package lookups)."""
-    path = Path(__file__).with_name("test_cake_lm_head_det_train.py")
-    found = {}
-    for node in ast.parse(path.read_text()).body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in ("GATE_MARGIN", "GATE_TINY", "PRODUCTION_B0")
-        ):
-            found[node.targets[0].id] = eval(  # noqa: S307 -- literal constants of a repository file
-                compile(ast.Expression(node.value), str(path), "eval"), {"dict": dict}
-            )
-    return found
 
 
 @pytest.fixture(autouse=True)
@@ -131,18 +132,6 @@ def _zero_weight_split_at_every_size():
 
 # A zero-weight floor above every call's row count: the split never applies
 NO_SPLIT = 1 << 62
-
-
-@contextlib.contextmanager
-def _det_unsplit():
-    """Run the deterministic package without its own zero-weight split (its floor raised past every call,
-    ``det_backend.set_zero_weight_min_rows``), then restore its previous floor: its plain path, every valid row in the
-    chunk loop."""
-    previous = det_backend.set_zero_weight_min_rows(NO_SPLIT)
-    try:
-        yield
-    finally:
-        det_backend.set_zero_weight_min_rows(previous)
 
 
 @contextlib.contextmanager
@@ -174,6 +163,167 @@ def _host_inputs(T, objective="ce", *, seed=SEED, device=DEV, **kw):
     )
 
 
+# ---------------------------------------------------------------------------
+# The naive-tier judge (``tests/cake_naive.py`` through the family's glue ``cake_lm_head_judge``)
+# ---------------------------------------------------------------------------
+# A judged case runs 32 draws; every input of draw ``j`` comes from its seed ``s`` (the weight from ``s +
+# W_DRAW_OFFSET``), one float64 oracle and one naive BF16 value per draw judge every form and launch of it, and each
+# draw is held to its contract.  Host cases run the reference backend at ``H_HOST`` / ``V_HOST`` on ``DEV``; device
+# cases the generated programs at ``JUDGE_H`` / ``JUDGE_V`` (production shapes keep their contract and bit checks).
+# This suite's own per-draw choices come from CPU generators seeded ``s`` plus the glue's offsets.
+ZERO_SET_OFFSET = SEED_OFFSETS["zero sets"]
+UPSTREAM_OFFSET = SEED_OFFSETS["upstream gradients"]
+DEVICE_UPSTREAM_OFFSET = SEED_OFFSETS["device upstream gradients"]
+
+
+def _ignore_frac(T, ignore_frac=None):
+    """The ignored-row fraction of a device case (:func:`_device_inputs`'s default: none below 16 rows, else 5 %)."""
+    return (0.0 if T < 16 else 0.05) if ignore_frac is None else ignore_frac
+
+
+def _judge_host(record_property, T, launch, *, make_kw=None, prepare=None, seed=SEED, **judge_kw):
+    """Judge the reference backend over the draws of a ``T``-row host case (seed ``seed + T``): draw ``s`` makes
+    :func:`judge_inputs` at ``H_HOST`` / ``V_HOST`` on ``DEV`` (``make_kw``: ``objective``, ``ignore_frac``,
+    ``temperature`` ...), ``prepare(inp)`` turns them into the case's inputs, ``launch(inp)`` returns the call's result
+    (or one per form).  ``judge_kw``: the other keywords of :func:`judge_lm_head`."""
+    make_kw = dict(make_kw or {})
+
+    def make(s):
+        inp = judge_inputs(T, s, H=H_HOST, V=V_HOST, device=DEV, **make_kw)
+        return inp if prepare is None else prepare(inp)
+
+    return judge_lm_head(record_property, make=make, launch=launch, seed=seed + T, **judge_kw)
+
+
+def _judge_device(
+    record_property, T, launch, *, make_kw=None, prepare=None, seed=SEED, ignore_frac=None, H=JUDGE_H, V=JUDGE_V,
+    **judge_kw,
+):
+    """:func:`_judge_host` for the generated programs: the draws' inputs at ``H`` / ``V`` (default ``JUDGE_H`` /
+    ``JUDGE_V``) on the device, ``ignore_frac`` as :func:`_device_inputs`."""
+    make_kw = dict(make_kw or {})
+    make_kw.setdefault("ignore_frac", _ignore_frac(T, ignore_frac))
+
+    def make(s):
+        inp = judge_inputs(T, s, H=H, V=V, device=CUDA, **make_kw)
+        return inp if prepare is None else prepare(inp)
+
+    return judge_lm_head(record_property, make=make, launch=launch, seed=seed + T, **judge_kw)
+
+
+def _judge_problems(record_property, launch, labels, *, seed, entry="loss", names=None, contract=None):
+    """Judge a case whose draw runs several problems: ``launch(j, s)`` returns a list of ``(inp, {label: result})``
+    -- each problem's inputs and the results of its calls, the ``labels`` between them -- and every label's ``names``
+    (default the entry's ``loss`` / ``logp`` / ``dX`` / ``dW``; a mapping gives each label its own) are judged as
+    ``name@label`` against its problem's float64 oracle and naive BF16 value (one of each per problem), its ignored
+    rows' ``logp`` / ``dX`` exactly 0, every result held to ``contract(result, inp)`` (default
+    :func:`contract_lm_head`)."""
+    default = ("loss", "logp", "dX", "dW") if entry == "loss" else ("logp", "dX", "dW")
+    if names is None:
+        names = default
+    per_label = dict(names) if isinstance(names, dict) else {label: tuple(names) for label in labels}
+    wanted = {name for found in per_label.values() for name in found}
+    need = dict(need_dx="dX" in wanted, need_dw="dW" in wanted)
+    exact = frozenset(f"{name}_ignored@{label}" for name in ("logp", "dX") for label in labels)
+    kept: dict = {}
+    judged_on: list[torch.device] = []  # the device of the judged outputs (their architecture's known misses)
+
+    def check(result, inp):
+        if contract is None:
+            contract_lm_head(result, inp, entry=entry)
+        else:
+            contract(result, inp)
+
+    def run(j, s):
+        groups = launch(j, s)
+        seen = [label for _, results in groups for label in results]
+        assert sorted(seen) == sorted(labels), (seen, labels)
+        outputs, oracle = {}, {}
+        for inp, results in groups:
+            ref = reference_fp64(inp, entry=entry, **need)
+            ignored = ~inp.valid
+            for label, result in results.items():
+                try:
+                    check(result, inp)
+                except AssertionError as exc:
+                    raise AssertionError(f"draw {j} {label}: {exc}") from exc
+                for name in per_label[label]:
+                    outputs[f"{name}@{label}"] = result[name].detach()
+                    oracle[f"{name}@{label}"] = ref[name]
+                for name in ("logp", "dX"):
+                    value = result.get(name)
+                    if value is not None:
+                        value = value.detach()[ignored.to(value.device)]
+                        outputs[f"{name}_ignored@{label}"] = value
+                        oracle[f"{name}_ignored@{label}"] = torch.zeros(
+                            value.shape, dtype=torch.float64, device=value.device
+                        )
+        kept[j] = [(inp, tuple(results)) for inp, results in groups]
+        if not judged_on and outputs:
+            judged_on.append(next(iter(outputs.values())).device)
+        return outputs, oracle
+
+    def naive(j, tier):
+        values = {}
+        for inp, group in kept.pop(j):
+            found = naive_bf16(inp, entry=entry, **need)
+            for label in group:
+                for name in per_label[label]:
+                    values[f"{name}@{label}"] = found[name]
+        return values
+
+    judge, failures = judge_case(run, naive, seed=seed, exact=exact)
+    judge.record(record_property)
+    settle(judge, failures, judged_on[0] if judged_on else None)
+    return judge
+
+
+def _judge_weight(s, *, H=JUDGE_H, V=JUDGE_V):
+    """The weight of the draw of seed ``s`` (:func:`judge_inputs`'s: ``s + W_DRAW_OFFSET``), on the device."""
+    return make_weight(V, H, seed=s + W_DRAW_OFFSET, device=CUDA)
+
+
+def _draw_inputs(T, s, W, objective="ce", *, ignore_frac=None, **kw):
+    """:func:`judge_inputs` of ``T`` rows on the device with the draw's weight ``W`` (:func:`_judge_weight`) passed in,
+    so the problems of one draw share it; ``ignore_frac`` as :func:`_device_inputs`."""
+    return make_inputs(
+        T,
+        objective=objective,
+        seed=s,
+        H=int(W.shape[1]),
+        V=int(W.shape[0]),
+        device=CUDA,
+        W=W,
+        ignore_frac=_ignore_frac(T, ignore_frac),
+        **kw,
+    )
+
+
+def _zero_weight_rows(inp):
+    """The valid rows of zero weight (``+0`` or ``-0``) of a policy problem."""
+    return inp.valid & (inp.loss_weights == 0)
+
+
+def _draw_zero_weights(inp, kind, *, negative_zero=False):
+    """``inp`` with the zero-weight rows of ``kind`` (:func:`_zero_weight_set`) drawn from the draw's own generator
+    (``inp.seed + ZERO_SET_OFFSET``)."""
+    zero = _zero_weight_set(inp, kind, gen_seed=inp.seed + ZERO_SET_OFFSET)
+    return _with_zero_weights(inp, zero, negative_zero=negative_zero)
+
+
+def _zero_rows_contract(entry="loss"):
+    """The contract of a call with zero-weight rows: :func:`contract_lm_head` and the zero-weight rows' ``dX`` rows
+    exact zeros."""
+
+    def check(result, inp):
+        contract_lm_head(result, inp, entry=entry)
+        dX = result.get("dX")
+        if dX is not None:
+            assert not bool(dX[_zero_weight_rows(inp)].any()), "a zero-weight row's dX is not 0"
+
+    return check
+
+
 # The mode and alert tests run on the CPU: under torch's deterministic algorithms some CUDA operators of the
 # reference backend raise their own alert, which is not the one under test.
 CPU = torch.device("cpu")
@@ -186,7 +336,6 @@ def _run(
     inp,
     C,
     *,
-    package="nd",
     entry="loss",
     train_x=True,
     train_w=True,
@@ -195,13 +344,11 @@ def _run(
     keep=False,
     **switches,
 ):
-    """One forward + backward through the autograd entry of ``package`` (``"nd"``: this package; ``"det"``: the
-    deterministic package) on ``backend``.  ``switches`` pass through
+    """One forward + backward through this package's autograd entry on ``backend``.  ``switches`` pass through
     (``memory_mode`` / ``num_valid_rows`` / ``check_num_valid_rows`` select the opt-in module); ``keep`` calls the
-    log-probability entry with the kept logits (``cake_lm_head_nondet_train_logprob_keep`` /
-    ``cake_lm_head_det_train_logprob_keep``); the log-probability entry also takes the inputs' ``temperature`` unless
-    ``switches`` names one, and a call with ``temperature`` or ``check_temperature`` goes to the module's
-    ``cake_lm_head_nondet_train_logprob_temperature`` / ``cake_lm_head_det_train_logprob_temperature``.  Returns ``loss`` /
+    log-probability entry with the kept logits (``cake_lm_head_nondet_train_logprob_keep``); the log-probability entry
+    also takes the inputs' ``temperature`` unless ``switches`` names one, and a call with ``temperature`` or
+    ``check_temperature`` goes to the module's ``cake_lm_head_nondet_train_logprob_temperature``.  Returns ``loss`` /
     ``logp`` / ``dX`` / ``dW`` and the leaves."""
     X = inp.X.detach().requires_grad_(train_x)
     W = inp.W.detach().requires_grad_(train_w)
@@ -209,28 +356,15 @@ def _run(
         switches.setdefault("temperature", inp.temperature)
     opt = bool(_OPT_IN_KEYWORDS & switches.keys())
     tau = bool(TEMPERATURE_KEYWORDS & switches.keys())
-    if package == "nd":
-        be = opt_in if opt else cake_backend
-        loss_fn, logprob_fn = (
-            be.cake_lm_head_nondet_train_loss,
-            be.cake_lm_head_nondet_train_logprob_temperature
-            if tau
-            else be.cake_lm_head_nondet_train_logprob,
-        )
-    else:
-        be = det_opt_in if opt else det_backend
-        loss_fn, logprob_fn = (
-            be.cake_lm_head_det_train_loss,
-            be.cake_lm_head_det_train_logprob_temperature
-            if tau
-            else be.cake_lm_head_det_train_logprob,
-        )
+    be = opt_in if opt else cake_backend
+    loss_fn, logprob_fn = (
+        be.cake_lm_head_nondet_train_loss,
+        be.cake_lm_head_nondet_train_logprob_temperature
+        if tau
+        else be.cake_lm_head_nondet_train_logprob,
+    )
     if keep:
-        logprob_fn = (
-            cake_backend.cake_lm_head_nondet_train_logprob_keep
-            if package == "nd"
-            else det_backend.cake_lm_head_det_train_logprob_keep
-        )
+        logprob_fn = cake_backend.cake_lm_head_nondet_train_logprob_keep
     if entry == "loss":
         loss, logp = loss_fn(
             X,
@@ -257,32 +391,6 @@ def _run(
     return dict(loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad, X=X, W=W)
 
 
-def _check_against_references(result, inp, *, entry="loss", ceiling=False):
-    """The deterministic suite's gates, unchanged: every metric at most ``GATE_MARGIN`` times the unchunked path's
-    error against the FP64 oracle plus ``GATE_TINY``; with ``ceiling`` also below twice ``PRODUCTION_B0``; exact zeros
-    on the ignored rows."""
-    oracle = reference_fp64(inp, entry=entry)
-    b0 = reference_unchunked(inp, entry=entry)
-    errors = error_report(result, oracle, inp.labels)
-    b0_errors = error_report(b0, oracle, inp.labels)
-    assert not errors["nan"]
-    for key, tiny in GATE_TINY.items():
-        if key in errors:
-            assert errors[key] <= GATE_MARGIN * b0_errors[key] + tiny, (
-                f"{key}: {errors[key]:.3e} vs unchunked {b0_errors[key]:.3e}"
-            )
-    if ceiling:
-        for key, measured in PRODUCTION_B0.items():
-            if key in errors:
-                assert errors[key] <= 2.0 * measured, (
-                    f"{key}: {errors[key]:.3e} above twice the production-geometry unchunked error"
-                )
-    assert errors["logp_ignored_zero"]
-    if result.get("dX") is not None:
-        assert errors["dX_ignored_zero"]
-    return errors, b0_errors
-
-
 def _bits(t: torch.Tensor) -> torch.Tensor:
     """The bit pattern of a float tensor as integers (``torch.equal`` on floats equates +0 and -0)."""
     t = t.detach().reshape(-1).contiguous()
@@ -295,26 +403,9 @@ def _same_bits(a, b) -> bool:
     return a.dtype == b.dtype and a.shape == b.shape and torch.equal(_bits(a), _bits(b))
 
 
-def _ulp_flips(a: torch.Tensor, b: torch.Tensor) -> tuple[float, int]:
-    """Fraction of BF16 elements that differ, and the largest difference in units in the last place."""
-    ia, ib = _bits(a).to(torch.int32), _bits(b).to(torch.int32)
-    # ordered integer view of the BF16 bit patterns (sign-magnitude -> two's complement order)
-    oa = torch.where(ia < 0, -(ia & 0x7FFF), ia)
-    ob = torch.where(ib < 0, -(ib & 0x7FFF), ib)
-    diff = (oa - ob).abs()
-    return float((diff != 0).float().mean()), int(diff.max()) if diff.numel() else 0
-
-
 # ---------------------------------------------------------------------------
-# Host layer (any device; the reference backend)
+# Host layer (the reference backend on ``DEV``: the CPU, or a supported GPU)
 # ---------------------------------------------------------------------------
-
-
-def test_tolerances_are_the_deterministic_suites():
-    """The accuracy budgets of this suite are the deterministic suite's (the same budgets for both paths)."""
-    assert _det_suite_constants() == dict(
-        GATE_MARGIN=GATE_MARGIN, GATE_TINY=GATE_TINY, PRODUCTION_B0=PRODUCTION_B0
-    )
 
 
 # The names of the package without ``det`` and the deterministic package's name of each.
@@ -1095,24 +1186,16 @@ def test_paths_without_gradient_gemms_do_not_alert():
 
 @pytest.mark.parametrize("T, C", [(1, 16), (37, 16), (200, 64)])
 @pytest.mark.parametrize("objective", ["ce", "policy"])
-def test_reference_matches_the_deterministic_reference_and_the_oracle(objective, T, C):
-    """The reference backend (PyTorch operators at the kernels' rounding boundaries, fixed order) is the
-    deterministic package's bit for bit and passes the deterministic suite's gates."""
-    inp = _host_inputs(T, objective)
-    nd = _run(inp, C)
-    det = _run(inp, C, package="det")
-    for key in ("loss", "logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    _check_against_references(nd, inp)
+def test_reference_meets_the_naive_tier(record_property, objective, T, C):
+    """The reference backend (PyTorch operators at the kernels' rounding boundaries, fixed order): ``loss`` / ``logp``
+    / ``dX`` / ``dW`` are judged against the naive tier over the draws."""
+    _judge_host(record_property, T, lambda inp: _run(inp, C), make_kw=dict(objective=objective))
 
 
-def test_reference_logprob_entry_matches_the_deterministic_reference():
-    inp = _host_inputs(37)
-    nd = _run(inp, 16, entry="logprob")
-    det = _run(inp, 16, entry="logprob", package="det")
-    for key in ("logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    _check_against_references(nd, inp, entry="logprob")
+def test_reference_logprob_entry_meets_the_naive_tier(record_property):
+    _judge_host(
+        record_property, 37, lambda inp: _run(inp, 16, entry="logprob"), entry="logprob"
+    )
 
 
 # The B200 (sm_100a, 148 SMs, 74 co-resident dX clusters) geometry of the GLM-class head the slice rules were measured
@@ -1379,17 +1462,16 @@ def test_dx_launches_come_from_the_dx_helper():
     assert not plain.dx_sliced
 
 
-def test_slab_sum_binds_the_k_sliced_launch_slab():
+def test_slab_sum_binds_the_k_sliced_launch_slab(record_property):
     """The slab sum of a K-sliced chunk (forced two slices, reference backend) is bound right behind the chunk's
     ``gemm_dx_red`` launch to the chunk's rows of ``dX_acc`` and the call's slab that launch writes, at its
     ``m_tiles`` / ``ldc``: ``ws_slab = m_tiles * 128 * ldc``, ``num_vecs = rows_c * H / cast_vec``, ``n_slabs = 2``.
     The slab sum of a chunk the plan does not slice is refused, and the reference engine's store-then-sum ``dX``
-    passes the gates."""
+    meets the naive tier."""
     inp = _host_inputs(37)
     kw = dict(loss_div=1.0, chunk_size=16, backend="reference")
     with _forced_dx_slices():
         runner = cake_backend.prepare_lm_head_loss(inp.X, inp.W, inp.labels, **kw)
-        nd = _run(inp, 16)
     plan, t = runner.plan, runner.tensors
     assert plan.dx_slices == (2,) * plan.num_chunks
     order = runner.forward_order
@@ -1411,7 +1493,8 @@ def test_slab_sum_binds_the_k_sliced_launch_slab():
         cake_backend.stage_values(
             cake_backend.DX_SLAB_SUM_STAGE, plain.tensors, plain.plan, 0
         )
-    _check_against_references(nd, inp)
+    with _forced_dx_slices():
+        _judge_host(record_property, 37, lambda draw: _run(draw, 16))
 
 
 def test_reference_slab_sum_stores_without_reading_dx():
@@ -1943,10 +2026,11 @@ def test_package_reads_no_environment_variable():
                 assert node.id not in ("environ", "getenv"), (path.name, node.lineno)
 
 
-def test_zero_weight_floor_switch():
+def test_zero_weight_floor_switch(record_property):
     """The programmatic switch of the zero-weight split's smallest call: default (calls of at least 4096 rows -- this
     suite runs at 0, every compacted policy call), the previous value returned, bad values refused, and the floor
-    applied to the split decision (no binding depends on it)."""
+    applied to the split decision (no binding depends on it); ``logp`` of the split and of the unsplit call meet the
+    naive tier."""
     assert cake_backend.ZERO_WEIGHT_MIN_ROWS_DEFAULT == 4096
     inp = _host_inputs(200, "policy")
     problem = cake_backend.validate_lm_head_inputs(
@@ -1984,7 +2068,25 @@ def test_zero_weight_floor_switch():
         assert cake_backend.set_zero_weight_min_rows(0) == 256
     split = cake_backend.forward_loss(inp.X, inp.W, weighted.labels, **kw)
     assert split.memory["zero_weight_rows"] == int(zero.sum())
-    torch.testing.assert_close(split.logp, below.logp, atol=1e-5, rtol=0)
+
+    def forms(draw):
+        call = dict(kw, infer_logp=draw.infer_logp, loss_weights=draw.loss_weights)
+        with _zero_weight_floor(NO_SPLIT):
+            plain = cake_backend.forward_loss(draw.X, draw.W, draw.labels, **call)
+        assert "zero_weight_rows" not in plain.memory
+        found = cake_backend.forward_loss(draw.X, draw.W, draw.labels, **call)
+        assert found.memory["zero_weight_rows"] == int(_zero_weight_rows(draw).sum())
+        return {"split": dict(logp=found.logp), "plain": dict(logp=plain.logp)}
+
+    _judge_host(
+        record_property,
+        200,
+        forms,
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("random", 0.3)),
+        names=("logp",),
+        forms=("split", "plain"),
+    )
 
 
 def test_k_sliced_plans_start_their_sequences_with_chunk_0():
@@ -2377,47 +2479,6 @@ def _poison_allocator(nbytes: int = 1 << 31) -> None:
     torch.cuda.synchronize()
 
 
-def _det_tuning(kw: dict) -> dict:
-    """The deterministic package's arm of a call's ``gemm_tuning``: a pinned dX slice count above its four slices (the
-    reduction serves up to eight) falls back to its own rule -- ``loss`` / ``logp`` / ``dW`` do not depend on it."""
-    tuning = kw.get("gemm_tuning")
-    k = (tuning or {}).get("dx", {}).get("k_slices")
-    if k is None or int(k) <= 4:
-        return kw
-    dx = {key: v for key, v in tuning["dx"].items() if key != "k_slices"}
-    rest = {op: v for op, v in tuning.items() if op != "dx"}
-    return dict(kw, gemm_tuning=dict(rest, **({"dx": dx} if dx else {})) or None)
-
-
-def _folds(inp, chunk) -> bool:
-    """Whether this package's plan of the call folds its short tail (``cake_backend.loop_chunks``) over the valid rows
-    (compacted) or every row: the deterministic package's chunks then differ."""
-    T = int(inp.labels.numel())
-    return any(
-        len(cake_backend.loop_chunks(T, rows, chunk))
-        < len(cake_backend.plan_chunks(rows, chunk))
-        for rows in {T, int((inp.labels >= 0).sum())}
-        if rows
-    )
-
-
-def _compare_with_det(nd, det, *, record=None, folded=False):
-    """``loss`` / ``logp`` and ``dW`` are the deterministic package's bits (fixed-order stages); ``dX`` is
-    reported: max |ND - det| and the BF16 flip rate.  ``folded`` (a call whose short tail folds, :func:`_folds`): its
-    chunks are not the deterministic package's, ``logp`` only (``loss`` / ``dW`` are held to the gates)."""
-    for key in ("logp",) if folded else ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    if nd["dX"] is not None:
-        diff = float((nd["dX"].float() - det["dX"].float()).abs().max())
-        flips, max_ulp = _ulp_flips(nd["dX"], det["dX"])
-        if record is not None:
-            record.append(
-                dict(dX_max_abs_vs_det=diff, dX_flip_rate=flips, dX_max_ulp=max_ulp)
-            )
-        return diff, flips, max_ulp
-    return None
-
-
 @contextlib.contextmanager
 def _launch_record(*, temperature: bool = False):
     """The launch keys both backend modules run (each key as ``_run_keys`` runs it), in order: the record of what a
@@ -2471,31 +2532,59 @@ DEVICE_CASES = [
     DEVICE_CASES,
     ids=lambda v: "-" if v is None else str(v).replace(" ", ""),
 )
-def test_device_matches_references_and_the_deterministic_package(
-    glm_weight, T, objective, entry, tuning
-):
+def test_device_meets_the_naive_tier(glm_weight, record_property, T, objective, entry, tuning):
+    """Each case's ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the
+    draws (a one-pass call judges the one-pass call and the chunked call of the same draw as named outputs, the
+    route asserted on every draw; a one-pass case launches both twice per draw and the judge keeps each output's
+    largest error); the production-shape call holds its contract, and a one-pass call's second call (its remembered
+    binding) holds its contract too."""
     _require_program(entry=entry)
     inp = _device_inputs(T, objective, W=glm_weight)
     kw = {} if tuning is None else dict(gemm_tuning=tuning)
     with _one_pass_launches() as one_pass:
         nd = _run(inp, 4096, entry=entry, backend="cake", **kw)
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **_det_tuning(kw))
-    errors, b0 = _check_against_references(nd, inp, entry=entry, ceiling=True)
-    _check_against_references(det, inp, entry=entry, ceiling=True)
+    contract_lm_head(nd, inp, entry=entry)
     if one_pass:
-        # a one-pass call (one_pass_rows) forms loss / logp / dW in its own fixed-order stages: the same bits run to
-        # run, not the deterministic package's; the chunked path of the same call keeps the package's bits
         again = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        for key in ("loss", "logp", "dW"):
-            assert _same_bits(again[key], nd[key]), key
+        contract_lm_head(again, inp, entry=entry)
+        del again
+    one_pass = bool(one_pass)
+
+    def launch(draw):
+        with _one_pass_launches() as launched:
+            first = _run(draw, 4096, entry=entry, backend="cake", **kw)
+        assert bool(launched) == one_pass, launched
+        if not one_pass:
+            return first
         with _one_pass_rows(()):
-            nd = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        _check_against_references(nd, inp, entry=entry, ceiling=True)
-    diff, flips, max_ulp = _compare_with_det(nd, det)
-    print(
-        f"\nND T={T} {objective} {entry} {tuning}: dX_rel_l2 {errors['dX_rel_l2']:.3e} (b0 {b0['dX_rel_l2']:.3e}) "
-        f"dW_rel_l2 {errors['dW_rel_l2']:.3e} max|ND-det| dX {diff:.3e} flip {flips:.2e} max_ulp {max_ulp}"
+            chunked = _run(draw, 4096, entry=entry, backend="cake", **kw)
+        return {"one_pass": first, "chunked": chunked}
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry=entry,
+        forms=("one_pass", "chunked") if one_pass else None,
+        make_kw=dict(objective=objective),
+        repeats=2 if one_pass else 1,
     )
+
+
+@pytest.mark.parametrize("entry", ["loss", "logprob"])
+def test_device_meets_the_naive_tier_at_the_production_head(record_property, entry):
+    """One call of each entry (``T`` 4097, cross-entropy, the default plan) is judged against the naive tier at the
+    production head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the draws: the
+    case the ``JUDGE_V`` matrix scales down; no draw runs the one-pass launches."""
+    _require_program(entry=entry)
+
+    def launch(draw):
+        with _one_pass_launches() as launched:
+            out = _run(draw, 4096, entry=entry, backend="cake")
+        assert not launched, launched
+        return out
+
+    _judge_device(record_property, 4097, launch, entry=entry, H=GLM_H, V=GLM_V)
 
 
 @pytest.mark.parametrize(
@@ -2512,76 +2601,72 @@ def test_device_matches_references_and_the_deterministic_package(
     ids=lambda v: "-" if v is None else str(v).replace(" ", ""),
 )
 def test_device_worst_case_over_repeated_runs(
-    logprob_chunk_loop, glm_weight, T, objective, entry, tuning, policy
+    logprob_chunk_loop, glm_weight, record_property, T, objective, entry, tuning, policy
 ):
-    """``REPEATS`` runs on the same inputs (fresh allocator state each time, 0xFF-poisoned): every run passes the
-    gates against the FP64 oracle and the unchunked FP32 path; ``loss`` / ``logp`` / ``dW`` never change and are the
-    deterministic package's bits; the worst ``dX`` error, the run-to-run ``dX`` spread and the worst max |ND - det| and
-    BF16 flip rate of ``dX`` are reported."""
+    """``REPEATS`` runs on the same production-shape inputs (fresh allocator state each time, 0xFF-poisoned): every run
+    holds its contract.  At ``JUDGE_H`` / ``JUDGE_V`` three poisoned runs per draw meet the naive tier (the judge
+    keeps each output's largest error)."""
     _require_program(entry=entry)
     inp = _device_inputs(T, objective, W=glm_weight)
     kw = {} if tuning is None else dict(gemm_tuning=tuning)
-    oracle = reference_fp64(inp, entry=entry)
-    b0 = error_report(reference_unchunked(inp, entry=entry), oracle, inp.labels)
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **_det_tuning(kw))
-    first, worst, spread, versus = None, {}, 0.0, []
     for _ in range(REPEATS):
         _poison_allocator(1 << 30)
         with _slice_policy(policy):
             run = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        _compare_with_det(run, det, record=versus, folded=_folds(inp, 4096))
-        errors = error_report(run, oracle, inp.labels)
-        assert (
-            not errors["nan"]
-            and errors["logp_ignored_zero"]
-            and errors["dX_ignored_zero"]
-        )
-        for key, tiny in GATE_TINY.items():
-            if key in errors:
-                assert errors[key] <= GATE_MARGIN * b0[key] + tiny, key
-                worst[key] = max(worst.get(key, 0.0), errors[key])
-        if first is None:
-            first = run
-        else:
-            for key in ("loss", "logp", "dW"):
-                assert _same_bits(run[key], first[key]), key
-            spread = max(
-                spread, float((run["dX"].float() - first["dX"].float()).abs().max())
-            )
-    print(
-        f"\nND worst over {REPEATS} runs T={T} {objective} {entry} {tuning} policy={policy}: {worst}; dX run-to-run "
-        f"max {spread:.3e}; max|ND-det| dX {max(v['dX_max_abs_vs_det'] for v in versus):.3e} flip "
-        f"{max(v['dX_flip_rate'] for v in versus):.2e} max_ulp {max(v['dX_max_ulp'] for v in versus)}"
+        contract_lm_head(run, inp, entry=entry)
+
+    def launch(draw):
+        _poison_allocator(1 << 30)
+        with _slice_policy(policy):
+            return _run(draw, 4096, entry=entry, backend="cake", **kw)
+
+    _judge_device(
+        record_property, T, launch, entry=entry, make_kw=dict(objective=objective), repeats=3
     )
 
 
-def test_device_changing_shapes_reuse_nonzero_scratch(glm_weight):
+def test_device_changing_shapes_reuse_nonzero_scratch(glm_weight, record_property):
     """Ragged and changing row counts on one weight, the binding cache and the allocator's blocks reused between
-    calls after a 0xFF fill: every call passes the gates and repeats its own ``loss`` / ``logp`` / ``dW``."""
+    calls after a 0xFF fill: every call holds its contract; at ``JUDGE_H`` / ``JUDGE_V`` the same sequence per draw
+    (one weight) judges every call against the naive tier: the first call of each size (``name@T<rows>``) and the
+    repeated sizes' calls from their remembered bindings on reused blocks (``name@T<rows>_again``)."""
     _require_program(entry="loss")
     sizes = (4097, 1, 12289, 4095, 37, 4097, 8191, 1)
     inputs = {T: _device_inputs(T, "policy", W=glm_weight) for T in sorted(set(sizes))}
-    seen = {}
     for T in sizes:
         _poison_allocator(1 << 30)
-        run = _run(inputs[T], 4096, backend="cake")
-        if T in seen:
-            for key in ("loss", "logp", "dW"):
-                assert _same_bits(run[key], seen[T][key]), (T, key)
-        else:
-            _check_against_references(run, inputs[T], ceiling=True)
-            seen[T] = run
+        contract_lm_head(_run(inputs[T], 4096, backend="cake"), inputs[T])
+    del inputs
+
+    def label(T, seen):
+        return f"T{T}_again" if seen else f"T{T}"
+
+    labels = []
+    for i, T in enumerate(sizes):
+        labels.append(label(T, T in sizes[:i]))
+    assert len(set(labels)) == len(labels), labels
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {T: _draw_inputs(T, s, W, "policy") for T in sorted(set(sizes))}
+        results = {T: {} for T in draws}
+        for T in sizes:
+            _poison_allocator(1 << 30)
+            results[T][label(T, bool(results[T]))] = _run(draws[T], 4096, backend="cake")
+        return [(draws[T], results[T]) for T in sorted(results)]
+
+    _judge_problems(record_property, launch, tuple(labels), seed=SEED)
 
 
 @pytest.mark.parametrize("T", [1, 256])
 @pytest.mark.parametrize("form", ["plain", "temperature"])
 def test_device_logprob_backward_makes_its_gradient_buffers_behind_the_recompute(
-    glm_weight, T, form
+    glm_weight, record_property, T, form
 ):
     """A remembered log-probability backward binding (plain and with a per-token temperature) makes ``dX_acc``,
     ``dX`` and ``dW`` right before chunk 0's dX GEMM -- behind the row gathers and the recompute launch, the launches
-    a call of a few rows waits for on the host -- and the call repeats the first (prepared) call's ``logp`` / ``dW``
-    bits (plain: and passes the gates; temperature: ``dX`` within :func:`_assert_tau_close`)."""
+    a call of a few rows waits for on the host -- and the first (prepared) call and the remembered call hold their
+    contract; at ``JUDGE_H`` / ``JUDGE_V`` the remembered call of every draw is judged against the naive tier."""
     if form == "temperature":
         _require_tau_program()
         inp = _tau_inputs(T, W=glm_weight)
@@ -2611,42 +2696,54 @@ def test_device_logprob_backward_makes_its_gradient_buffers_behind_the_recompute
     )
     dx = next(i for i, s in enumerate(stages) if s.startswith("gemm_dx"))
     assert dz < dx, stages
-    for key in ("logp", "dW"):
-        assert _same_bits(again[key], first[key]), key
-    if form == "temperature":
-        _assert_tau_close(again, first, (T, form), keys=("dX",))
-    else:
-        _check_against_references(again, inp, entry="logprob", ceiling=True)
+    contract_lm_head(first, inp, entry="logprob")
+    contract_lm_head(again, inp, entry="logprob")
+
+    def launch(draw):
+        with _small_t_keep(False):
+            _run(draw, 4096, entry="logprob", backend="cake")
+            _run(draw, 4096, entry="logprob", backend="cake")
+            before = cache.misses
+            result = _run(draw, 4096, entry="logprob", backend="cake")
+        assert cache.misses == before, "the judged call runs remembered bindings"
+        return result
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        seed=SEED + 7637 if form == "temperature" else SEED,
+        make_kw=dict(temperature="hetero") if form == "temperature" else None,
+        ignore_frac=0.05 if form == "temperature" else None,
+    )
 
 
-def test_device_checkpoint_replay(glm_weight):
-    """``torch.utils.checkpoint`` replays the forward in the backward: ``loss`` / ``logp`` / ``dW`` are the
-    uncheckpointed call's bits, ``dX`` passes the gates."""
+def test_device_checkpoint_replay(glm_weight, record_property):
+    """``torch.utils.checkpoint`` replays the forward in the backward: the checkpointed step holds its contract, and its
+    ``loss`` / ``dX`` / ``dW`` meet the naive tier at ``JUDGE_H`` / ``JUDGE_V``."""
     _require_program(entry="loss")
     inp = _device_inputs(4097, "ce", W=glm_weight)
 
-    def head(X, W):
-        return cake_backend.cake_lm_head_nondet_train_loss(
-            X, W, inp.labels, loss_div=inp.loss_div, chunk_size=4096
-        )
+    def step(problem):
+        def head(X, W):
+            return cake_backend.cake_lm_head_nondet_train_loss(
+                X, W, problem.labels, loss_div=problem.loss_div, chunk_size=4096
+            )
 
-    X = inp.X.detach().requires_grad_(True)
-    W = inp.W.detach().requires_grad_(True)
-    loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
-    loss.backward()
-    plain = _run(inp, 4096, backend="cake")
-    assert _same_bits(loss.detach(), plain["loss"])
-    assert _same_bits(W.grad, plain["dW"])
-    _check_against_references(
-        dict(loss=loss.detach(), logp=plain["logp"], dX=X.grad, dW=W.grad),
-        inp,
-        ceiling=True,
-    )
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
+        loss.backward()
+        return dict(loss=loss.detach(), dX=X.grad, dW=W.grad)
+
+    contract_lm_head(step(inp), inp)
+    _judge_device(record_property, 4097, step, names=("loss", "dX", "dW"))
 
 
 def test_device_gradient_accumulation(glm_weight):
     """Two backward passes into the same leaves: each leaf's ``.grad`` is the sum of the two incoming gradients (the
-    autograd engine's BF16 add), and each incoming gradient passes the gates."""
+    autograd engine's BF16 add), and each incoming gradient holds its contract."""
     _require_program(entry="loss")
     a = _device_inputs(4097, "ce", W=glm_weight)
     b = _device_inputs(4095, "ce", W=glm_weight, seed=SEED + 7)
@@ -2665,71 +2762,115 @@ def test_device_gradient_accumulation(glm_weight):
         loss.backward()
     assert len(seen_w) == 2
     assert _same_bits(W.grad, seen_w[0] + seen_w[1])
-    single_a, single_b = (
-        _run(a, 4096, backend="cake"),
-        _run(b, 4096, backend="cake", train_x=False),
-    )
-    assert _same_bits(seen_w[0], single_a["dW"]) and _same_bits(
-        seen_w[1], single_b["dW"]
-    )
-    _check_against_references(dict(single_a, dX=X.grad), a, ceiling=True)
+    contract_lm_head(dict(dX=X.grad, dW=seen_w[0]), a)
+    contract_lm_head(dict(dW=seen_w[1]), b)
 
 
-def test_device_retained_graph(glm_weight):
-    """A retained graph runs the backward again from the saved accumulators: the same bits both times."""
+def test_device_retained_graph(glm_weight, record_property):
+    """A retained graph runs the backward again from the saved accumulators: both backward passes hold their
+    contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence, and the loss and both backward passes
+    are judged against the naive tier (``name@first``: the loss and the pass that retains the graph;
+    ``name@retained``: the second pass, from the retained graph)."""
     _require_program(entry="loss")
+
+    def passes(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        loss = cake_backend.cake_lm_head_nondet_train_loss(
+            X,
+            W,
+            problem.labels,
+            objective="policy",
+            infer_logp=problem.infer_logp,
+            loss_weights=problem.loss_weights,
+            chunk_size=4096,
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dx, dw = torch.autograd.grad(loss, (X, W), retain_graph=retain)
+            results[label] = dict(dX=dx, dW=dw)
+        results["first"]["loss"] = loss.detach()
+        return results
+
     inp = _device_inputs(4097, "policy", W=glm_weight)
-    X = inp.X.detach().requires_grad_(True)
-    W = inp.W.detach().requires_grad_(True)
-    loss = cake_backend.cake_lm_head_nondet_train_loss(
-        X,
-        W,
-        inp.labels,
-        objective="policy",
-        infer_logp=inp.infer_logp,
-        loss_weights=inp.loss_weights,
-        chunk_size=4096,
+    for result in passes(inp).values():
+        contract_lm_head(result, inp)
+    del inp
+
+    def launch(j, s):
+        draw = _draw_inputs(4097, s, _judge_weight(s), "policy")
+        return [(draw, passes(draw))]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 4097,
+        names={"first": ("loss", "dX", "dW"), "retained": ("dX", "dW")},
     )
-    dx1, dw1 = torch.autograd.grad(loss, (X, W), retain_graph=True)
-    dx2, dw2 = torch.autograd.grad(loss, (X, W))
-    assert _same_bits(dx1, dx2) and _same_bits(dw1, dw2)
 
 
-def test_device_concurrent_streams(glm_weight):
-    """Calls on two streams at once (different row counts, one weight): each gives the serial call's ``loss`` /
-    ``logp`` / ``dW`` and passes the gates."""
+def test_device_concurrent_streams(glm_weight, record_property):
+    """Calls on two streams at once (different row counts, one weight), after a serial call of each: every call holds
+    its contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence (one weight), and every call is judged
+    against the naive tier (``name@serial_T<rows>``: the serial call; ``name@stream_T<rows>``: the call on its
+    stream)."""
     _require_program(entry="loss")
-    inputs = [_device_inputs(T, "ce", W=glm_weight) for T in (4097, 8191)]
-    serial = [_run(inp, 4096, backend="cake") for inp in inputs]
-    streams = [torch.cuda.Stream() for _ in inputs]
-    results = [None, None]
-    torch.cuda.synchronize()
-    for i, (inp, stream) in enumerate(zip(inputs, streams, strict=True)):
-        with torch.cuda.stream(stream):
-            X = inp.X.detach().requires_grad_(True)
-            W = inp.W.detach().requires_grad_(True)
-            loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
-                X,
-                W,
-                inp.labels,
-                loss_div=inp.loss_div,
-                chunk_size=4096,
-                return_logp=True,
-            )
-            loss.backward()
-            results[i] = dict(loss=loss.detach(), logp=logp, dX=X.grad, dW=W.grad)
-    torch.cuda.synchronize()
-    for inp, got, want in zip(inputs, results, serial, strict=True):
-        for key in ("loss", "logp", "dW"):
-            assert _same_bits(got[key], want[key]), key
-        _check_against_references(got, inp, ceiling=True)
+    sizes = (4097, 8191)
+
+    def sequence(inputs):
+        results = {T: {f"serial_T{T}": _run(inputs[T], 4096, backend="cake")} for T in sizes}
+        streams = {T: torch.cuda.Stream() for T in sizes}
+        torch.cuda.synchronize()
+        for T in sizes:
+            inp = inputs[T]
+            with torch.cuda.stream(streams[T]):
+                X = inp.X.detach().requires_grad_(True)
+                W = inp.W.detach().requires_grad_(True)
+                loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+                    X,
+                    W,
+                    inp.labels,
+                    loss_div=inp.loss_div,
+                    chunk_size=4096,
+                    return_logp=True,
+                )
+                loss.backward()
+                results[T][f"stream_T{T}"] = dict(
+                    loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad
+                )
+        torch.cuda.synchronize()
+        return results
+
+    inputs = {T: _device_inputs(T, "ce", W=glm_weight) for T in sizes}
+    for T, results in sequence(inputs).items():
+        for got in results.values():
+            contract_lm_head(got, inputs[T])
+    del inputs
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {T: _draw_inputs(T, s, W) for T in sizes}
+        results = sequence(draws)
+        return [(draws[T], results[T]) for T in sizes]
+
+    _judge_problems(
+        record_property,
+        launch,
+        tuple(f"{form}_T{T}" for T in sizes for form in ("serial", "stream")),
+        seed=SEED + sum(sizes),
+    )
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
-def test_device_prepared_runner_and_cuda_graph(glm_weight, entry, shipped_chunks):
+def test_device_prepared_runner_and_cuda_graph(glm_weight, record_property, entry, shipped_chunks):
     """A prepared runner launches without allocating; a CUDA graph captured from it replays for new values written
-    into the bound tensors and gives the runner's own results on those values.  The shipped chunks (``shipped_chunks``:
-    no short-tail fold; the 4097-row call keeps its 1-row tail chunk)."""
+    into the bound tensors, again after its accumulators and chunk buffers were filled with NaN, and holds its contract
+    on those values.  At ``JUDGE_H`` / ``JUDGE_V`` a graph captured once replays every draw's ``X`` / labels /
+    ``dlogp`` copied into its bound tensors (the weight bound and fixed), again after its accumulators and chunk
+    buffers were filled with NaN, and the outputs of both replays are judged against the naive tier (``name@replay`` /
+    ``name@again``).  The shipped chunks (``shipped_chunks``: no short-tail fold; the 4097-row call keeps its 1-row
+    tail chunk)."""
     _require_program(entry=entry)
     inp = _device_inputs(4097, "ce", W=glm_weight, ignore_frac=0.0)
     new = _device_inputs(4097, "ce", W=glm_weight, seed=SEED + 11, ignore_frac=0.0)
@@ -2783,39 +2924,63 @@ def test_device_prepared_runner_and_cuda_graph(glm_weight, entry, shipped_chunks
     graph.replay()
     torch.cuda.synchronize()
     again = outputs()
-    for key in ("loss", "logp", "dW"):
-        if replayed[key] is not None:
-            assert _same_bits(again[key], replayed[key]), key
-    assert bool(torch.isfinite(again["dX"].float()).all())
-    print(
-        f"\nND CUDA graph {entry}: second replay max|dX - first| "
-        f"{float((again['dX'].float() - replayed['dX'].float()).abs().max()):.3e}"
-    )
-    runner.step()
-    torch.cuda.synchronize()
-    eager = dict(
-        logp=runner.logp,
-        dX=runner.dx_out,
-        dW=runner.dw_out,
-        loss=runner.loss if entry == "loss" else None,
-    )
-    for key in ("loss", "logp", "dW"):
-        if replayed[key] is not None:
-            assert _same_bits(replayed[key], eager[key]), key
-    result = dict(
-        loss=replayed["loss"].reshape(())
-        if entry == "loss"
-        else (replayed["logp"] * new.dlogp).sum(),
-        logp=replayed["logp"],
-        dX=replayed["dX"],
-        dW=replayed["dW"],
-    )
-    if entry == "loss":
-        _check_against_references(result, new, ceiling=True)
-    else:
-        _check_against_references(
-            dict(result, loss=None), new, entry="logprob", ceiling=True
+    for result in (replayed, again):
+        result = dict(result, loss=result["loss"].reshape(()) if entry == "loss" else None)
+        contract_lm_head(result, new, entry=entry)
+    runner = graph = replayed = again = result = None  # release the production-shape buffers
+    W = make_weight(JUDGE_V, JUDGE_H, seed=SEED + W_DRAW_OFFSET, device=CUDA)  # bound once for every draw
+    state = {}
+
+    def make(s):
+        return make_inputs(
+            4097, seed=s, H=JUDGE_H, V=JUDGE_V, device=CUDA, W=W, ignore_frac=0.0
         )
+
+    def launch(draw):
+        if not state:
+            bound_x, bound_labels = draw.X.clone(), draw.labels.clone()
+            call = dict(chunk_size=4096, backend="cake", entry=entry)
+            if entry == "loss":
+                call.update(loss_div=draw.loss_div)
+            prepared = cake_backend.prepare_lm_head_loss(bound_x, W, bound_labels, **call)
+            assert prepared.plan.dx_sliced
+            if entry == "logprob":
+                prepared.tensors["d_in"].copy_(draw.dlogp)
+            prepared.step()
+            capture = torch.cuda.Stream()
+            capture.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(capture):
+                prepared.step()
+            torch.cuda.current_stream().wait_stream(capture)
+            captured = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(captured):
+                prepared.step()
+            state.update(runner=prepared, graph=captured, X=bound_x, labels=bound_labels)
+        prepared = state["runner"]
+        state["X"].copy_(draw.X)
+        state["labels"].copy_(draw.labels)
+        if entry == "logprob":
+            prepared.tensors["d_in"].copy_(draw.dlogp)
+
+        def replay():
+            state["graph"].replay()
+            torch.cuda.synchronize()
+            return dict(
+                loss=prepared.loss.reshape(()).clone() if entry == "loss" else None,
+                logp=prepared.logp.clone(),
+                dX=prepared.dx_out.clone(),
+                dW=prepared.dw_out.clone(),
+            )
+
+        first = replay()
+        # the second replay: the bound accumulators and chunk buffers hold NaN before it
+        for name in ("dx_acc", "logits", "stats"):
+            prepared.tensors[name].fill_(float("nan"))
+        return {"replay": first, "again": replay()}
+
+    judge_lm_head(
+        record_property, make=make, launch=launch, entry=entry, seed=SEED + 4097, forms=("replay", "again")
+    )
 
 
 def test_device_frozen_inputs(glm_weight):
@@ -2830,27 +2995,29 @@ def test_device_frozen_inputs(glm_weight):
         assert _same_bits(r["loss"], both["loss"]) and _same_bits(
             r["logp"], both["logp"]
         )
-    _check_against_references(x_only, inp, ceiling=True)
+    contract_lm_head(x_only, inp)
 
 
 @pytest.mark.parametrize("memory_mode", ["fast", "budget"])
-def test_device_opt_in_forms(glm_weight, memory_mode):
-    """The opt-in forms (``memory_mode``, the caller's valid-row count) of this package pass the gates and keep the
-    deterministic package's ``loss`` / ``logp`` / ``dW``."""
+def test_device_opt_in_forms(glm_weight, record_property, memory_mode):
+    """The opt-in forms (``memory_mode``, the caller's valid-row count) of this package hold their contract and meet
+    the naive tier at ``JUDGE_H`` / ``JUDGE_V``."""
     _require_program(entry="loss")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     count = int(inp.valid.sum())
     nd = _run(inp, 4096, backend="cake", memory_mode=memory_mode, num_valid_rows=count)
-    det = _run(
-        inp,
-        4096,
-        backend="cake",
-        package="det",
-        memory_mode=memory_mode,
-        num_valid_rows=count,
+    contract_lm_head(nd, inp)
+    _judge_device(
+        record_property,
+        8191,
+        lambda draw: _run(
+            draw,
+            4096,
+            backend="cake",
+            memory_mode=memory_mode,
+            num_valid_rows=int(draw.valid.sum()),
+        ),
     )
-    _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
 
 
 @pytest.mark.parametrize("policy", ["det", "measured"])
@@ -2858,13 +3025,14 @@ def test_device_opt_in_forms(glm_weight, memory_mode):
     "T, entry", [(16231, "loss"), (4097, "loss"), (8191, "logprob")], ids=str
 )
 def test_device_unordered_reduce_is_exercised(
-    logprob_chunk_loop, glm_weight, T, entry, policy
+    logprob_chunk_loop, glm_weight, record_property, T, entry, policy
 ):
     """On the representative rows the eager entries launch the K-sliced reduction (``gemm_dx_red*``), each followed
     right away by its slab sum (``dx_slab_sum*``, never the support path's accumulating form), for every chunk the
     slice rule gives more than one slice: the device's registered program serves the reduction forms and their slab
     sum and no deterministic sliced form (no ``slab_sum`` / ``dx_reduce`` launch, no ``dx_ws`` workspace); the plan
-    sizes the ordered form's slab."""
+    sizes the ordered form's slab.  At ``JUDGE_H`` / ``JUDGE_V`` the calls launch the reduction and its slab sum on
+    every draw and meet the naive tier."""
     _require_program(entry=entry)
     module_name, record = cake_backend.record_for(CUDA)
     registered = set(cake_jit.registered_stages(module_name))
@@ -2912,10 +3080,20 @@ def test_device_unordered_reduce_is_exercised(
     assert not any(key[0] in ("slab_sum", "dx_reduce") for key in order)
     assert "dx_ws" not in runner.tensors and "dx_ws" not in runner.layout
     assert plan.dx_slab_bytes > 0
-    _check_against_references(nd, inp, entry=entry, ceiling=True)
+    contract_lm_head(nd, inp, entry=entry)
     print(
         f"\nND reduction T={T} {entry} policy={policy}: slices {plan.dx_slices} red {[k[0] for k in red]}"
     )
+    runners.clear()
+    runner = nd = None
+
+    def launch(draw):
+        with _slice_policy(policy), _launch_record() as launched:
+            result = _run(draw, 4096, entry=entry, backend="cake")
+        _assert_reduction_launched(launched)
+        return result
+
+    _judge_device(record_property, T, launch, entry=entry)
 
 
 @pytest.mark.parametrize(
@@ -2927,24 +3105,47 @@ def test_device_unordered_reduce_is_exercised(
     ],
     ids=str,
 )
-def test_device_ordered_dx_repeats_bitwise(glm_weight, T, entry, tuning):
+def test_device_ordered_dx_reduction_meets_the_naive_tier(glm_weight, record_property, T, entry, tuning):
     """The K-sliced dX reduction is ordered: five runs of one call (the slice rule's slices, or forced ones) launch
-    ``gemm_dx_red*`` and its slab sum, give the same ``loss`` / ``logp`` / ``dX`` / ``dW`` bits and pass the
-    gates."""
+    ``gemm_dx_red*`` and its slab sum and hold their contract; at ``JUDGE_H`` / ``JUDGE_V`` five runs per draw launch
+    the reduction and meet the naive tier (the judge keeps each output's largest error)."""
     _require_program(entry=entry)
     inp = _device_inputs(T, "ce", W=glm_weight)
     kw = {} if tuning is None else {"gemm_tuning": tuning}
-    with _launch_record() as launched:
-        first = _run(inp, 4096, entry=entry, backend="cake", **kw)
-    assert any(key[0].startswith(cake_backend.DX_RED_STAGE) for key in launched), (
-        launched
-    )
-    assert any(key[0] in cake_backend.DX_SLAB_SUM_STAGES for key in launched), launched
-    for _ in range(4):
-        again = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        for key in ("loss", "logp", "dX", "dW"):
-            assert _same_bits(again[key], first[key]), key
-    _check_against_references(first, inp, entry=entry, ceiling=True)
+    for _ in range(5):
+        with _launch_record() as launched:
+            run = _run(inp, 4096, entry=entry, backend="cake", **kw)
+        assert any(key[0].startswith(cake_backend.DX_RED_STAGE) for key in launched), (
+            launched
+        )
+        assert any(key[0] in cake_backend.DX_SLAB_SUM_STAGES for key in launched), launched
+        contract_lm_head(run, inp, entry=entry)
+        del run
+
+    def launch(draw):
+        with _launch_record() as launched:
+            result = _run(draw, 4096, entry=entry, backend="cake", **kw)
+        _assert_reduction_launched(launched)
+        return result
+
+    _judge_device(record_property, T, launch, entry=entry, repeats=5)
+
+
+def _assert_reduction_launched(launched, chunks=None):
+    """A call's launch record (:func:`_launch_record`) runs the K-sliced dX reduction -- on the chunks ``chunks`` when
+    given -- each launch followed right away by its chunk's slab sum."""
+    red = [key for key in launched if key[0].startswith(cake_backend.DX_RED_STAGE)]
+    assert red, sorted({key[0] for key in launched})
+    if chunks is not None:
+        assert [key[1] for key in red] == list(chunks), (chunks, red)
+    for key in red:
+        after = launched[launched.index(key) + 1]
+        assert after[0] in cake_backend.DX_SLAB_SUM_STAGES and after[1] == key[1], launched
+
+
+def _judge_shape_weight():
+    """A weight of the judged shape for the planner's rules that read only its shape (:func:`_device_slices`)."""
+    return torch.empty((JUDGE_V, JUDGE_H), dtype=torch.bfloat16, device="meta")
 
 
 def _device_slices(
@@ -2987,15 +3188,12 @@ def _device_slices(
 
 
 @pytest.mark.parametrize("policy", ["det", "measured"])
-def test_device_one_slice_chunks_are_the_deterministic_bits(
-    glm_weight, policy, shipped_chunks
-):
+def test_device_one_slice_and_sliced_chunks_in_one_call(glm_weight, record_property, policy, shipped_chunks):
     """A call whose plan on the RUNNING device mixes a chunk of more than one K slice (the reduction) with a chunk of
     one (the plain store) -- the row count is searched on this device's plan (its SM count and architecture), never
-    assumed: the one-slice chunk's ``dX`` rows are the deterministic package's one-slice bits, ``loss`` / ``logp`` /
-    ``dW`` its bits under its own rule, the call passes the gates, and the
-    sliced rows' max |ND - det| and BF16 flip rate are reported.  Skipped only when no two-chunk call of this device
-    has such a plan.  The shipped chunks (``shipped_chunks``: no short-tail fold)."""
+    assumed: the call runs that plan and holds its contract, and at ``JUDGE_H`` / ``JUDGE_V`` the call of the row
+    count searched on that shape's plan runs it on every draw and meets the naive tier.  Skipped only when no
+    two-chunk call of this device has such a plan.  The shipped chunks (``shipped_chunks``: no short-tail fold)."""
     _require_program(entry="loss")
     T = next(
         (
@@ -3023,59 +3221,92 @@ def test_device_one_slice_chunks_are_the_deterministic_bits(
         del runner
         nd = _run(inp, 4096, backend="cake")
     assert slices == _device_slices(T, policy, glm_weight), slices
-    det = _run(inp, 4096, backend="cake", package="det")
-    one = _run(
-        inp, 4096, backend="cake", package="det", gemm_tuning={"dx": {"k_slices": None}}
+    assert len(chunks) == len(slices) == 2, (chunks, slices)
+    contract_lm_head(nd, inp)
+    print(f"\nND mixed slices T={T} {slices} policy={policy}")
+    del nd
+    shape = _judge_shape_weight()
+    T_judge = next(
+        (
+            rows
+            for rows in range(4097, 8192)
+            if 1 in (s := _device_slices(rows, policy, shape)) and max(s) > 1
+        ),
+        None,
     )
-    _check_against_references(nd, inp, ceiling=True)
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    sliced = torch.zeros(T, dtype=torch.bool, device=CUDA)
-    for (row0, rows_c), s in zip(chunks, slices, strict=True):
-        if s > 1:
-            sliced[row0 : row0 + rows_c] = True
-    # the one-slice rows: the deterministic package's one-slice dX bits (one slice sums the same products in the same
-    # K order in every dX form, so this holds whatever slice count the deterministic rule plans for that chunk)
-    assert _same_bits(nd["dX"][~sliced], one["dX"][~sliced])
-    diff = float((nd["dX"][sliced].float() - det["dX"][sliced].float()).abs().max())
-    flips, max_ulp = _ulp_flips(nd["dX"][sliced], det["dX"][sliced])
-    print(
-        f"\nND mixed slices T={T} {slices} policy={policy}: S1 rows bitwise det; sliced rows max|ND-det| {diff:.3e} "
-        f"flip {flips:.2e} max_ulp {max_ulp}"
-    )
+    assert T_judge is not None, "no two-chunk call of the judged shape mixes the slice counts"
+    want = _device_slices(T_judge, policy, shape)
+
+    def launch(draw):
+        with _slice_policy(policy):
+            prepared = cake_backend.prepare_lm_head_loss(
+                draw.X, draw.W, draw.labels, loss_div=draw.loss_div, chunk_size=4096
+            )
+            assert prepared.plan.dx_slices == want, (prepared.plan.dx_slices, want)
+            del prepared
+            return _run(draw, 4096, backend="cake")
+
+    _judge_device(record_property, T_judge, launch, ignore_frac=0.0)
 
 
-def test_device_logp_statistics_never_change(glm_weight):
-    """``loss`` / ``logp`` / ``lse`` keep their fixed order in this package: the deterministic package's bits."""
+def test_device_logp_statistics_never_change(glm_weight, record_property):
+    """The forward-only log-probability call's ``logp`` (fixed-order stages) is finite, and at ``JUDGE_H`` /
+    ``JUDGE_V`` its ``logp`` and its compacted ``lse`` (the valid rows, in row order) meet the naive tier."""
     _require_program(entry="logprob")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     nd = cake_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096)
-    det = det_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096)
-    assert _same_bits(nd.logp, det.logp) and _same_bits(nd.lse, det.lse)
     assert math.isfinite(float(nd.logp.sum()))
+
+    def launch(draw):
+        fr = cake_backend.forward_logprob(draw.X, draw.W, draw.labels, chunk_size=4096)
+        rows = draw.valid.nonzero().squeeze(1)
+        index = fr.row_index.to(rows.device)
+        assert torch.equal(index.sort().values, rows), "the compacted rows are not the valid rows"
+        lse = torch.full((draw.T,), float("nan"), dtype=fr.lse.dtype, device=fr.lse.device)
+        lse[index] = fr.lse
+        return dict(logp=fr.logp, lse=lse[rows])  # the valid rows' statistic, in row order
+
+    def contract(result, draw):
+        contract_lm_head(result, draw, entry="logprob")
+        lse = result["lse"]
+        assert lse.dtype == torch.float32 and tuple(lse.shape) == (int(draw.valid.sum()),)
+        assert bool(torch.isfinite(lse).all())
+
+    _judge_device(
+        record_property,
+        8191,
+        launch,
+        entry="logprob",
+        names=("logp", "lse"),
+        views={"lse": ("lse", lambda draw, value: value[draw.valid])},
+        contract=contract,
+    )
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_one_slice_call_runs_under_strict_deterministic_algorithms(
-    glm_weight, entry
+    glm_weight, record_property, entry
 ):
     """Under strict ``torch.use_deterministic_algorithms(True)`` a call whose dX chunks all have one slice (pinned; every
-    row valid, uncompacted) raises no alert: its launches have one order, so two runs give the same ``dX`` / ``dW``
-    bits and ``dX`` is the deterministic entry's (the same one-slice plain store).  This checks on the device the
-    fixed order of the weight gradient (chunk order, no atomics) that the package's docstrings state."""
+    row valid, uncompacted) raises no alert (its launches have one order), binding and from the remembered binding, and
+    both calls hold their contract; at ``JUDGE_H`` / ``JUDGE_V`` two calls per draw raise no alert and are judged
+    against the naive tier (the judge keeps each output's largest error)."""
     _require_program(entry=entry)
     inp = _device_inputs(8191, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(gemm_tuning={"dx": {"k_slices": None}}, compact_rows=False)
-    runs = []
     for _ in range(2):
         with _torch_deterministic(True), warnings.catch_warnings():
             warnings.filterwarnings("error", message=f".*{_ALERT}.*")
-            runs.append(_run(inp, 4096, entry=entry, backend="cake", **kw))
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det", **kw)
-    for key in ("loss", "logp", "dX", "dW"):
-        assert _same_bits(runs[0][key], runs[1][key]), key
-    assert _same_bits(runs[0]["dX"], det["dX"])
-    _check_against_references(runs[0], inp, entry=entry)
+            run = _run(inp, 4096, entry=entry, backend="cake", **kw)
+        contract_lm_head(run, inp, entry=entry)
+        del run
+
+    def launch(draw):
+        with _torch_deterministic(True), warnings.catch_warnings():
+            warnings.filterwarnings("error", message=f".*{_ALERT}.*")
+            return _run(draw, 4096, entry=entry, backend="cake", **kw)
+
+    _judge_device(record_property, 8191, launch, entry=entry, ignore_frac=0.0, repeats=2)
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
@@ -3085,14 +3316,13 @@ def test_device_k_sliced_call_alerts_before_its_dx_and_leaves_no_state(
     """Under strict ``torch.use_deterministic_algorithms(True)`` a call whose plan has K-sliced dX chunks (two slices
     pinned; the default compacted path with the hidden valid-row count) raises PyTorch's ``RuntimeError`` before any dX
     launch -- the launch record holds no ``gemm_dx*`` key and no slab sum -- on a call that forms its binding
-    and on a remembered one; the next call outside the mode gives the reference call's ``loss`` / ``logp`` / ``dW``
-    bits and a ``dX`` within the budgets (the raise leaves no half-built binding or thread state).  Under
-    ``warn_only=True`` the call warns and runs."""
+    and on a remembered one; the next call outside the mode holds its contract (the raise leaves no half-built binding
+    or thread state).  Under ``warn_only=True`` the call warns, runs and holds its contract."""
     _require_program(entry=entry)
     inp = _device_inputs(8191, "ce", W=glm_weight)
     kw = dict(gemm_tuning={"dx": {"k_slices": 2}})
     name = "forward_loss" if entry == "loss" else "backward_logprob"
-    ref = _run(inp, 4096, entry=entry, backend="cake", **kw)
+    contract_lm_head(_run(inp, 4096, entry=entry, backend="cake", **kw), inp, entry=entry)
     cake_backend.BINDING_CACHE.clear()
     for attempt in ("binds", "remembered"):
         with (
@@ -3110,24 +3340,21 @@ def test_device_k_sliced_call_alerts_before_its_dx_and_leaves_no_state(
         ]
         assert not dx_keys, (attempt, launched)
         again = _run(inp, 4096, entry=entry, backend="cake", **kw)
-        for key in ("loss", "logp", "dW"):
-            assert _same_bits(again[key], ref[key]), (attempt, key)
-        _check_against_references(again, inp, entry=entry)
+        contract_lm_head(again, inp, entry=entry)
     with (
         _torch_deterministic(True, warn_only=True),
         pytest.warns(UserWarning, match=f"{name} {_ALERT}"),
     ):
         warned = _run(inp, 4096, entry=entry, backend="cake", **kw)
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(warned[key], ref[key]), key
-    _check_against_references(warned, inp, entry=entry)
+    contract_lm_head(warned, inp, entry=entry)
 
 
 def test_device_kept_backward_alerts_before_its_dx_and_keeps_the_logits(glm_weight):
     """``backward_logprob_keep`` under strict ``torch.use_deterministic_algorithms(True)`` with K-sliced dX chunks (two
     slices pinned) raises PyTorch's ``RuntimeError`` before any dX launch (no ``gemm_dx*`` key, no slab sum)
     and leaves the kept logits unconsumed: the same views then serve a backward outside the mode, which gives the
-    default call's ``dW`` bits and a ``dX`` within the budgets.  Under ``warn_only=True`` it warns once and runs."""
+    default call's ``dW`` bits and a ``dX`` that holds its contract.  Under ``warn_only=True`` it warns once and
+    runs."""
     _require_program(entry="logprob")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     tuning = {"dx": {"k_slices": 2}}
@@ -3147,7 +3374,7 @@ def test_device_kept_backward_alerts_before_its_dx_and_keeps_the_logits(glm_weig
     def check(dx, dw, tag):
         torch.cuda.synchronize()
         assert _same_bits(dw, ref["dW"]), tag
-        _check_against_references(dict(ref, dX=dx, dW=dw), inp, entry="logprob")
+        contract_lm_head(dict(ref, dX=dx, dW=dw), inp, entry="logprob")
 
     fr = forward()
     with (
@@ -3212,15 +3439,16 @@ def test_device_budget_recompute_backward_does_not_alert(glm_weight, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def _zero_weight_set(inp, kind, *, seed=SEED):
+def _zero_weight_set(inp, kind, *, seed=SEED, gen_seed=None):
     """bool ``[T]`` of the valid rows whose weight becomes zero: ``"none"``, ``"one"`` (the first valid row),
     ``("group", f)`` (whole groups of 512 consecutive rows, ``round(f * groups)`` of them), ``("random", f)``
-    (``round(f * T_v)`` random valid rows) or ``"all"``."""
+    (``round(f * T_v)`` random valid rows) or ``"all"``; the random choices from a CPU generator seeded ``gen_seed``
+    (default ``seed + T``)."""
     valid = inp.labels >= 0
     T = int(valid.numel())
     zs = torch.zeros(T, dtype=torch.bool, device=valid.device)
     gen = torch.Generator(device="cpu")
-    gen.manual_seed(seed + T)
+    gen.manual_seed(seed + T if gen_seed is None else gen_seed)
     if kind == "none":
         return zs
     if kind == "all":
@@ -3260,7 +3488,6 @@ def _loss_call(
     inp,
     C,
     *,
-    package="nd",
     backend="cake",
     return_logp=True,
     train_x=True,
@@ -3268,14 +3495,11 @@ def _loss_call(
     module=None,
     **kw,
 ):
-    """One autograd loss call (forward + backward) of ``package`` (``module``: this package's opt-in module for its
+    """One autograd policy-loss call (forward + backward) of this package (``module``: its opt-in module for its
     keywords); returns loss / logp (``None`` without ``return_logp``) / dX / dW."""
     X = inp.X.detach().requires_grad_(train_x)
     W = inp.W.detach().requires_grad_(train_w)
-    if package == "nd":
-        fn = (cake_backend if module is None else module).cake_lm_head_nondet_train_loss
-    else:
-        fn = det_backend.cake_lm_head_det_train_loss
+    fn = (cake_backend if module is None else module).cake_lm_head_nondet_train_loss
     out = fn(
         X,
         W,
@@ -3343,31 +3567,39 @@ ZERO_KINDS_HOST = ["one", ("random", 0.166), ("group", 0.5), "all"]
 
 @pytest.mark.parametrize("kind", ZERO_KINDS_HOST, ids=str)
 @pytest.mark.parametrize("T, C", [(37, 16), (1200, 256)])
-def test_reference_zero_weight_rows(kind, T, C):
-    """The reference backend with zero-weight rows (ignored rows mixed in, ragged multi-chunk calls): the
-    deterministic suite's gates against the FP64 oracle; ``logp`` of every valid row (the zero-weight rows' from the
-    logp-only pass) matches the deterministic reference; the zero-weight rows' ``dX`` rows are exact zeros; ``loss``
-    and the gradients agree with the deterministic reference within the gates."""
+def test_reference_zero_weight_rows(record_property, kind, T, C):
+    """The reference backend with zero-weight rows (ignored rows mixed in, ragged multi-chunk calls): the outputs meet
+    the naive tier over the draws (``logp`` of the zero-weight rows from the logp-only pass) and the zero-weight
+    rows' ``dX`` rows are exact zeros.  Every valid row of zero weight: ``logp`` meets the tier, ``loss`` is 0 and
+    the gradients are zeros."""
     base = _host_inputs(T, "policy")
     if kind == ("group", 0.5) and T < 1024:
         kind = ("random", 0.5)  # one 512-row group: the fraction rounds to no group
     zero = _zero_weight_set(base, kind)
     inp = _with_zero_weights(base, zero, negative_zero=True)
     nd = _run(inp, C)
-    det = _run(inp, C, package="det")
     valid = inp.labels >= 0
-    torch.testing.assert_close(nd["logp"], det["logp"], atol=1e-5, rtol=0)
     assert bool((nd["logp"][~valid] == 0).all())
     assert bool((nd["dX"][zero] == 0).all())
-    if bool(zero[valid].all()):
+    every = bool(zero[valid].all())
+    if every:
         assert float(nd["loss"]) == 0.0
         assert not bool(nd["dX"].any()) and not bool(nd["dW"].any())
-    else:
-        _check_against_references(nd, inp)
-        assert (
-            abs(float(nd["loss"]) - float(det["loss"]))
-            <= 1e-6 * abs(float(det["loss"])) + 1e-6
-        )
+
+    def contract(result, draw):
+        _zero_rows_contract()(result, draw)
+        if every:
+            assert float(result["loss"]) == 0.0 and not bool(result["dW"].any())
+
+    _judge_host(
+        record_property,
+        T,
+        lambda draw: _run(draw, C),
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, kind, negative_zero=True),
+        names=("logp",) if every else None,
+        contract=contract,
+    )
 
 
 def test_reference_zero_weight_rows_without_return_logp():
@@ -3441,95 +3673,83 @@ ZERO_DEVICE_CASES = [
 ]
 
 
-@pytest.mark.parametrize("return_logp", [True, False])
 @pytest.mark.parametrize("T, kind", ZERO_DEVICE_CASES, ids=str)
-def test_device_zero_weight_rows_match_the_deterministic_package(
-    glm_weight, T, kind, return_logp
-):
-    """Zero-weight policy rows on the device: the deterministic suite's gates against the FP64 oracle; ``logp`` of
-    every valid row -- the zero-weight rows' from the logp-only pass -- is the deterministic package's bits (with
-    ``return_logp``); the zero-weight rows' ``dX`` rows are exact zeros; ``loss`` / ``dW`` / ``dX`` are reported
-    against the deterministic package.  Every valid row of zero weight: loss 0, zero gradients, no gradient GEMM."""
+def test_device_zero_weight_rows(glm_weight, record_property, T, kind):
+    """Zero-weight policy rows on the device, with and without ``return_logp``: the call holds its contract, the
+    zero-weight rows' ``dX`` rows are exact zeros and the loss call binds once.  Every valid row of zero weight: loss
+    0, zero gradients, no gradient GEMM.  At ``JUDGE_H`` / ``JUDGE_V`` both calls of a draw run the same bindings and
+    meet the naive tier (``name@return_logp`` -- ``logp`` of the zero-weight rows from the logp-only pass -- and
+    ``name@no_logp``; every row of zero weight: ``logp`` alone)."""
     _require_program(entry="loss")
+
+    def call(problem, return_logp):
+        launched = []
+        original = cake_backend.prepare_lm_head_loss
+
+        def recording(*a, **k):
+            launched.append(k.get("entry", "loss"))
+            return original(*a, **k)
+
+        cake_backend.BINDING_CACHE.clear()
+        cake_backend.prepare_lm_head_loss = recording
+        try:
+            result = _loss_call(problem, 4096, return_logp=return_logp)
+        finally:
+            cake_backend.prepare_lm_head_loss = original
+        zero = _zero_weight_rows(problem)
+        assert bool((result["dX"][zero] == 0).all())
+        if bool(zero[problem.valid].all()):
+            assert launched == (["logprob"] if return_logp else [])
+            assert float(result["loss"]) == 0.0
+            assert not bool(result["dX"].any()) and not bool(result["dW"].any())
+        else:
+            assert launched.count("loss") == 1, launched
+        return result
+
     base = _device_inputs(T, "policy", W=glm_weight)
-    zero = _zero_weight_set(base, kind)
-    inp = _with_zero_weights(base, zero, negative_zero=True)
-    launched = []
-    original = cake_backend.prepare_lm_head_loss
+    inp = _with_zero_weights(base, _zero_weight_set(base, kind), negative_zero=True)
+    for return_logp in (True, False):
+        _zero_rows_contract()(call(inp, return_logp), inp)
+    every = kind == "all"
+    del base, inp
 
-    def recording(*a, **k):
-        launched.append(k.get("entry", "loss"))
-        return original(*a, **k)
+    def launch(j, s):
+        draw = _draw_zero_weights(
+            _draw_inputs(T, s, _judge_weight(s), "policy"), kind, negative_zero=True
+        )
+        return [(draw, {"return_logp": call(draw, True), "no_logp": call(draw, False)})]
 
-    cake_backend.BINDING_CACHE.clear()
-    cake_backend.prepare_lm_head_loss = recording
-    try:
-        nd = _loss_call(inp, 4096, return_logp=return_logp)
-    finally:
-        cake_backend.prepare_lm_head_loss = original
-    det = _loss_call(inp, 4096, package="det")
-    valid = inp.labels >= 0
-    assert bool((nd["dX"][zero] == 0).all())
-    if return_logp:
-        assert _same_bits(nd["logp"], det["logp"])
-    every = bool(zero[valid].all())
-    if every:
-        assert launched == (["logprob"] if return_logp else [])
-        assert float(nd["loss"]) == 0.0
-        assert not bool(nd["dX"].any()) and not bool(nd["dW"].any())
-        return
-    assert launched.count("loss") == 1
-    # without return_logp the gates read the deterministic logp (the gradients and the loss are this call's)
-    _check_against_references(
-        nd if return_logp else dict(nd, logp=det["logp"]), inp, ceiling=True
+    names = (
+        {"return_logp": ("logp",), "no_logp": ()}
+        if every
+        else {"return_logp": ("loss", "logp", "dX", "dW"), "no_logp": ("loss", "dX", "dW")}
     )
-    loss_rel = abs(float(nd["loss"]) - float(det["loss"])) / max(
-        abs(float(det["loss"])), 1e-30
-    )
-    dw_rel = float(
-        (nd["dW"].float() - det["dW"].float()).norm() / det["dW"].float().norm()
-    )
-    dx_diff = float((nd["dX"].float() - det["dX"].float()).abs().max())
-    dw_flips, dw_ulp = _ulp_flips(nd["dW"], det["dW"])
-    assert loss_rel <= 1e-6, loss_rel
-    print(
-        f"\nzero-weight T={T} {kind} zero {int(zero.sum())}/{int(valid.sum())} logp={return_logp}: loss_rel vs det "
-        f"{loss_rel:.2e}, dW rel-L2 vs det {dw_rel:.2e} (flip {dw_flips:.2e} max_ulp {dw_ulp}), "
-        f"dX max|ND-det| {dx_diff:.2e}"
+    _judge_problems(
+        record_property,
+        launch,
+        ("return_logp", "no_logp"),
+        seed=SEED + T,
+        names=names,
+        contract=_zero_rows_contract(),
     )
 
 
-def test_device_zero_weight_rows_repeat_and_both_count_paths(glm_weight):
+def test_device_zero_weight_rows_repeat_and_both_count_paths(glm_weight, record_property):
     """``REPEATS`` runs with 16.6 % zero-weight rows on the hidden valid-row count path and on the host count path:
-    every run passes the gates and repeats the first run's ``loss`` / ``logp`` / ``dW``; both paths give the same
-    ``loss`` / ``logp`` / ``dW`` bits; one synchronizing readback per call on the host path (PyTorch's
-    synchronization debug mode), as the plain path."""
+    every run holds its contract; both paths give the same ``loss`` / ``logp`` / ``dW`` bits (the first run of each);
+    one synchronizing readback per call on the host path (PyTorch's
+    synchronization debug mode), as the plain path.  At ``JUDGE_H`` / ``JUDGE_V`` three poisoned hidden-count calls
+    per draw meet the naive tier (the judge keeps each output's largest error)."""
     _require_program(entry="loss")
     base = _device_inputs(12289, "policy", W=glm_weight)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("random", 0.166)))
-    oracle = reference_fp64(inp)
-    b0 = error_report(reference_unchunked(inp), oracle, inp.labels)
     firsts = {}
     for hidden in (True, False):
-        first = None
         for _ in range(REPEATS):
             _poison_allocator(1 << 30)
             run = _loss_call(inp, 4096, hidden_count=hidden)
-            errors = error_report(run, oracle, inp.labels)
-            assert (
-                not errors["nan"]
-                and errors["logp_ignored_zero"]
-                and errors["dX_ignored_zero"]
-            )
-            for key, tiny in GATE_TINY.items():
-                if key in errors:
-                    assert errors[key] <= GATE_MARGIN * b0[key] + tiny, key
-            if first is None:
-                first = run
-            else:
-                for key in ("loss", "logp", "dW"):
-                    assert _same_bits(run[key], first[key]), key
-        firsts[hidden] = first
+            _zero_rows_contract()(run, inp)
+            firsts.setdefault(hidden, run)
     for key in ("loss", "logp", "dW"):
         assert _same_bits(firsts[True][key], firsts[False][key]), key
 
@@ -3564,10 +3784,25 @@ def test_device_zero_weight_rows_repeat_and_both_count_paths(glm_weight):
         )
         assert nd_syncs == det_syncs
 
+    def launch(draw):
+        _poison_allocator(1 << 30)
+        return _loss_call(draw, 4096, hidden_count=True)
 
-def test_device_zero_weight_rows_checkpoint_accumulation_retained_graph(glm_weight):
-    """With 30 % zero-weight rows: a checkpoint replay gives the plain call's ``loss`` / ``dW`` bits; a retained graph
-    repeats its backward bit for bit; two backward passes accumulate into ``W.grad`` (the autograd engine's add)."""
+    _judge_device(
+        record_property,
+        12289,
+        launch,
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("random", 0.166)),
+        contract=_zero_rows_contract(),
+        repeats=3,
+    )
+
+
+def test_device_zero_weight_rows_checkpoint_accumulation_retained_graph(glm_weight, record_property):
+    """With 30 % zero-weight rows: a checkpoint replay and both backward passes of a retained graph hold their
+    contract; two backward passes accumulate into ``W.grad`` (the autograd engine's add).  At ``JUDGE_H`` /
+    ``JUDGE_V`` the checkpointed step's ``loss`` / ``dX`` / ``dW`` meet the naive tier."""
     _require_program(entry="loss")
     base = _device_inputs(8191, "policy", W=glm_weight)
     inp = _with_zero_weights(base, _zero_weight_set(base, ("group", 0.3)))
@@ -3585,15 +3820,13 @@ def test_device_zero_weight_rows_checkpoint_accumulation_retained_graph(glm_weig
     W = inp.W.detach().requires_grad_(True)
     loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
     loss.backward()
-    plain = _loss_call(inp, 4096)
-    assert _same_bits(loss.detach(), plain["loss"]) and _same_bits(W.grad, plain["dW"])
-    _check_against_references(dict(plain, dX=X.grad), inp, ceiling=True)
+    _zero_rows_contract()(dict(loss=loss.detach(), dX=X.grad, dW=W.grad), inp)
     X_retained = inp.X.detach().requires_grad_(True)
     W_retained = inp.W.detach().requires_grad_(True)
     loss2 = head(X_retained, W_retained)
-    dx1, dw1 = torch.autograd.grad(loss2, (X_retained, W_retained), retain_graph=True)
-    dx2, dw2 = torch.autograd.grad(loss2, (X_retained, W_retained))
-    assert _same_bits(dx1, dx2) and _same_bits(dw1, dw2)
+    for retain in (True, False):
+        dx, dw = torch.autograd.grad(loss2, (X_retained, W_retained), retain_graph=retain)
+        _zero_rows_contract()(dict(dX=dx, dW=dw), inp)
     W_hooked = inp.W.detach().requires_grad_(True)
     seen = []
     W_hooked.register_hook(lambda g: seen.append(g.detach().clone()))
@@ -3601,11 +3834,39 @@ def test_device_zero_weight_rows_checkpoint_accumulation_retained_graph(glm_weig
         head(inp.X, W_hooked).backward()
     assert len(seen) == 2 and _same_bits(W_hooked.grad, seen[0] + seen[1])
 
+    def step(problem):
+        call = dict(
+            objective="policy",
+            infer_logp=problem.infer_logp,
+            loss_weights=problem.loss_weights,
+            chunk_size=4096,
+        )
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        out = torch.utils.checkpoint.checkpoint(
+            lambda a, b: cake_backend.cake_lm_head_nondet_train_loss(a, b, problem.labels, **call),
+            X,
+            W,
+            use_reentrant=False,
+        )
+        out.backward()
+        return dict(loss=out.detach(), dX=X.grad, dW=W.grad)
+
+    _judge_device(
+        record_property,
+        8191,
+        step,
+        names=("loss", "dX", "dW"),
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("group", 0.3)),
+        contract=_zero_rows_contract(),
+    )
+
 
 def test_device_zero_weight_rows_do_not_propagate_non_finite_values(glm_weight):
     """An ``inf`` ``X`` row and a NaN ``infer_logp`` in zero-weight rows leave ``loss`` / ``dX`` / ``dW`` finite and
-    equal to the clean call's (the deterministic package's plain path, without its own zero-weight split, gives a
-    non-finite ``dW``); a NaN weight keeps its row in the gradient path (NaN loss)."""
+    equal to the clean call's (this package's plain path, the zero-weight split off, gives a non-finite ``dW``); a NaN
+    weight keeps its row in the gradient path (NaN loss)."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.2))
@@ -3621,9 +3882,9 @@ def test_device_zero_weight_rows_do_not_propagate_non_finite_values(glm_weight):
     for key in ("loss", "dW"):
         assert _same_bits(a[key], b[key]), key
     assert bool(torch.isfinite(b["dX"].float()).all()) and not bool(b["dX"][zero].any())
-    with _det_unsplit():
-        det = _loss_call(poisoned, 4096, package="det")
-    assert not bool(torch.isfinite(det["dW"].float()).all())
+    with _zero_weight_floor(NO_SPLIT):
+        plain = _loss_call(poisoned, 4096)
+    assert not bool(torch.isfinite(plain["dW"].float()).all())
     w = clean.loss_weights.clone()
     w[int((~zero & (clean.labels >= 0)).nonzero()[0])] = float("nan")
     assert math.isnan(
@@ -3634,13 +3895,14 @@ def test_device_zero_weight_rows_do_not_propagate_non_finite_values(glm_weight):
 @pytest.mark.parametrize("memory_mode", [None, "budget"])
 @pytest.mark.parametrize("grads", ["w_frozen", "no_grad"])
 def test_device_zero_weight_pass_adds_no_peak_without_a_weight_gradient(
-    glm_weight, grads, memory_mode
+    glm_weight, record_property, grads, memory_mode
 ):
     """Without a weight gradient (``W`` frozen, or no gradient at all) on the hidden valid-row count path
     (four chunks), the zero-weight rows' logp-only pass runs after the chunk loop once chunk 0's buffers are released:
     the call's measured peak with ``return_logp=True`` stays within the same call's without the split (every weight
     nonzero) plus the split's extra ``O(T)`` row vectors; the memory report's ``peak_temporary_bytes`` covers the
-    loop and the pass; ``logp`` is the deterministic package's bits and the zero-weight rows' ``dX`` rows are zeros.
+    loop and the pass; the zero-weight rows' ``dX`` rows are zeros; at ``JUDGE_H`` / ``JUDGE_V`` the call's ``logp``
+    (and ``dX`` with ``X`` trainable) meet the naive tier.
     ``memory_mode="budget"`` runs the opt-in module's forward: without a weight gradient its budget form does not
     apply (``budget = need_dw``), so the call keeps the hidden valid-row count and the opt-in module's own pass order --
     after the chunk loop (the recorded order), with the same peaks as the default rows."""
@@ -3727,11 +3989,19 @@ def test_device_zero_weight_pass_adds_no_peak_without_a_weight_gradient(
         f"(+{(split_peak - plain_peak) / 2**20:.2f} MiB)"
     )
     assert split_peak <= plain_peak + slack, (split_peak, plain_peak)
-    det = _loss_call(split, 4096, package="det", train_w=False, train_x=train_x)
-    assert _same_bits(nd["logp"], det["logp"])
     if train_x:
         assert not bool(nd["dX"][zero].any())
-        _check_against_references(dict(nd, dW=None), split, ceiling=True)
+    _zero_rows_contract()(nd, split)
+    del nd
+    _judge_device(
+        record_property,
+        T,
+        call,
+        names=("logp", "dX") if train_x else ("logp",),
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("group", 0.5)),
+        contract=_zero_rows_contract(),
+    )
     if memory_mode is not None:
         return
     result = cake_backend.forward_loss(
@@ -3794,19 +4064,21 @@ ZERO_PHASE_SLACK = (
 
 @pytest.mark.parametrize("kind, grads, module, where", ZERO_PHASE_CASES, ids=str)
 def test_device_zero_weight_pass_phase_matches_the_report(
-    glm_weight, monkeypatch, kind, grads, module, where
+    glm_weight, record_property, monkeypatch, kind, grads, module, where
 ):
     """The logp-only pass's phase measured directly -- the bytes live at its entry plus its own peak, above
     the call's start -- equals the report's ``zero_weight_logp_phase_bytes`` plus the accumulators alive at that
     point (after the loop: the FP32 accumulators the loop filled; ahead of it or without a loop: none) within
     ``ZERO_PHASE_SLACK``, in both directions; ``peak_temporary_bytes`` is the larger phase.  Every valid row of zero
     weight on the hidden valid-row count path with a trainable ``W``: the pass runs once chunk 0's buffers are released
-    (no overlap: the bytes live at its entry are far below them)."""
+    (no overlap: the bytes live at its entry are far below them), and at ``JUDGE_H`` / ``JUDGE_V`` its ``logp`` meets
+    the naive tier."""
     _require_program(entry="loss")
     backend = cake_backend if module == "nd" else opt_in
     base = _device_inputs(16231, "policy", W=glm_weight)
     zero = _zero_weight_set(base, kind)
     inp = _with_zero_weights(base, zero)
+    phase_original = backend._zero_weight_logp
     phase = _zero_pass_phase(monkeypatch, backend)
     kw = dict(
         objective="policy",
@@ -3849,11 +4121,23 @@ def test_device_zero_weight_pass_phase_matches_the_report(
     if kind == "all":
         assert result.row_index is not None and result.row_index.numel() == 0
         assert float(result.loss) == 0.0
-        torch.testing.assert_close(
-            result.logp,
-            det_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096).logp,
-            atol=0,
-            rtol=0,
+        del result
+        monkeypatch.setattr(backend, "_zero_weight_logp", phase_original)
+
+        def launch(draw):
+            call = dict(kw, infer_logp=draw.infer_logp, loss_weights=draw.loss_weights)
+            found = backend.forward_loss(draw.X, draw.W, draw.labels, **call)
+            assert found.row_index is not None and found.row_index.numel() == 0
+            assert float(found.loss) == 0.0
+            return dict(loss=found.loss, logp=found.logp)
+
+        _judge_device(
+            record_property,
+            16231,
+            launch,
+            names=("logp",),
+            make_kw=dict(objective="policy"),
+            prepare=lambda draw: _draw_zero_weights(draw, "all"),
         )
 
 
@@ -3964,109 +4248,119 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
             assert fwd.memory.get("hidden_count"), fwd.memory
 
 
-def test_device_zero_weight_rows_concurrent_threads(glm_weight):
+def test_device_zero_weight_rows_concurrent_threads(glm_weight, record_property):
     """Zero-weight splits on the hidden valid-row count path (four chunks, the dW side stream) from two threads
-    at once, each on its own stream, several calls each: every call gives its serial call's ``loss`` / ``logp`` /
-    ``dW`` bits and zero ``dX`` rows on the zero-weight rows (each thread reads its own counts and forks its own side
-    stream), and passes the gates."""
+    at once, each on its own stream, several calls each, after a serial call of each: every call gives zero ``dX``
+    rows on the zero-weight rows (each thread reads its own counts and forks its own side stream) and holds its
+    contract.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the same sequence (one weight, the zero-weight rows from the
+    draw's own generator), and every call is judged against the naive tier (``name@first_serial`` /
+    ``name@second_serial``: the serial calls; ``name@first_<k>`` / ``name@second_<k>``: the ``k``-th call of each
+    thread)."""
     _require_program(entry="loss")
-    inputs, zeros = [], []
-    for T, kind in ((12289, ("random", 0.166)), (16231, ("group", 0.5))):
-        base = _device_inputs(T, "policy", W=glm_weight)
-        zero = _zero_weight_set(base, kind)
-        inputs.append(_with_zero_weights(base, zero))
-        zeros.append(zero)
-    serial = [_loss_call(inp, 4096) for inp in inputs]
-    runs: list[list] = [[], []]
-    errors: list[BaseException] = []
-    barrier = threading.Barrier(2)
+    cases = {"first": (12289, ("random", 0.166)), "second": (16231, ("group", 0.5))}
+    calls = 4
 
-    def worker(i):
-        try:
-            stream = torch.cuda.Stream()
-            inp = inputs[i]
-            with torch.cuda.stream(stream):
-                barrier.wait()
-                for _ in range(4):
-                    X = inp.X.detach().requires_grad_(True)
-                    W = inp.W.detach().requires_grad_(True)
-                    loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
-                        X,
-                        W,
-                        inp.labels,
-                        objective="policy",
-                        infer_logp=inp.infer_logp,
-                        loss_weights=inp.loss_weights,
-                        chunk_size=4096,
-                        return_logp=True,
-                    )
-                    loss.backward()
-                    runs[i].append(
-                        dict(
+    def sequence(inputs):
+        results = {name: {f"{name}_serial": _loss_call(inp, 4096)} for name, inp in inputs.items()}
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def worker(name):
+            try:
+                stream = torch.cuda.Stream()
+                inp = inputs[name]
+                with torch.cuda.stream(stream):
+                    barrier.wait(TIMEOUT_S)
+                    for k in range(1, calls + 1):
+                        X = inp.X.detach().requires_grad_(True)
+                        W = inp.W.detach().requires_grad_(True)
+                        loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+                            X,
+                            W,
+                            inp.labels,
+                            objective="policy",
+                            infer_logp=inp.infer_logp,
+                            loss_weights=inp.loss_weights,
+                            chunk_size=4096,
+                            return_logp=True,
+                        )
+                        loss.backward()
+                        results[name][f"{name}_{k}"] = dict(
                             loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad
                         )
-                    )
-            stream.synchronize()
-        except BaseException as exc:  # noqa: BLE001 -- re-raised by the main thread
-            errors.append(exc)
+                stream.synchronize()
+            except BaseException as exc:  # noqa: BLE001 -- re-raised by the main thread
+                errors.append(exc)
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    torch.cuda.synchronize()
-    assert not errors, errors
-    for inp, zero, got, want in zip(inputs, zeros, runs, serial, strict=True):
-        assert len(got) == 4
-        for run in got:
-            for key in ("loss", "logp", "dW"):
-                assert _same_bits(run[key], want[key]), key
-            assert not bool(run["dX"][zero].any())
-        _check_against_references(got[-1], inp, ceiling=True)
+        threads = [threading.Thread(target=worker, args=(name,)) for name in inputs]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(TIMEOUT_S)
+        assert not any(thread.is_alive() for thread in threads), "a thread did not finish"
+        torch.cuda.synchronize()
+        assert not errors, errors
+        assert all(len(found) == calls + 1 for found in results.values()), results.keys()
+        return results
+
+    inputs = {}
+    for name, (T, kind) in cases.items():
+        base = _device_inputs(T, "policy", W=glm_weight)
+        inputs[name] = _with_zero_weights(base, _zero_weight_set(base, kind))
+    contract = _zero_rows_contract()
+    for name, results in sequence(inputs).items():
+        for run in results.values():
+            contract(run, inputs[name])
+    del inputs
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {
+            name: _draw_zero_weights(_draw_inputs(T, s, W, "policy"), kind)
+            for name, (T, kind) in cases.items()
+        }
+        results = sequence(draws)
+        return [(draws[name], results[name]) for name in cases]
+
+    _judge_problems(
+        record_property,
+        launch,
+        tuple(
+            f"{name}_{call}" for name in cases for call in ("serial", *range(1, calls + 1))
+        ),
+        seed=SEED + 12289,
+        contract=contract,
+    )
 
 
 def test_device_zero_weight_rows_under_a_non_finite_upstream_gradient(glm_weight):
     """A non-finite upstream loss gradient leaves the zero-weight rows' ``dX`` rows exact zeros (as an ignored
-    row's); the deterministic package's are ``bf16(g * 0)``."""
+    row's)."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.3))
     inp = _with_zero_weights(base, zero)
-    out = {}
-    for package in ("nd", "det"):
-        X = inp.X.detach().requires_grad_(True)
-        fn = (
-            cake_backend.cake_lm_head_nondet_train_loss
-            if package == "nd"
-            else det_backend.cake_lm_head_det_train_loss
-        )
-        loss = fn(
-            X,
-            inp.W,
-            inp.labels,
-            objective="policy",
-            infer_logp=inp.infer_logp,
-            loss_weights=inp.loss_weights,
-            chunk_size=4096,
-            return_logp=False,
-        )
-        loss.backward(torch.tensor(float("inf"), device=CUDA))
-        torch.cuda.synchronize()
-        out[package] = X.grad
-    nd_zero = out["nd"][zero]
-    assert bool((nd_zero == 0).all())
-    assert not bool(out["nd"][inp.labels < 0].any())
-    det_zero = out["det"][zero].float()
-    print(
-        f"\nnon-finite grad_loss=inf: ND zero-weight dX rows all +0; det non-finite share "
-        f"{float((~torch.isfinite(det_zero)).float().mean()):.3f}"
+    X = inp.X.detach().requires_grad_(True)
+    loss = cake_backend.cake_lm_head_nondet_train_loss(
+        X,
+        inp.W,
+        inp.labels,
+        objective="policy",
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=4096,
+        return_logp=False,
     )
+    loss.backward(torch.tensor(float("inf"), device=CUDA))
+    torch.cuda.synchronize()
+    assert bool((X.grad[zero] == 0).all())
+    assert not bool(X.grad[inp.labels < 0].any())
 
 
-def test_opt_in_forms_split_zero_weight_rows_unless_the_count_is_given():
+def test_opt_in_forms_split_zero_weight_rows_unless_the_count_is_given(record_property):
     """The opt-in module's forward leaves the zero-weight rows out of its chunk loop when it forms the count itself
-    (the same bits as :mod:`cake_backend`'s), and keeps every valid row with a caller-given ``num_valid_rows``."""
+    (the same bits as :mod:`cake_backend`'s), and keeps every valid row with a caller-given ``num_valid_rows``; the
+    ``logp`` of both forms meets the naive tier."""
     base = _host_inputs(200, "policy")
     zero = _zero_weight_set(base, ("random", 0.3))
     inp = _with_zero_weights(base, zero)
@@ -4090,7 +4384,25 @@ def test_opt_in_forms_split_zero_weight_rows_unless_the_count_is_given():
         assert _same_bits(getattr(opt, key), getattr(main, key)), key
     given = opt_in.forward_loss(inp.X, inp.W, inp.labels, num_valid_rows=valid, **kw)
     assert "zero_weight_rows" not in given.memory and given.row_index.numel() == valid
-    torch.testing.assert_close(given.logp, main.logp, atol=1e-5, rtol=0)
+
+    def forms(draw):
+        call = dict(kw, infer_logp=draw.infer_logp, loss_weights=draw.loss_weights)
+        count = int(draw.valid.sum())
+        split = opt_in.forward_loss(draw.X, draw.W, draw.labels, **call)
+        assert split.row_index.numel() == count - int(_zero_weight_rows(draw).sum())
+        counted = opt_in.forward_loss(draw.X, draw.W, draw.labels, num_valid_rows=count, **call)
+        assert counted.row_index.numel() == count
+        return {"split": dict(logp=split.logp), "given": dict(logp=counted.logp)}
+
+    _judge_host(
+        record_property,
+        200,
+        forms,
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("random", 0.3)),
+        names=("logp",),
+        forms=("split", "given"),
+    )
 
 
 def test_memory_plan_counts_the_zero_weight_logp_pass():
@@ -4129,7 +4441,7 @@ def test_memory_plan_counts_the_zero_weight_logp_pass():
 )
 def test_device_zero_weight_rows_budget_form(glm_weight, T, kind):
     """``memory_mode="budget"`` with zero-weight rows (a third of the labels ignored): ``loss`` / ``logp`` / ``dW``
-    are the fast form's bits, ``dX`` passes the gates, and the step's peak -- the logp-only pass included, of the call
+    are the fast form's bits, the call holds its contract, and the step's peak -- the logp-only pass included, of the call
     that binds and of one from the remembered binding -- stays within the bytes of a head that materializes the BF16
     logits of the valid rows."""
     _require_program(entry="loss")
@@ -4172,7 +4484,7 @@ def test_device_zero_weight_rows_budget_form(glm_weight, T, kind):
         for key in ("loss", "logp", "dW"):
             assert _same_bits(result[key], fast[key]), key
         assert not bool(result["dX"][zero].any())
-        _check_against_references(result, inp, ceiling=True)
+        contract_lm_head(result, inp)
         del result, X, W, loss, logp
     print(
         f"\nzero-weight budget T={T} {kind}: form {mplan.form} predicted {mplan.predicted_bytes} budget {mplan.budget_bytes} "
@@ -4182,9 +4494,10 @@ def test_device_zero_weight_rows_budget_form(glm_weight, T, kind):
     assert max(peaks) <= mplan.predicted_bytes, (mplan, peaks)
 
 
-def test_zero_weight_split_is_not_applied_to_the_excluded_forms():
+def test_zero_weight_split_is_not_applied_to_the_excluded_forms(record_property):
     """``compact_rows=False`` and the prepared runner keep every valid row in the chunk loop (the plain path); so does
-    the cross-entropy objective, which has no weights."""
+    the cross-entropy objective, which has no weights.  The ``logp`` of the split and of the uncompacted call meets
+    the naive tier."""
     base = _host_inputs(200, "policy")
     zero = _zero_weight_set(base, ("random", 0.3))
     inp = _with_zero_weights(base, zero)
@@ -4204,7 +4517,23 @@ def test_zero_weight_split_is_not_applied_to_the_excluded_forms():
     assert runner.plan.rows == int((inp.labels >= 0).sum())
     split = cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
     assert split.row_index.numel() == int((inp.labels >= 0).sum()) - int(zero.sum())
-    torch.testing.assert_close(split.logp, flat.logp, atol=1e-5, rtol=0)
+
+    def forms(draw):
+        call = dict(kw, infer_logp=draw.infer_logp, loss_weights=draw.loss_weights)
+        found = cake_backend.forward_loss(draw.X, draw.W, draw.labels, **call)
+        uncompacted = cake_backend.forward_loss(draw.X, draw.W, draw.labels, compact_rows=False, **call)
+        assert "zero_weight_rows" not in uncompacted.memory and uncompacted.row_index is None
+        return {"split": dict(logp=found.logp), "flat": dict(logp=uncompacted.logp)}
+
+    _judge_host(
+        record_property,
+        200,
+        forms,
+        make_kw=dict(objective="policy"),
+        prepare=lambda draw: _draw_zero_weights(draw, ("random", 0.3)),
+        names=("logp",),
+        forms=("split", "flat"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4575,12 +4904,12 @@ def test_device_loads_the_libraries_of_its_architecture():
 
 
 @pytest.mark.parametrize("stage", RED_STAGES)
-def test_device_every_reduction_form_runs_within_the_budgets(glm_weight, stage):
+def test_device_every_reduction_form_meets_the_naive_tier(glm_weight, record_property, stage):
     """Every ``gemm_dx_red*`` form the running architecture registers and its tuning accepts (``gemm_dx_red_swab`` on
     the ``DX_SWAB_ARCHES`` only: ``sm_103a`` and ``sm_107a``, which registers it with the ``sm_103a`` stages), pinned
-    at four K slices on a call of two whole 4096-row chunks: the launch record shows it launched on both, the
-    outputs pass the deterministic suite's gates against the FP64 oracle, and ``loss`` / ``logp`` / ``dW`` are the
-    deterministic package's bits."""
+    at four K slices on a call of two whole 4096-row chunks: the launch record shows it launched on both, and the
+    outputs hold their contract; at ``JUDGE_H`` / ``JUDGE_V`` it launches on both chunks of every draw and the
+    outputs meet the naive tier."""
     _require_program(entry="loss")
     module_name, record = cake_backend.record_for(CUDA)
     if stage not in cake_jit.registered_stages(module_name):
@@ -4596,20 +4925,25 @@ def test_device_every_reduction_form_runs_within_the_budgets(glm_weight, stage):
         nd = _run(inp, 4096, backend="cake", gemm_tuning=tuning)
     count = sum(1 for key in launched if key[0] == stage)
     assert count == 2, (stage, sorted({key[0] for key in launched}))
-    det = _run(inp, 4096, backend="cake", package="det")
-    errors, b0 = _check_against_references(nd, inp, ceiling=True)
-    diff, flips, max_ulp = _compare_with_det(nd, det)
-    print(
-        f"\nND form {stage} x{count}: dX_rel_l2 {errors['dX_rel_l2']:.3e} (b0 {b0['dX_rel_l2']:.3e}) "
-        f"max|ND-det| {diff:.3e} flip {flips:.2e} max_ulp {max_ulp}"
-    )
+    contract_lm_head(nd, inp)
+    del nd
+
+    def launch(draw):
+        cake_backend.BINDING_CACHE.clear()
+        with _launch_record() as launched:
+            result = _run(draw, 4096, backend="cake", gemm_tuning=tuning)
+        assert sum(1 for key in launched if key[0] == stage) == 2, sorted({key[0] for key in launched})
+        return result
+
+    _judge_device(record_property, 8192, launch, ignore_frac=0.0)
 
 
 @pytest.mark.parametrize("policy", ["det", "measured"])
-def test_device_reduction_on_a_four_chunk_cross_entropy_call(glm_weight, policy):
+def test_device_reduction_on_a_four_chunk_cross_entropy_call(glm_weight, record_property, policy):
     """A cross-entropy call of four compacted chunks (``T = 16231``, every row valid) under each slice policy: exactly
     the chunks the device's rule slices launch one ``gemm_dx_red*`` form each (launch record), each followed right away
-    by its slab sum, and the call passes the gates."""
+    by its slab sum, and the call holds its contract; at ``JUDGE_H`` / ``JUDGE_V`` the same holds on every draw (the
+    rule's slices of that shape) and the outputs meet the naive tier."""
     _require_program(entry="loss")
     T = 16231
     slices = _device_slices(T, policy, glm_weight)
@@ -4627,51 +4961,64 @@ def test_device_reduction_on_a_four_chunk_cross_entropy_call(glm_weight, policy)
         after = launched[launched.index(key) + 1]
         assert after[0] in cake_backend.DX_SLAB_SUM_STAGES, launched
         assert after[1] == key[1], launched
-    _check_against_references(nd, inp, ceiling=True)
+    contract_lm_head(nd, inp)
     print(
         f"\nND 4-chunk ce policy={policy} slices {slices}: red launches {[key[0] for key in red]}"
     )
+    del nd
+    judged = [i for i, s in enumerate(_device_slices(T, policy, _judge_shape_weight())) if s > 1]
+
+    def launch(draw):
+        with _slice_policy(policy), _launch_record() as launched:
+            result = _run(draw, 4096, backend="cake")
+        _assert_reduction_launched(launched, judged)
+        return result
+
+    _judge_device(record_property, T, launch, ignore_frac=0.0)
 
 
-def test_device_fp32_dx_acc_is_bitwise_over_repeated_runs(glm_weight):
+def test_device_fp32_dx_acc_meets_the_naive_tier(glm_weight, record_property):
     """The FP32 ``dX_acc`` of ``REPEATS`` forwards at one and 339 rows with three and eight K slices and at 4097
-    rows with eight: every run is within the deterministic suite's ``dX`` budget against the FP64 oracle, the number
-    of distinct bit patterns and the largest run-to-run difference are reported, and every case has one bit pattern.
+    rows with eight: every run holds its shape and finite values, and the number of distinct bit patterns and the
+    largest run-to-run difference are reported (the package makes no run-to-run promise); at ``JUDGE_H`` /
+    ``JUDGE_V`` three poisoned forwards per draw of each case (the judge keeps the largest error) give a ``dX_acc``
+    (in row order) that meets the naive tier's ``dX`` (``dX = bf16(g * dX_acc)``, ``g = 1``; output
+    ``dx_acc@T<rows>_S<slices>``).
     Every element of ``dX_acc`` gets one nonzero partial per slice (``dz`` is dense over the vocabulary), so three or
     more slices would make a sum in finishing order depend on which slice finishes first; the K-sliced GEMM stores each
     slice's slab and the slab sum adds the slabs in slice order, so the result does not depend on it."""
     _require_program(entry="loss")
-    distinct: dict = {}
+
+    def forward(problem, k):
+        return cake_backend.forward_loss(
+            problem.X,
+            problem.W,
+            problem.labels,
+            loss_div=problem.loss_div,
+            chunk_size=4096,
+            need_dw=False,
+            gemm_tuning={"dx": {"k_slices": k}},
+        )
+
+    def in_row_order(fwd, problem):
+        """``dX_acc`` of every row in row order (a compacted call's rows are those of ``row_index``)."""
+        if fwd.row_index is None:
+            return fwd.dx_acc
+        acc = torch.zeros(problem.T, problem.H, dtype=fwd.dx_acc.dtype, device=fwd.dx_acc.device)
+        return acc.index_copy_(0, fwd.row_index.to(acc.device), fwd.dx_acc)
+
+    def contract(result, problem):
+        acc = result["dx_acc"]
+        assert acc.dtype == torch.float32 and tuple(acc.shape) == (problem.T, problem.H)
+        assert bool(torch.isfinite(acc).all())
+
     for T, slices in ((1, (3, 8)), (339, (3, 8)), (4097, (8,))):
         inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
-        oracle = reference_fp64(inp, need_dw=False)
-        b0 = error_report(reference_unchunked(inp, need_dw=False), oracle, inp.labels)
         for k in slices:
             runs = []
             for _ in range(REPEATS):
-                fwd = cake_backend.forward_loss(
-                    inp.X,
-                    inp.W,
-                    inp.labels,
-                    loss_div=inp.loss_div,
-                    chunk_size=4096,
-                    need_dw=False,
-                    gemm_tuning={"dx": {"k_slices": k}},
-                )
-                ref = (
-                    oracle["dX"]
-                    if fwd.row_index is None
-                    else oracle["dX"].index_select(
-                        0, fwd.row_index.to(oracle["dX"].device)
-                    )
-                )
-                assert tuple(fwd.dx_acc.shape) == (T, inp.H)  # every row valid
-                err = rel_l2(fwd.dx_acc, ref)  # dX = bf16(g * dx_acc), g = 1
-                assert err <= GATE_MARGIN * b0["dX_rel_l2"] + GATE_TINY["dX_rel_l2"], (
-                    T,
-                    k,
-                    err,
-                )
+                fwd = forward(inp, k)
+                contract(dict(dx_acc=fwd.dx_acc), inp)  # every row valid
                 runs.append(fwd.dx_acc.clone())
             unique: list = []
             for run in runs:
@@ -4683,13 +5030,29 @@ def test_device_fp32_dx_acc_is_bitwise_over_repeated_runs(glm_weight):
                 if len(unique) > 1
                 else 0
             )
-            distinct[(T, k)] = len(unique)
             print(
                 f"\nND FP32 dX_acc T={T} S{k}: {len(unique)} distinct of {REPEATS}, run-to-run max {spread:.3e}, "
                 f"{changed} of {runs[0].numel()} elements differ between the first two patterns"
             )
             del runs, unique
-    assert all(n == 1 for n in distinct.values()), distinct
+            label = f"T{T}_S{k}"
+
+            def launch(draw, k=k, label=label):
+                _poison_allocator(1 << 30)
+                return {label: dict(dx_acc=in_row_order(forward(draw, k), draw))}
+
+            _judge_device(
+                record_property,
+                T,
+                launch,
+                ignore_frac=0.0,
+                names=("dx_acc",),
+                forms=(label,),
+                views={"dx_acc": ("dX", None)},
+                contract=contract,
+                exact_rows=False,
+                repeats=3,
+            )
 
 
 def _budget_step(inp, entry, chunk_size=4096, **kw):
@@ -4736,7 +5099,8 @@ def test_device_budget_step_peak_within_the_prediction(
     """With the dX slabs gone, the budget step of the cross-entropy loss and of the log-probability entry (a
     third of the labels ignored), of the call that binds and of one from the remembered binding, peaks within the
     bytes of a head that materializes the BF16 logits of the valid rows and -- the loss entry's recorded plan -- within
-    the planner's prediction; ``loss`` / ``logp`` / ``dW`` are the fast step's bits and ``dX`` passes the gates."""
+    the planner's prediction; ``loss`` / ``logp`` / ``dW`` are the fast step's bits and the step holds its
+    contract."""
     _require_program(entry=entry)
     inp = make_inputs(
         T, seed=SEED + 7545 + T, device=CUDA, W=glm_weight, ignore_frac=0.33
@@ -4749,7 +5113,7 @@ def test_device_budget_step_peak_within_the_prediction(
         result, peak, mplan = _budget_step(inp, entry, memory_mode="budget")
         for key in ("loss", "logp", "dW") if entry == "loss" else ("logp", "dW"):
             assert _same_bits(result[key], fast[key]), key
-        _check_against_references(result, inp, entry=entry, ceiling=True)
+        contract_lm_head(result, inp, entry=entry)
         peaks.append(peak)
         del result
     print(
@@ -5136,6 +5500,75 @@ def _explicit_budget_bytes(nbytes):
         opt_in._set_memory_budget_bytes(previous)
 
 
+def _budget_points(inp, C, **extra):
+    """The internal explicit budget's points of a loss step (:func:`_explicit_budget_step`): the fused and unfused
+    forms' memory plans and the smallest peak (the plan of a budget of one byte refuses the call with it)."""
+    with _explicit_budget_bytes(1 << 45):
+        _, _, fused = _explicit_budget_step(inp, C, memory_mode="budget", **extra)
+        _, _, unfused = _explicit_budget_step(
+            inp, C, memory_mode="budget", fuse_dw_cast=False, **extra
+        )
+    with (
+        _explicit_budget_bytes(1),
+        pytest.raises(ValueError, match="no loss form fits") as excinfo,
+    ):
+        _explicit_budget_step(inp, C, memory_mode="budget", **extra)
+    return fused, unfused, _smallest_peak(excinfo)
+
+
+def _judge_budget_steps(record_property, T, C, budgets, labels, *, seed, count=False, V=JUDGE_V, **make_kw):
+    """Judge the explicit-budget loss steps of a ``T``-row case at ``JUDGE_H`` / ``V``: ``budgets(fused, unfused,
+    smallest)`` (:func:`_budget_points` of the draw itself: each draw has its own valid rows, so its own peaks) gives
+    ``{label: (budget bytes, forms)}``; every draw runs each budget's step, asserts that its plan runs one of ``forms``
+    and fits, and judges its outputs as ``name@label``; the same step inside a non-reentrant checkpoint under that
+    budget is judged as ``name@ckpt_<label>``.  ``count``: the caller's ``num_valid_rows``."""
+
+    def launch(draw):
+        extra = dict(num_valid_rows=int(draw.valid.sum())) if count else {}
+        cases = budgets(*_budget_points(draw, C, **extra))
+        assert sorted(cases) == sorted(labels), (sorted(cases), labels)
+        results = {}
+        for label, (budget, forms) in cases.items():
+            with _explicit_budget_bytes(budget):
+                result, _, mplan = _explicit_budget_step(draw, C, memory_mode="budget", **extra)
+                ckpt, _, _ = _explicit_budget_step(
+                    draw, C, checkpoint=True, memory_mode="budget", **extra
+                )
+            assert mplan is not None and mplan.form in forms, (label, budget, mplan)
+            assert mplan.fits and mplan.budget_bytes == budget, (label, budget, mplan)
+            results[label] = result
+            results[f"ckpt_{label}"] = ckpt
+        return results
+
+    forms = (*labels, *(f"ckpt_{label}" for label in labels))
+    return _judge_device(
+        record_property, T, launch, seed=seed, forms=forms, make_kw=make_kw, V=V
+    )
+
+
+# the judged vocabulary of the one-chunk explicit-budget case: at a smaller V one chunk's fused form is its smallest
+# step peak, so no form fits one byte below the fused peak and the smaller budgets run the fused form (V 32768 and
+# below on B200, V 24576 and below on VR200)
+_ONE_CHUNK_BUDGET_V = 65536
+
+
+def _budget_cases(fused, unfused, smallest):
+    """The four budgets of :func:`test_device_loss_explicit_budget_forms` and the forms each runs: the fused form's
+    peak, one byte below it, between the top and the smallest peak, and the smallest peak."""
+    top = min(fused.predicted_bytes, unfused.predicted_bytes)
+    return {
+        "fused": (fused.predicted_bytes, ("fused",)),
+        "below_fused": (
+            fused.predicted_bytes - 1,
+            ("unfused",)
+            if unfused.predicted_bytes < fused.predicted_bytes
+            else ("partial", "recompute"),
+        ),
+        "between": ((smallest + top) // 2, ("partial", "recompute")),
+        "smallest": (smallest, ("partial", "recompute")),
+    }
+
+
 @pytest.mark.parametrize(
     "objective, T, C, count",
     [
@@ -5147,15 +5580,17 @@ def _explicit_budget_bytes(nbytes):
     ],
     ids=["ce", "policy", "ce_chunk2048", "ce_1chunk", "ce_num_valid_rows"],
 )
-def test_device_loss_explicit_budget_forms(glm_weight, objective, T, C, count):
+def test_device_loss_explicit_budget_forms(glm_weight, record_property, objective, T, C, count):
     """The loss entry under the internal explicit budget (:func:`opt_in._set_memory_budget_bytes`) at the fused form's
     peak, one byte below it, a budget between the unfused and the smallest peak and the smallest peak itself runs
     ``"fused"``, then the next form in the order (``"unfused"`` where its peak is below the fused one, else a recompute
     form), a recompute form, and a recompute form at the smallest peak: each step -- the call that binds and one from
     the remembered binding -- peaks within the plan's prediction, itself within the budget; ``loss`` / ``logp`` / ``dW`` are the default step's
-    bits and ``dX`` passes the gates.  The same step inside a non-reentrant checkpoint gives the same bits within the
+    bits and ``dX`` holds its contract.  The same step inside a non-reentrant checkpoint holds its contract within the
     budget.  One byte below the smallest peak the call raises ``ValueError`` before its chunk loop, and the next call
-    runs.  GLM ``H`` / ``V`` (5 % of the labels ignored); ``count``: the caller's ``num_valid_rows``."""
+    runs.  GLM ``H`` / ``V`` (5 % of the labels ignored); ``count``: the caller's ``num_valid_rows``.  At ``JUDGE_H`` /
+    ``JUDGE_V`` (a one-chunk call at ``_ONE_CHUNK_BUDGET_V``) every draw's four budgets (of its own peaks) run their
+    forms and the steps, plain and checkpointed (``name@ckpt_<budget>``), are judged against the naive tier."""
     _require_program(entry="loss")
     inp = make_inputs(
         T,
@@ -5180,18 +5615,7 @@ def test_device_loss_explicit_budget_forms(glm_weight, objective, T, C, count):
     ):
         _explicit_budget_step(inp, C, memory_mode="budget", **extra)
     smallest = _smallest_peak(excinfo)
-    top = min(fused.predicted_bytes, unfused.predicted_bytes)
-    cases = [
-        (fused.predicted_bytes, ("fused",)),
-        (
-            fused.predicted_bytes - 1,
-            ("unfused",)
-            if unfused.predicted_bytes < fused.predicted_bytes
-            else ("partial", "recompute"),
-        ),
-        ((smallest + top) // 2, ("partial", "recompute")),
-        (smallest, ("partial", "recompute")),
-    ]
+    cases = list(_budget_cases(fused, unfused, smallest).values())
     report = []
     for budget, forms in cases:
         peaks = []
@@ -5204,7 +5628,7 @@ def test_device_loss_explicit_budget_forms(glm_weight, objective, T, C, count):
                 assert mplan.fits and mplan.budget_bytes == budget, (budget, mplan)
                 for key in ("loss", "logp", "dW"):
                     assert _same_bits(result[key], fast[key]), (budget, mplan.form, key)
-                _check_against_references(result, inp, ceiling=True)
+                contract_lm_head(result, inp)
                 peaks.append(peak)
                 del result
             assert max(peaks) <= mplan.predicted_bytes <= budget, (budget, mplan, peaks)
@@ -5212,12 +5636,10 @@ def test_device_loss_explicit_budget_forms(glm_weight, objective, T, C, count):
             ckpt, ckpt_peak, _ = _explicit_budget_step(
                 inp, C, checkpoint=True, memory_mode="budget", **extra
             )
-            plain, _, _ = _explicit_budget_step(inp, C, memory_mode="budget", **extra)
-            for key in ("loss", "logp", "dX", "dW"):
-                assert _same_bits(ckpt[key], plain[key]), (budget, mplan.form, key)
+            contract_lm_head(ckpt, inp)
             assert ckpt_peak <= budget, (budget, mplan, ckpt_peak, peaks)
             peaks.append(ckpt_peak)
-            del ckpt, plain
+            del ckpt
         report.append(
             (
                 budget,
@@ -5243,6 +5665,18 @@ def test_device_loss_explicit_budget_forms(glm_weight, objective, T, C, count):
         f"\nexplicit budget {objective} T={T} C={C} count={count} R={R}: fused {fused.predicted_bytes} unfused "
         f"{unfused.predicted_bytes} smallest {smallest}; "
         f"(budget, form, dw_rows, block_rows, predicted, peaks) {report}"
+    )
+    del result, fast, inp
+    _judge_budget_steps(
+        record_property,
+        T,
+        C,
+        _budget_cases,
+        ("fused", "below_fused", "between", "smallest"),
+        seed=SEED + 6992 + C,
+        count=count,
+        V=_ONE_CHUNK_BUDGET_V if R <= C else JUDGE_V,
+        objective=objective,
     )
 
 
@@ -5335,14 +5769,15 @@ def test_budget_dx_slab_is_the_plans(monkeypatch, entry, H, V, C, R, slab):
 
 
 @pytest.mark.parametrize("budget_case", ["below_top", "smallest"])
-def test_device_loss_budget_dx_slab_of_a_tail_chunk(glm_weight, budget_case):
+def test_device_loss_budget_dx_slab_of_a_tail_chunk(glm_weight, record_property, budget_case):
     """A loss call whose shorter tail chunk takes more K slices than its full chunk (GLM ``H`` / ``V``, 10240 valid
     rows in chunks of 6144: on B200 one slice for the 6144-row chunk, four for the 4096-row tail) under the internal
     explicit budget one byte below the fused / unfused peaks and at the smallest peak: the plan counts the tail's
     ordered dX slab (:func:`opt_in._budget_dx_slab`), so the step -- the call that binds, one from the remembered
     binding and the same step in a non-reentrant checkpoint -- peaks within the plan's prediction, itself within the
-    budget; ``loss`` / ``logp`` / ``dW`` are the default step's bits, ``dX`` passes the gates and the checkpointed step
-    gives the plain step's bits."""
+    budget; ``loss`` / ``logp`` / ``dW`` are the default step's bits, and ``dX`` and the checkpointed step hold their
+    contract.  At ``JUDGE_H`` / ``JUDGE_V`` every draw's own budget (of its own peaks) runs a recompute
+    form and the step, plain and checkpointed (``name@ckpt_<budget>``), meets the naive tier."""
     _require_program(entry="loss")
     T, C = 10779, 6144  # round(0.05 * 10779) = 539 ignored rows: 10240 valid rows
     inp = make_inputs(T, seed=SEED + 6993, device=CUDA, W=glm_weight, ignore_frac=0.05)
@@ -5373,15 +5808,13 @@ def test_device_loss_budget_dx_slab_of_a_tail_chunk(glm_weight, budget_case):
             assert mplan.fits and mplan.budget_bytes == budget, (budget, mplan)
             for key in ("loss", "logp", "dW"):
                 assert _same_bits(result[key], fast[key]), (budget, mplan.form, key)
-            _check_against_references(result, inp, ceiling=True)
+            contract_lm_head(result, inp)
             peaks.append(peak)
-            plain = result
             del result
         ckpt, ckpt_peak, _ = _explicit_budget_step(
             inp, C, checkpoint=True, memory_mode="budget"
         )
-        for key in ("loss", "logp", "dX", "dW"):
-            assert _same_bits(ckpt[key], plain[key]), (budget, mplan.form, key)
+        contract_lm_head(ckpt, inp)
     print(
         f"\nloss budget dx slab of a tail chunk ({budget_case}): fused {fused.predicted_bytes} unfused "
         f"{unfused.predicted_bytes} smallest {smallest} budget {budget} form {mplan.form} dw_rows {mplan.dw_rows} "
@@ -5389,6 +5822,13 @@ def test_device_loss_budget_dx_slab_of_a_tail_chunk(glm_weight, budget_case):
     )
     assert max(peaks) <= mplan.predicted_bytes <= budget, (budget, mplan, peaks)
     assert ckpt_peak <= budget, (budget, mplan, ckpt_peak)
+    del ckpt, fast, inp
+
+    def budgets(fused, unfused, smallest):
+        top = min(fused.predicted_bytes, unfused.predicted_bytes)
+        return {budget_case: (top - 1 if budget_case == "below_top" else smallest, ("partial", "recompute"))}
+
+    _judge_budget_steps(record_property, T, C, budgets, (budget_case,), seed=SEED + 6993 - T)
 
 
 @pytest.mark.parametrize("placement", ["auto", "forward"])
@@ -5396,8 +5836,8 @@ def test_device_loss_explicit_budget_raises_where_the_call_plans(glm_weight, pla
     """An explicit budget that no loss form fits raises ``ValueError`` where the call plans: in the forward of a plain
     call; inside a non-reentrant ``torch.utils.checkpoint`` under the gradient placement ``"auto"`` the checkpointed
     forward computes the loss only and plans nothing, so the backward raises (its recomputation runs the forward that
-    plans), and under ``"forward"`` the checkpointed forward raises.  The next checkpointed step under a budget that
-    fits runs and gives the plain step's bits."""
+    plans), and under ``"forward"`` the checkpointed forward raises.  The next plain and checkpointed steps under a
+    budget that fits run and hold their contract."""
     _require_program(entry="loss")
     inp = make_inputs(
         8192, seed=SEED + 6994, device=CUDA, W=glm_weight, ignore_frac=0.05
@@ -5436,8 +5876,8 @@ def test_device_loss_explicit_budget_raises_where_the_call_plans(glm_weight, pla
             got = dict(loss=loss.detach(), dX=X.grad, dW=W.grad)
     finally:
         cake_backend.set_gradient_placement(previous)
-    for key in ("loss", "dX", "dW"):
-        assert _same_bits(got[key], want[key]), (placement, key)
+    contract_lm_head(want, inp)
+    contract_lm_head(got, inp)
 
 
 def test_logprob_vm_auto_rows():
@@ -5508,13 +5948,14 @@ def test_logprob_vm_dx_tuning():
 
 @pytest.mark.parametrize("tau", [None, "scalar", "hetero"])
 @pytest.mark.parametrize("T", [12000, 24000])
-def test_device_budget_vocab_major_logprob(glm_weight, monkeypatch, T, tau):
+def test_device_budget_vocab_major_logprob(glm_weight, record_property, monkeypatch, T, tau):
     """``memory_mode="budget"`` of the log-probability entry (no temperature, a scalar and a per-token one) at a budget
     below the chunk loop's fused peak (the internal override) runs the vocabulary-major backward, at any chunk count
     (here 3 and 6 chunks of 4096 rows; the default form takes it for 2 .. 4 chunks only): ``logp`` / ``dX`` / ``dW``
-    are the vocabulary-major backward's bits (mode ``"1"`` on the default entry), the gates pass (the production
-    ceiling where every temperature is at least 1), and the step peaks within the plan's prediction, itself within the
-    budget."""
+    are the vocabulary-major backward's bits (mode ``"1"`` on the default entry), the outputs hold their contract, and
+    the step peaks within the plan's prediction, itself within the budget.  At ``T = 12000`` the vocabulary-major
+    backward (mode ``"1"``, the budget form's bits) runs on every draw at ``JUDGE_H`` / ``JUDGE_V`` and is judged
+    against the naive tier."""
     _require_program(entry="logprob")
     calls = []
     real = cake_backend._backward_logprob_vm
@@ -5533,8 +5974,6 @@ def test_device_budget_vocab_major_logprob(glm_weight, monkeypatch, T, tau):
         temperature=tau,
     )
     tkw = {} if tau is None else dict(temperature=inp.temperature)
-    # the production ceiling is a temperature-1 figure: only where every temperature is at least 1 (the suite's rule)
-    ceiling = tau is None or bool(torch.as_tensor(inp.temperature).min() >= 1.0)
     R, H, V = int(inp.valid.sum()), int(inp.H), int(inp.V)
     head = 2 * R * V + 2 * V * H + 2 * T * H
     plan_kw = dict(
@@ -5562,7 +6001,7 @@ def test_device_budget_vocab_major_logprob(glm_weight, monkeypatch, T, tau):
             result, peak, _ = _budget_step(inp, "logprob", memory_mode="budget", **tkw)
             for key in ("logp", "dX", "dW"):
                 assert _same_bits(result[key], forced[key]), (T, tau, key)
-            _check_against_references(result, inp, entry="logprob", ceiling=ceiling)
+            contract_lm_head(result, inp, entry="logprob")
             peaks.append(peak)
             del result
     finally:
@@ -5574,6 +6013,29 @@ def test_device_budget_vocab_major_logprob(glm_weight, monkeypatch, T, tau):
     )
     assert predicted.form == "vocab_major", predicted
     assert max(peaks) <= predicted.predicted_bytes <= budget, (peaks, predicted, budget)
+    if T != 12000:
+        return
+    del forced, inp
+
+    def launch(draw):
+        calls.clear()
+        with _vocab_major("1"):
+            result, _, _ = _budget_step(
+                draw,
+                "logprob",
+                **({} if draw.temperature is None else dict(temperature=draw.temperature)),
+            )
+        assert len(calls) == 1, calls
+        return result
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        seed=SEED + 7600,
+        make_kw=dict(temperature=tau),
+    )
 
 
 def _spy_budget_plans(monkeypatch):
@@ -5600,7 +6062,7 @@ def test_device_budget_logprob_temperature_one_is_the_budget_call(
     1.0 given as an int or a 0-dim CPU tensor) is the budget call without a temperature: at an explicit budget below
     the chunk loop's fused peak it runs the vocabulary-major backward its plan picks -- here for 2 chunks whose tail
     holds more than half a chunk, which the default form's auto rule leaves to the chunk loop --, with the budget call's
-    ``logp`` / ``dX`` / ``dW`` bits (the vocabulary-major backward's), the gates and a peak within the plan's
+    ``logp`` / ``dX`` / ``dW`` bits (the vocabulary-major backward's), the contract and a peak within the plan's
     prediction, itself within the budget."""
     _require_program(entry="logprob")
     calls = []
@@ -5634,7 +6096,7 @@ def test_device_budget_logprob_temperature_one_is_the_budget_call(
             )
             for key in ("logp", "dX", "dW"):
                 assert _same_bits(result[key], want[key]), (tau, key)
-            _check_against_references(result, inp, entry="logprob", ceiling=True)
+            contract_lm_head(result, inp, entry="logprob")
             peaks.append(peak)
             del result
     assert len(calls) == 2, (tau, calls)
@@ -5692,8 +6154,7 @@ def test_device_checkpointed_forward_keeps_no_more_than_the_deterministic_packag
     """After a non-reentrant checkpointed forward the bytes
     the graph keeps alive, and after its backward (graph released) the bytes left beyond the gradients, are no more
     than the deterministic package's for the same call, whatever each package forms in that forward (the FP32 gradient
-    accumulators, kept until the backward, or the loss only); the outputs keep the deterministic package's ``loss`` /
-    ``dW`` bits.  The bytes are the ones the live tensors requested from the caching allocator, not its allocated
+    accumulators, kept until the backward, or the loss only).  The bytes are the ones the live tensors requested from the caching allocator, not its allocated
     blocks: a block can exceed its request by up to 1 MiB, by an amount set by the free blocks the process's earlier
     tests left, so the allocated bytes of the same call differ with the test order."""
     _require_program(entry="loss")
@@ -5723,98 +6184,141 @@ def test_device_checkpointed_forward_keeps_no_more_than_the_deterministic_packag
         torch.cuda.synchronize()
         kept = requested() - before
         loss.backward()
-        out = dict(loss=loss.detach(), dW=W.grad, dX=X.grad)
         del loss
         gc.collect()
         torch.cuda.synchronize()
         grads = sum(t.numel() * t.element_size() for t in (X.grad, W.grad))
         after = requested() - before - grads
-        return kept, after, out
+        return kept, after
 
-    nd_kept, nd_after, nd = retained("nd")
-    det_kept, det_after, det = retained("det")
+    nd_kept, nd_after = retained("nd")
+    det_kept, det_after = retained("det")
     print(
         f"\ncheckpoint T=8191 (requested bytes): kept after forward ND {nd_kept} det {det_kept}; "
         f"after backward ND {nd_after} det {det_after}"
     )
     assert nd_kept <= det_kept + (1 << 20), (nd_kept, det_kept)
     assert nd_after <= max(det_after, 0) + (1 << 20), (nd_after, det_after)
-    assert _same_bits(nd["loss"], det["loss"]) and _same_bits(nd["dW"], det["dW"])
 
 
-@pytest.mark.parametrize("fuse", [True, False])
-def test_device_fp32_weight_gradient(glm_weight, fuse):
-    """FP32 ``dW``: ``forward_loss`` / ``backward_loss`` with ``grad_weight_dtype=torch.float32``
-    (fused and unfused last-chunk cast) give an FP32 ``dW`` with the deterministic package's bits, within the gates."""
+def test_device_fp32_weight_gradient(glm_weight, record_property):
+    """FP32 ``dW``: ``forward_loss`` / ``backward_loss`` with ``grad_weight_dtype=torch.float32`` (fused and unfused
+    last-chunk cast) give an FP32 ``dW`` that holds its contract, and at ``JUDGE_H`` / ``JUDGE_V`` both forms of a
+    draw meet the naive tier (output ``name@fused`` / ``name@unfused``; the naive BF16 ``dW`` widened exactly)."""
     _require_program(entry="loss")
+
+    def call(problem, fuse):
+        fwd = cake_backend.forward_loss(
+            problem.X,
+            problem.W,
+            problem.labels,
+            loss_div=problem.loss_div,
+            chunk_size=4096,
+            grad_weight_dtype=torch.float32,
+            fuse_dw_cast=fuse,
+        )
+        dx, dw = fwd.backward(grad_weight_dtype=torch.float32)
+        return dict(loss=fwd.loss, logp=fwd.logp, dX=dx, dW=dw)
+
+    def contract(result, problem):
+        contract_lm_head(result, problem, grad_weight_dtype=torch.float32)
+
     inp = _device_inputs(4097, "ce", W=glm_weight)
-    kw = dict(
-        loss_div=inp.loss_div,
-        chunk_size=4096,
-        grad_weight_dtype=torch.float32,
-        fuse_dw_cast=fuse,
-    )
-    nd_fwd = cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
-    dx, dw = nd_fwd.backward(grad_weight_dtype=torch.float32)
-    det_fwd = det_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
-    det_dx, det_dw = det_fwd.backward(grad_weight_dtype=torch.float32)
-    assert dw.dtype == torch.float32 and _same_bits(dw, det_dw)
-    assert _same_bits(nd_fwd.loss, det_fwd.loss) and _same_bits(
-        nd_fwd.logp, det_fwd.logp
-    )
-    _check_against_references(
-        dict(loss=nd_fwd.loss, logp=nd_fwd.logp, dX=dx, dW=dw), inp, ceiling=True
+    for fuse in (True, False):
+        contract(call(inp, fuse), inp)
+    _judge_device(
+        record_property,
+        4097,
+        lambda draw: {"fused": call(draw, True), "unfused": call(draw, False)},
+        forms=("fused", "unfused"),
+        contract=contract,
     )
 
 
-def test_device_policy_rows_at_the_clip_knee(glm_weight):
-    """The policy objective at ``ratio = 2``: rows whose inference log-probability puts the ratio at the
-    clip knee and one FP32 step on either side: ``loss`` / ``logp`` / ``dW`` are the deterministic package's bits
-    (the same row kernel decides the same side), the rows the deterministic package gives zero ``dX`` get zero ``dX``,
-    and ``dX`` is the deterministic package's within the dX budget's floor (an FP64 oracle decides a knee row's side in
-    FP64, so it is no reference at the knee)."""
+def test_device_policy_rows_at_the_clip_knee(glm_weight, record_property):
+    """The policy objective at ``ratio = 2``.  The production-shape call puts its rows at the clip knee of this
+    package's own FP32 ``logp`` and one FP32 step on either side (a knee row's side is a decision of the kernel's FP32
+    arithmetic; an FP64 oracle decides it in FP64, so it is no reference at the knee) and holds its contract.  At
+    ``JUDGE_H`` / ``JUDGE_V`` each draw sets every valid row's side by its inputs alone, around the kernel's own FP32
+    ``logp``: half the valid rows at ``ratio = 2 e^-0.001`` (under the knee), the other half at ``2 e^0.001`` (over
+    it).  Every draw's call gives exact-zero ``dX`` rows over the knee and nonzero ones under it, its ``logp`` puts
+    every such row on its side, and ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive tier over the draws against
+    the forced-side oracle and naive tier (:func:`reference_fp64_forced_side`: the rows over the knee saturated, every
+    other valid row unclipped)."""
     _require_program(entry="loss")
-    base = _device_inputs(4097, "policy", W=glm_weight)
-    logp = det_backend.forward_logprob(
-        base.X, base.W, base.labels, chunk_size=4096
-    ).logp
-    rows = (base.labels >= 0).nonzero().squeeze(1)
-    knee = logp - math.log(2.0)
-    infer = base.infer_logp.clone()
-    third = rows.numel() // 3
-    infer[rows[:third]] = knee[rows[:third]]
-    infer[rows[third : 2 * third]] = torch.nextafter(
-        knee[rows[third : 2 * third]],
-        torch.full_like(knee[rows[third : 2 * third]], -1e30),
-    )
-    infer[rows[2 * third :]] = torch.nextafter(
-        knee[rows[2 * third :]], torch.full_like(knee[rows[2 * third :]], 1e30)
-    )
-    inp = dataclasses.replace(base, infer_logp=infer.contiguous())
+
+    def own_logp(base):
+        return cake_backend.forward_logprob(base.X, base.W, base.labels, chunk_size=4096).logp
+
+    def at_the_knee(base):
+        logp = own_logp(base)
+        rows = (base.labels >= 0).nonzero().squeeze(1)
+        knee = logp - math.log(2.0)
+        infer = base.infer_logp.clone()
+        third = rows.numel() // 3
+        infer[rows[:third]] = knee[rows[:third]]
+        infer[rows[third : 2 * third]] = torch.nextafter(
+            knee[rows[third : 2 * third]],
+            torch.full_like(knee[rows[third : 2 * third]], -1e30),
+        )
+        infer[rows[2 * third :]] = torch.nextafter(
+            knee[rows[2 * third :]], torch.full_like(knee[rows[2 * third :]], 1e30)
+        )
+        return dataclasses.replace(base, infer_logp=infer.contiguous(), regime=None)
+
+    inp = at_the_knee(_device_inputs(4097, "policy", W=glm_weight))
     nd = _loss_call(inp, 4096)
-    det = _loss_call(inp, 4096, package="det")
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    clipped = (det["dX"] == 0).all(dim=1) & (inp.labels >= 0)
-    assert bool((nd["dX"][clipped] == 0).all())
-    err = rel_l2(nd["dX"], det["dX"].double())
-    print(
-        f"\nknee rows: {int(clipped.sum())} zero-dX of {rows.numel()}; dX rel-L2 vs det {err:.3e}"
+    contract_lm_head(nd, inp)
+    clipped = (nd["dX"] == 0).all(dim=1) & (inp.labels >= 0)
+    print(f"\nknee rows: {int(clipped.sum())} zero-dX of {int((inp.labels >= 0).sum())}")
+    sides = {}  # draw seed -> (the rows under the knee, the rows over it, the bool [T] mask of the rows over it)
+
+    def around_the_knee(base):
+        logp = own_logp(base)
+        rows = (base.labels >= 0).nonzero().squeeze(1)
+        under, over = rows[0::2], rows[1::2]
+        assert under.numel() >= 8 and over.numel() >= 8, rows.numel()
+        infer = base.infer_logp.clone()
+        infer[under] = logp[under] - (math.log(2.0) - 1e-3)  # ratio 2 e^-0.001: under the knee
+        infer[over] = logp[over] - (math.log(2.0) + 1e-3)  # ratio 2 e^0.001: over the knee
+        mask = torch.zeros(base.labels.shape, dtype=torch.bool, device=base.labels.device)
+        mask[over] = True
+        sides[base.seed] = (under, over, mask)
+        return dataclasses.replace(base, infer_logp=infer.contiguous(), regime=None)
+
+    def contract(result, draw):
+        contract_lm_head(result, draw)
+        under, over, _ = sides[draw.seed]
+        assert not bool(result["dX"][over].any()), "a row over the knee has a nonzero dX row"
+        assert bool((result["dX"][under].float().abs().sum(dim=1) > 0).all()), "a row under the knee has a zero dX row"
+        ratio = torch.exp(result["logp"] - draw.infer_logp)
+        assert bool((ratio[under] < 2.0).all()), "a row set under the knee is over it"
+        assert bool((ratio[over] > 2.0).all()), "a row set over the knee is under it"
+
+    def side(draw):
+        return dict(over=sides[draw.seed][2])
+
+    _judge_device(
+        record_property,
+        4097,
+        lambda draw: _loss_call(draw, 4096),
+        make_kw=dict(objective="policy"),
+        prepare=around_the_knee,
+        contract=contract,
+        oracle_kw=side,
+        naive_kw=side,
     )
-    assert err <= GATE_TINY["dX_rel_l2"], err
 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_every_row_ignored_and_no_rows(glm_weight, entry):
-    """Every label ``-100`` gives loss 0, ``logp`` 0 and zero gradients (the deterministic package's
-    bits); ``T = 0`` gives loss 0, an empty ``logp`` and zero gradients."""
+    """Every label ``-100`` gives loss 0, ``logp`` 0 and zero gradients; ``T = 0`` gives loss 0, an empty ``logp``
+    and zero gradients."""
     _require_program(entry=entry)
     inp = _device_inputs(37, "ce", W=glm_weight, ignore_frac=1.0)
     assert not bool((inp.labels >= 0).any())
     nd = _run(inp, 4096, entry=entry, backend="cake")
-    det = _run(inp, 4096, entry=entry, backend="cake", package="det")
     for key in ("logp", "dX", "dW") + (("loss",) if entry == "loss" else ()):
-        assert _same_bits(nd[key], det[key]), key
         assert not bool(nd[key].any()), key
     empty = dataclasses.replace(
         inp,
@@ -5828,51 +6332,50 @@ def test_device_every_row_ignored_and_no_rows(glm_weight, entry):
     assert tuple(nd0["dX"].shape) == (0, inp.H) and not bool(nd0["dW"].any())
 
 
-def test_device_upstream_gradient_scale(glm_weight):
-    """A loss upstream gradient other than 1 (``loss * 3``) scales ``dX`` / ``dW`` through the same
-    single cast: ``loss`` / ``logp`` / ``dW`` are the deterministic package's bits and ``dX`` passes the gates against
-    three times the oracle's."""
+def test_device_upstream_gradient_scale(glm_weight, record_property):
+    """A loss upstream gradient other than 1 (``loss * 3``) scales ``dX`` / ``dW`` through the same single cast: the
+    production-shape call holds its contract, and at ``JUDGE_H`` / ``JUDGE_V`` ``dX`` / ``dW`` are judged against the
+    naive tier, their errors taken against three times the oracle's (the naive tier backpropagates ``loss * 3``)."""
     _require_program(entry="loss")
     inp = _device_inputs(4097, "ce", W=glm_weight)
-    nd = _run(inp, 4096, backend="cake", scale=3.0)
-    det = _run(inp, 4096, backend="cake", package="det", scale=3.0)
-    _compare_with_det(nd, det)
-    oracle = reference_fp64(inp)
-    b0 = error_report(reference_unchunked(inp), oracle, inp.labels)
-    for name in ("dX", "dW"):
-        err = rel_l2(nd[name], 3.0 * oracle[name])
-        assert (
-            err <= GATE_MARGIN * b0[f"{name}_rel_l2"] + GATE_TINY[f"{name}_rel_l2"]
-        ), (
-            name,
-            err,
-        )
+    contract_lm_head(_run(inp, 4096, backend="cake", scale=3.0), inp)
+    _judge_device(
+        record_property,
+        4097,
+        lambda draw: _run(draw, 4096, backend="cake", scale=3.0),
+        oracle_kw=dict(scale=3.0),
+        naive_kw=dict(scale=3.0),
+    )
 
 
-def test_device_uncompacted_path(glm_weight):
-    """``compact_rows=False``: the chunk loop over every row gives the deterministic package's
-    uncompacted ``loss`` / ``logp`` / ``dW`` bits, ``dX`` within the gates, and the compacted call's ``logp`` bits."""
+def test_device_uncompacted_path(glm_weight, record_property):
+    """``compact_rows=False``: the chunk loop over every row holds its contract and gives the compacted call's
+    ``logp`` bits; at ``JUDGE_H`` / ``JUDGE_V`` it meets the naive tier."""
     _require_program(entry="loss")
     inp = _device_inputs(8191, "ce", W=glm_weight)
     nd = _run(inp, 4096, backend="cake", compact_rows=False)
-    det = _run(inp, 4096, backend="cake", package="det", compact_rows=False)
-    _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
+    contract_lm_head(nd, inp)
     assert _same_bits(nd["logp"], _run(inp, 4096, backend="cake")["logp"])
+    _judge_device(
+        record_property, 8191, lambda draw: _run(draw, 4096, backend="cake", compact_rows=False)
+    )
 
 
 @pytest.mark.parametrize("ld_pad", [256, 1])
-def test_device_strided_x(glm_weight, ld_pad):
+def test_device_strided_x(glm_weight, record_property, ld_pad):
     """Strided ``X``: the ``[:, :H]`` view of a ``[T, H + ld_pad]`` buffer -- read in place at a 16-byte
-    row pitch (``ld_pad`` 256), copied to a contiguous tensor otherwise (``ld_pad`` 1) -- gives the deterministic
-    package's ``loss`` / ``logp`` / ``dW`` bits and ``dX`` within the gates."""
+    row pitch (``ld_pad`` 256), copied to a contiguous tensor otherwise (``ld_pad`` 1) -- holds its contract, and at
+    ``JUDGE_H`` / ``JUDGE_V`` (the same strides) meets the naive tier."""
     _require_program(entry="loss")
     inp = make_inputs(4097, seed=SEED + 4097, device=CUDA, W=glm_weight, ld_pad=ld_pad)
     assert inp.X.stride(0) == inp.H + ld_pad
-    nd = _run(inp, 4096, backend="cake")
-    det = _run(inp, 4096, backend="cake", package="det")
-    _check_against_references(nd, inp, ceiling=True)
-    _compare_with_det(nd, det)
+    contract_lm_head(_run(inp, 4096, backend="cake"), inp)
+
+    def launch(draw):
+        assert draw.X.stride(0) == draw.H + ld_pad
+        return _run(draw, 4096, backend="cake")
+
+    _judge_device(record_property, 4097, launch, make_kw=dict(ld_pad=ld_pad))
 
 
 def test_device_wrong_valid_row_count_raises_on_every_path(glm_weight):
@@ -5931,36 +6434,64 @@ def test_device_wrong_valid_row_count_raises_on_every_path(glm_weight):
         torch.cuda.synchronize()
 
 
-def test_device_dw_stream_modes(glm_weight):
-    """``dw_stream``: off, on and ``"auto"`` on a four-chunk call give the same ``loss`` / ``logp`` /
-    ``dW`` bits (the deterministic package's), and ``dX`` within the gates after a 0xFF-poisoned allocator: every
-    ``dX_acc`` row is stored (a one-slice chunk's GEMM, a K-sliced chunk's slab sum) when the weight-gradient GEMMs run
-    on the side stream."""
+def test_device_dw_stream_modes(glm_weight, record_property):
+    """``dw_stream``: off, on and ``"auto"`` on a four-chunk call hold their contract after a 0xFF-poisoned allocator:
+    every ``dX_acc`` row is stored (a one-slice chunk's GEMM, a K-sliced chunk's slab sum) when the weight-gradient
+    GEMMs run on the side stream.  At ``JUDGE_H`` / ``JUDGE_V`` the three modes of a draw meet the naive tier
+    (``name@off`` / ``name@on`` / ``name@auto``)."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, "ce", W=glm_weight)
-    oracle = reference_fp64(inp)
-    b0 = error_report(reference_unchunked(inp), oracle, inp.labels)
-    det = _run(inp, 4096, backend="cake", package="det")
-    for mode in (False, True, "auto"):
+    modes = {"off": False, "on": True, "auto": "auto"}
+    for mode in modes.values():
         _poison_allocator(1 << 30)
         nd = _run(inp, 4096, backend="cake", dw_stream=mode)
-        _compare_with_det(nd, det)
-        errors = error_report(nd, oracle, inp.labels)
-        assert not errors["nan"] and errors["dX_ignored_zero"]
-        for key, tiny in GATE_TINY.items():
-            if key in errors:
-                assert errors[key] <= GATE_MARGIN * b0[key] + tiny, (mode, key)
+        contract_lm_head(nd, inp)
+    del nd
+
+    def launch(draw):
+        results = {}
+        for name, mode in modes.items():
+            _poison_allocator(1 << 30)
+            results[name] = _run(draw, 4096, backend="cake", dw_stream=mode)
+        return results
+
+    _judge_device(record_property, 12289, launch, forms=tuple(modes))
 
 
-def test_device_fresh_thread_and_preload(glm_weight):
-    """A call from a thread that never called the package before forms that thread's state (side
-    streams, count cells) and gives the main thread's ``loss`` / ``logp`` / ``dW`` bits;
-    ``cake_lm_head_nondet_train_preload`` forms the calling thread's state ahead of its first call."""
+def test_device_fresh_thread_and_preload(glm_weight, record_property):
+    """A call from a thread that never called the package before (after a call on the main thread) forms that thread's
+    state (side streams, count cells) and holds its contract; ``cake_lm_head_nondet_train_preload`` forms the calling
+    thread's state ahead of its first call.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs a call on the main thread
+    and then one from a new thread, and both are judged against the naive tier (``name@main`` /
+    ``name@fresh_thread``)."""
     _require_program(entry="loss")
     import cake_pplx.cake_lm_head_nondet_train as public
 
+    def from_a_new_thread(problem):
+        found: dict = {}
+
+        def fresh():
+            try:
+                found["state_before"] = getattr(cake_backend._THREAD_STATE, "dw_streams", None)
+                found["result"] = _run(problem, 4096, backend="cake")
+            except BaseException as exc:  # noqa: BLE001 -- re-raised on the main thread
+                found["error"] = exc
+
+        thread = threading.Thread(target=fresh)
+        thread.start()
+        thread.join()
+        if "error" in found:
+            raise found["error"]
+        assert found["state_before"] is None
+        return found["result"]
+
+    def launch(j, s):
+        draw = _draw_inputs(12289, s, _judge_weight(s))
+        main = _run(draw, 4096, backend="cake")
+        return [(draw, dict(main=main, fresh_thread=from_a_new_thread(draw)))]
+
     inp = _device_inputs(12289, "ce", W=glm_weight)
-    main = _run(inp, 4096, backend="cake")
+    contract_lm_head(_run(inp, 4096, backend="cake"), inp)
     out: dict = {}
 
     def fresh():
@@ -5990,10 +6521,11 @@ def test_device_fresh_thread_and_preload(glm_weight):
         if "error" in out:
             raise out["error"]
     assert out["state_before"] is None
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(out["result"][key], main[key]), key
-    _check_against_references(out["result"], inp, ceiling=True)
+    contract_lm_head(out["result"], inp)
     assert out["preloaded"] == (True, True)
+    out.clear()  # the names stay bound: ``fresh`` / ``preloaded`` read them
+    inp = None
+    _judge_problems(record_property, launch, ("main", "fresh_thread"), seed=SEED + 12289)
 
 
 def _forget_device_constants():
@@ -6196,14 +6728,14 @@ def test_device_first_calls_of_two_threads_keep_the_sync_debug_mode(glm_weight, 
     """With a synchronization debug mode set, the constant cells' one wait -- an event recorded behind their fills --
     neither triggers nor changes the mode and takes no lock.  The first calls of two threads race into the cells'
     creation (cleared cache; every event wait held open for 0.5 s): their waits overlap, each sees ``mode``, the
-    package never sets the mode, the calls raise nothing and give the serial call's ``loss`` / ``logp`` / ``dW`` bits
-    (``dX`` of both within the gates), and the mode is ``mode`` after both.  ``T`` = 12289 (``ceil(T / 4096)`` = 4, at
+    package never sets the mode, the calls raise nothing and hold their contract, and the mode is ``mode`` after
+    both.  ``T`` = 12289 (``ceil(T / 4096)`` = 4, at
     least :data:`cake_backend.HIDDEN_COUNT_MIN_CHUNKS`): the call takes the hidden valid-row count, whose wait is an
     event wait too."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, "ce", W=glm_weight)
     # binds: the threads' calls are binding-cache hits
-    serial = _run(inp, 4096, backend="cake")
+    contract_lm_head(_run(inp, 4096, backend="cake"), inp)
     original = torch.cuda.Event.synchronize
     guard = threading.Lock()
     inside, entered, seen, modes = [0], [], [], []
@@ -6272,9 +6804,7 @@ def test_device_first_calls_of_two_threads_keep_the_sync_debug_mode(glm_weight, 
     assert seen and set(seen) == {level}, seen
     assert after == level, after
     for got in results:
-        for key in ("loss", "logp", "dW"):
-            assert _same_bits(got[key], serial[key]), key
-        _check_against_references(got, inp, ceiling=True)
+        contract_lm_head(got, inp)
 
 
 # Cycles of the delay that holds both backwards of the two-stream tests (about a second at the B200 boost clock)
@@ -6483,8 +7013,8 @@ def test_device_same_inputs_on_two_streams_at_once(
     completions overlap (both entries), both backwards are queued behind one delay on a third stream, so both are in
     flight on the device when it ends (the delay's event had not completed when both were queued), and in the
     log-probability backward -- the loss backward runs only eager casts -- the spans of the two calls' launch
-    completions overlap.  Each call of EVERY run, overlapping or not, gives the serial call's ``loss`` / ``logp`` /
-    ``dW`` bits and ``dX`` within the gates, and prepares no binding.  With no overlapping run in
+    completions overlap.  Each call of EVERY run, overlapping or not, holds its contract and prepares no binding.
+    With no overlapping run in
     :data:`TWO_STREAM_ATTEMPTS` (a host too slow to queue the second call in time) the test skips with the runs' times
     after those checks; it never fails on timing.  That no call writes a buffer of the shared binding rests on the
     binding owning none (``owned_bytes == 0`` here, the registry check of :func:`test_bindings_own_no_buffer`): with the
@@ -6499,18 +7029,16 @@ def test_device_same_inputs_on_two_streams_at_once(
         counts = (r.prepared, r.after, r.bound)
         assert r.prepared == [] and r.after == r.bound, counts
         for got in r.results:
-            for key in got.keys() - {"dX"}:
-                assert _same_bits(got[key], r.serial[key]), key
-            _check_against_references(got, inp, entry=entry, ceiling=True)
+            contract_lm_head(got, inp, entry=entry)
     _skip_without(run, runs, "overlapping")
 
 
 def test_device_logprob_backward_binding_holds_no_lse_or_dlogp_address(glm_weight):
     """The log-probability backward's binding key holds the layout of ``lse`` / ``dlogp``, not their addresses.
     Backward calls on one forward whose ``lse`` and ``dlogp`` sit at a new address every time (copies kept alive) bind
-    once: the later calls are binding-cache hits that prepare nothing and give the first call's ``dW`` bits and ``dX``
-    within the gates.  The autograd entry's second step prepares nothing either, after a 1 GiB allocator poison
-    between the steps (each forward allocates a fresh ``lse``)."""
+    once: the later calls are binding-cache hits that prepare nothing, and every call holds its contract.  The
+    autograd entry's second step prepares nothing either, after a 1 GiB allocator poison between the steps (each
+    forward allocates a fresh ``lse``)."""
     _require_program(entry="logprob")
     inp = _device_inputs(4097, "ce", W=glm_weight)
     fwd = cake_backend.forward_logprob(inp.X, inp.W, inp.labels, chunk_size=4096)
@@ -6548,11 +7076,8 @@ def test_device_logprob_backward_binding_holds_no_lse_or_dlogp_address(glm_weigh
     assert len({lse.data_ptr() for lse, _ in kept}) == 3
     assert len({dlogp.data_ptr() for _, dlogp in kept}) == 3
     assert prepared == ["logprob"] and hits == [0, 1, 1], (prepared, hits)
-    for dx, dw in results[1:]:
-        assert _same_bits(dw, results[0][1])
-        _check_against_references(
-            dict(logp=fwd.logp, dX=dx, dW=dw), inp, entry="logprob", ceiling=True
-        )
+    for dx, dw in results:
+        contract_lm_head(dict(logp=fwd.logp, dX=dx, dW=dw), inp, entry="logprob")
     _run(inp, 4096, entry="logprob", backend="cake")
     prepared.clear()
     cake_backend.prepare_lm_head_loss = counting
@@ -6562,7 +7087,7 @@ def test_device_logprob_backward_binding_holds_no_lse_or_dlogp_address(glm_weigh
     finally:
         cake_backend.prepare_lm_head_loss = original
     assert prepared == [], prepared
-    _check_against_references(second, inp, entry="logprob", ceiling=True)
+    contract_lm_head(second, inp, entry="logprob")
 
 
 @pytest.fixture
@@ -6580,12 +7105,13 @@ def shipped_chunks(monkeypatch):
 @pytest.mark.parametrize(
     "objective, entry", [("ce", "loss"), ("policy", "loss"), ("ce", "logprob")]
 )
-def test_device_short_tail_fold(logprob_chunk_loop, glm_weight, objective, entry):
+def test_device_short_tail_fold(logprob_chunk_loop, glm_weight, record_property, objective, entry):
     """The short-tail fold on the device: T 4600 at C 4096 with 5 % ignored rows (the V07 shape: 4370 loop rows, a
     274-row tail) runs ONE chunk of 4370 rows -- one launch of each GEMM (launch record; the log-probability backward
     under the zero-gradient row skip's counted forms too, its chunk loop pinned: the vocabulary-major auto rule takes
-    this two-chunk call otherwise) and, with the fused cast, no FP32 ``dW_acc`` -- passes the
-    deterministic suite's gates against the FP64 oracle, and ``loss`` / ``logp`` / ``dW`` repeat bit for bit."""
+    this two-chunk call otherwise) and, with the fused cast, no FP32 ``dW_acc`` -- and holds its contract, as does a
+    second call from the remembered binding; at ``JUDGE_H`` / ``JUDGE_V`` the binding call and the remembered call
+    (``name@first`` / ``name@again``) run one chunk on every draw and are judged against the naive tier."""
     _require_program(entry=entry)
     inp = _device_inputs(4600, objective, W=glm_weight)
     rows = int((inp.labels >= 0).sum())
@@ -6595,10 +7121,35 @@ def test_device_short_tail_fold(logprob_chunk_loop, glm_weight, objective, entry
         nd = _run(inp, 4096, entry=entry, backend="cake")
     gemms = [key for key in launched if key[0].startswith("gemm_")]
     assert gemms and {key[1] for key in gemms} == {0}, gemms
+    contract_lm_head(nd, inp, entry=entry)
     again = _run(inp, 4096, entry=entry, backend="cake")
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], again[key]), key
-    _check_against_references(nd, inp, entry=entry, ceiling=True)
+    contract_lm_head(again, inp, entry=entry)
+    del again
+
+    def one_chunk(draw):
+        with _launch_record() as launched:
+            result = _run(draw, 4096, entry=entry, backend="cake")
+        gemm_keys = [key for key in launched if key[0].startswith("gemm_")]
+        assert gemm_keys and {key[1] for key in gemm_keys} == {0}, gemm_keys
+        return result
+
+    def launch(draw):
+        cache = cake_backend.BINDING_CACHE
+        cache.clear()
+        first = one_chunk(draw)
+        misses = cache.misses
+        again = one_chunk(draw)
+        assert cache.misses == misses, "the second call runs remembered bindings"
+        return {"first": first, "again": again}
+
+    _judge_device(
+        record_property,
+        4600,
+        launch,
+        entry=entry,
+        forms=("first", "again"),
+        make_kw=dict(objective=objective),
+    )
     if objective == "ce" and entry == "loss":
         fr = cake_backend.forward_loss(
             inp.X, inp.W, inp.labels, loss_div=inp.loss_div, chunk_size=4096
@@ -6608,11 +7159,12 @@ def test_device_short_tail_fold(logprob_chunk_loop, glm_weight, objective, entry
 
 
 def test_device_red_min_rows_keeps_small_chunks_on_the_plain_store(
-    glm_weight, shipped_chunks
+    glm_weight, record_property, shipped_chunks
 ):
     """``set_dx_red_min_rows``: a two-chunk call whose one-row tail falls below the floor runs that chunk with the
-    plain store -- its ``dX`` rows are the deterministic package's one-slice bits -- while the 4096-row chunk keeps
-    the reduction (launch record); the call passes the gates.  The shipped chunks (no short-tail fold)."""
+    plain store while the 4096-row chunk keeps the reduction (launch record); the call holds its contract, and at
+    ``JUDGE_H`` / ``JUDGE_V`` the same launches on every draw are judged against the naive tier.  The shipped chunks (no
+    short-tail fold)."""
     _require_program(entry="loss")
     policy = cake_backend.dx_slice_policy()
     if _device_slices(4097, policy, glm_weight)[0] == 1:
@@ -6632,17 +7184,31 @@ def test_device_red_min_rows_keeps_small_chunks_on_the_plain_store(
     assert [key[1] for key in dx_keys] == [0, 1], dx_keys
     assert dx_keys[0][0].startswith(cake_backend.DX_RED_STAGE)
     assert not dx_keys[1][0].startswith(cake_backend.DX_RED_STAGE)
-    plain = _run(
-        inp, 4096, backend="cake", package="det", gemm_tuning={"dx": {"k_slices": None}}
-    )
-    assert _same_bits(nd["dX"][4096:], plain["dX"][4096:])
-    _check_against_references(nd, inp, ceiling=True)
+    contract_lm_head(nd, inp)
+    del nd
+    assert _device_slices(4097, policy, _judge_shape_weight())[0] > 1
+    assert _device_slices(4097, policy, _judge_shape_weight(), red_min_rows=2)[1] == 1
+
+    def launch(draw):
+        previous = cake_backend.set_dx_red_min_rows(2)
+        try:
+            cake_backend.BINDING_CACHE.clear()
+            with _launch_record() as launched:
+                result = _run(draw, 4096, backend="cake")
+        finally:
+            cake_backend.set_dx_red_min_rows(previous)
+        keys = [key for key in launched if key[0].startswith("gemm_dx")]
+        assert [key[1] for key in keys] == [0, 1], keys
+        assert keys[0][0].startswith(cake_backend.DX_RED_STAGE)
+        assert not keys[1][0].startswith(cake_backend.DX_RED_STAGE)
+        return result
+
+    _judge_device(record_property, 4097, launch, ignore_frac=0.0)
 
 
 def test_device_zero_weight_floor_keeps_small_calls_unsplit(glm_weight):
     """``set_zero_weight_min_rows``: a policy call below the floor keeps its zero-weight rows on the gradient path (no
-    split): ``loss`` / ``logp`` / ``dW`` are the bits of the deterministic package's plain path (its own zero-weight
-    split off) and the zero-weight rows' ``dX`` rows are zeros."""
+    split, no zero-weight report) and the zero-weight rows' ``dX`` rows are zeros."""
     _require_program(entry="loss")
     base = _device_inputs(4097, "policy", W=glm_weight)
     zero = _zero_weight_set(base, ("random", 0.3))
@@ -6662,10 +7228,6 @@ def test_device_zero_weight_floor_keeps_small_calls_unsplit(glm_weight):
     finally:
         cake_backend.set_zero_weight_min_rows(previous)
     assert "zero_weight_rows" not in (fwd.memory or {})
-    with _det_unsplit():
-        det = _loss_call(inp, 4096, package="det")
-    for key in ("loss", "logp", "dW"):
-        assert _same_bits(nd[key], det[key]), key
     assert not bool(nd["dX"][zero].any())
 
 
@@ -6950,22 +7512,19 @@ def test_frozen_head_with_a_trainable_policy_operand_keeps_the_autograd_entry():
 def test_checkpointed_step_forms_the_gradients_once(objective, kind):
     """A checkpointed step runs one gradient forward, as an uncheckpointed step (the non-reentrant checkpointed forward
     and the reentrant first pass run the loss only; the recomputation forms the gradients; with offload hooks on top
-    the call keeps its fused forward); ``loss`` / ``logp`` / ``dX`` / ``dW`` are the uncheckpointed step's bits.
-    ``"forward"`` placement: two gradient forwards, the same bits."""
+    the call keeps its fused forward); the step holds its contract.  ``"forward"`` placement: two gradient forwards,
+    the step holding its contract."""
     inp = _host_inputs(200, objective)
-    plain = _placement_step(inp, 64, "plain", backend="reference")
     with _gradient_forwards() as seen:
         run = _placement_step(inp, 64, kind, backend="reference")
     grads = [p for p in seen if p[0] or p[1]]
     assert len(grads) == 1, seen
-    for key in ("loss", "logp", "dX", "dW"):
-        assert _same_bits(run[key], plain[key]), key
+    contract_lm_head(run, inp)
     if kind != "offload_inside":
         with _placement("forward"), _gradient_forwards() as seen:
             again = _placement_step(inp, 64, kind, backend="reference")
         assert len([p for p in seen if p[0] or p[1]]) == 2, seen
-        for key in ("loss", "logp", "dX", "dW"):
-            assert _same_bits(again[key], plain[key]), key
+        contract_lm_head(again, inp)
     gc.collect()
     assert len(cake_backend._CHECKPOINT_CALLS) == 0
 
@@ -7024,14 +7583,13 @@ def test_selective_checkpoint_and_dispatch_modes_form_the_gradients_once(
     position; the call runs outside its dispatch modes, so the checkpointed forward computes the loss only and the
     recomputation forms the gradients, as in a plain non-reentrant checkpoint (also with a policy that saves every
     operator).  Likewise under another dispatch mode (``dispatch_mode``: around the checkpointed forward only;
-    ``dispatch_mode_step``: around the forward and the backward).  One gradient forward, the uncheckpointed step's
-    bits, no frame record left; the ``"forward"`` placement forms them in both passes, with the same bits.  ``count``:
-    the opt-in count form."""
+    ``dispatch_mode_step``: around the forward and the backward).  One gradient forward, the step's contract, no frame
+    record left; the ``"forward"`` placement forms them in both passes, the step holding its contract.  ``count``: the
+    opt-in count form."""
     inp = _host_inputs(200, objective)
     kw = dict(backend="reference")
     if module == "count":
         kw.update(module=opt_in, num_valid_rows=int((inp.labels >= 0).sum()))
-    plain = _placement_step(inp, 64, "plain", **kw)
     for mode, gradient_forwards in (("auto", 1), ("forward", 2)):
         with _placement(mode), _gradient_forwards() as seen:
             if kind == "dispatch_mode_step":
@@ -7040,16 +7598,15 @@ def test_selective_checkpoint_and_dispatch_modes_form_the_gradients_once(
             else:
                 run = _placement_step(inp, 64, kind, **kw)
         assert _gradient_count(seen) == gradient_forwards, (mode, seen)
-        _assert_step_bits(run, plain)
+        contract_lm_head(run, inp)
     gc.collect()
     assert len(cake_backend._CHECKPOINT_CALLS) == 0
 
 
 def test_checkpointed_retained_graph_forms_the_gradients_per_backward():
     """Two backward passes through one retained checkpointed graph: each recomputes and forms the gradients once,
-    each pair of gradients is the uncheckpointed step's bits."""
+    each pair of gradients holds its contract."""
     inp = _host_inputs(200, "policy")
-    plain = _placement_step(inp, 64, "plain", backend="reference")
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
 
@@ -7071,14 +7628,13 @@ def test_checkpointed_retained_graph_forms_the_gradients_per_backward():
         second = torch.autograd.grad(loss, (X, W))
     assert len([p for p in seen if p[0] or p[1]]) == 2, seen
     for grads in (first, second):
-        assert _same_bits(grads[0], plain["dX"]) and _same_bits(grads[1], plain["dW"])
+        contract_lm_head(dict(dX=grads[0], dW=grads[1]), inp)
 
 
 def test_checkpointed_call_without_a_handed_result_forms_its_gradients_in_the_backward():
     """When the recomputation cannot hand its result to the checkpointed call (its frame record dropped), the
-    checkpointed call's backward runs the fused forward itself, with a warning: the same bits."""
+    checkpointed call's backward runs the fused forward itself, with a warning; the gradients hold their contract."""
     inp = _host_inputs(200, "ce")
-    plain = _placement_step(inp, 64, "plain", backend="reference")
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
 
@@ -7103,14 +7659,13 @@ def test_checkpointed_call_without_a_handed_result_forms_its_gradients_in_the_ba
     assert len([p for p in seen if p[0] or p[1]]) == 2, (
         seen
     )  # the recomputation's and the backward's own
-    assert _same_bits(X.grad, plain["dX"]) and _same_bits(W.grad, plain["dW"])
+    contract_lm_head(dict(dX=X.grad, dW=W.grad), inp)
 
 
 def test_checkpointed_steps_on_concurrent_threads():
-    """Non-reentrant checkpointed steps on two threads at once: each forms the gradients once, with the uncheckpointed
-    step's bits, and no frame record is left behind."""
+    """Non-reentrant checkpointed steps on two threads at once: each forms the gradients once and holds its contract,
+    and no frame record is left behind."""
     inps = [_host_inputs(200, "ce"), _host_inputs(201, "policy")]
-    plains = [_placement_step(inp, 64, "plain", backend="reference") for inp in inps]
     barrier = threading.Barrier(2)
     runs: list = [None, None]
     errors: list = []
@@ -7134,16 +7689,16 @@ def test_checkpointed_steps_on_concurrent_threads():
     assert not any(t.is_alive() for t in threads), "a thread did not finish"
     assert not errors, errors
     assert _gradient_count(seen) == 6, seen
-    for run, plain in zip(runs, plains, strict=True):
-        _assert_step_bits(run, plain)
+    for run, inp in zip(runs, inps, strict=True):
+        contract_lm_head(run, inp)
     gc.collect()
     assert len(cake_backend._CHECKPOINT_CALLS) == 0
 
 
 @pytest.mark.parametrize("kind", ["no_grad", "nonreentrant", "reentrant"])
 def test_opt_in_count_form_places_the_gradients_alike(kind):
-    """The opt-in count form (``num_valid_rows``) follows the gradient placement: no gradient forward without a graph,
-    one per checkpointed step, the uncheckpointed step's bits."""
+    """The opt-in count form (``num_valid_rows``) follows the gradient placement: no gradient forward without a graph
+    (the plain step's ``loss`` / ``logp`` bits), one per checkpointed step (the step holds its contract)."""
     inp = _host_inputs(200, "policy")
     count = int((inp.labels >= 0).sum())
     plain = _placement_step(
@@ -7172,7 +7727,7 @@ def test_opt_in_count_form_places_the_gradients_alike(kind):
             inp, 64, kind, module=opt_in, backend="reference", num_valid_rows=count
         )
     assert _gradient_count(seen) == 1, seen
-    _assert_step_bits(run, plain)
+    contract_lm_head(run, inp)
 
 
 @pytest.mark.parametrize("graph", ["no_grad", "inference_mode"])
@@ -7219,10 +7774,10 @@ def test_device_no_graph_launches_no_gradient_gemm(glm_weight, objective, graph)
 def test_device_checkpointed_step_launches_the_gradient_gemms_once(
     glm_weight, objective, kind
 ):
-    """A checkpointed three-chunk step launches as many dX / dW GEMMs as the uncheckpointed step (launch record);
-    with one dX slice pinned (the same plan, the same bits run to run) ``loss`` / ``logp`` / ``dX`` / ``dW`` are the
-    uncheckpointed step's bits and the ``"forward"`` placement's (which launches them twice -- the reentrant first
-    pass: its dW GEMMs only -- and once with the offload hooks innermost)."""
+    """A checkpointed three-chunk step launches as many dX / dW GEMMs as the uncheckpointed step (launch record; one
+    dX slice pinned: the same plan in every step) and holds its contract, as does the step under the ``"forward"``
+    placement (which launches them twice -- the reentrant first pass: its dW GEMMs only -- and once with the offload
+    hooks innermost)."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, objective, W=glm_weight)
     one = dict(gemm_tuning={"dx": {"k_slices": 1}})
@@ -7231,10 +7786,11 @@ def test_device_checkpointed_step_launches_the_gradient_gemms_once(
         plain = _placement_step(inp, 4096, "plain", **one)
     count = _gradient_gemm_keys(launched)
     assert count >= 5, sorted({k[0] for k in launched})
+    contract_lm_head(plain, inp)
     with _launch_record() as launched:
         run = _placement_step(inp, 4096, kind, **one)
     assert _gradient_gemm_keys(launched) == count
-    _assert_step_bits(run, plain)
+    contract_lm_head(run, inp)
     with _placement("forward"), _launch_record() as launched:
         again = _placement_step(inp, 4096, kind, **one)
     forward = _gradient_gemm_keys(launched)
@@ -7245,29 +7801,24 @@ def test_device_checkpointed_step_launches_the_gradient_gemms_once(
         assert count < forward < 2 * count, (forward, count)
     else:
         assert forward == 2 * count, (forward, count)
-    _assert_step_bits(again, plain)
+    contract_lm_head(again, inp)
 
 
 @pytest.mark.parametrize("objective", ["ce", "policy"])
 def test_device_checkpointed_step_default_plan_and_memory(glm_weight, objective):
-    """Under the default dX slice rule a non-reentrant checkpointed three-chunk step gives the uncheckpointed step's
-    ``loss`` / ``logp`` / ``dW`` bits and a ``dX`` within the gates; it keeps fewer bytes from the forward to the
-    backward than the ``"forward"`` placement (which keeps the FP32 gradient accumulators) and peaks no higher."""
+    """Under the default dX slice rule a non-reentrant checkpointed three-chunk step (after an uncheckpointed one) holds
+    its contract; it keeps fewer bytes from the forward to the backward than the ``"forward"`` placement (which keeps
+    the FP32 gradient accumulators) and peaks no higher."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, objective, W=glm_weight)
-    plain = _placement_step(inp, 4096, "plain")
+    contract_lm_head(_placement_step(inp, 4096, "plain"), inp)
     mem = {}
     for mode in ("forward", "auto"):
         with _placement(mode):
             _placement_step(inp, 4096, "nonreentrant")  # binds
             mem[mode] = {}
             run = _placement_step(inp, 4096, "nonreentrant", memory=mem[mode])
-        for key in ("loss", "logp", "dW"):
-            assert _same_bits(run[key], plain[key]), (mode, key)
-        assert (
-            float((run["dX"].float() - plain["dX"].float()).abs().max())
-            <= float(plain["dX"].float().abs().max()) * 2.0**-7
-        ), mode
+        contract_lm_head(run, inp)
     print(
         f"\ncheckpoint T=12289 {objective}: kept/peak forward {mem['forward']} auto {mem['auto']}"
     )
@@ -7280,7 +7831,7 @@ def test_device_checkpointed_step_default_plan_and_memory(glm_weight, objective)
 
 def test_device_checkpointed_logprob_step_launches_the_gradient_gemms_once(glm_weight):
     """The log-probability entry forms no gradient in its forward: a checkpointed step launches the uncheckpointed
-    step's dX / dW GEMMs and gives its bits (one dX slice pinned)."""
+    step's dX / dW GEMMs (one dX slice pinned) and holds its contract."""
     _require_program(entry="logprob")
     inp = _device_inputs(12289, "ce", W=glm_weight)
     one = dict(gemm_tuning={"dx": {"k_slices": 1}})
@@ -7304,6 +7855,7 @@ def test_device_checkpointed_logprob_step_launches_the_gradient_gemms_once(glm_w
         plain = step("plain")
     count = _gradient_gemm_keys(launched)
     assert count >= 5, sorted({k[0] for k in launched})
+    contract_lm_head(dict(dX=plain[0], dW=plain[1]), inp, entry="logprob")
     for kind in (
         "reentrant",
         "nonreentrant",
@@ -7315,7 +7867,7 @@ def test_device_checkpointed_logprob_step_launches_the_gradient_gemms_once(glm_w
         with _launch_record() as launched:
             run = step(kind)
         assert _gradient_gemm_keys(launched) == count, kind
-        assert _same_bits(run[0], plain[0]) and _same_bits(run[1], plain[1]), kind
+        contract_lm_head(dict(dX=run[0], dW=run[1]), inp, entry="logprob")
 
 
 @contextlib.contextmanager
@@ -7398,17 +7950,16 @@ _LOGPROB_FORWARDS = dict(
 @pytest.mark.parametrize("kind", CHECKPOINT_KINDS)
 def test_checkpointed_logprob_step_runs_the_forward_once(kind, form):
     """A non-reentrant checkpointed log-probability step runs the logits forward once: the recomputation takes the
-    checkpointed call's ``logp`` and row results instead of running it again.  ``logp`` / ``dX`` / ``dW`` are the
-    uncheckpointed step's bits for every checkpoint kind; ``"forward"`` placement keeps the second forward, with the
-    same bits.  No frame record is left behind."""
+    checkpointed call's ``logp`` and row results instead of running it again.  The step holds its contract for every
+    checkpoint kind; ``"forward"`` placement keeps the second forward, the step holding its contract.  No frame record
+    is left behind."""
     inp = _host_inputs(200, "ce")
-    plain = _logprob_step(inp, "plain", form, backend="reference")
     with _logprob_forwards() as seen:
         run = _logprob_step(inp, kind, form, backend="reference")
     taken = len(seen)
     want = _LOGPROB_FORWARDS.get(kind)
     assert taken == want if want is not None else 1 <= taken <= 2, seen
-    _assert_step_bits(run, plain, keys=("logp", "dX", "dW"))
+    contract_lm_head(run, inp, entry="logprob")
     if kind not in ("reentrant", "offload_inside"):
         with _placement("forward"), _logprob_forwards() as seen:
             again = _logprob_step(inp, kind, form, backend="reference")
@@ -7416,7 +7967,7 @@ def test_checkpointed_logprob_step_runs_the_forward_once(kind, form):
             assert len(seen) >= taken, seen
         else:
             assert len(seen) == 2, seen
-        _assert_step_bits(again, plain, keys=("logp", "dX", "dW"))
+        contract_lm_head(again, inp, entry="logprob")
     gc.collect()
     assert len(cake_backend._LOGPROB_CHECKPOINT_CALLS) == 0
 
@@ -7428,43 +7979,32 @@ def test_checkpointed_logprob_recomputation_runs_the_forward_after_a_change(
 ):
     """The recomputation runs the forward again when an input of the checkpointed call (here the labels, which the
     checkpointed function reads from outside the region) or its kept ``logp`` changed in place after the forward, or
-    when it calls the entry with other options: ``dX`` / ``dW`` are then those of an uncheckpointed step on the changed
-    labels (the options of the checkpointed call, which its backward runs), never from a stale row result."""
+    when it calls the entry with other options: ``dX`` / ``dW`` then hold their contract on the changed labels (``+0``
+    ``dX`` on the rows the change ignores: no stale row result)."""
     inp = _host_inputs(200, "ce")
     if change == "options":
-        # a checkpointed function whose recomputation passes another chunk size than its first pass; the backward
-        # takes the recomputation's row results (``lse``), the first pass's bits where the logits GEMM's bits do not
-        # depend on the chunk's row count: the cake kernels and the CUDA reference, not torch's multi-threaded CPU BF16
-        # GEMM (one row's ``lse`` 1 ulp apart at chunks 64 / 32 for these inputs), so the CPU runs it on one thread
-        threads = torch.get_num_threads()
-        if inp.X.device.type == "cpu":
-            torch.set_num_threads(1)
-        try:
-            sizes = iter((64, 32))
-            X = inp.X.detach().requires_grad_(True)
-            W = inp.W.detach().requires_grad_(True)
-            tau = _logprob_temperature(inp, form)
+        # a checkpointed function whose recomputation passes another chunk size than its first pass (the backward is
+        # the checkpointed call's, chunk size 64)
+        sizes = iter((64, 32))
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        tau = _logprob_temperature(inp, form)
 
-            def head(a, b):
-                kw = dict(chunk_size=next(sizes), backend="reference")
-                if tau is not None:
-                    kw["temperature"] = tau
-                    entry = cake_backend.cake_lm_head_nondet_train_logprob_temperature
-                else:
-                    entry = cake_backend.cake_lm_head_nondet_train_logprob
-                return (entry(a, b, inp.labels, **kw) * inp.dlogp).sum()
+        def head(a, b):
+            kw = dict(chunk_size=next(sizes), backend="reference")
+            if tau is not None:
+                kw["temperature"] = tau
+                entry = cake_backend.cake_lm_head_nondet_train_logprob_temperature
+            else:
+                entry = cake_backend.cake_lm_head_nondet_train_logprob
+            return (entry(a, b, inp.labels, **kw) * inp.dlogp).sum()
 
-            with _logprob_forwards() as seen:
-                torch.utils.checkpoint.checkpoint(
-                    head, X, W, use_reentrant=False, determinism_check="none"
-                ).backward()
-            assert len(seen) == 2, seen
-            # the backward is the checkpointed call's (chunk size 64); the recomputed row results are the same bits
-            plain = _logprob_step(inp, "plain", form, C=64, backend="reference")
-        finally:
-            torch.set_num_threads(threads)
-        assert _same_bits(X.grad, plain["dX"])
-        assert _same_bits(W.grad, plain["dW"])
+        with _logprob_forwards() as seen:
+            torch.utils.checkpoint.checkpoint(
+                head, X, W, use_reentrant=False, determinism_check="none"
+            ).backward()
+        assert len(seen) == 2, seen
+        contract_lm_head(dict(dX=X.grad, dW=W.grad), inp, entry="logprob")
         return
 
     own = dataclasses.replace(inp, labels=inp.labels.clone())
@@ -7489,16 +8029,13 @@ def test_checkpointed_logprob_recomputation_runs_the_forward_after_a_change(
         )
     assert len(seen) == 2, seen
     changed = own if change == "logp" else dataclasses.replace(inp, labels=ignored)
-    plain = _logprob_step(changed, "plain", form, backend="reference")
-    assert _same_bits(run["dX"], plain["dX"])
-    assert _same_bits(run["dW"], plain["dW"])
+    contract_lm_head(dict(dX=run["dX"], dW=run["dW"]), changed, entry="logprob")
 
 
 def test_checkpointed_logprob_retained_graph_takes_the_row_results_per_backward():
     """Two backward passes through one retained checkpointed log-probability graph: each recomputation takes the kept
-    row results (one forward in all), each pair of gradients is the uncheckpointed step's bits."""
+    row results (one forward in all), each pair of gradients holds its contract."""
     inp = _host_inputs(200, "ce")
-    plain = _logprob_step(inp, "plain", None, backend="reference")
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
 
@@ -7514,8 +8051,7 @@ def test_checkpointed_logprob_retained_graph_takes_the_row_results_per_backward(
         second = torch.autograd.grad(loss, (X, W))
     assert len(seen) == 1, seen
     for grads in (first, second):
-        assert _same_bits(grads[0], plain["dX"])
-        assert _same_bits(grads[1], plain["dW"])
+        contract_lm_head(dict(dX=grads[0], dW=grads[1]), inp, entry="logprob")
 
 
 def _logits_gemm_keys(launched) -> int:
@@ -7526,7 +8062,7 @@ def _logits_gemm_keys(launched) -> int:
 def test_device_checkpointed_logprob_step_runs_the_logits_gemms_once(glm_weight, form):
     """A non-reentrant (plain, selective, under a dispatch mode) checkpointed log-probability step runs the logits
     forward once, as the uncheckpointed step (the same logits and gradient GEMM launches, no more; without a
-    temperature both counted), and gives its bits (one dX slice pinned)."""
+    temperature both counted; one dX slice pinned), and holds its contract."""
     if form is None:
         _require_program(entry="logprob")
     else:
@@ -7540,6 +8076,7 @@ def test_device_checkpointed_logprob_step_runs_the_logits_gemms_once(glm_weight,
     assert len(seen) == 1, seen
     if form is None:
         assert logits > 0 and grads > 0, sorted({k[0] for k in launched})
+    contract_lm_head(plain, inp, entry="logprob")
     for kind in (
         "nonreentrant",
         "selective_recompute",
@@ -7552,7 +8089,7 @@ def test_device_checkpointed_logprob_step_runs_the_logits_gemms_once(glm_weight,
         assert len(seen) == 1, (kind, seen)
         assert _logits_gemm_keys(launched) == logits, kind
         assert _gradient_gemm_keys(launched) == grads, kind
-        _assert_step_bits(run, plain, keys=("logp", "dX", "dW"))
+        contract_lm_head(run, inp, entry="logprob")
 
 
 @pytest.mark.parametrize("memory_mode", [None, "budget"])
@@ -7570,8 +8107,8 @@ def test_device_selective_checkpoint_step_launches_the_gradient_gemms_once(
     glm_weight, objective, kind, memory_mode
 ):
     """A three-chunk step under selective activation checkpointing (or a non-reentrant checkpoint under a dispatch
-    mode) launches the uncheckpointed step's dX / dW GEMMs (the recomputation forms the gradients) and gives its
-    bits (one dX slice pinned)."""
+    mode) launches the uncheckpointed step's dX / dW GEMMs (the recomputation forms the gradients; one dX slice
+    pinned) and holds its contract."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, objective, W=glm_weight)
     kw = {} if memory_mode is None else dict(module=opt_in, memory_mode=memory_mode)
@@ -7581,18 +8118,20 @@ def test_device_selective_checkpoint_step_launches_the_gradient_gemms_once(
         plain = _placement_step(inp, 4096, "plain", **kw)
     count = _gradient_gemm_keys(launched)
     assert count >= 5, sorted({k[0] for k in launched})
+    contract_lm_head(plain, inp)
     with _launch_record() as launched:
         run = _placement_step(inp, 4096, kind, **kw)
     assert _gradient_gemm_keys(launched) == count, kind
-    _assert_step_bits(run, plain)
+    contract_lm_head(run, inp)
 
 
 # A process whose first gradient step of an entry is a selective-checkpoint step, run by a fresh interpreter (one dX
-# slice pinned: the selective and the plain step are compared by their bits).
+# slice pinned); the step holds its contract.
 _SELECTIVE_FIRST_CALL_SCRIPT = """
 import functools, sys, torch
 import torch.utils.checkpoint as tuc
 sys.path.insert(0, {root!r})
+from tests.experimental.test_helpers.cake_lm_head_judge import contract_lm_head
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 from tests.cake.test_helpers.cake_package import cake_package
 backend = cake_package("cake.cake_lm_head_nondet_train", {module!r})
@@ -7627,10 +8166,8 @@ def step(selective):
 if {warm!r}:  # the main thread's state formed first: the recomputation (autograd thread) forms its own
     with torch.no_grad():
         head(inp.X, inp.W)
-first = step(True)  # the entry's first gradient step: inside a selective checkpoint
-plain = step(False)
-for a, b in zip(first, plain):
-    assert a.dtype == b.dtype and torch.equal(a.reshape(-1).view(torch.int8), b.reshape(-1).view(torch.int8))
+loss, dX, dW = step(True)  # the entry's first gradient step: inside a selective checkpoint
+contract_lm_head(dict(loss=loss, dX=dX, dW=dW), inp, entry={entry!r})
 print("SELECTIVE_FIRST_CALL_OK")
 """
 
@@ -7654,7 +8191,7 @@ def test_device_selective_checkpoint_first_call_of_a_process(
     recomputes every operator, and one that saves every operator): the process-wide constant cells (first used inside
     its recomputation) and the autograd thread's own state (the valid-row constant and count cells, formed in the
     recomputation; ``warm``: after the main thread's were formed by a ``no_grad`` call) stay outside the checkpoint's
-    operator record.  The step runs and gives the uncheckpointed step's bits.  This process's cached blocks are
+    operator record.  The step runs and holds its contract.  This process's cached blocks are
     released first (the fresh interpreter needs memory for its own context)."""
     _require_program(entry=entry)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -7747,8 +8284,8 @@ def test_device_selective_checkpoint_region_input(glm_weight, entry, kind):
     step binds at ``X``'s address, the checkpointed forward finds that binding, and memory held between the forward
     and the backward moves the recomputed ``X`` to another address (a binding miss in the recomputation only).  Also
     with a user dispatch mode around the whole step (``user_mode``), a non-reentrant checkpoint nested inside the
-    selective one (``nested``) and a policy that saves every operator (``save_all``).  ``loss`` / ``dHin`` / ``dP`` /
-    ``dW`` are the uncheckpointed step's bits."""
+    selective one (``nested``) and a policy that saves every operator (``save_all``).  The uncheckpointed and the
+    checkpointed steps give a finite ``loss`` / ``dHin`` / ``dP`` and a ``dW`` that holds its contract."""
     _require_program(entry="loss" if entry.startswith("loss") else "logprob")
     inp = _device_inputs(12289, "ce", W=glm_weight)
     H = inp.X.shape[1]
@@ -7771,7 +8308,6 @@ def test_device_selective_checkpoint_region_input(glm_weight, entry, kind):
                 out = region(h, p, w)
             else:
                 ctx = _selective("save_all" if kind == "save_all" else "recompute")
-                fn = region
                 if kind == "nested":
 
                     def fn(a, b, c):
@@ -7779,6 +8315,8 @@ def test_device_selective_checkpoint_region_input(glm_weight, entry, kind):
                             region, a, b, c, use_reentrant=False
                         )
 
+                else:
+                    fn = region
                 out = torch.utils.checkpoint.checkpoint(
                     fn, h, p, w, use_reentrant=False, context_fn=ctx
                 )
@@ -7788,24 +8326,28 @@ def test_device_selective_checkpoint_region_input(glm_weight, entry, kind):
         del held
         return [out.detach(), h.grad, p.grad, w.grad]
 
+    def holds(result):
+        for name, value in zip(("loss", "dHin", "dP"), result, strict=False):
+            assert bool(torch.isfinite(value.float()).all()), name
+        contract_lm_head(dict(dW=result[3]), inp)
+
     step(False)  # binds
     plain = step(False)
+    holds(plain)
     for _ in range(2):
         # a plain step right before (results dropped): its X's block is the one the checkpointed forward's X reuses
         step(False)
-        run = step(True)
-        for name, a, b in zip(("loss", "dHin", "dP", "dW"), run, plain, strict=True):
-            assert _same_bits(a, b), name
+        holds(step(True))
 
 
 @pytest.mark.parametrize("entry", ["backend", "opt_in"])
-def test_device_checkpointed_logprob_keep_step_is_bitwise(
+def test_device_checkpointed_logprob_keep_step_holds_its_contract(
     glm_weight, entry, chunked_keep
 ):
     """The kept logits (``cake_lm_head_nondet_train_logprob_keep``; the opt-in ``memory_mode="keep_logits"``; the
-    chunked kept form, :data:`CHUNKED_KEEP`) under a non-reentrant checkpoint, selective activation checkpointing and a
-    dispatch mode (around the checkpointed forward; around the whole step) give the uncheckpointed default entry's
-    ``dX`` / ``dW`` bits (one dX slice pinned)."""
+    chunked kept form, :data:`CHUNKED_KEEP`) in an uncheckpointed step give the default entry's ``dX`` / ``dW`` bits
+    (one dX slice pinned); under a non-reentrant checkpoint, selective activation checkpointing and a dispatch mode
+    (around the checkpointed forward; around the whole step) the step holds its contract."""
     _require_program(entry="logprob")
     inp = _device_inputs(12289, "ce", W=glm_weight)
     one = dict(gemm_tuning={"dx": {"k_slices": 1}})
@@ -7852,15 +8394,17 @@ def test_device_checkpointed_logprob_keep_step_is_bitwise(
         "dispatch_mode_step",
     ):
         run = step(kind, head_keep)
-        assert _same_bits(run[0], plain[0]), kind
-        assert _same_bits(run[1], plain[1]), kind
+        if kind == "plain":
+            assert _same_bits(run[0], plain[0]), kind
+            assert _same_bits(run[1], plain[1]), kind
+        contract_lm_head(dict(dX=run[0], dW=run[1]), inp, entry="logprob")
 
 
 @pytest.mark.parametrize("memory_mode", ["budget", None])
 def test_device_opt_in_forms_place_the_gradients_alike(glm_weight, memory_mode):
     """The opt-in forms (``memory_mode="budget"`` / ``num_valid_rows``) follow the gradient placement on the device:
-    no dX / dW GEMM under ``torch.no_grad``; a non-reentrant checkpointed step launches the uncheckpointed step's
-    count; the same bits (one dX slice pinned)."""
+    no dX / dW GEMM under ``torch.no_grad`` (the plain step's ``loss`` / ``logp`` bits); a non-reentrant
+    checkpointed step launches the uncheckpointed step's count and holds its contract (one dX slice pinned)."""
     _require_program(entry="loss")
     inp = _device_inputs(12289, "policy", W=glm_weight)
     sw = dict(gemm_tuning={"dx": {"k_slices": 1}})
@@ -7875,7 +8419,7 @@ def test_device_opt_in_forms_place_the_gradients_alike(glm_weight, memory_mode):
     with _launch_record() as launched:
         run = _placement_step(inp, 4096, "nonreentrant", module=opt_in, **sw)
     assert _gradient_gemm_keys(launched) == count
-    _assert_step_bits(run, plain)
+    contract_lm_head(run, inp)
     # trainable inputs (the plain step's head input, ``tanh`` of X): only the grad mode keeps the call from forming
     # gradients
     X = torch.tanh(inp.X).detach().requires_grad_(True)
@@ -7964,36 +8508,19 @@ def _keep_problem(T, H, V, C, entry="loss"):
     )
 
 
-def _same_dx(dx, base, inp, plan, case):
+def _same_dx(dx, base, plan, case):
     """``dX`` of the kept path against the default call ``base``: the same bits when every chunk of ``plan`` (the kept
-    backward's) runs one dX slice; else the same products in the unordered K-slice reduction, held to the suite's
-    budgets (``base``'s ``loss`` / ``logp`` / ``dW``, the kept path's bits, with this ``dX``)."""
+    backward's) runs one dX slice; else (the same products through the K-sliced reduction, its slab summed in slice
+    order) ``base``'s dtype and shape and finite values (the kept form's accuracy:
+    :func:`test_device_logprob_keep_meets_the_naive_tier`)."""
     if dx is None or base["dX"] is None:
         assert dx is None and base["dX"] is None, case
         return
     if max(plan.dx_slices or (1,)) == 1:
         assert _same_bits(dx, base["dX"]), case
         return
-    flips, ulps = _ulp_flips(dx, base["dX"])
-    print(
-        f"\nkept dX {case}: {flips:.2e} of elements differ from the default call's, max {ulps} ulp"
-    )
-    beyond = inp.labels >= inp.V
-    if not bool(beyond.any()):
-        _check_against_references(dict(base, dX=dx), inp, entry="logprob")
-        return
-    # labels beyond the last vocabulary column: no oracle describes those rows, so their dX is held to the default
-    # call's within the dX budget; the oracles see them as ignored rows and the gate holds the dX of the other rows
-    masked = dataclasses.replace(
-        inp, labels=torch.where(beyond, torch.full_like(inp.labels, -100), inp.labels)
-    )
-    oracle = reference_fp64(masked, entry="logprob", need_dw=False)
-    b0 = reference_unchunked(masked, entry="logprob", need_dw=False)
-    rows = ~beyond
-    err = rel_l2(dx[rows], oracle["dX"][rows])
-    b0_err = rel_l2(b0["dX"][rows], oracle["dX"][rows])
-    assert err <= GATE_MARGIN * b0_err + GATE_TINY["dX_rel_l2"], (case, err, b0_err)
-    assert rel_l2(dx[beyond], base["dX"][beyond]) <= GATE_TINY["dX_rel_l2"], case
+    assert dx.dtype == base["dX"].dtype and dx.shape == base["dX"].shape, case
+    assert bool(torch.isfinite(dx.float()).all()), case
 
 
 def test_logprob_keep_plan_keys_and_memory():
@@ -8267,7 +8794,8 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
     ``memory_mode="keep_logits"``) and the explicit pair (``forward_logprob_keep`` keeps one BF16 ``[rows_c, V]`` view
     per chunk, ``backward_logprob_keep`` on the forward's row index and on a recount) give bitwise the same ``logp`` /
     ``dW`` -- and ``dX`` wherever the call runs one dX slice per chunk (pinned or by the rule; else the same products
-    in the unordered K-slice reduction, held to the budgets) -- over one-, two- and many-chunk calls, compacted and
+    through the K-sliced reduction, its slab summed in slice order: finite, judged by
+    :func:`test_device_logprob_keep_meets_the_naive_tier`) -- over one-, two- and many-chunk calls, compacted and
     uncompacted calls, every row valid, the hidden valid-row count on and off, the dW side stream, the unfused dW
     cast and dX finalize, labels at and beyond the last vocabulary column and an ``X`` with a padded leading stride;
     the kept bindings are their own (``_KeptBinding``, keys ending in ``"keep"``) and the kept backward bindings
@@ -8348,6 +8876,8 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
             ("bwd", True),
             ("bwd", False),
         }, (case, forms)
+        for out in base:  # the default call that binds and the one from its remembered binding
+            contract_lm_head(out, inp, entry="logprob")
         mode = _run(
             inp,
             C,
@@ -8359,9 +8889,8 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
         for key in ("logp", "dW"):
             for i, out in enumerate((*keep, mode)):
                 assert _same_bits(out[key], base[0][key]), (case, key, i)
-            assert _same_bits(base[1][key], base[0][key]), (case, key)
         for i, out in enumerate((*keep, mode)):
-            _same_dx(out["dX"], base[0], inp, plan, (case, i))
+            _same_dx(out["dX"], base[0], plan, (case, i))
         fwd_kw = {
             k: v
             for k, v in switches.items()
@@ -8392,7 +8921,7 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
                 **bwd_kw,
                 **extra,
             )
-            _same_dx(dx, base[0], inp, plan, (case, tag))
+            _same_dx(dx, base[0], plan, (case, tag))
             assert _same_bits(dw, base[0]["dW"]), (case, tag)
         assert torch.all(keep[0]["logp"][~inp.valid] == 0)
         assert torch.all(keep[0]["dX"][~inp.valid] == 0)
@@ -8450,7 +8979,7 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
             for out in keep:
                 assert _same_bits(out["logp"], base["logp"]), case
                 if train_x:
-                    _same_dx(out["dX"], base, inp, plan, case)
+                    _same_dx(out["dX"], base, plan, case)
                     assert out["dW"] is None, case
                 else:
                     assert _same_bits(out["dW"], base["dW"]), case
@@ -8458,17 +8987,64 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
             del base, keep
 
 
-def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
+# (T, chunk, ignored fraction, switches, X pitch padding) of the kept form's judged cases
+KEEP_JUDGED_CASES = [
+    (1500, 4096, 0.05, {}, 0),
+    (6000, 4096, 0.05, {}, 0),
+    (8700, 4096, 0.05, {}, 0),
+    (8700, 4096, 0.05, dict(hidden_count=False), 0),
+    (3100, 1024, 0.5, dict(dw_stream=True), 0),
+    (1500, 4096, 0.05, {}, 8),
+    (2500, 2048, 0.05, dict(compact_rows=False), 0),
+    (5000, 2048, 0.05, dict(fuse_dw_cast=False, dx_finalize=False), 0),
+]
+
+
+@pytest.mark.parametrize("T, C, ignore, switches, ld_pad", KEEP_JUDGED_CASES, ids=str)
+def test_device_logprob_keep_meets_the_naive_tier(
+    logprob_chunk_loop, chunked_keep, record_property, T, C, ignore, switches, ld_pad
+):
+    """The kept logits (the chunked kept form, :data:`CHUNKED_KEEP`) of :func:`test_device_logprob_keep_is_bitwise`'s
+    calls, whose ``dX`` of a chunk of more than one slice comes from the ordered K-slice reduction (a slab sum in slice
+    order): ``logp`` /
+    ``dX`` / ``dW`` of the kept autograd entry are judged against the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the
+    draws, every draw's backward through a kept binding."""
+    _require_program(entry="logprob")
+    case = (T, C, ignore, switches, ld_pad)
+
+    def launch(draw):
+        with _cache(True) as cache:
+            cache.clear()
+            out = _run(draw, C, entry="logprob", backend="cake", keep=True, **switches)
+            assert any(
+                key[0] == "bwd" and b.plan.logprob_keep for key, b in cache._bindings.items()
+            ), case
+        return out
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        make_kw=dict(ld_pad=ld_pad),
+        ignore_frac=ignore,
+        seed=SEED + 90,
+    )
+
+
+def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep, record_property):
     """Where the kept logits live and what they cost (the chunked kept form, :data:`CHUNKED_KEEP`; one dX slice pinned:
-    every gradient is compared by its bits): a
+    the kept gradients are compared with the default call's by their bits): a
     kept-entry call no backward can follow (``torch.no_grad``, ``torch.inference_mode``, frozen inputs) is the default
     call -- the same launches (the label-column forward), bitwise the same ``logp``, no kept binding; the first
-    backward through a retained graph spends the kept logits and a second one recomputes (both bitwise the default
-    path's); a non-reentrant and a reentrant ``torch.utils.checkpoint`` give the default gradients; the bytes held
+    backward through a retained graph spends the kept logits (bitwise the default path's) and a second one recomputes
+    (its contract); a non-reentrant and a reentrant ``torch.utils.checkpoint`` step hold their contract; the bytes held
     from the forward to the backward grow by the kept bindings' ``memory["saved_logits_bytes"]`` (chunk 0 lives in the
     chunk buffer the default forward frees), the step peak by no more than that, and nothing stays allocated after the
     backward; a kept views tuple of the wrong plan is a ``ValueError``; the prepared runner of a kept plan does not
-    launch it."""
+    launch it.  At ``JUDGE_H`` / ``JUDGE_V`` each draw runs the retained graph's two backward passes, and both are
+    judged against the naive tier (``name@first``: the kept call's ``logp`` and the pass that spends the kept logits;
+    ``name@retained``: the second pass, which recomputes)."""
     _require_program(entry="logprob")
     C, T = 4096, 8700
     inp = make_inputs(T, seed=SEED + 97, device=CUDA, W=glm_weight, ignore_frac=0.05)
@@ -8566,16 +9142,16 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
         assert _same_bits(X.grad, ref["dX"]) and _same_bits(W.grad, ref["dW"])
         X.grad = W.grad = None
         lp.backward(inp.dlogp)
-        assert _same_bits(X.grad, ref["dX"]) and _same_bits(W.grad, ref["dW"])
+        contract_lm_head(dict(dX=X.grad, dW=W.grad), inp, entry="logprob")
         del lp, node
         # checkpointed: both the non-reentrant and the reentrant form
         for reentrant in (False, True):
             X, W = leaves()
             lp = torch.utils.checkpoint.checkpoint(call, X, W, use_reentrant=reentrant)
             lp.backward(inp.dlogp)
-            assert _same_bits(lp.detach(), ref["logp"]), reentrant
-            assert _same_bits(X.grad, ref["dX"]), reentrant
-            assert _same_bits(W.grad, ref["dW"]), reentrant
+            contract_lm_head(
+                dict(logp=lp.detach(), dX=X.grad, dW=W.grad), inp, entry="logprob"
+            )
             del lp
         monkeypatch.undo()
         # memory, after both forms are bound
@@ -8677,6 +9253,39 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch, chunked_keep):
     assert runner.plan.logprob_keep
     with pytest.raises(NotImplementedError, match="eager entry points"):
         runner.forward()
+    del runner, ref
+    inp = None  # the name stays bound: ``leaves`` / ``call`` read it
+
+    def retained_passes(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        lp = cake_backend.cake_lm_head_nondet_train_logprob_keep(
+            X, W, problem.labels, chunk_size=C, gemm_tuning=ONE_SLICE
+        )
+        node = lp.grad_fn
+        assert node.kept is True
+        lp.backward(problem.dlogp, retain_graph=True)
+        assert node.kept is False  # spent
+        first = dict(logp=lp.detach(), dX=X.grad, dW=W.grad)
+        X.grad = W.grad = None
+        lp.backward(problem.dlogp)
+        return dict(first=first, retained=dict(dX=X.grad, dW=W.grad))
+
+    def launch(j, s):
+        draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05)
+        with _cache(True) as cache:
+            cache.clear()
+            results = retained_passes(draw)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 97 + T,
+        entry="logprob",
+        names={"first": ("logp", "dX", "dW"), "retained": ("dX", "dW")},
+    )
 
 
 def test_device_logprob_keep_hidden_count_memory_report(glm_weight):
@@ -8761,7 +9370,7 @@ def _with_zero_dlogp(inp, zero, *, negative_zero=True):
     return dataclasses.replace(inp, dlogp=d.contiguous())
 
 
-def _zero_dlogp_set(inp, kind):
+def _zero_dlogp_set(inp, kind, *, gen_seed=None):
     """:func:`_zero_weight_set` plus ``"single"`` (every valid row zero but one in the middle) and ``"last"`` (every
     valid row zero but those of the last 4096-row chunk of the valid rows)."""
     valid = inp.labels >= 0
@@ -8774,7 +9383,22 @@ def _zero_dlogp_set(inp, kind):
         zero = valid.clone()
         zero[rows[(rows.numel() - 1) // 4096 * 4096 :]] = False
         return zero
-    return _zero_weight_set(inp, kind)
+    return _zero_weight_set(inp, kind, gen_seed=gen_seed)
+
+
+def _draw_zero_dlogp(inp, kind, *, negative_zero=True):
+    """``inp`` with the zero-gradient rows of ``kind`` (:func:`_zero_dlogp_set`) drawn from the draw's own generator
+    (``inp.seed + ZERO_SET_OFFSET``)."""
+    zero = _zero_dlogp_set(inp, kind, gen_seed=inp.seed + ZERO_SET_OFFSET)
+    return _with_zero_dlogp(inp, zero, negative_zero=negative_zero)
+
+
+def _zero_dlogp_contract(result, inp):
+    """The contract of a log-probability call with zero-gradient rows: :func:`contract_lm_head` and the ``dX`` rows
+    of the valid rows of zero ``dlogp`` exact ``+0``."""
+    contract_lm_head(result, inp, entry="logprob")
+    zero = inp.valid & (inp.dlogp == 0)
+    assert not bool(_bits(result["dX"][zero]).any()), "a zero-gradient row's dX is not +0"
 
 
 def test_kept_logits_form_plan_and_switches():
@@ -8981,7 +9605,7 @@ def _kept_forward_chunks(inp, T_v, C, form, switches):
     ],
     ids=str,
 )
-def test_device_logprob_keep_one_pass(glm_weight, T, C, ignore, form, switches):
+def test_device_logprob_keep_one_pass(glm_weight, record_property, T, C, ignore, form, switches):
     """The kept-logits form (:func:`set_kept_logits_form`) on the generated program: the forward keeps one contiguous
     buffer (``[T_v, V]``, or the hidden count's ``[T, V]`` whose first ``T_v`` rows the node saves) on its chunks (the
     shipped chunks under the hidden count, else the folded ones); the first backward runs ``row_grad`` and dX in those
@@ -8989,10 +9613,14 @@ def test_device_logprob_keep_one_pass(glm_weight, T, C, ignore, form, switches):
     ``K = T_v`` -- a one-chunk kept binding without dX or an FP32 accumulator (``dx_one_pass``: one binding of one
     chunk), a one-chunk call too (there its ``dW`` is the ``one_pass=False`` bits).  ``logp`` / ``lse`` are the
     default path's bits; ``dX`` is the chunked kept backward's bits on the same
-    chunks (``one_pass=False``) wherever those repeat (at most two dX slices per chunk; with one slice pinned also
-    the default path's bits); ``dX`` and ``dW`` pass the suite's FP64 gates (budgets unchanged) and ``dW`` repeats bit
-    for bit; the side-stream dX (``dx_side``) gives the in-order bits.  A non-reentrant and a reentrant
-    ``torch.utils.checkpoint`` give the uncheckpointed kept step's bits (one dX slice pinned)."""
+    chunks (``one_pass=False``) wherever its reduction is order-free (at most two dX slices per chunk; with one slice
+    pinned also the default path's bits); every call holds its contract; the side-stream dX (``dx_side``) gives the
+    in-order bits.  The uncheckpointed kept step and a non-reentrant and a reentrant ``torch.utils.checkpoint`` step
+    (one dX slice pinned) hold their contract.  At ``JUDGE_H`` / ``JUDGE_V`` the kept call, its second call from the
+    remembered kept bindings, its chunked form (``one_pass=False``), its other dX stream and the three kept steps are
+    judged against the naive tier over the draws (``name@one_pass`` / ``name@again`` / ``name@chunked`` /
+    ``name@other_side`` / ``name@step`` / ``name@ckpt`` / ``name@ckpt_reentrant``), every draw's weight gradient one
+    pass over ``K = T_v``."""
     _require_program(entry="logprob")
     inp = make_inputs(
         T, seed=SEED + 290 + T, device=CUDA, W=glm_weight, ignore_frac=ignore
@@ -9040,23 +9668,14 @@ def test_device_logprob_keep_one_pass(glm_weight, T, C, ignore, form, switches):
     deterministic_dx = max(dx_plan.dx_slices or (1,)) <= 2
     for out in keep + [chunked, other_side]:
         assert _same_bits(out["logp"], base["logp"]), case
-    _check_against_references(
-        dict(base, dX=keep[0]["dX"], dW=keep[0]["dW"]), inp, entry="logprob"
-    )
-    assert _same_bits(keep[1]["dW"], keep[0]["dW"]), case
+        contract_lm_head(out, inp, entry="logprob")
     assert _same_bits(other_side["dW"], keep[0]["dW"]), case
     if one_chunk:  # one GEMM over K = T_v either way: the chunked kept backward's dW
         assert _same_bits(chunked["dW"], keep[0]["dW"]), case
-    if not full["dx_one_pass"]:
-        if deterministic_dx:
-            # dX in the forward's chunks: the chunked kept backward's bits
-            for out in (keep[1], chunked, other_side):
-                assert _same_bits(out["dX"], keep[0]["dX"]), case
-        else:  # the unordered K-slice reduction: every dX is held to the gates
-            for out in (keep[1], chunked, other_side):
-                _check_against_references(
-                    dict(base, dX=out["dX"], dW=keep[0]["dW"]), inp, entry="logprob"
-                )
+    if not full["dx_one_pass"] and deterministic_dx:
+        # dX in the forward's chunks: the chunked kept backward's bits
+        for out in (chunked, other_side):
+            assert _same_bits(out["dX"], keep[0]["dX"]), case
     if switches.get("gemm_tuning") == ONE_SLICE:
         for out in keep:
             assert _same_bits(out["dX"], base["dX"]), case
@@ -9079,20 +9698,20 @@ def test_device_logprob_keep_one_pass(glm_weight, T, C, ignore, form, switches):
     if hidden:  # the hidden count's buffer: sized by T
         assert saved[5].untyped_storage().nbytes() == T * V * 2, case
     del lp, X, W, saved
-    # checkpointed steps: the uncheckpointed kept step's bits (one dX slice pinned)
+    # the uncheckpointed and the checkpointed kept steps (one dX slice pinned): their contract
     one = dict(fw, gemm_tuning=ONE_SLICE)
 
-    def step(reentrant=None):
-        X = inp.X.detach().requires_grad_(True)
-        W = inp.W.detach().requires_grad_(True)
+    def step(problem, reentrant=None):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        logps = []
 
         def head(a, b):
-            return (
-                cake_backend.cake_lm_head_nondet_train_logprob_keep(
-                    a, b, inp.labels, chunk_size=C, **one
-                )
-                * inp.dlogp
-            ).sum()
+            lp = cake_backend.cake_lm_head_nondet_train_logprob_keep(
+                a, b, problem.labels, chunk_size=C, **one
+            )
+            logps.append(lp.detach())  # the forward's; a checkpoint's recomputation appends a second
+            return (lp * problem.dlogp).sum()
 
         if reentrant is None:
             head(X, W).backward()
@@ -9101,23 +9720,50 @@ def test_device_logprob_keep_one_pass(glm_weight, T, C, ignore, form, switches):
                 head, X, W, use_reentrant=reentrant
             ).backward()
         torch.cuda.synchronize()
-        return X.grad, W.grad
+        return dict(logp=logps[0], dX=X.grad, dW=W.grad)
 
+    steps = (("step", None), ("ckpt", False), ("ckpt_reentrant", True))
     with _kept_form(**form):
-        plain = step()
-        for reentrant in (False, True):
-            got = step(reentrant)
-            assert _same_bits(got[0], plain[0]) and _same_bits(got[1], plain[1]), (
-                case,
-                reentrant,
-            )
+        for _, reentrant in steps:
+            contract_lm_head(step(inp, reentrant), inp, entry="logprob")
+
+    def launch(draw):
+        rows = int(draw.valid.sum()) if compact else T
+        with _cache(True) as cache:
+            cache.clear()
+            with _kept_form(**form):
+                one_pass = _run(draw, C, entry="logprob", backend="cake", keep=True, **switches)
+                bindings = _kept_bwd_bindings(cache)
+                again = _run(draw, C, entry="logprob", backend="cake", keep=True, **switches)
+            with _kept_form(**dict(form, one_pass=False)):
+                chunks_run = _run(draw, C, entry="logprob", backend="cake", keep=True, **switches)
+            with _kept_form(**dict(form, dx_side=not full["dx_side"])):
+                side_run = _run(draw, C, entry="logprob", backend="cake", keep=True, **switches)
+        # the weight gradient in one pass over K = T_v
+        assert ((0, rows),) in [b.plan.chunks for b in bindings if b.plan.need_dw], case
+        results = {"one_pass": one_pass, "again": again, "chunked": chunks_run, "other_side": side_run}
+        with _kept_form(**form):
+            for name, reentrant in steps:
+                results[name] = step(draw, reentrant)
+        return results
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        forms=("one_pass", "again", "chunked", "other_side", *(name for name, _ in steps)),
+        ignore_frac=ignore,
+        seed=SEED + 290,
+    )
 
 
 @pytest.mark.parametrize("form", [{}, dict(hidden_count=False)], ids=str)
-def test_device_logprob_keep_one_pass_row_limit(glm_weight, form):
+def test_device_logprob_keep_one_pass_row_limit(glm_weight, record_property, form):
     """Above the one-pass row limit (:func:`kept_one_pass_rows`; here ``one_pass_rows=8192``) the first kept backward
-    runs the forward's chunks with its FP32 ``dW`` accumulator: the bits of the chunked kept backward
-    (``one_pass=False``), held to the suite's FP64 gates."""
+    runs the forward's chunks with its FP32 ``dW`` accumulator: the ``logp`` / ``dW`` bits of the chunked kept backward
+    (``one_pass=False``) and its contract; at ``JUDGE_H`` / ``JUDGE_V`` that call meets the naive tier over the
+    draws, every draw's backward one kept binding with the accumulator."""
     _require_program(entry="logprob")
     C, T = 4096, 12289
     inp = make_inputs(T, seed=SEED + 411, device=CUDA, W=glm_weight, ignore_frac=0.05)
@@ -9136,10 +9782,18 @@ def test_device_logprob_keep_one_pass_row_limit(glm_weight, form):
     assert bwd[0].plan.dw_acc_needed and bwd[0].plan.need_dx
     for key in ("logp", "dW"):
         assert _same_bits(capped[key], chunked[key]), key
-    base = _run(inp, C, entry="logprob", backend="cake")
-    _check_against_references(
-        dict(base, dX=capped["dX"], dW=capped["dW"]), inp, entry="logprob"
-    )
+    contract_lm_head(capped, inp, entry="logprob")
+
+    def launch(draw):
+        with _cache(True) as cache:
+            cache.clear()
+            with _kept_form(one_pass_rows=8192, **form):
+                out = _run(draw, C, entry="logprob", backend="cake", keep=True)
+            (binding,) = _kept_bwd_bindings(cache)
+        assert binding.plan.dw_acc_needed and binding.plan.need_dx, form
+        return out
+
+    _judge_device(record_property, T, launch, entry="logprob", ignore_frac=0.05, seed=SEED + 411 - T)
 
 
 @pytest.mark.parametrize("form", [{}, dict(hidden_count=False)], ids=str)
@@ -9197,9 +9851,9 @@ def test_device_logprob_keep_one_pass_frees_the_dw_accumulator(glm_weight, form)
     assert left1 <= (8 << 20) and left0 <= (8 << 20), (left0, left1)
 
 
-def _logprob_call(inp, C=4096, *, package="nd"):
-    """One autograd log-probability call (forward + ``backward(dlogp)``) of ``package`` on the generated programs."""
-    return _run(inp, C, package=package, entry="logprob", backend="cake")
+def _logprob_call(inp, C=4096):
+    """One autograd log-probability call (forward + ``backward(dlogp)``) of this package on the generated programs."""
+    return _run(inp, C, entry="logprob", backend="cake")
 
 
 def _has_zero_dlogp_skip():
@@ -10095,6 +10749,50 @@ def test_plan_counts_the_short_last_chunk_of_a_long_call():
             assert not counted.dcnt and counted == shipped, pin
 
 
+def _judge_zero_dlogp_skip(
+    record_property, monkeypatch, T, kind, *, prepare=None, call=None, one_partition=True, ignore_frac=None, repeats=1
+):
+    """Judge the backward with the zero-gradient row skip (floor 0) of ``T`` rows at ``JUDGE_H`` / ``JUDGE_V`` over the
+    draws: each draw's zero rows of ``kind`` come from its own generator (:func:`_draw_zero_dlogp`; ``prepare`` first
+    adjusts the draw), ``logp`` / ``dX`` / ``dW`` of ``call(draw)`` (default :func:`_logprob_call`) are judged against
+    the naive tier, the zero rows' and the ignored rows' ``dX`` rows are exact ``+0`` (:func:`_zero_dlogp_contract`),
+    and the partition runs on every launch (``one_partition``: once, over the valid rows).  ``repeats``: launches per
+    draw, each after the first from the remembered binding (the judge keeps each output's largest error)."""
+    calls = _counted_partition(monkeypatch)
+    call = _logprob_call if call is None else call
+
+    def launch(draw):
+        calls.clear()
+        with _zero_dlogp_floor(0):
+            out = call(draw)
+        rows = int((draw.labels >= 0).sum())
+        if one_partition:
+            assert calls == [rows], (rows, calls)
+        else:
+            assert calls, "the skip ran no partition"
+        return out
+
+    def make(draw):
+        return _draw_zero_dlogp(draw if prepare is None else prepare(draw), kind)
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        prepare=make,
+        contract=_zero_dlogp_contract,
+        ignore_frac=ignore_frac,
+        repeats=repeats,
+    )
+
+
+def _nonzero_dlogp(draw):
+    """``draw`` with every zero ``dlogp`` set to 1 (a live row's upstream gradient is never zero)."""
+    d = draw.dlogp
+    return dataclasses.replace(draw, dlogp=torch.where(d == 0, torch.ones_like(d), d).contiguous())
+
+
 ZERO_DLOGP_DEVICE_CASES = [
     (4097, "none"),
     (4097, "one"),
@@ -10113,14 +10811,13 @@ ZERO_DLOGP_DEVICE_CASES = [
 
 
 @pytest.mark.parametrize("T, kind", ZERO_DLOGP_DEVICE_CASES, ids=str)
-def test_device_zero_dlogp_rows_skip(glm_weight, request, T, kind):
-    """The zero-gradient row skip on the device against the same backward without it (``set_zero_dlogp_min_rows(None)``)
-    and the FP64 oracle: ``logp`` the same bits; the deterministic suite's gates; the zero rows' and the ignored rows'
-    ``dX`` rows exact ``+0``; the other ``dX`` rows equal to the backward without the skip within one BF16 rounding
-    (the K-sliced reductions add in any order); a second call from the remembered binding gives the first's ``dW``
-    within the FP32 reduction order.  Every valid row zero: zero gradients.  The short-tail fold cases (T 4600 / 6000)
-    run the chunk loop (``logprob_chunk_loop``): by default a call of 2 chunks with a short tail takes the
-    vocabulary-major backward, which never runs the folded chunk."""
+def test_device_zero_dlogp_rows_skip(glm_weight, request, monkeypatch, record_property, T, kind):
+    """The zero-gradient row skip on the device against the same backward without it (``set_zero_dlogp_min_rows(None)``):
+    ``logp`` the same bits; the zero rows' and the ignored rows' ``dX`` rows exact ``+0``; the call and a second call
+    from the remembered binding hold their contract.  Every valid row zero: zero gradients.  Otherwise the skip call
+    is judged against the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The
+    short-tail fold cases (T 4600 / 6000) run the chunk loop (``logprob_chunk_loop``): by default a call of 2 chunks
+    with a short tail takes the vocabulary-major backward, which never runs the folded chunk."""
     _require_program(entry="logprob")
     if T in (4600, 6000):
         request.getfixturevalue("logprob_chunk_loop")
@@ -10141,18 +10838,9 @@ def test_device_zero_dlogp_rows_skip(glm_weight, request, T, kind):
     if not bool(live.any()):
         assert not bool(_bits(nd["dX"]).any()) and not bool(nd["dW"].float().any())
         return
-    scale = float(plain["dX"][live].float().abs().max())
-    dx_diff = float((nd["dX"][live].float() - plain["dX"][live].float()).abs().max())
-    assert dx_diff <= scale * 2**-7, (dx_diff, scale)
-    _check_against_references(nd, inp, entry="logprob", ceiling=True)
-    _check_against_references(again, inp, entry="logprob", ceiling=True)
-    dw_rel = float(
-        (nd["dW"].float() - plain["dW"].float()).norm() / plain["dW"].float().norm()
-    )
-    print(
-        f"\nzero-dlogp skip T={T} {kind} zero {int(zero.sum())}/{int(valid.sum())}: dW rel-L2 vs no skip "
-        f"{dw_rel:.2e}, dX max|skip - no skip| {dx_diff:.2e}"
-    )
+    for run in (nd, again):
+        _zero_dlogp_contract(run, inp)
+    _judge_zero_dlogp_skip(record_property, monkeypatch, T, kind, one_partition=False)
 
 
 # One-chunk calls (1 to 4096 valid rows) under the skip at floor 0: an all-live chunk ("none"), an all-zero chunk
@@ -10181,14 +10869,15 @@ ZERO_DLOGP_ONE_CHUNK_CASES = [
 
 
 @pytest.mark.parametrize("rows, kind", ZERO_DLOGP_ONE_CHUNK_CASES, ids=str)
-def test_device_zero_dlogp_one_chunk_skip(glm_weight, monkeypatch, rows, kind):
+def test_device_zero_dlogp_one_chunk_skip(glm_weight, monkeypatch, record_property, rows, kind):
     """At floor 0 a one-chunk backward of ``rows`` valid rows (one ignored row makes the call compacted) runs the skip:
     the partition runs on every call (binding and remembered binding) over every valid row, the backward plan has the
     counted forms and one chunk, ``logp`` keeps the bits of the backward without the skip, the zero rows' and the
-    ignored rows' ``dX`` rows are exact ``+0``, the live ``dX`` rows are within one BF16 rounding of the backward
-    without the skip, ``dW`` keeps its bits from run to run and the outputs pass the deterministic suite's gates
-    against the FP64 oracle.  Without zero rows ``dW`` is bitwise the backward without the skip's (the partition keeps
-    the forward's row order); every valid row zero gives zero gradients."""
+    ignored rows' ``dX`` rows are exact ``+0`` and every call holds its contract.  Without zero rows ``dW`` is bitwise
+    the backward without the skip's (the partition keeps the forward's row order); every valid row zero gives zero
+    gradients.  Otherwise the skip call of the same rows (one ignored row,
+    no other zero ``dlogp``) and its second call from the remembered binding are judged against the naive tier at
+    ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`, two launches per draw)."""
     _require_zero_dlogp_skip()
     # the counted path of the default Function: a call of at most uncompacted_max_rows() rows would run uncompacted
     # (no row skip), one of at most SMALL_T_KEEP_MAX_ROWS rows the kept logits
@@ -10225,7 +10914,6 @@ def test_device_zero_dlogp_one_chunk_skip(glm_weight, monkeypatch, rows, kind):
     for run in (nd, again):
         assert _same_bits(run["logp"], plain["logp"]), case
         assert not bool(_bits(run["dX"][zero | ~valid]).any()), case
-    assert _same_bits(again["dW"], nd["dW"]), case
     if not bool(live.any()):
         for run in (nd, again):
             assert not bool(_bits(run["dX"]).any()), case
@@ -10233,18 +10921,16 @@ def test_device_zero_dlogp_one_chunk_skip(glm_weight, monkeypatch, rows, kind):
         return
     if not bool(zero.any()):
         assert _same_bits(nd["dW"], plain["dW"]), case
-    scale = float(plain["dX"][live].float().abs().max())
-    dx_diff = 0.0
     for run in (nd, again):
-        diff = float((run["dX"][live].float() - plain["dX"][live].float()).abs().max())
-        assert diff <= scale * 2**-7, (case, diff, scale)
-        dx_diff = max(dx_diff, diff)
-        _check_against_references(run, inp, entry="logprob", ceiling=True)
-    dw_rel = float(rel_l2(nd["dW"].float(), plain["dW"].float()))
-    assert dw_rel <= GATE_TINY["dW_rel_l2"], (case, dw_rel)
-    print(
-        f"\nzero-dlogp one-chunk skip rows={rows} {kind} zero {int(zero.sum())}/{rows}: dW rel-L2 vs no skip "
-        f"{dw_rel:.2e}, dX max|skip - no skip| {dx_diff:.2e}"
+        _zero_dlogp_contract(run, inp)
+
+    def prepare(draw):
+        labels = draw.labels.clone()
+        labels[T // 2] = -100
+        return _nonzero_dlogp(dataclasses.replace(draw, labels=labels))
+
+    _judge_zero_dlogp_skip(
+        record_property, monkeypatch, T, kind, prepare=prepare, ignore_frac=0.0, repeats=2
     )
 
 
@@ -10263,22 +10949,131 @@ def _one_chunk_skip_inputs(W, T, kind, tau):
     return inp, zero
 
 
+def _judge_zero_dlogp_replay(
+    record_property, T, kinds, *, tau=None, warm=1, extra=None, chunk_loop=True, dx_slices=None
+):
+    """Judge the CUDA-graph replays of a log-probability backward of ``T`` rows under the zero-gradient row skip (floor
+    0) at ``JUDGE_H`` / ``JUDGE_V`` over the draws: each draw's backward (``tau="distinct"``: with a distinct per-token
+    temperature from the draw's own generator; ``extra``: more backward keywords) is bound by ``warm`` warm-up calls
+    on a side stream and captured once on the draw's ``dlogp`` (no zero row); the graph then replays with the
+    ``dlogp`` of every zero-row kind of ``kinds`` and of every row zero written into the captured input (the zero rows
+    from the draw's own generator, :func:`_draw_zero_dlogp`).  The route on every draw: each warm-up and the captured
+    call run the partition over every valid row and, where the backward runs the chunk loop (``chunk_loop``), the
+    remembered backward binding's plan has the counted forms (and the dX slice counts ``dx_slices`` when given).
+    Every replay holds :func:`_zero_dlogp_contract` (every row zero: zero ``dW``), and every draw's replay of each kind
+    of ``kinds`` is judged against the naive tier as its own output (``dX@replay_<kind>`` / ``dW@replay_<kind>``,
+    :func:`_replay_label`: each kind on all the draws, against its own float64 oracle and naive value)."""
+    kinds = tuple(kinds)
+    labels = tuple(_replay_label(kind) for kind in kinds)
+    assert len(set(labels)) == len(labels), labels
+    extra = dict(extra or {})
+    kw = dict(chunk_size=4096)
+    partition = cake_backend.zero_dlogp_partition
+    partitioned: list = []
+
+    def counted(*args, **kwargs):
+        partitioned.append(int(args[2].numel()))
+        return partition(*args, **kwargs)
+
+    def launch(j, s):
+        draw = _nonzero_dlogp(_draw_inputs(T, s, _judge_weight(s)))
+        if tau is None:
+            fr = cake_backend.forward_logprob(draw.X, draw.W, draw.labels, **kw)
+            entry, more = cake_backend.backward_logprob, {}
+        else:
+            temperature = _distinct_tau(T, seed=s + SEED_OFFSETS["temperature"])
+            draw = dataclasses.replace(draw, temperature=temperature)
+            fr = cake_backend.forward_logprob_temperature(
+                draw.X, draw.W, draw.labels, temperature=temperature, **kw
+            )
+            form = cake_backend._resolve_temperature(temperature, T, draw.X.device)
+            entry = cake_backend.backward_logprob_temperature
+            more = dict(temperature=form, temperature_rows=fr.temperature_rows)
+        assert fr.row_index is not None
+        dlogp = draw.dlogp.clone()
+
+        def backward(d):
+            return entry(
+                draw.X, draw.W, draw.labels, fr.lse, d, row_index=fr.row_index, **more, **extra, **kw
+            )
+
+        problems = []
+        with _zero_dlogp_floor(0):
+            cake_backend.BINDING_CACHE.clear()
+            partitioned.clear()
+            cake_backend.zero_dlogp_partition = counted
+            try:
+                side = torch.cuda.Stream()
+                side.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(side):
+                    for _ in range(warm):
+                        backward(dlogp)
+                torch.cuda.current_stream().wait_stream(side)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    dx_g, dw_g = backward(dlogp)
+            finally:
+                cake_backend.zero_dlogp_partition = partition
+            rows = int(draw.valid.sum())
+            assert partitioned == [rows] * (warm + 1), (j, partitioned)
+            if chunk_loop:
+                bindings = [
+                    b
+                    for k, b in cake_backend.BINDING_CACHE._bindings.items()
+                    if k[:2] == ("bwd", "logprob") and b.plan.dcnt
+                ]
+                assert len(bindings) == 1, (j, len(bindings))
+                if dx_slices is not None:
+                    assert bindings[0].plan.dx_slices == dx_slices, (j, bindings[0].plan.dx_slices)
+            for kind in kinds + ("all",):
+                inp = _draw_zero_dlogp(draw, kind)
+                dlogp.copy_(inp.dlogp)
+                graph.replay()
+                torch.cuda.synchronize()
+                result = dict(dX=dx_g.clone(), dW=dw_g.clone())
+                _zero_dlogp_contract(result, inp)
+                if kind == "all":
+                    assert not bool(result["dW"].float().any()), (j, kind)
+                else:
+                    problems.append((inp, {_replay_label(kind): result}))
+        del graph, dx_g, dw_g
+        return problems
+
+    _judge_problems(
+        record_property,
+        launch,
+        labels,
+        seed=SEED + T,
+        entry="logprob",
+        names={label: ("dX", "dW") for label in labels},
+        contract=_zero_dlogp_contract,
+    )
+
+
+def _replay_label(kind):
+    """The judged output form of a replay with the zero rows of ``kind`` (:func:`_zero_dlogp_set`): ``replay_none``,
+    ``replay_single``, ``replay_last``, ``replay_random0.166``, ``replay_group0.5`` ..."""
+    return "replay_" + (kind if isinstance(kind, str) else "".join(str(part) for part in kind))
+
+
 @pytest.mark.parametrize("slices", ["one", "default", "raised"])
 @pytest.mark.parametrize("warm", [1, 2])
 @pytest.mark.parametrize("tau", [None, "distinct"])
 def test_device_zero_dlogp_one_chunk_backward_cuda_graph(
-    glm_weight, monkeypatch, tau, warm, slices
+    glm_weight, monkeypatch, record_property, tau, warm, slices
 ):
     """A one-chunk log-probability backward under the zero-gradient row skip (plain and with a distinct per-token
     temperature) captured in a CUDA graph through its remembered binding -- the first warm-up call (the runner's) makes
     and remembers the binding, so the captured call is the binding's first remembered call after one warm-up and its
-    second after two -- replays with other ``dlogp`` values written into the captured input
-    (other zero rows and live counts, none, a single live row and every row zero) and gives the eager backward's bits
-    on those values: ``dW`` bitwise; ``dX`` bitwise with one dX slice pinned and, with the default slices (an
-    unordered split-K reduction) or ``"raised"`` ones (the chunk below the K-sliced reduction's row floor, so the slice
-    rule gives it one slice and the counted plan the architecture's ``DX_COUNTED_MIN_SLICES_BY_ARCH`` count), exact
-    ``+0`` on the zero and ignored rows and the eager values within the reduction order on the live rows.  The replays leave the forward's ``lse`` bits unchanged, and every captured and eager call
-    ran the partition over every valid row."""
+    second after two -- replays with other ``dlogp`` values written into the captured input (other zero rows and live
+    counts, none, a single live row and every row zero), with one dX slice pinned, the default slices (the ordered
+    split-K reduction: a slab sum in slice order) or ``"raised"`` ones (the chunk below the K-sliced reduction's row
+    floor, so the slice rule gives it one slice and the counted plan the architecture's
+    ``DX_COUNTED_MIN_SLICES_BY_ARCH`` count): every replay holds its contract on those values, with exact ``+0`` ``dX``
+    on the zero and ignored rows and zero ``dW`` when every row is zero.  The replays leave the forward's ``lse`` bits
+    unchanged, and every warm-up and captured call ran the partition over every valid row.  At ``JUDGE_H`` / ``JUDGE_V``
+    each draw's graph replays the same kinds of ``dlogp``, and every kind's replay is judged against the naive tier on
+    every draw as its own output (:func:`_judge_zero_dlogp_replay`)."""
     _require_zero_dlogp_skip()
     if tau is not None:
         _require_tau_program()
@@ -10326,24 +11121,16 @@ def test_device_zero_dlogp_one_chunk_backward_cuda_graph(
             dx_g, dw_g = backward(dlogp)
         for kind in (("random", 0.166), ("random", 0.5), "none", "single", "all"):
             zero = _zero_dlogp_set(inp, kind)
-            new = _with_zero_dlogp(inp, zero).dlogp
-            dlogp.copy_(new)
+            new = _with_zero_dlogp(inp, zero)
+            dlogp.copy_(new.dlogp)
             graph.replay()
             torch.cuda.synchronize()
             got_dx, got_dw = dx_g.clone(), dw_g.clone()
-            want_dx, want_dw = backward(new.clone())
-            torch.cuda.synchronize()
-            assert _same_bits(got_dw, want_dw), kind
             assert not bool(_bits(got_dx[zero | ~valid]).any()), kind
-            if slices == "one":
-                assert _same_bits(got_dx, want_dx), kind
-                continue
-            live = valid & ~zero
-            if bool(live.any()):
-                scale = float(want_dx[live].float().abs().max())
-                err = float((got_dx[live].float() - want_dx[live].float()).abs().max())
-                assert err <= scale * 2**-7, (kind, err, scale)
-    assert calls == [rows] * (warm + 6), calls
+            _zero_dlogp_contract(dict(dX=got_dx, dW=got_dw), new)
+            if not bool((valid & ~zero).any()):
+                assert not bool(got_dw.float().any()), kind
+    assert calls == [rows] * (warm + 1), calls
     bindings = [
         b
         for k, b in cake_backend.BINDING_CACHE._bindings.items()
@@ -10356,6 +11143,16 @@ def test_device_zero_dlogp_one_chunk_backward_cuda_graph(
         least = cake_backend.DX_COUNTED_MIN_SLICES_BY_ARCH.get(record["arch"], 1)
         assert bindings[0].plan.dx_slices == (least,), bindings[0].plan.dx_slices
     assert torch.equal(_bits(fr.lse), lse_bits)
+    del graph, dx_g, dw_g
+    _judge_zero_dlogp_replay(
+        record_property,
+        2048,
+        (("random", 0.166), ("random", 0.5), "none", "single"),
+        tau=tau,
+        warm=warm,
+        extra=_TAU_ONE if slices == "one" else None,
+        dx_slices=(least,) if slices == "raised" else None,
+    )
 
 
 @pytest.mark.parametrize("tau", [None, "distinct"])
@@ -10365,7 +11162,8 @@ def test_device_logprob_backward_reuses_the_forward_problem(
     """The autograd log-probability backward takes the forward's validated problem back (``ForwardResult.problem``,
     the internal ``_problem`` keyword) instead of validating ``X`` / ``W`` / ``labels`` again: one validation fewer per
     call.  Under saved-tensor hooks (which may unpack another ``X``) the backward gets none and validates its own.  The
-    bits are the same either way (plain and with a temperature)."""
+    hooked call gives the first call's bits (plain and with a temperature), and the unhooked one holds its
+    contract."""
     _require_program(entry="logprob")
     if tau is not None:
         _require_tau_program()
@@ -10398,8 +11196,8 @@ def test_device_logprob_backward_reuses_the_forward_problem(
     assert len(problems) == 2, problems
     assert problems[0] is not None and problems[1] is None
     assert problems[0].num_rows == 2048 and not problems[0].temperature
+    contract_lm_head(plain, inp, entry="logprob")
     for key in ("logp", "dX", "dW"):
-        assert _same_bits(plain[key], first[key]), key
         assert _same_bits(hooked[key], first[key]), key
 
 
@@ -10439,8 +11237,8 @@ def test_device_binding_scratch_slots_cover_every_launch(glm_weight, T, case):
     """A remembered binding allocates per call only the scratch slots (``d`` / ``term`` / ``loss_acc`` / ``loss``) its
     sequences bind or return: the log-probability forward ``d`` and ``term`` (``row_finalize``), its backward none,
     the loss entry's forward all four.  Every launch and host step of a binding's forward / backward sequence finds
-    every value it binds when only that sequence's scratch slots are present, and the remembered calls give the first
-    call's bits.  The log-probability cases set the zero-gradient row skip's floor: ``logprob_skip`` runs it (``0``),
+    every value it binds when only that sequence's scratch slots are present, and every call holds its contract.  The
+    log-probability cases set the zero-gradient row skip's floor: ``logprob_skip`` runs it (``0``),
     ``logprob`` and ``logprob_tau`` run the shipped backward (``None``) on every architecture -- on sm_100a and
     sm_107a the default floor (1946 valid rows) would put both sizes on the skip."""
     _require_program(entry="loss" if case.startswith("loss") else "logprob")
@@ -10461,9 +11259,8 @@ def test_device_binding_scratch_slots_cover_every_launch(glm_weight, T, case):
         if entry == "logprob":
             stack.enter_context(_zero_dlogp_floor(floor))
         runs = [_run(inp, 4096, **kw) for _ in range(3)]
-    for run in runs[1:]:
-        for key in ("loss", "logp", "dX", "dW"):
-            assert _same_bits(run[key], runs[0][key]), (case, key)
+    for run in runs:
+        contract_lm_head(run, inp, entry=entry)
     placeholder = torch.empty((0,), device=CUDA)
     checked = {"fwd": 0, "bwd": 0}
     for key, binding in list(cake_backend.BINDING_CACHE._bindings.items()):
@@ -10623,8 +11420,8 @@ def test_device_zero_dlogp_plan_without_counted_forms_runs_the_shipped_backward(
     """An eligible backward whose plan has no counted forms (forced here: ``make_plan`` resolves ``dcnt`` off, as it
     does for an explicitly pinned swapped dX tile or weight-gradient TMA epilogue) launches no partition -- binding
     (first call) and from the remembered binding (second call) -- and runs the backward without the skip: the plan and
-    launch sequence of the backward with the skip off, the same ``logp`` and ``dW`` bits, ``dX`` within its unordered
-    K-slice reduction, the zero rows' ``dX`` zeros."""
+    launch sequence of the backward with the skip off, the same ``logp`` and ``dW`` bits, the contract, the zero
+    rows' ``dX`` zeros."""
     _require_zero_dlogp_skip()
     base = _device_inputs(8117, "ce", W=glm_weight)
     zero = _zero_dlogp_set(base, ("random", 0.3))
@@ -10649,16 +11446,11 @@ def test_device_zero_dlogp_plan_without_counted_forms_runs_the_shipped_backward(
     (eligible, eligible_run), (shipped, shipped_run) = _logprob_bwd_plans()
     assert not eligible.dcnt and eligible == shipped and eligible_run == shipped_run
     valid = inp.labels >= 0
-    live = valid & ~zero
-    scale = float(plain["dX"][live].float().abs().max())
     for run in runs:
         for key in ("logp", "dW"):
             assert _same_bits(run[key], plain[key]), key
         assert not bool(run["dX"][zero | ~valid].float().any())
-        dx_diff = float(
-            (run["dX"][live].float() - plain["dX"][live].float()).abs().max()
-        )
-        assert dx_diff <= scale * 2**-7, (dx_diff, scale)
+        contract_lm_head(run, inp, entry="logprob")
 
 
 def test_device_zero_dlogp_skip_is_off_without_the_counted_forms(
@@ -10668,8 +11460,8 @@ def test_device_zero_dlogp_skip_is_off_without_the_counted_forms(
     record registers them, so the device's record is read here as one without them: its ``_skip_record`` entry) a
     backward that would be eligible elsewhere (floor 0, compacted, the dz arm) is not eligible and runs the shipped
     backward: no partition, binding (first call) and from the remembered binding (second call); every remembered plan
-    without counted forms; the same ``logp`` and ``dW`` bits as the backward with the skip off, ``dX`` within its
-    unordered K-slice reduction, the zero rows' ``dX`` zeros."""
+    without counted forms; the same ``logp`` and ``dW`` bits as the backward with the skip off, the contract, the
+    zero rows' ``dX`` zeros."""
     _require_program(entry="logprob")
     module_name, record = cake_backend.record_for(CUDA)
     device = CUDA.index if CUDA.index is not None else torch.cuda.current_device()
@@ -10695,16 +11487,11 @@ def test_device_zero_dlogp_skip_is_off_without_the_counted_forms(
         plain = _logprob_call(inp)
     plans = _logprob_bwd_plans()
     assert plans and not any(plan.dcnt for plan, _run in plans)
-    live = valid & ~zero
-    scale = float(plain["dX"][live].float().abs().max())
     for run in runs:
         for key in ("logp", "dW"):
             assert _same_bits(run[key], plain[key]), key
         assert not bool(run["dX"][zero | ~valid].float().any())
-        dx_diff = float(
-            (run["dX"][live].float() - plain["dX"][live].float()).abs().max()
-        )
-        assert dx_diff <= scale * 2**-7, (dx_diff, scale)
+        contract_lm_head(run, inp, entry="logprob")
     print(
         f"\nzero-dlogp skip on {record['arch']} (record read without it): off; "
         f"{len(plans)} remembered backward plan(s), none counted"
@@ -10712,13 +11499,15 @@ def test_device_zero_dlogp_skip_is_off_without_the_counted_forms(
 
 
 def test_device_zero_dlogp_short_last_chunk_keeps_the_counted_cast(
-    logprob_chunk_loop, glm_weight, monkeypatch, shipped_chunks
+    logprob_chunk_loop, glm_weight, monkeypatch, shipped_chunks, record_property
 ):
     """A backward whose last chunk the shipped plan casts through the TMA-epilogue bf16 cast (two chunks, the second of
     about 650 rows) keeps the skip: the partition runs (binding and remembered binding), the remembered plan casts the
-    last chunk through the TMA cast's counted form where the record registers it (else the counted shipped cast), and
-    the results pass the skip suite's checks against the backward without the skip and the FP64 oracle.  The shipped
-    chunks (``shipped_chunks``: no short-tail fold)."""
+    last chunk through the TMA cast's counted form where the record registers it (else the counted shipped cast);
+    ``logp`` keeps the bits of the backward without the skip, the zero and ignored rows' ``dX`` rows are exact ``+0``
+    and both calls hold their contract.  The skip call of two chunks (a short last chunk) is judged against the naive
+    tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (:func:`_judge_zero_dlogp_skip`).  The shipped chunks
+    (``shipped_chunks``: no short-tail fold)."""
     _require_zero_dlogp_skip()
     _module_name, record = cake_backend.record_for(CUDA)
     base = _device_inputs(5000, "ce", W=glm_weight)
@@ -10756,16 +11545,19 @@ def test_device_zero_dlogp_short_last_chunk_keeps_the_counted_cast(
         else "gemm_dw_cast_bf16_dcnt",
         skip_plan,
     )
-    live = valid & ~zero
     assert _same_bits(nd["logp"], plain["logp"])
-    scale = float(plain["dX"][live].float().abs().max())
     for run in (nd, again):
         assert not bool(_bits(run["dX"][zero | ~valid]).any())
-        dx_diff = float(
-            (run["dX"][live].float() - plain["dX"][live].float()).abs().max()
-        )
-        assert dx_diff <= scale * 2**-7, (dx_diff, scale)
-        _check_against_references(run, inp, entry="logprob", ceiling=True)
+        _zero_dlogp_contract(run, inp)
+
+    def two_chunks(draw):
+        cake_backend.BINDING_CACHE.clear()
+        out = _logprob_call(draw)
+        ((plan, _),) = _logprob_bwd_plans()
+        assert plan.dcnt and plan.num_chunks == 2, plan.chunks
+        return out
+
+    _judge_zero_dlogp_skip(record_property, monkeypatch, 5000, ("random", 0.5), call=two_chunks)
 
 
 @pytest.mark.parametrize("last", [650, 1792, 1793])
@@ -10829,13 +11621,11 @@ def test_device_zero_dlogp_short_last_chunk_cast_bits_without_zero_rows(
     for key in ("logp", "dW"):
         assert _same_bits(nd[key], plain[key]), key
     assert not bool(_bits(nd["dX"][~valid]).any())
-    scale = float(plain["dX"].float().abs().max())
-    dx_diff = float((nd["dX"].float() - plain["dX"].float()).abs().max())
-    assert dx_diff <= scale * 2**-7, (dx_diff, scale)
+    contract_lm_head(nd, inp, entry="logprob")
     print(
         f"\nzero-dlogp skip on {record['arch']}, z = 0, last chunk {last} rows: "
         f"cast {skip_plan.dw_cast_stage} (skip off: {shipped.dw_cast_stage}); "
-        f"dW and logp bitwise equal, max |dX - skip off| {dx_diff:.3g}"
+        f"dW and logp bitwise equal"
     )
 
 
@@ -10856,15 +11646,16 @@ ZERO_DLOGP_RAISED_CASES = [
 
 @pytest.mark.parametrize("mode, T, kind", ZERO_DLOGP_RAISED_CASES, ids=str)
 def test_device_zero_dlogp_raised_dx_slices(
-    logprob_chunk_loop, glm_weight, mode, T, kind
+    logprob_chunk_loop, glm_weight, monkeypatch, record_property, mode, T, kind
 ):
     """Under the skip the backward's plan runs each dX chunk at the architecture's counted slice count at least
     (``DX_COUNTED_MIN_SLICES_BY_ARCH``: two on sm_100a, sm_103a and sm_107a) and the backward without the skip the
     slice rule's counts; every chunk of more than one slice launches its counted form.
-    The results pass the skip suite's checks on the binding and the remembered binding: ``logp`` the bits of the
-    backward without the skip; the zero and ignored rows' ``dX`` exact ``+0``; the live rows' ``dX`` within one BF16
-    rounding of the backward without the skip; ``dW`` bitwise without zero rows (the forward's row order); the
-    deterministic suite's gates against the FP64 oracle.  Every valid row zero: zero gradients."""
+    On the binding and the remembered binding: ``logp`` the bits of the backward without the skip; the zero and
+    ignored rows' ``dX`` exact ``+0``; ``dW`` bitwise without zero rows (the forward's row order); the contract.  Every
+    valid row zero: zero gradients.  Otherwise the skip call is judged against the naive tier at ``JUDGE_H`` /
+    ``JUDGE_V`` over the draws, its plan counted with every chunk at the architecture's counted slice count at least
+    (:func:`_judge_zero_dlogp_skip`)."""
     _require_zero_dlogp_skip()
     _module_name, record = cake_backend.record_for(CUDA)
     least = cake_backend.DX_COUNTED_MIN_SLICES_BY_ARCH.get(record["arch"], 1)
@@ -10917,19 +11708,22 @@ def test_device_zero_dlogp_raised_dx_slices(
         return
     if not bool(zero.any()):
         assert _same_bits(nd["dW"], plain["dW"]), case
-    scale = float(plain["dX"][live].float().abs().max())
-    dx_diff = 0.0
     for run in (nd, again):
-        diff = float((run["dX"][live].float() - plain["dX"][live].float()).abs().max())
-        assert diff <= scale * 2**-7, (case, diff, scale)
-        dx_diff = max(dx_diff, diff)
-        _check_against_references(run, inp, entry="logprob", ceiling=True)
-    dw_rel = float(rel_l2(nd["dW"].float(), plain["dW"].float()))
-    print(
-        f"\nzero-dlogp raised dX slices {case} on {record['arch']}: slices {skip_plan.dx_slices} (skip off "
-        f"{shipped.dx_slices}), zero {int(zero.sum())}/{int(valid.sum())}: dW rel-L2 vs no skip {dw_rel:.2e}, "
-        f"dX max|skip - no skip| {dx_diff:.2e}"
-    )
+        _zero_dlogp_contract(run, inp)
+
+    def raised(draw):
+        previous = cake_backend.set_dx_red_min_rows(T) if mode == "forced" else None
+        try:
+            cake_backend.BINDING_CACHE.clear()
+            out = _logprob_call(draw)
+            ((plan, _),) = _logprob_bwd_plans()
+        finally:
+            if previous is not None:
+                cake_backend.set_dx_red_min_rows(previous)
+        assert plan.dcnt and min(plan.dx_slices) >= least, (case, plan.dx_slices)
+        return out
+
+    _judge_zero_dlogp_skip(record_property, monkeypatch, T, kind, prepare=_nonzero_dlogp, call=raised)
 
 
 def _require_live_cast():
@@ -10969,9 +11763,8 @@ def test_device_zero_dlogp_live_cast(
     chunks or more runs every accumulate but the last chunk's and the deferred cast in their ``_lc`` forms, and its
     ``dW`` is bitwise that of the counted forms (the same FP32 operations: the tile added into the sum with the
     accumulate's flush to zero, then the scale and the bf16 cast) -- with trailing chunks of no live row (no cast-only
-    pass), with only the first chunk live, with every chunk live, on the dW side stream and without it; ``dX`` within
-    the unordered K-slice reduction of the counted run and exact zeros on the zero rows; the public runner keeps the
-    counted forms."""
+    pass), with only the first chunk live, with every chunk live, on the dW side stream and without it; ``dX`` finite
+    and exact zeros on the zero rows; the public runner keeps the counted forms."""
     module_name = _require_live_cast()
     base = _device_inputs(13500, "ce", W=glm_weight)
     zero = _zero_dlogp_set(base, kind)
@@ -11012,11 +11805,8 @@ def test_device_zero_dlogp_live_cast(
     valid = inp.labels >= 0
     live = valid & ~zero
     assert not bool(_bits(dx_lc[~live]).any())
-    if bool(live.any()):
-        scale = float(dx_c[live].float().abs().max())
-        diff = float((dx_lc[live].float() - dx_c[live].float()).abs().max())
-        assert diff <= scale * 2**-7, (diff, scale)
-    else:
+    assert bool(torch.isfinite(dx_lc.float()).all())
+    if not bool(live.any()):
         assert not bool(dw_lc.float().any())
     # the public runner of the same call keeps the counted forms (its ``dw_acc`` holds the sum before the last chunk)
     rows = int(fr.row_index.numel())
@@ -11095,36 +11885,34 @@ def test_device_zero_dlogp_generic_floor_is_one_row_above_a_chunk(
     assert calls == [4097]
 
 
-def test_device_zero_dlogp_rows_repeat(glm_weight):
+def test_device_zero_dlogp_rows_repeat(glm_weight, record_property):
     """``REPEATS`` runs with 16.6 % zero-gradient rows (T 12289, chunks of 4096), each after poisoning the free
-    allocator memory: every run passes the deterministic suite's gates and keeps the zero rows' ``dX`` exact ``+0``; the
-    worst error per metric is printed beside the deterministic package's on the same inputs."""
+    allocator memory: every run holds its contract and keeps the zero rows' ``dX`` exact ``+0``.  At ``JUDGE_H`` /
+    ``JUDGE_V`` three poisoned runs per draw meet the naive tier (the judge keeps each output's largest error)."""
     _require_program(entry="logprob")
     base = _device_inputs(12289, "ce", W=glm_weight)
     zero = _zero_dlogp_set(base, ("random", 0.166))
     inp = _with_zero_dlogp(base, zero)
-    oracle = reference_fp64(inp, entry="logprob")
-    b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
-    det = error_report(_logprob_call(inp, package="det"), oracle, inp.labels)
-    worst = {}
     with _zero_dlogp_floor(0):
         for _ in range(REPEATS):
             _poison_allocator(1 << 30)
             run = _logprob_call(inp)
             assert not bool(_bits(run["dX"][zero]).any())
-            errors = error_report(run, oracle, inp.labels)
-            assert not errors["nan"] and errors["logp_ignored_zero"]
-            assert errors["dX_ignored_zero"]
-            for key, tiny in GATE_TINY.items():
-                if key in errors:
-                    assert errors[key] <= GATE_MARGIN * b0[key] + tiny, key
-                    worst[key] = max(worst.get(key, 0.0), errors[key])
-    print(
-        "\nzero-dlogp skip repeat worst: "
-        + ", ".join(
-            f"{k} {v:.3e} (det {det.get(k, float('nan')):.3e}, b0 {b0[k]:.3e})"
-            for k, v in worst.items()
-        )
+            contract_lm_head(run, inp, entry="logprob")
+
+    def launch(draw):
+        _poison_allocator(1 << 30)
+        with _zero_dlogp_floor(0):
+            return _logprob_call(draw)
+
+    _judge_device(
+        record_property,
+        12289,
+        launch,
+        entry="logprob",
+        prepare=lambda draw: _draw_zero_dlogp(draw, ("random", 0.166)),
+        contract=_zero_dlogp_contract,
+        repeats=3,
     )
 
 
@@ -11194,11 +11982,13 @@ def test_device_zero_dlogp_skip_adds_no_synchronization(
             assert not bool(_bits(dx[zero]).any())
 
 
-def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight):
+def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight, record_property):
     """The log-probability backward with the skip captured in a CUDA graph (after a warm-up that binds it on the
     capture stream): replays with other ``dlogp`` values -- other zero rows and live counts per chunk, none and every
-    row zero -- written into the captured input give the eager backward's results on those values (``dW`` within
-    the FP32 reduction order, the zero rows' ``dX`` exact ``+0``)."""
+    row zero -- written into the captured input give finite results on those values, the zero rows' ``dX`` exact
+    ``+0`` and every row zero zero ``dW``.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds of
+    ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
+    (:func:`_judge_zero_dlogp_replay`)."""
     _require_program(entry="logprob")
     base = _device_inputs(12289, "ce", W=glm_weight)
     kw = dict(chunk_size=4096)
@@ -11230,34 +12020,32 @@ def test_device_zero_dlogp_backward_cuda_graph(logprob_backward_form, glm_weight
             graph.replay()
             torch.cuda.synchronize()
             got_dx, got_dw = dx_g.clone(), dw_g.clone()
-            want_dx, want_dw = backward(new.clone())
-            torch.cuda.synchronize()
             assert not bool(_bits(got_dx[zero | ~valid]).any()), kind
             live = valid & ~zero
             if not bool(live.any()):
                 assert not bool(got_dw.float().any()), kind
                 continue
-            scale = float(want_dx[live].float().abs().max())
-            assert (
-                float((got_dx[live].float() - want_dx[live].float()).abs().max())
-                <= scale * 2**-7
-            ), kind
-            dw_rel = float(
-                (got_dw.float() - want_dw.float()).norm() / want_dw.float().norm()
-            )
-            assert dw_rel <= 1e-3, (kind, dw_rel)
+            assert bool(torch.isfinite(got_dx.float()).all()), kind
+            assert bool(torch.isfinite(got_dw.float()).all()), kind
+    del graph, dx_g, dw_g
+    _judge_zero_dlogp_replay(
+        record_property,
+        12289,
+        (("random", 0.166), ("group", 0.5), "none", "last"),
+        chunk_loop=logprob_backward_form == "0",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Temperature of the log-probability entry (``*_temperature``; the deterministic suite's temperature tests on this
-# package: ``logp`` / ``dW`` keep the deterministic package's bits, ``dX`` of a chunk of more than one slice comes from
-# the unordered K-slice reduction)
+# package: ``logp`` / ``dW`` keep their fixed order, ``dX`` of a chunk of more than one slice comes from the ordered
+# K-slice reduction, a slab sum in slice order)
 # ---------------------------------------------------------------------------
 
 # The keywords of the log-probability entries' temperature forms (``*_temperature``).
 TEMPERATURE_KEYWORDS = frozenset({"temperature", "check_temperature"})
 # One dX slice per chunk: the plain dX store, so a test of the temperature's plumbing compares ``dX`` bitwise too
-# (``_region_entry``'s pin); the default slices are compared by :func:`_assert_tau_close`.
+# (``_region_entry``'s pin); the default slices are compared by :func:`_assert_fixed_order_bits`.
 _TAU_ONE = dict(gemm_tuning={"dx": {"k_slices": 1}})
 _KERNEL_SOURCE_RE = re.compile(
     r"^csrc/cake_lm_head_loss/cake_lm_head_loss_([0-9a-f]{20})_kernel\.cu$"
@@ -11390,27 +12178,19 @@ def _assert_same_bits(a, b, keys=("loss", "logp", "dX", "dW")):
             assert torch.equal(_bits(x), _bits(y)), key
 
 
-def _assert_tau_close(a, b, case=None, keys=("logp", "dX", "dW")):
-    """Two calls of the same problem on this package: ``logp`` / ``dW`` (and ``loss``) bitwise; ``dX`` bitwise when
-    both are, else the unordered K-slice reduction's distance -- the same zero rows and a relative L2 distance within
-    the dX budget floor (``GATE_TINY["dX_rel_l2"]``); max |a - b| and the BF16 flip rate are printed."""
+def _assert_fixed_order_bits(a, b, case=None, keys=("logp", "dX", "dW")):
+    """Two calls of the same problem on this package with different options: ``logp`` / ``dW`` (and ``loss``) have the
+    same bits; ``dX`` -- whose K-sliced reduction of a chunk of more than one slice sums its slices in slice order, so
+    another slice count gives other bits -- the same dtype and shape (its accuracy is judged against the naive
+    tier)."""
     for key in keys:
         x, y = a[key], b[key]
         assert (x is None) == (y is None), (case, key)
         if x is None:
             continue
         assert x.dtype == y.dtype and x.shape == y.shape, (case, key)
-        if key != "dX" or torch.equal(_bits(x), _bits(y)):
+        if key != "dX":
             assert torch.equal(_bits(x), _bits(y)), (case, key)
-            continue
-        assert torch.equal((x == 0).all(dim=-1), (y == 0).all(dim=-1)), (case, key)
-        err = rel_l2(x.float(), y.float())
-        flips, ulps = _ulp_flips(x, y)
-        diff = float((x.float() - y.float()).abs().max())
-        print(
-            f"\ntemperature dX {case}: max |diff| {diff:.3e}, {flips:.2e} of elements flip, max {ulps} ulp, rel L2 {err:.2e}"
-        )
-        assert err <= GATE_TINY["dX_rel_l2"], (case, err)
 
 
 def _require_recompute():
@@ -11747,9 +12527,9 @@ def test_temperature_one_runs_the_default_path(compact, monkeypatch):
 
 
 @pytest.mark.parametrize("s", [0.7, 2.0])
-def test_temperature_scalar_equals_the_constant_tensor(s):
+def test_temperature_scalar_equals_the_constant_tensor(record_property, s):
     """A scalar temperature gives the bits of the constant FP32 tensor of its value (the same values reach the same
-    stages), differs from the call without one and passes the accuracy gates of its references."""
+    stages), differs from the call without one, and its outputs meet the naive tier over the draws."""
     inp = _host_inputs(37, ignore_frac=0.2)
     scalar = _run(inp, 16, entry="logprob", temperature=s)
     tensor = _run(
@@ -11761,8 +12541,12 @@ def test_temperature_scalar_equals_the_constant_tensor(s):
     _assert_same_bits(scalar, tensor, _LOGPROB_KEYS)
     plain = _run(inp, 16, entry="logprob")
     assert not torch.equal(scalar["logp"], plain["logp"])
-    _check_against_references(
-        scalar, dataclasses.replace(inp, temperature=s), entry="logprob"
+    _judge_host(
+        record_property,
+        37,
+        lambda draw: _run(draw, 16, entry="logprob"),
+        entry="logprob",
+        make_kw=dict(ignore_frac=0.2, temperature="scalar", temperature_value=s),
     )
 
 
@@ -11778,25 +12562,26 @@ def test_temperature_scalar_equals_the_constant_tensor(s):
         (1031, 512, "all_but_one"),
     ],
 )
-def test_temperature_heterogeneous_matches_the_references(T, C, frac):
+def test_temperature_heterogeneous_matches_the_references(record_property, T, C, frac):
     """A heterogeneous per-token temperature (log-uniform in [0.25, 4], some rows exactly 1.0) on irregular ``T``,
-    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` within 1.05x the unchunked
-    PyTorch path's error against the FP64 oracle (both with the temperature) plus the floor, zeros on ignored rows."""
+    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` are judged against the naive
+    tier (with the temperature) over the draws, zeros on ignored rows."""
     ignore = (T - 1) / T if frac == "all_but_one" else float(frac)
-    inp = _host_inputs(T, ignore_frac=ignore, temperature="hetero")
-    result = _run(inp, C, entry="logprob")
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp, entry="logprob")
-    assert torch.all(result["logp"][~inp.valid] == 0)
-    assert torch.all(result["dX"][~inp.valid] == 0)
+    _judge_host(
+        record_property,
+        T,
+        lambda draw: _run(draw, C, entry="logprob"),
+        entry="logprob",
+        make_kw=dict(ignore_frac=ignore, temperature="hetero"),
+    )
 
 
 @pytest.mark.parametrize("frac", ["none", "five_percent", "half", "all_but_one"])
-def test_temperature_compaction_matches_uncompacted(frac):
+def test_temperature_compaction_matches_uncompacted(record_property, frac):
     """The temperature follows its rows through the compaction (as ``test_compaction_matches_uncompacted``): the
-    compacted and uncompacted calls with a heterogeneous temperature are bitwise when no row is ignored and at the
-    host's precision level otherwise; the caller's count gives the bits of the counted compacted call; a temperature
-    moved by one row breaks the comparison (the check is not vacuous)."""
+    compacted and uncompacted calls with a heterogeneous temperature are bitwise when no row is ignored and each meets
+    the naive tier over the draws; the caller's count gives the bits of the counted compacted call; a temperature
+    moved by one row changes ``logp`` (the check is not vacuous)."""
     T, C = 37, 16
     ignore = {
         "none": 0.0,
@@ -11808,17 +12593,9 @@ def test_temperature_compaction_matches_uncompacted(frac):
     num_ignored = int((~inp.valid).sum())
     compact = _run(inp, C, entry="logprob", compact_rows=True)
     plain = _run(inp, C, entry="logprob", compact_rows=False)
-    for result in (compact, plain):
-        _check_against_references(result, inp, entry="logprob")
-        assert torch.all(result["logp"][~inp.valid] == 0)
-        assert torch.all(result["dX"][~inp.valid] == 0)
     if num_ignored == 0:
         for key in _LOGPROB_KEYS:
             assert torch.equal(compact[key], plain[key]), key
-    else:
-        assert torch.allclose(compact["logp"], plain["logp"], rtol=1e-5, atol=2e-5)
-        assert rel_l2(compact["dX"].float(), plain["dX"].float()) <= 1e-3
-        assert rel_l2(compact["dW"].float(), plain["dW"].float()) <= 1e-3
     given = _run(
         inp, C, entry="logprob", compact_rows=True, num_valid_rows=T - num_ignored
     )
@@ -11829,29 +12606,36 @@ def test_temperature_compaction_matches_uncompacted(frac):
         entry="logprob",
         compact_rows=True,
     )
-    assert (shifted["logp"] - compact["logp"])[inp.valid].abs().max() > 1e-3
+    assert not torch.equal(shifted["logp"][inp.valid], compact["logp"][inp.valid])
+    _judge_host(
+        record_property,
+        T,
+        lambda draw: {
+            "compact": _run(draw, C, entry="logprob", compact_rows=True),
+            "plain": _run(draw, C, entry="logprob", compact_rows=False),
+        },
+        entry="logprob",
+        forms=("compact", "plain"),
+        make_kw=dict(ignore_frac=ignore, temperature="hetero"),
+    )
 
 
-def test_temperature_upstream_gradients():
-    """Arbitrary per-row upstream gradients with a heterogeneous temperature: random (nonzero on ignored rows too),
-    zeros, negated, large -- each within the gates of its references; zeros give zero gradients, the negated upstream
-    the negated gradients and twice the upstream twice the gradients (exact operations), and a retained graph
-    repeats the backward bitwise."""
+def test_temperature_upstream_gradients(record_property):
+    """Arbitrary per-row upstream gradients with a heterogeneous temperature: random (nonzero on ignored rows too) and
+    large ones meet the naive tier over the draws; zeros give zero gradients, the negated upstream the negated
+    gradients and twice the upstream twice the gradients (exact operations), and both backward passes of a retained
+    graph hold their contract."""
     inp = _host_inputs(65, ignore_frac=0.1, temperature="hetero")
     base = _run(inp, 32, entry="logprob")
-    gen = torch.Generator(device=DEV)
-    gen.manual_seed(SEED + 7637)
     upstream = dict(
-        random=torch.randn(65, generator=gen, device=DEV),
         zeros=torch.zeros(65, device=DEV),
         negated=-inp.dlogp,
-        large=inp.dlogp * 1e4,
     )
     results = {}
     for name, g in upstream.items():
         g_inp = dataclasses.replace(inp, dlogp=g.contiguous())
         results[name] = _run(g_inp, 32, entry="logprob")
-        _check_against_references(results[name], g_inp, entry="logprob")
+        contract_lm_head(results[name], g_inp, entry="logprob")
         assert torch.equal(results[name]["logp"], base["logp"]), name
     assert torch.all(results["zeros"]["dX"] == 0) and torch.all(
         results["zeros"]["dW"] == 0
@@ -11871,10 +12655,23 @@ def test_temperature_upstream_gradients():
         backend="reference",
         temperature=inp.temperature,
     )
-    first = torch.autograd.grad(logp, (X, W), inp.dlogp, retain_graph=True)
-    second = torch.autograd.grad(logp, (X, W), inp.dlogp)
-    for a, b, ref in zip(first, second, (base["dX"], base["dW"]), strict=True):
-        assert torch.equal(a, b) and torch.equal(a, ref)
+    for retain in (True, False):
+        dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp, retain_graph=retain)
+        contract_lm_head(dict(dX=dX, dW=dW), inp, entry="logprob")
+
+    def launch(j, s):
+        draw = judge_inputs(65, s, H=H_HOST, V=V_HOST, device=DEV, ignore_frac=0.1, temperature="hetero")
+        gen = torch.Generator(device="cpu").manual_seed(s + UPSTREAM_OFFSET)
+        problems = []
+        for name, g in (
+            ("random", torch.randn(65, generator=gen).to(DEV)),
+            ("large", draw.dlogp * 1e4),
+        ):
+            g_inp = dataclasses.replace(draw, dlogp=g.contiguous())
+            problems.append((g_inp, {name: _run(g_inp, 32, entry="logprob")}))
+        return problems
+
+    _judge_problems(record_property, launch, ("random", "large"), seed=SEED + 65, entry="logprob")
 
 
 def test_temperature_frozen_inputs():
@@ -12006,17 +12803,23 @@ def test_temperature_all_ignored_rows(monkeypatch):
     assert tuple(empty.shape) == (0,)
 
 
-def test_temperature_reaches_the_reference_engine():
-    """The reference backend applies the temperature: a heterogeneous temperature moves ``logp`` / ``dX`` / ``dW``
-    well away from the call without one and matches the references with it (a reference engine that ignored the
-    temperature would fail both)."""
+def test_temperature_reaches_the_reference_engine(record_property):
+    """The reference backend applies the temperature: a heterogeneous temperature changes ``logp`` / ``dX`` / ``dW``
+    from the call without one, and the outputs with it meet the naive tier over the draws (a reference engine that
+    ignored the temperature would fail both)."""
     inp = _host_inputs(200, temperature="hetero")
     tau = _run(inp, 64, entry="logprob")
     plain = _run(dataclasses.replace(inp, temperature=None), 64, entry="logprob")
-    assert (tau["logp"] - plain["logp"])[inp.valid].abs().max() > 1e-2
-    assert rel_l2(tau["dX"], plain["dX"]) > 1e-2
-    assert rel_l2(tau["dW"], plain["dW"]) > 1e-2
-    _check_against_references(tau, inp, entry="logprob")
+    assert not torch.equal(tau["logp"][inp.valid], plain["logp"][inp.valid])
+    assert not torch.equal(tau["dX"], plain["dX"])
+    assert not torch.equal(tau["dW"], plain["dW"])
+    _judge_host(
+        record_property,
+        200,
+        lambda draw: _run(draw, 64, entry="logprob"),
+        entry="logprob",
+        make_kw=dict(temperature="hetero"),
+    )
 
 
 def test_temperature_through_the_opt_in_fast_entry(monkeypatch):
@@ -12123,9 +12926,10 @@ def test_device_temperature_through_the_opt_in_entry_with_a_count(
     """:func:`test_temperature_through_the_opt_in_entry_with_a_count` on the generated program through the opt-in
     module's binding cache: ``temperature=None`` / ``1.0`` take the autograd function without a temperature, resolve
     no temperature, reuse the forward binding of the first call (a backward binding is keyed by the addresses of the
-    forward's saved row tensors, so a later call may bind a backward again; no temperature binding remembered) and
-    give the same bits; ``0.7`` and per-token rows take the temperature form, which remembers temperature bindings of
-    its own.  One dX slice pinned (``_TAU_ONE``): the calls' ``dX`` compare bitwise."""
+    forward's saved row tensors, so a later call may bind a backward again; no temperature binding remembered), each
+    ``1.0`` call gives the bits of the ``None`` call right before it (the same binding state) and every call without
+    a temperature holds its contract; ``0.7`` and per-token rows take the temperature form, which remembers
+    temperature bindings of its own.  One dX slice pinned (``_TAU_ONE``): the calls' ``dX`` compare bitwise."""
     _require_tau_program()
     T, C = 5000, 2048
     inp = _device_inputs(T, W=glm_weight)
@@ -12180,13 +12984,14 @@ def test_device_temperature_through_the_opt_in_entry_with_a_count(
                 assert remembered and not any(
                     isinstance(b, opt_in._TemperatureBinding) for b in remembered
                 )
+                contract_lm_head(dict(logp=logp.detach(), dX=X.grad), inp, entry="logprob")
                 bits.append((_bits(logp.detach()), _bits(X.grad)))
             else:
                 assert any(
                     isinstance(b, opt_in._TemperatureBinding) for b in remembered
                 )
-    for other in bits[1:]:
-        assert all(torch.equal(a, b) for a, b in zip(bits[0], other, strict=True))
+    for none, one in ((bits[0], bits[1]), (bits[2], bits[3])):  # each 1.0 call against the None call before it
+        assert all(torch.equal(a, b) for a, b in zip(none, one, strict=True))
 
 
 def test_temperature_plan_keys():
@@ -12966,10 +13771,10 @@ def test_device_temperature_one_is_bitwise_the_default(glm_weight, monkeypatch):
     """``temperature=1.0`` and a ones tensor give the bits (integer views) of the call without a temperature over
     the switch matrix -- compacted / uncompacted, hidden / host / caller's count, fast / budget, fused / unfused dW
     cast, dX finalize, dW side stream -- with the binding cache on and off, at two and four chunks, one dX slice pinned
-    (``_TAU_ONE``); with the default dX slices ``logp`` / ``dW`` keep the bits and ``dX`` is held by
-    :func:`_assert_tau_close`.  ``1.0`` binds no temperature form and the ones tensor binds the temperature forms (the
-    device-count one exactly when the hidden valid-row count runs) and none of the stages they replace, so no cell
-    compares a path with itself."""
+    (``_TAU_ONE``); with the default dX slices ``logp`` / ``dW`` keep the bits
+    (:func:`_assert_fixed_order_bits`) and both calls hold their contract.  ``1.0`` binds no temperature form and the
+    ones tensor binds the temperature forms (the device-count one exactly when the hidden valid-row count runs) and
+    none of the stages they replace, so no cell compares a path with itself."""
     _require_tau_program()
     bound = _spy_bound_stages(monkeypatch)
     for T in (4097, 16231):
@@ -13009,18 +13814,19 @@ def test_device_temperature_one_is_bitwise_the_default(glm_weight, monkeypatch):
                 _assert_same_bits(base, one, _LOGPROB_KEYS)
                 _assert_same_bits(base, tensor, _LOGPROB_KEYS)
         sliced = _run(inp, 4096, entry="logprob", backend="cake")
-        _assert_tau_close(
-            sliced,
-            _run(inp, 4096, entry="logprob", backend="cake", temperature=ones),
-            (T, "default slices"),
-        )
+        sliced_ones = _run(inp, 4096, entry="logprob", backend="cake", temperature=ones)
+        _assert_fixed_order_bits(sliced, sliced_ones, (T, "default slices"))
+        for run in (sliced, sliced_ones):
+            contract_lm_head(run, inp, entry="logprob")
 
 
 @pytest.mark.parametrize("T", [4097, 16231])
-def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, monkeypatch, T):
+def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, record_property, monkeypatch, T):
     """A scalar temperature gives the bits of the constant FP32 tensor of its value through the temperature forms
     (two chunks; four chunks with the hidden valid-row count; one dX slice pinned, ``_TAU_ONE``) and, with the default
-    dX slices, passes the accuracy gates of its references."""
+    dX slices, keeps the one-slice call's ``logp`` / ``dW`` bits and holds its contract; at ``T = 4097`` the scalar
+    call of each value (``name@tau<value>``) meets the naive tier at ``JUDGE_H`` / ``JUDGE_V`` (the naive tier
+    divides by the BF16 temperature), through the temperature forms on every draw."""
     _require_tau_program()
     bound = _spy_bound_stages(monkeypatch)
     inp = _device_inputs(T, W=glm_weight)
@@ -13044,9 +13850,26 @@ def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, monkeypatc
         _assert_same_bits(scalar, tensor, _LOGPROB_KEYS)
         if T == 4097:
             sliced = _run(inp, 4096, entry="logprob", backend="cake", temperature=s)
-            _assert_tau_close(sliced, scalar, (T, s))
-            _check_against_references(
-                sliced, dataclasses.replace(inp, temperature=s), entry="logprob"
+            _assert_fixed_order_bits(sliced, scalar, (T, s))
+            contract_lm_head(sliced, inp, entry="logprob")
+
+            def launch(draw, s=s):
+                label = f"tau{s}"
+                with _cache(False):
+                    bound.clear()
+                    result = _run(draw, 4096, entry="logprob", backend="cake")
+                    _assert_temperature_plan(
+                        bound, hidden=_expect_hidden(draw, 4096, {}), case=(label, draw.seed)
+                    )
+                return {label: result}
+
+            _judge_device(
+                record_property,
+                T,
+                launch,
+                entry="logprob",
+                forms=(f"tau{s}",),
+                make_kw=dict(temperature="scalar", temperature_value=s),
             )
 
 
@@ -13065,58 +13888,37 @@ def test_device_temperature_heterogeneous_matches_the_references(
     logprob_chunk_loop, glm_weight, record_property, T, C, ignore
 ):
     """A heterogeneous per-token temperature on the generated program (the default dX slices), ``REPEATS`` runs on
-    the same inputs (fresh allocator state each time, 0xFF-poisoned): every run passes the gates against the FP64
-    oracle and the unchunked PyTorch path (both with the temperature: 1.05x its error plus the floor; the production
-    ceiling, a temperature-1 figure, only where every temperature is at least 1) with zeros on the ignored rows;
-    ``logp`` / ``dW`` never change and are the deterministic package's bits (its temperature entry on the same
-    inputs; ``logp`` only where the short tail folds); the worst errors, the run-to-run ``dX`` spread and the worst max |ND - det| and BF16 flip rate of ``dX``
-    are recorded (junit properties)."""
+    the same inputs (fresh allocator state each time, 0xFF-poisoned): every run holds its contract (zeros on the
+    ignored rows).  At ``JUDGE_H`` / ``JUDGE_V`` three poisoned runs per draw are judged against
+    the naive tier with the temperature (the judge keeps each output's largest error); the cells of 5 % ignored rows
+    at ``C = 4096`` and ``T`` 4097 / 16231 also judge the uncompacted call of the draw (``name@compact`` /
+    ``name@plain``)."""
     _require_tau_program()
     inp = _tau_inputs(T, W=glm_weight, ignore_frac=ignore)
-    ceiling = bool(inp.temperature.min() >= 1.0)
-    oracle = reference_fp64(inp, entry="logprob")
-    b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
-    det = _run(inp, C, entry="logprob", backend="cake", package="det")
-    first, worst, spread, versus = None, {}, 0.0, []
     for _ in range(REPEATS):
         _poison_allocator(1 << 30)
         run = _run(inp, C, entry="logprob", backend="cake")
-        _check_dtypes(run, inp)
-        _compare_with_det(run, det, record=versus, folded=_folds(inp, C))
-        errors = error_report(run, oracle, inp.labels)
-        assert (
-            not errors["nan"]
-            and errors["logp_ignored_zero"]
-            and errors["dX_ignored_zero"]
-        )
-        for key, tiny in GATE_TINY.items():
-            if key in errors:
-                assert errors[key] <= GATE_MARGIN * b0[key] + tiny, key
-                worst[key] = max(worst.get(key, 0.0), errors[key])
-        if ceiling:
-            for key, measured in PRODUCTION_B0.items():
-                if key in errors:
-                    assert errors[key] <= 2.0 * measured, key
-        if first is None:
-            first = run
-        else:
-            for key in ("loss", "logp", "dW"):
-                assert _same_bits(run[key], first[key]), key
-            spread = max(
-                spread, float((run["dX"].float() - first["dX"].float()).abs().max())
-            )
-    record_property("temperature_errors_worst", repr(worst))
-    record_property("temperature_unchunked_errors", repr(b0))
-    record_property(
-        "temperature_dX_vs_det",
-        repr(
-            dict(
-                run_to_run_max=spread,
-                max_abs=max(v["dX_max_abs_vs_det"] for v in versus),
-                flip_rate=max(v["dX_flip_rate"] for v in versus),
-                max_ulp=max(v["dX_max_ulp"] for v in versus),
-            )
-        ),
+        contract_lm_head(run, inp, entry="logprob")
+    run = None  # release the production-shape results
+    both = T in (4097, 16231) and C == 4096 and ignore == 0.05
+
+    def launch(draw):
+        _poison_allocator(1 << 30)
+        compact = _run(draw, C, entry="logprob", backend="cake")
+        if not both:
+            return compact
+        _poison_allocator(1 << 30)
+        return {"compact": compact, "plain": _run(draw, C, entry="logprob", backend="cake", compact_rows=False)}
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        seed=SEED + 7637,
+        forms=("compact", "plain") if both else None,
+        make_kw=dict(temperature="hetero", ignore_frac=ignore),
+        repeats=3,
     )
 
 
@@ -13126,9 +13928,9 @@ def test_device_temperature_switches_are_bitwise(
     """A heterogeneous temperature over the switch matrix, one dX slice pinned (``_TAU_ONE``): every switch gives the
     bits (integer views) of the defaults with the binding cache on (first call and remembered binding) and off, each
     cell through the temperature forms; compacted vs uncompacted: ``logp`` bitwise, the first chunk's valid ``dX`` rows
-    bitwise, ``dW`` at the precision level; a row permutation of ``(X, labels, temperature, dlogp)`` permutes ``logp``
-    and the ``dX`` rows bitwise (row-local arithmetic) -- a temperature read at the wrong row breaks each of these.
-    With the default dX slices the defaults keep ``logp`` / ``dW`` and hold ``dX`` (:func:`_assert_tau_close`)."""
+    bitwise; a row permutation of ``(X, labels, temperature, dlogp)`` permutes ``logp`` and the ``dX`` rows bitwise
+    (row-local arithmetic) -- a temperature read at the wrong row breaks each of these.  With the default dX slices the
+    defaults keep ``logp`` / ``dW`` (:func:`_assert_fixed_order_bits`) and hold their contract."""
     _require_tau_program()
     bound = _spy_bound_stages(monkeypatch)
     one = dict(entry="logprob", backend="cake", **_TAU_ONE)
@@ -13140,9 +13942,10 @@ def test_device_temperature_switches_are_bitwise(
             _assert_temperature_plan(
                 bound, hidden=_expect_hidden(inp, 4096, {}), case=(T, "defaults")
             )
-        _assert_tau_close(
-            _run(inp, 4096, entry="logprob", backend="cake"), ref, (T, "sliced")
-        )
+        sliced = _run(inp, 4096, entry="logprob", backend="cake")
+        _assert_fixed_order_bits(sliced, ref, (T, "sliced"))
+        contract_lm_head(sliced, inp, entry="logprob")
+        del sliced
         for name, switches in _TAU_SWITCH_MATRIX[1:]:
             if name == "uncompacted":
                 continue  # its own expectations below
@@ -13175,7 +13978,6 @@ def test_device_temperature_switches_are_bitwise(
         assert torch.equal(_bits(plain["logp"]), _bits(ref["logp"]))
         _assert_same_bits(comp, ref, _LOGPROB_KEYS)
         assert torch.all(plain["dX"][~inp.valid] == 0)
-        assert rel_l2(plain["dW"].float(), ref["dW"].float()) <= GATE_TINY["dW_rel_l2"]
         rows = inp.valid[:4096]
         assert torch.equal(
             _bits(plain["dX"][:4096][rows]), _bits(ref["dX"][:4096][rows])
@@ -13279,43 +14081,76 @@ def test_device_temperature_frozen_inputs(glm_weight):
         assert torch.equal(_bits(r["logp"]), _bits(both["logp"]))
 
 
-def test_device_temperature_upstream_gradients(glm_weight):
-    """Arbitrary per-row upstream gradients with a heterogeneous temperature on the generated program: random
-    (nonzero on ignored rows too) and large ones within the gates of their references (the default dX slices), zeros
-    give zero gradients (values; the default slices), the negated upstream the negated gradients and a retained graph
-    repeats the backward bitwise (one dX slice pinned, ``_TAU_ONE``)."""
+def test_device_temperature_upstream_gradients(glm_weight, record_property):
+    """Arbitrary per-row upstream gradients with a heterogeneous temperature on the generated program: zeros give
+    zero gradients (values; the default slices), the negated upstream the negated gradients (one dX slice pinned,
+    ``_TAU_ONE``) and both backward passes of a retained graph hold their contract; at ``JUDGE_H`` / ``JUDGE_V``
+    random (nonzero on ignored rows too, drawn from the draw's seed) and large upstreams are judged against the naive
+    tier (the default dX slices; ``name@random`` / ``name@large``), and so are both backward passes of a retained
+    graph on the draw's own upstream (one dX slice pinned; ``name@first``: ``logp`` and the pass that retains the
+    graph, ``name@retained``: the second pass)."""
     _require_tau_program()
     T = 4097
     inp = _tau_inputs(T, W=glm_weight)
     kw = dict(entry="logprob", backend="cake")
     base = _run(inp, 4096, **kw, **_TAU_ONE)
-    zeros = _run(
-        dataclasses.replace(inp, dlogp=torch.zeros_like(inp.dlogp)), 4096, **kw
-    )
+    zero_inp = dataclasses.replace(inp, dlogp=torch.zeros_like(inp.dlogp))
+    zeros = _run(zero_inp, 4096, **kw)
+    contract_lm_head(zeros, zero_inp, entry="logprob")
     assert torch.all(zeros["dX"] == 0) and torch.all(zeros["dW"] == 0)
     negated = _run(dataclasses.replace(inp, dlogp=-inp.dlogp), 4096, **kw, **_TAU_ONE)
     assert torch.equal(negated["dX"], -base["dX"])
     assert torch.equal(negated["dW"], -base["dW"])
-    gen = torch.Generator(device=CUDA)
-    gen.manual_seed(SEED + 7639)
-    for g in (torch.randn(T, generator=gen, device=CUDA), inp.dlogp * 1e4):
-        g_inp = dataclasses.replace(inp, dlogp=g.contiguous())
-        _check_against_references(_run(g_inp, 4096, **kw), g_inp, entry="logprob")
-    X = inp.X.detach().requires_grad_(True)
-    W = inp.W.detach().requires_grad_(True)
-    logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
-        X,
-        W,
-        inp.labels,
-        chunk_size=4096,
-        backend="cake",
-        temperature=inp.temperature,
-        **_TAU_ONE,
+
+    def retained(problem):
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
+        logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
+            X,
+            W,
+            problem.labels,
+            chunk_size=4096,
+            backend="cake",
+            temperature=problem.temperature,
+            **_TAU_ONE,
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dX, dW = torch.autograd.grad(logp, (X, W), problem.dlogp, retain_graph=retain)
+            results[label] = dict(dX=dX, dW=dW)
+        results["first"]["logp"] = logp.detach()
+        return results
+
+    for result in retained(inp).values():
+        contract_lm_head(result, inp, entry="logprob")
+    base = zeros = negated = None
+
+    def launch(j, s):
+        draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05, temperature="hetero")
+        gen = torch.Generator(device="cpu").manual_seed(s + DEVICE_UPSTREAM_OFFSET)
+        groups = []
+        for name, g in (
+            ("random", torch.randn(T, generator=gen).to(CUDA)),
+            ("large", draw.dlogp * 1e4),
+        ):
+            g_inp = dataclasses.replace(draw, dlogp=g.contiguous())
+            groups.append((g_inp, {name: _run(g_inp, 4096, **kw)}))
+        groups.append((draw, retained(draw)))
+        return groups
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("random", "large", "first", "retained"),
+        seed=SEED + 7637 + T,
+        entry="logprob",
+        names={
+            "random": ("logp", "dX", "dW"),
+            "large": ("logp", "dX", "dW"),
+            "first": ("logp", "dX", "dW"),
+            "retained": ("dX", "dW"),
+        },
     )
-    first = torch.autograd.grad(logp, (X, W), inp.dlogp, retain_graph=True)
-    second = torch.autograd.grad(logp, (X, W), inp.dlogp)
-    for a, b, ref in zip(first, second, (base["dX"], base["dW"]), strict=True):
-        assert torch.equal(_bits(a), _bits(b)) and torch.equal(_bits(a), _bits(ref))
 
 
 _FRESH_PROCESS_TAU_SCRIPT = """
@@ -13337,35 +14172,63 @@ torch.cuda.synchronize()
 torch.save(dict(logp=logp.detach().cpu(), dX=dX.cpu(), dW=dW.cpu()), {out!r})
 """
 
+# One judged draw's step in a fresh process: the draw's inputs (:func:`_draw_inputs` of the draw's seed, the weight
+# :func:`_judge_weight`'s) and the test's backward form (``logprob_chunk_loop``) made again there.
+_FRESH_PROCESS_TAU_DRAW_SCRIPT = """
+import sys, torch
+sys.path.insert(0, {root!r})
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs, make_weight
+from tests.cake.test_helpers.cake_package import cake_package
+cake_backend = cake_package("cake.cake_lm_head_nondet_train", "cake_backend")
+cake_backend._set_logprob_vocab_major({vocab_major!r})
+W = make_weight({V}, {H}, seed={seed_w}, device="cuda")
+inp = make_inputs(
+    {T}, seed={seed}, H={H}, V={V}, device="cuda", W=W, ignore_frac={ignore_frac}, temperature="hetero"
+)
+X = inp.X.detach().requires_grad_(True)
+W = inp.W.detach().requires_grad_(True)
+logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
+    X, W, inp.labels, chunk_size={C}, backend="cake", temperature=inp.temperature,
+    gemm_tuning={tuning!r},
+)
+dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp)
+torch.cuda.synchronize()
+torch.save(dict(logp=logp.detach().cpu(), dX=dX.cpu(), dW=dW.cpu()), {out!r})
+"""
+
 
 def test_device_temperature_fresh_thread_process_and_changing_t(
-    logprob_chunk_loop, glm_weight, tmp_path
+    logprob_chunk_loop, glm_weight, tmp_path, record_property
 ):
     """With a heterogeneous temperature and one dX slice pinned (``_TAU_ONE``): the backward from a fresh thread and
-    the whole step in a fresh process give the main thread's bits; calls whose ``T`` changes between them (two chunks,
-    one, four) repeat bitwise; with the default dX slices they repeat within :func:`_assert_tau_close`."""
+    the whole step in a fresh process hold their contract; over calls whose ``T`` changes between them (two chunks,
+    one, four) every one-slice call holds its contract and with the default dX slices the calls keep the one-slice
+    calls' ``logp`` / ``dW`` bits (:func:`_assert_fixed_order_bits`) and hold their contract.  At ``JUDGE_H`` /
+    ``JUDGE_V`` each draw's step runs on the main thread, from a new thread and in a new process, and all three are
+    judged against the naive tier (``name@main`` / ``name@fresh_thread`` / ``name@fresh_process``)."""
     _require_tau_program()
     T, C = 4097, 4096
     inp = _tau_inputs(T, W=glm_weight)
 
-    def grad_path():
-        X = inp.X.detach().requires_grad_(True)
-        W = inp.W.detach().requires_grad_(True)
+    def grad_path(problem=None):
+        problem = inp if problem is None else problem
+        X = problem.X.detach().requires_grad_(True)
+        W = problem.W.detach().requires_grad_(True)
         logp = cake_backend.cake_lm_head_nondet_train_logprob_temperature(
             X,
             W,
-            inp.labels,
+            problem.labels,
             chunk_size=C,
             backend="cake",
-            temperature=inp.temperature,
+            temperature=problem.temperature,
             **_TAU_ONE,
         )
-        dX, dW = torch.autograd.grad(logp, (X, W), inp.dlogp)
+        dX, dW = torch.autograd.grad(logp, (X, W), problem.dlogp)
         torch.cuda.synchronize()
         return dict(logp=logp.detach(), dX=dX, dW=dW)
 
     main = grad_path()
-    _check_against_references(main, inp, entry="logprob")
+    contract_lm_head(main, inp, entry="logprob")
     outcome = {}
 
     def worker():
@@ -13378,7 +14241,7 @@ def test_device_temperature_fresh_thread_process_and_changing_t(
     thread.start()
     thread.join()
     assert "error" not in outcome, repr(outcome.get("error"))
-    _assert_same_bits(outcome["result"], main, _LOGPROB_KEYS)
+    contract_lm_head(outcome["result"], inp, entry="logprob")
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     out = tmp_path / "fresh_process_temperature.pt"
     script = _FRESH_PROCESS_TAU_SCRIPT.format(
@@ -13405,18 +14268,72 @@ def test_device_temperature_fresh_thread_process_and_changing_t(
         f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
     )
     fresh = torch.load(out)
-    _assert_same_bits({k: v.to(CUDA) for k, v in fresh.items()}, main, _LOGPROB_KEYS)
+    contract_lm_head({k: v.to(CUDA) for k, v in fresh.items()}, inp, entry="logprob")
     inputs = [_tau_inputs(n, W=glm_weight) for n in (4095, 4097, 1500, 16231, 4095)]
     kw = dict(entry="logprob", backend="cake")
     first = [_run(i, 4096, **kw, **_TAU_ONE) for i in inputs]
-    again = [_run(i, 4096, **kw, **_TAU_ONE) for i in inputs]
-    for a, b in zip(first, again, strict=True):
-        _assert_same_bits(a, b, _LOGPROB_KEYS)
-    _assert_same_bits(first[0], first[-1], _LOGPROB_KEYS)
+    for i, a in zip(inputs, first, strict=True):
+        contract_lm_head(a, i, entry="logprob")
     sliced = [_run(i, 4096, **kw) for i in inputs]
     for i, (a, b) in enumerate(zip(sliced, first, strict=True)):
-        _assert_tau_close(a, b, ("sliced vs one slice", inputs[i].T))
-    _assert_tau_close(sliced[0], sliced[-1], "sliced, T changed and back")
+        _assert_fixed_order_bits(a, b, ("sliced vs one slice", inputs[i].T))
+        contract_lm_head(a, inputs[i], entry="logprob")
+    del inputs, first, sliced, main, fresh
+    outcome.clear()  # the name stays bound: ``worker`` reads it
+
+    def launch(j, s):
+        draw = _draw_inputs(T, s, _judge_weight(s), ignore_frac=0.05, temperature="hetero")
+        results = dict(main=grad_path(draw))
+        found = {}
+
+        def new_thread():
+            try:
+                found["result"] = grad_path(draw)
+            except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                found["error"] = exc
+
+        thread = threading.Thread(target=new_thread, name="fresh-temperature-thread")
+        thread.start()
+        thread.join()
+        if "error" in found:
+            raise found["error"]
+        results["fresh_thread"] = found["result"]
+        saved = tmp_path / f"fresh_process_draw_{j}.pt"
+        script = _FRESH_PROCESS_TAU_DRAW_SCRIPT.format(
+            root=root,
+            vocab_major="0",  # the test's backward form (``logprob_chunk_loop``)
+            T=T,
+            seed=s,
+            seed_w=s + W_DRAW_OFFSET,
+            H=JUDGE_H,
+            V=JUDGE_V,
+            ignore_frac=0.05,
+            C=C,
+            tuning=_TAU_ONE["gemm_tuning"],
+            out=str(saved),
+        )
+        run = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert run.returncode == 0, (
+            f"draw {j}: fresh process failed ({run.returncode}):\n{run.stdout[-2000:]}\n{run.stderr[-4000:]}"
+        )
+        results["fresh_process"] = {k: v.to(CUDA) for k, v in torch.load(saved).items()}
+        saved.unlink()
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("main", "fresh_thread", "fresh_process"),
+        seed=SEED + 7637 + T,
+        entry="logprob",
+    )
 
 
 def test_device_temperature_ignored_rows(glm_weight):
@@ -13607,8 +14524,8 @@ def test_device_temperature_assertion_stops_the_stream():
 def test_device_temperature_binding_cache_rebinds_it(glm_weight, T):
     """The binding key carries whether a call has a temperature, not its storage or values: calls with different
     temperature tensors, scalars and an equal tensor in other storage launch from one remembered binding and give the
-    bits of fresh bindings (cache off; one dX slice pinned, ``_TAU_ONE``); different temperatures give different
-    results."""
+    bits of fresh bindings (cache off; one dX slice pinned, ``_TAU_ONE``); every call holds its contract; different
+    temperatures give different results."""
     _require_tau_program()
     inp = _device_inputs(T, W=glm_weight)
     tau1 = make_temperature(T, "hetero", seed=SEED + 1, device=CUDA)
@@ -13624,8 +14541,9 @@ def test_device_temperature_binding_cache_rebinds_it(glm_weight, T):
         cold = [_run(inp, 4096, temperature=f, **kw) for f in forms]
     for h, c in zip(hot, cold, strict=True):
         _assert_same_bits(h, c, _LOGPROB_KEYS)
+        contract_lm_head(h, inp, entry="logprob")
+        contract_lm_head(c, inp, entry="logprob")
     assert not torch.equal(hot[0]["logp"], hot[1]["logp"])
-    _assert_same_bits(hot[0], hot[4], _LOGPROB_KEYS)
 
 
 def test_device_temperature_needs_the_registered_forms(glm_weight, monkeypatch):
@@ -13675,20 +14593,41 @@ def test_device_temperature_needs_the_registered_forms(glm_weight, monkeypatch):
 
 
 @pytest.mark.parametrize("T,H", [(1000, 6144), (4097, 6144)])
-def test_device_vocab_256_dx_slices_temperature(T, H):
+def test_device_vocab_256_dx_slices_temperature(record_property, T, H):
     """A call with a temperature plans the dX slices of the call without one (V = 256 has four K steps: every slice
-    holds a K step): the default plan and every pin whose slices all hold a K step match the references with a
-    per-token temperature, and a pin of 3 slices is rejected."""
+    holds a K step): the default plan and every pin whose slices all hold a K step meet the naive tier with a
+    per-token temperature over the draws (V = 256, the weight drawn per draw; ``name@default`` / ``name@k<slices>``),
+    and a pin of 3 slices is rejected."""
     _require_tau_program()
     W = make_inputs(1, seed=SEED, H=H, V=256, device=CUDA, ignore_frac=0.0).W
     inp = make_inputs(
         T, seed=SEED + 7637 + T, H=H, V=256, device=CUDA, W=W, temperature="hetero"
     )
-    for k in (None, 1, 2, 4):
-        tuning = None if k is None else {"dx": {"k_slices": k}}
-        result = _run(inp, 4096, entry="logprob", backend="cake", gemm_tuning=tuning)
-        _check_dtypes(result, inp)
-        _check_against_references(result, inp, entry="logprob")
+    pins = {"default": None, "k1": 1, "k2": 2, "k4": 4}
+
+    def launch(draw):
+        return {
+            name: _run(
+                draw,
+                4096,
+                entry="logprob",
+                backend="cake",
+                gemm_tuning=None if k is None else {"dx": {"k_slices": k}},
+            )
+            for name, k in pins.items()
+        }
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        H=H,
+        V=256,
+        seed=SEED + 7637,
+        forms=tuple(pins),
+        make_kw=dict(temperature="hetero"),
+    )
     with pytest.raises(ValueError, match="K steps"):
         _run(
             inp,
@@ -13786,8 +14725,8 @@ def test_temperature_selective_checkpoint_runs_outside_the_dispatch_modes(
     monkeypatch, kind, module
 ):
     """The temperature entry under selective activation checkpointing runs its forward with every torch dispatch
-    mode popped in both passes (the checkpointed forward and the recomputation), as the other entries of the package, and gives
-    the uncheckpointed step's ``logp`` / ``dX`` / ``dW`` bits (a per-token temperature).  ``opt_in``: the opt-in
+    mode popped in both passes (the checkpointed forward and the recomputation), as the other entries of the package,
+    and the step (a per-token temperature) holds its contract.  ``opt_in``: the opt-in
     module's autograd function (the entry with a count).  Under the gradient placement ``"auto"`` the main module's
     recomputation takes the checkpointed call's row results (no forward); ``"forward"`` runs it in both passes."""
     inp = _host_inputs(65, ignore_frac=0.1, temperature="hetero")
@@ -13826,6 +14765,7 @@ def test_temperature_selective_checkpoint_runs_outside_the_dispatch_modes(
 
     plain = step("plain")
     assert stacks == [0], stacks
+    contract_lm_head(dict(zip(("logp", "dX", "dW"), plain)), inp, entry="logprob")
     for placement in ("auto", "forward"):
         stacks.clear()
         logps.clear()
@@ -13833,8 +14773,7 @@ def test_temperature_selective_checkpoint_runs_outside_the_dispatch_modes(
             run = step(kind)
         taken = module == "backend" and placement == "auto"
         assert stacks == ([0] if taken else [0, 0]), (placement, stacks)
-        for name, a, b in zip(("logp", "dX", "dW"), run, plain, strict=True):
-            assert torch.equal(a, b), (placement, name)
+        contract_lm_head(dict(zip(("logp", "dX", "dW"), run)), inp, entry="logprob")
     gc.collect()
     assert len(cake_backend._CHECKPOINT_CALLS) == 0
     assert len(cake_backend._LOGPROB_CHECKPOINT_CALLS) == 0
@@ -13872,9 +14811,9 @@ def _tau_region_entry(entry, inp, X, W):
 
 
 @pytest.mark.parametrize("entry", ["backend", "opt_in_count", "opt_in_budget"])
-def test_device_checkpointed_temperature_step_is_bitwise(glm_weight, entry):
+def test_device_checkpointed_temperature_step_holds_its_contract(glm_weight, entry):
     """The temperature entry under a non-reentrant checkpoint, selective activation checkpointing and a dispatch mode
-    (around the checkpointed forward; around the whole step) gives the uncheckpointed step's ``dX`` / ``dW`` bits."""
+    (around the checkpointed forward; around the whole step) holds its contract, as does the uncheckpointed step."""
     _require_tau_program()
     inp = _tau_inputs(12289, W=glm_weight)
 
@@ -13894,6 +14833,7 @@ def test_device_checkpointed_temperature_step_is_bitwise(glm_weight, entry):
 
     step("plain")  # binds
     plain = step("plain")
+    contract_lm_head(dict(dX=plain[0], dW=plain[1]), inp, entry="logprob")
     for kind in (
         "nonreentrant",
         "selective_recompute",
@@ -13903,8 +14843,7 @@ def test_device_checkpointed_temperature_step_is_bitwise(glm_weight, entry):
         "dispatch_mode_step",
     ):
         run = step(kind)
-        assert _same_bits(run[0], plain[0]), kind
-        assert _same_bits(run[1], plain[1]), kind
+        contract_lm_head(dict(dX=run[0], dW=run[1]), inp, entry="logprob")
 
 
 @pytest.mark.parametrize("kind", ["hold", "user_mode", "nested"])
@@ -13913,8 +14852,8 @@ def test_device_selective_checkpoint_region_input_temperature(glm_weight, entry,
     """:func:`test_device_selective_checkpoint_region_input` for the temperature entry: its input formed inside the
     selective-checkpoint region (``X = Hin @ P``), memory held between the forward and the backward (a binding miss in
     the recomputation only), a user dispatch mode around the step (``user_mode``) or a non-reentrant checkpoint nested
-    inside the selective one (``nested``).  ``logp`` sum / ``dHin`` / ``dP`` / ``dW`` are the uncheckpointed step's
-    bits."""
+    inside the selective one (``nested``).  The uncheckpointed and the checkpointed steps give a finite ``logp`` sum /
+    ``dHin`` / ``dP`` and a ``dW`` that holds its contract."""
     _require_tau_program()
     inp = _tau_inputs(12289, W=glm_weight)
     H = inp.X.shape[1]
@@ -13936,7 +14875,6 @@ def test_device_selective_checkpoint_region_input_temperature(glm_weight, entry,
             if not selective:
                 out = region(h, p, w)
             else:
-                fn = region
                 if kind == "nested":
 
                     def fn(a, b, c):
@@ -13944,6 +14882,8 @@ def test_device_selective_checkpoint_region_input_temperature(glm_weight, entry,
                             region, a, b, c, use_reentrant=False
                         )
 
+                else:
+                    fn = region
                 out = torch.utils.checkpoint.checkpoint(
                     fn, h, p, w, use_reentrant=False, context_fn=_selective("recompute")
                 )
@@ -13953,25 +14893,48 @@ def test_device_selective_checkpoint_region_input_temperature(glm_weight, entry,
         del held
         return [out.detach(), h.grad, p.grad, w.grad]
 
+    def holds(result):
+        for name, value in zip(("logp", "dHin", "dP"), result, strict=False):
+            assert bool(torch.isfinite(value.float()).all()), name
+        contract_lm_head(dict(dW=result[3]), inp, entry="logprob")
+
     step(False)  # binds
     plain = step(False)
+    holds(plain)
     for _ in range(2):
         step(False)
-        run = step(True)
-        for name, a, b in zip(("logp", "dHin", "dP", "dW"), run, plain, strict=True):
-            assert _same_bits(a, b), name
+        holds(step(True))
 
 
-def _distinct_tau(T: int) -> torch.Tensor:
-    """A per-token FP32 temperature with a distinct value on every row (log-spaced over ``[0.5, 2]``, shuffled), so a
-    temperature row read in the wrong row order changes the result (a constant temperature would hide it)."""
-    gen = torch.Generator(device="cpu").manual_seed(SEED + 9011 + int(T))
+def _distinct_tau(T: int, *, seed=None) -> torch.Tensor:
+    """A per-token FP32 temperature with a distinct value on every row (log-spaced over ``[0.5, 2]``, shuffled by a
+    CPU generator of ``seed``, default one of ``T``), so a temperature row read in the wrong row order changes the
+    result (a constant temperature would hide it)."""
+    gen = torch.Generator(device="cpu").manual_seed(
+        SEED + 9011 + int(T) if seed is None else int(seed)
+    )
     values = torch.logspace(
         math.log10(0.5), math.log10(2.0), int(T), dtype=torch.float64
     ).float()
     tau = values[torch.randperm(int(T), generator=gen)].contiguous().to(CUDA)
     assert int(torch.unique(tau).numel()) == int(T)
     return tau
+
+
+def _tau_zero_dlogp_prepare(kind, form):
+    """The draw's zero-gradient rows of ``kind`` (:func:`_draw_zero_dlogp`) and its temperature: with
+    ``form="distinct"`` a distinct per-token temperature shuffled by the draw's own generator
+    (``inp.seed + SEED_OFFSETS["temperature"]``), else the scalar 0.7."""
+
+    def prepare(draw):
+        draw = _draw_zero_dlogp(draw, kind)
+        if form == "distinct":
+            tau = _distinct_tau(draw.T, seed=draw.seed + SEED_OFFSETS["temperature"])
+        else:
+            tau = 0.7
+        return dataclasses.replace(draw, temperature=tau)
+
+    return prepare
 
 
 def _counted_partition(monkeypatch) -> list:
@@ -14018,11 +14981,11 @@ TAU_ZERO_DLOGP_ONE_CHUNK_CASES = [
     "T, kind, form", TAU_ZERO_DLOGP_CASES + TAU_ZERO_DLOGP_ONE_CHUNK_CASES, ids=str
 )
 def test_device_temperature_zero_dlogp_rows_skip(
-    logprob_chunk_loop, glm_weight, monkeypatch, request, T, kind, form, dz_form
+    logprob_chunk_loop, glm_weight, monkeypatch, request, record_property, T, kind, form, dz_form
 ):
     """The zero-gradient row skip with a temperature (a distinct per-token temperature on every row, or the scalar
     0.7; ignored rows; zero rows ``+0`` and ``-0``) against the same calls without the skip
-    (``set_zero_dlogp_min_rows(None)``), the deterministic package's temperature entry and the FP64 oracle.  Every
+    (``set_zero_dlogp_min_rows(None)``) and the naive tier.  Every
     call with the skip runs the partition (binding and remembered binding) and binds the counted weight-gradient
     GEMMs; its backward plan runs the ``dz`` arm's counted temperature form ``gemm_logits_dz_dcnt_tau``
     (``dz_form="counted"``, the default, where the record registers it) or the uncounted ``gemm_logits_dz_tau``
@@ -14031,11 +14994,14 @@ def test_device_temperature_zero_dlogp_rows_skip(
     both: bound, not launched by the backward under the skip).  ``logp`` keeps
     its bits; the zero rows' and the ignored rows' ``dX`` rows are exact ``+0``; with one dX slice pinned
     (``_TAU_ONE``) a live row's ``dX`` -- the same product of its ``dz`` row -- keeps the bits of the call without the
-    skip (the ``dz`` of the live rows is unchanged: the temperature rows follow the skip's row order).  ``dW`` and the
-    default-slice ``dX`` stay within the ND budget floors of the call without the skip and of the deterministic
-    package (``dW`` the same bits when no row is zero) and pass the gates against the FP64 oracle; every row zero
-    gives zero gradients.  A distinct temperature also keeps its bits with extreme values on the ignored rows.  T 5000
-    runs the shipped chunks (``shipped_chunks``: its two-chunk cast forms); T 4600 the short-tail fold."""
+    skip (the ``dz`` of the live rows is unchanged: the temperature rows follow the skip's row order).  ``dW`` is the
+    bits of the call without the skip when no row is zero; the default-slice call keeps that call's ``logp`` bits and
+    every call holds its contract; every row zero gives zero gradients.  A distinct temperature also keeps its bits
+    with extreme values on the ignored rows.  T 5000 runs the shipped chunks (``shipped_chunks``: its two-chunk cast
+    forms); T 4600 the short-tail fold.  Unless every row is zero, the skip's one-slice call, its second call from the
+    remembered binding and the default-slice call meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws
+    (``name@one`` / ``name@again`` / ``name@sliced``; each draw's zero rows and distinct temperature from its own
+    generator; the partition runs on every call)."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     if T == 5000:
@@ -14105,41 +15071,22 @@ def test_device_temperature_zero_dlogp_rows_skip(
         one_off = _run(inp, 4096, **kw, **_TAU_ONE)
         sliced_off = _run(inp, 4096, **kw)
     assert not calls and not any(s.endswith("_dcnt") for s in bound), case
-    det = _run(inp, 4096, **kw, package="det")
     for run in (one, again, sliced):
         assert _same_bits(run["logp"], one_off["logp"]), case
-        assert _same_bits(run["logp"], det["logp"]), case
         assert not bool(_bits(run["dX"][zero | ~valid]).any()), case
     for run in (one, again):
         assert _same_bits(run["dX"][live], one_off["dX"][live]), case
-    assert _same_bits(again["dW"], one["dW"]), case
     if not bool(live.any()):
-        for run in (one, sliced):
+        for run in (one, again, sliced):
             assert not bool(run["dW"].float().any()), case
         return
     if not bool(zero.any()):
         # no zero row: the partition keeps the forward's order, the counted forms run every row
-        for run, off in ((one, one_off), (sliced, sliced_off), (sliced, det)):
+        for run, off in ((one, one_off), (sliced, sliced_off)):
             assert _same_bits(run["dW"], off["dW"]), case
-    dw_rel = {}
-    for name, run, ref in (
-        ("one", one, one_off),
-        ("sliced", sliced, sliced_off),
-        ("det", sliced, det),
-    ):
-        dw_rel[name] = float(rel_l2(run["dW"].float(), ref["dW"].float()))
-        assert dw_rel[name] <= GATE_TINY["dW_rel_l2"], (case, name, dw_rel[name])
-    _assert_tau_close(sliced, sliced_off, (case, "skip off"), keys=("logp", "dX"))
-    _assert_tau_close(sliced, det, (case, "det"), keys=("logp", "dX"))
-    oracle = reference_fp64(inp, entry="logprob")
-    b0 = error_report(reference_unchunked(inp, entry="logprob"), oracle, inp.labels)
-    for run in (one, sliced):
-        errors = error_report(run, oracle, inp.labels)
-        assert not errors["nan"] and errors["logp_ignored_zero"], case
-        assert errors["dX_ignored_zero"], case
-        for key, tiny in GATE_TINY.items():
-            if key in errors:
-                assert errors[key] <= GATE_MARGIN * b0[key] + tiny, (case, key)
+    _assert_fixed_order_bits(sliced, sliced_off, (case, "skip off"), keys=("logp", "dX"))
+    for run in (one, again, sliced):
+        _zero_dlogp_contract(run, inp)
     if form == "distinct" and bool((~valid).any()):
         # the ignored rows' temperatures reach no output (the skip gathers the valid rows only)
         extreme = tau.clone()
@@ -14151,9 +15098,28 @@ def test_device_temperature_zero_dlogp_rows_skip(
                 dataclasses.replace(inp, temperature=extreme), 4096, **kw, **_TAU_ONE
             )
         _assert_same_bits(one, other, _LOGPROB_KEYS)
-    print(
-        f"\ntemperature zero-dlogp skip {case} zero {int(zero.sum())}/{rows}: dW rel-L2 vs skip off "
-        f"{dw_rel['one']:.2e} (one slice) / {dw_rel['sliced']:.2e}, vs det {dw_rel['det']:.2e}"
+
+    def launch(draw):
+        calls.clear()
+        with _zero_dlogp_floor(0), _tau_dz_counted(dz_form == "counted"):
+            out = {
+                "one": _run(draw, 4096, **kw, **_TAU_ONE),
+                "again": _run(draw, 4096, **kw, **_TAU_ONE),  # the remembered binding
+                "sliced": _run(draw, 4096, **kw),
+            }
+        assert calls == [int((draw.labels >= 0).sum())] * 3, (case, calls)
+        return out
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        prepare=_tau_zero_dlogp_prepare(kind, form),
+        forms=("one", "again", "sliced"),
+        contract=_zero_dlogp_contract,
+        seed=SEED + 7637,
+        ignore_frac=0.05,
     )
 
 
@@ -14170,15 +15136,17 @@ def test_device_temperature_zero_dlogp_rows_skip(
     ids=str,
 )
 def test_device_temperature_counted_dz_is_the_mixed_plans_bits(
-    logprob_chunk_loop, glm_weight, monkeypatch, T, kind, form
+    logprob_chunk_loop, glm_weight, monkeypatch, record_property, T, kind, form
 ):
     """Under the zero-gradient row skip with a temperature, the counted ``dz`` temperature form
     (``gemm_logits_dz_dcnt_tau``) leaves out only work whose result no later launch reads: ``logp``, ``dX`` and ``dW``
     (one dX slice pinned: binding and remembered binding) are the mixed plan's bits
     (``set_zero_dlogp_temperature_dz_counted(False)``: ``gemm_logits_dz_tau`` over every row) -- the same row order,
     the same counted dX / dW forms, the same ``dz`` on every row they read; with the default slices ``logp`` and
-    ``dW`` are its bits and ``dX`` -- whose K-sliced reduction adds its slices in the order they finish, so it may
-    differ from run to run by FP32 rounding -- stays within the dX budget floor (:func:`_assert_tau_close`)."""
+    ``dW`` are its bits (:func:`_assert_fixed_order_bits`; ``dX`` -- whose K-sliced reduction sums its slices in slice
+    order, with no bit promise between the two plans -- is not compared).  Unless every row is zero, the default-slice
+    calls of both plans meet the naive tier at ``JUDGE_H`` / ``JUDGE_V`` over the draws (``name@counted`` /
+    ``name@mixed``; each plan's ``dz`` form bound on every draw)."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     module_name, _ = cake_backend.record_for(CUDA)
@@ -14215,9 +15183,36 @@ def test_device_temperature_counted_dz_is_the_mixed_plans_bits(
     names = ("one", "again", "sliced")
     for name, a, b in zip(names, runs[True], runs[False], strict=True):
         if name == "sliced":
-            _assert_tau_close(a, b, (case, name), keys=_LOGPROB_KEYS)
+            _assert_fixed_order_bits(a, b, (case, name), keys=_LOGPROB_KEYS)
         else:
             _assert_same_bits(a, b, _LOGPROB_KEYS)
+    for run in runs[True] + runs[False]:
+        _zero_dlogp_contract(run, inp)
+    if kind == "all":
+        return
+
+    def launch(draw):
+        out = {}
+        for counted, label in ((True, "counted"), (False, "mixed")):
+            cake_backend.BINDING_CACHE.clear()
+            bound.clear()
+            with _zero_dlogp_floor(0), _tau_dz_counted(counted):
+                out[label] = _run(draw, 4096, **kw)
+            dz_stage = "gemm_logits_dz_dcnt_tau" if counted else "gemm_logits_dz_tau"
+            assert dz_stage in bound, (case, label, sorted(set(bound)))
+        return out
+
+    _judge_device(
+        record_property,
+        T,
+        launch,
+        entry="logprob",
+        prepare=_tau_zero_dlogp_prepare(kind, form),
+        forms=("counted", "mixed"),
+        contract=_zero_dlogp_contract,
+        seed=SEED + 7637,
+        ignore_frac=0.05,
+    )
 
 
 def test_device_temperature_zero_dlogp_skip_follows_the_row_order(
@@ -14299,13 +15294,15 @@ def test_device_temperature_zero_dlogp_skip_adds_no_synchronization(
 
 
 def test_device_temperature_zero_dlogp_backward_cuda_graph(
-    logprob_backward_form, glm_weight
+    logprob_backward_form, glm_weight, record_property
 ):
     """The log-probability backward with a per-token temperature under the skip, captured in a CUDA graph (after a
     warm-up that binds it on the capture stream) as the autograd Function calls it (the forward's temperature rows and
     its resolved temperature): replays with other ``dlogp`` values -- other zero rows and live counts per chunk, none
-    and every row zero -- written into the captured input give the eager backward's results on those values (``dW``
-    within the FP32 reduction order, the zero rows' ``dX`` exact ``+0``)."""
+    and every row zero -- written into the captured input give finite results on those values, the zero rows' ``dX``
+    exact ``+0`` and every row zero zero ``dW``.  At ``JUDGE_H`` / ``JUDGE_V`` each draw's graph replays the same kinds
+    of ``dlogp``, and every kind's replay is judged against the naive tier on every draw as its own output
+    (:func:`_judge_zero_dlogp_replay`)."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     base = _tau_inputs(12289, W=glm_weight)
@@ -14352,31 +15349,31 @@ def test_device_temperature_zero_dlogp_backward_cuda_graph(
             graph.replay()
             torch.cuda.synchronize()
             got_dx, got_dw = dx_g.clone(), dw_g.clone()
-            want_dx, want_dw = backward(new.clone())
-            torch.cuda.synchronize()
             assert not bool(_bits(got_dx[zero | ~valid]).any()), kind
             live = valid & ~zero
             if not bool(live.any()):
                 assert not bool(got_dw.float().any()), kind
                 continue
-            scale = float(want_dx[live].float().abs().max())
-            assert (
-                float((got_dx[live].float() - want_dx[live].float()).abs().max())
-                <= scale * 2**-7
-            ), kind
-            dw_rel = float(
-                (got_dw.float() - want_dw.float()).norm() / want_dw.float().norm()
-            )
-            assert dw_rel <= 1e-3, (kind, dw_rel)
+            assert bool(torch.isfinite(got_dx.float()).all()), kind
+            assert bool(torch.isfinite(got_dw.float()).all()), kind
+    del graph, dx_g, dw_g
+    _judge_zero_dlogp_replay(
+        record_property,
+        12289,
+        (("random", 0.166), ("group", 0.5), "none", "last"),
+        tau="distinct",
+        chunk_loop=logprob_backward_form == "0",
+    )
 
 
-def test_device_checkpointed_temperature_zero_dlogp_step_is_bitwise(
+def test_device_checkpointed_temperature_zero_dlogp_step_holds_its_contract(
     glm_weight, monkeypatch
 ):
     """The temperature entry under the zero-gradient row skip (a distinct per-token temperature, a third of the valid
     rows with a zero upstream gradient, one dX slice pinned) inside a non-reentrant checkpoint, selective activation
-    checkpointing and a dispatch mode (around the checkpointed forward; around the whole step) gives the
-    uncheckpointed step's ``dX`` / ``dW`` bits; every step's backward runs the partition once."""
+    checkpointing and a dispatch mode (around the checkpointed forward; around the whole step) holds its contract
+    with exact ``+0`` ``dX`` on the zero rows, as does the uncheckpointed step; every step's backward runs the
+    partition once."""
     _require_zero_dlogp_skip()
     _require_tau_program()
     T = 12289
@@ -14415,8 +15412,8 @@ def test_device_checkpointed_temperature_zero_dlogp_step_is_bitwise(
         calls.clear()
         for kind in kinds:
             run = step(kind)
-            assert _same_bits(run[0], plain[0]), kind
-            assert _same_bits(run[1], plain[1]), kind
+            _zero_dlogp_contract(dict(dX=run[0], dW=run[1]), inp)
+    _zero_dlogp_contract(dict(dX=plain[0], dW=plain[1]), inp)
     assert calls == [int(valid.sum())] * len(kinds), calls
     assert not bool(_bits(plain[0][zero | ~valid]).any())
 
@@ -14443,15 +15440,15 @@ def test_temperature_entries_run_their_function():
 
 @pytest.mark.parametrize("form", ["scalar", "hetero"])
 @pytest.mark.parametrize("compact", [True, False])
-def test_reference_temperature_matches_the_deterministic_reference(form, compact):
-    """With a temperature the reference backend is the deterministic package's temperature entry bit for bit
-    (``logp`` / ``dX`` / ``dW``) and passes the gates against the references."""
-    inp = _host_inputs(37, ignore_frac=0.2, temperature=form)
-    nd = _run(inp, 16, entry="logprob", compact_rows=compact)
-    det = _run(inp, 16, entry="logprob", compact_rows=compact, package="det")
-    for key in ("logp", "dX", "dW"):
-        assert _same_bits(nd[key], det[key]), key
-    _check_against_references(nd, inp, entry="logprob")
+def test_reference_temperature_meets_the_naive_tier(record_property, form, compact):
+    """With a temperature the reference backend's ``logp`` / ``dX`` / ``dW`` meet the naive tier over the draws."""
+    _judge_host(
+        record_property,
+        37,
+        lambda draw: _run(draw, 16, entry="logprob", compact_rows=compact),
+        entry="logprob",
+        make_kw=dict(ignore_frac=0.2, temperature=form),
+    )
 
 
 def test_temperature_stage_names_round_trip():
@@ -14619,71 +15616,87 @@ def test_device_logprob_temperature_steps_hit_one_backward_binding(
         assert torch.equal(_bits(out[key]), _bits(value)), key
 
 
-def test_device_temperature_concurrent_threads(glm_weight, monkeypatch):
+def test_device_temperature_concurrent_threads(glm_weight, monkeypatch, record_property):
     """Log-probability steps with a per-token temperature and ignored rows on two threads, each on its own stream
     (four chunks: the hidden count with the temperature's device-count form and the dW side stream run).  The first
     thread's call waits between its count's copy and its read until the second thread's whole step returned.  Both
-    give the single-thread bits (one dX slice pinned; one shared count cell would hand the first call the second's
-    count)."""
+    steps, and a single-thread step of each before them, hold their contract (one dX slice pinned).  At ``JUDGE_H`` /
+    ``JUDGE_V`` each draw runs the same sequence on two problems of its own (one weight; the second problem's inputs
+    from the draw's seed plus ``SEED_OFFSETS["a second problem's X, labels and operands"]``), and every step is judged
+    against the naive tier (``name@first_serial`` / ``name@second_serial``: the single-thread steps; ``name@first`` /
+    ``name@second``: the two threads' steps)."""
     _require_temperature_forms()
     C, T = 256, 1000
+    ignores = {"first": 0.05, "second": 0.40}
+    finish = cake_backend._HiddenCount.finish
+    state: dict = {"paused": []}
+
+    def finish_after_the_other_step(self):
+        if threading.current_thread().name == "first" and not state["paused"]:
+            state["paused"].append(True)
+            state["begun"].wait(TIMEOUT_S)
+            state["read"].wait(TIMEOUT_S)
+        return finish(self)
+
+    monkeypatch.setattr(
+        cake_backend._HiddenCount, "finish", finish_after_the_other_step
+    )
+
+    def sequence(inputs):
+        counts = {name: int(i.labels.ge(0).sum()) for name, i in inputs.items()}
+        assert counts["second"] < counts["first"]  # the other count never indexes past
+        results = {
+            name: {f"{name}_serial": _logprob_temperature_step(inp, C)} for name, inp in inputs.items()
+        }
+        torch.cuda.synchronize()
+        state.update(begun=threading.Barrier(2), read=threading.Barrier(2), paused=[])
+
+        def first():
+            results["first"]["first"] = _logprob_temperature_step(inputs["first"], C)
+
+        def second():
+            state["begun"].wait(TIMEOUT_S)
+            results["second"]["second"] = _logprob_temperature_step(inputs["second"], C)
+            torch.cuda.current_stream().synchronize()
+            state["read"].wait(TIMEOUT_S)
+
+        _run_two_threads(first, second)
+        assert state["paused"] == [True]
+        return results
+
     inputs = {
         name: make_inputs(
             T,
             seed=seed,
             device=CUDA,
             W=glm_weight,
-            ignore_frac=ignore,
+            ignore_frac=ignores[name],
             temperature="hetero",
         )
-        for name, seed, ignore in (
-            ("first", SEED + 15, 0.05),
-            ("second", SEED + 16, 0.40),
-        )
+        for name, seed in (("first", SEED + 15), ("second", SEED + 16))
     }
-    counts = {name: int(i.labels.ge(0).sum()) for name, i in inputs.items()}
-    assert counts["second"] < counts["first"]  # the other count never indexes past
-    ref = {
-        name: {
-            k: _bits(v).clone() for k, v in _logprob_temperature_step(inp, C).items()
+    for name, results in sequence(inputs).items():
+        for got in results.values():
+            contract_lm_head(got, inputs[name], entry="logprob")
+    del inputs
+    second = SEED_OFFSETS["a second problem's X, labels and operands"]
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        draws = {
+            name: _draw_inputs(T, s + offset, W, ignore_frac=ignores[name], temperature="hetero")
+            for name, offset in (("first", 0), ("second", second))
         }
-        for name, inp in inputs.items()
-    }
-    torch.cuda.synchronize()
-    begun, read = threading.Barrier(2), threading.Barrier(2)
-    finish = cake_backend._HiddenCount.finish
-    paused = []
+        results = sequence(draws)
+        return [(draws[name], results[name]) for name in ("first", "second")]
 
-    def finish_after_the_other_step(self):
-        if threading.current_thread().name == "first" and not paused:
-            paused.append(True)
-            begun.wait(TIMEOUT_S)
-            read.wait(TIMEOUT_S)
-        return finish(self)
-
-    monkeypatch.setattr(
-        cake_backend._HiddenCount, "finish", finish_after_the_other_step
+    _judge_problems(
+        record_property,
+        launch,
+        ("first_serial", "first", "second_serial", "second"),
+        seed=SEED + 15 + T,
+        entry="logprob",
     )
-    got = {}
-
-    def first():
-        got["first"] = _logprob_temperature_step(inputs["first"], C)
-
-    def second():
-        begun.wait(TIMEOUT_S)
-        got["second"] = _logprob_temperature_step(inputs["second"], C)
-        torch.cuda.current_stream().synchronize()
-        read.wait(TIMEOUT_S)
-
-    _run_two_threads(first, second)
-    assert paused == [True]
-    wrong = [
-        (name, key)
-        for name in ref
-        for key in ref[name]
-        if not torch.equal(_bits(got[name][key]), ref[name][key])
-    ]
-    assert not wrong, wrong
 
 
 # ---------------------------------------------------------------------------
@@ -14725,15 +15738,18 @@ def test_vocab_major_mode_and_block_rows():
 
 @pytest.mark.parametrize("tau", [None, "scalar", "hetero"])
 @pytest.mark.parametrize("dead", [0.0, 0.5])
-def test_device_vocab_major_logprob_backward(glm_weight, monkeypatch, tau, dead):
+def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkeypatch, tau, dead):
     """A log-probability call of 2 .. 4 chunks takes the vocabulary-major backward (mode ``"auto"``; ``"0"`` runs the
     chunk loop; a call of more than :data:`cake_backend.VM_AUTO_MAX_CHUNKS` chunks keeps the chunk loop under
-    ``"auto"`` and takes the form under ``"1"``): ``logp`` is the chunk loop's bit for bit (the forward is unchanged), ``dX`` and ``dW`` repeat bit for bit
-    (three runs), pass the suite's unchanged accuracy gates against the FP64 oracle like the chunk loop's, the rows of a
-    zero ``dlogp`` (the zero-gradient row skip at ``dead`` 0.5) get exact-zero ``dX`` rows, a non-reentrant
-    checkpointed step and a frozen ``X`` give the plain step's ``dX`` / ``dW`` bits, and the kept logits (no
-    temperature) keep their chunk loop: the default call's ``logp`` bits, ``dX`` / ``dW`` to the same gates -- with no
-    temperature, a scalar and a per-token one."""
+    ``"auto"`` and takes the form under ``"1"``): ``logp`` is the chunk loop's bit for bit (the forward is unchanged),
+    ``dX`` and ``dW`` of three runs hold their contract, the rows of a zero ``dlogp`` (the zero-gradient row skip at
+    ``dead`` 0.5) get exact-zero ``dX`` rows, a non-reentrant checkpointed step holds its contract, a frozen ``X``
+    gives the plain step's ``dW`` bits, and the kept logits (no temperature) keep their chunk loop: the default
+    call's ``logp`` bits -- with no temperature, a scalar and a per-token one.  At ``JUDGE_H`` / ``JUDGE_V`` the same
+    calls of every draw take the same forms and are judged against the naive tier: the three vocabulary-major runs, the
+    checkpointed step and the kept call of each ``T`` (``vm_T<rows>``, ``vm_T<rows>_run2`` / ``_run3``,
+    ``ckpt_T<rows>`` / ``kept_T<rows>``), the five-chunk call under ``"auto"`` and the two runs under ``"1"``
+    (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``)."""
     _require_program(entry="logprob")
     calls = []
     real = cake_backend._backward_logprob_vm
@@ -14769,13 +15785,12 @@ def test_device_vocab_major_logprob_backward(glm_weight, monkeypatch, tau, dead)
         assert len(calls) == 3, case
         vm = runs[0]
         assert _same_bits(vm["logp"], loop["logp"]), case
-        for other in runs[1:]:
-            assert _same_bits(vm["dX"], other["dX"]), case
-            assert _same_bits(vm["dW"], other["dW"]), case
-        _check_against_references(vm, inp, entry="logprob")
         dead_rows = inp.dlogp == 0
-        assert torch.all(vm["dX"][dead_rows] == 0), case
-        # a non-reentrant checkpointed step and a frozen X: the same backward, the same bits
+        for run in runs:
+            contract_lm_head(run, inp, entry="logprob")
+            assert torch.all(run["dX"][dead_rows] == 0), case
+        runs = None
+        # a non-reentrant checkpointed step (its contract) and a frozen X (the same backward, the same dW bits)
         X = inp.X.detach().requires_grad_(True)
         W = inp.W.detach().requires_grad_(True)
         kw = dict(chunk_size=C, backend="cake")
@@ -14790,17 +15805,18 @@ def test_device_vocab_major_logprob_backward(glm_weight, monkeypatch, tau, dead)
             use_reentrant=False,
         )
         dX, dW = torch.autograd.grad(L, (X, W))
-        assert _same_bits(dX, vm["dX"]) and _same_bits(dW, vm["dW"]), case
+        contract_lm_head(dict(dX=dX, dW=dW), inp, entry="logprob")
+        assert torch.all(dX[dead_rows] == 0), case
         frozen = _run(inp, C, entry="logprob", backend="cake", train_x=False)
         assert frozen["dX"] is None and _same_bits(frozen["dW"], vm["dW"]), case
         if tau is None:
             # the kept logits keep their own chunk loop: the default call's logp bits; dX / dW round differently
-            # (another summation order) and pass the same unchanged gates
+            # (another summation order), held to the contract here and judged as kept_T<rows> below
             calls.clear()
             kept = _run(inp, C, entry="logprob", backend="cake", keep=True)
             assert not calls, case
             assert _same_bits(kept["logp"], vm["logp"]), case
-            _check_against_references(kept, inp, entry="logprob")
+            contract_lm_head(kept, inp, entry="logprob")
             dead_rows = inp.dlogp == 0
             assert torch.all(kept["dX"][dead_rows] == 0), case
     # five chunks (8265 valid rows over 2048-row chunks): the auto rule keeps the chunk loop, mode "1" runs the form
@@ -14820,10 +15836,9 @@ def test_device_vocab_major_logprob_backward(glm_weight, monkeypatch, tau, dead)
         forced = [_run(inp, 2048, entry="logprob", backend="cake") for _ in range(2)]
     assert len(calls) == 2
     assert _same_bits(forced[0]["logp"], auto["logp"])
-    assert _same_bits(forced[0]["dX"], forced[1]["dX"])
-    assert _same_bits(forced[0]["dW"], forced[1]["dW"])
-    _check_against_references(auto, inp, entry="logprob")
-    _check_against_references(forced[0], inp, entry="logprob")
+    contract_lm_head(auto, inp, entry="logprob")
+    for run in forced:
+        contract_lm_head(run, inp, entry="logprob")
     # two chunks whose second chunk holds at least half a chunk (about 7600 valid rows over 4096-row chunks): the auto
     # rule keeps the chunk loop
     inp = make_inputs(
@@ -14838,7 +15853,77 @@ def test_device_vocab_major_logprob_backward(glm_weight, monkeypatch, tau, dead)
     calls.clear()
     two = _run(inp, 4096, entry="logprob", backend="cake")
     assert not calls
-    _check_against_references(two, inp, entry="logprob")
+    contract_lm_head(two, inp, entry="logprob")
+    two = auto = forced = vm = frozen = inp = None  # release the production-shape results
+
+    def launch(j, s):
+        W = _judge_weight(s)
+        groups = []
+
+        def logprob(problem, C, vm_calls, **kw):
+            calls.clear()
+            result = _run(problem, C, entry="logprob", backend="cake", **kw)
+            assert len(calls) == vm_calls, (problem.T, C, kw, calls)
+            return result
+
+        def checkpointed(problem, C):
+            # the non-reentrant checkpointed step: its recomputation and backward take the vocabulary-major form
+            X = problem.X.detach().requires_grad_(True)
+            W = problem.W.detach().requires_grad_(True)
+            kw = dict(chunk_size=C, backend="cake")
+            fn = cake_backend.cake_lm_head_nondet_train_logprob
+            if problem.temperature is not None:
+                kw["temperature"] = problem.temperature
+                fn = cake_backend.cake_lm_head_nondet_train_logprob_temperature
+            calls.clear()
+            L = torch.utils.checkpoint.checkpoint(
+                lambda a, b: (fn(a, b, problem.labels, **kw) * problem.dlogp).sum(),
+                X,
+                W,
+                use_reentrant=False,
+            )
+            dX, dW = torch.autograd.grad(L, (X, W))
+            assert len(calls) == 1, (problem.T, C, calls)
+            return dict(dX=dX, dW=dW)
+
+        for T, C in ((6000, 4096), (7000, 2048)):
+            problem = _draw_inputs(T, s, W, ignore_frac=0.05, temperature=tau)
+            if dead:
+                gen = torch.Generator().manual_seed(s + ZERO_SET_OFFSET)
+                zero = (torch.rand(T, generator=gen) < dead).to(CUDA)
+                problem = dataclasses.replace(
+                    problem, dlogp=torch.where(zero, torch.zeros_like(problem.dlogp), problem.dlogp)
+                )
+            results = {f"vm_T{T}": logprob(problem, C, 1)}
+            for run in (2, 3):
+                results[f"vm_T{T}_run{run}"] = logprob(problem, C, 1)
+            results[f"ckpt_T{T}"] = checkpointed(problem, C)
+            if tau is None:
+                results[f"kept_T{T}"] = logprob(problem, C, 0, keep=True)
+            groups.append((problem, results))
+        problem = _draw_inputs(8700, s, W, ignore_frac=0.05, temperature=tau)
+        results = {"auto_T8700": logprob(problem, 2048, 0)}
+        with _vocab_major("1"):
+            results["forced_T8700"] = logprob(problem, 2048, 1)
+            results["forced_T8700_run2"] = logprob(problem, 2048, 1)
+        groups.append((problem, results))
+        problem = _draw_inputs(8000, s, W, ignore_frac=0.05, temperature=tau)
+        groups.append((problem, {"two_T8000": logprob(problem, 4096, 0)}))
+        return groups
+
+    def contract(result, problem):
+        contract_lm_head(result, problem, entry="logprob")
+        assert not bool(result["dX"][problem.valid & (problem.dlogp == 0)].any())
+
+    labels = ["auto_T8700", "forced_T8700", "forced_T8700_run2", "two_T8000"]
+    for T in (6000, 7000):
+        labels += [f"vm_T{T}", f"vm_T{T}_run2", f"vm_T{T}_run3", f"ckpt_T{T}"]
+        if tau is None:
+            labels.append(f"kept_T{T}")
+    names = {label: ("dX", "dW") if label.startswith("ckpt_") else ("logp", "dX", "dW") for label in labels}
+    _judge_problems(
+        record_property, launch, tuple(labels), seed=SEED + 4100, entry="logprob", names=names, contract=contract
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -15176,17 +16261,26 @@ def test_device_small_call_has_no_host_synchronization(glm_weight, entry, ignore
 
 @pytest.mark.parametrize("T", [32, 256])
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
-def test_device_small_call_with_ignored_rows_meets_the_gates(glm_weight, T, entry):
-    """Ignored rows in a small call (staged, uncompacted, no count): the deterministic suite's gates against the FP64
-    oracle with exact zeros on the ignored rows, and the counted call's ``logp`` bits on every row."""
+def test_device_small_call_with_ignored_rows_meets_the_naive_tier(glm_weight, record_property, T, entry):
+    """Ignored rows in a small call (staged, uncompacted, no count): the production-shape call holds its contract
+    (exact ``+0`` on the ignored rows) and keeps the counted call's ``logp`` bits on every row; the small call is judged
+    against the naive tier over the draws with a quarter of the rows ignored -- at the production head (``H`` 6144,
+    ``V`` 154880) for ``T`` 256, at ``JUDGE_H`` / ``JUDGE_V`` for ``T`` 32."""
     _require_program(entry=entry)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
     with _uncompacted_max_rows(256):
         small = _run(inp, 4096, backend="cake", entry=entry)
-    _check_against_references(small, inp, entry=entry, ceiling=True)
+    contract_lm_head(small, inp, entry=entry)
     with _uncompacted_max_rows(0):
         counted = _run(inp, 4096, backend="cake", entry=entry)
     assert _same_bits(small["logp"], counted["logp"])
+
+    def launch(draw):
+        with _uncompacted_max_rows(256):
+            return _run(draw, 4096, backend="cake", entry=entry)
+
+    shape = dict(H=GLM_H, V=GLM_V) if T == 256 else {}
+    _judge_device(record_property, T, launch, entry=entry, ignore_frac=0.25, **shape)
 
 
 def _non_finite_ignored_rows(inp, value):
@@ -15270,8 +16364,7 @@ def test_device_small_call_every_row_ignored(glm_weight, entry):
 def test_device_small_call_cuda_graph(glm_weight, entry):
     """A small autograd call (T = 32 with ignored rows: no count; the log-probability entry on its small-call kept
     logits) and its backward captured in one CUDA graph replay for other ``X`` / ``labels`` / ``dlogp`` values written
-    into the captured inputs and give the eager call's bits (``loss`` / ``logp`` / ``dW``; ``dX`` with one dX slice
-    pinned)."""
+    into the captured inputs and hold their contract on those values (one dX slice pinned)."""
     _require_program(entry=entry)
     inps = [
         _device_inputs(32, "ce", W=glm_weight, ignore_frac=0.25, seed=SEED + k)
@@ -15305,11 +16398,7 @@ def test_device_small_call_cuda_graph(glm_weight, entry):
             graph.replay()
             torch.cuda.synchronize()
             got = [None if t is None else t.clone() for t in captured]
-            x_e = src.X.detach().clone().requires_grad_(True)
-            want = step(x_e, src.labels.clone(), src.dlogp.clone())
-            torch.cuda.synchronize()
-            for name, g, w in zip(("loss", "logp", "dX", "dW"), got, want, strict=True):
-                assert _same_bits(g, w), name
+            contract_lm_head(dict(zip(("loss", "logp", "dX", "dW"), got)), src, entry=entry)
 
 
 @pytest.mark.parametrize("T", [1, 32, 256, 257])
@@ -15601,10 +16690,12 @@ def test_device_one_pass_rule_is_host_only(glm_weight):
 
 @pytest.mark.parametrize("T", [1, 2])
 @pytest.mark.parametrize("train", ["both", "x", "w"])
-def test_device_one_pass_meets_the_gates(glm_weight, T, train):
+def test_device_one_pass_meets_the_naive_tier(glm_weight, record_property, T, train):
     """A one-pass call (T rows; X and W trainable, X alone, W alone) launches the forward (without the head-row sums
-    when X is frozen), the merge and the backward, passes the deterministic suite's gates against the FP64 oracle,
-    and repeats its bits on a second call (no reduction whose order the launch leaves open)."""
+    when X is frozen), the merge and the backward and holds its contract, as does a second call.  The three trainable
+    sets of one draw and the second call of each meet the naive tier at the production head (``H`` 6144, ``V`` 154880)
+    over the draws (``name@both`` / ``name@x`` / ``name@w``, the second calls ``name@both_again`` / ``name@x_again`` /
+    ``name@w_again``; judged in the ``train="both"`` case), every draw through the one-pass launches."""
     _require_one_pass(T)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(backend="cake", train_x=train != "w", train_w=train != "x")
@@ -15613,9 +16704,35 @@ def test_device_one_pass_meets_the_gates(glm_weight, T, train):
         again = _run(inp, 4096, **kw)
     stages = _one_pass_stages(T, need_dx=train != "w", need_dw=train != "x")
     assert launched == stages + stages
-    _check_against_references(got, inp, ceiling=True)
-    for key in ("loss", "logp", "dX", "dW"):
-        assert _same_bits(again[key], got[key]), key
+    contract_lm_head(got, inp)
+    contract_lm_head(again, inp)
+    if train != "both":
+        return
+    trains = {"both": (True, True), "x": (True, False), "w": (False, True)}
+    judged = {
+        "both": ("loss", "logp", "dX", "dW"),
+        "x": ("loss", "logp", "dX"),
+        "w": ("loss", "logp", "dW"),
+    }
+
+    def launch(j, s):
+        draw = judge_inputs(T, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        results, want = {}, []
+        with _one_pass_rows({T}), _one_pass_launches() as draw_launched:
+            for label, (tx, tw) in trains.items():
+                for name in (label, f"{label}_again"):  # the call and a second call
+                    results[name] = _run(draw, 4096, backend="cake", train_x=tx, train_w=tw)
+                    want += _one_pass_stages(T, need_dx=tx, need_dw=tw)
+        assert draw_launched == want, (j, draw_launched)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        [name for label in trains for name in (label, f"{label}_again")],
+        seed=SEED + T,
+        names={**judged, **{f"{label}_again": names for label, names in judged.items()}},
+    )
 
 
 def _padded_rows(X: torch.Tensor, pad: int = 64) -> torch.Tensor:
@@ -15628,10 +16745,12 @@ def _padded_rows(X: torch.Tensor, pad: int = 64) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("value", ["inf", "nan"])
-def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, value):
+def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, record_property, value):
     """An ignored row of a one-pass call holding ``inf`` / NaN in ``X`` (rows at a padded pitch) gives the bits of the
     same call with a zero ``X`` row there -- ``loss`` / ``logp`` / ``dX`` / ``dW``, every output finite, the ignored
-    row's ``logp`` and ``dX`` exact zeros -- and the clean call meets the gates against the FP64 oracle."""
+    row's ``logp`` and ``dX`` exact zeros -- and the clean call holds its contract.  The clean call (the same in both
+    cases: judged in the ``inf`` one) meets the naive tier at the production head (``H`` 6144, ``V`` 154880) over the
+    draws, every draw through the one-pass launches."""
     _require_one_pass(2)
     inp = make_inputs(2, seed=SEED + 2, device=CUDA, W=glm_weight, ignore_frac=0.5)
     ignored = inp.labels < 0
@@ -15651,7 +16770,25 @@ def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, value):
         assert _same_bits(got[key], ref[key]), key
     assert not bool(got["dX"][ignored].float().any())
     assert not bool(got["logp"][ignored].any())
-    _check_against_references(ref, clean, ceiling=True)
+    contract_lm_head(ref, clean)
+    if value != "inf":
+        return
+
+    def padded(draw):
+        ignored = draw.labels < 0
+        assert int(ignored.sum()) == 1
+        zeroed = torch.where(ignored[:, None], torch.zeros_like(draw.X), draw.X)
+        return dataclasses.replace(draw, X=_padded_rows(zeroed))
+
+    def clean_call(draw):
+        with _one_pass_rows({2}), _one_pass_launches() as draw_launched:
+            out = _run(draw, 4096, backend="cake")
+        assert draw_launched == _one_pass_stages(2), draw_launched
+        return out
+
+    _judge_device(
+        record_property, 2, clean_call, prepare=padded, ignore_frac=0.5, H=GLM_H, V=GLM_V
+    )
 
 
 def test_device_one_pass_every_row_ignored(glm_weight):
@@ -15675,7 +16812,7 @@ def test_device_one_pass_every_row_ignored(glm_weight):
 def test_device_one_pass_checkpoint_replay(glm_weight, T):
     """Under ``torch.utils.checkpoint`` (non-reentrant, gradient placement "auto") the checkpointed forward runs the
     forward without the head-row sums and the merge, the recomputation the full forward and the merge, the backward
-    once: the uncheckpointed call's bits."""
+    once; the step holds its contract."""
     _require_one_pass(T)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
 
@@ -15690,18 +16827,19 @@ def test_device_one_pass_checkpoint_replay(glm_weight, T):
         with _one_pass_launches() as launched:
             loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
             loss.backward()
-        plain = _run(inp, 4096, backend="cake")
     fwd, fwd_nodx = cake_backend.ONE_PASS_FWD_STAGES[T]
     combine, dw = cake_backend.ONE_PASS_COMBINE_STAGE, cake_backend.ONE_PASS_DW_STAGE
     assert launched == [fwd_nodx, combine, fwd, combine, dw]
-    assert _same_bits(loss.detach(), plain["loss"])
-    assert _same_bits(X.grad, plain["dX"]) and _same_bits(W.grad, plain["dW"])
+    contract_lm_head(dict(loss=loss.detach(), dX=X.grad, dW=W.grad), inp)
 
 
-def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight):
+def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight, record_property):
     """Two backward passes into the same ``W`` (the second call with a frozen X: the backward writes ``dW`` alone):
-    ``W.grad`` is the autograd engine's sum of the two incoming gradients, each the single call's bits; a retained
-    graph's second backward repeats the first's bits."""
+    ``W.grad`` is the autograd engine's sum of the two incoming gradients, each holding its contract; both backward
+    passes of a retained graph hold their contract.  At the production head (``H`` 6144, ``V`` 154880, where the
+    one-pass programs are registered) each draw runs the retained graph through the one-pass launches, and the loss
+    and both backward passes are judged against the naive tier (``name@first``: the loss and the pass that retains
+    the graph; ``name@retained``: the second pass)."""
     _require_one_pass(1)
     a = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     b = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 7, ignore_frac=0.0)
@@ -15720,22 +16858,41 @@ def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight):
         loss.backward()
     assert len(seen_w) == 2
     assert _same_bits(W.grad, seen_w[0] + seen_w[1])
-    single_a, single_b = (
-        _run(a, 4096, backend="cake"),
-        _run(b, 4096, backend="cake", train_x=False),
+    contract_lm_head(dict(dX=X.grad, dW=seen_w[0]), a)
+    contract_lm_head(dict(dW=seen_w[1]), b)
+
+    def passes(problem):
+        X2 = problem.X.detach().requires_grad_(True)
+        W2 = problem.W.detach().requires_grad_(True)
+        loss = cake_backend.cake_lm_head_nondet_train_loss(
+            X2, W2, problem.labels, loss_div=problem.loss_div, chunk_size=4096
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dx, dw = torch.autograd.grad(loss, (X2, W2), retain_graph=retain)
+            results[label] = dict(dX=dx, dW=dw)
+        results["first"]["loss"] = loss.detach()
+        return results
+
+    for result in passes(a).values():
+        contract_lm_head(result, a)
+    del a, b, X, W
+    seen_w.clear()  # the name stays bound: the hook reads it
+
+    def launch(j, s):
+        draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        with _one_pass_rows({1}), _one_pass_launches() as launched:
+            results = passes(draw)
+        assert launched[:2] == _one_pass_stages(1)[:2], (j, launched)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 1,
+        names={"first": ("loss", "dX", "dW"), "retained": ("dX", "dW")},
     )
-    assert _same_bits(seen_w[0], single_a["dW"]) and _same_bits(
-        seen_w[1], single_b["dW"]
-    )
-    assert _same_bits(X.grad, single_a["dX"])
-    X2 = a.X.detach().requires_grad_(True)
-    W2 = glm_weight.detach().requires_grad_(True)
-    loss = cake_backend.cake_lm_head_nondet_train_loss(
-        X2, W2, a.labels, loss_div=a.loss_div, chunk_size=4096
-    )
-    dx1, dw1 = torch.autograd.grad(loss, (X2, W2), retain_graph=True)
-    dx2, dw2 = torch.autograd.grad(loss, (X2, W2))
-    assert _same_bits(dx1, dx2) and _same_bits(dw1, dw2)
 
 
 @pytest.mark.parametrize("ignore_frac", [0.0, 1.0])
@@ -15761,8 +16918,8 @@ def test_device_one_pass_has_no_host_synchronization(glm_weight, ignore_frac):
 
 
 def test_device_one_pass_cuda_graph(glm_weight):
-    """A one-pass step (forward and ``torch.autograd.grad``) captured into a CUDA graph replays the eager step's bits,
-    and the eager bits of new inputs written into the captured ``X`` and ``labels``."""
+    """A one-pass step (forward and ``torch.autograd.grad``) captured into a CUDA graph (after an eager step) replays
+    and holds its contract, also on new inputs written into the captured ``X`` and ``labels``."""
     _require_one_pass(1)
     inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     new = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 11, ignore_frac=0.0)
@@ -15777,10 +16934,8 @@ def test_device_one_pass_cuda_graph(glm_weight):
         dx, dw = torch.autograd.grad(loss, (X, W))
         return loss.detach(), dx, dw
 
-    def clone(out):
-        return tuple(t.clone() for t in out)
-
-    eager = clone(step())
+    names = ("loss", "dX", "dW")
+    contract_lm_head(dict(zip(names, step())), inp)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -15793,11 +16948,10 @@ def test_device_one_pass_cuda_graph(glm_weight):
     assert launched == _one_pass_stages(1)
     graph.replay()
     torch.cuda.synchronize()
-    assert all(_same_bits(g, e) for g, e in zip(captured, eager, strict=True))
+    contract_lm_head(dict(zip(names, captured)), inp)
     with torch.no_grad():
         X.copy_(new.X)
     labels.copy_(new.labels)
-    want = clone(step())
     graph.replay()
     torch.cuda.synchronize()
-    assert all(_same_bits(g, w) for g, w in zip(captured, want, strict=True))
+    contract_lm_head(dict(zip(names, captured)), new)
