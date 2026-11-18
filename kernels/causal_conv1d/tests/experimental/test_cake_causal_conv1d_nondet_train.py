@@ -134,17 +134,31 @@ OVERRIDE_CASES = {
     "sm_103a": (("bwd", 62585, 1536),),
     "sm_107a": (("bwd_dt_bf16_taps", 62585, 768), ("bwd_dt", 62585, 768)),
 }
+# The token counts a ``NARROW_TILES`` key over every S (one token to ``INT32_MAX``) launches its rows at, in the perf
+# packing: the largest S of ``CASES`` and a longer stream.
+EVERY_S_TOKENS = (4097, 31292)
+
+
+def _key_tokens(s_min: int, s_max: int) -> tuple[int, ...]:
+    """The token counts a ``NARROW_TILES`` key's rows launch at: its smallest token count and one token above it
+    (inside its range), or :data:`EVERY_S_TOKENS` for a key over every S."""
+
+    if (s_min, s_max) == (1, loader.INT32_MAX):
+        return EVERY_S_TOKENS
+    return tuple(sorted({s_min, min(s_min + 1, s_max)}))
+
+
 # The rows of ``NARROW_TILES`` (rendered with the table; empty for an architecture without rows) the narrow-tile
 # test launches, per architecture (route, S, C): each key's lowest, an inner and its highest channel count at the
-# key's smallest token count and one token above it (inside the delivered range; ``CASES`` stop at S = 4097), on the
-# key's route and on every route that plans by its rows (``TILE_ROUTE``).
+# token counts of :func:`_key_tokens` (inside the delivered range; ``CASES`` stop at S = 4097), on the key's route and
+# on every route that plans by its rows (``TILE_ROUTE``).
 NARROW_CASES = {
     arch: tuple(
         (route, S, C)
         for (base, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
         for route in (base, *sorted(t for t, b in loader.TILE_ROUTE.items() if b == base))
         for C in sorted({int(c_lo), (int(c_lo) + int(c_hi)) // 16 * 8, int(c_hi)})
-        for S in sorted({int(s_min), min(int(s_min) + 1, int(s_max))})
+        for S in _key_tokens(int(s_min), int(s_max))
     )
     for arch, rows in loader.NARROW_TILES.items()
 }
