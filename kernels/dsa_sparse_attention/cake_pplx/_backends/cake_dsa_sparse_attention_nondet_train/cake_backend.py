@@ -1334,7 +1334,8 @@ def _plan_nope_direct(
     there the natural drain, slower on that target, costs more than the cast path's zero fill and cast; above
     the cap the natural drain serves every row with at least one key per query (on long single-segment rows the
     cast path's advantage shrinks as S grows: parity, then a measured loss; see the README).
-    A problem below either threshold, or ``dkv_direct=False``, uses the permuted accumulator and the cast.
+    A row with fewer keys than query tokens, an ``sm_107a`` row of at most 163,840 keys on the cast side of the
+    work test, or ``dkv_direct=False`` uses the permuted accumulator and the cast.
     Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.
     """
     return plan_dkv_direct(
