@@ -66,11 +66,11 @@ CTAS_PER_SM = 8
 MODULES: dict[str, dict[str, Any]] = {
     "lookup": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "w"], ["buffer", "s"], ["buffer", "row_ids"], ["buffer", "out"], ["parameter", "P"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_engram_lookup_det_train_50c6822299d93af1d6a6",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
