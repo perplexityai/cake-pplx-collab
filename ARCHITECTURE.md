@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 15 families and 32 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 16 families and 33 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -94,6 +94,7 @@ The repository has 15 families and 32 backend packages, about 212 MB in total. M
 | `gqa` | det, nondet | `cake-pplx-gqa` |
 | `fmha` | nondet | `cake-pplx-fmha` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
+| `act_qdq` | det | `cake-pplx-act-qdq` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
@@ -221,6 +222,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha and causal_conv1d are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha and causal_conv1d are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`). act_qdq: `sm_107a` validation is pending.
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
