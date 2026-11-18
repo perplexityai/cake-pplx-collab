@@ -15,8 +15,8 @@ limitations under the License.
 
 Benchmark of the Cake mHC training head (``cake_pplx.cake_mhc_head_det_train`` and
 ``cake_pplx.cake_mhc_head_nondet_train``): the stream mean ``Y = mean_i X[:, i, :]`` of BF16 ``X [T, 4, H]`` and its
-gradient ``dX[:, i] = BF16(dY / 4)``, against PyTorch's own ``X.mean(dim=1)`` (the function the head reproduces bit
-for bit) and its ``torch.compile`` versions.
+gradient ``dX[:, i] = BF16(dY / 4)``, against PyTorch's own ``X.mean(dim=1)`` (the function the head computes) and
+its ``torch.compile`` versions.
 
 Arms: ``cake_head_det`` / ``cake_head_nondet`` (the explicit entry points, caller-owned outputs; ``--aa`` adds a
 second instance of each, the noise band), ``torch_eager`` (``X.mean(dim=1)`` with autograd), ``compile_default`` and
@@ -31,8 +31,9 @@ Timing, modes (eager launches and CUDA graph replays), groups, the cold L2 and t
 benchmarks (``cake_mhc_head_harness.py`` beside this file: this family's copy of their timer and helpers).  Accuracy
 before timing: the family's judge (``tests/cake_naive.py``) over ``--judge-draws`` (32) draws of ``(--judge-tokens, H)``
 per hidden size holds every arm to the naive tier (PyTorch BF16, i.e. ``torch_eager`` itself) against a float64 oracle;
-on every row each arm's outputs are also compared bit for bit with ``torch_eager``'s (the Cake head's contract).  Each
-arm's determinism is measured by ``--det-runs`` (5) runs of the same call compared bit for bit.
+on every row each arm's outputs are also compared bit for bit with ``torch_eager``'s (recorded only; the contract makes
+no bit promise against torch).  Each arm's determinism is measured by ``--det-runs`` (5) runs of the same call compared
+bit for bit.
 
 Example::
 
@@ -308,7 +309,7 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer, device, eligible:
             live.append(arm)
         except Exception as exc:  # noqa: BLE001
             rec["error"] = "prepare: " + harness._err(exc, f"{arm.name} prepare")
-    # bit-for-bit comparison with torch_eager (the head's contract) and the determinism runs
+    # bit-for-bit comparison with torch_eager (recorded, not part of the contract) and the determinism runs
     ref = None
     try:
         ref = TorchHead("ref").run_once(i)

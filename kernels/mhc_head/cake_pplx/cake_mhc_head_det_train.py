@@ -17,7 +17,7 @@ Cake mHC training head, deterministic: the stream mean
 ``Y = mean_i X[:, i, :]`` of the last layer's four residual streams of the
 four-stream mHC training layers (:mod:`cake_pplx.cake_mhc_det_train`) and its
 gradient, for hidden sizes 4096, 5120 and 7168 on SM100 / SM103 /
-SM107, bit for bit torch's BF16 ``X.mean(dim=1)`` and its gradient::
+SM107::
 
     Y = cake_mhc_head_det_train_forward(X)                    # BF16 [T, H] from [T, 4, H]
     dX = cake_mhc_head_det_train_backward(dY)                 # dX[:, i] = BF16(dY / 4)
@@ -38,6 +38,14 @@ points take no ``deterministic`` keyword, give the same results under
 ``torch.use_deterministic_algorithms(True)`` and raise no alert.  Every output
 (``Y``, the written ``dX`` and the accumulated ``dX``) repeats bit for bit for
 identical inputs, also in the recompute of an activation checkpoint.
+
+Numerical contract: the tests judge every output over 32 inputs against a
+float64 oracle of the mean and its gradient: its error, in the L2 and the max
+norm, median and max, is at most 1.005 times that of the naive BF16 tier
+(PyTorch on the same BF16 inputs: ``X.mean(dim=1)``, ``dY * 0.25`` on each
+stream and ``dX0 + dY * 0.25``), and zero where the tier's error is zero.  The
+tests check the run-to-run and checkpoint-replay bits above; they do not
+compare the outputs with torch's bit for bit.
 """
 
 from __future__ import annotations
@@ -70,9 +78,9 @@ def cake_mhc_head_det_train_forward(
     r"""The model's head: the mean of the four residual streams, ``Y = mean_i X[:, i, :]``.
 
     ``Y[t, d] = BF16(((X[t, 0, d] + X[t, 1, d]) + X[t, 2, d] + X[t, 3, d]) * 0.25)``
-    with the sum in FP32 from zero in stream order and one rounding: bit for
-    bit torch's ``X.mean(dim=1)`` of a BF16 ``X``, signed zeros and the NaN
-    encoding included.
+    with the sum in FP32 from zero in stream order and one rounding.  The tests
+    judge ``Y`` against the float64 mean within the naive BF16 tier (torch's
+    ``X.mean(dim=1)``) and check that it repeats bit for bit run to run.
 
     Parameters
     ----------
@@ -106,12 +114,13 @@ def cake_mhc_head_det_train_backward(
 ) -> torch.Tensor:
     r"""Gradient of the head: ``dX[t, i, d] = BF16(dY[t, d] * 0.25)`` for each of the four streams.
 
-    Bit for bit torch's ``MeanBackward`` of ``X.mean(dim=1)`` (the quarter is
-    exact unless it is subnormal, and then rounds once).  With
+    The quarter is exact unless it is subnormal, and then rounds once.  With
     ``accumulate=True`` the kernel adds instead,
-    ``dX[t, i, d] = BF16(dX[t, i, d] + BF16(dY[t, d] * 0.25))``, bit for bit
-    torch's BF16 ``dX.add_(...)`` of that gradient (autograd's accumulation
-    into an existing ``X.grad``).
+    ``dX[t, i, d] = BF16(dX[t, i, d] + BF16(dY[t, d] * 0.25))`` (autograd's
+    accumulation into an existing ``X.grad``).  The tests judge both forms
+    against the float64 gradient within the naive BF16 tier (torch's BF16
+    ``dY * 0.25`` and ``dX0 + dY * 0.25``) and check that they repeat bit for
+    bit run to run.
 
     Parameters
     ----------
@@ -148,9 +157,9 @@ def cake_mhc_head_det(X: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     BF16 ``Y`` of shape ``[T, H]``.  Its backward is
-    :func:`cake_mhc_head_det_train_backward` (bit for bit torch's gradient of
-    ``X.mean(dim=1)``); the node saves no tensor, so an activation checkpoint
-    around it keeps nothing alive and its backward needs no recomputation.
+    :func:`cake_mhc_head_det_train_backward`; the node saves no tensor, so an
+    activation checkpoint around it keeps nothing alive and its backward needs
+    no recomputation.
     """
 
     return _pkg().cake_mhc_head_det(X)
