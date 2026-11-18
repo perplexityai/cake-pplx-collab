@@ -352,7 +352,7 @@ with more keys (and at least one key per query) takes the natural drain
 whatever its work.  On long single-segment rows the cast path's advantage
 is smaller at the largest key counts and turns into a loss: at `T = 32,768`
 the cast path is faster up to 131,072 keys and slower at 163,840 keys (the
-backward median in both runs, beyond the spread in the first); at `T = 16,384` it
+backward median in both runs, beyond the spread only in the 0.984 run); at `T = 16,384` it
 is faster at 163,840 keys, at parity at 196,608 and 229,376 keys and slower
 from 262,144 keys on.  The backward times below are what was measured; the
 stages behind them were not timed separately.  Backward medians of the two
