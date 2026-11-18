@@ -1845,3 +1845,83 @@ def _check_large_row_dw(
             {"dw": ref.naive_dw(g, x, eps)},
         )
     check.check(record_property)
+
+
+# The backward windows the tests above leave unjudged at large row counts (the residual and FP32-weight tier tests stop
+# at 16231 rows, the poisoned-workspace test at 32768, and LARGE_ROW_DW_CASES judges dw of plain routes only), read
+# from the registry: every residual backward route (BF16 and FP32 weight) one row above each window edge at or above
+# LARGE_ROW_EDGE and at OPEN_WINDOW_ROWS, and one row above the lower edge of every window of
+# SWAPPED_FP32_BACKWARD_TWINS, where an FP32-weight route runs the twin of another program than its BF16 route.
+# (arch, hidden, residual, weight dtype token, rows); a case runs on its architecture, over the minimum of draws.
+LARGE_ROW_EDGE = 32768
+
+
+def _large_row_backward_cases() -> list[tuple[str, int, bool, str, int]]:
+    cases = set()
+    for arch in loader.ARCHES:
+        for hidden in loader.supported_hidden_sizes(arch):
+            for w_token in loader.weight_dtypes(arch, hidden, "bwd", True):
+                cases.add((arch, hidden, True, w_token, OPEN_WINDOW_ROWS))
+                for above, _at_most, _library in loader.program_windows(
+                    arch, hidden, "bwd", True, w_token
+                ):
+                    if above >= LARGE_ROW_EDGE:
+                        cases.add((arch, hidden, True, w_token, above + 1))
+    for (arch, hidden, residual), twins in SWAPPED_FP32_BACKWARD_TWINS.items():
+        for above, _at_most in twins:
+            cases.add((arch, hidden, residual, "f32", above + 1))
+    return sorted(cases)
+
+
+LARGE_ROW_BACKWARD_CASES = _large_row_backward_cases()
+
+
+@pytest.mark.parametrize(
+    ("arch", "hidden", "residual", "w_token", "rows"),
+    LARGE_ROW_BACKWARD_CASES,
+    ids=[
+        f"{arch}-h{hidden}-{'residual' if residual else 'plain'}-{w_token}-T{rows}"
+        for arch, hidden, residual, w_token, rows in LARGE_ROW_BACKWARD_CASES
+    ],
+)
+def test_large_row_backward_windows_meet_the_naive_tier(
+    arch: str,
+    hidden: int,
+    residual: bool,
+    w_token: str,
+    rows: int,
+    record_property,
+) -> None:
+    """``dx`` and ``dw`` of one backward window of ``LARGE_ROW_BACKWARD_CASES`` meet the naive BF16 tier over the
+    draws; with a residual ``dx`` is the gradient of both residual-add inputs (``g_residual`` added).  The backward
+    takes the forward's ``h_new`` and ``rstd``; the forward is judged by the other tests.  An FP32 weight holds a
+    BF16 draw, so the naive tier reads the same weight as the oracle."""
+
+    device_arch = loader.arch_for_capability(_capability())
+    if device_arch != arch:
+        pytest.skip(f"a case of {arch}; this device is {device_arch}")
+    if w_token == "f32":
+        _skip_unless_fp32_routes(hidden, residual)
+    else:
+        _skip_unless_route(hidden, residual)
+    eps = EPS[hidden]
+    check = ref.Draws(
+        f"{arch} hidden={hidden} residual={residual} w={w_token} rows={rows}"
+    )
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, residual, w_token == "f32", 101, draw=draw)
+        x = _rows(rows, hidden, generator=generator)
+        u = _rows(rows, hidden, generator=generator) if residual else None
+        g = _rows(rows, hidden, generator=generator)
+        g_h = _rows(rows, hidden, generator=generator) if residual else None
+        w = _weight(hidden, generator)
+        if w_token == "f32":
+            w = w.float()
+        outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
+        rstd = outputs[1]
+        normalized = outputs[2] if residual else x
+        del outputs
+        dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, normalized, w, rstd, eps, g_h=g_h)
+        del x, u, g, g_h, normalized, rstd, dx, dw
+    check.check(record_property)
