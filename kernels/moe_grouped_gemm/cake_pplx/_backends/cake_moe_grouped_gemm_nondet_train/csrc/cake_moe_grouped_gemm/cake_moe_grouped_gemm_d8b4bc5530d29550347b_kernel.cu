@@ -279,8 +279,8 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             unsigned int num_clusters_u = (unsigned int)num_clusters;
             unsigned int cluster_u = (unsigned int)cluster_id;
             int cta_linear = (int)cluster_u * CTA_GROUP + cta_rank;
-            int pair_stride = (int)num_bids * 256;
-            int slot_pair = 0;
+            unsigned int cta_base = (unsigned int)cta_linear * 2304;
+            unsigned int map_slot = 0;
             int slot_group = -1;
             unsigned int _phase_mma_done = 1;
             if (elect_sync()) {
@@ -288,7 +288,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 for (int pair = 0; pair < 9; pair++) {
                     {
                 const uint64_t* __tm_src = reinterpret_cast<const uint64_t*>((&A));
-                uint64_t* __tm_dst = reinterpret_cast<uint64_t*>((uint64_t)(tensormap_workspace + (cta_linear * 256 + pair * pair_stride)));
+                uint64_t* __tm_dst = reinterpret_cast<uint64_t*>((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(pair * 256))));
                 #pragma unroll
                 for (int __tm_i = 0; __tm_i < 16; ++__tm_i) {
                     __tm_dst[__tm_i] = __tm_src[__tm_i];
@@ -296,7 +296,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             }
                     {
                 const uint64_t* __tm_src = reinterpret_cast<const uint64_t*>((&B));
-                uint64_t* __tm_dst = reinterpret_cast<uint64_t*>((uint64_t)(tensormap_workspace + (cta_linear * 256 + pair * pair_stride + 128)));
+                uint64_t* __tm_dst = reinterpret_cast<uint64_t*>((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(pair * 256) + 128)));
                 #pragma unroll
                 for (int __tm_i = 0; __tm_i < 16; ++__tm_i) {
                     __tm_dst[__tm_i] = __tm_src[__tm_i];
@@ -306,8 +306,8 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 asm volatile("fence.proxy.tensormap::generic.release.gpu;" ::: "memory");
                 #pragma unroll
                 for (int pair_1 = 0; pair_1 < 9; pair_1++) {
-                    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + pair_1 * pair_stride))) : "memory");
-                    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + pair_1 * pair_stride + 128))) : "memory");
+                    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(pair_1 * 256)))) : "memory");
+                    asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(pair_1 * 256) + 128))) : "memory");
                 }
                 unsigned int reg_end = total_tiles;
                 unsigned int tail_base = total_tiles / num_clusters_u * num_clusters_u;
@@ -355,23 +355,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     }
                     if (k_iters > 0) {
                         if (e_i != slot_group) {
-                            slot_pair = slot_pair + 1;
-                            if (slot_pair == 9) {
-                                slot_pair = 0;
-                            }
-                            int next_pair = slot_pair + 1;
-                            if (next_pair == 9) {
-                                next_pair = 0;
-                            }
-                            asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" :: "l"(reinterpret_cast<unsigned int*>(tensormap_workspace + (cta_linear * 256 + next_pair * pair_stride))), "r"(static_cast<unsigned int>(0)) : "memory");
-                            asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" :: "l"(reinterpret_cast<unsigned int*>(tensormap_workspace + (cta_linear * 256 + next_pair * pair_stride + 128))), "r"(static_cast<unsigned int>(0)) : "memory");
-                            asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + next_pair * pair_stride))));
-                            asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + next_pair * pair_stride + 128))));
-                            asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride))), "r"((uint32_t)(end_e)) : "memory");
-                            asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128))), "r"((uint32_t)(end_e)) : "memory");
+                            map_slot += 1;
+                            if (map_slot == 9) { map_slot = 0; }
+                            asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(((map_slot + 1 < 9) ? map_slot + 1 : (unsigned int)0) * 256)))));
+                            asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(((map_slot + 1 < 9) ? map_slot + 1 : (unsigned int)0) * 256) + 128))));
+                            asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))), "r"((uint32_t)(end_e)) : "memory");
+                            asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))), "r"((uint32_t)(end_e)) : "memory");
                             asm volatile("fence.proxy.tensormap::generic.release.gpu;" ::: "memory");
-                            asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride))) : "memory");
-                            asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128))) : "memory");
+                            asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))) : "memory");
+                            asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))) : "memory");
+                            asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))) : "memory");
+                            asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))) : "memory");
                             slot_group = e_i;
                         }
                     }
@@ -381,12 +375,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     for (int iter_m = 0; iter_m < k_iters_eff; iter_m++) {
                         int m_coord = m_base + iter_m * BLOCK_K;
                         mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
-                        tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride), 0, m_coord, n_chunk0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride), 0, m_coord, n_chunk0 + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coord, k_chunk0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coord, k_chunk0 + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coord, k_chunk0 + 4, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coord, k_chunk0 + 5, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)), 0, m_coord, n_chunk0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)), 0, m_coord, n_chunk0 + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coord, k_chunk0, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coord, k_chunk0 + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coord, k_chunk0 + 4, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coord, k_chunk0 + 5, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         asm volatile(
                             "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
                             :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
@@ -474,23 +468,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     if (n_steps_h > 0) {
                         if (k_iters_h > 0) {
                             if (e_ih != slot_group) {
-                                slot_pair = slot_pair + 1;
-                                if (slot_pair == 9) {
-                                    slot_pair = 0;
-                                }
-                                int next_pair_h = slot_pair + 1;
-                                if (next_pair_h == 9) {
-                                    next_pair_h = 0;
-                                }
-                                asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" :: "l"(reinterpret_cast<unsigned int*>(tensormap_workspace + (cta_linear * 256 + next_pair_h * pair_stride))), "r"(static_cast<unsigned int>(0)) : "memory");
-                                asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" :: "l"(reinterpret_cast<unsigned int*>(tensormap_workspace + (cta_linear * 256 + next_pair_h * pair_stride + 128))), "r"(static_cast<unsigned int>(0)) : "memory");
-                                asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + next_pair_h * pair_stride))));
-                                asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + next_pair_h * pair_stride + 128))));
-                                asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride))), "r"((uint32_t)(end_eh)) : "memory");
-                                asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128))), "r"((uint32_t)(end_eh)) : "memory");
+                                map_slot += 1;
+                                if (map_slot == 9) { map_slot = 0; }
+                                asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(((map_slot + 1 < 9) ? map_slot + 1 : (unsigned int)0) * 256)))));
+                                asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(((map_slot + 1 < 9) ? map_slot + 1 : (unsigned int)0) * 256) + 128))));
+                                asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))), "r"((uint32_t)(end_eh)) : "memory");
+                                asm volatile("tensormap.replace.tile.global_dim.global.b1024.b32 [%0], 1, %1;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))), "r"((uint32_t)(end_eh)) : "memory");
                                 asm volatile("fence.proxy.tensormap::generic.release.gpu;" ::: "memory");
-                                asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride))) : "memory");
-                                asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128))) : "memory");
+                                asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))) : "memory");
+                                asm volatile("fence.proxy.tensormap::generic.acquire.gpu [%0], 128;" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))) : "memory");
+                                asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)))) : "memory");
+                                asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)(tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128))) : "memory");
                                 slot_group = e_ih;
                             }
                         }
@@ -500,10 +488,10 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         for (int iter_mh = 0; iter_mh < n_steps_h; iter_mh++) {
                             int m_coordh = m_baseh + (lo_h + iter_mh) * BLOCK_K;
                             mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
-                            tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride), 0, m_coordh, n_chunk0h, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                            tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride), 0, m_coordh, n_chunk0h + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                            tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coordh, k_chunk0h, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                            tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_linear * 256 + slot_pair * pair_stride + 128), 0, m_coordh, k_chunk0h + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                            tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)), 0, m_coordh, n_chunk0h, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                            tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256)), 0, m_coordh, n_chunk0h + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                            tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coordh, k_chunk0h, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                            tma_3d_gmem2smem_cta2(smem_b0_addr + load_stage * 49152 + 8192, tensormap_workspace + (cta_base + (unsigned int)(map_slot * 256) + 128), 0, m_coordh, k_chunk0h + 1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             asm volatile(
                                 "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(32768)) : "memory");
@@ -511,6 +499,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                         }
                     }
+                }
+                #pragma unroll
+                for (int _ = 0; _ < 4; _++) {
+                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    load_stage += 1;
+                    if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                 }
             }
         }

@@ -50,10 +50,7 @@ from . import cake_build
 # The forward, data-gradient and 256-wide k tile weight-gradient routes bind
 # this package's copies of the deterministic package's programs
 # (``cake_pplx._backends.cake_moe_grouped_gemm_det_train``: the same builds of the
-# same kernels, so the same output bits; the 256-wide k tile's ``main_wave``
-# program is the same kernel rendered from a newer source, with two more buffer
-# arguments its sm_100a / sm_103a builds never read and no sm_107a build) with
-# the same stages: ``main``,
+# same kernels, so the same output bits) with the same stages: ``main``,
 # ``main_wide``, ``main_wide_ef`` and ``main_wide_ts33`` of ``fwd`` / ``dgrad``,
 # and ``main``, ``main_wave`` and the ordered fp32 ``tail_reduce`` of the
 # 256-wide k tile.  The ``main_wide_ef`` programs are the deterministic
@@ -131,6 +128,35 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         ],
         "launch": {"block": [320, 1, 1], "cluster": [2, 1, 1]},
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
+    },
+    "cake_moe_grouped_gemm_09a336207c15c131f5dc": {
+        "library": "cake_moe_grouped_gemm_09a336207c15c131f5dc",
+        "ffi_entry": "run",
+        "arg_plan": [
+            ["tma_buffer", "A"],
+            ["tma_buffer", "B"],
+            ["buffer", "C"],
+            ["buffer", "offs"],
+            ["buffer", "tensormap_workspace"],
+            ["buffer", "partials"],
+            ["parameter", "tail_splits"],
+            ["parameter", "raster_rows"],
+            ["parameter", "num_groups"],
+            ["parameter", "sum_m"],
+            ["parameter", "N"],
+            ["parameter", "K"],
+            ["parameter", "ldc"],
+            ["parameter", "stride_e"],
+            ["buffer", "A_rows"],
+            ["buffer", "B_rows"],
+            ["parameter", "lda"],
+            ["parameter", "ldb"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "launch": {"block": [192, 1, 1], "cluster": [2, 1, 1]},
+        "arches": ["sm_107a"],
     },
     "cake_moe_grouped_gemm_12a3b3c91ad6f91315e0": {
         "library": "cake_moe_grouped_gemm_12a3b3c91ad6f91315e0",
@@ -708,12 +734,14 @@ PROGRAMS: dict[str, dict[str, Any]] = {
             ["parameter", "K"],
             ["parameter", "ldc"],
             ["parameter", "stride_e"],
+            ["buffer", "A_rows"],
+            ["buffer", "B_rows"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
         "launch": {"block": [192, 1, 1], "cluster": [2, 1, 1]},
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
     },
     "cake_moe_grouped_gemm_f2b304a9af5613f646f4": {
         "library": "cake_moe_grouped_gemm_f2b304a9af5613f646f4",
@@ -865,6 +893,11 @@ ROUTES: dict[str, dict[str, Any]] = {
                 "specializations": {},
             },
             {
+                "name": "main",
+                "program": "cake_moe_grouped_gemm_09a336207c15c131f5dc",
+                "specializations": {},
+            },
+            {
                 "name": "main_wave",
                 "program": "cake_moe_grouped_gemm_fc0a5c2da4d4782f42eb",
                 "specializations": {},
@@ -919,6 +952,11 @@ ROUTES: dict[str, dict[str, Any]] = {
             {
                 "name": "main",
                 "program": "cake_moe_grouped_gemm_ed9a74f36ba13a52183d",
+                "specializations": {"WGRAD_OUT": 32},
+            },
+            {
+                "name": "main",
+                "program": "cake_moe_grouped_gemm_09a336207c15c131f5dc",
                 "specializations": {"WGRAD_OUT": 32},
             },
             {

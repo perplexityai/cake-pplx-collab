@@ -22,11 +22,10 @@ token-owner pass, which take the count as a kernel argument.  This module checks
 * the selection (pure host rules: at 20 no run-time-count record launches, at any other count the coefficient
   and token-owner passes launch exactly their run-time-count record) is checked on CPU in
   ``tests/cpu/mhc/test_cake_mhc_det_train_rules.py``;
-* the numerics at counts 1, 2, 5, 10, 19, 21, 30, 50 and 64 on T = 1, 7, 1024 and 16263: every output against an FP64
-  reference evaluated at the same count, under the absolute bars of ``test_cake_mhc_det_train.py`` (BF16 outputs at atol =
-  rtol = 1e-2 with no mismatch; the FP32 statistics, gradient statistics and parameter gradients at rel-L2 <= 1e-5;
-  ``dscale`` / ``dbase`` per element <= 1e-4 of max(|ref|, RMS(ref))), and the comparator-relative clause of the
-  parameter gradients over 25 draws at three counts;
+* the numerics at counts 1, 2, 5, 10, 19, 21, 30, 50 and 64 on T = 1, 7, 257, 1024 and 16263: every output judged
+  with ``tests/cake_naive.py`` against the naive BF16 tier over 32 inputs, the float64 oracle and the tier evaluated
+  at the same count (``tests/cake/test_helpers/cake_mhc_naive.py``); where the FP64 Sinkhorn matrices of the count and
+  of 20 lie apart, the kernel's ``C`` is nearer the count's;
 * the paths: at each count the checkpoint replay (``forward_stats``) is bitwise the ``forward_prepare`` record, and the
   autograd functions (``save_stats`` True and False) give bitwise the outputs and gradients of the direct entry points;
 * that changing the count in one process loads no module after the first run-time-count call, and the argument checks.
@@ -35,17 +34,15 @@ The cases above run at ``H = 4096``; ``test_counts_match_fp64_at_every_hidden_si
 ``test_paths_agree_bitwise_at_every_hidden_size`` repeat the numerics and the paths at the counts 1, 7, 20 and 64 at
 every hidden size the device's architecture exports (4096, 5120 and 7168 on SM100 / SM103 / SM107).
 
-The reference is the same arithmetic as ``test_cake_mhc_det_train.py``'s with the count as a parameter.
+The oracle and the naive tier are those of ``test_cake_mhc_det_train.py`` with the count as a parameter.
 """
 
 from __future__ import annotations
 
-import math
-import statistics
-
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_mhc_naive import case_oracle, judge_package
 from tests.cake.test_helpers.cake_package import cake_package
 
 pkg = cake_package("cake.cake_mhc_det_train")
@@ -62,13 +59,10 @@ HIDDEN_SIZES = (4096, 5120, 7168)
 HIDDEN_COUNTS = (1, 7, 20, 64)
 RMS_EPS, HC_EPS, SINKHORN_ITERS, SINKHORN_ITERS_MAX = 1e-5, 1e-6, 20, 64
 COUNTS = (1, 2, 5, 10, 19, 21, 30, 50, 64)
-T_COUNTS = (1, 7, 1024, 16263)
-BF16_ATOL = BF16_RTOL = 1e-2
-FP32_REL_L2_MAX = 1e-5
-FP32_ELEM_REL_MAX = 1e-4
-FP32_COMPARATOR_FACTOR = 2.0
-PARAM_CLAUSE_DRAWS = 25
-BLOCK_TOKENS = 8192
+T_COUNTS = (1, 7, 257, 1024, 16263)
+# The relative L2 distance between the FP64 Sinkhorn matrices of a count and of 20 above which the kernel's C must
+# lie nearer its own count's (below it a chain at its fixed point leaves nothing to tell apart).
+COUNT_APART = 4e-5
 SEED = 2032
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 
@@ -103,82 +97,7 @@ def _require_hidden(hidden: int) -> int:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Reference (the arithmetic of test_cake_mhc_det_train.py with the Sinkhorn count as a parameter)
-
-
-def _set_ieee_fp32() -> None:
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-
-
-def _sinkhorn(logits: torch.Tensor, iters: int, hc_eps: float = HC_EPS) -> torch.Tensor:
-    C = torch.softmax(logits, dim=-1) + hc_eps
-    C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    for _ in range(iters - 1):
-        C = C / (C.sum(dim=2, keepdim=True) + hc_eps)
-        C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    return C
-
-
-def _block(X, fn, scale, base, B, dY, dU, *, dtype, iters: int) -> dict:
-    T = X.shape[0]
-    with torch.enable_grad():
-        Xd = X.detach().to(dtype).requires_grad_(True)
-        fnd = fn.detach().to(dtype).requires_grad_(True)
-        scaled = scale.detach().to(dtype).requires_grad_(True)
-        based = base.detach().to(dtype).requires_grad_(True)
-        Bd = B.detach().to(dtype).requires_grad_(True)
-        u = Xd.reshape(T, -1)
-        r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + RMS_EPS)
-        z = (u * r) @ fnd.T
-        pre = torch.sigmoid(z[:, 0:4] * scaled[0] + based[0:4]) + HC_EPS
-        post = 2 * torch.sigmoid(z[:, 4:8] * scaled[1] + based[4:8])
-        C = _sinkhorn(
-            (z[:, 8:] * scaled[2] + based[8:]).reshape(T, STREAMS, STREAMS), iters
-        )
-        U_pre = (pre.unsqueeze(-1) * Xd).sum(dim=1)
-        Y_pre = post.unsqueeze(-1) * Bd.unsqueeze(1) + torch.einsum(
-            "tij,tid->tjd", C, Xd
-        )
-        dUd, dYd = dU.detach().to(dtype), dY.detach().to(dtype)
-        dX32, dfn, dscale, dbase, dB32 = torch.autograd.grad(
-            [U_pre, Y_pre], [Xd, fnd, scaled, based, Bd], grad_outputs=[dUd, dYd]
-        )
-    with torch.no_grad():
-        Bd = Bd.detach()
-        return {
-            "r": r.detach().reshape(T), "z": z.detach(), "pre": pre.detach(), "post": post.detach(), "C": C.detach(),
-            "U32": U_pre.detach(), "Y32": Y_pre.detach(), "dB32": dB32, "dX32": dX32,
-            "dpost": torch.einsum("tjd,td->tj", dYd, Bd), "dC": torch.einsum("tid,tjd->tij", Xd.detach(), dYd),
-            "dfn": dfn, "dscale": dscale, "dbase": dbase,
-        }  # fmt: skip
-
-
-def _oracle(i: dict, iters: int, *, dtype=F64) -> dict:
-    """FP64 in row blocks of BLOCK_TOKENS (the oracle), or IEEE FP32 in one block (the comparator)."""
-    T = i["X"].shape[0]
-    if dtype == F32:
-        _set_ieee_fp32()
-    bt = T if dtype == F32 else max(1, min(BLOCK_TOKENS, T))
-    blocks = [
-        _block(
-            i["X"][lo : lo + bt], i["fn"], i["scale"], i["base"], i["B"][lo : lo + bt], i["dY"][lo : lo + bt],
-            i["dU"][lo : lo + bt], dtype=dtype, iters=iters,
-        )
-        for lo in range(0, T, bt)
-    ]  # fmt: skip
-    out = {
-        k: torch.cat([b[k] for b in blocks], dim=0)
-        for k in blocks[0]
-        if k not in ("dfn", "dscale", "dbase")
-    }
-    for k in ("dfn", "dscale", "dbase"):
-        acc = blocks[0][k].clone()
-        for b in blocks[1:]:
-            acc += b[k]
-        out[k] = acc
-    return out
+# Inputs, launches and the judge
 
 
 def _make_inputs(T: int, *, seed: int = SEED, hidden: int = HIDDEN) -> dict:
@@ -216,77 +135,38 @@ def _run(i: dict, iters: int) -> dict:
             "dbase": dbase}  # fmt: skip
 
 
-def _stats_columns(stats: torch.Tensor) -> dict:
-    T = stats.shape[0]
-    return {
-        "r": stats[:, 0], "z": stats[:, 1:25], "pre": stats[:, 25:29], "post": stats[:, 29:33],
-        "C": stats[:, 33:49].reshape(T, STREAMS, STREAMS),
-    }  # fmt: skip
-
-
 def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
     num = (a.double() - b.double()).norm().item()
     den = b.double().norm().item()
-    return num / den if den > 0 else (0.0 if num == 0 else math.inf)
+    return num / den if den > 0 else (0.0 if num == 0 else float("inf"))
 
 
-def _max_rel_elem(a: torch.Tensor, b: torch.Tensor) -> float:
-    ref = b.double()
-    err = (a.double() - ref).abs()
-    rms = ref.square().mean().sqrt().item()
-    if rms == 0:
-        return 0.0 if float(err.max()) == 0 else math.inf
-    return float((err / ref.abs().clamp_min(rms)).max())
-
-
-def _assert_bf16(out: torch.Tensor, ref: torch.Tensor, label: str) -> None:
-    assert out.dtype == BF16 and tuple(out.shape) == tuple(ref.shape), label
-    a, b = out.double(), ref.double()
-    assert torch.isfinite(a).all(), f"{label}: non-finite values"
-    bad = int(((a - b).abs() > BF16_ATOL + BF16_RTOL * b.abs()).sum())
-    assert bad == 0, (
-        f"{label}: {bad} of {a.numel()} elements outside atol = rtol = 1e-2"
-    )
-
-
-def _assert_fp32(
-    out: torch.Tensor, ref: torch.Tensor, label: str, *, per_element: bool = False
+def _check(
+    T: int,
+    iters: int,
+    record_property,
+    *,
+    seed: int = SEED,
+    hidden: int = HIDDEN,
+    names=None,
+    prefix: str = "",
 ) -> None:
-    assert out.dtype == F32 and tuple(out.shape) == tuple(ref.shape), label
-    assert torch.isfinite(out).all(), f"{label}: non-finite values"
-    error = _rel_l2(out, ref)
-    assert error <= FP32_REL_L2_MAX, (
-        f"{label}: rel-L2 {error:.3e} > {FP32_REL_L2_MAX:.0e}"
-    )
-    if per_element:
-        worst = _max_rel_elem(out, ref)
-        assert worst <= FP32_ELEM_REL_MAX, (
-            f"{label}: per-element relative error {worst:.3e} > {FP32_ELEM_REL_MAX:.0e}"
-        )
-
-
-def _check(T: int, iters: int, *, seed: int = SEED, hidden: int = HIDDEN) -> dict:
-    i = _make_inputs(T, seed=seed, hidden=hidden)
-    res = _run(i, iters)
-    ref = _oracle(i, iters)
+    """Every output of the package at the count (or the outputs ``names``) judged against the naive BF16 tier over 32
+    inputs, the oracle and the tier at the same count; every draw's formats and the zero pad of ``gstats``."""
     label = f"T={T} sinkhorn_iters={iters} H={hidden}"
-    for out, key in (("U", "U32"), ("Y", "Y32"), ("dB", "dB32"), ("dX", "dX32")):
-        _assert_bf16(res[out], ref[key], f"{out} {label}")
-    for name, out in _stats_columns(res["stats"]).items():
-        _assert_fp32(out.contiguous(), ref[name], f"{name} {label}")
-    _assert_fp32(res["gstats"][:, 0:4].contiguous(), ref["dpost"], f"dpost {label}")
-    _assert_fp32(
-        res["gstats"][:, 4:20].reshape(T, STREAMS, STREAMS).contiguous(),
-        ref["dC"],
-        f"dC {label}",
-    )
-    assert torch.equal(
-        res["gstats"][:, 20:], torch.zeros_like(res["gstats"][:, 20:])
-    ), f"gstats pad {label}"
-    _assert_fp32(res["dfn"], ref["dfn"], f"dfn {label}")
-    _assert_fp32(res["dscale"], ref["dscale"], f"dscale {label}", per_element=True)
-    _assert_fp32(res["dbase"], ref["dbase"], f"dbase {label}", per_element=True)
-    return {"inputs": i, "result": res, "ref": ref}
+
+    def check(i: dict, results: list, expected: dict) -> None:
+        for res in results:
+            for k in ("U", "Y", "dB", "dX"):
+                assert res[k].dtype == BF16, f"{k} {label}"
+            assert torch.equal(
+                res["gstats"][:, 20:], torch.zeros_like(res["gstats"][:, 20:])
+            ), f"gstats pad {label}"
+
+    judge_package(
+        lambda s: _make_inputs(T, seed=s, hidden=hidden), lambda i: _run(i, iters), record_property, seed=seed,
+        names=names, prefix=prefix, check=check, iters=iters,
+    )  # fmt: skip
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -296,8 +176,8 @@ def _check(T: int, iters: int, *, seed: int = SEED, hidden: int = HIDDEN) -> dic
 @needs_device
 @pytest.mark.parametrize("iters", COUNTS)
 @pytest.mark.parametrize("T", T_COUNTS)
-def test_counts_match_fp64(T: int, iters: int) -> None:
-    _check_counts(T, iters, HIDDEN)
+def test_counts_match_fp64(T: int, iters: int, record_property) -> None:
+    _check_counts(T, iters, HIDDEN, record_property)
 
 
 @needs_device
@@ -305,69 +185,26 @@ def test_counts_match_fp64(T: int, iters: int) -> None:
 @pytest.mark.parametrize("T", T_COUNTS)
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES[1:], ids=lambda h: f"H{h}")
 def test_counts_match_fp64_at_every_hidden_size(
-    hidden: int, T: int, iters: int
+    hidden: int, T: int, iters: int, record_property
 ) -> None:
-    """The counts 1, 7, 20 and 64 at hidden 5120 and 7168 against the FP64 reference of the size (H 4096 is
+    """The counts 1, 7, 20 and 64 at hidden 5120 and 7168, judged against the naive tier of the size (H 4096 is
     ``test_counts_match_fp64``)."""
-    _check_counts(T, iters, _require_hidden(hidden))
+    _check_counts(T, iters, _require_hidden(hidden), record_property)
 
 
-def _check_counts(T: int, iters: int, hidden: int) -> None:
-    out = _check(T, iters, hidden=hidden)
-    # The count reaches the kernels: where the FP64 Sinkhorn matrices of this count and of 20 lie apart at the test's
-    # tolerance, the record's matrix is nearer this count's. A chain at its fixed point (T=1 from about 19 steps on)
-    # leaves the two FP64 matrices closer than that and nothing to tell apart; the values alone are checked there.
-    C = _stats_columns(out["result"]["stats"])["C"]
-    ref_n, ref_20 = out["ref"]["C"], _oracle(out["inputs"], SINKHORN_ITERS)["C"]
-    if _rel_l2(ref_n, ref_20) > 4 * FP32_REL_L2_MAX:
+def _check_counts(T: int, iters: int, hidden: int, record_property) -> None:
+    _check(T, iters, record_property, hidden=hidden)
+    # The count reaches the kernels: where the FP64 Sinkhorn matrices of this count and of 20 lie apart, the record's
+    # matrix is nearer this count's. A chain at its fixed point (T=1 from about 19 steps on) leaves the two FP64
+    # matrices closer than that and nothing to tell apart; the values alone are judged there.
+    i = _make_inputs(T, hidden=hidden)
+    C = _run(i, iters)["stats"][:, 33:49].reshape(T, STREAMS, STREAMS)
+    ref_n = case_oracle(i, iters=iters)["C"]
+    ref_20 = case_oracle(i, iters=SINKHORN_ITERS)["C"]
+    if _rel_l2(ref_n, ref_20) > COUNT_APART:
         assert _rel_l2(C, ref_n) < _rel_l2(C, ref_20), (
             f"stats C at sinkhorn_iters={iters} H={hidden} is nearer the count of 20's"
         )
-
-
-@needs_device
-@pytest.mark.parametrize("iters", (1, 5, 64))
-@pytest.mark.parametrize("T", (7, 257))
-def test_parameter_gradients_within_2x_comparator_over_draws(
-    T: int, iters: int
-) -> None:
-    """The comparator-relative clause of record over 25 draws at the count: rel-L2 <= 1e-5 on every draw (dscale /
-    dbase per element <= 1e-4), and median and maximum of the rel-L2 <= 2x the IEEE-FP32 comparator's at the same
-    count; the statistics r / z / pre / post / C hold the same form."""
-    rows: dict[str, list[tuple[float, float]]] = {}
-    for seed in range(SEED, SEED + PARAM_CLAUSE_DRAWS):
-        i = _make_inputs(T, seed=seed)
-        res = _run(i, iters)
-        ref, comp = _oracle(i, iters), _oracle(i, iters, dtype=F32)
-        outs = {
-            **{k: res[k] for k in ("dfn", "dscale", "dbase")},
-            **_stats_columns(res["stats"]),
-        }
-        for k, out in outs.items():
-            out = out.contiguous()
-            error = _rel_l2(out, ref[k])
-            assert error <= FP32_REL_L2_MAX, (
-                f"{k} T={T} sinkhorn_iters={iters} seed={seed}: rel-L2 {error:.3e}"
-            )
-            if k in ("dscale", "dbase"):
-                assert _max_rel_elem(out, ref[k]) <= FP32_ELEM_REL_MAX, (
-                    k,
-                    T,
-                    iters,
-                    seed,
-                )
-            rows.setdefault(k, []).append((error, _rel_l2(comp[k], ref[k])))
-    for k, pairs in rows.items():
-        kernel, comparator = [p[0] for p in pairs], [p[1] for p in pairs]
-        print(
-            f"{k} T={T} sinkhorn_iters={iters}: kernel rel-L2 median {statistics.median(kernel):.3e} max "
-            f"{max(kernel):.3e}; comparator median {statistics.median(comparator):.3e} max {max(comparator):.3e}",
-            flush=True,
-        )
-        assert statistics.median(kernel) <= FP32_COMPARATOR_FACTOR * statistics.median(
-            comparator
-        ), (k, T, iters)
-        assert max(kernel) <= FP32_COMPARATOR_FACTOR * max(comparator), (k, T, iters)
 
 
 @needs_device
@@ -443,18 +280,28 @@ def _check_paths(T: int, iters: int, hidden: int) -> None:
 
 
 @needs_device
-def test_changing_count_does_not_rebuild() -> None:
+def test_changing_count_does_not_rebuild(record_property) -> None:
     """The count is a launch argument of the run-time-count programs: after one call at a non-default count, calls at
-    other counts (and back at the default) load no module, and each follows the FP64 reference at its count."""
-    _check(64, SINKHORN_ITERS)
-    _check(64, 3)
+    other counts (and back at the default) load no module, and ``dX`` and ``dfn`` at each count are judged against
+    the naive BF16 tier at that count over 32 inputs.  The calls of the counts run at 255 tokens, whose route may
+    select records of other token-count bands than 64 tokens' (the mapping pass ``nsx_st5_mb1_xn`` at hidden 4096):
+    one call at 255 tokens at the default count and one at a non-default count load them first, so the count of
+    loads compares calls that differ in their Sinkhorn count alone, whatever the earlier tests of the process
+    loaded."""
+    _check(64, SINKHORN_ITERS, record_property, prefix="T=64 sinkhorn_iters=20 ")
+    _check(64, 3, record_property, prefix="T=64 sinkhorn_iters=3 ")
+    for iters in (SINKHORN_ITERS, 3):
+        _run(_make_inputs(255, seed=SEED + 3), iters)
     loaded = loader.load.cache_info().misses
     for iters in (1, 2, 7, 33, 64, SINKHORN_ITERS, 11):
-        i = _make_inputs(255, seed=SEED + iters)
-        res = _run(i, iters)
-        ref = _oracle(i, iters)
-        _assert_bf16(res["dX"], ref["dX32"], f"dX sinkhorn_iters={iters}")
-        _assert_fp32(res["dfn"], ref["dfn"], f"dfn sinkhorn_iters={iters}")
+        _check(
+            255,
+            iters,
+            record_property,
+            seed=SEED + iters,
+            names=("dX", "dfn"),
+            prefix=f"sinkhorn_iters={iters} ",
+        )
     assert loader.load.cache_info().misses == loaded, (
         "a changed sinkhorn_iters loaded a module"
     )
