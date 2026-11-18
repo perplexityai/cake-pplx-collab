@@ -109,8 +109,12 @@ the SM count only.  Packed rows of the last repeatable band of either
 weight gradient from ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (2560 on
 SM100 and SM103, 1536 on SM107) run its long role (``bwd_bf16_rep_long`` or
 ``bwd_f32_rep_long``: the deterministic package's look-ahead program of the
-same build, the same grid, block schedule and bits).
-Beside a long-resident
+same build, the same grid, block schedule and bits).  A call with
+``compute_grad_weight=False`` (stage ``backward_nodw``) runs its band's
+program without the weight gradient: one cluster in a small-row band, in the
+fused and the repeatable bands up to their cut of rows per SM a strided
+program of one CTA per 16-row block with no claim and no ticket, past it the
+claimed program.  Beside a long-resident
 one-thread kernel on another stream each call must keep its speed: per token
 count, the median of seven event-timed calls with the side kernel resident is
 at most ``MAX_RATIO`` times the median of seven calls alone, or at most
@@ -132,7 +136,7 @@ delay its start until the side kernel exits (no test here asserts that delay;
 documented in :mod:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train`).  The
 documented remedy is checked here: with the side kernel's preferred carveout
 set to the maximum shared memory, the backward (BF16 and FP32 weight
-gradients) and the forward start beside it and cost at most
+gradients, and without one) and the forward start beside it and cost at most
 ``MAX_ALL_SM_EXTRA_MS`` more than alone, far below the side kernel's
 ``ALL_SM_SPIN_MS`` lifetime; so do the small-row backwards of a BF16 and an
 FP32 weight gradient at 1 and 5 tokens (48 and 240 rows, where a small-row
@@ -372,7 +376,7 @@ def _keeps_its_speed(alone_ms: float, busy_ms: float) -> bool:
 
 
 @pytest.mark.parametrize("tokens", TOKENS)
-@pytest.mark.parametrize("stage", ["forward", "backward"])
+@pytest.mark.parametrize("stage", ["forward", "backward", "backward_nodw"])
 def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> None:
     x, z, w, dy = _inputs(tokens)
     workspace = workspace_for(tokens * H, x.device)
@@ -382,10 +386,18 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
         def call():
             return (forward(x, z, w, EPS, out=y),)
 
-    else:
+    elif stage == "backward":
 
         def call():
             return backward(dy, x, z, w, EPS, workspace=workspace)
+
+    else:
+        # the program without the weight gradient: dx and dz
+
+        def call():
+            return backward(
+                dy, x, z, w, EPS, compute_grad_weight=False, workspace=workspace
+            )[:2]
 
     side = torch.cuda.Stream()
     for _ in range(WARMUP):
@@ -400,9 +412,7 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
         f"STALL stage={stage} tokens={tokens} heads={H} alone_ms={alone_ms:.4f} "
         f"busy_ms={busy_ms:.4f} ratio={busy_ms / alone_ms:.3f} extra_ms={busy_ms - alone_ms:.4f}"
     )
-    if stage == "forward":
-        _check_outputs(stage, tokens, alone, busy)
-    else:
+    if stage == "backward":
         _check_outputs(
             stage,
             tokens,
@@ -411,6 +421,8 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
             _dw_reference(dy, x, z),
             module=_backward_module(tokens * H),
         )
+    else:
+        _check_outputs(stage, tokens, alone, busy)
     assert not bool(workspace.any()), f"tokens={tokens}: the workspace is not zero"
     assert _keeps_its_speed(alone_ms, busy_ms), (
         f"{stage} tokens={tokens}: {busy_ms:.4f} ms beside a resident kernel vs "
@@ -805,13 +817,14 @@ def _check_outputs(
     *,
     module: str | None = None,
 ) -> None:
-    """``y`` (forward) or ``dx`` and ``dz`` (backward) of every call of one
-    entry point and module bitwise those of its first call alone, and so its
-    ``dw`` where the backward ``module`` repeats it (``_dw_repeats``); every
-    backward ``dw`` holds its contract against the float64 oracle of
-    ``dw_reference`` (finite where it is, :func:`contract`), and where it does
-    not repeat, the naive tier (:func:`_naive_tier_message`)."""
-    assert stage == "forward" or module is not None, "the backward's module"
+    """``y`` (forward) or ``dx`` and ``dz`` (backward, ``backward_nodw``: no
+    ``dw``) of every call of one entry point and module bitwise those of its
+    first call alone, and so its ``dw`` where the backward ``module`` repeats
+    it (``_dw_repeats``); every backward ``dw`` holds its contract against the
+    float64 oracle of ``dw_reference`` (finite where it is, :func:`contract`),
+    and where it does not repeat, the naive tier
+    (:func:`_naive_tier_message`)."""
+    assert stage != "backward" or module is not None, "the backward's module"
     first = alone[0][1]
     for _t, out in alone + busy:
         if stage == "forward":
@@ -819,6 +832,8 @@ def _check_outputs(
             continue
         assert torch.equal(out[0], first[0]), f"dx tokens={tokens}"
         assert torch.equal(out[1], first[1]), f"dz tokens={tokens}"
+        if stage == "backward_nodw":
+            continue
         name = f"dw tokens={tokens} {out[2].dtype}"
         if _dw_repeats(module):
             assert torch.equal(out[2], first[2]), name
@@ -831,17 +846,26 @@ def _check_outputs(
 
 @pytest.mark.parametrize("tokens", ALL_SM_TOKENS)
 @pytest.mark.parametrize(
-    "dw_dtype", [torch.bfloat16, torch.float32], ids=["bf16", "f32"]
+    "dw_dtype", [torch.bfloat16, torch.float32, None], ids=["bf16", "f32", "nodw"]
 )
 def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
-    dw_dtype: torch.dtype, tokens: int
+    dw_dtype: torch.dtype | None, tokens: int
 ) -> None:
     x, z, w, dy = _inputs(tokens)
     workspace = workspace_for(tokens * H, x.device)
-    dw = torch.empty(D, dtype=dw_dtype, device=x.device)
+    if dw_dtype is None:
+        # compute_grad_weight=False: the program without the weight gradient
 
-    def call():
-        return backward(dy, x, z, w, EPS, grad_weight=dw, workspace=workspace)
+        def call():
+            return backward(
+                dy, x, z, w, EPS, compute_grad_weight=False, workspace=workspace
+            )[:2]
+
+    else:
+        dw = torch.empty(D, dtype=dw_dtype, device=x.device)
+
+        def call():
+            return backward(dy, x, z, w, EPS, grad_weight=dw, workspace=workspace)
 
     alone_ms, busy_ms, alone, busy = _paired_medians(
         call, _spin(CARVEOUT_MAX_SHARED), ALL_SM_RUNS
@@ -851,18 +875,21 @@ def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
         f"carveout=max_shared alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
         f"extra_ms={busy_ms - alone_ms:.4f}"
     )
-    _check_outputs(
-        "backward",
-        tokens,
-        alone,
-        busy,
-        _dw_reference(dy, x, z),
-        module=_backward_module(tokens * H, dw_dtype),
-    )
+    if dw_dtype is None:
+        _check_outputs("backward_nodw", tokens, alone, busy)
+    else:
+        _check_outputs(
+            "backward",
+            tokens,
+            alone,
+            busy,
+            _dw_reference(dy, x, z),
+            module=_backward_module(tokens * H, dw_dtype),
+        )
     assert not bool(workspace.any()), f"tokens={tokens}: the workspace is not zero"
     assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
-        f"tokens={tokens}: backward alone {alone_ms:.4f} ms, beside an all-SM kernel "
-        f"with the max-shared carveout {busy_ms:.4f} ms (at most "
+        f"tokens={tokens} dw={dw_dtype}: backward alone {alone_ms:.4f} ms, beside an "
+        f"all-SM kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
         f"{MAX_ALL_SM_EXTRA_MS} ms more; the side kernel lives {ALL_SM_SPIN_MS} ms)"
     )
 

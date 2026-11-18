@@ -23,17 +23,20 @@ per SM it launches one CTA per row block; from there the fewest whole waves of
 ``max_blocks_per_cta`` row blocks (its record's grid rule).  The backward is
 one kernel of ``min(row blocks, ctas_per_sm * SMs)`` CTAs; past one block per
 CTA its CTAs claim chunks of row blocks from a counter, so a CTA that becomes
-resident late takes only the blocks left.  No kernel waits for another CTA or
-grid, so none needs the whole device.  Beside a long-resident one-thread
-kernel on another stream each call must keep its speed: per token count, the
-median of seven event-timed calls with the side kernel resident is at most
-``MAX_RATIO`` times the median of seven calls alone, or at most
-``MAX_EXTRA_MS`` above it.  The alone and busy calls alternate in pairs, so
-host launch gaps and clock drift hit both arms alike.  The bounds sit above
-the slowdown a resident kernel causes (the CTAs sharing its SM run a little
-slower) and below the stall this test guards against, a wait of milliseconds
-behind the resident kernel.  ``y``, ``dx``, ``dz`` and ``dw`` are bitwise
-equal across the alone and busy calls.
+resident late takes only the blocks left.  A backward with
+``compute_grad_weight=False`` (stage ``backward_nodw``) runs the program
+without the weight gradient: up to its cut of rows per SM one CTA per row
+block with no claim and no ticket, past it the claimed program.  No kernel
+waits for another CTA or grid, so none needs the whole device.  Beside a
+long-resident one-thread kernel on another stream each call must keep its
+speed: per token count, the median of seven event-timed calls with the side
+kernel resident is at most ``MAX_RATIO`` times the median of seven calls
+alone, or at most ``MAX_EXTRA_MS`` above it.  The alone and busy calls
+alternate in pairs, so host launch gaps and clock drift hit both arms alike.
+The bounds sit above the slowdown a resident kernel causes (the CTAs sharing
+its SM run a little slower) and below the stall this test guards against, a
+wait of milliseconds behind the resident kernel.  ``y``, ``dx``, ``dz`` and
+``dw`` are bitwise equal across the alone and busy calls.
 
 The forward and the backward beside a kernel resident on every SM with the
 maximum-shared-memory carveout: at ``ALL_SM_TOKENS``
@@ -132,7 +135,7 @@ def _keeps_its_speed(alone_ms: float, busy_ms: float) -> bool:
 
 
 @pytest.mark.parametrize("tokens", TOKENS)
-@pytest.mark.parametrize("stage", ["forward", "backward"])
+@pytest.mark.parametrize("stage", ["forward", "backward", "backward_nodw"])
 def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> None:
     x, z, w, dy = _inputs(tokens)
     if stage == "forward":
@@ -145,11 +148,13 @@ def test_keeps_its_speed_beside_a_resident_kernel(stage: str, tokens: int) -> No
         workspace = cake_rmsnorm_silu_gate_det_train_backward_workspace(
             tokens * H, x.device
         )
+        compute = stage == "backward"
 
         def call():
-            return cake_rmsnorm_silu_gate_det_train_backward(
-                dy, x, z, w, EPS, workspace=workspace
+            out = cake_rmsnorm_silu_gate_det_train_backward(
+                dy, x, z, w, EPS, compute_grad_weight=compute, workspace=workspace
             )
+            return out if compute else out[:2]
 
     side = torch.cuda.Stream()
     for _ in range(WARMUP):
@@ -412,9 +417,13 @@ def _paired_medians(call, spin: _Spin, runs: int):
 
 
 def _check_outputs(stage: str, tokens: int, alone, busy) -> None:
-    """Every output of every call (``y``, or ``dx``, ``dz`` and ``dw``)
-    bitwise that of the first call alone."""
-    names = ("y",) if stage == "forward" else ("dx", "dz", "dw")
+    """Every output of every call (``y``, or ``dx``, ``dz`` and, but for
+    ``backward_nodw``, ``dw``) bitwise that of the first call alone."""
+    names = {
+        "forward": ("y",),
+        "backward": ("dx", "dz", "dw"),
+        "backward_nodw": ("dx", "dz"),
+    }[stage]
     first = alone[0][1]
     for _t, out in alone + busy:
         for got, want, name in zip(out, first, names, strict=True):
@@ -448,30 +457,33 @@ def test_forward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
 
 
 @pytest.mark.parametrize("tokens", ALL_SM_TOKENS)
+@pytest.mark.parametrize("stage", ["backward", "backward_nodw"])
 def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
-    tokens: int,
+    stage: str, tokens: int
 ) -> None:
     x, z, w, dy = _inputs(tokens)
     workspace = cake_rmsnorm_silu_gate_det_train_backward_workspace(
         tokens * H, x.device
     )
+    compute = stage == "backward"
 
     def call():
-        return cake_rmsnorm_silu_gate_det_train_backward(
-            dy, x, z, w, EPS, workspace=workspace
+        out = cake_rmsnorm_silu_gate_det_train_backward(
+            dy, x, z, w, EPS, compute_grad_weight=compute, workspace=workspace
         )
+        return out if compute else out[:2]
 
     alone_ms, busy_ms, alone, busy = _paired_medians(
         call, _spin(CARVEOUT_MAX_SHARED), ALL_SM_RUNS
     )
     print(
-        f"ALL_SM stage=backward tokens={tokens} heads={H} carveout=max_shared "
+        f"ALL_SM stage={stage} tokens={tokens} heads={H} carveout=max_shared "
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
         f"extra_ms={busy_ms - alone_ms:.4f}"
     )
-    _check_outputs("backward", tokens, alone, busy)
+    _check_outputs(stage, tokens, alone, busy)
     assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
-        f"tokens={tokens}: backward alone {alone_ms:.4f} ms, beside an all-SM "
+        f"tokens={tokens}: {stage} alone {alone_ms:.4f} ms, beside an all-SM "
         f"kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
         f"{MAX_ALL_SM_EXTRA_MS} ms more)"
     )

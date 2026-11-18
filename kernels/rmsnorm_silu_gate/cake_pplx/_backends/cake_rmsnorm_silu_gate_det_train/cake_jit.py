@@ -46,6 +46,18 @@ the previous block's row math runs, faster where a CTA runs many blocks.
 ``min_rows_per_sm`` times the SM count, and the role's module otherwise; both
 compute the rows and the weight gradient with the same FP32 operations in the
 same order, so ``dx``, ``dz`` and ``dw`` are the same bits on either route.
+A backward that computes no weight gradient (``compute_grad_weight=False``)
+runs a program built without it (``NODW_ROLES``, :func:`nodw_module`): the
+BF16 backward's row arithmetic with all weight-gradient work removed at build
+time, so ``dx`` and ``dz`` are the bits of the BF16 backward on the same rows
+(at every grid).  The strided program (``bwd_bf16_nodw_strided``: CTA ``b``
+runs the blocks ``b``, ``b + grid``, ... with no claim, no ticket and no
+workspace) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed
+program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket and
+workspace) past it, and the long one (``bwd_bf16_nodw_long``: its look-ahead
+loop) where :func:`backward_module` runs ``bwd_bf16_long``; an architecture
+that routes none of them runs the BF16 backward's module with
+``weight_grad`` 0, which gives the same bits.
 
 Grids (:func:`launch_grid`): the forward launches one CTA per block of
 ``rows_per_block`` rows below ``persistent_from_rows_per_sm`` rows per SM, and
@@ -59,11 +71,15 @@ one block per CTA its CTAs claim the blocks in chunks whose rows are fixed by
 the row count and the grid, add each thread's FP32 runs of rows into plain
 FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
 so the weight gradient's bits depend on the rows and
-the SM count only, not on which CTA runs a chunk.  The backward's workspace
+the SM count only, not on which CTA runs a chunk.  The strided program
+launches ``ceil(rows / rows_per_block)`` CTAs up to its cut (one block a
+CTA) and ``min(blocks, ctas_per_sm * SMs)`` past it, its CTAs walking their
+blocks with no claim.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two
 32-bit words of the arrival ticket and the claim counter) starts zero and the
-kernel leaves it zero.  No module is cooperative, and none waits for another
+kernel leaves it zero; the strided program's record has none, and it reads
+and writes no workspace word.  No module is cooperative, and none waits for another
 CTA or grid inside a kernel.  A kernel resident on another stream delays a
 call roughly by its share of the SMs; a forward CTA whose slot such a kernel
 holds walks all of its blocks once it starts, and a backward CTA that starts
@@ -612,6 +628,263 @@ MODULES: dict[str, dict[str, Any]] = {
             "slots": 2,
         },
     },
+    # The backward without the weight gradient, strided: the BF16 backward
+    # built without the weight gradient (all of its work removed at build
+    # time), CTA b running the 16-row blocks b, b + grid, ... with no claim,
+    # no ticket and no workspace word, so dx and dz are the BF16 backward's
+    # bits at any grid; the BF16 backward's kernel parameters (the
+    # weight-gradient and workspace ones unread); a call with
+    # compute_grad_weight=False runs it up to NODW_STRIDED_ROWS_PER_SM rows
+    # per SM (build {"dw": False, "math": "ax", "min_blocks": 4, "out":
+    # "bf16", "prefetch_share": None, "strided": True, "threads": 256}).
+    "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "kind": "strided_row_blocks",
+            "rows_per_block": 16,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 18176,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_nodw_strided",
+    },
+    # The backward without the weight gradient, claimed: the BF16 backward
+    # built without the weight gradient, with its claims, its arrival ticket
+    # and its claim counter (its grid and workspace; the kernel leaves the
+    # claim counter and the ticket words zero), so dx and dz are the BF16
+    # backward's bits; a call with compute_grad_weight=False runs it past
+    # NODW_STRIDED_ROWS_PER_SM rows per SM (build {"dw": False, "math": "ax",
+    # "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads":
+    # 256}).
+    "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "kind": "claimed_row_blocks",
+            "rows_per_block": 16,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 18176,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_nodw",
+        "workspace": {
+            "limbs": 9,
+            "slots": 2,
+        },
+    },
+    # The long program without the weight gradient: the BF16 long program
+    # built without the weight gradient (its look-ahead loop, claims, ticket,
+    # grid rule and workspace), so dx and dz are the BF16 backward's bits; a
+    # call with compute_grad_weight=False runs it where backward_module runs
+    # the BF16 long program (build {"dw": False, "lookahead": True, "math":
+    # "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None,
+    # "threads": 256}).
+    "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "kind": "claimed_row_blocks",
+            "min_rows_per_sm": {
+                "sm_100a": 2560,
+                "sm_103a": 2560,
+                "sm_107a": 1536,
+            },
+            "packed_rows": True,
+            "rows_per_block": 16,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 18176,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_nodw_long",
+        "workspace": {
+            "limbs": 9,
+            "slots": 2,
+        },
+    },
 }
 
 ROUTES: dict[str, dict[str, str]] = {
@@ -619,6 +892,9 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
+        "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -626,6 +902,9 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
+        "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -634,6 +913,9 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_packed": "cake_rmsnorm_silu_gate_det_train_8a371a49c065b60c88a9",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
+        "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
+        "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -654,7 +936,28 @@ PACKED_ROLES = ("fwd_packed",)
 # packed rows only when its rule says ``packed_rows`` (:func:`module_for_rows`).
 LONG = "_long"
 LONG_ROLES = ("bwd_bf16_long", "bwd_f32_long")
-GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks")
+# The suffixes of the roles of a backward without the weight gradient, and
+# those roles (:func:`nodw_module`): the BF16 backward built without the
+# weight gradient, claimed (``bwd_bf16_nodw``), strided
+# (``bwd_bf16_nodw_strided``: no claim, no ticket, no workspace) and in the
+# look-ahead loop (``bwd_bf16_nodw_long``); a call with
+# ``compute_grad_weight=False`` runs one of them where its architecture routes
+# it.
+NODW = "_nodw"
+STRIDED = "_strided"
+NODW_ROLES = ("bwd_bf16_nodw", "bwd_bf16_nodw_strided", "bwd_bf16_nodw_long")
+GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks")
+# A call without the weight gradient runs the strided program (``role + NODW
+# + STRIDED``) up to this many rows per SM, by architecture and role, and the
+# claimed program (``role + NODW``) past it; the strided program launches one
+# CTA per row block up to the cut (no claim and no ticket) and at most
+# ``ctas_per_sm`` CTAs per SM past it.  Provisional cuts, set by measurement.
+# Host plan only: a new cut needs no new program.
+NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
+    "sm_100a": {"bwd_bf16": 240},
+    "sm_103a": {"bwd_bf16": 240},
+    "sm_107a": {"bwd_bf16": 300},
+}
 # Elements of one normalized row.
 HEAD_DIM = 128
 # The forward reads rows with 32-byte vector accesses (the backward with
@@ -779,25 +1082,56 @@ def backward_module(
     return module_for_rows(arch, role, rows, sm_count, packed)
 
 
+def nodw_module(arch: str, name: str, rows: int, sm_count: int) -> str:
+    """The module of a backward without the weight gradient for ``rows``
+    rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
+    :func:`backward_module` names for the call's role (``bwd_bf16``), rows
+    and layout: for a long module (packed rows past its cut) the role's long
+    module without the weight gradient (``role + NODW + LONG``) where
+    ``arch`` routes one, else ``name`` itself (run with ``weight_grad`` 0);
+    otherwise the strided module (``role + NODW + STRIDED``) where ``arch``
+    routes one and ``rows <= NODW_STRIDED_ROWS_PER_SM[arch][role] *
+    sm_count``, else the claimed module (``role + NODW``) where routed, else
+    the strided module where routed, else ``name``.  Every one gives the
+    ``dx`` and ``dz`` bits of ``name``."""
+
+    routes = ROUTES.get(arch, {})
+    role = MODULES[name]["role"]
+    if role.endswith(LONG):
+        return routes.get(role[: -len(LONG)] + NODW + LONG, name)
+    strided = routes.get(role + NODW + STRIDED)
+    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
+    if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
+        return strided
+    claimed = routes.get(role + NODW)
+    if claimed is not None:
+        return claimed
+    return name if strided is None else strided
+
+
 def workspace_elements(name: str) -> int:
     """FP32 elements of the workspace of backward module ``name``: its
     accumulator (``slots * limbs * HEAD_DIM`` 64-bit digits, two FP32 elements
     each), one 32-bit flag word per column, and the arrival ticket and the
-    claim counter."""
+    claim counter (a module whose record has a workspace: not the strided
+    program)."""
 
     shape = MODULES[name]["workspace"]
     return 2 * int(shape["slots"]) * int(shape["limbs"]) * HEAD_DIM + HEAD_DIM + 2
 
 
 def launch_grid(
-    record: dict[str, Any], *, rows: int, sm_count: int
+    record: dict[str, Any], *, rows: int, sm_count: int, arch: str = ""
 ) -> tuple[int, int, int]:
     """The grid of one module record for ``rows`` rows on a device with
-    ``sm_count`` SMs.  The forward launches one CTA per block of
-    ``rows_per_block`` rows below ``persistent_from_rows_per_sm`` rows per SM,
-    and from there the fewest whole waves of ``ctas_per_sm * sm_count`` CTAs
-    whose CTAs walk at most ``max_blocks_per_cta`` blocks each, and at most one
-    CTA per block; the backward ``min(blocks, ctas_per_sm * sm_count)`` CTAs."""
+    ``sm_count`` SMs of architecture ``arch``.  The forward launches one CTA
+    per block of ``rows_per_block`` rows below ``persistent_from_rows_per_sm``
+    rows per SM, and from there the fewest whole waves of ``ctas_per_sm *
+    sm_count`` CTAs whose CTAs walk at most ``max_blocks_per_cta`` blocks
+    each, and at most one CTA per block; the backward ``min(blocks,
+    ctas_per_sm * sm_count)`` CTAs, and so does the strided program but up
+    to its role's ``NODW_STRIDED_ROWS_PER_SM[arch]`` cut, where it launches
+    one CTA per block (the only grid that depends on ``arch``)."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
@@ -809,6 +1143,12 @@ def launch_grid(
         waves = max(1, -(-blocks // (wave * int(rule["max_blocks_per_cta"]))))
         return (min(blocks, waves * wave), 1, 1)
     if kind == "claimed_row_blocks":
+        return (min(blocks, wave), 1, 1)
+    if kind == "strided_row_blocks":
+        role = str(record["role"]).removesuffix(NODW + STRIDED)
+        cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
+        if cut is not None and int(rows) <= int(cut) * int(sm_count):
+            return (blocks, 1, 1)
         return (min(blocks, wave), 1, 1)
     raise ValueError(
         f"unknown Cake SiLU-gated RMSNorm grid rule: {kind!r} (known: {GRID_KINDS})"
@@ -877,13 +1217,16 @@ def run_module(
 
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
-    grid is the module's :func:`launch_grid` on the device's SM count, and the
-    kernel runs on the current torch stream.
+    grid is the module's :func:`launch_grid` on the device's SM count and
+    architecture, and the kernel runs on the current torch stream.
     """
 
     record = MODULES[name]
     logical = record["logical"]
-    grid = launch_grid(record, rows=rows, sm_count=device_sm_count(device_index))
+    arch = device_arch(device_index)
+    grid = launch_grid(
+        record, rows=rows, sm_count=device_sm_count(device_index), arch=arch
+    )
     grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
     args = []
     for kind, key in record["arg_plan"]:
@@ -896,7 +1239,7 @@ def run_module(
                 f"module {name} needs {logical_name!r} (kernel parameter {key!r})"
             )
         args.append(values[logical_name])
-    module = load(name, device_arch(device_index))
+    module = load(name, arch)
     with tvm_ffi.use_torch_stream():
         getattr(module, record["ffi_entry"])(*args)
 
@@ -911,10 +1254,14 @@ __all__ = [
     "LONG",
     "LONG_ROLES",
     "MODULES",
+    "NODW",
+    "NODW_ROLES",
+    "NODW_STRIDED_ROWS_PER_SM",
     "PACKED_ROLES",
     "PACKED_ROWS",
     "ROLES",
     "ROUTES",
+    "STRIDED",
     "arch_for_capability",
     "backward_module",
     "device_arch",
@@ -925,6 +1272,7 @@ __all__ = [
     "load",
     "min_rows_per_sm",
     "module_for_rows",
+    "nodw_module",
     "route_module",
     "run_module",
     "specs_for_arch",
