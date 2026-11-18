@@ -221,6 +221,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d and mhc are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc and mhc_head are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
