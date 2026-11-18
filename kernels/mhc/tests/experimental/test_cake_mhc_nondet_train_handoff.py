@@ -826,33 +826,41 @@ def test_handoff_workspace_and_retained_bytes_per_token(
         )
         assert handoff == kind, (kind, handoff)
         report[f"{kind}_workspace"] = nbytes / T
-    for save_stats in (True, False):
-        kept = {}
-        for route in ("standard", "handoff"):
-            X = i["X"].clone().requires_grad_(True)
-            pre_in = i["pre_in"].clone().requires_grad_(True)
-            params = [
-                i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")
-            ]
-            B = i["B"].clone().requires_grad_(True)
-            before = _live_bytes()
-            if route == "standard":
-                U, handle = pkg.cake_mhc_nondet_train_prepare(
-                    X, *params, save_stats=save_stats, **CONSTANTS
-                )
-                outputs = [U]
-            else:
-                U, pre_next, handle = pkg.cake_mhc_nondet_train_handoff_prepare(
-                    X, pre_in, *params, save_stats=save_stats, **CONSTANTS
-                )
-                outputs = [U, pre_next]
-            Y = pkg.cake_mhc_nondet_train_finish(X, B, handle)
-            kept[route] = (
-                _live_bytes()
-                - before
-                - sum(t.untyped_storage().nbytes() for t in (*outputs, Y))
+
+    def kept_after_forward(route: str, save_stats: bool) -> int:
+        """The bytes one sublayer keeps alive after its forward beyond its outputs (its inputs, outputs and graph
+        are released on return, before the next measurement)."""
+        X = i["X"].clone().requires_grad_(True)
+        pre_in = i["pre_in"].clone().requires_grad_(True)
+        params = [i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")]
+        B = i["B"].clone().requires_grad_(True)
+        before = _live_bytes()
+        if route == "standard":
+            U, handle = pkg.cake_mhc_nondet_train_prepare(
+                X, *params, save_stats=save_stats, **CONSTANTS
             )
-            del U, Y, handle, outputs
+            outputs = [U]
+        else:
+            U, pre_next, handle = pkg.cake_mhc_nondet_train_handoff_prepare(
+                X, pre_in, *params, save_stats=save_stats, **CONSTANTS
+            )
+            outputs = [U, pre_next]
+        Y = pkg.cake_mhc_nondet_train_finish(X, B, handle)
+        return (
+            _live_bytes()
+            - before
+            - sum(t.untyped_storage().nbytes() for t in (*outputs, Y))
+        )
+
+    for save_stats in (True, False):
+        # one unmeasured call per route first: the allocations the first call at this token count makes once (and
+        # keeps for later calls) are not bytes a sublayer keeps
+        for route in ("standard", "handoff"):
+            kept_after_forward(route, save_stats)
+        kept = {
+            route: kept_after_forward(route, save_stats)
+            for route in ("standard", "handoff")
+        }
         assert kept["handoff"] == kept["standard"], (save_stats, kept)
         report[f"retained_save_stats_{save_stats}"] = kept["handoff"] / T
     report["pre_next_until_consumed"] = STREAMS * 4
