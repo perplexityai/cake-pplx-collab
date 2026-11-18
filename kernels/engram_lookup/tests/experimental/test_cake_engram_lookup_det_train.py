@@ -208,20 +208,22 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
 
 
 def test_the_grid_covers_every_row() -> None:
-    """One CTA per ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM`` CTAs per SM, at least one: a
-    one-dimensional grid the kernel walks grid-stride."""
+    """One CTA per ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM[arch]`` CTAs per SM (8 on SM100
+    and SM103, 4 on SM107), at least one: a one-dimensional grid the kernel walks grid-stride."""
+    assert cake_jit.CTAS_PER_SM == {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4}
     per_cta = cake_jit.WARPS_PER_CTA * cake_jit.ROWS_PER_WARP
     rng = random.Random(8379)
     sizes = [1, 2, per_cta - 1, per_cta, per_cta + 1, 393_216, 1_572_864, 2**31 - 9]
     sizes += [rng.randint(1, 1 << 24) for _ in range(200)]
-    for sms in (1, 132, 148, 160, 224):
-        cap = sms * cake_jit.CTAS_PER_SM
-        for positions in sizes:
-            gx, gy, gz = cake_jit.grid(positions, sms)
-            assert (gy, gz) == (1, 1)
-            assert gx == min(-(-positions // per_cta), cap), (positions, sms, gx)
-            assert 1 <= gx <= cap
-            assert gx * per_cta >= positions or gx == cap
+    for arch in ARCHES:
+        for sms in (1, 132, 148, 160, 224):
+            cap = sms * cake_jit.CTAS_PER_SM[arch]
+            for positions in sizes:
+                gx, gy, gz = cake_jit.grid(positions, sms, arch)
+                assert (gy, gz) == (1, 1)
+                assert gx == min(-(-positions // per_cta), cap), (arch, positions, sms, gx)
+                assert 1 <= gx <= cap
+                assert gx * per_cta >= positions or gx == cap
 
 
 def test_the_launch_passes_byte_views_and_the_grid(monkeypatch) -> None:

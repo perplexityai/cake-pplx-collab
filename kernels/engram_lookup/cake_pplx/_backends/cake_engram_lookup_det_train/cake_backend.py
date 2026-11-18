@@ -366,7 +366,7 @@ def cake_engram_lookup_det_train_forward(
     index = row_ids.get_device()
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES, before the allocation
     out = torch.empty(shape, dtype=torch.bfloat16, device=row_ids.device)
-    _launch(arch, weight, scale, row_ids, out, positions, cake_jit.grid(positions, sm_count(index))[0])
+    _launch(arch, weight, scale, row_ids, out, positions, cake_jit.grid(positions, sm_count(index), arch)[0])
     return out
 
 
