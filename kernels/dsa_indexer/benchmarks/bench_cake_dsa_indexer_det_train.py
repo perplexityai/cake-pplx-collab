@@ -42,7 +42,18 @@ peaked variant):
   documents (full causal) and ``Z2cp`` their zigzag rank-0 halves, ``Z3`` a
   packed batch of 4k .. 64k documents and ``Z3cp`` its zigzag halves,
   ``P1sink`` the recorded ``P1`` geometry, ``S4sink`` / ``S6sink`` one 64k /
-  262k causal document.  ``--rows iid`` / ``--rows sink`` name the two groups.
+  262k causal document.  ``--rows iid`` / ``--rows sink`` name the two groups;
+* the candidate-block rows (``--rows candidates``, top-k 512): ``tail16k_k512`` /
+  ``tail64k_k512`` / ``tail256k_k512`` 16384 queries at the tail of one
+  document of 16384 / 65536 / 262144 keys, ``P1_k512`` the ``P1`` geometry and
+  ``P1_k512_bound`` the same with ``max_seqlen_k`` (the longest key segment),
+  which every arm then passes.  On these rows ``cake_cb`` / ``cake_cb_aa``
+  time ``prepare_dsa_indexer_det_topk_with_candidates`` (the same top-k plus
+  the ``[T, 2048]`` candidate blocks, its workspace bound from
+  ``cake_dsa_indexer_det_train_topk_with_candidates_workspace_size``) next to
+  ``cake``, the plain call of the same ``top_k``; ``same_bits`` holds their
+  ``indices`` / ``scores`` bit for bit, and ``candidate_blocks`` records each
+  candidate-block arm's block structure (counts, newest block, containment).
 
 Arms (``--arms``): ``cake`` (this backend, a prepared runner over caller-owned
 outputs and workspace), ``cake_nosample`` (the same runner with
@@ -288,7 +299,9 @@ def _sink(seg_q, seg_k, **kw):
 
 
 _Z1_Q, _Z1_K = cp_zigzag_rank0(262144)
-ROWS["Z1"] = _sink(_Z1_Q, _Z1_K, note="attention-sink repro: 262k document, CP16 zigzag rank 0")
+ROWS["Z1"] = _sink(
+    _Z1_Q, _Z1_K, note="attention-sink repro: 262k document, CP16 zigzag rank 0"
+)
 ROWS["Z1k4096"] = _sink(_Z1_Q, _Z1_K, top_k=4096, note="Z1 with top-k 4096")
 ROWS["Z1k256"] = _sink(_Z1_Q, _Z1_K, top_k=256, note="Z1 with top-k 256")
 ROWS["Z2"] = _sink(
@@ -403,19 +416,49 @@ ROWS["s3_cold16k"] = _row(
     [16384], [16384], seed=7804, note="16384 queries over 16384 keys"
 )
 FP8_ROWS = ["P1", "glm2k_16k", "s1_8k_on_64k", "s2_4x2k_packed", "s3_cold16k"]
+# the candidate-block rows: the request's shapes at top-k 512 (see the module docstring)
+for _name, _lk, _seed in (
+    ("tail16k_k512", 16384, 7781),
+    ("tail64k_k512", 65536, 7782),
+    ("tail256k_k512", 262144, 7783),
+):
+    ROWS[_name] = _row(
+        [16384],
+        [_lk],
+        top_k=512,
+        seed=_seed,
+        note=f"16384 queries at the tail of {_lk} keys, top-k 512",
+    )
+ROWS["P1_k512"] = _row(
+    _lengths(P1_CU_SEQLENS_Q),
+    _lengths(P1_CU_SEQLENS_K),
+    top_k=512,
+    seed=7784,
+    note="P1 geometry, top-k 512",
+)
+ROWS["P1_k512_bound"] = _row(
+    _lengths(P1_CU_SEQLENS_Q),
+    _lengths(P1_CU_SEQLENS_K),
+    top_k=512,
+    seed=7784,
+    bound_seqlen=True,
+    note="P1 geometry, top-k 512, max_seqlen_k given",
+)
+CB_ROWS = ["tail16k_k512", "tail64k_k512", "tail256k_k512", "P1_k512", "P1_k512_bound"]
 ROW_GROUPS = {
     "iid": IID_ROWS,
     "sink": SINK_ROWS,
     "pool": POOL_ROWS,
     "all": DEFAULT_ROWS,
     "fp8": FP8_ROWS,
+    "candidates": CB_ROWS,
 }
 FORMS = ("bf16", "fp8")
 
 
 def expand_rows(names):
-    """``--rows`` with the group names ``iid`` / ``sink`` / ``pool`` / ``all`` / ``fp8`` expanded, in order, without
-    repeats."""
+    """``--rows`` with the group names ``iid`` / ``sink`` / ``pool`` / ``all`` / ``fp8`` / ``candidates`` expanded, in
+    order, without repeats."""
     out = []
     for name in names:
         for row in ROW_GROUPS.get(name, [name]):
@@ -723,9 +766,13 @@ class CakeArm(Arm):
         policy=None,
         fp8_fallback=None,
         fp8_hidden=None,
+        with_candidates=False,
     ):
         super().__init__(inputs)
         self.backend = cake_backend if backend is None else backend
+        # the candidate-block call (this package only): its own workspace bound, plan and [T, 2048] output
+        self.with_candidates = bool(with_candidates)
+        self.blocks = None
         self.knobs = dict(knobs or {})
         # forced dispatch: registry fields replaced for this arm (empty: the package's own policy), FP8 kind
         # fallback entries replaced (empty: the package's own) and the FP8 programs of these physical kinds hidden
@@ -744,6 +791,9 @@ class CakeArm(Arm):
         if self.fp8_hidden:
             scope.enter_context(hidden_fp8_kinds(self.backend, self.fp8_hidden))
         with scope:  # one scope: the workspace bound, the plan record and prepare see the same policy
+            if self.with_candidates:
+                self._prepare_with_candidates(inputs)
+                return
             self.workspace_bytes = backend_api(
                 self.backend,
                 "cake_dsa_indexer_det_train_topk_workspace_size",
@@ -782,12 +832,105 @@ class CakeArm(Arm):
                 scores=self.scores,
             )
 
+    def _prepare_with_candidates(self, inputs):
+        dev = inputs.device
+        extra = row_extra(inputs)
+        self.workspace_bytes = (
+            self.backend.cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
+                inputs.num_queries,
+                inputs.num_keys,
+                inputs.num_segments,
+                top_k=inputs.top_k,
+                ratio=inputs.ratio,
+                max_seqlen_k=extra.get("max_seqlen_k"),
+                device=dev,
+            )
+        )
+        self.workspace = torch.empty(
+            self.workspace_bytes, dtype=torch.uint8, device=dev
+        )
+        self.indices = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.int32, device=dev
+        )
+        self.scores = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.float32, device=dev
+        )
+        self.blocks = torch.empty(
+            (inputs.num_queries, 2048), dtype=torch.int32, device=dev
+        )
+        plan = self.backend.plan_dsa_indexer_det_topk_with_candidates(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            device=dev,
+            **extra,
+            **self.knobs,
+        )
+        c = plan.choice
+        self.plan = dict(
+            scan_key=c.scan_key,
+            merge_key=c.merge_key,
+            finalize_key=c.finalize_key,
+            kind=c.kind,
+            block_q=int(c.block_q),
+            n_split=int(c.n_split),
+            grid_ctas=int(c.grid_ctas),
+            cand_cap=int(c.cand_cap),
+            check_period=int(c.check_period),
+            sample_tiles_max=int(c.sample_tiles_max),
+            sample_shift_permille=int(c.sample_shift_permille),
+            far_sample=getattr(c, "far_sample", None),
+            sample_fit=bool(c.sample_fit),
+            blk_cap=int(plan.blk_cap),
+            blk_bytes=int(plan.blk_bytes),
+        )
+        self.runner = self.backend.prepare_dsa_indexer_det_topk_with_candidates(
+            inputs.q,
+            inputs.k,
+            inputs.w,
+            inputs.cu_seqlens_q,
+            inputs.cu_seqlens_k,
+            **inputs.kwargs(),
+            **extra,
+            **self.knobs,
+            workspace_buffer=self.workspace,
+            indices=self.indices,
+            scores=self.scores,
+            candidate_blocks=self.blocks,
+        )
+
     def __call__(self):
         return self.runner()
 
     def outputs(self, out):
         """None: the runner writes into ``indices`` / ``scores`` allocated before the measured call."""
         return ()
+
+
+def candidate_block_record(inputs, indices, blocks) -> dict:
+    """The block structure of one candidate-block result: rows whose valid count is not ``min(2048, nb)``, rows
+    without their newest block, rows with an id outside their blocks (each 0 when the structure holds)."""
+    n = ref.visible_rows(inputs)
+    nb = (n + 7) // 8
+    b = blocks.long()
+    counts = (b >= 0).sum(1)
+    newest = (b == (nb - 1)[:, None]).any(1) | (n == 0)
+    ids = indices.long()
+    have = torch.where(b >= 0, b, torch.iinfo(torch.int64).max).sort(dim=1).values
+    want = torch.where(ids >= 0, ids // 8, 0)
+    pos = torch.searchsorted(have, want.contiguous()).clamp(max=have.shape[1] - 1)
+    inside = ((have.gather(1, pos) == want) | (ids < 0)).all(1)
+    return dict(
+        rows=int(n.numel()),
+        bad_counts=int((counts != nb.clamp(max=2048)).sum()),
+        missing_newest=int((~newest).sum()),
+        ids_outside_blocks=int((~inside).sum()),
+        blocks_sha256=hashlib.sha256(
+            blocks.contiguous().cpu().numpy().tobytes()
+        ).hexdigest(),
+    )
 
 
 NOSAMPLE = {"sample_tiles_max": 0}
@@ -845,7 +988,13 @@ FP8_NO_WIDE = ("wide",)
 
 
 def _cake(
-    name, backend=None, knobs=None, policy=None, fp8_fallback=None, fp8_hidden=None
+    name,
+    backend=None,
+    knobs=None,
+    policy=None,
+    fp8_fallback=None,
+    fp8_hidden=None,
+    with_candidates=False,
 ):
     def make(inputs):
         return CakeArm(
@@ -856,6 +1005,7 @@ def _cake(
             policy=policy,
             fp8_fallback=fp8_fallback,
             fp8_hidden=fp8_hidden,
+            with_candidates=with_candidates,
         )
 
     return make
@@ -912,6 +1062,9 @@ ARMS = {
         "cake_fp8_wn", fp8_fallback=FP8_FALLBACK_NARROW, fp8_hidden=FP8_NO_WIDE
     ),
     "cake_l6_all": _cake("cake_l6_all", policy=L6_ALL),
+    # the candidate-block call of the same top_k (``--rows candidates``) and its A/A twin
+    "cake_cb": _cake("cake_cb", with_candidates=True),
+    "cake_cb_aa": _cake("cake_cb_aa", with_candidates=True),
 }
 MAIN_ARMS = ("cake_main", "cake_main_nosample", "cake_main_aa")
 # arms that take the FP8 inputs in ``--form fp8``; every other arm takes the same data dequantized to BF16
@@ -1172,6 +1325,13 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
         )
         record["gpu_ms"]["all"] = statistics.median(every)
         record["digest"] = result_digest(outputs[arm_name])
+        if getattr(arm, "blocks", None) is not None:
+            cb = candidate_block_record(
+                arm_inputs[arm_name], outputs[arm_name][0], arm.blocks
+            )
+            record["candidate_blocks"] = cb
+            if cb["bad_counts"] or cb["missing_newest"] or cb["ids_outside_blocks"]:
+                record["structure_failures"].append(f"candidate_blocks {cb}")
         if isinstance(arm, CakeArm):
             record["plan"] = arm.plan
             record["knobs"] = arm.knobs
@@ -1296,7 +1456,7 @@ def main():
         "--rows",
         nargs="*",
         default=None,
-        help=f"rows to measure (default: all regression rows, iid and sink, with --form bf16; the fp8 group with --form fp8; the group names iid / sink / pool / all / fp8 expand; also {', '.join(n for n in ROWS if n.startswith('smoke'))})",
+        help=f"rows to measure (default: all regression rows, iid and sink, with --form bf16; the fp8 group with --form fp8; the group names iid / sink / pool / all / fp8 / candidates expand; also {', '.join(n for n in ROWS if n.startswith('smoke'))})",
     )
     parser.add_argument(
         "--arms",

@@ -261,6 +261,39 @@ NaN lowest for its own bookkeeping only).  The kernels' loop bounds and
 barriers do not depend on score comparisons, which is what lets any bit
 pattern terminate.
 
+## Candidate blocks
+
+`cake_dsa_indexer_det_train_topk_with_candidates` (BF16, `ratio = 1`,
+`1 <= top_k <= 2047`, default 512; `sm_100a` and `sm_103a`) returns
+`(indices, scores, candidate_blocks)`.  `indices` and `scores` are those of
+`cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit.
+`candidate_blocks` is int32 `[T, 2048]`: block `b` holds the segment-local
+keys `8 b .. 8 b + 7`, a row with `n` visible keys sees `nb = ceil(n / 8)`
+blocks (the newest, `nb - 1`, may be partial; its future keys do not count),
+and a block's score is the largest score of its visible keys.  With
+`nb <= 2048` the row holds `0 .. nb - 1`; otherwise block `nb - 1` and the
+2047 blocks of `0 .. nb - 2` with the largest scores, ties broken by the
+larger block id (`+0.0 == -0.0`).  Rows are in ascending block id order with
+a `-1` tail (all `-1` when `n == 0`), and every id of `indices` lies in a
+block of its row.
+
+The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
+`scan_blocks:<narrow|l6>:u1:s0:f<fit>`): the scan program of the same unit
+that also folds each tile's block maxima into per-query block entries and
+writes the row.  Only the unsplit, unpaired narrow and l6 units carry it, so
+the host maps the decided kind to one of them (a wide unit or a CTA pair to
+its unpaired unit, a key-range split to narrow) with `n_split = 1`; then the
+finalize orders `indices` as in the plain call.  The block entries follow the
+scan's candidate buffers and ticket tail in the workspace: `blk_cap =
+ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
+`ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
+`Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
+segment of the call: a row with more older blocks than `blk_cap` stops the
+kernel with a device-side trap.
+`cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
+bound; the `[T, 2048]` output is not part of it.  `sm_107a` registers no
+`scan_blocks` program, and the call raises `NotImplementedError` there.
+
 ## Host dispatch
 
 One call runs two or three kernels: the persistent **scan** (scoring, exact
@@ -403,6 +436,19 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
   program's `build.json` entry passes its own values with `-D`.
 
 ## Tests and benchmark
+
+The candidate-block call has its own suite,
+`tests/experimental/test_cake_dsa_indexer_det_train_candidates.py`, with the
+FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
+host-only registry, plans at the request's shapes, argument checks and the
+`sm_107a` refusal; on the GPU, the exact sets of `indices` and
+`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
+packed layouts), sampled rows at the request's shapes, the Gaussian rule with
+the scores judged against the naive tier, containment, bitwise repetition and
+the plain call's bits, the caller-owned workspace and outputs, the argument
+checks and the absence of host synchronization.  The benchmark's
+`--rows candidates` times the call next to the plain call at the request's
+shapes.
 
 Tests: `tests/experimental/test_cake_dsa_indexer_det_train.py` (the backend suite, which
 imports the package only through `tests/cake/test_helpers/cake_package.py`),
