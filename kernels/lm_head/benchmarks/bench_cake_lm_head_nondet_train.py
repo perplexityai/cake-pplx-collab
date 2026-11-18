@@ -17,7 +17,8 @@ Benchmark of the Cake chunked LM-head + loss training kernels in their two numer
 deterministic module ``cake_pplx.cake_lm_head_det_train`` (backend
 ``cake_pplx._backends.cake_lm_head_det_train``) against the non-deterministic module
 ``cake_pplx.cake_lm_head_nondet_train`` (backend ``cake_pplx._backends.cake_lm_head_nondet_train``: the dX
-GEMM's K-slice partials added in an unordered FP32 reduction), each through its own public entries.
+GEMM's K-slice partials stored into an FP32 slab and summed in slice order, one fixed order with no run-to-run
+promise), each through its own public entries.
 
 The rows are the deterministic benchmark's (``bench_cake_lm_head_det_train.py``): the GLM-class geometry
 (``H = 6144``, ``V = 154880``, BF16 ``X`` / ``W``, int64 labels with five percent ignored rows), the loss entry with

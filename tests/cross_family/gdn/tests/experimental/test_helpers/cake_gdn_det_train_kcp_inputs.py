@@ -26,9 +26,8 @@ fragments, and a ``token_range`` slice is bitwise the slice of the global pack.
 
 The generator is the seeded-operands section of
 ``cake_gdn_det_train_kcp_reference`` (the FP64 reference generates the whole
-pack from the same code), so the distributed tests, the reference and the
-accuracy budgets of ``tests/experimental/cake_gdn_det_train_kcp_g1_budgets.json``
-see the same operands.
+pack from the same code), so the distributed tests, the FP64 reference and its
+naive BF16 tier see the same operands.
 """
 
 from tests.experimental.test_helpers.cake_gdn_det_train_kcp_reference import (
