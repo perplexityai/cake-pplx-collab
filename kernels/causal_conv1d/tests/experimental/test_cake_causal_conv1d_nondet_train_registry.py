@@ -746,12 +746,57 @@ def test_backward_workspace_covers_every_override_row() -> None:
                     assert layout["total_bytes"] <= nbytes, (arch, route, C, name)
 
 
+# The C 768 rows of ``TILE_OVERRIDES`` per architecture, route -> (ct_vec, S_min, S_max): on sm_100a and sm_103a the
+# measured rows of the package's 0.2.0 release (sm_100a has no row on route ``bwd``), on sm_107a the ``bwd_dt`` row of
+# every S (``bwd_dt_bf16_taps`` plans by it too).
+C768_TILE_OVERRIDES = {
+    "sm_100a": {
+        "bwd_dt": (32, 62585, 500680),
+        "bwd_bias": (32, 62585, 500680),
+        "bwd_fp32g": (32, 31292, 500680),
+        "bwd_bias_fp32g": (32, 31292, 500680),
+    },
+    "sm_103a": {
+        "bwd": (32, 62585, 500680),
+        "bwd_dt": (32, 62585, 500680),
+        "bwd_bias": (32, 62585, 500680),
+        "bwd_fp32g": (32, 62585, 500680),
+        "bwd_bias_fp32g": (32, 31292, 500680),
+    },
+    "sm_107a": {"bwd_dt": (32, 1, 2147483647)},
+}
+# The architectures whose C 768 backward rows are only those measured rows: no ``NARROW_TILES`` key covers C 768.
+C768_MEASURED_ONLY = ("sm_100a", "sm_103a")
+
+
+@pytest.mark.cpu_only
+def test_c768_backward_rows_are_the_literal_rows() -> None:
+    """The C 768 rows of the rendered ``TILE_OVERRIDES`` are the literal :data:`C768_TILE_OVERRIDES` on every
+    architecture, and on the architectures of :data:`C768_MEASURED_ONLY` no ``NARROW_TILES`` key covers C 768 (no
+    backward route there has a narrow range at C 768)."""
+
+    assert set(C768_TILE_OVERRIDES) == set(ARCHES)
+    for arch in ARCHES:
+        rows = {
+            route: tuple(int(value) for value in entry)
+            for (route, C), entry in cake_jit.TILE_OVERRIDES.get(arch, {}).items()
+            if C == 768
+        }
+        assert rows == C768_TILE_OVERRIDES[arch], arch
+    for arch in C768_MEASURED_ONLY:
+        covering = [key for key in cake_jit.NARROW_TILES.get(arch, {}) if key[1] <= 768 <= key[2]]
+        assert not covering, (arch, covering)
+        for route in cake_jit.backward_kinds(arch):
+            assert cake_jit.narrow_tile_range(arch, route, 768) is None, (arch, route)
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # The 32-vector channel tiles of the narrow single-tile backward rows (``NARROW_TILES``).
 
 # A table that exercises the narrow-row plan on every architecture whatever the rendered table holds: the sm_100a
-# rows of the shipped rule, plus rows on the other architectures (one of them spans a ``TILE_OVERRIDES`` row of its
-# route, C = 768 on sm_103a, which keeps its override).
+# rows of the package's 0.2.0 release (route ``bwd`` only, from 31292 to 500680 tokens), plus rows on the other
+# architectures (one of them spans a ``TILE_OVERRIDES`` row of its route, C = 768 on sm_103a, which keeps its
+# override).
 SYNTHETIC_NARROW_TILES = {
     "sm_100a": {
         ("bwd", 224, 224): (31292, 500680),
