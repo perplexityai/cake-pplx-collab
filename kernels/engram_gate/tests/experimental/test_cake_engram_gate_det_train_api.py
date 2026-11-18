@@ -357,17 +357,17 @@ def _gpu_activities(call) -> Optional[list[str]]:
     return names or None
 
 
-# The GPU activities of one call (FP32 weights; a BF16 ``q_weight`` adds its FP32 copy to the forward): the forward
-# forms the weight product and launches ``fwd``; the backward launches ``bwd_dot2`` and ``dw_reduce``.
-LAUNCHES = {"forward": 2, "backward": 2}
+# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward launches
+# ``bwd_dot2`` and ``dw_reduce``.
+LAUNCHES = {"forward": 1, "backward": 2}
 
 
 @pytest.mark.parametrize("weights", ("fp32", "bf16", "mixed"))
 @pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
 def test_launches_per_call(packed, weights) -> None:
-    """CUPTI's count of the GPU activities of one forward and one backward call (autograd and explicit): the backward
-    runs 2 for every pair of weight dtypes, with no cast, product or copy of a weight and no cast of a weight
-    gradient; the forward runs the weight product and ``fwd`` (and the FP32 copy of a BF16 ``q_weight``)."""
+    """CUPTI's count of the GPU activities of one forward and one backward call (autograd and explicit), for every
+    pair of weight dtypes, with no cast, product or copy of a weight and no cast of a weight gradient: the forward runs
+    ``fwd`` alone and the backward 2."""
     device = _device_or_skip()
     layout = "kv" if packed else "contiguous"
     ns = make_inputs(129, seed=61, device=device, weights=weights, mask="some", layout=layout)
@@ -387,12 +387,13 @@ def test_launches_per_call(packed, weights) -> None:
     if forward is None:
         pytest.skip("torch.profiler's CUPTI sees no GPU activity on this device")
     backward = _gpu_activities(lambda: holder["out"].backward(ns.dout))
-    fwd = LAUNCHES["forward"] + int(qw.dtype == torch.bfloat16)
-    assert (len(forward), len(backward)) == (fwd, LAUNCHES["backward"]), (forward, backward)
+    assert (len(forward), len(backward)) == (LAUNCHES["forward"], LAUNCHES["backward"]), (forward, backward)
     assert qw.grad.dtype == qw.dtype and kw.grad.dtype == kw.dtype
     args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
     explicit = _gpu_activities(lambda: api.cake_engram_gate_det_train_backward(ns.dout, *args))
     assert len(explicit) == LAUNCHES["backward"], explicit
+    explicit_fwd = _gpu_activities(lambda: api.cake_engram_gate_det_train_forward(*args))
+    assert len(explicit_fwd) == LAUNCHES["forward"], explicit_fwd
 
 
 @pytest.mark.parametrize("weights", ("bf16", "mixed"))

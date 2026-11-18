@@ -235,7 +235,6 @@ def _cpu_operands(T: int) -> dict:
         "x": torch.zeros(T, STREAMS, HIDDEN, **bf16),
         "key": torch.zeros(T, STREAMS, HIDDEN, **bf16),
         "value": torch.zeros(T, HIDDEN, **bf16),
-        "w": torch.zeros(STREAMS, HIDDEN),
         "q_words": torch.zeros(STREAMS, HIDDEN // 2, dtype=torch.int32),
         "k_words": torch.zeros(STREAMS, HIDDEN, dtype=torch.int32),
         "dout": torch.zeros(T, STREAMS, HIDDEN, **bf16),
@@ -260,7 +259,9 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         x=ops["x"],
         key=ops["key"],
         value=ops["value"],
-        w=ops["w"],
+        q_weight=ops["q_words"],
+        k_weight=ops["k_words"],
+        wmode=1,
         mask=mask,
         out=out,
         eps=1e-20,
@@ -306,7 +307,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
             assert named["T"] == T
         if "mask" in named:
             assert named["mask"] is mask
-        if name == "bwd_dot2":
+        if name in (f"fwd_{acc}", "bwd_dot2"):
             assert named["q_weight"] is ops["q_words"] and named["k_weight"] is ops["k_words"]
             assert named["wmode"] == 1
         if name == "dw_reduce":
@@ -485,13 +486,14 @@ def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout,
 
     def run(ns):
         out = torch.full_like(ns.x, math.nan)
-        w = (ns.q_weight.float() * ns.k_weight.float()).contiguous()
         cake_backend.launch_fwd(
             name,
             x=ns.x,
             key=ns.key,
             value=ns.value,
-            w=w,
+            q_weight=cake_backend._words(ns.q_weight),
+            k_weight=cake_backend._words(ns.k_weight),
+            wmode=cake_backend._wmode(ns.q_weight.dtype, ns.k_weight.dtype),
             mask=ns.token_mask,
             out=out,
             eps=1e-20,

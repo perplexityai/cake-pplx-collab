@@ -34,12 +34,13 @@ and each BF16 output rounded once, at its store::
     gate = sigmoid(copysign(sqrt(max(|dot|, clamp_value)), dot))   (0 on a masked token)
     out[t, s] = bf16(h + gate v)
 
-One forward call forms ``w`` on the host (FP32 ``[4, 5120]``, one rounding of
-the FP32 product) and launches ``fwd``.  One backward call launches ``bwd`` and
-``dw_reduce``, back to back.  Both read ``q_weight`` and ``k_weight`` as
-stored, BF16 or FP32, as the 32-bit words of each (:func:`_words`) with a mode
-word (:func:`_wmode`).  ``bwd`` forms the same FP32 product ``w`` once
-per CTA, recomputes ``r_h``, ``r_k`` and ``P`` from the inputs (the forward
+One forward call launches ``fwd`` alone.  One backward call launches ``bwd``
+and ``dw_reduce``, back to back.  Every kernel reads ``q_weight`` and
+``k_weight`` as stored, BF16 or FP32, as the 32-bit words of each
+(:func:`_words`) with a mode word (:func:`_wmode`): ``fwd`` and ``bwd`` form
+the FP32 product ``w`` once per CTA (each BF16 value widened exactly, one
+FP32 multiply per column, the bits of ``q_weight.float() * k_weight.float()``).
+``bwd`` recomputes ``r_h``, ``r_k`` and ``P`` from the inputs (the forward
 keeps nothing beyond its inputs) and writes ``dx``, ``dkey`` and ``dvalue``
 and the FP32 weight-gradient partial sums ``dw = sum_t c h k``.  ``dw_reduce``
 writes ``dq_weight = dw * k_weight`` and ``dk_weight = dw * q_weight``: in
@@ -136,7 +137,7 @@ _STRIDE_ELEMENTS = 8
 _ALIGNMENT = 16
 # The kernels take the token count as a 32-bit integer (token offsets are 64-bit).
 _MAX_TOKENS = 2**31 - 1
-# Bytes of one FP32 [4, 5120] row (the forward's weight product, a partial row of the backward).
+# Bytes of one FP32 [4, 5120] row (a partial row of the backward's weight gradients).
 _ROW_BYTES = STREAMS * HIDDEN * 4
 
 # This package's module prefix (the vendored name of a vendored copy).
@@ -265,7 +266,7 @@ def _entry(name: str, arch: str) -> Any:
 
 # The kernel parameters each stage's launcher passes, in order (then the grid): every record of a stage takes these.
 _STAGE_PARAMETERS: dict[str, tuple[str, ...]] = {
-    "fwd": ("x", "key", "value", "w", "mask", "out", "T", "eps", "clamp"),
+    "fwd": ("x", "key", "value", "q_weight", "k_weight", "mask", "out", "T", "eps", "clamp", "wmode"),
     "bwd": (
         "dout",
         "x",
@@ -318,7 +319,9 @@ def launch_fwd(
     x: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    w: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    wmode: int,
     mask: Optional[torch.Tensor],
     out: torch.Tensor,
     eps: float,
@@ -327,11 +330,12 @@ def launch_fwd(
 ) -> None:
     """Launch the forward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters:
     ``out = bf16(x + gate * value)`` from ``x`` (BF16 ``[T, 4, 5120]``, contiguous), ``key`` (BF16 ``[T, 4, 5120]``,
-    token stride a multiple of 8), ``value`` (BF16 ``[T, 5120]``, same), ``w`` (FP32 ``[4, 5120]``, the weight
-    product) and ``mask`` (bool ``[T]`` or None)."""
+    token stride a multiple of 8), ``value`` (BF16 ``[T, 5120]``, same), the weights' 32-bit words ``q_weight`` and
+    ``k_weight`` (:func:`_words`) with their mode ``wmode`` (:func:`_wmode`, bits 0 and 1) and ``mask`` (bool ``[T]``
+    or None)."""
     grid = cake_jit.CLUSTER_CTAS * int(clusters)
-    args = (x, key, value, w, mask, out, int(x.shape[0]), float(eps), float(clamp_value), grid, 1, 1)
-    _run(name, "fwd", x.device, args)
+    args = (x, key, value, q_weight, k_weight, mask, out, int(x.shape[0]), float(eps), float(clamp_value), int(wmode))
+    _run(name, "fwd", x.device, (*args, grid, 1, 1))
 
 
 def launch_bwd(
@@ -534,19 +538,13 @@ def _split_kv(kv: Any, name: str = "kv") -> tuple[torch.Tensor, torch.Tensor]:
 # Host operands
 
 
-def _fp32(t: torch.Tensor) -> torch.Tensor:
-    """``t`` as a contiguous, 16-byte aligned FP32 tensor (``t`` itself when it already is one)."""
-    t = t.detach().to(dtype=torch.float32, memory_format=torch.contiguous_format)
-    return t if t.data_ptr() % _ALIGNMENT == 0 else t.clone()
-
-
 def _mask(token_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     """The mask the kernels read: contiguous bool ``[T]``, or None."""
     return None if token_mask is None else token_mask.contiguous()
 
 
 def _words(t: torch.Tensor) -> torch.Tensor:
-    """The 32-bit words the backward kernels read of ``t``, a BF16 or FP32 ``[4, 5120]`` weight or weight gradient: an
+    """The 32-bit words the kernels read of ``t``, a BF16 or FP32 ``[4, 5120]`` weight or weight gradient: an
     ``int32`` view (``[4, 2560]`` for BF16, two columns a word; ``[4, 5120]`` for FP32) of ``t`` itself when it is
     contiguous and 16-byte aligned, of a copy otherwise."""
     t = t.detach().contiguous()
@@ -567,8 +565,8 @@ def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.devic
     allocates beside its operands and outputs: the ``[clusters, 4, 5120]`` FP32 weight-gradient partial rows (one
     per cluster of the backward grid), 80 KiB each (0 for ``T == 0``), and a copy of a weight that is not contiguous
     or not 16-byte aligned (none otherwise: the kernels read the weights in place, in their dtypes).  A forward call
-    allocates the weight product (and an FP32 copy of a BF16 ``q_weight``) only; the state kept for the backward is
-    the inputs alone.  The backward, and so its workspace, is the same for either ``dot_sum`` of the forward."""
+    allocates its output alone (and such a copy); the state kept for the backward is the inputs alone.  The backward,
+    and so its workspace, is the same for either ``dot_sum`` of the forward."""
     T = int(T)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
@@ -609,20 +607,11 @@ def _forward(
     index = device.index
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES
     name = cake_jit.record("fwd", acc)
-    # FP32(q_weight) * FP32(k_weight): a BF16 k_weight is widened exactly by type promotion.
-    w = (_fp32(q_weight) * k_weight.detach()).contiguous()
-    launch_fwd(
-        name,
-        x=x,
-        key=key,
-        value=value,
-        w=w,
-        mask=_mask(token_mask),
-        out=out,
-        eps=eps_f,
-        clamp_value=clamp_f,
-        clusters=cake_jit.clusters(name, T, arch, sm_count(index)),
-    )
+    clusters = cake_jit.clusters(name, T, arch, sm_count(index))
+    # The weights as stored (their 32-bit words), the product formed in the kernel: one launch.
+    args = (x, key, value, _words(q_weight), _words(k_weight), _mask(token_mask), out, T, eps_f, clamp_f)
+    wmode = _wmode(q_weight.dtype, k_weight.dtype)
+    _run(name, "fwd", device, (*args, wmode, cake_jit.CLUSTER_CTAS * clusters, 1, 1))
     return out
 
 

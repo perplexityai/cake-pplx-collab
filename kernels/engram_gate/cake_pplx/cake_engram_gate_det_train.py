@@ -35,8 +35,8 @@ The autograd entries and the explicit forward take ``dot_sum``, how the
 forward sums ``P``.  The default, ``"compensated"``, is a compensated FP32 dot
 product: each product split with an FMA, each running sum with an error-free
 two-sum, the error words added once at the end.  ``"fp32"`` (opt-in) sums
-``P`` in one FP32 word: the forward takes about 7% less time (GB300,
-``T = 16384``: 0.313 ms against 0.337 ms) and, where the products nearly
+``P`` in one FP32 word: the forward takes about 6% less time (GB300,
+``T = 16384``: 0.313 ms against 0.333 ms) and, where the products nearly
 cancel, rounds more output elements away from the correctly rounded result
 (17802 of the 8.19 million output elements of 25 near-cancelling draws,
 against 117; an FP32 evaluation of the formula: 21917).  The backward is the
@@ -380,8 +380,8 @@ def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.devic
     -------
     80 KiB (``4 * 5120`` FP32) for each ``[4, 5120]`` partial row of the weight gradient (one per cluster of the
     backward grid); 0 for ``T == 0``.  The backward reads BF16 and FP32 weights as stored (a weight that is not
-    contiguous or not 16-byte aligned is copied first).  A forward call allocates the weight product (and an FP32 copy
-    of a BF16 ``q_weight``) only, and the state kept for the backward is the inputs alone.
+    contiguous or not 16-byte aligned is copied first).  A forward call reads them the same way and allocates its
+    output alone, and the state kept for the backward is the inputs alone.
 
     Notes
     -----
