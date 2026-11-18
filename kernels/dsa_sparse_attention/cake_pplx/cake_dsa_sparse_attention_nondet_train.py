@@ -56,6 +56,12 @@ the flat rope form, the flat NoPE form and the packed NoPE form::
 The packed forward also returns the global rows and row lengths that its
 backward reads.
 
+The flat NoPE entries take an optional trainable per-head sink, ``sink`` FP32
+``[64]`` (SM100 / SM103): it adds ``exp(sink[h])`` to every row's softmax
+denominator, ``lse`` includes it, and its gradient ``dsink`` flows back
+through autograd (the step backward returns it).  The packed NoPE entries
+take ``sink=None`` only.
+
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
 ``CakeDSASparseAttentionNondetNopeVarlenFunction``, resolve from the backend
@@ -182,6 +188,17 @@ def _backend(backend: str):
             "DSA sparse-attention training currently supports backend='cake'"
         )
     return _cake_backend()
+
+
+def _refuse_varlen_sink(sink: Optional[torch.Tensor]) -> None:
+    """The packed NoPE entries take ``sink=None`` only: their per-document forward has no sink build in this
+    package."""
+    if sink is not None:
+        raise NotImplementedError(
+            "a sink is not supported by the packed (varlen) NoPE entries: their per-document forward has no "
+            "sink build in this package; pass global index rows to "
+            "cake_dsa_sparse_attention_nondet_nope or the flat NoPE step entries"
+        )
 
 
 @cake_api
@@ -473,6 +490,7 @@ def cake_dsa_sparse_attention_nondet_nope(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     return_lse: bool = False,
     key_passes: Optional[int] = None,
     backend: str = "cake",
@@ -521,9 +539,26 @@ def cake_dsa_sparse_attention_nondet_nope(
     softmax_scale : Optional[float]
         Defaults to ``1 / 16`` (``512 ** -0.5`` of the latent width is not
         used: the absorbed queries of this form carry their own scale).
+    sink : Optional[torch.Tensor]
+        FP32 ``[64]`` trainable per-head attention sink, contiguous, on the
+        device of ``q``; ``None`` (default) runs without a sink, with today's
+        results.  Head ``h`` adds ``exp(sink[h])`` -- not scaled by
+        ``softmax_scale`` -- to the softmax denominator of every row and
+        contributes no value: ``lse = log(sum_j exp(s_j) + exp(sink[h]))``,
+        ``O = sum_j exp(s_j - lse) kv_j``, computed in FP32 and rounded once
+        (``out`` is not a rescaled sink-free output).  A row whose every slot
+        is invalid gives ``out = 0`` and ``lse = sink[h]``; a ``-inf`` head
+        behaves as without a sink and gets ``dsink`` exactly 0.  The gradient
+        reaches ``sink`` through autograd as ``dsink [64] = -sum_t exp(sink -
+        lse[t]) * delta[t]`` in FP32, summed over all rows of the call
+        (``delta = <dout, O>``), in a fixed order that does not depend on the
+        SM count.  Only the metadata is checked (no device synchronization):
+        ``+inf`` and NaN values are not supported.  SM100 / SM103 only
+        (``NotImplementedError`` on SM107).
     return_lse : bool
         Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
-        scores over the valid keys (``-inf`` for fully masked rows).
+        scores over the valid keys (``-inf`` for fully masked rows), plus the
+        sink when one is given (``sink[h]`` for fully masked rows).
     key_passes : Optional[int]
         Number of key-range passes of the backward's main stage.  ``None``
         (default) applies the registered policy of this program, which plans
@@ -592,9 +627,9 @@ def cake_dsa_sparse_attention_nondet_nope(
     out : torch.Tensor
         BF16 ``[T, 64, 512]``; zero for fully masked rows.
     lse : torch.Tensor
-        Only with ``return_lse=True``.
+        Only with ``return_lse=True``.  Not differentiable.
 
-    Gradients flow to ``q`` and ``kv``.  ``dq`` is BF16, written once per row.
+    Gradients flow to ``q`` and ``kv`` (and ``sink`` when given).  ``dq`` is BF16, written once per row.
     ``dkv`` is accumulated in FP32 by the kernels' atomics (the summation order
     is not fixed) and handed over in FP32: through
     ``dkv_acc`` when given, otherwise as the ``kv`` gradient -- which the
@@ -642,6 +677,7 @@ def cake_dsa_sparse_attention_nondet_nope(
         dkv_dst_map=dkv_dst_map,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 
@@ -658,6 +694,7 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
     causal: bool = False,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     return_lse: bool = False,
     key_passes: Optional[int] = None,
     backend: str = "cake",
@@ -722,6 +759,11 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
 
     Parameters
     ----------
+    sink : Optional[torch.Tensor]
+        ``None`` only: the packed entries have no sink build yet (any tensor
+        raises ``NotImplementedError``); the flat entry
+        :func:`cake_dsa_sparse_attention_nondet_nope` takes a sink over global
+        index rows.
     check_cu_seqlens : bool
         ``True`` checks the values of ``cu_seqlens_q`` / ``cu_seqlens_k``
         against the invariants above at the cost of one blocking device-to-host
@@ -744,6 +786,7 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         ``CAKE_PPLX_DSA_CHECK_DST_MAP``; ``True`` validates the values of
         ``dkv_dst_map`` on every backward, ``False`` never does.
     """
+    _refuse_varlen_sink(sink)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:
@@ -884,6 +927,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_forward(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     backend: str = "cake",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Training forward of the NoPE form without autograd: ``(out, lse,
@@ -893,10 +937,18 @@ def cake_dsa_sparse_attention_nondet_train_nope_forward(
     the outputs those of
     :func:`cake_dsa_sparse_attention_nondet_train_forward`. Pass them unchanged
     to :func:`cake_dsa_sparse_attention_nondet_train_nope_backward`. ``out``,
-    ``lse`` and ``o_lo`` come from one forward kernel.
+    ``lse`` and ``o_lo`` come from one forward kernel. With ``sink`` (FP32
+    ``[64]``, as in :func:`cake_dsa_sparse_attention_nondet_nope`) ``lse``
+    includes the sink (``sink[h]`` on a row without a valid slot); pass the
+    same ``sink`` to the step backward.
     """
     return _backend(backend).forward_nope(
-        q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
+        q,
+        kv,
+        indices,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+        sink=sink,
     )
 
 
@@ -912,14 +964,16 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     key_passes: Optional[int] = None,
     backend: str = "cake",
     dkv_acc: Optional[torch.Tensor] = None,
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Training backward of the NoPE form without autograd: ``(dq, dkv)``.
+) -> tuple[Optional[torch.Tensor], ...]:
+    """Training backward of the NoPE form without autograd: ``(dq, dkv)``,
+    or ``(dq, dkv, dsink)`` with a ``sink``.
 
     ``out``, ``o_lo`` and ``lse`` are the outputs of
     :func:`cake_dsa_sparse_attention_nondet_train_nope_forward` on the same
@@ -934,7 +988,10 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
     promised to repeat bit for bit. Under
     ``torch.use_deterministic_algorithms(True)`` it raises PyTorch's
     ``RuntimeError`` before its first backward kernel (with ``warn_only=True``
-    a ``UserWarning``, then it runs).
+    a ``UserWarning``, then it runs). ``sink``: the sink the step forward ran
+    with; the call then also returns ``dsink``, FP32 ``[64]``, ``-sum_t
+    exp(sink - lse[t]) * delta[t]`` summed over all rows of the call. With
+    ``sink=None`` the return is ``(dq, dkv)`` as before.
     """
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
@@ -955,6 +1012,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
         dkv_dst_map=dkv_dst_map,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 
@@ -969,6 +1027,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
     causal: bool = False,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     backend: str = "cake",
     check_cu_seqlens: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -982,8 +1041,10 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
     (int32 ``[T]``) are the rows and row lengths the forward read. Pass all
     five unchanged to
     :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_backward`.
-    ``out``, ``lse`` and ``o_lo`` come from one forward kernel.
+    ``out``, ``lse`` and ``o_lo`` come from one forward kernel. ``sink``:
+    ``None`` only (any tensor raises ``NotImplementedError``).
     """
+    _refuse_varlen_sink(sink)
     return _backend(backend).forward_nope_varlen(
         q,
         kv,
@@ -1010,6 +1071,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
     *,
     topk_length: torch.Tensor,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     key_passes: Optional[int] = None,
     backend: str = "cake",
     dkv_acc: Optional[torch.Tensor] = None,
@@ -1027,8 +1089,10 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
     ``dK`` / ``dV`` are added with FP32 atomics; no output is promised to
     repeat bit for bit. Under ``torch.use_deterministic_algorithms(True)``
     it raises PyTorch's ``RuntimeError`` before its first backward kernel
-    (with ``warn_only=True`` a ``UserWarning``, then it runs).
+    (with ``warn_only=True`` a ``UserWarning``, then it runs). ``sink``:
+    ``None`` only (any tensor raises ``NotImplementedError``).
     """
+    _refuse_varlen_sink(sink)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:

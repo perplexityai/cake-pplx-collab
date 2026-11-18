@@ -251,8 +251,14 @@ MODULES: dict[str, dict[str, Any]] = {
     # gradient view is consumed in place by both programs);
     # the forward (320 threads, 222,464 B dynamic shared memory) and the four
     # main backward forms (640 threads, 214,208 B; permuted / natural-layout
-    # accumulation, single-pass / key-range-pass) are the NoPE kernels.  Stage
-    # order = launch order.  ``build.json`` carries every library named here
+    # accumulation, single-pass / key-range-pass) are the NoPE kernels.  A call
+    # with a trainable per-head sink runs the forward's sink build
+    # (``nope_fwd_sink``: the forward's arguments plus the FP32 ``sink [64]``,
+    # the forward's launch geometry) in place of ``nope_fwd`` and, in its
+    # backward, the sink-gradient stage (``nope_bwd_dsink``, 256 threads) once
+    # right after the delta stage; both ship for ``sm_100a`` / ``sm_103a`` only
+    # (no scanner-warp sink build).  Stage order = launch order, the sink
+    # stages last.  ``build.json`` carries every library named here
     # once the export delivers it; ``scripts/check_cake_build_manifests.py``
     # reports a registry library the manifest lacks.
     "cake_dsa_h64_nope_train": {
@@ -268,6 +274,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_main_pass_natural",
             "nope_bwd_cast",
             "nope_fwd_scan",
+            "nope_fwd_sink",
+            "nope_bwd_dsink",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -400,6 +408,30 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": True,
             },
         },
+        "nope_fwd_sink": {
+            "library": "cake_dsa_h64_nope_train_f41a0f9f0e10448aaf94",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [320, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
+        "nope_bwd_dsink": {
+            "library": "cake_dsa_h64_nope_train_cf51de6f7c115ad9def7",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [256, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 0,
+                "use_pdl": False,
+            },
+        },
     },
 }
 
@@ -427,9 +459,16 @@ NOPE_FORWARD_STAGES = NOPE_STAGES[:1]
 # forward stage; the device's architecture alone chooses.  Same arguments,
 # grid and outputs as the forward they replace.
 SCAN_STAGES = {"fwd": "fwd_scan", "nope_fwd": "nope_fwd_scan"}
+# The NoPE program's trainable-sink stages: the forward's sink build, which runs in place of ``nope_fwd`` when a call
+# passes a sink (same arguments plus ``sink``, same grid and outputs; its ``lse`` includes the sink), and the
+# sink-gradient stage the backward of such a call launches once after the delta stage.  Their entries' ``arches``
+# name the architectures that ship them.
+NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
+NOPE_DSINK_STAGE = "nope_bwd_dsink"
+NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
 STAGES_OF = {
     PROGRAM: STAGES + (SCAN_STAGES["fwd"],),
-    NOPE_PROGRAM: NOPE_STAGES + (SCAN_STAGES["nope_fwd"],),
+    NOPE_PROGRAM: NOPE_STAGES + (SCAN_STAGES["nope_fwd"],) + NOPE_SINK_STAGES,
 }
 
 

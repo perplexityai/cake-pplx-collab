@@ -14,8 +14,9 @@ SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
 the acceptance architecture of the packed / strided-layout extension.  On
 `sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan` and
 `nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
-`sm_100a` and `sm_103a`; the other stages compile from the same sources for
-all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
+`sm_100a` and `sm_103a`, as do the NoPE trainable-sink stages `nope_fwd_sink` /
+`nope_bwd_dsink` (see "Trainable per-head sink"); the other stages compile from
+the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
 in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
 or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
 `nope_bwd_delta` and `index_prep`, which need 12.8.  The feature does not
@@ -764,6 +765,66 @@ whether the record registers the stages a call needs for the device; the NoPE
 GPU tests additionally skip while `build.json` lacks a registered NoPE library
 (the export delivers the libraries).
 
+### Trainable per-head sink (NoPE, `sm_100a` / `sm_103a`)
+
+The flat NoPE entries -- `cake_dsa_sparse_attention_nondet_nope` and the step
+pair `cake_dsa_sparse_attention_nondet_train_nope_forward` / `_backward` (and,
+in this backend, `forward_nope`, `backward_nope` and `prepare_dsa_nope_train`)
+-- take an optional `sink`: FP32 `[64]`, contiguous, on the device of `q`.
+Per row `t` and head `h`, over the valid slots `j`:
+
+```text
+s_j      = softmax_scale * <q[t,h], kv_j>
+lse[t,h] = log(sum_j exp(s_j) + exp(sink[h]))      # the sink is not scaled
+out      = BF16(sum_j exp(s_j - lse) * kv_j)       # the sink has no value term
+delta    = <dout[t,h], out + o_lo>
+dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
+```
+
+* Forward: the stage `nope_fwd_sink` (the forward's sink build: the forward's
+  arguments plus `sink`, its grid and launch geometry) runs in place of
+  `nope_fwd`.  It folds the sink into the final normalisation of the FP32
+  softmax and rounds `out` and the residual `o_lo` once from that sum (not a
+  rescaled sink-free output).  `lse` includes the sink.  A row without a valid
+  slot gives `out = o_lo = 0` and `lse = sink[h]` (`-inf` for a `-inf` head);
+  a `-inf` head behaves as without a sink; a sink far above every score of its
+  row (beyond FP32's `exp` range) gives `out = 0`, `lse = sink[h]` and finite
+  gradients.
+* Backward: the main stages are unchanged -- they recompute
+  `P = exp(s - lse)` from the saved `lse`, which already includes the sink, so
+  `dq` and `dkv` follow the formulas above on every route (single pass or
+  `key_passes`, natural or permuted drain, `dkv_acc` / `dkv_dst_map`,
+  head-major `dout`).  The stage `nope_bwd_dsink` (256 threads) runs once over
+  all `T` rows right after `nope_bwd_delta`, outside the key passes and token
+  chunks.  It splits the rows into fixed chunks of `NOPE_DSINK_CHUNK_TOKENS`
+  (64) tokens, writes one FP32 partial per (chunk, head) to the workspace
+  (`dsink_partial`, `ceil(T / 64) x 64` FP32); the CTA that completes the
+  grid (`dsink_ticket`: a 32-bit completion counter, zero-filled by the host
+  before every backward) sums the partials in chunk order, so `dsink` depends
+  on `T` only, not on the SM count or the grid.  A row without a valid slot (`delta = 0`) and a `-inf`
+  head contribute exactly 0.  FP32 throughout.
+* Returns: the step backward returns `(dq, dkv, dsink)` when it is given the
+  `sink` its forward ran with (`(dq, dkv)` without one, as before); the
+  autograd entry returns `dsink` as the gradient of `sink` (its thirteenth
+  input); the prepared runner's `backward()` returns `(dq, dkv, dsink)`.
+  `lse` stays non-differentiable.
+* Checks: metadata only (dtype, shape, contiguity, the device of the other
+  tensors), no value check and no device synchronization; `+inf` and NaN
+  values are not supported.  The binding keys end with the sink's geometry, so
+  a sink call and a call without one never share a plan, and new `T` / `S`
+  values reuse the compiled stages.
+* State: a call with a sink retains one more tensor for its backward -- the
+  reference to the caller's `sink` (`ctx.save_for_backward`, so non-reentrant
+  checkpointing releases and recomputes it like the others).  The workspace
+  grows by the sink-gradient scratch, `ceil(T / 64) * 256 + 4` bytes
+  (`dsa_nope_train_workspace_size(..., sink=True)`, the regions
+  `dsink_partial` / `dsink_ticket` of `workspace_layout_nope`); `dsink [64]`
+  is an output.
+* Not supported yet (`NotImplementedError`): a sink on `sm_107a` (no
+  scanner-warp sink build ships), a sink on the packed (varlen) NoPE entries
+  (their per-document forward has no sink build), and a sink in the
+  deterministic package.
+
 ## Layout of this package
 
 * `cake_jit.py` -- the `MODULES` registry (one record per program, the rope
@@ -777,16 +838,18 @@ GPU tests additionally skip while `build.json` lacks a registered NoPE library
   program)` loads through `cake_build`.  Stages of the two programs that
   share a kernel name the same library stem.  A stage entry may narrow the
   record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan`:
-  `sm_107a`; `fwd` / `nope_fwd`: `sm_100a`, `sm_103a`); `SCAN_STAGES` and
+  `sm_107a`; `fwd` / `nope_fwd` and the sink stages `nope_fwd_sink` /
+  `nope_bwd_dsink`: `sm_100a`, `sm_103a`); `SCAN_STAGES` and
   `stage_for` resolve a forward on `sm_107a` to its scanner-warp stage, and
   `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`, written by the export): one entry per `<library>_<arch>`
-  (sixteen libraries over twelve kernel sources, four of them compiled a
-  second time with `-DDKV_NATURAL=1`; fourteen per architecture, the
-  scanner-warp forwards on `sm_107a` only and `fwd` / `nope_fwd` on `sm_100a`
-  and `sm_103a`) with its translation
+  (eighteen libraries over fourteen kernel sources, four of them compiled a
+  second time with `-DDKV_NATURAL=1`; sixteen on `sm_100a` and `sm_103a` and
+  fourteen on `sm_107a`: the scanner-warp forwards on `sm_107a` only, and `fwd`
+  / `nope_fwd` and the two NoPE sink stages on `sm_100a` and `sm_103a`) with
+  its translation
   units, digests, nvcc flags (`--use_fast_math` per stage, plus the natural
   variants' specialization defines), closure digest and `aot/<name>.so`
   path.  `cake_build.load_library(name)` loads the prebuilt library when
@@ -824,10 +887,11 @@ backward preprocess, backward main (single-pass and key-range-pass form with
 its compaction, each with its natural-layout direct-accumulation variant) and
 cast stages plus the key-range-pass and direct-accumulation policies, exported
 from the kernel snapshot named in the pull request, and the NoPE program's
-record with its ten stages (the forward and, on `sm_107a`, its scanner-warp
+record with its twelve stages (the forward and, on `sm_107a`, its scanner-warp
 build `nope_fwd_scan`; the delta, compaction and cast kernels shared with
-the rope program) and its own key-range-pass and direct-accumulation policies
-(see "NoPE (zero-rope) program").
+the rope program; the trainable-sink stages `nope_fwd_sink` and
+`nope_bwd_dsink` on `sm_100a` / `sm_103a`) and its own key-range-pass and
+direct-accumulation policies (see "NoPE (zero-rope) program").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability
