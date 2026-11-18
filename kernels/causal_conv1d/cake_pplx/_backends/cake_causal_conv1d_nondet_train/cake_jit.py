@@ -4353,7 +4353,10 @@ PLAN_SCALARS = (
     "n_sub",
     "n_ch_tiles",
 )
-LOGICAL_SCALARS = (*PLAN_SCALARS, "flags")
+# ``enable_pdl`` (0 or 1) is the per-call launch scalar of a record whose
+# ``launch.use_pdl`` is ``"runtime"``: its binding sets the programmatic
+# dependent launch attribute only when it is 1 (:func:`pdl_enabled`).
+LOGICAL_SCALARS = (*PLAN_SCALARS, "flags", "enable_pdl")
 
 
 def arch_for_capability(device_capability: Sequence[int]) -> str | None:
@@ -4517,26 +4520,75 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
     return int(S) >= floor
 
 
+# The rows where a backward route runs its fallback program (the route's record
+# without a ``select_rule``) in place of the program its selection rules pick,
+# ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}``: a backward call of
+# ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8)
+# and ``S_min <= S <= S_max`` tokens launches the fallback
+# (:func:`selected_modules`); its tiles stay the route's (:func:`plan`).  The
+# keys of one ``(arch, route)`` are disjoint.  Written by the exporter from the
+# backward kernel generator's table; every other channel count, route, ``S``
+# and architecture selects by the rules.
+FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("bwd", 520, 760): (1, 131072),
+        ("bwd", 768, 768): (1, 262144),
+        ("bwd", 776, 1016): (1, 62585),
+    },
+    "sm_103a": {
+        ("bwd", 520, 760): (1, 31292),
+        ("bwd", 768, 768): (1, 250340),
+        ("bwd", 776, 1016): (1, 125170),
+    },
+}
+
+
+def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
+    """The ``(S_min, S_max)`` of the :data:`FALLBACK_ROWS` key of ``arch`` on
+    route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
+    8), ``None`` without one: inside that token range (both bounds included)
+    the call launches the route's fallback program."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), (s_min, s_max) in FALLBACK_ROWS.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return int(s_min), int(s_max)
+    return None
+
+
 def selected_modules(
     arch: str, kind: str, *, C: int, S: int | None = None
 ) -> tuple[str, ...]:
     """Ordered module names one public call launches on ``arch`` for ``C`` channels and ``S`` tokens.
 
     A route may carry several programs of its kernel and launches exactly one:
-    of the records whose :func:`select_rule` admits the call on ``arch`` the
-    one of the highest channel threshold, else the route's single fallback
-    record (the one without a rule).  The choice is a pure function of the
-    architecture, the route, ``C`` and ``S`` -- ``S`` enters only through a
-    rule's token floor, and the host never reads the data -- so a given ``(S,
-    C, device)`` always runs the same program of a route (``dx`` is that
-    program's bits; ``dweight`` / ``dbias`` are summed in an unordered
-    cross-CTA order).  Two records of one channel threshold that
-    both reach ``C``, or zero or several fallbacks, are registry errors
-    (``RuntimeError``); an unknown rule kind, or ``S`` of ``None`` where a
-    token floor decides, is a ``ValueError``.
+    at a row of :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``)
+    the route's single fallback record (the one without a rule); elsewhere, of
+    the records whose :func:`select_rule` admits the call on ``arch`` the one
+    of the highest channel threshold, else the fallback.  The choice is a pure
+    function of the architecture, the route, ``C`` and ``S`` -- ``S`` enters
+    only through a rule's token floor or a :data:`FALLBACK_ROWS` range, and
+    the host never reads the data -- so a given ``(S, C, device)`` always runs
+    the same program of a route (``dx`` is that program's bits; ``dweight`` /
+    ``dbias`` are summed in an unordered cross-CTA order).  Two records of one
+    channel threshold that both reach ``C``, or zero or several fallbacks, are
+    registry errors (``RuntimeError``); an unknown rule kind, or ``S`` of
+    ``None`` where a token floor decides or a :data:`FALLBACK_ROWS` key covers
+    ``C``, is a ``ValueError``.
     """
 
     candidates, fallback = _ranked_candidates(arch, kind, C)
+    bounds = fallback_row_range(arch, kind, C)
+    if bounds is not None:
+        if S is None:
+            raise ValueError(
+                f"the Cake causal conv1d training {kind!r} route on {arch} for C={int(C)} runs its fallback "
+                f"program at S {bounds[0]} to {bounds[1]}; the selection needs S"
+            )
+        if bounds[0] <= int(S) <= bounds[1]:
+            return (fallback,)
     for name in candidates:
         if _admits(select_rule(MODULES[name]), arch=arch, C=C, S=S):
             return (name,)
@@ -4575,13 +4627,16 @@ def _ranked_candidates(arch: str, kind: str, C: int) -> tuple[tuple[str, ...], s
 
 
 def tokens_select(arch: str, kind: str, C: int) -> bool:
-    """Whether ``S`` enters :func:`selected_modules` for ``C`` channels of ``kind`` on ``arch``.
+    """Whether a token floor of the selection rules decides :func:`selected_modules` for ``C`` channels of
+    ``kind`` on ``arch``.
 
     A record whose channel threshold ``C`` reaches admits the call unless its
-    rule has a token floor, so the selection reads ``S`` exactly when the
+    rule has a token floor, so the rules read ``S`` exactly when the
     highest-threshold record ``C`` reaches has one (in this registry the
-    sm_107a ``bwd`` route at ``256 <= C < 512``); every other row selects one
-    program whatever ``S``.
+    sm_107a ``bwd`` route at ``256 <= C < 512``); every other row's rules
+    select one program whatever ``S``.  A :data:`FALLBACK_ROWS` key reads
+    ``S`` too, as one range compare (:func:`fallback_row_range`; the row plan
+    of each side is :func:`plan_row`'s ``inside``).
     """
 
     candidates, _ = _ranked_candidates(arch, kind, C)
@@ -4748,28 +4803,38 @@ FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
     "sm_107a": {72: 40960, 80: 36864},
 }
 FORWARD_NARROW_MIN_S: dict[str, int] = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
-# ``{arch: ((cv, S), ...)}``, ``cv`` ascending: the narrow rows of at least
-# ``cv`` channel vectors take the token floor ``S`` on ``arch`` instead of
-# the architecture's :data:`FORWARD_NARROW_MIN_S` floor (the last entry they
-# reach wins); read through :func:`forward_narrow_min_s`.
-FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int], ...]] = {"sm_103a": ((89, 20480),)}
+# ``{arch: ((cv, S, routes), ...)}``, ``cv`` non-decreasing: on ``arch`` the
+# narrow forward rows of at least ``cv`` channel vectors on a forward route of
+# ``routes`` take the token floor ``S`` instead of the architecture's
+# :data:`FORWARD_NARROW_MIN_S` floor (of the entries a row reaches on its
+# route, the last wins); read through :func:`forward_narrow_min_s`.
+# ``routes`` is a non-empty tuple of :data:`FORWARD_NARROW_ROUTES` in that
+# order.  ``fwd_bias`` covers both tap dtypes: the plan does not see the taps'
+# dtype.
+FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int, tuple[str, ...]], ...]] = {
+    "sm_103a": ((89, 20480, ("fwd_bias",)),),
+}
 
 
-def forward_narrow_min_s(arch: str | None, channel_vectors: int) -> int | None:
+def forward_narrow_min_s(arch: str | None, channel_vectors: int, *, route: str) -> int | None:
     """The token floor from which the forward row of ``channel_vectors``
-    vectors on ``arch`` plans as the deterministic forward: the
-    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the last entry of ``arch``
-    whose channel-vector count the row reaches, else the architecture's
-    :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the single tile at every
-    ``S``) on an architecture :data:`FORWARD_NARROW_MIN_S` does not list.
-    The per-call plan (:func:`_forward_tiles`), the row plan
-    (:func:`plan_row`) and the tests read the floor here."""
+    vectors on route ``route`` (one of :data:`FORWARD_NARROW_ROUTES`, a
+    ``ValueError`` otherwise) on ``arch`` plans as the deterministic forward:
+    the floor of the last :data:`FORWARD_NARROW_ROW_MIN_S` entry of ``arch``
+    that lists ``route`` and whose channel-vector count the row reaches, else
+    the architecture's :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the
+    single tile at every ``S``) on an architecture
+    :data:`FORWARD_NARROW_MIN_S` does not list.  The per-call plan
+    (:func:`_forward_tiles`), the row plan (:func:`plan_row`) and the tests
+    read the floor here."""
 
+    if route not in FORWARD_NARROW_ROUTES:
+        raise ValueError(f"route must be one of {FORWARD_NARROW_ROUTES}, got {route!r}")
     floor = FORWARD_NARROW_MIN_S.get(arch)
     if floor is None:
         return None
-    for cv, S in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
-        if int(channel_vectors) >= int(cv):
+    for cv, S, routes in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
+        if int(channel_vectors) >= int(cv) and route in routes:
             floor = S
     return int(floor)
 
@@ -4879,7 +4944,7 @@ def _forward_tiles(
         return "one"
     if route not in FORWARD_NARROW_ROUTES:
         return "one"
-    min_s = forward_narrow_min_s(arch, channel_vectors)
+    min_s = forward_narrow_min_s(arch, channel_vectors, route=route)
     if min_s is None or int(S) < min_s:
         return "one"
     floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
@@ -5578,7 +5643,8 @@ def launch_grid(
 
 
 class RowPlan(NamedTuple):
-    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` -- for every ``S`` and
+    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` and, where a
+    :data:`FALLBACK_ROWS` key covers the row, the side of its token range -- for every ``S`` of that side and
     ``num_docs`` (:func:`plan_row`); :func:`row_launch` completes it for one call."""
 
     # The programs the row launches (:func:`selected_modules`) and the record of the first.
@@ -5599,29 +5665,49 @@ class RowPlan(NamedTuple):
 
 
 def plan_row(
-    arch: str, kind: str, C: int, *, device_index: int, bwd_grid_mult: int = 1
+    arch: str,
+    kind: str,
+    C: int,
+    *,
+    device_index: int,
+    bwd_grid_mult: int = 1,
+    inside: bool | None = None,
 ) -> RowPlan | None:
     """The :class:`RowPlan` of the calls of route ``kind`` with ``C`` channels on device ``device_index`` (of
     architecture ``arch``) launching ``bwd_grid_mult`` times the untrimmed backward grid (1: the default grid), or
-    ``None`` where the program selection reads ``S`` (:func:`tokens_select`).
+    ``None`` where a token floor of the selection rules decides the program (:func:`tokens_select`).
 
-    ``S`` enters a call's host plan only through a token floor of the
-    route's selection rules, the ``[S_min, S_max]`` range of the record's
-    :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors
-    of a narrow forward row (:func:`forward_narrow_min_s` and
-    :data:`FORWARD_WIDTH_FLOORS`) and the trim of :func:`launch_grid` (an
-    ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs``
-    only through :func:`search_steps`; so with this row :func:`row_launch`
-    returns what :func:`plan` and :func:`launch_grid` return for the call
-    (the planning ``_launch`` does: ``plan(..., arch=, route=)`` with the
-    record's route) without selecting, splitting or sizing the grid again.
-    Registry errors raise as in :func:`selected_modules`.
+    Where a :data:`FALLBACK_ROWS` key covers ``(kind, C)`` on ``arch`` (:func:`fallback_row_range`) the row has
+    two sides and ``inside`` names one (``ValueError`` when it is ``None``): ``True`` plans the calls with ``S``
+    inside the key's ``[S_min, S_max]`` (the route's fallback program), ``False`` the calls outside it (the
+    program the selection rules pick there, or ``None`` where a token floor decides); elsewhere ``inside`` is not
+    read.  ``S`` enters a call's host plan only through that range, a token floor of the route's selection rules,
+    the ``[S_min, S_max]`` range of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token
+    floors of a narrow forward row (:func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS`) and the trim
+    of :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only
+    through :func:`search_steps`; so with this row (of the call's side) :func:`row_launch` returns what
+    :func:`plan` and :func:`launch_grid` return for the call (the planning ``_launch`` does: ``plan(..., arch=,
+    route=)`` with the record's route) without selecting, splitting or sizing the grid again.  Registry errors
+    raise as in :func:`selected_modules`.
     """
 
     C = int(C)
-    if tokens_select(arch, kind, C):
+    S: int | None = None
+    bounds = fallback_row_range(arch, kind, C)
+    if bounds is not None:
+        if inside is None:
+            raise ValueError(
+                f"the {kind!r} route on {arch} for C={C} runs its fallback program at S {bounds[0]} to "
+                f"{bounds[1]}; plan_row needs inside= (the side of that range the row plans)"
+            )
+        # One token count of the side: the key's S_min inside, the token count after S_max (or before S_min) outside.
+        if inside:
+            S = bounds[0]
+        else:
+            S = bounds[1] + 1 if bounds[1] < INT32_MAX else bounds[0] - 1
+    if not (bounds is not None and inside) and tokens_select(arch, kind, C):
         return None
-    names = selected_modules(arch, kind, C=C)
+    names = selected_modules(arch, kind, C=C, S=S)
     record = MODULES[names[0]]
     rule = record["grid_rule"]
     geometry, role = rule["geometry"], record["role"]
@@ -5635,7 +5721,7 @@ def plan_row(
         floors = sorted(
             {
                 int(S)
-                for S in (forward_narrow_min_s(arch, cv), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
+                for S in (forward_narrow_min_s(arch, cv, route=route), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
                 if S is not None
             }
         )
@@ -5985,6 +6071,25 @@ def _stream_context(device_index: int) -> Any:
     return tvm_ffi.use_raw_stream(device, _raw_stream_getter()(device_index))
 
 
+# The programmatic dependent launch policy of the records whose ``launch.use_pdl`` is ``"runtime"`` (their binding
+# takes the ``enable_pdl`` launch scalar, :data:`LOGICAL_SCALARS`), per architecture: ``PDL_EAGER[arch]`` for a call
+# outside a CUDA Graph capture, ``PDL_GRAPH[arch]`` for a call inside one (read through :func:`pdl_enabled`).  With
+# the attribute the launch may start while the stream's preceding kernel finishes; every program waits for that
+# kernel (``griddepcontrol.wait``) before it reads or writes global memory, so the results are the same either way.
+PDL_EAGER: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+PDL_GRAPH: dict[str, bool] = {"sm_100a": False, "sm_103a": False, "sm_107a": False}
+
+
+def pdl_enabled(arch: str, *, capturing: bool) -> int:
+    """The ``enable_pdl`` value, 0 or 1, of a launch on ``arch`` (one of :data:`ARCHES`, a ``ValueError``
+    otherwise): :data:`PDL_GRAPH` inside a CUDA Graph capture (``capturing``), else :data:`PDL_EAGER`.  A record
+    whose ``launch.use_pdl`` is not ``"runtime"`` binds no ``enable_pdl`` and ignores the value."""
+
+    if arch not in ARCHES:
+        raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
+    return int(bool((PDL_GRAPH if capturing else PDL_EAGER)[arch]))
+
+
 def run_modules(
     launches: Sequence[tuple[str, tuple[int, int, int] | None]],
     values: dict[str, Any],
@@ -6064,6 +6169,8 @@ __all__ = [
     "LOGICAL_TENSORS",
     "MODULES",
     "PAIR_ROUTES",
+    "PDL_EAGER",
+    "PDL_GRAPH",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
@@ -6089,6 +6196,7 @@ __all__ = [
     "class_aligned_grid",
     "counter_words",
     "device_arch",
+    "fallback_row_range",
     "forward_kinds",
     "forward_route",
     "forward_workspace_words",
@@ -6099,6 +6207,7 @@ __all__ = [
     "library_name",
     "load",
     "main_grid",
+    "pdl_enabled",
     "plan",
     "record_route",
     "route_applies",
