@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 16 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 17 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,7 +11,7 @@ This page covers the public modules of all 16 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, and fmha has only a backward step (`cake_fmha_nondet_train_backward`). Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -38,6 +38,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for any output. | Alerts before a K-sliced `dX` reduction |
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
+| engram_lookup | Has no nondet module | — |
 
 ---
 
@@ -1561,6 +1562,72 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 - Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them.
 - No double backward (`create_graph`). No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
+
+---
+
+## engram_lookup
+
+**Computes.** The Engram row lookup for training: rows of a quantized table, gathered by row id and written as BF16.
+
+- `weight` holds FP8 E4M3 values `[R, 256]` and `scale` one E8M0 scale per 32 columns `[R, 8]`. For each looked-up row `p` with `r = row_ids[p]`, group `g` in `[0, 8)` and `j` in `[0, 32)`: `out[p, 32*g + j] = BF16(float32(weight[r, 32*g + j]) * float32(scale[r, g]))`.
+- Each element is the exact product rounded once to BF16 (round to nearest even), as an FP64 reference rounds it. FP32-subnormal products are kept, products past the FP32 range are `±inf`, and the E8M0 byte `0xFF` (NaN) makes its 32 columns NaN.
+- One kernel runs on the current stream and reads only the looked-up rows, so time and memory follow the number of looked-up rows, not `R`.
+- The family has no backward and no autograd entry. The table's gradient does not depend on its storage format; the caller sums it.
+
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError` (an empty lookup returns before that check). The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
+
+**Inputs.**
+
+- `weight`: `float8_e4m3fn [R, 256]`. `scale`: `float8_e8m0fnu [R, 8]` with `weight`'s `R`.
+- Each of `weight` and `scale` has a unit column stride, a row stride that is a multiple of 8 elements and a start on an 8-byte boundary. They are two contiguous tensors, or two views into one packed `uint8 [R, 264]` buffer (row stride 264), as rows fetched from other ranks arrive. Both layouts give the same output bytes.
+- `row_ids`: contiguous int64 of any shape, fewer than 2^31 - 8 elements: `[T, 24]` for a direct lookup, `[M]` for deduplicated or routed rows. Values in `[0, R)`; repeats are allowed. An id outside `[0, R)` (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize).
+- All operands are on one CUDA device.
+
+### `cake_pplx.cake_engram_lookup_det_train`
+
+This family has a det module only, with no nondet or KCP module: a gather has no sums, so det is the only mode, and the lookup is a single-rank local lookup. Every output element is one product rounded once, so the output repeats bit for bit, for both layouts and every `row_ids` shape. No call reads torch's deterministic-algorithms setting, and no call alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/engram_lookup/cake_pplx/cake_engram_lookup_det_train.py`](../kernels/engram_lookup/cake_pplx/cake_engram_lookup_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_engram_lookup_det_train_forward` | `(weight, scale, row_ids)` | As above. | Returns a new contiguous BF16 `[*row_ids.shape, 256]` that does not require a gradient. Not autograd; it works inside `torch.utils.checkpoint(..., use_reentrant=False)`. An empty `row_ids` (`T == 0` or `M == 0`) returns an empty output without a launch. Workspace: none. The call allocates only the output (`row_ids.numel() * 512` bytes) and retains no state. One program per architecture serves every `R`, `T` and `M` and both layouts, with no recompilation and no host synchronization. A malformed call raises `ValueError` before any launch. |
+| `cake_engram_lookup_det_train_split_packed` | `(buf)` | `buf`: `uint8 [R, 264]` with a unit column stride, on any device | Returns `(weight, scale)`: `buf[:, :256]` as `float8_e4m3fn` and `buf[:, 256:]` as `float8_e8m0fnu`. Views that share `buf`'s storage and row stride; nothing is copied. Another dtype, rank, width or column stride raises `ValueError`. |
+
+**Options and environment.** The entries take no keyword argument. The facade reads no environment variable.
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+import torch
+from cake_pplx.cake_engram_lookup_det_train import (
+    cake_engram_lookup_det_train_forward,
+    cake_engram_lookup_det_train_split_packed,
+)
+
+R, T = 1_000_000, 4096
+# A local shard: E4M3 values and one E8M0 scale per 32 columns (the byte 127 is the scale 1.0).
+weight = (torch.randn(R, 256, device="cuda") * 8).clamp(-448, 448).to(torch.float8_e4m3fn)
+scale = torch.randint(120, 135, (R, 8), device="cuda", dtype=torch.uint8).view(torch.float8_e8m0fnu)
+row_ids = torch.randint(0, R, (T, 24), device="cuda")
+rows = cake_engram_lookup_det_train_forward(weight, scale, row_ids)  # BF16 [T, 24, 256]
+x = rows.flatten(-2)                                                 # BF16 [T, 6144]
+
+# Rows fetched from other ranks: one packed uint8 [M, 264] buffer.
+M = 2048
+fetched = torch.empty(M, 264, device="cuda", dtype=torch.uint8)
+fetched[:, :256] = weight[:M].view(torch.uint8)
+fetched[:, 256:] = scale[:M].view(torch.uint8)
+w, s = cake_engram_lookup_det_train_split_packed(fetched)
+out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))  # BF16 [M, 256]
+```
+
+**Caveats.**
+
+- Forward only: there is no backward and no autograd entry.
+- The row width is 256 with 8 scales per row.
+- `row_ids` must lie in `[0, R)`; see Inputs for what an id outside that range does.
+- `weight` and `scale` need a unit column stride, a row stride that is a multiple of 8 elements and an 8-byte aligned start. A packed `[R, 264]` buffer from the caching allocator meets these rules.
 
 ---
 
