@@ -1997,15 +1997,16 @@ def _posted(sem: int) -> bool:
 
 
 # The seconds after which :func:`_stream_held` lets its stream go on by itself (the block then fails).
-HOLD_TIMEOUT = 120.0
+HOLD_TIMEOUT = 60.0
 
 
 @contextlib.contextmanager
 def _stream_held(stream: torch.cuda.Stream):
     """The work queued on ``stream`` inside the block starts on the device only when the block ends: the stream first
     waits (``cuStreamWaitValue32``) for a mapped pinned host word that the block's end sets to 1, so checks inside the
-    block see that work not started, whatever the host's speed.  If the host waits for the stream inside the block, a
-    watchdog sets the word after ``HOLD_TIMEOUT`` seconds and the block fails."""
+    block see that work not started, whatever the host's speed.  If the host waits for the stream inside the block (a
+    call that synchronizes the device, such as a program's first launch in the process under CUDA's lazy module
+    loading), a watchdog sets the word after ``HOLD_TIMEOUT`` seconds and sets the yielded event; the block fails."""
 
     from cuda.bindings import driver, runtime
 
@@ -2028,7 +2029,7 @@ def _stream_held(stream: torch.cuda.Stream):
         watchdog = threading.Timer(HOLD_TIMEOUT, release)
         watchdog.start()
         try:
-            yield
+            yield fired
         finally:
             watchdog.cancel()
             value.value = 1
@@ -2736,8 +2737,9 @@ def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypa
 
 def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
     """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
-    C 1280 and then C 2560 on another stream, held on the device until the checks end (:func:`_stream_held`: their
-    zero fills and readiness copies wait), each raise the pool size: the idle buffers below the new size leave the
+    C 1280 and then C 2560 on another stream (their programs launched once before, on caller-owned workspaces), held
+    on the device until the checks end (:func:`_stream_held`: their zero fills and readiness copies wait; the host
+    never waits for the stream), each raise the pool size: the idle buffers below the new size leave the
     pool and ``_POOL_DEPTH`` buffers of the new size replace them, a released buffer whose readiness copy has not run
     gives its flag back as pending, and no semaphore or flag serves two buffers.  CUDA gets the released idle buffers'
     user objects only after the checks, so their semaphores are not posted at the second growth's drain: they stay
@@ -2786,14 +2788,25 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
         deferred.append((obj, sem))
         uo.retired.append(sem)
 
+    # the eager steps' programs launched once first, on caller-owned workspaces (no pool refill): a program's first
+    # launch in the process may synchronize the device (CUDA's lazy module loading), a wait for the held stream
+    for (S, C, _), (x, w, cu, dy, b), out in zip(cases[1:], inputs[1:], outs[1:], strict=True):
+        _forward(x, w, cu, bias=b, out=out["y"][0],
+                 workspace=pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device))
+        _backward(x, w, cu, dy, b, ROUTE_SETTINGS[kind]["policy"], kind=kind,
+                  workspace=pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device),
+                  dx=out["dx"][0], dweight=out["dweight"][0], dbias=out["dbias"][0] if out["dbias"] else None)
+    torch.cuda.synchronize(device)
+    assert state() == stages[0], "an eager call with caller-owned workspaces changed the pool"
     stream_b.wait_stream(torch.cuda.current_stream(device))
     try:
-        with pytest.MonkeyPatch.context() as patch, _stream_held(stream_b):
+        with pytest.MonkeyPatch.context() as patch, _stream_held(stream_b) as waited:
             patch.setattr(uo, "release", release_later)
             with torch.cuda.stream(stream_b):
                 for i in (1, 2):
                     _phase_step("step", inputs[i], outs[i], kind)
                     stages.append(state())
+            assert not waited.is_set(), "the host waited for the held stream (a call that synchronizes the device)"
             assert not stream_b.query(), "the held stream ran"
             pending = {f[2] for f in uo.pending_flags}
             free = {f[2] for f in uo.free_flags}
