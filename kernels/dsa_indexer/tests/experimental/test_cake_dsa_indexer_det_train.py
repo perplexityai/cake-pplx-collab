@@ -29,6 +29,13 @@ limitations under the License.
 # points (``cake_pplx.cake_dsa_indexer_det_train``) are covered by
 # ``test_cake_dsa_indexer_det_train_api.py`` and their naming rules by
 # ``test_cake_dsa_indexer_det_train_names.py``.
+#
+# Accuracy (``tests/experimental/test_helpers/cake_dsa_indexer_naive.py``): the ids and the per-row count of a result
+# are integers and equal the exact selection of inputs whose scores are exact in FP32 (integer values); the scores
+# are floating and are judged over 32 draws against their FP64 values beside the naive tier's (the same scores in
+# torch BF16), on those inputs and at the kernel's own keys on Gaussian inputs.  A single call on such inputs is held
+# to that exact contract only.  The bitwise checks of this suite are the package's own: a call repeats bit for bit,
+# and the partition knobs, the dispatched program and the workspace and graph paths never change a result.
 
 import dataclasses
 import itertools
@@ -42,6 +49,7 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.experimental.test_helpers import cake_dsa_indexer_naive as naive
 from tests.experimental.test_helpers import cake_dsa_indexer_reference as ref
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -260,14 +268,6 @@ def _plan(inputs: ref.IndexerInputs, **extra):
         device=inputs.device,
         **extra,
     )
-
-
-def _judge_ok(result, reference, **kw) -> ref.Judgement:
-    if kw.get("exact_bits") and "zero_sign_policy" not in kw:
-        kw["zero_sign_policy"] = record_zero_sign_policy()
-    verdict = ref.judge(result, reference, **kw)
-    assert verdict.passed, str(verdict)
-    return verdict
 
 
 def _independent_membership_check(
@@ -3631,7 +3631,9 @@ def test_bind_program_orders_arguments_and_fails_closed(monkeypatch):
     [(0, 5, 1, None), (1, 1, 1, [2, -1]), (2, 3, 2, None), (3, 20, 1, None)],
 )
 def test_reference_matches_bruteforce(seed, top_k, ratio, offsets):
-    inputs = ref.make_random_inputs(
+    """The FP64 selection, the exact selection and the pure-Python per-row selection agree exactly on integer inputs
+    (every score exact in FP32 and FP64): ids, FP64 scores and FP32 scores, with intact structure."""
+    inputs = ref.make_integer_inputs(
         [9, 6],
         [11, 7],
         top_k=top_k,
@@ -3639,17 +3641,18 @@ def test_reference_matches_bruteforce(seed, top_k, ratio, offsets):
         device="cpu",
         ratio=ratio,
         q_causal_offsets=offsets,
-        softmax_scale=0.3,
     )
+    assert ref.exact_inputs(inputs) is None
     result = ref.select_reference(inputs, order="sequential")
+    exact = ref.exact_selection(inputs)
     ids, scores = ref.bruteforce_rows(inputs)
     assert result.indices.tolist() == ids
-    got = result.scores_fp64.tolist()
-    for row_got, row_exp in zip(got, scores, strict=True):
-        for a, b in zip(row_got, row_exp, strict=True):
-            assert a == b or abs(a - b) <= 1e-12 * max(1.0, abs(b)), (a, b)
+    assert exact.indices.tolist() == ids
+    assert result.scores_fp64.tolist() == scores
+    assert exact.scores_fp64.tolist() == scores
+    assert ref.same_bits((exact.indices, exact.scores), (result.indices, result.scores))
     assert not ref.structure_failures(inputs, result.indices, result.scores)
-    assert ref.judge((result.indices, result.scores), result, exact_bits=True).passed
+    assert not naive.exact_failures((result.indices, result.scores), inputs, exact)
 
 
 def test_reference_sequential_order_is_partition_invariant():
@@ -3685,13 +3688,8 @@ def test_exact_cases_match_closed_form(name):
         assert bool((bits[zero] == 0).all())
         even = torch.arange(inputs.num_queries) % 2 == 0
         assert bool(zero[even].any()) and bool(zero[~even].any())
-        with pytest.raises(NotImplementedError):
-            ref.judge(
-                (result.indices, result.scores),
-                result,
-                exact_bits=True,
-                zero_sign_policy="ieee_sum",
-            )
+    exact = ref.exact_selection(inputs)
+    assert ref.same_bits((exact.indices, exact.scores), (result.indices, result.scores))
 
 
 # the scaled geometry of the exact cases, small enough for the sequential CPU reference
@@ -3787,11 +3785,14 @@ def test_packed_geometry_extra_segments_keep_the_declared_segments(name):
     assert extra[7] == 64 and extra[15] == 64 and min(extra) >= 56
 
 
-def test_judge_rejects_a_clearly_better_lacking_key_and_bad_bits():
+def test_exact_contract_rejects_a_swapped_key_a_bad_padding_and_a_duplicate():
+    """The exact contract (``naive.exact_failures``) on the exact selection of an exact case: a row that holds an
+    unselected key in place of a selected one breaks ``indices`` exactly; a padding slot with a finite score, a NaN
+    score on a valid slot and a duplicated id break it too."""
     inputs = ref.make_exact_case("distinct", "cpu")
-    reference = ref.select_reference(inputs, order="sequential")
+    reference = ref.exact_selection(inputs)
     ids, scores = reference.indices.clone(), reference.scores.clone()
-    assert ref.judge((ids, scores), reference, exact_bits=True).passed
+    assert not naive.exact_failures((ids, scores), inputs, reference)
     # swap the weakest selected key of row 0 for an unselected, lower-scoring visible key
     row = 0
     n = int(reference.selected_count[row])
@@ -3808,21 +3809,23 @@ def test_judge_rejects_a_clearly_better_lacking_key_and_bad_bits():
         torch.where(ids[row] >= 0, ids[row], torch.full_like(ids[row], 2**31 - 1))
     )
     ids[row], scores[row] = ids[row][order], scores[row][order]
-    verdict = ref.judge((ids, scores), reference)
-    assert not verdict.passed and any(
-        "clearly better" in f for f in verdict.failures
-    ), str(verdict)
-    # a wrong score bit pattern on a correct id
+    failures = naive.exact_failures((ids, scores), inputs, reference)
+    assert any(f.startswith("indices:") for f in failures), failures
+    # a NaN score on a selected id
     ids, scores = reference.indices.clone(), reference.scores.clone()
-    scores[1, 0] = scores[1, 0] + 1.0
-    verdict = ref.judge((ids, scores), reference)
-    assert not verdict.passed and any(
-        "outside the bound" in f for f in verdict.failures
-    ), str(verdict)
+    scores[1, 0] = float("nan")
+    failures = naive.exact_failures((ids, scores), inputs, reference)
+    assert failures, "a NaN score on a valid slot must break the contract"
+    # a padding slot with a finite score
+    ids, scores = reference.indices.clone(), reference.scores.clone()
+    pr, pc = (ids < 0).nonzero()[0].tolist()
+    scores[pr, pc] = 0.0
+    assert naive.exact_failures((ids, scores), inputs, reference)
     # a structural error: a duplicate id
     ids, scores = reference.indices.clone(), reference.scores.clone()
     ids[2, 1] = ids[2, 0]
     assert ref.structure_failures(inputs, ids, scores)
+    assert naive.exact_failures((ids, scores), inputs, reference)
 
 
 # ---------------------------------------------------------------------------
@@ -3832,121 +3835,127 @@ def test_judge_rejects_a_clearly_better_lacking_key_and_bad_bits():
 
 @pytest.mark.parametrize("name", list(ref.EXACT_CASES))
 def test_exact_semantics(name):
+    """The exactly representable cases (fixed patterns: one input each, held to the exact contract): the exact
+    selection's ids and counts, and the oracle's padding."""
     _require_program()
     inputs = ref.make_exact_case(name, "cuda")
-    reference = ref.select_reference(inputs, order="sequential")
-    verdict = _judge_ok(_run(inputs), reference, exact_bits=True)
-    assert verdict.rows_identical == inputs.num_queries
-
-
-def test_signed_zero_bits_follow_the_documented_policy():
-    _require_program()
-    inputs = ref.make_exact_case("signed_zeros", "cuda")
-    indices, scores = _run(inputs)
-    reference = ref.select_reference(inputs, order="sequential")
-    assert torch.equal(
-        indices, reference.indices
-    )  # +0.0 == -0.0 for ranking: the id rule decides inside the zero group
-    policy = record_zero_sign_policy()
-    zero = (scores == 0) & (indices >= 0)
-    assert bool(zero.any())
-    bits = scores.view(torch.int32)
-    if policy != "positive_accumulator":
-        pytest.fail(f"the reference has no model for zero-sign policy {policy!r}")
-    assert bool((bits[zero] == 0).all()), (
-        "the chains start from +0.0 with a fixed FMA order: every zero score is +0.0"
-    )
-    assert torch.equal(bits[zero], reference.scores.view(torch.int32)[zero])
+    naive.assert_exact(_run(inputs), inputs)
 
 
 @pytest.mark.parametrize("name", list(ref.PACKED_GEOMETRIES))
-def test_packed_causality(name):
+def test_packed_causality(name, record_property):
+    """Every packed geometry over 32 integer draws: the exact selection's ids and counts (visibility and segment
+    membership checked once more from the scalar rule in Python on draw 0), the scores judged against the naive tier."""
     _require_program()
-    inputs = ref.make_packed_inputs(name, "cuda")
-    reference = ref.select_reference(inputs)
-    out = _run(inputs)
-    _independent_membership_check(inputs, out[0])
-    _judge_ok(out, reference)
+
+    def check(j, inputs, result, reference):
+        if j == 0:
+            _independent_membership_check(inputs, result[0])
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_packed_inputs(name, "cuda", seed=s),
+        _run,
+        seed=100,
+        check=check,
+    )
 
 
 @pytest.mark.parametrize("seed,peaked", [(1, False), (2, False), (3, True)])
-def test_random_accuracy_within_bound(seed, peaked):
+def test_random_rows_meet_the_naive_tier(seed, peaked, record_property):
+    """Three segments (a causal block, a long key range, a short block), top_k 2048, 32 draws of integer inputs (the
+    exact selection's ids and counts, the scores judged) and 32 Gaussian draws (the scores judged at the kernel's own
+    keys); ``peaked`` makes a few keys per segment dominate most rows."""
     _require_program()
-    inputs = ref.make_random_inputs(
-        [1100, 900, 1000],
-        [1100, 20000, 1000],
+    geometry = dict(
+        seg_q_len=[1100, 900, 1000],
+        seg_k_len=[1100, 20000, 1000],
         top_k=2048,
-        seed=seed,
         device="cuda",
         peaked=peaked,
     )
-    reference = ref.select_reference(inputs)
-    verdict = _judge_ok(_run(inputs), reference)
-    assert (
-        verdict.max_fp32_error_over_bound <= 1.0
-        and verdict.max_fp64_error_over_bound <= 1.0
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_inputs(seed=s, **geometry),
+        _run,
+        seed=seed,
+    )
+    naive.judge_gaussian(
+        record_property,
+        lambda s: ref.make_random_inputs(seed=s, **geometry),
+        _run,
+        seed=seed,
     )
 
 
-def test_near_tie_duplicated_keys_prefer_larger_ids():
-    """Replicated keys give bit-identical scores under any deterministic scheme: the larger id must win."""
+def test_near_tie_duplicated_keys_prefer_larger_ids(record_property):
+    """Replicated keys give bit-identical scores under any deterministic scheme: the larger id must win.  32 draws of
+    integer inputs whose 300 distinct keys are each replicated 8 times in a random order: the exact selection's ids
+    (which keep the larger ids of a cut replica group) and the replica-group rule checked directly on draw 0."""
     _require_program()
     n_distinct, reps, lq, K = 300, 8, 48, 2048
-    base = ref.make_random_inputs([lq], [n_distinct], top_k=K, seed=21, device="cuda")
     lk = n_distinct * reps
-    group = (
-        torch.randperm(
-            lk, generator=torch.Generator(device="cuda").manual_seed(5), device="cuda"
+    groups = {}
+
+    def make(s):
+        base = ref.make_integer_inputs([lq], [n_distinct], top_k=K, seed=s, device="cuda")
+        group = (
+            torch.randperm(
+                lk, generator=torch.Generator(device="cuda").manual_seed(s + 5), device="cuda"
+            )
+            % n_distinct
         )
-        % n_distinct
-    )
-    k = base.k[group].contiguous()
-    inputs = ref.build_inputs(
-        base.q,
-        k,
-        base.w,
-        [lq],
-        [lk],
-        top_k=K,
-        softmax_scale=base.softmax_scale,
-        label="near_tie_duplicates",
-    )
-    reference = ref.select_reference(inputs, order="sequential")
-    out = _run(inputs)
-    _judge_ok(out, reference)
-    ids = out[0].cpu()
-    group_cpu = group.cpu()
-    visible = ref.visible_rows(inputs, device="cpu")
-    for t in range(inputs.num_queries):
-        n = min(K, int(visible[t]))
-        sel = ids[t, :n]
-        sel_groups = group_cpu[sel]
-        for g in sel_groups.unique().tolist():
-            members = (group_cpu[: int(visible[t])] == g).nonzero().squeeze(1)
-            chosen = sel[sel_groups == g]
-            if (
-                chosen.numel() < members.numel()
-            ):  # the cutoff splits this replica group: the largest ids are chosen
-                assert torch.equal(
-                    chosen.sort().values, members.sort().values[-chosen.numel() :]
-                ), (t, g)
+        inputs = ref.build_inputs(
+            base.q,
+            base.k[group].contiguous(),
+            base.w,
+            [lq],
+            [lk],
+            top_k=K,
+            softmax_scale=base.softmax_scale,
+            label="near_tie_duplicates",
+        )
+        groups[id(inputs)] = group
+        return inputs
+
+    def check(j, inputs, out, reference):
+        if j:
+            return
+        ids = out[0].cpu()
+        group_cpu = groups[id(inputs)].cpu()
+        visible = ref.visible_rows(inputs, device="cpu")
+        for t in range(inputs.num_queries):
+            n = min(K, int(visible[t]))
+            sel = ids[t, :n]
+            sel_groups = group_cpu[sel]
+            for g in sel_groups.unique().tolist():
+                members = (group_cpu[: int(visible[t])] == g).nonzero().squeeze(1)
+                chosen = sel[sel_groups == g]
+                if (
+                    chosen.numel() < members.numel()
+                ):  # the cutoff splits this replica group: the largest ids are chosen
+                    assert torch.equal(
+                        chosen.sort().values, members.sort().values[-chosen.numel() :]
+                    ), (t, g)
+
+    naive.judge_exact(record_property, make, _run, seed=21, check=check)
 
 
-def test_near_tie_perturbed_keys_disagree_only_within_uncertainty():
+def test_near_tie_perturbed_keys_select_the_exact_top_k(record_property):
+    """Keys 3000..5999 copy keys 0..2999 with one dimension moved by one (the smallest step of the integer inputs), so
+    most rows hold many pairs of keys whose scores differ by one step or tie: 32 draws, the exact selection's ids and
+    counts, the scores judged."""
     _require_program()
-    inputs = ref.make_random_inputs([64], [6000], top_k=2048, seed=22, device="cuda")
-    k = inputs.k
-    src = torch.arange(0, 3000, device="cuda")
-    k[src + 3000] = k[src]
-    col = k[src + 3000, 0].contiguous()
-    k[src + 3000, 0] = (col.view(torch.int16) + 1).view(
-        torch.bfloat16
-    )  # one BF16 ulp on one dimension
-    reference = ref.select_reference(inputs)
-    verdict = _judge_ok(_run(inputs), reference)
-    assert (
-        verdict.rows_identical + verdict.rows_within_uncertainty == inputs.num_queries
-    )
+
+    def make(s):
+        inputs = ref.make_integer_inputs([64], [6000], top_k=2048, seed=s, device="cuda")
+        k = inputs.k
+        src = torch.arange(0, 3000, device="cuda")
+        k[src + 3000] = k[src]
+        k[src + 3000, 0] = k[src + 3000, 0] + 1
+        return inputs
+
+    naive.judge_exact(record_property, make, _run, seed=22)
 
 
 # ---------------------------------------------------------------------------
@@ -3966,7 +3975,7 @@ def _recorded_inputs(name: str):
         seg_k = list(
             seg_q
         )  # keys per segment = queries per segment keeps the FP64 reference to seconds
-    return ref.make_random_inputs(
+    return ref.make_integer_inputs(
         seg_q, seg_k, top_k=2048, seed=7571, device="cuda", label=name
     )
 
@@ -3976,8 +3985,7 @@ def test_recorded_token_counts(name):
     _require_program()
     inputs = _recorded_inputs(name)
     assert inputs.num_queries in (16231, P2_T)
-    reference = ref.select_reference(inputs)
-    _judge_ok(_run(inputs), reference)
+    naive.assert_exact(_run(inputs), inputs)
 
 
 _BOUNDARY = [
@@ -4031,10 +4039,27 @@ _BOUNDARY += [
 
 
 @pytest.mark.parametrize("lq,lk,top_k", _BOUNDARY)
-def test_tile_boundary_neighbours(lq, lk, top_k):
+def test_tile_boundary_neighbours(lq, lk, top_k, record_property):
+    """32 integer draws per geometry: the exact selection's ids and counts, the scores judged.  One query over one
+    key keeps a single score, which the integer inputs repeat between draws (a few hundred likely values); there the
+    ids are held to the exact contract on one integer draw and the score is judged over 32 Gaussian draws."""
     _require_program()
-    inputs = ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda")
-    _judge_ok(_run(inputs), ref.select_reference(inputs))
+    if (lq, lk) == (1, 1):
+        inputs = ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda")
+        naive.assert_exact(_run(inputs), inputs)
+        naive.judge_gaussian(
+            record_property,
+            lambda s: ref.make_random_inputs([lq], [lk], top_k=top_k, seed=s, device="cuda"),
+            _run,
+            seed=7,
+        )
+        return
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_boundary_inputs(lq, lk, top_k=top_k, device="cuda", seed=s),
+        _run,
+        seed=7,
+    )
 
 
 # Geometries that reach the host dispatch's program kinds (which kind a geometry takes depends on the
@@ -4064,7 +4089,7 @@ _DISPATCH_ROWS = [
 @pytest.mark.parametrize("seg_q,seg_k,top_k", _DISPATCH_ROWS)
 def test_dispatch_rows_are_exact_and_plan_matches_runner(seg_q, seg_k, top_k):
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=90 + top_k % 7, device="cuda"
     )
     bound = max(inputs.seg_k_len)  # the caller's bound on every key segment (lever RW)
@@ -4089,7 +4114,7 @@ def test_dispatch_rows_are_exact_and_plan_matches_runner(seg_q, seg_k, top_k):
     assert set(runner.programs) == set(runner.stages)
     assert runner.workspace_bytes == plan.workspace_bytes
     out = runner()
-    _judge_ok((out[0].clone(), out[1].clone()), ref.select_reference(inputs))
+    naive.assert_exact(naive.cloned(out), inputs)
     if seg_q == [64]:
         assert plan.split and plan.n_split >= 2
 
@@ -4104,39 +4129,42 @@ def test_changing_shapes_in_sequence():
         ([129], [129], 1),
     ]
     for i, (lq, lk, k) in enumerate(sequence):
-        inputs = ref.make_random_inputs(lq, lk, top_k=k, seed=30 + i, device="cuda")
-        _judge_ok(_run(inputs), ref.select_reference(inputs))
+        inputs = ref.make_integer_inputs(lq, lk, top_k=k, seed=30 + i, device="cuda")
+        naive.assert_exact(_run(inputs), inputs)
 
 
 def test_max_seqlen_k_bound_changes_the_program_never_a_bit():
     """Lever RW: the caller's bound on every key segment sizes the rank finalize's bitmap pool -- a smaller program for packed
-    segments -- and the results are bitwise identical with the bound, with a looser bound and without it; a bound that cannot hold
-    every segment is rejected."""
+    segments -- and the results are bitwise identical with the bound, with a looser bound and without it (on Gaussian
+    inputs, whose FP32 sums round, and on integer inputs, held to the exact contract); a bound that cannot hold every
+    segment is rejected."""
     _require_program()
-    inputs = ref.make_random_inputs(
-        [50, 300, 50, 300], [100, 9000, 100, 9000], top_k=2048, seed=37, device="cuda"
-    )
-    tight = max(inputs.seg_k_len)
-    plan_none, plan_tight, plan_loose = (
-        _plan(inputs),
-        _plan(inputs, max_seqlen_k=tight),
-        _plan(inputs, max_seqlen_k=inputs.num_keys),
-    )
-    assert plan_tight.max_seqlen_k == tight and plan_none.max_seqlen_k is None
-    assert plan_loose.max_seqlen_k == inputs.num_keys
-    if (
-        plan_none.rank_window is not None
-        and policy_for(arch_for(inputs.device)).rank_seg_window
-    ):
-        assert (
-            plan_tight.rank_window is not None
-            and plan_tight.rank_window < plan_none.rank_window
+    for make in (ref.make_random_inputs, ref.make_integer_inputs):
+        inputs = make(
+            [50, 300, 50, 300], [100, 9000, 100, 9000], top_k=2048, seed=37, device="cuda"
         )
-        assert plan_tight.finalize_key != plan_none.finalize_key
-    base = _run(inputs)
-    _judge_ok(base, ref.select_reference(inputs))
-    assert ref.same_bits(base, _run(inputs, max_seqlen_k=tight))
-    assert ref.same_bits(base, _run(inputs, max_seqlen_k=inputs.num_keys))
+        tight = max(inputs.seg_k_len)
+        plan_none, plan_tight, plan_loose = (
+            _plan(inputs),
+            _plan(inputs, max_seqlen_k=tight),
+            _plan(inputs, max_seqlen_k=inputs.num_keys),
+        )
+        assert plan_tight.max_seqlen_k == tight and plan_none.max_seqlen_k is None
+        assert plan_loose.max_seqlen_k == inputs.num_keys
+        if (
+            plan_none.rank_window is not None
+            and policy_for(arch_for(inputs.device)).rank_seg_window
+        ):
+            assert (
+                plan_tight.rank_window is not None
+                and plan_tight.rank_window < plan_none.rank_window
+            )
+            assert plan_tight.finalize_key != plan_none.finalize_key
+        base = _run(inputs)
+        if make is ref.make_integer_inputs:
+            naive.assert_exact(base, inputs)
+        assert ref.same_bits(base, _run(inputs, max_seqlen_k=tight))
+        assert ref.same_bits(base, _run(inputs, max_seqlen_k=inputs.num_keys))
     for bad in (
         tight - 1 if tight * (inputs.num_segments - 1) < inputs.num_keys else 0,
         inputs.num_keys + 1,
@@ -4251,14 +4279,16 @@ PARTITION_KNOBS = (
     "knobs", PARTITION_KNOBS, ids=lambda d: "_".join(f"{k}={v}" for k, v in d.items())
 )
 def test_partition_knobs_do_not_change_results(knobs):
+    """A partition knob changes no bit of a result, on Gaussian inputs (whose FP32 sums round) and on integer inputs
+    (held to the exact contract)."""
     _require_program()
-    inputs = ref.make_random_inputs(
-        [1500, 600], [1500, 30000], top_k=2048, seed=41, device="cuda"
-    )
-    base = _run(inputs)
-    _judge_ok(base, ref.select_reference(inputs))
-    other = _run(inputs, **knobs)
-    assert ref.same_bits(base, other), f"partition knob {knobs} changed the result"
+    for make in (ref.make_random_inputs, ref.make_integer_inputs):
+        inputs = make([1500, 600], [1500, 30000], top_k=2048, seed=41, device="cuda")
+        base = _run(inputs)
+        if make is ref.make_integer_inputs:
+            naive.assert_exact(base, inputs)
+        other = _run(inputs, **knobs)
+        assert ref.same_bits(base, other), f"partition knob {knobs} changed the result"
 
 
 # The exact cases (cutoff ties, signed zeros, large tie groups, ...) under the partition and sampling knobs: the
@@ -4288,7 +4318,7 @@ def test_exact_cases_are_knob_invariant(name):
     _require_program()
     inputs = ref.make_exact_case(name, "cuda")
     base = _run(inputs)
-    _judge_ok(base, ref.select_reference(inputs, order="sequential"), exact_bits=True)
+    naive.assert_exact(base, inputs)
     _assert_positional_order(base[0])
     for knobs in EXACT_CASE_KNOBS:
         other = _run(inputs, **knobs)
@@ -4298,8 +4328,8 @@ def test_exact_cases_are_knob_invariant(name):
 # -- the attention-sink + local-band distribution -----------------------------------------------------------------
 # Small context-parallel geometries whose long units overflow the candidate buffer and run the sampled first
 # threshold (the attention-sink regime: the nearest key tile of every unit -- the diagonal -- holds a hot band of top-k
-# keys), judged like the random rows against the FP64 / FP32 reference under both settings of the far-sample
-# switch and compared bitwise with the sampled threshold switched off and with the forced re-stream.  Host plan,
+# keys), judged like the random rows (the scores against the FP64 oracle beside the naive BF16 tier) under both
+# settings of the far-sample switch and compared bitwise with the sampled threshold switched off and with the forced re-stream.  Host plan,
 # hand-evaluated from the registry policies (the test asserts the host-visible parts): narrow units (l6 on sm_107a for ``cp16_16k``), ``cand_cap`` 8192,
 # ``check_period`` 16; ``cp16_16k`` (mean unit tiles 64) samples 8 tiles at stride 16 on its 125-128-tile units,
 # ``tail_30848`` (mean 239) samples 16 tiles at stride 15 / 16 on its 238-241-tile units.  The 241-tile units of
@@ -4323,22 +4353,44 @@ def _longest_unit_samples(inputs, plan) -> bool:
 
 @pytest.mark.parametrize("far_sample", [0, 1])
 @pytest.mark.parametrize("name", list(SINK_GEOMETRIES))
-def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample):
+def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample, record_property):
+    """The attention-sink geometries: 32 draws of the integer sink inputs (the exact selection's ids and counts, the
+    scores judged; most rows select key 0 on draw 0) and 32 draws of the Gaussian sink inputs (the scores judged at
+    the kernel's own keys); on the recorded Gaussian sink inputs the result is bitwise the same with the sampled
+    threshold switched off and with the forced re-stream."""
     _require_program()
+
+    def check(j, inputs, out, reference):
+        if j:
+            return
+        plan = _plan(inputs, far_sample=far_sample)
+        assert plan.sample_tiles_max > 0 and _longest_unit_samples(inputs, plan), plan
+        assert plan.far_sample == far_sample
+        # the sink: most rows select key 0 (an iid row selects it with probability ~ top_k / visible)
+        assert float((out[0] == 0).any(dim=1).float().mean()) > 0.5
+
+    naive.judge_exact(
+        record_property,
+        lambda s: ref.make_integer_sink_inputs(
+            **SINK_GEOMETRIES[name], seed=s, device="cuda", label=name
+        ),
+        lambda inputs: _run(inputs, far_sample=far_sample),
+        seed=ref.SINK_SEED,
+        check=check,
+    )
+    naive.judge_gaussian(
+        record_property,
+        lambda s: ref.make_sink_inputs(**SINK_GEOMETRIES[name], seed=s, device="cuda", label=name),
+        lambda inputs: _run(inputs, far_sample=far_sample),
+        seed=ref.SINK_SEED,
+    )
     inputs = ref.make_sink_inputs(
         **SINK_GEOMETRIES[name], seed=ref.SINK_SEED, device="cuda", label=name
     )
     plan = _plan(inputs, far_sample=far_sample)
     assert plan.sample_tiles_max > 0 and _longest_unit_samples(inputs, plan), plan
-    assert plan.far_sample == far_sample
     base = _run(inputs, far_sample=far_sample)
-    verdict = _judge_ok(base, ref.select_reference(inputs))
-    assert (
-        verdict.max_fp32_error_over_bound <= 1.0
-        and verdict.max_fp64_error_over_bound <= 1.0
-    )
-    # the sink: most rows select key 0 (94-100 % on the recorded statistics; an iid row selects it with probability
-    # ~ top_k / visible)
+    # the sink: most rows select key 0 (94-100 % on the recorded statistics)
     assert float((base[0] == 0).any(dim=1).float().mean()) > 0.5
     nosample = _run(inputs, sample_tiles_max=0)
     assert ref.same_bits(base, nosample), (
@@ -4352,11 +4404,11 @@ def test_sink_distribution_is_exact_and_knob_invariant(name, far_sample):
 
 def test_sink_issue_geometry_full():
     """The recorded long-context call: one 262144-token document, CP16 zigzag rank 0, top-k 2048, ``max_seqlen_k`` 262144.
-    ``CAKE_PPLX_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the matmul-order reference (minutes)."""
+    ``CAKE_PPLX_DSA_INDEXER_FULL=1`` only: 2.1 G visible pairs through the exact selection (integer sink inputs)."""
     _require_program()
     if not FULL:
         pytest.skip("set CAKE_PPLX_DSA_INDEXER_FULL=1 for the 262k sink geometry")
-    inputs = ref.make_sink_inputs(
+    inputs = ref.make_integer_sink_inputs(
         [8192, 8192],
         [8192, 262144],
         top_k=2048,
@@ -4371,7 +4423,7 @@ def test_sink_issue_geometry_full():
     assert plan.sample_tiles_max == 32 and plan.cand_cap == 16384, plan
     assert plan.check_period == 32, plan
     base = _run(inputs, max_seqlen_k=262144)
-    _judge_ok(base, ref.select_reference(inputs))
+    naive.assert_exact(base, inputs)
     nosample = _run(inputs, max_seqlen_k=262144, sample_tiles_max=0)
     assert ref.same_bits(base, nosample)
     far = _run(inputs, max_seqlen_k=262144, far_sample=1)
@@ -4386,33 +4438,37 @@ def test_sink_issue_geometry_full():
 
 
 def test_strided_k_view_matches_contiguous_bitwise():
+    """A ``k`` view with the trainer's row stride gives the contiguous ``k``'s bits, on Gaussian inputs and on integer
+    inputs (held to the exact contract)."""
     _require_program()
     seg_q = [max(1, v // 16) for v in _lengths(P1_CU_SEQLENS_Q)]
     seg_k = [max(1, v // 16) for v in _lengths(P1_CU_SEQLENS_K)]
-    strided = ref.make_random_inputs(
-        seg_q,
-        seg_k,
-        top_k=256,
-        seed=7701,
-        device="cuda",
-        k_row_stride=ref.TRAINER_KEY_ROW_STRIDE,
-    )
-    assert (
-        strided.k.stride(0) == ref.TRAINER_KEY_ROW_STRIDE
-        and not strided.k.is_contiguous()
-    )
-    contiguous = ref.build_inputs(
-        strided.q,
-        strided.k.contiguous(),
-        strided.w,
-        seg_q,
-        seg_k,
-        top_k=256,
-        softmax_scale=strided.softmax_scale,
-    )
-    a, b = _run(strided), _run(contiguous)
-    assert ref.same_bits(a, b)
-    _judge_ok(a, ref.select_reference(contiguous))
+    for make in (ref.make_random_inputs, ref.make_integer_inputs):
+        strided = make(
+            seg_q,
+            seg_k,
+            top_k=256,
+            seed=7701,
+            device="cuda",
+            k_row_stride=ref.TRAINER_KEY_ROW_STRIDE,
+        )
+        assert (
+            strided.k.stride(0) == ref.TRAINER_KEY_ROW_STRIDE
+            and not strided.k.is_contiguous()
+        )
+        contiguous = ref.build_inputs(
+            strided.q,
+            strided.k.contiguous(),
+            strided.w,
+            seg_q,
+            seg_k,
+            top_k=256,
+            softmax_scale=strided.softmax_scale,
+        )
+        a, b = _run(strided), _run(contiguous)
+        assert ref.same_bits(a, b)
+        if make is ref.make_integer_inputs:
+            naive.assert_exact(a, contiguous)
 
 
 def test_nonfinite_inputs_return_with_intact_structure():
@@ -4428,8 +4484,12 @@ def test_nonfinite_inputs_return_with_intact_structure():
         tuple(scores.shape) == (inputs.num_queries, inputs.top_k)
         and scores.dtype == torch.float32
     )
-    reference = ref.select_reference(inputs)
-    _judge_ok((indices, scores), reference, rows=ref.clean_rows(inputs))
+    rows = ref.clean_rows(inputs)  # the finite segment, a problem of its own: exact
+    naive.assert_exact(
+        (indices.index_select(0, rows), scores.index_select(0, rows)),
+        ref.clean_segment(inputs),
+    )
+
     visible = ref.visible_rows(inputs)
     for t in ref.dirty_rows(inputs).tolist():
         row = indices[t].tolist()
@@ -4442,7 +4502,7 @@ def test_nonfinite_inputs_return_with_intact_structure():
 
 def test_prepared_runner_graph_capture_and_replay():
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=50, device="cuda"
     )
     eager = _run(inputs)
@@ -4469,7 +4529,7 @@ def test_prepared_runner_graph_capture_and_replay():
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
     assert ref.same_bits(captured, eager)
-    fresh = ref.make_random_inputs(
+    fresh = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=51, device="cuda"
     )
     inputs.q.copy_(fresh.q)
@@ -4478,7 +4538,7 @@ def test_prepared_runner_graph_capture_and_replay():
     graph.replay()
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok((captured[0].clone(), captured[1].clone()), ref.select_reference(inputs))
+    naive.assert_exact(naive.cloned(captured), inputs)
 
 
 # the first 16 int64 of the ticket tail: the ticket word and its padding; the rest of the tail holds the
@@ -4646,7 +4706,7 @@ def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the
     reads 0 after."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=72, device="cuda"
     )
     workspace = torch.empty(
@@ -4659,7 +4719,7 @@ def test_caller_owned_workspace_tail_written_between_runs_is_restored_before_the
     expected = _cloned(runner())
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs)
     for fill in (7, 0xFF, 1):
         # what another kernel could leave in a shared buffer; not a failed launch,
         # so the scan binding's zero_region alone restores it
@@ -4747,7 +4807,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
     between replays leaves every replay bit-exact and the tail 0 afterwards."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=73, device="cuda"
     )
     workspace = torch.empty(
@@ -4774,7 +4834,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
         torch.cuda.synchronize()
         _assert_ticket_tail_zero(runner)
         assert ref.same_bits(captured, eager), fill
-    fresh = ref.make_random_inputs(
+    fresh = ref.make_integer_inputs(
         [600, 400], [600, 12000], top_k=1024, seed=74, device="cuda"
     )
     inputs.q.copy_(fresh.q)
@@ -4784,7 +4844,7 @@ def test_caller_owned_workspace_graph_replay_restores_the_tail():
     graph.replay()
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(runner)
-    _judge_ok(_cloned(captured), ref.select_reference(inputs))
+    naive.assert_exact(_cloned(captured), inputs)
 
 
 def test_static_scan_kind_runner_has_no_ticket_tail_and_stays_exact_on_a_poisoned_workspace():
@@ -4953,7 +5013,7 @@ def _ticket_word_inputs(seed: int):
             f"no scan program reads its TicketWord on {arch}: they draw from the workspace's tail"
         )
     for seg_q, seg_k, top_k in _TICKET_GEOMETRIES:
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             seg_q, seg_k, top_k=top_k, seed=seed, device="cuda"
         )
         runner = _prepare(inputs)
@@ -4974,7 +5034,7 @@ def test_ticket_word_runner_owns_its_block_and_ignores_a_poisoned_caller_workspa
     expected = _cloned(own())
     torch.cuda.synchronize()
     _assert_ticket_tail_zero(own)
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs)
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -5034,7 +5094,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
     """On sm_107a a packed call of the two l6 ticket programs runs their longest-first copy, which draws from its
     TicketWord block and writes the segment order into the caller-owned workspace's ticket tail before any role reads
     it: with the whole workspace poisoned before the first run and refilled with random bytes between runs, every run
-    is bit-equal to a backend-owned runner's, which passes the reference judge."""
+    is bit-equal to a backend-owned runner's, which holds the exact selection."""
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
     arch = arch_for(device)
@@ -5044,7 +5104,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
         )
     assert set(cake_jit.PROGRAM_KEYS[arch]) >= _SM107_LSF_COPIES
     seg_q, seg_k, top_k, key = _SM107_LSF_GEOMETRIES[geometry]
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         seg_q, seg_k, top_k=top_k, seed=88 + geometry, device="cuda"
     )
     own = _prepare(inputs)
@@ -5053,7 +5113,7 @@ def test_sm107_longest_first_copy_runs_on_a_poisoned_caller_workspace(geometry):
     )
     expected = _cloned(own())
     torch.cuda.synchronize()
-    _judge_ok(expected, ref.select_reference(inputs))
+    naive.assert_exact(expected, inputs)
     workspace = torch.empty(
         _workspace_bytes(inputs, device), dtype=torch.uint8, device=device
     )
@@ -5294,7 +5354,7 @@ def test_static_ticket_word_calls_get_the_placeholder_and_shape_alone_decides():
 
 def test_workspace_bound_is_respected():
     _require_program()
-    inputs = ref.make_random_inputs(
+    inputs = ref.make_integer_inputs(
         [900, 300], [900, 7000], top_k=2048, seed=60, device="cuda"
     )
     device = torch.device("cuda", torch.cuda.current_device())
@@ -5346,7 +5406,7 @@ def test_workspace_bound_is_respected():
         out[0].data_ptr() == indices.data_ptr()
         and out[1].data_ptr() == scores.data_ptr()
     )
-    _judge_ok(out, ref.select_reference(inputs))
+    naive.assert_exact(out, inputs)
     with pytest.raises(ValueError, match="workspace_buffer needs"):
         prepare_dsa_indexer_det_topk(
             inputs.q,
@@ -5370,10 +5430,10 @@ def test_empty_rows_and_no_keys_are_all_padding():
         q, k, w, cu, torch.tensor([0, 5], dtype=torch.int32, device=device), top_k=8
     )
     assert tuple(indices.shape) == (0, 8) and tuple(scores.shape) == (0, 8)
-    inputs = ref.make_random_inputs([3, 4], [0, 0], top_k=8, seed=1, device="cuda")
+    inputs = ref.make_integer_inputs([3, 4], [0, 0], top_k=8, seed=1, device="cuda")
     indices, scores = _run(inputs)
     assert bool((indices == -1).all()) and bool(torch.isneginf(scores).all())
-    _judge_ok((indices, scores), ref.select_reference(inputs))
+    naive.assert_exact((indices, scores), inputs)
 
 
 def test_persistent_rank_finalize_follows_the_architecture_cap():
@@ -5574,7 +5634,8 @@ def test_merge_rank_fuses_the_slab_rank_finalize_into_split_merges():
 
 def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
     """The fused merge writes the bits of the merge + slab rank finalize pair: every output of a split call is bitwise the
-    same with the architecture's record and with ``merge_rank`` off, and the fused call launches no finalize program."""
+    same with the architecture's record and with ``merge_rank`` off (Gaussian and integer inputs; the integer ones
+    held to the exact contract), and the fused call launches no finalize program."""
     _require_program()
     arch = arch_for(torch.device("cuda"))
     if not policy_for(arch).merge_rank:
@@ -5585,10 +5646,10 @@ def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
         ([64, 64], [16384, 16384]),
         ([3, 5], [7000, 30000]),
     )
-    for seed, (seg_q, seg_k) in enumerate(rows):
-        inputs = ref.make_random_inputs(
-            seg_q, seg_k, top_k=2048, seed=700 + seed, device="cuda"
-        )
+    for make, (seed, (seg_q, seg_k)) in itertools.product(
+        (ref.make_random_inputs, ref.make_integer_inputs), enumerate(rows)
+    ):
+        inputs = make(seg_q, seg_k, top_k=2048, seed=700 + seed, device="cuda")
         runner = _prepare(inputs)
         if not runner.choice.split or not runner.choice.merge_rank:
             continue
@@ -5615,7 +5676,8 @@ def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
             seg_q,
             seg_k,
         )
-        _judge_ok(fused, ref.select_reference(inputs))
+        if make is ref.make_integer_inputs:
+            naive.assert_exact(fused, inputs)
 
 
 def test_device_facts_are_queried_once_per_device(monkeypatch):
@@ -6011,7 +6073,7 @@ def test_offsets_placeholder_is_one_never_written_tensor_per_device():
     assert scales.dtype == torch.float32 and scales.numel() == 1
     before = holder.clone()
     for n, (seg_q, seg_k, top_k) in enumerate(_EAGER_GEOMETRIES):
-        inputs = ref.make_random_inputs(
+        inputs = ref.make_integer_inputs(
             seg_q, seg_k, top_k=top_k, seed=93 + n, device="cuda"
         )
         assert inputs.q_causal_offsets is None
@@ -6023,7 +6085,7 @@ def test_offsets_placeholder_is_one_never_written_tensor_per_device():
             assert ref.same_bits(runner(), expected)
             assert ref.same_bits(_run(inputs), expected)
         torch.cuda.synchronize()
-        _judge_ok(expected, ref.select_reference(inputs))
+        naive.assert_exact(expected, inputs)
     assert torch.equal(holder, before)
 
 
@@ -6058,7 +6120,7 @@ def test_eager_entry_graph_capture_holds_only_the_runner_launches(
     _require_program()
     device = torch.device("cuda", torch.cuda.current_device())
     seg_q, seg_k, top_k = _EAGER_GEOMETRIES[0]
-    inputs = ref.make_random_inputs(seg_q, seg_k, top_k=top_k, seed=97, device="cuda")
+    inputs = ref.make_integer_inputs(seg_q, seg_k, top_k=top_k, seed=97, device="cuda")
     call = _EagerCall(monkeypatch, inputs, device)
     expected = _cloned(call())  # loads the programs and makes the device's placeholders
     kept = cake_backend._offsets_placeholder(device.index)
@@ -6078,7 +6140,7 @@ def test_eager_entry_graph_capture_holds_only_the_runner_launches(
     ops = _device_ops(graph.replay, tmp_path, f"graph_{first_use}")
     assert ops == _expected_ops(runner), (ops, runner.stages)
     assert ref.same_bits(captured, expected)
-    fresh = ref.make_random_inputs(seg_q, seg_k, top_k=top_k, seed=98, device="cuda")
+    fresh = ref.make_integer_inputs(seg_q, seg_k, top_k=top_k, seed=98, device="cuda")
     inputs.q.copy_(fresh.q)
     inputs.k.copy_(fresh.k)
     inputs.w.copy_(fresh.w)
@@ -6088,4 +6150,4 @@ def test_eager_entry_graph_capture_holds_only_the_runner_launches(
     assert ref.same_bits(replayed, _run(fresh))
     assert ref.same_bits(call(), replayed)
     torch.cuda.synchronize()
-    _judge_ok(replayed, ref.select_reference(inputs))
+    naive.assert_exact(replayed, inputs)

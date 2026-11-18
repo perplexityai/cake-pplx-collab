@@ -37,6 +37,38 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
+// The bytes a tensor's elements cover, [first, one past the last): along each axis its stride reaches (size - 1) *
+// stride elements from the data pointer, below it for a negative stride; an empty tensor covers none.
+std::pair<intptr_t, intptr_t> ByteSpan(const TensorView& t) {
+  const intptr_t base = reinterpret_cast<intptr_t>(DataPtr(t));
+  if (t.numel() == 0) return {base, base};
+  const intptr_t item = (static_cast<intptr_t>(t.dtype().bits) * t.dtype().lanes + 7) / 8;
+  intptr_t lo = 0, hi = 0;
+  for (int axis = 0; axis < t.ndim(); ++axis) {
+    const intptr_t reach = static_cast<intptr_t>(t.size(axis) - 1) * t.stride(axis);
+    (reach < 0 ? lo : hi) += reach;
+  }
+  return {base + lo * item, base + (hi + 1) * item};
+}
+
+// The checked `CK.disjoint(a, b)`: the two tensors share no byte.
+void CheckDisjoint(const TensorView& a, const char* a_name, const TensorView& b, const char* b_name, const char* atom) {
+  const auto [a_lo, a_hi] = ByteSpan(a);
+  const auto [b_lo, b_hi] = ByteSpan(b);
+  TVM_FFI_CHECK(a_hi <= b_lo || b_hi <= a_lo, ValueError)
+      << KERNEL_NAME << ": " << atom << ": '" << a_name << "' covers bytes ["
+      << reinterpret_cast<void*>(a_lo) << ", " << reinterpret_cast<void*>(a_hi) << ") and '" << b_name << "' ["
+      << reinterpret_cast<void*>(b_lo) << ", " << reinterpret_cast<void*>(b_hi) << "), which meet";
+}
+
+// The checked `CK.exact_or_disjoint(a, b, offset=k)`: b's data pointer `offset` bytes (k of a's elements) past a's, or
+// two tensors that share no byte.
+void CheckExactOrDisjoint(const TensorView& a, const char* a_name, const TensorView& b, const char* b_name,
+                          intptr_t offset, const char* atom) {
+  if (reinterpret_cast<intptr_t>(DataPtr(b)) == reinterpret_cast<intptr_t>(DataPtr(a)) + offset) return;
+  CheckDisjoint(a, a_name, b, b_name, atom);
+}
+
 [[noreturn]] void NoInt64(int64_t a, const char* op, int64_t b) {
   TVM_FFI_THROW(ValueError) << KERNEL_NAME << ": " << a << " " << op << " " << b
                             << " has no int64 value in a host check";
@@ -133,6 +165,7 @@ void Run(TensorView a_dkv_acc, TensorView a_dkr_acc, TensorView a_e_lat, TensorV
       << KERNEL_NAME << ": requires (dkr_col0 >= 0)";
   TVM_FFI_CHECK((a_dkr_stride >= CheckedAdd(a_dkr_col0, 64LL)), ValueError)
       << KERNEL_NAME << ": requires (dkr_stride >= (dkr_col0 + 64))";
+  CheckExactOrDisjoint(a_dkr_acc, "dkr_acc", a_dkv_acc, "dkv_acc", 0, "requires exact_or_disjoint(dkr_acc, dkv_acc)");
   TVM_FFI_CHECK((CMod(a_dst_lat_stride, 4LL) == 0LL), ValueError)
       << KERNEL_NAME << ": requires (CMod(dst_lat_stride, 4) == 0)";
   TVM_FFI_CHECK((CMod(a_dst_rope_stride, 4LL) == 0LL), ValueError)

@@ -25,9 +25,12 @@ per direction).
 One process per rank: ``torchrun --nproc_per_node W`` (W = 2 / 4 / 8), or a plain ``python`` launch for a one-rank
 group (W = 1).
 
-Rows: the single-rank benchmark's performance matrix (``C = 512`` over eight packed token counts and ``S = 250340``
-over the channel counts), each the same four-document pack (0.37 / 0.29 / 0.21 / rest of ``S``, nudged off a multiple
-of 64), token-sharded over the W ranks by ``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_partition`` (``--layout``;
+Rows (``--rows``): ``perf``, the single-rank benchmark's performance matrix (``C = 512`` over eight packed token
+counts and ``S = 250340`` over the channel counts), each the same four-document pack (0.37 / 0.29 / 0.21 / rest of
+``S``, nudged off a multiple of 64); or ``customer``, the production shapes of the deterministic KCP benchmark
+(``C = 10240`` at 32768 tokens per rank, single entry, and ``3 x C = 8192`` at 16384 tokens per rank, multi entry,
+packed by its ``Row.docs`` rule for ``W`` ranks; ``--tensors`` is the row's own there).  Every row is token-sharded
+over the W ranks by ``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_partition`` (``--layout``;
 ``contiguous``: equal token shares in order, documents cut at the shard boundaries, whose first tokens read their
 history rows through the halo exchange).  ``S`` is the whole pack; a rank holds about ``S / W`` tokens.  Every rank draws the whole pack
 from the same seed and keeps its fragments.
@@ -69,9 +72,11 @@ it rotated left by ``i mod n`` arms and reversed when ``i // n`` is odd, so in e
 by ``det``, ``nondet``, ``nondet``, ``det``, ...  Each row's ``round_orders`` lists the arm order of every round.
 Each value is the median over the rounds of the round's value, with its ``[min, max]`` over the rounds; ``speedup`` is
 ``det / nondet`` of the medians (above 1: the non-deterministic mode is faster), ``speedup_range`` the ``[min, max]``
-of the per-round ratios.  A check per row on every rank (exit status 1 when it fails): the non-deterministic ``y`` and
-``dx`` are bitwise the deterministic ones and each ``dweight`` partial is within ``5e-2 + 1e-4 |det|`` of the
-deterministic partial.  Rank 0 prints the rows and writes ``--json``.
+of the per-round ratios.  The accuracy gate per row (``--draws``; ``cake_causal_conv1d_baselines.kcp_gate``: the
+training tests' judge, each arm's error against a float64 oracle of the whole pack beside PyTorch BF16's over 32
+random inputs, ``y`` / ``dx`` on the arm's rows reduced over the ranks, ``dweight`` as the sum of the ranks'
+partials) judges both Cake modes and every baseline; the modes are never compared with each other.  Exit status 1
+when a Cake mode fails the gate.  Rank 0 prints the rows and writes ``--json``.
 
 Non-Cake context-parallel baselines (``--sota``, default ``all``; ``cake_causal_conv1d_baselines.py``):
 flash-linear-attention's ``causal_conv1d`` with its ``cp_context`` on the Triton (``fla_cp_triton``) and CUDA
@@ -79,19 +84,27 @@ flash-linear-attention's ``causal_conv1d`` with its ``cp_context`` on the Triton
 multiple of ``2 W`` tokens, and Attention Gym's fragment-tail exchange with its CuTe DSL ``causal_conv1d``
 (``attn_gym_cp``, BF16 taps: a feature mismatch, never the best baseline) on this benchmark's partition.  They run
 the same phases through autograd in the same interleaved rounds and measures, with ``--tensors`` convolutions as
-one call each.  Per row ``sota`` keeps each arm's library version, determinism, feature match, local token counts
-and a numerics check (``y`` / ``dx`` on its rows, the summed ``dweight``) against the whole-pack Cake
-non-deterministic result, or the reason it cannot run the row (every rank must be able to); ``best_sota`` names the
-fastest eligible arm per phase and measure, ``speedup_vs_sota`` its time over the non-deterministic time.
+one call each.  Per row ``sota`` keeps each arm's library version, determinism claim, features, local token counts
+and its accuracy gate, or the reason it cannot run the row (every rank must be able to); an arm with the Cake
+route's taps that passes the gate is eligible (a SiLU' policy other than the Cake KCP backward's FP32 preactivation
+is a note: the gate decides).  ``best_sota`` names the fastest eligible arm per phase and measure,
+``speedup_vs_sota`` its time over the non-deterministic time.
 ``comparison`` is the row's two-baseline comparison on one column, the ``ahead`` time (``COMPARISON_COLUMN``: the
 ``gpu`` span of a multi-op autograd phase also counts its host gaps; ``wall`` stays in ``modes`` and ``sota``): per
 phase the deterministic and non-deterministic Cake times, the best eligible arm (or ``unsupported`` with every arm's
 reason, e.g. a layout no eligible arm runs), ``det_over_nondet`` and ``sota_over_nondet``; the ``compare`` lines
 print it.
 
+``--pair`` adds the non-deterministic KCP package's opt-in FP32 (hi, lo) pair ``dweight`` (``dweight_sum="fp32_pair"``,
+the overlapped backward's pair main program) as a third mode, ``nondet_pair``, timed in the same interleaved rounds and
+gated the same way; ``pair_over_single`` is its time over the ``nondet`` time per phase and measure (above 1: the
+pair sums are slower), with the range of the per-round ratios.
+
 Example::
 
     python benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tokens 250340 --channels 512 1280
+    python benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tokens 250340 --channels 512 1280 --pair --sota none
+    torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --rows customer --layout zigzag
     torchrun --nproc_per_node 4 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --json kcp_w4.json
     torchrun --nproc_per_node 8 benchmarks/bench_cake_causal_conv1d_nondet_train_kcp.py --tensors 3 --layout zigzag
 """
@@ -99,6 +112,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib
 import gc
 import json
@@ -150,6 +164,14 @@ MODES: dict[str, dict[str, Callable]] = {
         "multi": nondet_kcp_api.cake_causal_conv1d_nondet_kcp_multi,
     },
 }
+# The opt-in pair mode of ``--pair``: the non-deterministic KCP entry points with ``dweight_sum="fp32_pair"``.
+PAIR_MODE = {
+    "nondet_pair": {
+        "supported": nondet_conv.is_cake_causal_conv1d_nondet_train_supported,
+        "single": functools.partial(nondet_kcp_api.cake_causal_conv1d_nondet_kcp, dweight_sum="fp32_pair"),
+        "multi": functools.partial(nondet_kcp_api.cake_causal_conv1d_nondet_kcp_multi, dweight_sum="fp32_pair"),
+    },
+}
 PHASES = ("fwd", "bwd", "ckpt")
 KINDS = ("gpu", "ahead", "wall", "host")
 ROUNDS = 21
@@ -170,8 +192,31 @@ COMPARISON_RULE = (
     "KCP: every arm compared on the host-hidden GPU time (ahead; the slowest rank); wall kept in the JSON; "
     "feature- or precision-mismatched arms are listed, never the best"
 )
-# The deterministic KCP suite's dweight budget.
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
+# The production rows (``--rows customer``): (C, tokens per rank, document pack) and the multi entry's tensors.
+CUSTOMER_SINGLE = (10240, 32768, (12000, 9000, 6000, 3768, 2000))
+CUSTOMER_MULTI = (8192, 16384, (9000, 5000, 2384))
+MULTI_TENSORS = 3
+
+
+def customer_docs(tokens_per_rank: int, pack: tuple[int, ...], world: int) -> tuple[int, ...]:
+    """The document lengths of a production row on ``world`` ranks: at ``W = 1`` the pack repeated to fill the rank;
+    at ``W > 1`` the pack's first document, one long document of ``floor(W / 2)`` ranks' tokens plus a third of a
+    rank's, then the pack repeated from its second document up to ``W x tokens_per_rank`` (the last one cut)."""
+
+    total = world * tokens_per_rank
+    if world == 1:
+        docs: list[int] = []
+        index = 0
+    else:
+        docs = [pack[0], tokens_per_rank * (world // 2) + tokens_per_rank // 3]
+        index = 1
+    remaining = total - sum(docs)
+    while remaining > 0:
+        n = min(pack[index % len(pack)], remaining)
+        docs.append(n)
+        remaining -= n
+        index += 1
+    return tuple(docs)
 
 
 def _median(samples) -> float:
@@ -398,8 +443,9 @@ class Problem:
         world: int,
         device: torch.device,
         keep_global: bool = False,
+        lens: Optional[tuple[int, ...]] = None,
     ) -> None:
-        self.lens = doc_lengths(tokens)
+        self.lens = lens if lens is not None else doc_lengths(tokens)
         cu = [0]
         for n in self.lens:
             cu.append(cu[-1] + n)
@@ -409,7 +455,11 @@ class Problem:
             self.part, dist.group.WORLD, rank, device, conv_kernel_size=WIDTH
         )
         fragments = [f for f in self.part.fragments[rank] if f.length > 0]
-
+        ranges = baselines.merged_fragments(cu, self.part.fragments[rank])
+        # The global token of each local row.
+        self.rows = (
+            torch.cat([torch.arange(s, e) for s, e in ranges]) if ranges else torch.zeros(0, dtype=torch.long)
+        )
         def shard(t: torch.Tensor) -> torch.Tensor:
             pieces = [
                 t[cu[f.doc] + f.off : cu[f.doc] + f.off + f.length] for f in fragments
@@ -456,7 +506,7 @@ class Problem:
         torch.cuda.empty_cache()
 
 
-def _calls(p: Problem, api: dict[str, Callable]) -> dict[str, Callable[[], object]]:
+def _calls(p: Problem, api: dict[str, Callable]) -> baselines.Calls:
     """``{name: fn}`` of one mode (``api``: its ``MODES`` entry points) on its own leaves: the timed phases ``fwd`` /
     ``bwd`` / ``ckpt``, ``record`` (the forward the timed ``bwd`` replays the backward of), the one-shot ``bwd_once``
     and ``ckpt_memory`` probes."""
@@ -477,8 +527,8 @@ def _calls(p: Problem, api: dict[str, Callable]) -> dict[str, Callable[[], objec
         for leaf in (*xs, *ws):
             leaf.grad = None
 
-    def grads() -> list[tuple[torch.Tensor, torch.Tensor]]:
-        return [(x.grad, w.grad) for x, w in zip(xs, ws, strict=True)]
+    def grads() -> list[torch.Tensor]:
+        return [x.grad for x in xs] + [w.grad for w in ws]
 
     def fwd():
         return layer(*xs, *ws)
@@ -508,61 +558,17 @@ def _calls(p: Problem, api: dict[str, Callable]) -> dict[str, Callable[[], objec
         ckpt()
         reset()
 
-    return {
-        "fwd": fwd,
-        "record": record,
-        "bwd": bwd,
-        "bwd_once": bwd_once,
-        "ckpt": ckpt,
-        "ckpt_memory": ckpt_memory,
-    }
-
-
-def _check(p: Problem, device: torch.device) -> dict:
-    """Per rank: nondet ``y`` / ``dx`` bitwise the det ones, each ``dweight`` partial within the budget of det's."""
-
-    outs = {}
-    for mode, api in MODES.items():
-        calls = _calls(p, api)
-        ys = calls["record"]()
-        g = calls["bwd"]()
-        torch.cuda.synchronize(device)
-        outs[mode] = (
-            [y.detach().clone() for y in ys],
-            [(dx.clone(), dw.clone()) for dx, dw in g],
-        )
-    (ys_d, g_d), (ys_n, g_n) = outs["det"], outs["nondet"]
-    worst_ratio, worst_rel = 0.0, 0.0
-    for (_, dw_d), (_, dw_n) in zip(g_d, g_n, strict=True):
-        diff = (dw_n.double() - dw_d.double()).abs()
-        worst_ratio = max(
-            worst_ratio, float((diff / (DW_ATOL + DW_RTOL * dw_d.double().abs())).max())
-        )
-        worst_rel = max(
-            worst_rel, float(diff.max() / dw_d.double().abs().max().clamp_min(1e-30))
-        )
-    flags = {
-        "y_bitwise": all(
-            torch.equal(_bits(a), _bits(b)) for a, b in zip(ys_d, ys_n, strict=True)
-        ),
-        "dx_bitwise": all(
-            torch.equal(_bits(a[0]), _bits(b[0])) for a, b in zip(g_d, g_n, strict=True)
-        ),
-        "dweight_within_budget": worst_ratio <= 1.0,
-    }
-    ranks = _gather(
-        {
-            **flags,
-            "dweight_ratio_to_budget": worst_ratio,
-            "dweight_max_rel_diff": worst_rel,
-        }
+    calls = baselines.Calls(
+        fwd=fwd, record=record, bwd=bwd, bwd_once=bwd_once, ckpt=ckpt, ckpt_memory=ckpt_memory
     )
-    return {
-        **{key: all(r[key] for r in ranks) for key in flags},
-        "dweight_ratio_to_budget": max(r["dweight_ratio_to_budget"] for r in ranks),
-        "dweight_max_rel_diff": max(r["dweight_max_rel_diff"] for r in ranks),
-        "ok": all(all(r[key] for key in flags) for r in ranks),
-    }
+    calls.leaves = [*xs, *ws]
+    calls.dys = p.dys
+    return calls
+
+
+def _all_reduce_op(t: torch.Tensor, op: str) -> torch.Tensor:
+    dist.all_reduce(t, op=dist.ReduceOp.SUM if op == "sum" else dist.ReduceOp.MAX)
+    return t
 
 
 def _all_reduce(t: torch.Tensor) -> torch.Tensor:
@@ -585,23 +591,14 @@ def _agreed(reason: Optional[str]) -> Optional[str]:
 def _baselines(
     p: Problem, args: argparse.Namespace, rank: int, world: int, device: torch.device
 ) -> tuple[dict[str, dict], dict[str, dict]]:
-    """``(entries, calls)`` of the requested non-Cake arms on the row: each built on every rank, checked against
-    the whole-pack Cake non-deterministic result and warmed up (outside the timing).  An arm runs only when every
-    rank can run it.  The whole pack is released afterwards."""
+    """``(entries, calls)`` of the requested non-Cake arms on the row: each built on every rank and warmed up
+    (outside the timing); ``calls[name]`` is ``(calls, rows)``.  An arm runs only when every rank can run it.  The
+    whole pack is released afterwards."""
 
     entries: dict[str, dict] = {}
-    runs: dict[str, dict] = {}
+    runs: dict[str, tuple] = {}
     if not args.sota_arms:
         return entries, runs
-    cu_t = torch.tensor(p.cu, dtype=torch.int32, device=device)
-    references = []
-    for x, w, dy in zip(p.global_xs, p.ws, p.global_dys, strict=True):
-        xl = x.detach().clone().requires_grad_(True)
-        wl = w.detach().clone().requires_grad_(True)
-        y = nondet_conv.cake_causal_conv1d_nondet(xl, wl, cu_t, None)
-        y.backward(dy)
-        references.append((y.detach(), xl.grad, wl.grad))
-        del xl, wl, y
     fragments = [
         baselines.merged_fragments(p.cu, p.part.fragments[r]) for r in range(world)
     ]
@@ -616,9 +613,7 @@ def _baselines(
             calls, rows = built
             error = None
             try:
-                entry["numerics"] = baselines.kcp_numerics(
-                    calls, rows, references, _all_reduce
-                )
+                calls["record"]()
                 for phase in PHASES:
                     calls[phase]()
                 calls["record"]()
@@ -631,12 +626,7 @@ def _baselines(
             entry["unsupported"] = reason
             entry["eligible"] = False
             continue
-        entry["eligible"] = (
-            entry["feature"]["match"] in ("exact", "more_precise")
-            and entry["numerics"]["ok"]
-        )
-        runs[name] = calls
-    del references
+        runs[name] = (calls, rows)
     p.global_xs.clear()
     p.global_dys.clear()
     gc.collect()
@@ -653,15 +643,18 @@ def bench_row(
     world: int,
     device: torch.device,
     ahead: _GpuAhead,
+    lens: Optional[tuple[int, ...]] = None,
+    row_tensors: int = 1,
 ) -> dict:
+    tensors = row_tensors
     p = Problem(
-        tokens, channels, args.tensors, args.layout, rank, world, device,
-        keep_global=bool(args.sota_arms),
+        tokens, channels, tensors, args.layout, rank, world, device,
+        keep_global=bool(args.sota_arms), lens=lens,
     )  # fmt: skip
     result: dict = {
         "tokens": tokens,
         "channels": channels,
-        "tensors": args.tensors,
+        "tensors": tensors,
         "documents": list(p.lens),
         "tokens_local": _gather(p.tokens_local),
         "halo": _gather(p.halo),
@@ -692,12 +685,31 @@ def bench_row(
                     "ckpt": calls["ckpt_memory"],
                 }[phase]
                 entries[mode][f"{phase}_{when}"] = _probe(probe, device)
-    sota_entries, sota_calls = _baselines(p, args, rank, world, device)
+    sota_entries, sota_built = _baselines(p, args, rank, world, device)
+    # The accuracy gate: both Cake modes and every baseline on the same draws (their leaves refilled in place).
+    gate_arms = {mode: (_calls(p, api), p.rows, {}) for mode, api in MODES.items()}
+    gate_arms.update(
+        {name: (calls, rows, sota_entries[name].get("env", {})) for name, (calls, rows) in sota_built.items()}
+    )
+    verdicts = (
+        baselines.kcp_gate(
+            {name: (c, r, e) for name, (c, r, e) in gate_arms.items()},
+            cu=p.cu, channels=channels, tensors=tensors, device=device, all_reduce=_all_reduce_op,
+            draws=args.draws,
+        )
+        if args.draws
+        else {}
+    )  # fmt: skip
+    del gate_arms
+    for mode in MODES:
+        entries[mode]["gate"] = verdicts.get(mode, {"passed": False, "error": "gate not run (--draws 0)"})
+    for name in sota_built:
+        baselines.apply_gate(sota_entries[name], verdicts.get(name, {"passed": False, "error": "gate not run"}))
     # Interleaved rounds: every phase of both modes and of every baseline per round, in the balanced arm order below.
     timed = {mode: _calls(p, api) for mode, api in MODES.items()}
     for calls in timed.values():
         calls["record"]()
-    timed.update(sota_calls)
+    timed.update({name: calls for name, (calls, _) in sota_built.items()})
     records = {**entries, **sota_entries}
     samples = {
         mode: {f"{phase}_{kind}": [] for phase in PHASES for kind in KINDS}
@@ -758,6 +770,17 @@ def bench_row(
             for d, n in zip(samples["det"][key], samples["nondet"][key], strict=True)
         ]
         result["speedup_range"][key] = [min(ratios), max(ratios)]
+    if "nondet_pair" in entries:
+        result["pair_over_single"] = {
+            key: {
+                "ratio": entries["nondet_pair"][f"{key}_us"] / entries["nondet"][f"{key}_us"],
+                "range": [
+                    min(q / s for s, q in zip(samples["nondet"][key], samples["nondet_pair"][key], strict=True)),
+                    max(q / s for s, q in zip(samples["nondet"][key], samples["nondet_pair"][key], strict=True)),
+                ],
+            }
+            for key in keys
+        }
     if args.sota_arms:
         result["sota"] = sota_entries
         result["best_sota"], result["speedup_vs_sota"] = baselines.best_baseline(
@@ -766,7 +789,10 @@ def bench_row(
         result["comparison"] = baselines.comparison(
             result, PHASES, COMPARISON_COLUMN, COMPARISON_RULE
         )
-    result["check"] = _check(p, device)
+    result["check"] = {
+        "accuracy_gate": {mode: bool(entries[mode]["gate"].get("passed")) for mode in MODES},
+        "ok": all(entries[mode]["gate"].get("passed") for mode in MODES),
+    }
     del p
     gc.collect()
     torch.cuda.empty_cache()
@@ -803,6 +829,15 @@ def _format(result: dict, world: int) -> list[str]:
             f"{steady['peak_temp_bytes']} B | ckpt steady peak temp {entry['ckpt_steady']['peak_temp_bytes']} B "
             f"retained {entry['ckpt_steady']['retained_bytes']} B | ahead_late {entry['ahead_late']}"
         )
+    pair = result["modes"].get("nondet_pair")
+    if pair is not None:
+        for phase in PHASES:
+            ratio = result["pair_over_single"][f"{phase}_ahead"]
+            lines.append(
+                f"{head} {phase:4s} | nondet {nondet[f'{phase}_ahead_us']:9.2f} ahead | nondet_pair "
+                f"{pair[f'{phase}_ahead_us']:9.2f} ahead {pair[f'{phase}_gpu_us']:9.2f} gpu | pair/single ahead "
+                f"{ratio['ratio']:5.3f}x [{ratio['range'][0]:5.3f}, {ratio['range'][1]:5.3f}]"
+            )
     lines.append(
         f"{head} tokens per rank {result['tokens_local']} check {result['check']}"
     )
@@ -824,6 +859,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--channels", type=int, nargs="*", default=None, help="channel counts C"
+    )
+    parser.add_argument(
+        "--rows",
+        choices=("perf", "customer"),
+        default="perf",
+        help="perf: the single-rank matrix (or --tokens / --channels); customer: the production rows",
+    )
+    parser.add_argument(
+        "--draws",
+        type=int,
+        default=32,
+        help="accuracy gate draws per row (at least 32; 0: no gate, nothing eligible, exit status 1)",
     )
     parser.add_argument(
         "--tensors",
@@ -856,9 +903,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=["all"],
         help=f"non-Cake baselines: all (default), none, or names from {list(baselines.KCP_ARMS)}",
     )
+    parser.add_argument(
+        "--pair",
+        action="store_true",
+        help='also time the non-deterministic KCP package with dweight_sum="fp32_pair" (mode nondet_pair)',
+    )
     args = parser.parse_args(argv)
+    if args.pair:
+        MODES.update(PAIR_MODE)
     if args.rounds < 1 or args.tensors < 1:
         parser.error("--rounds and --tensors must be at least 1")
+    if 0 < args.draws < 32:
+        parser.error("--draws: the gate judges at least 32 draws (or 0)")
     args.sota_arms = baselines.parse_arms(args.sota, baselines.KCP_ARMS)
     rank, world, device = _init()
     for mode, api in MODES.items():
@@ -877,11 +933,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"device {torch.cuda.get_device_name(device)} CUDA {torch.version.cuda} torch {torch.__version__} "
             f"W={world} layout={args.layout} tensors={args.tensors} rounds={args.rounds}"
         )
-    if args.tokens is None and args.channels is None:
-        rows = perf_rows()
+    # (tokens, channels, document lengths or None, tensors)
+    if args.rows == "customer":
+        rows = [
+            (world * t, c, customer_docs(t, pack, world), n)
+            for (c, t, pack), n in ((CUSTOMER_SINGLE, 1), (CUSTOMER_MULTI, MULTI_TENSORS))
+        ]
+    elif args.tokens is None and args.channels is None:
+        rows = [(s, c, None, args.tensors) for s, c in perf_rows()]
     else:
         rows = [
-            (s, c)
+            (s, c, None, args.tensors)
             for s in (args.tokens or [P2_TOKENS])
             for c in (args.channels or [P1_CHANNELS])
         ]
@@ -921,7 +983,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 indent=1,
             )
 
-    for tokens, channels in rows:
+    for tokens, channels, lens, tensors in rows:
         result = bench_row(
             tokens,
             channels,
@@ -930,6 +992,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             world=world,
             device=device,
             ahead=ahead,
+            lens=lens,
+            row_tensors=tensors,
         )
         results.append(result)
         if rank == 0:

@@ -17,8 +17,9 @@ limitations under the License.
 # The names of the non-deterministic Cake dense GEMMs: the public module
 # ``cake_pplx.cake_dense_gemm_nondet_train`` carries the mode word in every public name, no entry point takes a
 # ``deterministic=`` keyword (nor any ``**kwargs``), the projection planner's keyword-only knobs are the deterministic
-# planner's public ones plus ``splits`` and ``chains``, the former names and import paths are gone (no alias, no
-# read-through to the deterministic package), and the module imports its backend only on first use.  CPU only.
+# planner's public ones plus ``splits``, ``chains`` and ``promote``, the former names and import paths are gone (no
+# alias, no read-through to the deterministic package), and the module imports its backend only on first use.
+# CPU only.
 
 import importlib
 import importlib.util
@@ -160,7 +161,7 @@ UNREACHABLE = (
 # The deterministic planners' private knobs, which this module does not pass on.
 DET_PRIVATE_KNOBS = {"_fallback", "_allow_swap", "_use_rules"}
 # This package's own knobs of the projection planner.
-OWN_KNOBS = {"splits", "chains"}
+OWN_KNOBS = {"splits", "chains", "promote"}
 
 
 def mode_word_violations(name: str, *, op: str, mode: str) -> list[str]:
@@ -338,8 +339,8 @@ def test_the_backend_helpers_take_no_mode_keyword(helper):
 )
 def test_the_projection_planner_knobs_are_the_deterministic_planners(entry, det_entry):
     """The keyword-only knobs of the projection plan / prepare entries are the deterministic entry's public ones plus
-    ``splits`` and ``chains`` (a change of the deterministic signature shows here), each defaulting to one private
-    sentinel: a knob the caller does not give is not passed on."""
+    ``splits``, ``chains`` and ``promote`` (a change of the deterministic signature shows here), each defaulting to
+    one private sentinel: a knob the caller does not give is not passed on."""
     fn = getattr(
         importlib.import_module(MODULE), f"cake_dense_gemm_nondet_train_{entry}"
     )

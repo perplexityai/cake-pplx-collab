@@ -49,8 +49,7 @@ Contract
   never selected; negative offsets, empty segments and rows without visible
   keys are defined (all padding).
 * Selection: the exact global top ``min(top_k, visible)`` keys per row, ranked
-  by score descending then key id descending (``+0.0 == -0.0`` for ranking);
-  the returned score bits are the computed FP32 bits.
+  by score descending then key id descending (``+0.0 == -0.0`` for ranking).
 * Repeatable: identical inputs give identical ids and score bits; the program
   the host dispatches (unit geometry, key-range split, CTA pair, unroll, unit
   order, sampled threshold; the CUB block radix sort or the prefix-popcount
@@ -79,9 +78,8 @@ FP8 form (opt-in, selected by the input dtype)
 * Score ``s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j,
   d])``: the e4m3 products are exact and accumulate in FP32 on the tensor
   cores, four K = 32 steps on sm_100a / sm_103a (the order of DeepGEMM's
-  ``fp8_mqa_logits``, whose logits these programs reproduce bit for bit) and
-  two K = 64 steps on sm_107a (which can differ from DeepGEMM's logit in the
-  last bits); the head sum and the ``k_scale[j]`` product are FP32.
+  ``fp8_mqa_logits``) and two K = 64 steps on sm_107a; the head sum and the
+  ``k_scale[j]`` product are FP32.
 * Selection, visibility, outputs and the workspace bound follow the BF16
   contract; every FP8 program of one architecture computes the same ids and
   score bits, so the dispatched program never changes a result.  FP8 results
@@ -235,8 +233,8 @@ CONTRACT_ALIASES = {
 # ``NUMERICS["zero_sign_policy"]``): ``positive_accumulator`` -- the FMA chains
 # start from ``+0.0``, so a row whose head terms are all zero scores ``+0.0``;
 # ``ieee_sum`` -- the sum starts from the ``h = 0`` term, so an all-zero sum is
-# ``-0.0`` iff every term is ``-0.0``.  Either way the computed bits are
-# returned unchanged and ``+0.0 == -0.0`` for ranking.
+# ``-0.0`` iff every term is ``-0.0``.  Either way ``+0.0 == -0.0`` for
+# ranking.
 ZERO_SIGN_POLICIES = ("positive_accumulator", "ieee_sum")
 
 

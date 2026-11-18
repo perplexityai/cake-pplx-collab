@@ -11,20 +11,26 @@ stable APIs; this backend package is experimental (no compatibility guarantee
 for its own helpers).  SM100 (B200 / GB200) is the acceptance architecture of
 the native kernels and
 SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
-the acceptance architecture of the packed / strided-layout extension
-and is compiled from the same sources with an
-nvcc that emits `compute_107a`.  The feature does not participate in
-automatic backend selection, autotuning or trace-apply.  Its libraries are
-loaded prebuilt from `aot/` when the package ships them and JIT-built through
-the package's JIT shim from `build.json` otherwise (see "Layout of this
-package").
+the acceptance architecture of the packed / strided-layout extension.  On
+`sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan` and
+`nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
+`sm_100a` and `sm_103a`; the other stages compile from the same sources for
+all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
+in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
+or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
+`nope_bwd_delta` and `index_prep`, which need 12.8.  The feature does not
+participate in automatic backend selection, autotuning or trace-apply.  Its
+libraries are loaded prebuilt from `aot/` when the package ships them and
+JIT-built through the package's JIT shim from `build.json` otherwise (see
+"Layout of this package").
 
 ## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
-keyword.  This is the `nondet` package: the forward and `dq` are fixed-order,
-and the backward adds the dK / dV contributions with unordered FP32 atomics, so
-the key gradients may differ run to run within the FP32 reduction spread.
+keyword.  This is the `nondet` package: the backward adds the dK / dV
+contributions with unordered FP32 atomics, and the package does not promise that
+any output repeats bit for bit, from run to run or across routes, views,
+layouts, streams or kernels running beside it.
 Under `torch.use_deterministic_algorithms(True)` the forward runs and every
 backward launch sequence (the autograd backward, `backward` / `backward_nope`
 and the prepared runners' `backward`) raises PyTorch's `RuntimeError` before it
@@ -40,21 +46,11 @@ deterministic package `cake_pplx.cake_dsa_sparse_attention_det_train` has
 the same entry points (`det` in place of `nondet`); its outputs repeat bit for
 bit run to run.
 
-Run to run, with identical inputs on the same GPU, and the error of each output
-against an FP64 reference: relative L2 / worst element over max |reference|,
-median of 5 runs at T 1024, S 8192, top-k 2048 (B200; rope form, then NoPE
-form):
-
-| Output | Run to run | Error vs FP64 |
-|---|---|---|
-| `out` | repeats bit for bit | 1.98e-3 / 4.28e-3; 2.01e-3 / 2.89e-3 |
-| `lse` | repeats bit for bit | 8.30e-8 / 2.29e-7; 9.11e-8 / 2.10e-7 |
-| the `o_lo` residual (forward) | repeats bit for bit | (internal) |
-| `dq_latent`; the NoPE `dq` | repeats bit for bit | 1.97e-3 / 4.33e-3; 2.13e-3 / 3.24e-3 |
-| `dq_rope` | repeats bit for bit | 2.35e-3 / 4.35e-3 |
-| `dkv_latent`; the NoPE `dkv` (fresh, or the `kv` gradient) | may vary (unordered FP32 atomic adds) | 1.65e-3 / 1.40e-3; 1.66e-3 / 1.86e-3 |
-| `dk_rope` | may vary (unordered FP32 atomic adds) | 1.66e-3 / 1.93e-3 |
-| the rows accumulated into `dkv_acc` | may vary (unordered FP32 atomic adds) | as `dkv_latent` / `dk_rope` |
+The tests judge the accuracy of every floating output against an FP64
+reference: over 32 random inputs per case, the error of each output, in the L2
+and the max norm, median and largest, is at most 1.005 times that of the same
+call in PyTorch BF16, and exactly 0 where that error is 0.  Index, length and
+map outputs are checked exactly (see "Status").
 
 | Before | Now |
 |---|---|
@@ -99,7 +95,7 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   `topk_length` the forward kernel derives each row's length (last valid slot
   + 1) itself while it runs and the training entry hands that vector to the
   backward, so both skip the trailing invalid key blocks of short rows; the
-  results are those of the full row.
+  skipped blocks hold only invalid slots.
 * The varlen form takes per-document indices (`gather_kv_indices`, relative
   to `cu_seqlens_k[d]`) and turns them into global key rows on device.  The
   NoPE varlen entry follows the size rule of its own section below
@@ -140,9 +136,10 @@ out = cake_dsa_sparse_attention_nondet_varlen(
 * Forward: `out [T, 64, 512]` BF16 and (with `return_lse=True`) the natural-log
   `lse [T, 64]` FP32 over the valid keys; fully masked rows give `out = 0` and
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
-  `o_lo = bf16(fp32(O) - bf16(O))` for the backward's exact `delta`.
-* Backward: `dq_latent`, `dq_rope` (computed once per row, bitwise
-  deterministic), `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
+  `o_lo = bf16(fp32(O) - bf16(O))`; the backward forms
+  `delta = rowsum(dO * (O + O_lo))` in FP32 from the BF16 output and it.
+* Backward: `dq_latent`, `dq_rope` (computed once per row),
+  `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
   accumulation, then a cast to natural-layout BF16).  BF16 MMA operands, FP32
   accumulation throughout.  `cake_backend.backward(..., dkv_fp32=True)` (and a
   runner prepared with `dkv_fp32=True`) returns the dK/dV gradients as
@@ -183,9 +180,8 @@ trainer's packed layouts are consumed in place
   the descriptor cannot address it (base not 16-byte aligned, strides not
   multiples of 8 elements, channel stride != 1); `prepare_dsa_train` rejects
   such a view.
-* A strided view yields bitwise the same `out`, `lse` and `dq` as the
-  contiguous copy (only descriptor fields and pointer offsets change); dK/dV
-  agree within the FP32 `red.global` reduction spread.
+* For a strided view, only descriptor fields and pointer offsets differ from
+  a contiguous tensor.
 
 ### Packed fp32 dKV accumulation and destination mapping
 
@@ -241,7 +237,7 @@ context-parallel window):
   (`accumulate = 1`).  With a map the adds are `red.global.add.v4.f32`, whose
   order is not fixed for repeated destination rows (an injective map is still
   exactly one add per element); without a map every 16-byte vector is a
-  load-add-store, bitwise `previous + value`.
+  load-add-store, `previous + value`.
 * The generated `bwd_cast` launcher takes the packed-accumulate operands
   (`dst_packed, dst_row_stride, dst_map, has_dst_map, accumulate`); a plan
   that does not accumulate passes inert placeholders with `accumulate = 0`.
@@ -271,7 +267,7 @@ value is part of the binding key (the public wrapper maps
 `CAKE_PPLX_DSA_DKV_DIRECT=auto|1|0` onto the keyword when the caller
 leaves it at `None`).  Both
 paths add the same FP32 contributions into the same rows in another summation
-order; dq is bitwise the same.  Without the natural stages every `dkv_acc`
+order.  Without the natural stages every `dkv_acc`
 call takes the cast's accumulate path.
 
 Explicit forward / backward entry points without autograd, a prepared
@@ -345,11 +341,13 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
 
 * `fwd`: one CTA per query token gathers its top-k keys once (TMA gather) and
   produces `out`, the natural-log `lse` and the BF16 output residual `o_lo`.
+  On `sm_107a` its scanner-warp build `fwd_scan` (416 threads) runs in its
+  place, with the same arguments, grid and outputs.
 * `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp.
 * `bwd_main`: one CTA per query token (20 warps: gather, compute, reduce, MMA,
   load and metadata roles) recomputes S and P from the BF16 Q and the gathered
   K, forms dP and dS, accumulates dQ / dQ_rope in tensor memory (written once
-  per row: bitwise deterministic) and scatters the per-token dK/dV and dK_rope
+  per row) and scatters the per-token dK/dV and dK_rope
   contributions with vectorized FP32 `red.global.add` into the accumulators.
 * `bwd_compact` / `bwd_main_pass`: the key-range-pass form of the main stage
   for the DRAM regime (see below).  Per pass, `bwd_compact` (one warp per
@@ -371,7 +369,7 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
   stage carries an L2 `evict_last` policy for the accumulator lines.
 
 Launch grids are functions of the problem scalars in `cake_launch.py`
-(`num_queries` CTAs for `fwd`, `bwd_main`, `bwd_main_pass` and their
+(`num_queries` CTAs for `fwd` / `fwd_scan`, `bwd_main`, `bwd_main_pass` and their
 natural-layout variants,
 `num_queries * 8` for `bwd_delta`, `ceil(num_queries / 4)` for `bwd_compact`,
 `ceil(num_kv * 18 / 256)` for `bwd_cast`).
@@ -423,9 +421,9 @@ binding of the last one.  The passes add
 `min(T, 4224) * (147,456 + 4 * topk + 4)` B to the workspace (`dq_partial`,
 `key_scratch`, `pass_counts`; 608 MiB at `T = 4096`, top-k 2048;
 `dsa_train_workspace_size` includes them).  dQ is
-still written once per row from the carried FP32 partial (bitwise
-deterministic run to run; its partial sums are re-associated, so it differs
-from the single pass in the last FP32 places), and the dK/dV reductions are
+still written once per row from the carried FP32 partial (its partial sums
+are re-associated, so it can differ from the single pass in the last FP32
+places), and the dK/dV reductions are
 the same reds in another order.  `key_passes=` on the entry points overrides
 the policy (`1` = single pass, `n` = that many passes); a program without the
 pass stages serves the single pass only.
@@ -514,8 +512,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   stage writing the permuted accumulator out densely (`out_f32`).  Accumulate
   (`dkv_acc` FP32 `[S_dst, >= 512]`, optional `dkv_dst_map`): `+=` into columns
   `0:512` of the caller's rows by the same two
-  paths and `None` for `dkv`; chunked backward passes of one long row sum into
-  one buffer without intermediate rounding.  Through autograd without
+  paths and `None` for `dkv`; chunked backward passes of one long row add
+  their FP32 contributions into one FP32 buffer (no BF16 cast in between).  Through autograd without
   `dkv_acc`, the FP32 `dkv` becomes the `kv` gradient and the autograd engine
   casts it to the leaf's dtype (BF16 for a BF16 leaf); `dkv_acc` may be the
   tensor or a zero-argument callable producing it (or an `(accumulator,
@@ -555,8 +553,9 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   crossover (the largest measured table at which the one-launch forward stays
   within 0.95x of the stage route on the eager forward and 1.02x on the
   GPU-busy step, plus one, rounded up to the next power of two when the next
-  measured table also stays within 1.02x on the GPU-busy step).  Both forward
-  stages (`fwd`, `nope_fwd`) launch with the programmatic-dependent-launch
+  measured table also stays within 1.02x on the GPU-busy step).  The forward
+  stages (`fwd`, `nope_fwd` and their scanner-warp builds `fwd_scan`,
+  `nope_fwd_scan`) launch with the programmatic-dependent-launch
   attribute (`use_pdl` in their launch records, a fixed attribute of their
   bindings): `index_prep` signals `launch_dependents` at entry and the forward
   kernels execute `griddepcontrol.wait` after their barrier / TMEM prologue,
@@ -610,12 +609,12 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   fallback; its structural checks are unchanged.
 
 Stages of the record, in launch order and with the kernels they share with the
-rope program: `nope_fwd` (own kernel, 320 threads), `nope_bwd_delta` (the
+rope program: `nope_fwd` (own kernel, 320 threads; on `sm_107a` its
+scanner-warp build `nope_fwd_scan`, 352 threads), `nope_bwd_delta` (the
 strided delta kernel, shared with the rope program's `bwd_delta`, 256 threads:
 the `[T * 64, 512]` rows of `dout` addressed as `dout_offset + token *
 dout_token_stride + head * dout_head_stride + channel`, strides and offset
-multiples of 8 elements; with contiguous strides it is bitwise the dense form
-it replaced),
+multiples of 8 elements),
 `nope_bwd_main` /
 `nope_bwd_main_natural` (own kernels, 640 threads: no rope operands, one
 accumulator `dkv_f32` with `dkv_stride >= 512`, a multiple of 4, and the
@@ -646,8 +645,7 @@ a multiple of 128).
 `generated_program_available(..., program=cake_jit.NOPE_PROGRAM)` reports
 whether the record registers the stages a call needs for the device; the NoPE
 GPU tests additionally skip while `build.json` lacks a registered NoPE library
-(the export delivers the libraries; `scripts/check_cake_build_manifests.py`
-reports that gap).
+(the export delivers the libraries).
 
 ## Layout of this package
 
@@ -660,19 +658,26 @@ reports that gap).
   the loader glue: `library_name(stage, arch, program)` is the `build.json`
   entry `<library>_<arch>` that `load_cake_dsa_train_module(stage, arch,
   program)` loads through `cake_build`.  Stages of the two programs that
-  share a kernel name the same library stem.
+  share a kernel name the same library stem.  A stage entry may narrow the
+  record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan`:
+  `sm_107a`; `fwd` / `nope_fwd`: `sm_100a`, `sm_103a`); `SCAN_STAGES` and
+  `stage_for` resolve a forward on `sm_107a` to its scanner-warp stage, and
+  `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`, written by the export): one entry per `<library>_<arch>`
-  (fourteen libraries x three architectures over ten kernel sources, four of
-  them compiled a second time with `-DDKV_NATURAL=1`) with its translation
+  (sixteen libraries over twelve kernel sources, four of them compiled a
+  second time with `-DDKV_NATURAL=1`; fourteen per architecture, the
+  scanner-warp forwards on `sm_107a` only and `fwd` / `nope_fwd` on `sm_100a`
+  and `sm_103a`) with its translation
   units, digests, nvcc flags (`--use_fast_math` per stage, plus the natural
   variants' specialization defines), closure digest and `aot/<name>.so`
   path.  `cake_build.load_library(name)` loads the prebuilt library when
   `aot/` holds it (next to the builder's `aot/build_info.json` sidecar, which
   must agree with the library's exported `build_cuda_version()`) and otherwise
   JIT-builds the entry through the package's JIT shim (`gen_jit_spec`, sources
-  digest-verified first; `sm_107a` needs an nvcc that lists `compute_107`).
+  digest-verified first; `sm_107a` needs CUDA 13.5 or newer, an nvcc that
+  lists `compute_107`).
   `aot/` is never tracked (`.gitignore`).
 * `cake_launch.py` -- generated positional launchers and grid functions over
   the kernels' own argument names, one per distinct argument plan or grid
@@ -688,32 +693,22 @@ reports that gap).
   their natural-layout variant as the compile-line specialization
   `DKV_NATURAL=1` of the same pair, under the variant's own kernel symbol and
   binding namespace; the delta, compaction and cast pairs serve both
-  programs), shared by `sm_100a`, `sm_103a` and `sm_107a` and
-  compiled once per library and architecture (`.clang-format` disables formatting: the sources are
-  identity-checked by the digests in `build.json`).  The four shared pairs,
-  the registry leaves of the natural stages and their `build.json` entries are
-  a hand fold of exported files; the next export regenerates them.
-  The kernel units take their shared preamble (ABI types, the tensor-map
-  descriptor types, `make_warp_uniform`, `<math_constants.h>`) and their
-  device helpers from `cake_dsa_h64_train_device.cuh`, naming the helpers
-  they need through `CAKE_DSA_H64_TRAIN_NEED_*` defines before the include;
-  this header is part of the same hand fold, ships with the sources and is
-  covered by no `build.json` digest.
-  The main and forward bindings take their host-side check helpers from
-  `cake_dsa_h64_train_binding_helpers.h` and their shared tensor-map
-  encoders from `cake_dsa_h64_train_binding_tma_<operand>.h`, each included
-  once inside the binding's namespace; these ten headers are part of the
-  same hand fold, ship with the sources and are covered by no `build.json`
-  digest.
+  programs), compiled once per library and architecture for the
+  architectures of its `build.json` entries (`.clang-format` disables
+  formatting: the sources are identity-checked by the digests in
+  `build.json`).  The only package header they include is
+  `csrc/cake_ffi_checks.h` (the binding units).
 
 ## Status
 
-The registry holds the rope program for `sm_100a`, `sm_103a` and `sm_107a` with the forward,
+The registry holds the rope program for `sm_100a`, `sm_103a` and `sm_107a` with the forward
+(on `sm_107a` its scanner-warp build `fwd_scan`),
 backward preprocess, backward main (single-pass and key-range-pass form with
 its compaction, each with its natural-layout direct-accumulation variant) and
 cast stages plus the key-range-pass and direct-accumulation policies, exported
 from the kernel snapshot named in the pull request, and the NoPE program's
-record with its nine stages (the delta, compaction and cast kernels shared with
+record with its ten stages (the forward and, on `sm_107a`, its scanner-warp
+build `nope_fwd_scan`; the delta, compaction and cast kernels shared with
 the rope program) and its own key-range-pass and direct-accumulation policies
 (see "NoPE (zero-rope) program").
 
@@ -724,5 +719,9 @@ only this package; skips without a registered program or a compute capability
 resolves into this package's keyword switches and the behaviour under
 `torch.use_deterministic_algorithms`); the CPU-only
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_names.py`
-checks the public names.  Benchmark:
+checks the public names.  Accuracy is judged by `tests/cake_naive.py` through
+`tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
+reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
+one `TIER` line per judged output); index, length and map outputs are checked
+exactly.  Benchmark:
 `benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py`.

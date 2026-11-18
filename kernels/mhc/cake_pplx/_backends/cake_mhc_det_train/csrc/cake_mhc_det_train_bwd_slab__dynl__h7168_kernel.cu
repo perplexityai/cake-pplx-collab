@@ -1195,11 +1195,9 @@ kernel_cake_mhc_det_train_bwd_slab__dynl__h7168(const __grid_constant__ CUtensor
                     n_tiles_2 = (rows_2 + 63) / 64;
                 }
                 float acc[24];
-                float comp[24];
                 #pragma unroll
                 for (int n = 0; n < 24; n++) {
                     acc[n] = 0.0f;
-                    comp[n] = 0.0f;
                 }
                 #pragma unroll 1
                 for (int tile_2 = 0; tile_2 < n_tiles_2; tile_2++) {
@@ -2827,16 +2825,9 @@ kernel_cake_mhc_det_train_bwd_slab__dynl__h7168(const __grid_constant__ CUtensor
                     asm volatile("tcgen05.wait::ld.sync.aligned;");
                     #pragma unroll
                     for (int n_1 = 0; n_1 < 24; n_1++) {
-                        float sub;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub) : "f"(_tmem_load_4[n_1]), "f"(comp[n_1]));
-                        float add;
-                        asm("add.rn.f32 %0, %1, %2;" : "=f"(add) : "f"(acc[n_1]), "f"(sub));
-                        float _sub_1;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_1) : "f"(add), "f"(acc[n_1]));
-                        float _sub_0;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_0) : "f"(_sub_1), "f"(sub));
-                        comp[n_1] = _sub_0;
-                        acc[n_1] = add;
+                        float _add_0;
+                        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_0) : "f"(acc[n_1]), "f"(_tmem_load_4[n_1]));
+                        acc[n_1] = _add_0;
                     }
                     int in_grp_1 = tile_2 % 16;
                     int prom = 0;
@@ -2856,16 +2847,9 @@ kernel_cake_mhc_det_train_bwd_slab__dynl__h7168(const __grid_constant__ CUtensor
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         #pragma unroll
                         for (int n_2 = 0; n_2 < 24; n_2++) {
-                            float sub_1;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_1) : "f"(_tmem_load_5[n_2]), "f"(comp[n_2]));
-                            float add_1;
-                            asm("add.rn.f32 %0, %1, %2;" : "=f"(add_1) : "f"(acc[n_2]), "f"(sub_1));
-                            float _sub_3;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_3) : "f"(add_1), "f"(acc[n_2]));
-                            float _sub_2;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_2) : "f"(_sub_3), "f"(sub_1));
-                            comp[n_2] = _sub_2;
-                            acc[n_2] = add_1;
+                            float _add_1;
+                            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_1) : "f"(acc[n_2]), "f"(_tmem_load_5[n_2]));
+                            acc[n_2] = _add_1;
                         }
                         grp_ep = grp_ep + 1;
                     }
@@ -2893,9 +2877,7 @@ kernel_cake_mhc_det_train_bwd_slab__dynl__h7168(const __grid_constant__ CUtensor
                 unsigned long long pbase = (unsigned long long)p_2 * 688128ull;
                 #pragma unroll
                 for (int n_3 = 0; n_3 < 24; n_3++) {
-                    float _sub_4;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_4) : "f"(acc[n_3]), "f"(comp[n_3]));
-                    dfn_part[pbase + (unsigned long long)(n_3 * 28672) + kcol] = _sub_4;
+                    dfn_part[pbase + (unsigned long long)(n_3 * 28672) + kcol] = acc[n_3];
                 }
             }
         }

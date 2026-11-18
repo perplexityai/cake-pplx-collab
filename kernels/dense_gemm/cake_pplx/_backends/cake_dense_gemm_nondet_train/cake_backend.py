@@ -42,7 +42,10 @@ The module selects the mode: no entry point takes a mode argument.  Every entry 
   :data:`K1_PARITY_RANGES_BY_SM` (sm_107a parts of 208, 212, 216 and more SMs)
   run two, four or eight chains of one split by the parity of their number of K blocks, the one-split rows store
   whole tiles, and the rows of
-  :data:`K1_WGRAD_DET_RULES_BY_SM` run another fixed-order program of the deterministic package;
+  :data:`K1_WGRAD_DET_RULES_BY_SM` run another fixed-order program of the deterministic package.  A one-chain
+  BF16 transposed-store plan whose largest split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks runs the
+  promoted program (:func:`k1_promote_blocks`; not the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`): the same splits and
+  split sum, each split's K blocks summed in chunks of at most that many, added in order;
 * the K1 weight gradient of the FP32 rows of :data:`K1_DSM_RANGES_BY_SM` (thin ``d_out`` on 148-SM and 152-SM
   ``sm_100a``, 152-SM ``sm_103a`` and 212-SM ``sm_107a`` parts, in that table's token ranges; the odd numbers of K
   blocks of :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM` take that table's 64-wide four-CTA tile), before every other K1
@@ -347,6 +350,26 @@ K1_ROW_MAJOR_BLOCK_N: tuple[int, ...] = (192,)
 #: :data:`K1_CHAIN_RANGES_BY_SM`, three-chain programs (templates ``..._c3``); the two- and four-chain programs of
 #: :data:`K1_ORDERED_RANGES_BY_SM` (templates ``..._c2``, ``..._c4``) are the planner's only, not a ``chains`` choice.
 K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
+#: The K blocks of one promoted chunk of a K1 program (templates ``..._kc128``): one FP32 accumulator that adds a
+#: split's whole long token range is less accurate than the reference, so the promoted program cuts each item's ``n``
+#: K blocks into ``ceil(n / K1_PROMOTE_BLOCKS)`` balanced contiguous chunks of at most this many blocks, each summed in
+#: an accumulator of its own, and adds the chunk sums in FP32 registers in chunk order.  The split sum, its order, the
+#: workspace and the launch arguments are those of the program without promotion; at one chunk (``n <= 128``) its bits
+#: are that program's.  :func:`plan_atomic_gemm` runs it where :func:`k1_promote_blocks` names it (one chain, BF16
+#: out, the transposed store, more than this many K blocks in the largest split), except on the rows of
+#: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
+K1_PROMOTE_BLOCKS = 128
+#: Rows whose plans :func:`plan_atomic_gemm` keeps without promotion where :func:`k1_promote_blocks` names the promoted
+#: program, keys as in :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles (on
+#: 212 SMs from 512 to 12288 tokens, on 216 SMs and more at every token count of its verdict); the verdicts were
+#: measured without promotion.  Measured on a 212-SM VR200 part: without promotion its output met the naive BF16 tier at
+#: 10240, 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and the max norm, its
+#: median and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to 1.015 times its time
+#: at 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20 launches).  The row
+#: keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
+K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
+    {("sm_107a", 1, 5120, 1024, "bf16")}
+)
 
 # ---------------------------------------------------------------------------
 # K1 planner: the measured verdicts
@@ -365,13 +388,19 @@ K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
 #: than that plan next to a kernel holding 8, 16 or 32 SMs on another stream.  A ``None`` entry is a measured row that
 #: missed; a row without an entry was not measured.  Both run the deterministic program.  A verdict does not hold at the
 #: token counts of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` and, where the token count spans an odd number of K blocks, of
-#: :data:`K1_SPLIT_ODD_BLOCK_EXCLUDED_TOKENS`.  At every token count a verdict holds, its output met the deterministic
-#: package's error budgets against an FP64 reference of the exact operands (BF16 output ``atol = rtol = 1e-2``
-#: elementwise with no element outside; FP32 output a relative Frobenius error ``<= 5e-5`` and a max error
-#: ``<= 1e-3 * max|ref|``) on every measured seed, the bound the deterministic package states for its own programs; the
-#: split program's FP64 error relative to the deterministic program's is reported data, not a rule.  Where both programs
-#: miss that budget for some seed (BF16 output at the largest token counts, FP32 output from about 98305 tokens), the
-#: budget does not choose between them, and the tables keep the routing they give there.
+#: :data:`K1_SPLIT_ODD_BLOCK_EXCLUDED_TOKENS`.  At the token counts the verdicts were measured at, the output of the
+#: split program without promotion met the deterministic package's error budgets against an FP64 reference of the exact
+#: operands (BF16 output ``atol = rtol = 1e-2`` elementwise with no element outside; FP32 output a relative Frobenius
+#: error ``<= 5e-5`` and a max error ``<= 1e-3 * max|ref|``) on every measured seed, the bound the deterministic package
+#: states for its own programs; the split program's FP64 error relative to the deterministic program's is reported data,
+#: not a rule.  Where both programs miss that budget for some seed (BF16 output at the largest token counts, FP32 output
+#: from about 98305 tokens), the budget does not choose between them: the FP32 output keeps the routing the tables give
+#: there, and the BF16 output of a row with a split verdict runs the promoted split program, whose output met the naive
+#: BF16 tier against FP64 at every measured point, where the deterministic program's missed it at most of them
+#: (:data:`K1_SPLIT_RULE_EXCLUDED_TOKENS`).  The promoted program runs where a one-chain BF16 transposed-store split
+#: holds more than :data:`K1_PROMOTE_BLOCKS` K blocks (:func:`k1_promote_blocks`), except on the rows of
+#: :data:`K1_PROMOTE_EXEMPT_ROWS`, whose program without promotion met the naive BF16 tier; it was not measured against
+#: those budgets.
 # fmt: off
 K1_SPLIT_RULES:dict[tuple[str, int, int, int, str], Optional[tuple[int, int]]] = {
     # sm_100a: two splits of 64-wide tiles (one wave of the CTA pairs; two partials, bitwise reproducible).  d_out 128
@@ -451,34 +480,40 @@ K1_RULE_MIN_SM_COUNT: dict[tuple[str, int, int, int, str], int] = {
 #: max error ``<= 1e-3 * max|ref|``) for some seed while the deterministic program's met it.  A token count between two
 #: consecutive measured entries is an entry too (not measured).  The split program's FP64 error relative to the
 #: deterministic program's is reported, not a rule.  Where the deterministic program misses the budget for some seed
-#: too, the budget does not choose a program, and these open-ended entries keep the deterministic program: sm_103a
-#: ``4096 -> 32`` and ``4096 -> 48`` above 65536 tokens (BF16: both programs outside the budget on every seed from 65537
-#: tokens; FP32: the two-split program's output is the deterministic program's bits at an even number of 64-token K
-#: blocks, and at an odd number it met the budget at 65537 tokens and missed it on every seed from 98305 tokens, as the
-#: deterministic program's did; the deterministic plan of these rows is the same on 148 and 152 SMs, and their entries
-#: start at the token counts at which the split program failed the timing rule above), and the open-ended sm_100a BF16
-#: entries of ``4096 -> 48`` and ``5120 -> 48`` from 49153 tokens, ``4096 -> 32`` from 65536 tokens and ``4096 -> 64``
-#: from 65536 tokens on 152 SMs (the 148-SM entry is in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`), where the split
-#: program's output missed the BF16 budget for some seed and the deterministic program's did too (10 seeds per token
-#: count on a 148-SM B200 part; the deterministic plan of these rows is the same on 148 and 152 SMs).  sm_100a
-#: ``5120 -> 32`` BF16 keeps its entry from 65537 tokens: measured with 10 seeds (20 runs each) at 32769 to 65025 tokens
-#: on a 148-SM B200 part and two 152-SM GB200 parts (finer from 45569 to 49665 tokens), both programs met the BF16
-#: budget on every seed up to 46593 tokens, and from 47105 tokens each missed it for some seed at some token counts,
-#: neither more accurate at every one; the budget does not choose a program there.  The sm_103a BF16 entries of
-#: ``5120 -> 32`` and ``5120 -> 64`` start at 45058 tokens: their split program's output met the BF16 budget on every
-#: seed at 32768 tokens (30 seeds on two parts) and at every measured token count up to 45057 tokens on a 152-SM GB300
-#: part (10 seeds, 20 runs each), and missed it for some seed at the next measured token count, 47105, where the
-#: deterministic program's output missed it too; the row keeps the deterministic program from there up (the split
-#: program misses it on every seed at 65536 tokens, 30 seeds on two parts).  That of ``5120 -> 128`` starts at 32768
-#: tokens: its split program met the budget up to 45057 tokens as well, but in a strict timing re-measurement on that
-#: part it failed the rule above at 5 of 11 token counts from 32768 to 45057 (32768, 33793, 38913, 43009 and 44033) and
-#: kept it at the other 6, so no measured window holds.  That of ``5120 -> 48`` starts at 40961 tokens: on the 152-SM
-#: part its split program's output met the budget on every seed up to 49152 tokens (the deterministic program's missed
-#: it for one seed at 45057 and at 49152 tokens), but on a 148-SM B300 part, which runs the same program, it missed it
-#: for one of 10 seeds at 40961 and at 40962 tokens while the deterministic program's met it on every seed; from 49153
-#: tokens both miss it on the 152-SM part.  Unmeasured token counts keep the verdict: below 512, above 65536 (except the
-#: rows with open-ended entries), between two measured token counts with different outcomes, and on parts with fewer
-#: than 152 SMs (148-SM parts: their own entries in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`).  The sm_107a entries
+#: too, the budget does not choose a program.  For a BF16 output no sm_100a or sm_103a BF16 entry is open-ended: from
+#: the token count at which a split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks the BF16 split program is the
+#: promoted program, whose output met the naive BF16 tier of the training tests at every measured point, where the
+#: deterministic program's missed it at most of them; where both met it, the row keeps its split verdict, as at any
+#: token count without an entry.  At the token counts of the former open-ended BF16 entries its output met the naive
+#: BF16 tier against FP64 (32 random inputs; the median and the largest error, in the L2 and in the max norm, at most
+#: 1.005 times those of PyTorch BF16) at every measured point (32768, 49153, 65536, 65537, 98304 and 131072 tokens;
+#: largest ratio 1.0005 on a 148-SM B200 part, 1.0025 on a 152-SM GB300 part), and the deterministic program's output
+#: missed it at 18 of 21 points on the B200 and 23 of 31 on the GB300 (largest ratio 1.027 and 1.028).  On the GB300 at
+#: 40961, 43009, 45057, 45058, 47105 and 49152 tokens of ``5120 -> 32``, ``5120 -> 48`` and ``5120 -> 64`` its output
+#: met the tier at all 18 points (largest ratio 1.0020) and the deterministic program's missed it at all 18 (smallest
+#: ratio 1.00502).  Timed against the deterministic program in paired runs (CUPTI, cold L2, eager launches and CUDA
+#: graph replays, 4 interleaved repetitions of 5 groups of 20 launches), the promoted program took 0.934 to 1.008 times
+#: its time on the B200 (49153, 65536, 98304 and 131072 tokens) and 0.929 to 1.022 times on the GB300 (32768, 49153,
+#: 65536, 98304 and 131072 tokens); it was slower on the B200 for ``4096 -> 64`` at 98304 and 131072 tokens (up to
+#: 1.008), and on the GB300 for ``4096 -> 32`` at 65536 and 131072 tokens (up to 1.013), ``4096 -> 48`` at 65536, 98304
+#: and 131072 tokens (up to 1.022) and ``5120 -> 128`` at 32768 tokens (up to 1.002).  Those entries were: sm_100a
+#: ``4096 -> 32`` from 65536 tokens, ``4096 -> 48`` and ``5120 -> 48`` from 49153 and ``5120 -> 32`` from 65537 (148 SMs
+#: up), and ``4096 -> 64`` from 65536 (152 SMs up; its 148-SM entry was in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`,
+#: as was that of sm_103a ``4096 -> 32``); sm_103a ``4096 -> 32`` from 65536 tokens, ``4096 -> 48`` and ``5120 -> 128``
+#: from 32768, ``5120 -> 32`` and ``5120 -> 64`` from 45058 and ``5120 -> 48`` from 40961 (152 SMs up; below 65536
+#: tokens the entries of ``4096 -> 48`` and ``5120 -> 128`` held where the two-split program without promotion failed
+#: the timing rule above, and from 40961 to 49152 tokens that of ``5120 -> 48`` held because on a 148-SM B300 part the
+#: split program without promotion missed the BF16 budget for one of 10 seeds at 40961 and 40962 tokens while the
+#: deterministic program's met it; its 148-SM entry in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` stays).  The 152-SM
+#: sm_100a parts (GB200) and the 148-SM sm_103a parts (B300) were not timed with the promoted program.  The FP32 entries
+#: of sm_103a ``4096 -> 32`` and ``4096 -> 48`` from 32768 tokens have no upper bound: the two-split program's FP32
+#: output is the deterministic program's bits at an even number of 64-token K blocks, and at an odd number it met the
+#: budget at 65537 tokens and missed it on every seed from 98305 tokens, as the deterministic program's did (the
+#: deterministic plan of these rows is the same on 148 and 152
+#: SMs, and the entries start at the token counts at which the split program failed the timing rule above).  Unmeasured
+#: token counts keep the verdict: below 512, above 65536 (except the rows with open-ended entries), between two measured
+#: token counts with different outcomes, and on parts with fewer than 152 SMs (148-SM parts: their own entries in
+#: :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`).  The sm_107a entries
 #: are single token counts of the deterministic package's sm_107a rules for one token count (16231 and 16384 tokens;
 #: 16231 only for ``4096 -> 1024``), which give the row a faster deterministic plan there, and 16231 tokens of
 #: ``5120 -> 1024`` BF16 on 216 SMs (measured in the same runs; the deterministic plan there is the row's plan at every
@@ -522,29 +557,29 @@ K1_RULE_MIN_SM_COUNT: dict[tuple[str, int, int, int, str], int] = {
 K1_SPLIT_RULE_EXCLUDED_TOKENS: dict[
     tuple[str, int, int, int, str], tuple[tuple[int, int, Optional[int]], ...]
 ] = {
-    ("sm_100a", 1, 4096, 32, "bf16"): ((148, 65536, None), (152, 512, 512)),
-    ("sm_100a", 1, 4096, 48, "bf16"): ((148, 49153, None), (152, 512, 512)),
+    ("sm_100a", 1, 4096, 32, "bf16"): ((152, 512, 512),),
+    ("sm_100a", 1, 4096, 48, "bf16"): ((152, 512, 512),),
     ("sm_100a", 1, 4096, 48, "f32"): ((152, 512, 512),),
-    ("sm_100a", 1, 4096, 64, "bf16"): ((152, 512, 512), (152, 65536, None)),
+    ("sm_100a", 1, 4096, 64, "bf16"): ((152, 512, 512),),
     ("sm_100a", 1, 4096, 64, "f32"): ((152, 512, 512),),
-    ("sm_100a", 1, 5120, 32, "bf16"): ((148, 65537, None), (152, 512, 512)),
+    ("sm_100a", 1, 5120, 32, "bf16"): ((152, 512, 512),),
     ("sm_100a", 1, 5120, 32, "f32"): ((152, 512, 512),),
-    ("sm_100a", 1, 5120, 48, "bf16"): ((148, 49153, None), (152, 512, 2048)),
+    ("sm_100a", 1, 5120, 48, "bf16"): ((152, 512, 2048),),
     ("sm_100a", 1, 5120, 48, "f32"): ((152, 512, 2048),),
     ("sm_100a", 1, 5120, 64, "bf16"): ((152, 512, 2048), (152, 8192, 8192)),
     ("sm_100a", 1, 5120, 64, "f32"): ((152, 512, 2048), (152, 8192, 8192)),
     ("sm_100a", 1, 6144, 32, "bf16"): ((152, 1024, 1024),),
-    ("sm_103a", 1, 4096, 32, "bf16"): ((152, 512, 512), (152, 65536, None)),
+    ("sm_103a", 1, 4096, 32, "bf16"): ((152, 512, 512),),
     ("sm_103a", 1, 4096, 32, "f32"): ((152, 512, 512), (152, 32768, None)),
-    ("sm_103a", 1, 4096, 48, "bf16"): ((152, 512, 512), (152, 32768, None)),
+    ("sm_103a", 1, 4096, 48, "bf16"): ((152, 512, 512),),
     ("sm_103a", 1, 4096, 48, "f32"): ((152, 512, 512), (152, 32768, None)),
-    ("sm_103a", 1, 5120, 32, "bf16"): ((152, 512, 512), (152, 45058, None)),
+    ("sm_103a", 1, 5120, 32, "bf16"): ((152, 512, 512),),
     ("sm_103a", 1, 5120, 32, "f32"): ((152, 512, 512),),
-    ("sm_103a", 1, 5120, 48, "bf16"): ((152, 512, 2048), (152, 40961, None)),
+    ("sm_103a", 1, 5120, 48, "bf16"): ((152, 512, 2048),),
     ("sm_103a", 1, 5120, 48, "f32"): ((152, 512, 2048),),
-    ("sm_103a", 1, 5120, 64, "bf16"): ((152, 512, 2048), (152, 45058, None)),
+    ("sm_103a", 1, 5120, 64, "bf16"): ((152, 512, 2048),),
     ("sm_103a", 1, 5120, 64, "f32"): ((152, 512, 2048),),
-    ("sm_103a", 1, 5120, 128, "bf16"): ((152, 512, 8192), (152, 32768, None)),
+    ("sm_103a", 1, 5120, 128, "bf16"): ((152, 512, 8192),),
     ("sm_103a", 1, 5120, 128, "f32"): ((152, 512, 4096),),
     ("sm_103a", 1, 6144, 32, "bf16"): ((152, 512, 512),),
     ("sm_103a", 1, 6144, 32, "f32"): ((152, 512, 512),),
@@ -586,25 +621,26 @@ K1_SPLIT_RULE_EXCLUDED_TOKENS: dict[
 #: the deterministic program leaves the backward pass and the checkpointed step no more than 1.3 % slower on both parts
 #: (the worst of the ratio of the medians and the median of the paired ratios, eager launches and graph replays), or
 #: where the split program's output missed the deterministic package's error budget against FP64 for some seed while the
-#: deterministic program's met it.  Where both miss it for some seed (BF16 output at the largest token counts), the
-#: budget does not choose a program and the entry keeps the deterministic program.  A token count between two
-#: consecutive measured entries is an entry too.  Entries without an upper bound: sm_103a ``4096 -> 32`` and sm_100a
-#: ``4096 -> 64`` (BF16 and FP32) from 65536 tokens up: there the split program's output is the deterministic program's
-#: bits where the token count spans an even number of 64-token blocks (65601 to 131072 tokens), where it does not make
-#: the backward pass or the checkpointed step 1 % faster (sm_100a: the backward pass up to 3.5 % slower); where it spans
-#: an odd number (65537, 65538, 65600 and 65665 tokens) its BF16 output and the deterministic program's both miss the
-#: budget for some seed, and its FP32 output (a relative Frobenius error 2.1 to 2.3 % above the deterministic program's:
-#: reported) misses the FP32 budget on every seed from 98305 tokens, as the deterministic program's does.  sm_103a
-#: ``5120 -> 48`` BF16 runs the deterministic program at 40961 to 49151 tokens and ``5120 -> 64`` BF16 at 47105 to 49152
-#: tokens on 148 SMs: on a 148-SM B300 part (10 seeds, 20 runs each, at 36865 to 61441 tokens) their split program's
-#: output missed the BF16 budget for one of 10 seeds at 40961 and at 40962 tokens (``5120 -> 64``: 47105) where the
-#: deterministic program's met it on every seed (``5120 -> 48`` met it at 41985 to 47105 tokens inside its range), and
-#: from 49152 tokens (``5120 -> 64``: 49153) both programs missed it for some seed, so the split program stays there.
-#: Unmeasured token counts keep the verdict.  The 152-SM ``sm_103a`` entries keep the FP32 rows ``5120 -> 32 / 48 / 64 /
-#: 128`` on the deterministic program at the token ranges where :data:`K1_DSM_RANGES_BY_SM` ran a cluster of three CTAs
-#: and at 16384 tokens of ``5120 -> 32`` (the accuracy check against the reference implementation described there),
-#: and ``5120 -> 48`` BF16 at 16231 tokens, where its two-split output missed that check on the mirrored-cancellation
-#: inputs with the permuted split (1.104 times the reference's worst error).
+#: deterministic program's met it.  Where both miss it for some seed, the budget does not choose a program: an FP32
+#: entry keeps the deterministic program, and a BF16 output runs the promoted split program
+#: (:data:`K1_SPLIT_RULE_EXCLUDED_TOKENS`).  A token count between two consecutive measured entries is an entry too.
+#: Entries without an upper bound: the FP32 rows sm_103a ``4096 -> 32`` and sm_100a ``4096 -> 64`` from 65536 tokens up:
+#: there the split program's output is the deterministic program's bits where the token count spans an even number of
+#: 64-token blocks (65601 to 131072 tokens), where it does not make the backward pass or the checkpointed step 1 %
+#: faster (sm_100a: the backward pass up to 3.5 % slower); where it spans an odd number (65537, 65538, 65600 and 65665
+#: tokens) its output (a relative Frobenius error 2.1 to 2.3 % above the deterministic program's: reported) misses the
+#: FP32 budget on every seed from 98305 tokens, as the deterministic program's does.  Their BF16 rows run the promoted
+#: split program there.  sm_103a ``5120 -> 48`` BF16 runs the deterministic program at 40961 to 49151 tokens and
+#: ``5120 -> 64`` BF16 at 47105 to 49152 tokens on 148 SMs: on a 148-SM B300 part (10 seeds, 20 runs each, at 36865 to
+#: 61441 tokens) their split program's output missed the BF16 budget for one of 10 seeds at 40961 and at 40962 tokens
+#: (``5120 -> 64``: 47105) where the deterministic program's met it on every seed (``5120 -> 48`` met it at 41985 to
+#: 47105 tokens inside its range), and from 49152 tokens (``5120 -> 64``: 49153) both programs missed it for some seed,
+#: so the split program stays there.  Unmeasured token counts keep the verdict.  The 152-SM ``sm_103a`` entries keep the
+#: FP32 rows ``5120 -> 32 / 48 / 64 / 128`` on the deterministic program at the token ranges where
+#: :data:`K1_DSM_RANGES_BY_SM` ran a cluster of three CTAs and at 16384 tokens of ``5120 -> 32`` (the accuracy check
+#: against the reference implementation described there), and ``5120 -> 48`` BF16 at 16231 tokens, where its two-split
+#: output missed that check on the mirrored-cancellation inputs with the permuted split (1.104 times the reference's
+#: worst error).
 # fmt: off
 K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM: dict[
     tuple[str, int],
@@ -613,7 +649,7 @@ K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM: dict[
     ("sm_100a", 148): {
         ("sm_100a", 1, 4096, 48, "bf16"): ((512, 512),),
         ("sm_100a", 1, 4096, 48, "f32"): ((512, 512),),
-        ("sm_100a", 1, 4096, 64, "bf16"): ((512, 512), (65536, None)),
+        ("sm_100a", 1, 4096, 64, "bf16"): ((512, 512),),
         ("sm_100a", 1, 4096, 64, "f32"): ((512, 512), (65536, None)),
         ("sm_100a", 1, 5120, 48, "bf16"): ((512, 2048),),
         ("sm_100a", 1, 5120, 48, "f32"): ((512, 512),),
@@ -628,7 +664,6 @@ K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM: dict[
         ("sm_103a", 1, 5120, 128, "f32"): ((4097, 32768),),
     },
     ("sm_103a", 148): {
-        ("sm_103a", 1, 4096, 32, "bf16"): ((65536, None),),
         ("sm_103a", 1, 4096, 32, "f32"): ((65536, None),),
         ("sm_103a", 1, 5120, 48, "bf16"): ((512, 2048), (40961, 49151)),
         ("sm_103a", 1, 5120, 48, "f32"): ((512, 2048),),
@@ -2556,12 +2591,17 @@ def k1_wgrad_det_knobs(
 
 
 def atomic_k1_template(
-    block_n: int, out_f32: bool, chains: int = 1, split_order: str = "arrival"
+    block_n: int,
+    out_f32: bool,
+    chains: int = 1,
+    split_order: str = "arrival",
+    promote_blocks: int = 0,
 ) -> str:
     """The registry template of this package's K1 program (both operands MN-major): the transposed-store program of
     the tile width, or the row-major-store one for a width of :data:`K1_ROW_MAJOR_BLOCK_N`; ``_c<chains>`` for more
     than one accumulation chain; ``_<split_order>`` for a split order of :data:`K1_SPLIT_ORDERS` other than
-    ``"arrival"``."""
+    ``"arrival"``; ``_kc<promote_blocks>`` for promoted chunks of at most that many K blocks (above 0,
+    :data:`K1_PROMOTE_BLOCKS`)."""
     if split_order not in K1_SPLIT_ORDERS:
         raise ValueError(
             f"split_order is one of {K1_SPLIT_ORDERS}, got {split_order!r}"
@@ -2572,7 +2612,52 @@ def atomic_k1_template(
         + ("" if int(block_n) in K1_ROW_MAJOR_BLOCK_N else "_t")
         + (f"_c{int(chains)}" if int(chains) > 1 else "")
         + ("" if split_order == "arrival" else f"_{split_order}")
+        + (f"_kc{int(promote_blocks)}" if int(promote_blocks) > 0 else "")
     )
+
+
+def _k1_promote_refusal(
+    arch: str, block_n: int, chains: int, out_f32: bool, split_order: str
+) -> str:
+    """Why a CTA-pair plan of these knobs has no promoted program on ``arch`` (:data:`K1_PROMOTE_BLOCKS`): more than
+    one chain, FP32 out, the row-major store, or a template this checkout does not register; ``""`` when it has
+    one."""
+    if int(chains) > 1:
+        return f"{int(chains)} accumulation chains (a promoted program runs one)"
+    if out_f32:
+        return "FP32 out (the promoted programs store BF16)"
+    if int(block_n) in K1_ROW_MAJOR_BLOCK_N:
+        return (
+            f"the row-major-store program of block_n {int(block_n)} (the promoted "
+            "programs store transposed)"
+        )
+    template = atomic_k1_template(
+        block_n, out_f32, chains, split_order, K1_PROMOTE_BLOCKS
+    )
+    if template not in cake_jit.KERNELS.get(arch, {}):
+        return f"{template} is not registered for {arch}"
+    return ""
+
+
+def k1_promote_blocks(
+    *,
+    arch: str,
+    K: int,
+    block_n: int,
+    splits: int,
+    chains: int,
+    out_f32: bool,
+    split_order: str = "arrival",
+) -> int:
+    """The promoted chunk of a CTA-pair plan of this package on ``arch``: :data:`K1_PROMOTE_BLOCKS` where the plan
+    runs one chain into a BF16 ``out`` with the transposed store (``block_n`` not in :data:`K1_ROW_MAJOR_BLOCK_N`), its
+    largest split holds more than :data:`K1_PROMOTE_BLOCKS` 64-element K blocks (``ceil(ceil(K / 64) / splits)``)
+    and this checkout registers the promoted template for ``arch``; else ``0`` (the program without promotion).  The
+    rule reads the split's length only, no row or token-count table."""
+    if _k1_promote_refusal(arch, block_n, chains, out_f32, split_order):
+        return 0
+    blocks = _ceil_div(_ceil_div(K, K1_BLOCK_K), splits)
+    return K1_PROMOTE_BLOCKS if blocks > K1_PROMOTE_BLOCKS else 0
 
 
 def dsm_k1_template(block_n: int, splits: int) -> str:
@@ -2598,7 +2683,10 @@ class CakeDenseGemmNondetProjectionPlan:
     ``128 x block_n``, each one cluster of ``splits`` CTAs (a K range each, the partials summed in the cluster's
     shared memory), ``splits`` CTAs per tile and no workspace.  ``M`` and ``N`` are the launch's.
     ``transposed_out`` is the caller's: the launch takes the caller's
-    operands exchanged (``swapped``) when its store form differs from the caller's output layout."""
+    operands exchanged (``swapped``) when its store form differs from the caller's output layout.  ``promote_blocks``
+    above 0 (:data:`K1_PROMOTE_BLOCKS`, :func:`k1_promote_blocks`) runs the promoted program (template ``..._kc<n>``):
+    each item's K blocks in chunks of at most that many, each summed in an accumulator of its own and added in order;
+    the splits, their sum and its order, the workspace and the launch arguments stay those of the plan without it."""
 
     L: int
     M: int
@@ -2616,6 +2704,7 @@ class CakeDenseGemmNondetProjectionPlan:
     chains: int = 1
     dsm: bool = False
     split_order: str = "arrival"
+    promote_blocks: int = 0
 
     @property
     def swapped(self) -> bool:
@@ -2634,7 +2723,8 @@ class CakeDenseGemmNondetProjectionPlan:
         """Whether the result repeats bit for bit: one split stores whole tiles (its chains added in order), two add
         ``own + other`` (one add of two values), the cluster program (``dsm``) adds its splits in cluster-rank order,
         and a fixed split order (``split_order`` other than ``"arrival"``) adds them in one order; three or more splits
-        of the CTA-pair program in the arrival order add the partials in the order the splits finish."""
+        of the CTA-pair program in the arrival order add the partials in the order the splits finish.  Promoted chunks
+        (``promote_blocks``) are added in order within a split and change none of this."""
         return self.dsm or self.splits <= 2 or self.split_order != "arrival"
 
     @property
@@ -2689,6 +2779,7 @@ def plan_atomic_gemm(
     splits: Optional[int] = None,
     block_n: Optional[int] = None,
     chains: Optional[int] = None,
+    promote: Optional[bool] = None,
 ) -> tuple[Optional[CakeDenseGemmNondetProjectionPlan], Any, Any, Any, str]:
     """Plan this package's K1 GEMM ``out = A @ B`` (``A [L, M, K]`` with unit stride on ``m``, ``B [L, K, N]`` with
     unit stride on ``n``; ``out [L, M, N]``, or ``[L, N, M]`` with ``transposed_out``).
@@ -2710,8 +2801,14 @@ def plan_atomic_gemm(
     :func:`k1_plan`'s, with :func:`k1_chain_plan`'s
     accumulation chains where it has them; an explicit choice runs one chain unless ``chains`` (one of :data:`K1_CHAINS_CHOICES`) names
     more, at one split, in the arrival order, and never the cluster program.
-    Raises ``ValueError`` for inconsistent shapes (as the deterministic planner does) and for an explicit choice the
-    program cannot run."""
+    Once the tile width, splits, chains and split order are settled (by the planner or explicitly), a CTA-pair plan
+    runs the promoted program of :func:`k1_promote_blocks` (``promote_blocks``, template ``..._kc<n>``) where that rule
+    names one, except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`; ``promote=False`` never runs it,
+    ``promote=True`` runs it at any length (on those rows too).  ``promote`` does not choose
+    between this package's program and the deterministic one.
+    Raises ``ValueError`` for inconsistent shapes (as the deterministic planner does), for an explicit choice the
+    program cannot run, and for ``promote=True`` on a plan without a promoted program (more than one chain, FP32 out,
+    the row-major store or the cluster program, or a template this checkout does not register)."""
     det = deterministic_backend()
     A3, B3, O3 = (
         det.as_batched(A, "A"),
@@ -2777,6 +2874,12 @@ def plan_atomic_gemm(
                 dsm, odd = odd, None
         if dsm is not None and odd is None:
             bn, p = dsm
+            if promote:
+                raise ValueError(
+                    "cake_dense_gemm_nondet_train_projection: promote=True, but the "
+                    "row runs the cluster program (FP32 out), which has no promoted "
+                    "program"
+                )
             template = dsm_k1_template(bn, p)
             if template not in cake_jit.KERNELS.get(arch, {}):
                 return (*none, f"{template} is not registered for {arch}")
@@ -2850,7 +2953,29 @@ def plan_atomic_gemm(
                 f"cake_dense_gemm_nondet_train_projection: splits must be in [1, {_ceil_div(K, K1_BLOCK_K)}] (the 64-element K blocks "
                 f"of K={K}), got {p}"
             )
-    template = atomic_k1_template(bn, out_f32, c, order)
+    if promote is None:
+        kc = k1_promote_blocks(
+            arch=arch,
+            K=K,
+            block_n=bn,
+            splits=p,
+            chains=c,
+            out_f32=out_f32,
+            split_order=order,
+        )
+        if (arch, L, M_, N_, "f32" if out_f32 else "bf16") in K1_PROMOTE_EXEMPT_ROWS:
+            kc = 0
+    elif promote:
+        refusal = _k1_promote_refusal(arch, bn, c, out_f32, order)
+        if refusal:
+            raise ValueError(
+                "cake_dense_gemm_nondet_train_projection: promote=True, but the plan "
+                f"has no promoted program: {refusal}"
+            )
+        kc = K1_PROMOTE_BLOCKS
+    else:
+        kc = 0
+    template = atomic_k1_template(bn, out_f32, c, order, kc)
     if template not in cake_jit.KERNELS.get(arch, {}):
         return (*none, f"{template} is not registered for {arch}")
     out_t = bn not in K1_ROW_MAJOR_BLOCK_N
@@ -2873,6 +2998,7 @@ def plan_atomic_gemm(
         out_t=out_t,
         chains=c,
         split_order=order,
+        promote_blocks=kc,
     )
     return plan, a_launch, b_launch, O3, ""
 
@@ -4802,13 +4928,19 @@ def _device_and_arch(A, B, out) -> tuple[torch.device, str, int]:
 
 #: The K1 knobs of this package's planner (the others are the deterministic planner's, applied when a row runs the
 #: deterministic program).
-_K1_OWN_KNOBS = ("splits", "block_n", "chains")
+_K1_OWN_KNOBS = ("splits", "block_n", "chains", "promote")
 
 
 def _split_knobs(knobs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     knobs = dict(knobs)
     own = {k: knobs.pop(k) for k in _K1_OWN_KNOBS if k in knobs}
     return own, knobs
+
+
+def _routing_knobs(knobs: dict[str, Any]) -> dict[str, Any]:
+    """``knobs`` without a ``promote`` of ``None`` or ``False``: these choose no program (the automatic rule, no
+    promoted program), so they neither skip the program tables nor reach the deterministic package."""
+    return {k: v for k, v in knobs.items() if k != "promote" or v}
 
 
 def _prepare_atomic_k1(
@@ -4884,7 +5016,7 @@ def _atomic_k1(
 ) -> Any:
     """This package's K1 GEMM ``out = A @ B`` (both MN-major): ``op`` is ``"plan"`` (returns the plan),
     ``"prepare"`` (the prepared launch) or ``"launch"`` (the convenience path, returns ``out``); ``own`` holds this
-    package's knobs (``splits``, ``block_n``, ``chains``).  A plan or a prepared launch of a row
+    package's knobs (``splits``, ``block_n``, ``chains``, ``promote``).  A plan or a prepared launch of a row
     :func:`plan_atomic_gemm` keeps on the deterministic program returns ``det_call()``: the deterministic package's
     object of the entry point and ``op``, with its knobs; a launch of such a row runs the deterministic package's
     convenience call ``det_args()`` through this package's binding (:func:`_launch_cached_atomic_k1`; ``det_knobs``:
@@ -6969,6 +7101,7 @@ def cake_dense_gemm_nondet_train_projection_plan(
     *,
     splits: Optional[int] = _UNSET,
     chains: Optional[int] = _UNSET,
+    promote: Optional[bool] = _UNSET,
     sm_count: int = _UNSET,
     l2_bytes: int = _UNSET,
     transposed_out: bool = _UNSET,
@@ -7012,18 +7145,20 @@ def cake_dense_gemm_nondet_train_projection_plan(
     arch: str = _UNSET,
 ) -> Any:
     """Validate the views and plan the K1 launch: a weight-gradient layout (both operands MN-major) is planned for
-    this package's split-K program (:class:`CakeDenseGemmNondetProjectionPlan`; ``splits``, ``block_n`` and ``chains``
-    are this package's knobs).  A row the planner keeps on the deterministic program, and every other layout, returns
+    this package's split-K program (:class:`CakeDenseGemmNondetProjectionPlan`; ``splits``, ``block_n``, ``chains``
+    and ``promote`` are this package's knobs, as for :func:`plan_atomic_gemm`).  A row the planner keeps on the
+    deterministic program, and every other layout, returns
     the deterministic package's plan (``cake_dense_gemm_det_train_projection_plan``, a
     ``CakeDenseGemmDetProjectionPlan``).  The other keyword-only knobs are the deterministic planner's public ones
     (``sm_count`` and ``l2_bytes`` included): a knob the caller gives reaches that planner as given, and
     ``transposed_out``, ``arch`` and ``sm_count`` also apply to this package's plan; a knob the caller does not give
-    takes the deterministic planner's default."""
+    takes the deterministic planner's default.  ``promote=None`` or ``False`` never reaches the deterministic planner
+    (:func:`_routing_knobs`)."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
     if _route(_k1_layout(A, B)) == "det":
         return deterministic_backend().cake_dense_gemm_det_train_projection_plan(
-            A, B, out, **knobs
+            A, B, out, **_routing_knobs(knobs)
         )
     own, det_knobs = _split_knobs(knobs)
     return _atomic_k1(
@@ -7048,6 +7183,7 @@ def cake_dense_gemm_nondet_train_projection_prepare(
     *,
     splits: Optional[int] = _UNSET,
     chains: Optional[int] = _UNSET,
+    promote: Optional[bool] = _UNSET,
     transposed_out: bool = _UNSET,
     sk: bool | str = _UNSET,
     block_n: Optional[int] = _UNSET,
@@ -7086,9 +7222,10 @@ def cake_dense_gemm_nondet_train_projection_prepare(
 ) -> Any:
     """Validate one K1 binding, plan it for the device and prepare its allocation-free launch: a weight-gradient
     layout prepares this package's split-K program (:class:`CakeDenseGemmNondetProjectionLaunch`; its workspace is
-    owned by the prepared object; ``splits``, ``block_n`` and ``chains`` as for
+    owned by the prepared object; ``splits``, ``block_n``, ``chains`` and ``promote`` as for
     :func:`cake_dense_gemm_nondet_train_projection_plan`).  Without other knobs than ``transposed_out`` and
-    ``enable_pdl``, a row of a program table of the device -- the forward, input-gradient and stream-K
+    ``enable_pdl`` (``promote=None`` or ``False`` counts as none, :func:`_routing_knobs`), a row of a program table of
+    the device -- the forward, input-gradient and stream-K
     weight-gradient tables (:func:`_k1_table_call`) -- prepares the program the convenience entry point of its
     operation runs (:class:`CakeDenseGemmNondetProgramLaunch`, the same program and bits).  A row the planner keeps on
     the deterministic program, and every other layout, prepares the deterministic package's
@@ -7097,7 +7234,8 @@ def cake_dense_gemm_nondet_train_projection_prepare(
     programmatic dependent launch."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
-    if not set(knobs) - {"transposed_out", "enable_pdl"}:
+    routed = _routing_knobs(knobs)
+    if not set(routed) - {"transposed_out", "enable_pdl"}:
         program = _k1_program_prepare(
             A,
             B,
@@ -7109,7 +7247,7 @@ def cake_dense_gemm_nondet_train_projection_prepare(
             return program
     if _route(_k1_layout(A, B)) == "det":
         return deterministic_backend().cake_dense_gemm_det_train_projection_prepare(
-            A, B, out, **knobs
+            A, B, out, **routed
         )
     own, det_knobs = _split_knobs(knobs)
     return _atomic_k1(

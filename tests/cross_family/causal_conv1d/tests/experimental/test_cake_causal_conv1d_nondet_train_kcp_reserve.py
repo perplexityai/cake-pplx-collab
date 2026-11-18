@@ -14,19 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The opt-in SM reserve of the non-deterministic KCP backward (``bwd_reserve_sms``): one
-process, world size 1, the deterministic KCP suite's contexts and FP64 oracle.
+process, world size 1, the deterministic KCP suite's contexts.  The outputs are judged by the naive judge
+(``tests/cake/test_helpers/cake_naive.py``: over 32 random draws against the float64 oracle of the unpartitioned
+problem and PyTorch's BF16 naive convolution); no bit rule holds the package and nothing is compared with the
+deterministic package.
 
 (a) The keyword of ``cake_pplx.cake_causal_conv1d_nondet_train_kcp``: ``None`` is never forwarded; a given value
     reaches the non-deterministic backend, which raises ``TypeError`` for a ``bool`` or a non-``int`` and
     ``ValueError`` below zero; torch's deterministic mode changes nothing at the call (the value is forwarded,
     nothing warns here); nothing runs the deterministic package.
 (b) ``K`` = 1 and 2: the main backward launches the single-wave grid less ``K x ctas_per_sm`` CTAs on both host
-    paths, at a width the shipped grid already trims and at one it does not; ``dx`` is bitwise the deterministic
-    backward's, ``dweight`` within budget of the FP64 oracle, the workspace reads back zero.
-(c) The autograd single and multi entries with ``bwd_reserve_sms=1``: ``y`` / ``dx`` bitwise the default calls'
-    (the multi call's bitwise the single calls'), ``dweight`` within budget, the reserved grid launched; activation
-    checkpointing with a recompute handle keeps the reserve; graph replay keys a reserved call apart from a default
-    one; a reserve at the device's SM count is refused before the forward.
+    paths, at a width the shipped grid already trims and at one it does not; ``dx`` and ``dweight`` judged, the
+    workspace reads back zero.
+(c) The autograd single and multi entries with ``bwd_reserve_sms=1``: the reserved grid launched, the outputs of
+    the default and the reserved calls judged; activation checkpointing with a recompute handle keeps the reserve;
+    graph replay keys a reserved call apart from a default one; a reserve at the device's SM count is refused
+    before the forward.
 (d) sm_107a (``RESERVE_UNSUPPORTED``): every entry point refuses ``K >= 1`` with a ``ValueError`` that names the
     architecture and the reason, before it launches anything; ``None`` and 0 pass.  (b) and (c) run where the
     reserve is supported; on sm_107a the device itself is checked to refuse it.
@@ -44,21 +47,12 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
-from tests.cake.test_helpers.cake_package import cake_package
 from tests.experimental.test_cake_causal_conv1d_nondet_train_kcp import (
     _bwd,
-    _dw_within,
     _fwd,
     _stream_workspace,
 )
-from tests.test_cake_causal_conv1d_det_train_kcp import (
-    _bits,
-    _problem,
-    _reference,
-)
-
-# the deterministic package's KCP backend, through the one place the suites name packages
-det_kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
+from tests.test_cake_causal_conv1d_det_train_kcp import _problem, judge_kcp
 
 LENS, CUTS = (5000, 1003), (1, 2, 4997, 1003)
 
@@ -232,17 +226,12 @@ def test_backward_launches_the_reserved_grid(monkeypatch, reserve) -> None:
     rows = _widths(device)
     assert len(rows) == 2, rows
     seen = _record_main_grids(monkeypatch)
-    try:
-        for C, full, k, shipped in rows:
-            p = _problem(LENS, CUTS, C, device)
+
+    def run_for(C, full, k, shipped):
+        def run(p):
+            conv_kcp._set_test_knobs(None)
             _, hist = _fwd(p.x_local, p.w, p.ctx)
-            _, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-                p.x_local, p.w, p.ctx
-            )
-            dx_det, _ = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-                p.x_local, p.w, p.ctx, p.dy_local, hist_det
-            )
-            _, _, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
+            found = {"dx": [], "dweight": []}
             # The single program's shipped grid at reserve 0 (the ``bwd_route`` knob "single"); the shipped route
             # runs the overlapped pair at reserve 0 (no ``kcp_bwd`` launch) and the reserved grid at reserve K.
             for host_trim, route in (
@@ -264,10 +253,17 @@ def test_backward_launches_the_reserved_grid(monkeypatch, reserve) -> None:
                         [] if route == "overlap" and k_res == 0 else [(expected, 1, 1)]
                     )
                     assert seen == want, (label, seen)
-                    assert torch.equal(_bits(dx), _bits(dx_det)), label
-                    _dw_within(dw, dw_ref, f"dweight vs FP64 oracle, {label}")
                     held = _stream_workspace()
                     assert held is None or int(torch.count_nonzero(held)) == 0, label
+                    found["dx"].append(dx)
+                    found["dweight"].append(dw)
+            return found
+
+        return run
+
+    try:
+        for C, full, k, shipped in rows:
+            judge_kcp(LENS, CUTS, C, run_for(C, full, k, shipped), label=f"C={C} reserve={reserve}")
     finally:
         conv_kcp._set_test_knobs(None)
         conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
@@ -287,97 +283,123 @@ def _autograd(p, entry, **kw):
 
 @needs_reserve
 def test_autograd_single_and_multi_keep_the_reserve(monkeypatch) -> None:
+    """The single entry with and without ``bwd_reserve_sms=1`` and the multi entry with it: the reserved grid
+    launched (one plan for the multi call's tensors, which share one host-cache entry); every call's ``y``, ``dx``
+    and ``dweight`` judged against the naive tier."""
+
     device = torch.device("cuda")
     _, (C, full, k, _) = _widths(
         device
     )  # a width whose shipped grid is whole: K = 1 changes it
-    p = _problem(LENS, CUTS, C, device)
     seen = _record_main_grids(monkeypatch)
-    conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-    y0, dx0, _ = _autograd(p, facade.cake_causal_conv1d_nondet_kcp)
-    seen.clear()
-    y1, dx1, dw1 = _autograd(p, facade.cake_causal_conv1d_nondet_kcp, bwd_reserve_sms=1)
-    assert seen == [(full - k, 1, 1)], seen
-    assert torch.equal(_bits(y1), _bits(y0)) and torch.equal(_bits(dx1), _bits(dx0))
-    _, _, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
-    _dw_within(dw1, dw_ref, "single dweight vs FP64 oracle")
 
-    xs = [p.x_local.clone().requires_grad_(True) for _ in range(2)]
-    ws = [p.w.clone().requires_grad_(True) for _ in range(2)]
-    conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()  # the single call above cached this key's plan
-    seen.clear()
-    ys = facade.cake_causal_conv1d_nondet_kcp_multi(xs, ws, p.ctx, bwd_reserve_sms=1)
-    torch.autograd.backward(ys, [p.dy_local, p.dy_local])
-    # Both tensors share one (ctx, S, C, device, cu_seqlens, reserve) host-cache entry: one plan, on the reserved grid.
-    assert seen == [(full - k, 1, 1)], seen
-    keys = [key for key in conv_kcp._HOST_CACHE[id(p.ctx)][1] if key[0] == "bwd"]
-    assert keys and all(key[-1] == 1 for key in keys), keys
-    for y, x, w in zip(ys, xs, ws, strict=True):
-        assert torch.equal(_bits(y.detach()), _bits(y1))
-        assert torch.equal(_bits(x.grad), _bits(dx1))
-        _dw_within(w.grad, dw_ref, "multi dweight vs FP64 oracle")
+    def run(p):
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+        found = {"y": [], "dx": [], "dweight": []}
+        for kw in ({}, {"bwd_reserve_sms": 1}):
+            seen.clear()
+            for out, value in zip(
+                ("y", "dx", "dweight"), _autograd(p, facade.cake_causal_conv1d_nondet_kcp, **kw), strict=True
+            ):
+                found[out].append(value)
+        assert seen == [(full - k, 1, 1)], seen
+        xs = [p.x_local.clone().requires_grad_(True) for _ in range(2)]
+        ws = [p.w.clone().requires_grad_(True) for _ in range(2)]
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()  # the single call above cached this key's plan
+        seen.clear()
+        ys = facade.cake_causal_conv1d_nondet_kcp_multi(xs, ws, p.ctx, bwd_reserve_sms=1)
+        torch.autograd.backward(ys, [p.dy_local, p.dy_local])
+        # Both tensors share one (ctx, S, C, device, cu_seqlens, reserve) host-cache entry: one plan, on the reserved
+        # grid.
+        assert seen == [(full - k, 1, 1)], seen
+        keys = [key for key in conv_kcp._HOST_CACHE[id(p.ctx)][1] if key[0] == "bwd"]
+        assert keys and all(key[-1] == 1 for key in keys), keys
+        for y, x, w in zip(ys, xs, ws, strict=True):
+            found["y"].append(y.detach())
+            found["dx"].append(x.grad)
+            found["dweight"].append(w.grad)
+        return found
+
+    judge_kcp(LENS, CUTS, C, run, label="autograd reserve")
 
 
 @needs_reserve
 def test_checkpoint_with_a_recompute_handle_keeps_the_reserve(monkeypatch) -> None:
+    """A checkpoint with a recompute handle and ``bwd_reserve_sms=1`` launches the reserved grid; its outputs and
+    those of the direct reserved call judged against the naive tier."""
+
     from torch.utils.checkpoint import checkpoint
 
     device = torch.device("cuda")
     _, (C, full, k, _) = _widths(
         device
     )  # a width whose shipped grid is whole: K = 1 changes it
-    p = _problem(LENS, CUTS, C, device)
-    _, dx_direct, _ = _autograd(
-        p, facade.cake_causal_conv1d_nondet_kcp, bwd_reserve_sms=1
-    )
     seen = _record_main_grids(monkeypatch)
-    conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-    handle = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
-    x = p.x_local.clone().requires_grad_(True)
-    w = p.w.clone().requires_grad_(True)
 
-    def fn(x_, w_):
-        return facade.cake_causal_conv1d_nondet_kcp(
-            x_, w_, p.ctx, recompute_handle=handle, bwd_reserve_sms=1
-        )
+    def run(p):
+        direct = _autograd(p, facade.cake_causal_conv1d_nondet_kcp, bwd_reserve_sms=1)
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+        seen.clear()
+        handle = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
+        x = p.x_local.clone().requires_grad_(True)
+        w = p.w.clone().requires_grad_(True)
 
-    y = checkpoint(fn, x, w, use_reentrant=False)
-    y.backward(p.dy_local)
-    assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay"}
-    assert seen == [(full - k, 1, 1)], seen
-    assert torch.equal(_bits(x.grad), _bits(dx_direct))
-    handle.clear()
+        def fn(x_, w_):
+            return facade.cake_causal_conv1d_nondet_kcp(
+                x_, w_, p.ctx, recompute_handle=handle, bwd_reserve_sms=1
+            )
+
+        y = checkpoint(fn, x, w, use_reentrant=False)
+        y.backward(p.dy_local)
+        assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay"}
+        assert seen == [(full - k, 1, 1)], seen
+        handle.clear()
+        return {
+            "y": [direct[0], y.detach()],
+            "dx": [direct[1], x.grad],
+            "dweight": [direct[2], w.grad],
+        }
+
+    judge_kcp(LENS, CUTS, C, run, label="checkpoint reserve")
 
 
 @needs_reserve
 def test_graph_replay_keys_the_reserve(monkeypatch) -> None:
-    """A reserved backward and a default one on the same operands are two graph keys, each replaying its own grid;
-    ``dx`` bitwise the eager result in both."""
+    """A reserved backward and a default one on the same operands are two graph keys, each replaying its own grid
+    (the graphs of the previous draw dropped first); ``dx`` and ``dweight`` of every call judged against the naive
+    tier."""
 
     device = torch.device("cuda")
     _, (C, full, k, shipped) = _widths(device)
-    p = _problem(LENS, CUTS, C, device)
-    x, w, ctx, dy = p.x_local, p.w, p.ctx, p.dy_local
-    _, hist = _fwd(x, w, ctx)
-    dx0, _ = _bwd(x, w, ctx, dy, hist)
-    try:
+
+    def run(p):
+        x, w, ctx, dy = p.x_local, p.w, p.ctx, p.dy_local
+        _, hist = _fwd(x, w, ctx)
         conv_kcp._GRAPHS.clear()
         keys = {}
+        found = {"dx": [], "dweight": []}
         for _ in range(4):
             for k_res in (0, 1):
-                dx, _ = _bwd(x, w, ctx, dy, hist, graph="replay", bwd_reserve_sms=k_res)
+                dx, dw = _bwd(x, w, ctx, dy, hist, graph="replay", bwd_reserve_sms=k_res)
                 torch.cuda.synchronize()
-                assert torch.equal(dx, dx0), k_res
+                found["dx"].append(dx.clone())
+                found["dweight"].append(dw.clone())
                 keys.setdefault(k_res, set()).add(
                     conv_kcp.LAST_CALL["bwd"]["graph_key"]
                 )
         assert len(keys[0]) == 1 and len(keys[1]) == 1 and keys[0] != keys[1], keys
+        return found
+
+    try:
+        judge_kcp(LENS, CUTS, C, run, label="graph reserve")
         assert conv_kcp.GRAPH_STATS["fallback"] == 0
         assert shipped == full and full - k < shipped
+        p = _problem(LENS, CUTS, C, device)
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
         seen = _record_main_grids(monkeypatch)
         conv_kcp._GRAPHS.clear()
         conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-        _bwd(x, w, ctx, dy, hist, bwd_reserve_sms=1)
+        _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist, bwd_reserve_sms=1)
         assert seen == [(full - k, 1, 1)], seen
     finally:
         conv_kcp._GRAPHS.clear()

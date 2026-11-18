@@ -227,7 +227,7 @@ TART_MODULE_OF = {
     "kcp_fwdh_tape": "gdn_chunk_det_fwdh_v1_kcp",
     "kcp_fwdh_out": "gdn_chunk_fwdh_out_v2_kcp",  # non-deterministic only: no det twin ships it
     "kcp_fwdh_out_tape": "gdn_chunk_fwdh_out_tape_v2_kcp",  # non-deterministic only: no det twin ships it
-    "kcp_transfer_walk": "gdn_chunk_det_transfer_walk_v1_kcp",
+    "kcp_transfer_walk": "gdn_chunk_det_transfer_walk_ez_v1_kcp",
     "kcp_affine_merge": "kda_chunk_kcp_affine_merge_fp32_v1",
     "fwd_o": "gdn_chunk_det_train_fwd_o_v1",
     "bwd_prep": "gdn_chunk_det_train_bwd_prep_v1",
@@ -237,6 +237,8 @@ TART_MODULE_OF = {
     "bwd_dqkg": "gdn_chunk_det_train_bwd_dqkg_v1",
     "gate_epilogue": "gdn_chunk_det_train_gate_epilogue_v1",
     "fwd_prep_l2n": "gdn_chunk_det_train_fwd_prep_l2n_v1",
+    # the forward form of #1_l2n (record fwd_prep_l2n_fwd): v1 without the backward-only akk / g_cum stores
+    "fwd_prep_l2n_fwd": "gdn_chunk_det_train_fwd_prep_l2n_v2",
     "bwd_dqkg_l2n": "gdn_chunk_det_train_bwd_dqkg_l2n_v1",
     "qk_apply": "gdn_chunk_det_train_qk_apply_v1",
     "fwd_prep_replay_l2n": "gdn_chunk_train_fwd_prep_replay_l2n_v1",  # this package's own (no det twin)
@@ -1641,6 +1643,33 @@ def l2n_records_shipped() -> bool:
     return _registry_answer(("l2n",), jit, derive)
 
 
+def prep_form_shipped(arch: str | None = None) -> bool:
+    """Whether the registry ships the forward form of #1_l2n for ``arch`` (``None``: any architecture): a record of
+    ``fwd_prep_l2n`` selected by ``prep_form`` with ``backward_tapes`` False (``fwd_prep_l2n_fwd``: no ``akk`` /
+    ``g_cum`` output).  A forward launches it only then (:func:`_prep_backward_tapes`)."""
+    jit = _registry()
+    if jit is None:
+        return False
+
+    def derive() -> bool:
+        try:
+            names = jit.records_of_program("fwd_prep_l2n")
+        except ValueError:  # a registry that does not know the program
+            return False
+        for n in names:
+            rec = jit.MODULES[n]
+            rule = rec.get("select_rule", {})
+            if (
+                rule.get("kind") == "prep_form"
+                and rule.get("backward_tapes") is False
+                and (arch is None or arch in rec.get("arches", ()))
+            ):
+                return True
+        return False
+
+    return _registry_answer(("prep_form", arch), jit, derive)
+
+
 def fused_o_shipped(arch: str | None = None) -> bool:
     """Whether the registry ships the output walk ``kcp_fwdh_out`` in both forms (the ``vh = 128`` record and the
     ``_vh64`` one) for ``arch`` (``None``: for any architecture, the fake backend's emulation): a forward folds #5
@@ -1732,6 +1761,9 @@ def resolve_launch(
     if jit is not None and not explicit:
         per_head = 2 if vh == 64 else 1
         select = dict(ncols=values.get("ncols"), precision_mode=pm, transfer_walk=tw)
+        if args.get("_backward_tapes") is False:
+            # the forward form of #1_l2n (no akk / g_cum): requested only where prep_form_shipped()
+            select["backward_tapes"] = False
         try:
             record = str(jit.select_record(name, ctas_per_head=per_head, **select))
         except TypeError:  # a registry without the ctas_per_head select rule: the suffixed record, if any
@@ -1788,7 +1820,8 @@ def resolve_launch(
 
 def _launch_key(name: str, args: dict[str, Any], cols_per_cta: int) -> tuple:
     """Every input :func:`resolve_launch` reads besides the launch's tensors: the program, the static knobs, the grid
-    rule's arguments (in the call site's order), the walk-form inputs, the merge's columns and the caller's grid x.
+    rule's arguments (in the call site's order), the walk-form inputs, the form of #1_l2n (``_backward_tapes``: the
+    forward form ``fwd_prep_l2n_fwd`` or the full record), the merge's columns and the caller's grid x.
 
     The launch cache is valid only because :func:`resolve_launch` derives the record, the grid, the test flag and the
     merge's ``cols_per_cta`` from these scalars alone and reads nothing from the launch's tensors: an input added to
@@ -1813,6 +1846,7 @@ _LAUNCH_KEY_ARGS = (
     "_vh64_fits",
     "_dhu_long_chain",
     "_arch",
+    "_backward_tapes",
     "ncols",
     "cols_per_cta",
     "_grid",
@@ -3946,11 +3980,13 @@ class CakeGDNNondetKcpCall:
             ),  # K4: seq_chunk_start[num_seqs] = the real chunk count on the device
         }
 
-    def local(self, name: str) -> None:
+    def local(self, name: str, *, backward_tapes: bool = True) -> None:
         """A chunk-local program (#1, #5, #6, #8, #9, ``qk_apply``) over this rank's tokens (skipped without
         tokens).  With ``use_qk_l2norm_in_kernel`` ``fwd_prep`` launches ``fwd_prep_l2n`` and the fused
         ``bwd_dqkg`` launches ``bwd_dqkg_l2n`` (:data:`L2N_SIBLING_OF`); ``group_reduce="host"`` keeps #8 itself
-        (on ``qn`` / ``kn``) and applies the pullback in :meth:`host_group_reduce`."""
+        (on ``qn`` / ``kn``) and applies the pullback in :meth:`host_group_reduce`.  ``backward_tapes`` False
+        (``fwd_prep_l2n`` only, from :func:`_prep_backward_tapes`): the forward form ``fwd_prep_l2n_fwd``, which
+        writes no ``akk`` / ``g_cum`` (neither tape is bound)."""
         if self.T_r == 0:
             return
         if (
@@ -3973,6 +4009,7 @@ class CakeGDNNondetKcpCall:
         o, NC = self.ops, int(self.ctx.NC)
         args = self._local_common()
         if name == "fwd_prep":
+            fwd_form = program == "fwd_prep_l2n" and not backward_tapes
             args.update(
                 q=o["q"],  # #1 / #1_l2n read the raw rows
                 k=o["k"],
@@ -3983,12 +4020,15 @@ class CakeGDNNondetKcpCall:
                 w=self.tape("w"),
                 u=self.tape("u"),
                 aqk=self.tape("aqk"),
-                akk=self.tape("akk"),
-                g_cum=self.tape("g_cum"),
                 rowscale=self.tape("rowscale"),
                 qscale=self.tape("qscale"),
                 gamma=self.tape("gamma"),
             )
+            if fwd_form:
+                # the forward form: no akk / g_cum output, so neither arena tape is bound by this call
+                args["_backward_tapes"] = False
+            else:
+                args.update(akk=self.tape("akk"), g_cum=self.tape("g_cum"))
             if program == "fwd_prep_l2n" or program in AKK_REPLAY_PROGRAMS:
                 rstd = self.rstd_out()
                 args.update(
@@ -4733,6 +4773,31 @@ def _call_arch(call: CakeGDNNondetKcpCall) -> str | None:
     return call.backend.launcher().device_arch(index)
 
 
+def _prep_backward_tapes(
+    call: CakeGDNNondetKcpCall, *, replay: bool, hand_off: bool, keep: bool
+) -> bool:
+    """Whether this forward's #1 writes the backward-only ``akk`` / ``g_cum`` (the full ``fwd_prep_l2n`` record):
+    ``True`` unless every reader of those tapes takes them from elsewhere -- a replay-mode backward's forward
+    (``replay``) and a hand-off forward (``reuse_recompute_tapes``) give them to #6 / #8, and a forward that keeps a
+    saved set holding them (``save_mode="full"``; ``"light_akk"``, the default with the in-kernel L2 norm, keeps
+    ``akk``) carries this launch's planes.  The autograd entry keeps its saved set without grad too, so a no-grad call
+    of a ``"light_akk"`` save runs the full record.  Every other forward (a low-level forward without a saved set,
+    the ``"light"`` save's forward, whose backward re-runs #1, the checkpoint's first forward, which saves
+    ``"light_akk"`` as ``"light"`` (:func:`_checkpoint_opts`), and a non-hand-off recompute) runs the forward form
+    ``fwd_prep_l2n_fwd`` when test knob ``prep_form`` = 1 (shipped), the call runs the in-kernel L2 norm and the
+    registry ships that record for the device's architecture (:func:`prep_form_shipped`)."""
+    if replay or hand_off:
+        return True
+    if keep and (
+        "akk" in saved_tapes(call.opts.save_mode)
+        or "g_cum" in saved_tapes(call.opts.save_mode)
+    ):
+        return True
+    if not call.l2n or call.T_r == 0 or int(call.opts.knob("prep_form")) != 1:
+        return True
+    return not prep_form_shipped(_call_arch(call))
+
+
 def _fuse_o(call: CakeGDNNondetKcpCall, *, launch: bool, hand_off: bool) -> bool:
     """Whether this forward runs the output walk ``kcp_fwdh_out`` on every tape-walk launch list in place of the tape
     walk and #5: #5 launches, the tapes go to no backward (not a hand-off forward), the rank holds tokens and
@@ -5008,7 +5073,11 @@ def _forward(
             call.scratch["rstd_source"] = "arena"
         else:
             call.scratch["rstd_source"] = "fresh" if keep else "arena"
-    call.local("fwd_prep")
+    backward_tapes = _prep_backward_tapes(
+        call, replay=replay, hand_off=hand_off, keep=keep
+    )
+    call.scratch["prep_form"] = "full" if backward_tapes else "fwd"
+    call.local("fwd_prep", backward_tapes=backward_tapes)
     if call.l2n and call.opts.knob("record_qk") and not call.backward:
         _record_qk(call)
     if call.l2n and not replay and opts.graph == "off":
@@ -5734,7 +5803,7 @@ def _prepare(
 
 
 # The numerical mode is in the name: this is the non-deterministic package.  It keeps the deterministic package's
-# contract and accuracy budgets, and its results need not equal that package's bit for bit (its fixed-order levers,
+# contract, and its results need not equal that package's bit for bit (its fixed-order levers,
 # e.g. the ``fill_small`` segment plan, reassociate FP32 sums).  Every launch of this version is fixed-order today, so
 # no entry raises PyTorch's alert for an operation without a deterministic implementation and
 # ``torch.use_deterministic_algorithms`` changes nothing here; the contract does not promise run-to-run bits.  No entry
@@ -7358,6 +7427,7 @@ __all__ = [
     "fused_o_tape_shipped",
     "kept_registry_size",
     "l2n_records_shipped",
+    "prep_form_shipped",
     "make_options",
     "merge_cols_per_cta",
     "cake_gdn_nondet_train_kcp_packed_qkv_views",

@@ -7362,8 +7362,8 @@ def _backward_logprob_budget_temperature(
     eligible for :mod:`.cake_backend`'s vocabulary-major backward at any chunk count whose fused form does not fit
     the budget runs that backward (:func:`.cake_backend.backward_logprob_temperature`'s; ahead of the unfused
     form).  The chunk-loop forms give the chunk loop's ``dX`` / ``dW`` bits; ``"vocab_major"`` the vocabulary-major
-    backward's (another summation order, the same accuracy budget).  A call whose temperature resolved to none
-    (``temperature_rows`` is ``None``: a scalar whose FP32 value is 1.0) is the budget call without a temperature
+    backward's (another summation order; both are judged against the naive tier).  A call whose temperature resolved to
+    none (``temperature_rows`` is ``None``: a scalar whose FP32 value is 1.0) is the budget call without a temperature
     (:func:`_backward_logprob_budget`: its plan, its forms and its bits), as the backend's backward without a
     temperature is the call without the keyword -- so a ``"vocab_major"`` pick runs that backward, not the chunk loop
     the plan rejected."""
