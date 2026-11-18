@@ -499,6 +499,10 @@ _DKV_DIRECT_ROWS = {
     "8 segments bound K_eff to 1024": ((960, 8192, 2048, 8), (True, True)),
     "5 segments bound K_eff to 1639": ((960, 8192, 2048, 5), (True, True)),
     "4 segments leave K_eff at K_slots": ((960, 8192, 2048, 4), (False, False)),
+    # K_eff rounds the mean segment up: ceil(S / num_segments) reaches the bound where S // num_segments does not
+    "ceil(S / 3) = 1681 above the bound": ((960, 5041, 4096, 3), (False, False)),
+    "ceil(S / 3) = 1618 at the bound": ((984, 4853, 2048, 3), (False, False)),
+    "ceil(S / 2) = 2427 at the bound": ((656, 4853, 2176, 2), (False, False)),
     "floor: T K above 112 S (NoPE)": ((1024, 1024, 128, 1), (False, True)),
     "floor: T K above 112 S (RoPE)": ((1024, 4096, 512, 1), (True, True)),
     "p8949": ((16384, 65536, 2048, 1), (False, False)),
@@ -511,6 +515,10 @@ _DKV_DIRECT_ROWS = {
     "short_4096_k512": ((4096, 4096, 512, 1), (False, False)),
     "short_2048_k256": ((2048, 2048, 256, 1), (False, True)),
 }
+# The rows a floor-based K_eff (S // num_segments) would send to the natural drain on sm_107a.
+_DKV_DIRECT_CEIL_ROWS = tuple(
+    name for name in _DKV_DIRECT_ROWS if name.startswith("ceil(")
+)
 
 
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a", None])
@@ -520,9 +528,10 @@ def test_dkv_direct_rule_by_architecture(program, arch):
     on sm_100a, sm_103a and without a device: direct iff S >= min_keys_per_query * T (4 RoPE, 1 NoPE), whatever
     the top-k width and the segment count.  The sm_107a rule of both programs: the same base test, and the cast path
     also where T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) -- both sides of the bound
-    and its equality (the cast path), the 2^20 floor, K_eff bounded by S and by the mean segment, measured rows.
-    ``dkv_direct=True`` / ``False`` override the rule on every architecture; without ``dkv_acc`` a RoPE binding
-    never accumulates directly; a NoPE plan applies the same rule to the fresh ``dkv`` and ``dkv_acc``."""
+    and its equality (the cast path), the 2^20 floor, K_eff bounded by S and by the mean segment rounded up (rows
+    that S // num_segments would send to the natural drain), measured rows.  ``dkv_direct=True`` / ``False``
+    override the rule on every architecture; without ``dkv_acc`` a RoPE binding never accumulates directly; a NoPE
+    plan applies the same rule to the fresh ``dkv`` and ``dkv_acc``."""
     record = cake_jit.record(program)
     stages = cake_jit.registered_stages(program)
     assert cake_backend.record_direct_stages(record, stages, program)
@@ -574,6 +583,13 @@ def test_dkv_direct_rule_by_architecture(program, arch):
         assert want is (
             sm107a[0 if rope else 1] if arch == "sm_107a" else S >= base * T
         ), name
+        if arch == "sm_107a" and name in _DKV_DIRECT_CEIL_ROWS:
+            # the row tells ceil from floor: the cast path, while S // num_segments keeps the work below the bound
+            bound = (
+                _DKV_DIRECT_SM107A["cast_slots_per_key"] * S
+                + _DKV_DIRECT_SM107A["cast_min_slots"]
+            )
+            assert not want and T * min(K, S // segments) < bound, name
         assert policy.wants(T, S, K, num_segments=segments, arch=arch) is want, name
         assert plan(T, S, K, segments) is want, name
         assert plan(T, S, K, segments, dkv_direct=None) is want, name
@@ -655,6 +671,8 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
     assert lower.rules == (("sm_100a", (1, 1000, 0)),)
     assert lower.wants(1000, 1000, 999, arch="sm_100a")  # 999,000 < 1,000,000
     assert not lower.wants(1000, 1000, 1000, arch="sm_100a")  # equality
+    # K_eff = ceil(2001 / 2) = 1001: 2,002,000 >= 2,001,000 (S // 2 = 1000 would give 2,000,000, the natural drain)
+    assert not lower.wants(2000, 2001, 2048, num_segments=2, arch="sm_100a")
     assert not lower.wants(1000, 1000, 1, arch="sm_107a")  # the base: S < 4 T
     # no rules (absent, None or empty): the base everywhere
     for rules in ({}, {"rules": None}, {"rules": {}}):
