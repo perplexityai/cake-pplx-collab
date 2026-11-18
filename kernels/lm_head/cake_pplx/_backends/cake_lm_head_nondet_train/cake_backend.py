@@ -5123,7 +5123,9 @@ def memory_report(
 
     ``temporary``: the workspace regions of :func:`workspace_layout`, the
     ``O(T)`` row vectors (``lse``; ``logp`` unless it is returned; the
-    contiguous ``dlogp`` of the log-probability backward) and a contiguous copy
+    contiguous ``dlogp`` of the log-probability backward; the FP32 label
+    residuals ``rlab`` of a call with a gradient and of every log-probability
+    runner, whose backward keys run a row-gradient producer) and a contiguous copy
     of ``X`` when its leading stride forced one; ``outputs``: what the caller
     receives (``loss``, ``logp`` when requested, ``dX`` BF16, ``dW`` in
     ``grad_weight_dtype``); ``accumulators``: the FP32 ``dX_acc`` / ``dW_acc``
@@ -5211,8 +5213,10 @@ def memory_report(
         for name, (_, size) in ((k, v) for k, v in layout.items() if k != "total")
     }
     temporary["lse"] = rows * 4
-    if need_dx or need_dw:
-        temporary["rlab"] = rows * 4  # the row-gradient producers' FP32 label residuals
+    if need_dx or need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (a log-probability runner allocates them without a
+        # gradient too: its backward keys run a producer)
+        temporary["rlab"] = rows * 4
     if dx_slab_bytes:
         temporary["dx_slab"] = int(
             dx_slab_bytes
@@ -5339,7 +5343,9 @@ def memory_report_temperature(
 
     ``temporary``: the workspace regions of :func:`workspace_layout`, the
     ``O(T)`` row vectors (``lse``; ``logp`` unless it is returned; the
-    contiguous ``dlogp`` of the log-probability backward) and a contiguous copy
+    contiguous ``dlogp`` of the log-probability backward; the FP32 label
+    residuals ``rlab`` of a call with a gradient and of every log-probability
+    runner, whose backward keys run a row-gradient producer) and a contiguous copy
     of ``X`` when its leading stride forced one; ``outputs``: what the caller
     receives (``loss``, ``logp`` when requested, ``dX`` BF16, ``dW`` in
     ``grad_weight_dtype``); ``accumulators``: the FP32 ``dX_acc`` / ``dW_acc``
@@ -5434,8 +5440,10 @@ def memory_report_temperature(
         for name, (_, size) in ((k, v) for k, v in layout.items() if k != "total")
     }
     temporary["lse"] = rows * 4
-    if need_dx or need_dw:
-        temporary["rlab"] = rows * 4  # the row-gradient producers' FP32 label residuals
+    if need_dx or need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (a log-probability runner allocates them without a
+        # gradient too: its backward keys run a producer)
+        temporary["rlab"] = rows * 4
     if dx_slab_bytes:
         temporary["dx_slab"] = int(
             dx_slab_bytes

@@ -1052,6 +1052,30 @@ def test_workspace_layout_and_memory_rule():
     )
 
 
+def test_logprob_runner_counts_its_label_residuals_without_a_gradient():
+    """A log-probability runner allocates the FP32 label residuals ``rlab`` also when it computes no gradient (its
+    backward keys run a row-gradient producer), so its memory report counts them, and so do the memory reports of that
+    entry; a loss call without a gradient has none."""
+    T, C = 37, 16
+    inp = _host_inputs(T)
+    lp = prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        chunk_size=C,
+        entry="logprob",
+        need_dx=False,
+        need_dw=False,
+        backend="reference",
+    )
+    assert lp.tensors["rlab"].numel() == T and lp.memory["temporary"]["rlab"] == T * 4
+    for report in (memory_report, memory_report_temperature):
+        rep = report(T, H_HOST, V_HOST, C, entry="logprob", need_dx=False, need_dw=False)
+        assert rep["temporary"]["rlab"] == T * 4, report
+        assert rep["temporary_bytes"] == sum(rep["temporary"].values()), report
+        assert "rlab" not in report(T, H_HOST, V_HOST, C, need_dx=False, need_dw=False)["temporary"], report
+
+
 def test_grid_dims_holds_no_reference_to_the_host_values():
     """The grid evaluator must not capture the stage's host values: scale_cast binds a fresh launch per call, and a
     recursive closure over ``scalars`` formed a reference cycle that kept every call's accumulator and output alive

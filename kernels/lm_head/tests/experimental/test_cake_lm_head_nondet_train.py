@@ -13899,6 +13899,30 @@ def test_temperature_memory_report():
         )
 
 
+def test_logprob_runner_counts_its_label_residuals_without_a_gradient():
+    """A log-probability runner allocates the FP32 label residuals ``rlab`` also when it computes no gradient (its
+    backward keys run a row-gradient producer), so its memory report counts them, and so do the memory reports of that
+    entry; a loss call without a gradient has none."""
+    T, C = 37, 16
+    inp = _host_inputs(T)
+    lp = cake_backend.prepare_lm_head_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        chunk_size=C,
+        entry="logprob",
+        need_dx=False,
+        need_dw=False,
+        backend="reference",
+    )
+    assert lp.tensors["rlab"].numel() == T and lp.memory["temporary"]["rlab"] == T * 4
+    for report in (cake_backend.memory_report, cake_backend.memory_report_temperature):
+        rep = report(T, H_HOST, V_HOST, C, entry="logprob", need_dx=False, need_dw=False)
+        assert rep["temporary"]["rlab"] == T * 4, report
+        assert rep["temporary_bytes"] == sum(rep["temporary"].values()), report
+        assert "rlab" not in report(T, H_HOST, V_HOST, C, need_dx=False, need_dw=False)["temporary"], report
+
+
 # --- device layer: the generated temperature forms
 
 
