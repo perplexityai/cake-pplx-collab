@@ -250,8 +250,8 @@ def test_the_launch_passes_byte_views_and_the_grid(monkeypatch) -> None:
 
 def test_a_one_row_table_goes_in_with_compact_strides(monkeypatch) -> None:
     """A one-row table goes in as byte views of the same storage with the compact row strides 256 and 8, not its own
-    (the packed 264 here): a DLPack exporter may report another stride for a size-1 dimension, and the binding requires
-    multiples of 8 (no device: the FFI entry is a recorder)."""
+    (the packed 264 here): a DLPack exporter that keeps a compact view's strides may still rewrite another size-1
+    stride, and the binding requires multiples of 8 (no device: the FFI entry is a recorder)."""
     calls = []
     monkeypatch.setattr(cake_backend, "_entry", lambda arch: lambda *args: calls.append(args))
     buf = torch.zeros(1, PACKED_ROW_BYTES, dtype=torch.uint8)
