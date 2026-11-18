@@ -20,11 +20,19 @@ two tail passes unless ``lean_passes`` says otherwise) against the ``"replay"`` 
 layout's bytes, lifetimes and per-pass packing, the single-rank layouts and bytes unchanged (with and without the
 registered layout, line for line), the registration rules, the fused-gradient records the layout relies on (this
 package's ``S1`` forms among them), every logical name of every launched
-record bound (the tail ranges' item bounds from the arena's tail-count table) and the byte prediction.  GPU rows: bitwise out / saved set / gradients against the replay arena on the unit rows
-(H 1-64, P > 1, ragged packs, both boundary modes, checkpointed autograd, recompute handles, graph replay, the overlap
-schedule) with the arena NaN-filled and the per-pass buffers NaN-filled before every write, the workspace
-bytes equal to ``cake_kda_nondet_train_kcp_workspace_bytes``, no allocation or blocking in steady calls, and the multi-GPU rows (W = 2 / 4 /
-8) in the launch forms of ``test_cake_kda_nondet_train_kcp_shared_ws.py``.
+record bound (the tail ranges' item bounds from the arena's tail-count table) and the byte prediction.  GPU rows: the
+unit rows (H 1-64, P > 1, ragged packs, both boundary modes, checkpointed autograd, recompute handles, graph replay, the
+overlap schedule) on the lean arena NaN-filled, the per-pass buffers NaN-filled before every write, beside the replay
+arena; the workspace bytes equal to ``cake_kda_nondet_train_kcp_workspace_bytes``, no allocation or blocking in steady
+calls, and the multi-GPU rows (W = 2 / 4 / 8) in the launch forms of ``test_cake_kda_nondet_train_kcp_shared_ws.py``.
+
+Accuracy: this package has no bit contract, so the lean arena's results are not compared with the replay arena's.
+Out and every gradient of each arena and path are judged under their own names per pack against the FP64 reference
+beside the naive BF16 tier of ``tests/cake_naive.py`` over 32 draws (``NaiveJudge`` of
+``test_cake_kda_nondet_train_kcp_shared_ws.py``; the owner-accepted gaps only).  The proxy pack (16380 tokens) is
+judged at H = 4 (the production-size case of each lean route); at H = 64 it keeps its exact checks only (the packs of
+the same rows judge the route).  A written saved set is an internal of the package: not compared; its backward's
+gradients are judged.
 """
 
 import gc
@@ -39,20 +47,37 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import _rendezvous
+from tests.cake_naive import draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
+    BWD_GRADS,
     DIST_ROWS,
+    HANDLE_LAYERS,
+    JUDGE_SEED,
     PACKS,
+    NaiveJudge,
     _bwd,
+    _cu,
     _device_or_skip,
     _dist_row_id,
+    _draw_ops,
+    _finish_rank_report,
     _fwd,
     _handle_pass,
-    _operands,
+    _judge_packs,
+    _judge_rank_arms,
     _part,
     _pointers,
+    _rank_ops,
     _rank_packs,
-    _same,
     _schedule,
+    draws_of,
+    handle_arms,
+    host,
+    judged,
+    pack_inputs,
+    schedule_arms,
+    settle_naive,
+    stack_refs,
 )
 from tests.experimental.test_helpers.cake_host_sync import (
     allocator_counts,
@@ -60,7 +85,6 @@ from tests.experimental.test_helpers.cake_host_sync import (
     nonblocking,
     summary,
 )
-from tests.experimental.test_helpers.cake_kda_train_kcp_saved import written_tensors
 from tests.cake.test_helpers.cake_package import cake_package
 
 kp = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_plan")
@@ -813,13 +837,12 @@ def test_gpu_single_rank_workspace_views_and_route_layouts(device) -> None:
     torch.cuda.empty_cache()
 
 
-def _packs_on(device, H: int, packs) -> tuple[list, list]:
+def _packs_on(device, H: int, packs, seed: int = JUDGE_SEED) -> tuple[list, list]:
     ctxs = [
         kp.cake_kda_nondet_train_kcp_build_context(_part(lengths), None, 0, device)
         for lengths in packs
     ]
-    ops = [_operands(device, int(c.T_r), H, 0x7815 + i) for i, c in enumerate(ctxs)]
-    return ctxs, ops
+    return ctxs, _draw_ops(ctxs, H, device, seed)
 
 
 def _poison(ws) -> None:
@@ -845,85 +868,117 @@ UNIT_ROWS = [(H, "packs") for H in CONTRACT_HEADS] + [(64, "proxy"), (4, "proxy"
 
 
 @pytest.mark.parametrize("H,which", UNIT_ROWS, ids=[f"h{h}-{w}" for h, w in UNIT_ROWS])
-def test_gpu_lean_arena_is_bitwise_the_replay_arena(device, H, which) -> None:
+def test_gpu_lean_arena_beside_the_replay_arena_judged(
+    device, H, which, record_property
+) -> None:
     """The interleaved schedule of the shared-workspace tests (saving and replay-mode forwards, saved and
     replay-mode backwards, forwards without a saved set, checkpointed autograd through all packs) on the replay
-    arena, one workspace per pack (the reference), against ONE reserved lean workspace with the arena NaN-filled
-    before every forward and a lean workspace per pack: out, the written saved sets and every gradient bitwise;
-    every pack ran the lean layout, two tail passes (the default) on a pack's own workspace and on the reserved
-    workspace's largest pack (a smaller pack's view takes the fewest passes that fit the reserved arena, one where
-    it fits whole); the lean bytes equal ``cake_kda_nondet_train_kcp_workspace_bytes`` and are below the replay ones; no pointer
-    moved."""
+    arena, one workspace per pack (``replay``), on a lean workspace per pack (``lean_per``) and on ONE reserved lean
+    workspace (``lean_shared``), the lean arenas NaN-filled before every forward: out and every gradient of each
+    judged per pack (case ``p<i>``; :func:`judged`).  Every pack ran the lean layout, two tail passes (the default) on
+    a pack's own workspace and on the reserved workspace's largest pack (a smaller pack's view takes the fewest passes
+    that fit the reserved arena, one where it fits whole); the lean bytes equal
+    ``cake_kda_nondet_train_kcp_workspace_bytes`` and are below the replay ones; no pointer moved (every draw)."""
     packs = PACKS if which == "packs" else (PROXY_PACK,)
-    ctxs, ops = _packs_on(device, H, packs)
-    ref_ws = [_ws("replay") for _ in ctxs]
-    ref = _schedule(ctxs, ops, ref_ws)
-    replay_bytes = [w.bytes for w in ref_ws]
-    assert all(_passes_of(w.local) is None for w in ref_ws)
-    del ref_ws
-    gc.collect()
-    per = [_ws() for _ in ctxs]
-    got_per = _schedule(ctxs, ops, per, poison=_poison)
-    for c, w in zip(ctxs, per, strict=True):
-        assert w.bytes == _lean(ctx=c, H=H)
-        assert _passes_of(w.local) == kp.LEAN_PASSES_DEFAULT, (H, _passes_of(w.local))
-    assert all(w.bytes < b for w, b in zip(per, replay_bytes, strict=True)), (
-        [w.bytes for w in per],
-        replay_bytes,
-    )
-    del per
-    gc.collect()
-    ws = _ws()
-    assert ws.reserve(ctxs, H) == _lean(ctx=ctxs, H=H) == ws.bytes
-    ptrs = _pointers(ws)
-    used = _lean_used(ws, ctxs)
-    assert all(b is not None for b in used) and max(used) == 2, used
-    got = _schedule(ctxs, ops, ws, poison=_poison)
-    print(
-        f"LEAN_UNIT H={H} {which} passes={used} lean={ws.bytes} replay_max={max(replay_bytes)} "
-        f"NC_pad={[int(c.NC_pad) for c in ctxs]}"
-    )
-    for res in (got_per, got):
-        for i in range(len(ctxs)):
-            for key, val in ref[i].items():
-                assert _same(res[i][key], val), (H, which, i, key)
-    assert _pointers(ws) == ptrs and ws.bytes == _lean(ctx=ctxs, H=H)
+    ctxs, _ = _packs_on(device, H, packs)
+    judge = NaiveJudge()
+    ws = ptrs = None
+    for j in range(draws_of(packs, H)):
+        ops = _draw_ops(ctxs, H, device, draw_seed(JUDGE_SEED, j))
+        ref_ws = [_ws("replay") for _ in ctxs]
+        ref = _schedule(ctxs, ops, ref_ws)
+        replay_bytes = [w.bytes for w in ref_ws]
+        assert all(_passes_of(w.local) is None for w in ref_ws)
+        del ref_ws
+        gc.collect()
+        per = [_ws() for _ in ctxs]
+        got_per = _schedule(ctxs, ops, per, poison=_poison)
+        for c, w in zip(ctxs, per, strict=True):
+            assert w.bytes == _lean(ctx=c, H=H)
+            assert _passes_of(w.local) == kp.LEAN_PASSES_DEFAULT, (
+                H,
+                _passes_of(w.local),
+            )
+        assert all(w.bytes < b for w, b in zip(per, replay_bytes, strict=True)), (
+            [w.bytes for w in per],
+            replay_bytes,
+        )
+        del per
+        gc.collect()
+        if ws is None:
+            ws = _ws()
+            assert ws.reserve(ctxs, H) == _lean(ctx=ctxs, H=H) == ws.bytes
+            ptrs = _pointers(ws)
+        used = _lean_used(ws, ctxs)
+        assert all(b is not None for b in used) and max(used) == 2, used
+        got = _schedule(ctxs, ops, ws, poison=_poison)
+        if j == 0:
+            print(
+                f"LEAN_UNIT H={H} {which} passes={used} lean={ws.bytes} replay_max={max(replay_bytes)} "
+                f"NC_pad={[int(c.NC_pad) for c in ctxs]}"
+            )
+        assert _pointers(ws) == ptrs and ws.bytes == _lean(ctx=ctxs, H=H), j
+        arms = [
+            {
+                **schedule_arms(ref[i], "replay"),
+                **schedule_arms(got_per[i], "lean_per"),
+                **schedule_arms(got[i], "lean_shared"),
+            }
+            for i in range(len(ctxs))
+        ]
+        _judge_packs(judge, j, "", packs, ops, arms, device)
+        del ref, got_per, got, arms
+    judge.settle(record_property)
 
 
 @pytest.mark.parametrize("b", LEAN_PASS_VARIANTS, ids=lambda b: f"b{b}")
 @pytest.mark.parametrize(
     "H,which", [(64, "proxy"), (4, "proxy"), (4, "packs"), (64, "packs")]
 )
-def test_gpu_lean_pass_variants_are_bitwise_the_replay_arena(
-    device, H, which, b
-) -> None:
-    """A lean arena sized for ``b`` tail passes (``lean_passes``), one workspace per pack and ONE reserved for all
-    packs, the arena NaN-filled before every forward: out, the written saved sets and every gradient bitwise those
-    of the replay arena; the largest pack runs ``b`` passes; the bytes equal ``cake_kda_nondet_train_kcp_workspace_bytes(...,
-    local_arena="lean", lean_passes=b)``; no pointer moved."""
+def test_gpu_lean_pass_variants_judged(device, H, which, b, record_property) -> None:
+    """A lean arena sized for ``b`` tail passes (``lean_passes``), one workspace per pack (``lean_per``) and ONE
+    reserved for all packs (``lean_shared``), the arena NaN-filled before every forward, beside the replay arena
+    (``replay``): out and every gradient of each judged per pack (case ``p<i>``; :func:`judged`); the largest pack runs
+    ``b`` passes; the bytes equal ``cake_kda_nondet_train_kcp_workspace_bytes(..., local_arena="lean",
+    lean_passes=b)``; no pointer moved (every draw)."""
     packs = PACKS if which == "packs" else (PROXY_PACK,)
-    ctxs, ops = _packs_on(device, H, packs)
-    ref = _schedule(ctxs, ops, [_ws("replay") for _ in ctxs])
-    gc.collect()
-    per = [_ws(lean_passes=b) for _ in ctxs]
-    got_per = _schedule(ctxs, ops, per, poison=_poison)
-    for c, w in zip(ctxs, per, strict=True):
-        assert _passes_of(w.local) == b, (H, which, b, _passes_of(w.local))
-        assert w.bytes == _lean(ctx=c, H=H, lean_passes=b)
-    del per
-    gc.collect()
-    ws = _ws(lean_passes=b)
-    assert ws.reserve(ctxs, H) == _lean(ctx=ctxs, H=H, lean_passes=b) == ws.bytes
-    ptrs = _pointers(ws)
-    used = _lean_used(ws, ctxs)
-    assert all(u is not None for u in used) and max(used) == b, used
-    got = _schedule(ctxs, ops, ws, poison=_poison)
-    print(f"LEAN_PASSES H={H} {which} b={b} passes={used} bytes={ws.bytes}")
-    for res in (got_per, got):
-        for i in range(len(ctxs)):
-            for key, val in ref[i].items():
-                assert _same(res[i][key], val), (H, which, b, i, key)
-    assert _pointers(ws) == ptrs
+    ctxs, _ = _packs_on(device, H, packs)
+    judge = NaiveJudge()
+    ws = ptrs = None
+    for j in range(draws_of(packs, H)):
+        ops = _draw_ops(ctxs, H, device, draw_seed(JUDGE_SEED, j))
+        ref = _schedule(ctxs, ops, [_ws("replay") for _ in ctxs])
+        gc.collect()
+        per = [_ws(lean_passes=b) for _ in ctxs]
+        got_per = _schedule(ctxs, ops, per, poison=_poison)
+        for c, w in zip(ctxs, per, strict=True):
+            assert _passes_of(w.local) == b, (H, which, b, _passes_of(w.local))
+            assert w.bytes == _lean(ctx=c, H=H, lean_passes=b)
+        del per
+        gc.collect()
+        if ws is None:
+            ws = _ws(lean_passes=b)
+            assert (
+                ws.reserve(ctxs, H) == _lean(ctx=ctxs, H=H, lean_passes=b) == ws.bytes
+            )
+            ptrs = _pointers(ws)
+        used = _lean_used(ws, ctxs)
+        assert all(u is not None for u in used) and max(used) == b, used
+        got = _schedule(ctxs, ops, ws, poison=_poison)
+        if j == 0:
+            print(f"LEAN_PASSES H={H} {which} b={b} passes={used} bytes={ws.bytes}")
+        assert _pointers(ws) == ptrs, j
+        arms = [
+            {
+                **schedule_arms(ref[i], "replay"),
+                **schedule_arms(got_per[i], "lean_per"),
+                **schedule_arms(got[i], "lean_shared"),
+            }
+            for i in range(len(ctxs))
+        ]
+        _judge_packs(judge, j, "", packs, ops, arms, device)
+        del ref, got_per, got, arms
+    judge.settle(record_property)
 
 
 def _nan_stage(monkeypatch, log: list) -> None:
@@ -947,14 +1002,16 @@ def _nan_stage(monkeypatch, log: list) -> None:
 
 
 @pytest.mark.parametrize("H", (4, 16, 64))
-def test_gpu_lean_nan_arena_rows(device, H, monkeypatch) -> None:
+def test_gpu_lean_nan_arena_rows(device, H, monkeypatch, record_property) -> None:
     """The lean layout's dead and per-pass bytes carry nothing: the arena NaN-filled before every forward and
-    backward, every per-pass buffer NaN-filled before each tail range's fused gradient, no ``kcp_dav`` launch; saved
-    and replay-mode backwards give bitwise the replay arena's gradients (no NaN reaches a result)."""
+    backward, every per-pass buffer NaN-filled before each tail range's fused gradient, no ``kcp_dav`` launch; no NaN
+    reaches a gradient of a saved or replay-mode backward (every pack, every draw).  Out and the saved and replay-mode
+    gradients on the replay arena (``replay``: ``out`` + ``saved``, ``replay_bwd``) and on the poisoned lean arena
+    (``lean_nan``: the same) are judged per pack (case ``p<i>``; :func:`judged`)."""
     packs = PACKS + (PROXY_PACK,) if H == 64 else PACKS
-    ctxs, ops = _packs_on(device, H, packs)
+    ctxs, _ = _packs_on(device, H, packs)
 
-    def run(wss, poison) -> list:
+    def run(wss, poison, ops) -> list:
         out = []
         for i, (c, o) in enumerate(zip(ctxs, ops, strict=True)):
             poison(wss[i])
@@ -963,122 +1020,186 @@ def test_gpu_lean_nan_arena_rows(device, H, monkeypatch) -> None:
             g = _bwd(c, o, wss[i], s)
             poison(wss[i])
             g_replay = _bwd(c, o, wss[i], None)
-            out.append((y, written_tensors(s), g, g_replay))
+            out.append((y, g, g_replay))
         return out
 
-    ref = run([_ws("replay") for _ in ctxs], lambda w: None)
+    def arms(prefix: str, r) -> dict:
+        y, g, g_replay = r
+        return {
+            f"{prefix}.saved": {"out": y, **dict(zip(BWD_GRADS, g, strict=True))},
+            f"{prefix}.replay_bwd": dict(zip(BWD_GRADS, g_replay, strict=True)),
+        }
+
     log: list = []
-    _nan_stage(monkeypatch, log)
-    ws = _ws()
-    ws.reserve(ctxs, H)
-    got = run([ws] * len(ctxs), _poison)
-    assert "dAqk" in log and "dq_f" in log, sorted(set(log))
-    assert "dav_skipped" in log and "dav_launched" not in log, sorted(set(log))
-    for i in range(len(ctxs)):
-        assert _same(got[i], ref[i]), (H, i)
-        for g in got[i][2] + got[i][3]:
-            if isinstance(g, torch.Tensor) and g.is_floating_point():
-                assert not torch.isnan(g).any(), (H, i)
+    ws = None
+    judge = NaiveJudge()
+    for j in range(draws_of(packs, H)):
+        ops = _draw_ops(ctxs, H, device, draw_seed(JUDGE_SEED, j))
+        if ws is not None:
+            monkeypatch.undo()  # the replay arena's reference runs without the NaN stage
+        ref = run([_ws("replay") for _ in ctxs], lambda w: None, ops)
+        log.clear()
+        _nan_stage(monkeypatch, log)
+        if ws is None:
+            ws = _ws()
+            ws.reserve(ctxs, H)
+        got = run([ws] * len(ctxs), _poison, ops)
+        assert "dAqk" in log and "dq_f" in log, sorted(set(log))
+        assert "dav_skipped" in log and "dav_launched" not in log, sorted(set(log))
+        for i in range(len(ctxs)):
+            for g in got[i][1] + got[i][2]:
+                if isinstance(g, torch.Tensor) and g.is_floating_point():
+                    assert not torch.isnan(g).any(), (H, i, j)
+        all_arms = [
+            {**arms("replay", ref[i]), **arms("lean_nan", got[i])}
+            for i in range(len(ctxs))
+        ]
+        _judge_packs(judge, j, "", packs, ops, all_arms, device)
+        del ref, got, all_arms
+    judge.settle(record_property)
 
 
 @pytest.mark.parametrize("H", (4, 64))
-def test_gpu_lean_handles_graph_replay_and_overlap_schedule(device, H) -> None:
-    """The knobs around the backward on the lean arena, each bitwise the replay arena's: recompute handles of both
-    tiers through two checkpointed layers per pack in both orders (the reference: direct autograd on the replay
-    arena; the stored tensors unchanged and outside the workspace), ``graph="replay"`` (captured and replayed
-    calls), and the overlap schedule (the document-end adjoint tape walk under b2) through ``_kcp_test_knobs``."""
+def test_gpu_lean_handles_graph_replay_and_overlap_schedule(
+    device, H, record_property
+) -> None:
+    """The knobs around the backward on the lean arena, each beside the replay arena: recompute handles of both
+    tiers through two checkpointed layers per pack in both orders (``direct``: direct autograd on the replay arena;
+    ``<tier>.<order>``: the lean arena poisoned; the stored tensors unchanged and outside the workspace, each recompute
+    run once per layer), ``graph="replay"`` (eager, captured and replayed calls; ``graph_replay_arena`` and
+    ``graph_lean``, repeats) and the overlap schedule (the document-end adjoint tape walk under b2; ``overlap_replay``
+    and ``overlap_lean``) through ``_kcp_test_knobs``.  Out and every gradient of each judged per pack (case
+    ``p<i>``; the handle arms against the FP64 reference of the two-layer stack, :func:`stack_refs`; :func:`judged`)."""
     packs = PACKS + (PROXY_PACK,) if H == 64 else PACKS
-    ctxs, ops = _packs_on(device, H, packs)
+    ctxs, _ = _packs_on(device, H, packs)
 
-    def graph(wss) -> list:
-        res = []
+    def graph(wss, ops) -> list:
+        res = [[] for _ in ctxs]
         for _ in range(3):  # eager, capture, replay
-            rnd = []
             for i, (c, o) in enumerate(zip(ctxs, ops, strict=True)):
                 y, s = _fwd(c, o, wss[i], graph="replay")
                 g = _bwd(c, o, wss[i], s, graph="replay")
-                rnd.append((y.clone(), [t.clone() for t in g]))
-            res.append(rnd)
+                res[i].append(host({"out": y, **dict(zip(BWD_GRADS, g, strict=True))}))
         return res
 
-    def overlap(wss) -> list:
+    def overlap(wss, ops) -> list:
         knobs = {"_kcp_test_knobs": {"schedule": "overlap"}}
         res = []
         for i, (c, o) in enumerate(zip(ctxs, ops, strict=True)):
             y, s = _fwd(c, o, wss[i], **knobs)
-            res.append((y, _bwd(c, o, wss[i], s, **knobs)))
+            g = _bwd(c, o, wss[i], s, **knobs)
+            res.append({"out": y, **dict(zip(BWD_GRADS, g, strict=True))})
         return res
 
+    judge = NaiveJudge()
     previous = kp.enable_test_knobs(True)
     try:
-        ref, _ = _handle_pass(ctxs, ops, [_ws("replay") for _ in ctxs])
-        for keep in ("states", "transfer"):
-            for order in ("interleaved", "sequential"):
-                ws = _ws()
-                ws.reserve(ctxs, H)
-                got, log = _handle_pass(
-                    ctxs, ops, ws, keep=keep, order=order, poison=_poison
-                )
-                assert not (log["changed"] or log["overlap"] or log["recompute_out"]), (
-                    H,
-                    keep,
-                    order,
-                    log,
-                )
-                for i in range(len(ctxs)):
-                    for key in ("out", "grads"):
-                        assert _same(got[i][key], ref[i][key]), (H, keep, order, i, key)
-        ref = graph([_ws("replay") for _ in ctxs])
-        ws = _ws()
-        ws.reserve(ctxs, H)
-        got = graph([ws] * len(ctxs))
-        for r in range(3):
-            assert _same(got[r], ref[0]) and _same(ref[r], ref[0]), (H, r)
-        cake_kcp.graph_cache_clear()
-        ref = overlap([_ws("replay") for _ in ctxs])
-        ws = _ws()
-        ws.reserve(ctxs, H)
-        assert _same(overlap([ws] * len(ctxs)), ref), H
+        for j in range(draws_of(packs, H)):
+            ops = _draw_ops(ctxs, H, device, draw_seed(JUDGE_SEED, j))
+            ref, _ = _handle_pass(ctxs, ops, [_ws("replay") for _ in ctxs])
+            stack = [handle_arms(ref[i], "direct") for i in range(len(ctxs))]
+            del ref
+            for keep in ("states", "transfer"):
+                for order in ("interleaved", "sequential"):
+                    ws = _ws()
+                    ws.reserve(ctxs, H)
+                    got, log = _handle_pass(
+                        ctxs, ops, ws, keep=keep, order=order, poison=_poison
+                    )
+                    assert not (
+                        log["changed"] or log["overlap"] or log["recompute_out"]
+                    ), (H, keep, order, log)
+                    for i in range(len(ctxs)):
+                        stack[i].update(handle_arms(got[i], f"{keep}.{order}"))
+                    del got, log, ws
+            cake_kcp.graph_cache_clear()
+            graph_ref = graph([_ws("replay") for _ in ctxs], ops)
+            ws = _ws()
+            ws.reserve(ctxs, H)
+            graph_lean = graph([ws] * len(ctxs), ops)
+            cake_kcp.graph_cache_clear()
+            overlap_ref = overlap([_ws("replay") for _ in ctxs], ops)
+            ws = _ws()
+            ws.reserve(ctxs, H)
+            overlap_lean = overlap([ws] * len(ctxs), ops)
+            del ws
+            arms = [
+                {
+                    "graph_replay_arena": graph_ref[i],
+                    "graph_lean": graph_lean[i],
+                    "overlap_replay": overlap_ref[i],
+                    "overlap_lean": overlap_lean[i],
+                }
+                for i in range(len(ctxs))
+            ]
+            _judge_packs(judge, j, "", packs, ops, arms, device)
+            for i, lengths in enumerate(packs):
+                if judged(lengths, H):
+                    inputs = pack_inputs(_part(lengths), _cu(lengths), ops[i], device)
+                    r, t = stack_refs(judge, inputs, HANDLE_LAYERS)
+                    judge.add_refs(j, f"p{i}", stack[i], r, t)
+            del stack, graph_ref, graph_lean, overlap_ref, overlap_lean, arms
     finally:
         kp.enable_test_knobs(previous)
         cake_kcp.graph_cache_clear()
+    judge.settle(record_property)
 
 
-def test_gpu_lean_steady_calls_do_not_block_or_allocate(device) -> None:
+def test_gpu_lean_steady_calls_do_not_block_or_allocate(
+    device, record_property
+) -> None:
     """Census of a steady round (saving forwards, then saved-mode backwards in reverse order) of the packs and the
-    proxy-geometry pack at H = 64 on one reserved lean workspace (two tail passes on the largest pack): no
-    pageable or pinned copy, no synchronizing operation, no device allocation or free (the tail ranges' item bounds
-    come from the arena's tail-count table); bitwise the first round."""
+    proxy-geometry pack at H = 64 on one reserved lean workspace (two tail passes on the largest pack; the first
+    draw): no pageable or pinned copy, no synchronizing operation, no device allocation or free (the tail ranges'
+    item bounds come from the arena's tail-count table).  Out and the five gradients of the first round (``first``)
+    and of the steady round (``steady``) are judged per pack on every draw (case ``p<i>``; the proxy pack keeps its
+    exact checks only, :func:`judged`)."""
     alloc_ok = allocator_counts(device)
     H = 64
-    ctxs, ops = _packs_on(device, H, PACKS + (PROXY_PACK,))
+    packs = PACKS + (PROXY_PACK,)
+    ctxs, ops = _packs_on(device, H, packs)
     ws = _ws()
     ws.reserve(ctxs, H)
     used = _lean_used(ws, ctxs)
     assert all(b is not None for b in used) and max(used) > 1, used
 
     def rnd():
-        saved, res = [], []
-        for c, o in zip(ctxs, ops, strict=True):
+        saved, res = [], [{} for _ in ctxs]
+        for i, (c, o) in enumerate(zip(ctxs, ops, strict=True)):
             out, s = _fwd(c, o, ws)
             saved.append(s)
-            res.append(out)
+            res[i]["out"] = out
         for i in reversed(range(len(ctxs))):
-            res.extend(_bwd(ctxs[i], ops[i], ws, saved[i]))
+            grads = _bwd(ctxs[i], ops[i], ws, saved[i])
+            res[i].update(zip(BWD_GRADS, grads, strict=True))
         return res
 
-    first = rnd()
-    rnd()
-    c = census(rnd, device)
-    print(f"CENSUS_LEAN {summary(c)}")
-    assert nonblocking(c), summary(c)
-    assert c["pinned"] == 0, summary(c)
-    if alloc_ok:
-        assert (c["device_alloc"], c["device_free"], c["alloc_retries"]) == (0, 0, 0), (
-            summary(c)
-        )
-        assert c["prof_malloc"] in (None, 0), summary(c)
-    assert _same(first, c["out"])
+    judge = NaiveJudge()
+    for j in range(draws_of(packs, H)):
+        if j:
+            ops = _draw_ops(ctxs, H, device, draw_seed(JUDGE_SEED, j))
+        first = rnd()
+        rnd()
+        if j == 0:
+            c = census(rnd, device)
+            print(f"CENSUS_LEAN {summary(c)}")
+            assert nonblocking(c), summary(c)
+            assert c["pinned"] == 0, summary(c)
+            if alloc_ok:
+                assert (c["device_alloc"], c["device_free"], c["alloc_retries"]) == (
+                    0,
+                    0,
+                    0,
+                ), summary(c)
+                assert c["prof_malloc"] in (None, 0), summary(c)
+            steady = c["out"]
+            del c
+        else:
+            steady = rnd()
+        arms = [{"first": a, "steady": b} for a, b in zip(first, steady, strict=True)]
+        _judge_packs(judge, j, "", packs, ops, arms, device)
+        del first, steady, arms
+    judge.settle(record_property)
     if not alloc_ok:
         pytest.skip(
             "the caching allocator's statistics do not count device allocations here"
@@ -1111,12 +1232,14 @@ def _run_lean_rank(
     result_dir: str | None,
     lean_passes: int | None = None,
 ) -> dict:
-    """One rank: the row's packs on the replay arena, one workspace per pack (the reference), then on ONE reserved
-    lean workspace (two rounds of the interleaved schedule, the arena NaN-filled before every forward of the first):
-    bitwise out / saved sets / gradients, the bytes equal ``cake_kda_nondet_train_kcp_workspace_bytes`` and below the replay ones, no
-    pointer moved, every pack of the rank on the lean layout.  The verdicts are gathered to every rank."""
-    _packs_, H, _w, _layout, exchange = row
-    _device, ctxs, ops = _rank_packs(rank, W, row, rdzv)
+    """One rank, over the judge's draws: the row's packs on the replay arena, one workspace per pack (``replay``),
+    then on ONE reserved lean workspace (two rounds of the interleaved schedule, the arena NaN-filled before every
+    forward of the first: ``lean_poisoned``, ``lean``); the bytes equal ``cake_kda_nondet_train_kcp_workspace_bytes``
+    and below the replay ones, no pointer moved, every pack of the rank on the lean layout.  Out and the five gradients
+    of every arm of every pack are gathered to rank 0 and judged there (``report["naive"]``).  The flags are gathered
+    to every rank."""
+    packs, H, _w, _layout, exchange = row
+    device, ctxs, parts = _rank_packs(rank, W, row, rdzv)
     kw = {"exchange": exchange}
     ring = exchange == "ring"
     rid = (
@@ -1131,32 +1254,48 @@ def _run_lean_rank(
         "pass": True,
         "fail": [],
     }
-    ref_ws = [_ws("replay") for _ in ctxs]
-    ref = _schedule(ctxs, ops, ref_ws, **kw)
-    report["replay_bytes"] = [w.bytes for w in ref_ws]
-    del ref_ws
-    gc.collect()
-    ws = _ws(lean_passes=lean_passes)
-    ws.reserve(ctxs, H, ring=ring)
-    report["lean_bytes"] = ws.bytes
-    report["pred_bytes"] = _lean(ctx=ctxs, H=H, lean_passes=lean_passes) + (
-        sum(
-            max(kp.kcp_arena_layout(c, H=H)[f"pool.{name}"] for c in ctxs)
-            for name in kp.LAZY_POOLS
-        )
-        if ring
-        else 0
-    )
-    report["passes"] = _lean_used(ws, ctxs) if ws.local is not None else []
-    ptrs = _pointers(ws)
-    for rnd in range(2):
-        res = _schedule(ctxs, ops, ws, poison=_poison if rnd == 0 else None, **kw)
-        for i in range(len(ctxs)):
-            for key, val in ref[i].items():
-                if not _same(res[i][key], val):
-                    report["fail"].append(f"bitwise r{rnd} pack{i} {key}")
-        if _pointers(ws) != ptrs:
-            report["fail"].append(f"pointers moved r{rnd}")
+    judge = NaiveJudge() if rank == 0 else None
+    ws = ptrs = None
+    for j in range(draws_of(packs, H)):
+        ops, globs = _rank_ops(packs, parts, rank, H, device, draw_seed(JUDGE_SEED, j))
+        ref_ws = [_ws("replay") for _ in ctxs]
+        ref = _schedule(ctxs, ops, ref_ws, **kw)
+        if ws is None:
+            report["replay_bytes"] = [w.bytes for w in ref_ws]
+        del ref_ws
+        gc.collect()
+        if ws is None:
+            ws = _ws(lean_passes=lean_passes)
+            ws.reserve(ctxs, H, ring=ring)
+            report["lean_bytes"] = ws.bytes
+            report["pred_bytes"] = _lean(ctx=ctxs, H=H, lean_passes=lean_passes) + (
+                sum(
+                    max(kp.kcp_arena_layout(c, H=H)[f"pool.{name}"] for c in ctxs)
+                    for name in kp.LAZY_POOLS
+                )
+                if ring
+                else 0
+            )
+            report["passes"] = _lean_used(ws, ctxs) if ws.local is not None else []
+            ptrs = _pointers(ws)
+        got = []
+        for rnd in range(2):
+            got.append(
+                _schedule(ctxs, ops, ws, poison=_poison if rnd == 0 else None, **kw)
+            )
+            if _pointers(ws) != ptrs:
+                report["fail"].append(f"pointers moved d{j} r{rnd}")
+        for i, (lengths, (part, cu)) in enumerate(zip(packs, parts, strict=True)):
+            if not judged(lengths, H):
+                continue
+            arms = {
+                **schedule_arms(ref[i], "replay"),
+                **schedule_arms(got[0][i], "lean_poisoned"),
+                **schedule_arms(got[1][i], "lean"),
+            }
+            glob = globs[i] if globs is not None else None
+            _judge_rank_arms(judge, j, f"p{i}", arms, part, cu, glob, W, rank)
+        del ref, got, ops, globs
     if report["lean_bytes"] != report["pred_bytes"]:
         report["fail"].append(
             "bytes != cake_kda_nondet_train_kcp_workspace_bytes(ctxs)"
@@ -1165,18 +1304,7 @@ def _run_lean_rank(
         report["fail"].append("lean bytes not below the replay workspace")
     if any(b is None for b in report["passes"]):
         report["fail"].append(f"a pack off the lean layout: {report['passes']}")
-    report["pass"] = not report["fail"]
-    if W > 1:
-        verdicts = [None] * W
-        dist.all_gather_object(verdicts, {k: report[k] for k in report if k != "row"})
-        report["ranks"] = verdicts
-        report["pass"] = all(v["pass"] for v in verdicts)
-        dist.barrier()
-    if rank == 0 and result_dir:
-        os.makedirs(result_dir, exist_ok=True)
-        with open(os.path.join(result_dir, rid + ".json"), "w") as fh:
-            json.dump(report, fh, indent=1, default=str)
-    return report
+    return _finish_rank_report(report, judge, W, rank, result_dir, rid)
 
 
 def _bound_rank_threads(W: int) -> None:
@@ -1207,11 +1335,11 @@ def _spawn_lean_entry(
 
 
 @pytest.mark.parametrize("row", LEAN_DIST_ROWS, ids=_dist_row_id)
-def test_multi_gpu_lean_rows_are_bitwise_the_replay_arena(row) -> None:
+def test_multi_gpu_lean_rows_judged(row, record_property) -> None:
     """The rows of :func:`_run_lean_rank`: one process per GPU (``spawn``, rows up to the visible GPU count) or one
     process per Slurm task (a step with ``SLURM_NTASKS`` > 1 runs the rows of its own world size and skips the
-    others)."""
-    _run_lean_row(row, None)
+    others); rank 0's verdicts recorded and settled here."""
+    _run_lean_row(row, None, record_property)
 
 
 # the explicit pass-count variants on a two-rank row each of a2a and the ring, a four-rank row and an eight-rank row
@@ -1227,12 +1355,12 @@ LEAN_PASS_DIST_ROWS = [
     LEAN_PASS_DIST_ROWS,
     ids=[f"b{b}-{_dist_row_id(r)}" for r, b in LEAN_PASS_DIST_ROWS],
 )
-def test_multi_gpu_lean_pass_variant_rows_are_bitwise(row, b) -> None:
+def test_multi_gpu_lean_pass_variant_rows_judged(row, b, record_property) -> None:
     """:func:`_run_lean_rank` on a lean arena sized for ``b`` tail passes (``lean_passes``)."""
-    _run_lean_row(row, b)
+    _run_lean_row(row, b, record_property)
 
 
-def _run_lean_row(row, lean_passes: int | None) -> None:
+def _run_lean_row(row, lean_passes: int | None, record_property) -> None:
     _packs_, _H, W, _layout, _exchange = row
     rid = (
         "lean-"
@@ -1252,6 +1380,8 @@ def _run_lean_row(row, lean_passes: int | None) -> None:
             lean_passes,
         )
         assert report["pass"], report
+        if report.get("naive", {}).get("verdicts"):  # rank 0 of a judged row
+            settle_naive(record_property, report["naive"])
         return
     _device_or_skip()
     if torch.cuda.device_count() < W:
@@ -1267,4 +1397,6 @@ def _run_lean_row(row, lean_passes: int | None) -> None:
         )
         with open(os.path.join(result_dir, rid + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    assert report["pass"], {k: v for k, v in report.items() if k != "naive"}
+    if report["naive"]["verdicts"] or report["naive"]["failures"]:
+        settle_naive(record_property, report["naive"])

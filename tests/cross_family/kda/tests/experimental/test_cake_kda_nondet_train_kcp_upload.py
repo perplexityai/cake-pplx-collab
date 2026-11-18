@@ -21,7 +21,14 @@ host-to-device copies by kind where the profiler traces the device), the caching
 synchronizing operations ``torch.cuda.set_sync_debug_mode("warn")`` reports, and a queue probe (``torch.cuda._sleep``
 enqueued before the window must still run after it, and the host must return well before it ends).  The negative control
 is the previous path (context test knobs ``upload="blocking"`` + ``table_cache="workspace"``): the same signals must
-report the copies and the waits there.  Results of the new path are bitwise those of the previous one.
+report the copies and the waits there.
+
+Accuracy: this package has no bit contract, so no KDA run is compared with another's bits.  Out and the five gradients
+of every KDA pass of a test (saved, replay, autograd under checkpoint: ``"<arm>.saved"`` / ``".replay"`` / ``".ckpt"``)
+are judged against the FP64 reference of the pack beside the naive BF16 tier of ``tests/cake_naive.py`` over 32 draws
+of the operands (the owner-accepted gaps only).  The census and the ordering checks run on the first draw (each queue
+probe holds the device ~1 s) unless a test says otherwise.  The conv halo is a deterministic package: its run-to-run
+bit equalities stay (``# mode contract``).
 """
 
 import gc
@@ -31,6 +38,13 @@ import weakref
 import pytest
 import torch
 
+from tests.cake_naive import DRAWS, draw_seed
+from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
+    BWD_GRADS,
+    LEAF_GRADS,
+    NaiveJudge,
+    pack_inputs,
+)
 from tests.experimental.test_helpers.cake_host_sync import (
     SLEEP_MS,
     allocator_counts,
@@ -66,6 +80,8 @@ ALLOC_SKIP = (
     "the caching allocator's statistics do not count device allocations here (allocator_counts); "
     "the copy, synchronization and queue-probe gates of this test passed"
 )
+# the judged operands: draw j at draw_seed(SEED, j) (tests/cake_naive.py); the first draw is _ops's default seed
+SEED = 0x7815
 
 
 @pytest.fixture
@@ -184,6 +200,54 @@ def _passes(ctx, o: dict, ws, **opts) -> tuple:
     out.backward(dout)
     res += [out.detach()] + [lf.grad for lf in leaves]
     return tuple(res)
+
+
+def _kept(res) -> tuple:
+    """Device copies of a pass's results (a later call may reuse the package's buffers)."""
+    return tuple(t.detach().clone() for t in res)
+
+
+def pass_arms(res, arm: str) -> dict:
+    """The judged arms of :func:`_passes` results (one run, or a list of runs: repeats): ``<arm>.saved`` and
+    ``<arm>.replay`` (out and the backward's ``dq, dk, dv, dbeta, dg``) and ``<arm>.ckpt`` (out and the leaves' ``dq,
+    dk, dv, dg, dbeta``)."""
+    if isinstance(res, list):
+        out: dict = {}
+        for r in res:
+            for name, d in pass_arms(r, arm).items():
+                out.setdefault(name, []).append(d)
+        return out
+    assert len(res) == 18, len(res)
+    return {
+        f"{arm}.saved": {"out": res[0], **dict(zip(BWD_GRADS, res[1:6], strict=True))},
+        f"{arm}.replay": {
+            "out": res[6],
+            **dict(zip(BWD_GRADS, res[7:12], strict=True)),
+        },
+        f"{arm}.ckpt": {
+            "out": res[12],
+            **dict(zip(LEAF_GRADS, res[13:18], strict=True)),
+        },
+    }
+
+
+def _lengths(cu) -> tuple[int, ...]:
+    """The document lengths of the boundaries ``cu``."""
+    return tuple(int(cu[i + 1]) - int(cu[i]) for i in range(len(cu) - 1))
+
+
+def _inputs(cu, o: dict, device) -> dict:
+    """The judge's operands of the one-rank pack of documents ``cu`` (``o``: :func:`_ops`)."""
+    part = kp.cake_kda_nondet_train_kcp_partition(list(cu), 1)
+    return pack_inputs(part, list(cu), o, device)
+
+
+def _judge_passes(judge: NaiveJudge, j: int, cu, o: dict, device, **arms) -> None:
+    """Draw ``j`` of the :func:`_passes` results ``arms`` (``name=result`` or ``name=[result, ...]``) on ``o``."""
+    flat: dict = {}
+    for arm, res in arms.items():
+        flat.update(pass_arms(res, arm))
+    judge.add(j, "", flat, _inputs(cu, o, device))
 
 
 # --------------------------------------------------------------------------- CPU
@@ -429,14 +493,18 @@ def _other_of_class(cu: tuple, H: int, P: int, device: torch.device) -> tuple[in
 
 @pytest.mark.parametrize("p_class", list(P_CLASSES))
 @pytest.mark.parametrize("ws_mode", ["none", "reused"])
-def test_gpu_calls_issue_no_blocking_upload(device, knobs, p_class, ws_mode) -> None:
+def test_gpu_calls_issue_no_blocking_upload(
+    device, knobs, record_property, p_class, ws_mode
+) -> None:
     """A T1 / T2: the first fwd + bwd (saved, replay, autograd under checkpoint) of a fresh context of a partition no
     earlier call has seen (the layout class is warmed by another partition of the same class, and the process caches
     keyed by table content are emptied) issues only pinned asynchronous copies -- at least one: the table sets of the
     call -- and no pageable copy, no synchronizing operation, the queue still runs when the host returns; in steady
     state the same passes issue no copy at all and no device allocation or free, with ``workspace=None`` and with a
     reused workspace.  The previous path (knob) on the same passes with ``workspace=None`` is the negative control:
-    pageable copies, synchronizing operations, a drained queue; bitwise the new path's results."""
+    pageable copies, synchronizing operations, a drained queue.  Census on the first draw; every draw (a fresh context
+    and workspace after the content caches are emptied) judges the first passes (``first``), a later call's
+    (``steady``) and, with ``workspace=None``, the previous path's (``old``)."""
     alloc_ok = allocator_counts(device)
     cu, H, P = _row_of(device, p_class)
     other = _other_of_class(cu, H, P, device)
@@ -452,45 +520,65 @@ def test_gpu_calls_issue_no_blocking_upload(device, knobs, p_class, ws_mode) -> 
     # the class: modules loaded, allocator blocks cached
     run(warm, _ops(warm, H, device), _new_ws())
     del warm
-    _clear_content_caches()
-    torch.cuda.synchronize(device)
-    ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
-    o = _ops(ctx, H, device)
-    ws = _new_ws()
-    torch.cuda.synchronize(device)
-    first = census(lambda: run(ctx, o, ws), device)
-    _assert_nonblocking(first, ("first", cu, H, P, ws_mode))
-    assert first["pinned"] >= 1, ("first", summary(first))
-    for _ in range(2):
-        run(ctx, o, ws)
-    steady = census(lambda: run(ctx, o, ws), device)
-    _assert_nonblocking(steady, ("steady", cu, H, P, ws_mode))
-    assert steady["pinned"] == 0, ("steady", summary(steady))
-    _assert_no_alloc(steady, alloc_ok, ("steady", cu, H, P, ws_mode))
-    print(f"CENSUS first {summary(first)} steady {summary(steady)}")
-    for a, b in zip(first["out"], steady["out"], strict=True):
-        assert torch.equal(a, b)
-    if ws_mode == "none":
-        old = kp.cake_kda_nondet_train_kcp_build_context(
-            part, None, 0, device, _kcp_test_knobs=dict(OLD)
-        )
-        for _ in range(2):
-            run(old, o, None)
-        neg = census(lambda: run(old, o, None), device)
-        assert neg["pageable"] > 0 and counts_agree(neg), ("old", summary(neg))
-        assert neg["sync_warn"] > 0 and not neg["busy"], ("old", summary(neg))
-        print(f"CENSUS old {summary(neg)}")
-        for a, b in zip(neg["out"], steady["out"], strict=True):
-            assert torch.equal(a, b)
+    judge = NaiveJudge()
+    old = None
+    for j in range(DRAWS):
+        _clear_content_caches()
+        torch.cuda.synchronize(device)
+        ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
+        o = _ops(ctx, H, device, draw_seed(SEED, j))
+        ws = _new_ws()
+        torch.cuda.synchronize(device)
+        if j:
+            first = _kept(run(ctx, o, ws))
+            steady = _kept(run(ctx, o, ws))
+        else:
+            c = census(lambda ctx=ctx, o=o, ws=ws: run(ctx, o, ws), device)
+            _assert_nonblocking(c, ("first", cu, H, P, ws_mode))
+            assert c["pinned"] >= 1, ("first", summary(c))
+            first, first_c = _kept(c["out"]), summary(c)
+            del c
+            for _ in range(2):
+                run(ctx, o, ws)
+            c = census(lambda ctx=ctx, o=o, ws=ws: run(ctx, o, ws), device)
+            _assert_nonblocking(c, ("steady", cu, H, P, ws_mode))
+            assert c["pinned"] == 0, ("steady", summary(c))
+            _assert_no_alloc(c, alloc_ok, ("steady", cu, H, P, ws_mode))
+            print(f"CENSUS first {first_c} steady {summary(c)}")
+            steady = _kept(c["out"])
+            del c
+        arms = {"first": first, "steady": steady}
+        if ws_mode == "none":
+            if old is None:
+                old = kp.cake_kda_nondet_train_kcp_build_context(
+                    part, None, 0, device, _kcp_test_knobs=dict(OLD)
+                )
+            if j:
+                arms["old"] = _kept(run(old, o, None))
+            else:
+                for _ in range(2):
+                    run(old, o, None)
+                neg = census(lambda old=old, o=o: run(old, o, None), device)
+                assert neg["pageable"] > 0 and counts_agree(neg), ("old", summary(neg))
+                assert neg["sync_warn"] > 0 and not neg["busy"], ("old", summary(neg))
+                print(f"CENSUS old {summary(neg)}")
+                arms["old"] = _kept(neg["out"])
+                del neg
+        _judge_passes(judge, j, cu, o, device, **arms)
+        del arms, first, steady, ctx, ws
+    judge.settle(record_property, lengths=_lengths(cu))
     if not alloc_ok:
         pytest.skip(ALLOC_SKIP)
 
 
 @pytest.mark.parametrize("p_class", list(P_CLASSES))
-def test_gpu_new_path_is_bitwise_the_previous_path(device, knobs, p_class) -> None:
+def test_gpu_new_and_previous_paths_judged(
+    device, knobs, record_property, p_class
+) -> None:
     """A T5 (one rank), a row of each P class on this device (:func:`_row_of`): out and the five gradients of the
-    saved, replay and checkpointed passes, and the conv halo's ``y`` / ``dx`` / ``dweight``, are bitwise equal between
-    the new path and the previous one (knob), with ``workspace=None`` and with a reused workspace."""
+    saved, replay and checkpointed passes of the new path and of the previous one (knob), with ``workspace=None``
+    (``new`` / ``old``) and with a reused workspace (``new_ws`` / ``old_ws``), judged on every draw.  The conv halo's
+    ``y`` / ``dx`` / ``dweight`` (a deterministic package) are bitwise equal between the two paths."""
     cu, H, P = _row_of(device, p_class)
     print(f"ROW {p_class}: documents {cu} H {H} P {P}")
     part = kp.cake_kda_nondet_train_kcp_partition(list(cu), 1)
@@ -498,12 +586,19 @@ def test_gpu_new_path_is_bitwise_the_previous_path(device, knobs, p_class) -> No
     old = kp.cake_kda_nondet_train_kcp_build_context(
         part, None, 0, device, _kcp_test_knobs=dict(OLD)
     )
-    o = _ops(new, H, device)
-    for ws_new, ws_old in ((None, None), (_new_ws(), _new_ws())):
-        a, b = _passes(new, o, ws_new), _passes(old, o, ws_old)
-        assert len(a) == 18
-        for i, (x, y) in enumerate(zip(a, b, strict=True)):
-            assert torch.equal(x, y), (i, ws_new is None)
+    judge = NaiveJudge()
+    ws_new, ws_old = _new_ws(), _new_ws()
+    for j in range(DRAWS):
+        o = _ops(new, H, device, draw_seed(SEED, j))
+        arms = {
+            "new": _kept(_passes(new, o, None)),
+            "old": _kept(_passes(old, o, None)),
+            "new_ws": _kept(_passes(new, o, ws_new)),
+            "old_ws": _kept(_passes(old, o, ws_old)),
+        }
+        _judge_passes(judge, j, cu, o, device, **arms)
+        del arms
+    judge.settle(record_property, lengths=_lengths(cu))
     from cake_pplx._backends.cake_causal_conv1d_det_train import kcp as conv
 
     gen = torch.Generator(device=device).manual_seed(7)
@@ -516,24 +611,27 @@ def test_gpu_new_path_is_bitwise_the_previous_path(device, knobs, p_class) -> No
         dx, dw = conv.cake_causal_conv1d_det_train_kcp_backward(x, w, ctx, dy, hist)
         res.append((y, dx, dw))
     for x_, y_ in zip(*res, strict=True):
+        # mode contract: the conv halo (deterministic package) gives the same bits on either path's tables
         assert torch.equal(x_, y_)
 
 
-def test_gpu_graph_replay_issues_no_copy(device) -> None:
+def test_gpu_graph_replay_issues_no_copy(device, record_property) -> None:
     """A T4: a reused workspace under ``graph="replay"``: the first call of a key is eager (it uploads the table
     set), the forward is captured before the backward, and once both replay the replayed calls issue no copy, no
-    allocator call and no synchronizing operation, bitwise equal to the eager call; no capture falls back to eager
+    allocator call and no synchronizing operation (census on the first draw); no capture falls back to eager
     (``GRAPH_STATS["fallback"]`` unchanged).  The calls that capture are not measured: a capture allocates the graph's
-    private pool and synchronizes by design."""
+    private pool and synchronizes by design.  Every draw (the graph cache emptied before it): out and the five
+    gradients of the eager first call (``eager``) and of two replayed calls (``graph``, repeats) are judged."""
     alloc_ok = allocator_counts(device)
     H = 2
     part = kp.cake_kda_nondet_train_kcp_partition(list(CU), 1)
     ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
-    o = _ops(ctx, H, device)
     ws = _new_ws()
-    q, k, v, g, beta, dout = (o[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+    judge = NaiveJudge()
+    fallback = cake_kcp.GRAPH_STATS["fallback"]
 
-    def call(clone: bool = True):
+    def call(o: dict, clone: bool = True):
+        q, k, v, g, beta, dout = (o[n] for n in ("q", "k", "v", "g", "beta", "dout"))
         out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
             q, k, v, g, beta, ctx, workspace=ws, graph="replay"
         )
@@ -556,53 +654,76 @@ def test_gpu_graph_replay_issues_no_copy(device) -> None:
         res = (out, *grads)
         return (tuple(t.clone() for t in res) if clone else res), events
 
-    cake_kcp.graph_cache_clear()
-    fallback = cake_kcp.GRAPH_STATS["fallback"]
+    def named(res) -> dict:
+        return {"out": res[0], **dict(zip(BWD_GRADS, res[1:], strict=True))}
+
     try:
-        ref, ev = call()
-        events = [ev]
-        while ev != ("replay", "replay") and len(events) < 8:
-            ev = call()[1]
-            events.append(ev)
-        assert events[0] == ("eager", "eager") and ev == ("replay", "replay"), events
-        fwd, bwd = [e[0] for e in events], [e[1] for e in events]
-        assert fwd.count("capture") == 1 and bwd.count("capture") == 1, events
-        assert fwd.index("capture") < bwd.index("capture"), events
-        for i in range(2):
-            # the replayed call alone in the window: its static outputs are compared right after it
-            # (the test's own clones would grow the allocator)
-            c = census(lambda: call(clone=False), device)
-            res, ev = c["out"]
-            assert ev == ("replay", "replay"), (i, ev)
-            _assert_nonblocking(c, ("replay", i))
-            assert c["pinned"] == 0, (i, summary(c))
-            _assert_no_alloc(c, alloc_ok, ("replay", i))
-            for a, b in zip(ref, res, strict=True):
-                assert torch.equal(a, b)
-            del c, res
-        assert cake_kcp.GRAPH_STATS["fallback"] == fallback
+        for j in range(DRAWS):
+            cake_kcp.graph_cache_clear()
+            o = _ops(ctx, H, device, draw_seed(SEED, j))
+            ref, ev = call(o)
+            events = [ev]
+            while ev != ("replay", "replay") and len(events) < 8:
+                ev = call(o)[1]
+                events.append(ev)
+            assert events[0] == ("eager", "eager") and ev == ("replay", "replay"), (
+                j,
+                events,
+            )
+            fwd, bwd = [e[0] for e in events], [e[1] for e in events]
+            assert fwd.count("capture") == 1 and bwd.count("capture") == 1, events
+            assert fwd.index("capture") < bwd.index("capture"), events
+            graph = []
+            for i in range(2):
+                if j:
+                    res, ev = call(o)
+                    assert ev == ("replay", "replay"), (j, i, ev)
+                    graph.append(named(res))
+                    continue
+                # the replayed call alone in the window (the test's own clones would grow the allocator): its
+                # static outputs are copied right after it
+                c = census(lambda o=o: call(o, clone=False), device)
+                res, ev = c["out"]
+                assert ev == ("replay", "replay"), (i, ev)
+                _assert_nonblocking(c, ("replay", i))
+                assert c["pinned"] == 0, (i, summary(c))
+                _assert_no_alloc(c, alloc_ok, ("replay", i))
+                graph.append(named(_kept(res)))
+                del c, res
+            assert cake_kcp.GRAPH_STATS["fallback"] == fallback, j
+            judge.add(
+                j,
+                "",
+                {"eager": named(ref), "graph": graph},
+                _inputs(CU, o, device),
+            )
+            del ref, graph
     finally:
         cake_kcp.graph_cache_clear()
+    judge.settle(record_property, lengths=_lengths(CU))
     if not alloc_ok:
         pytest.skip(ALLOC_SKIP)
 
 
 @pytest.mark.parametrize("hook", ["kda", "conv"])
 @pytest.mark.parametrize("form", ["stream", "thread"])
-def test_gpu_side_stream_preparation_is_ordered(device, form, hook) -> None:
+def test_gpu_side_stream_preparation_is_ordered(
+    device, record_property, form, hook
+) -> None:
     """B T4 (one rank), each entry point's hook alone: the next pack's context is prepared on a side stream whose
     copy is held back behind ~1 s of queued work there (``stream=side``; ``form="thread"`` prepares it from another
     thread, which must pass the stream), and the pack runs at once on the compute stream through ONE entry point:
     the KDA passes (``hook="kda"``) or the conv halo forward + backward (``hook="conv"``).  That entry point orders the
     copy itself (``ctx.wait_ready()``, an event wait): the context's wait record for the compute stream is empty
-    before the pack and set after it, and the results are bitwise those of a context prepared on an idle device.
-    Without that ordering the kernels would read the blob before its copy."""
+    before the pack and set after it.  Without that ordering the kernels would read the blob before its copy.  The
+    conv halo (a deterministic package, one run) gives the bits of a context prepared on an idle device.  The KDA
+    passes on every draw (a held-back context per draw) are judged beside those of a context prepared on an idle
+    device (``side`` / ``idle``)."""
     from cake_pplx._backends.cake_causal_conv1d_det_train import kcp as conv
 
     H = 2
     part = kp.cake_kda_nondet_train_kcp_partition(list(CU), 1)
     ref_ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
-    o = _ops(ref_ctx, H, device)
     gen = torch.Generator(device=device).manual_seed(9)
     x = torch.randn(ref_ctx.T_r, C_CONV, device=device, generator=gen).to(
         torch.bfloat16
@@ -612,44 +733,53 @@ def test_gpu_side_stream_preparation_is_ordered(device, form, hook) -> None:
         torch.bfloat16
     )
 
-    def pack(ctx):
+    def pack(ctx, o):
         if hook == "conv":
             y, hist = conv.cake_causal_conv1d_det_train_kcp_forward(x, w, ctx)
             return (
                 y,
                 *conv.cake_causal_conv1d_det_train_kcp_backward(x, w, ctx, dy, hist),
             )
-        return _passes(ctx, o, None)
+        return _kept(_passes(ctx, o, None))
 
-    ref = pack(ref_ctx)
-    torch.cuda.synchronize(device)
-    side = torch.cuda.Stream(device)
-    holder = {}
+    judge = NaiveJudge()
+    for j in range(DRAWS if hook == "kda" else 1):
+        o = _ops(ref_ctx, H, device, draw_seed(SEED, j))
+        ref = pack(ref_ctx, o)
+        torch.cuda.synchronize(device)
+        side = torch.cuda.Stream(device)
+        holder = {}
 
-    def prepare():
-        holder["ctx"] = kp.cake_kda_nondet_train_kcp_build_context(
-            part, None, 0, device, stream=side
-        )
+        def prepare(side=side, holder=holder):
+            holder["ctx"] = kp.cake_kda_nondet_train_kcp_build_context(
+                part, None, 0, device, stream=side
+            )
 
-    with torch.cuda.stream(side):
-        torch.cuda._sleep(sleep_cycles(device, SLEEP_MS))
-    if form == "thread":
-        th = threading.Thread(target=prepare)
-        th.start()
-        th.join()
-    else:
-        prepare()
-    ctx = holder["ctx"]
-    assert not ctx.ready.query()  # the copy is still held back on the side stream
-    key = torch.cuda.current_stream(device).cuda_stream
-    assert ctx._uploads[0].stream.cuda_stream == side.cuda_stream
-    assert ctx._waited.get(key, 0) == 0
-    res = pack(ctx)
-    # the side-stream copy was ordered on the compute stream by this entry point
-    assert ctx._waited.get(key, 0) >= 1, hook
-    torch.cuda.synchronize(device)
-    for i, (a, b) in enumerate(zip(ref, res, strict=True)):
-        assert torch.equal(a, b), (hook, i)
+        with torch.cuda.stream(side):
+            torch.cuda._sleep(sleep_cycles(device, SLEEP_MS))
+        if form == "thread":
+            th = threading.Thread(target=prepare)
+            th.start()
+            th.join()
+        else:
+            prepare()
+        ctx = holder["ctx"]
+        assert not ctx.ready.query()  # the copy is still held back on the side stream
+        key = torch.cuda.current_stream(device).cuda_stream
+        assert ctx._uploads[0].stream.cuda_stream == side.cuda_stream
+        assert ctx._waited.get(key, 0) == 0
+        res = pack(ctx, o)
+        # the side-stream copy was ordered on the compute stream by this entry point
+        assert ctx._waited.get(key, 0) >= 1, (hook, j)
+        torch.cuda.synchronize(device)
+        if hook == "conv":
+            for i, (a, b) in enumerate(zip(ref, res, strict=True)):
+                # mode contract: the conv halo (deterministic package) gives the same bits on either context
+                assert torch.equal(a, b), (hook, i)
+            return
+        _judge_passes(judge, j, CU, o, device, idle=ref, side=res)
+        del ref, res, ctx, holder
+    judge.settle(record_property, lengths=_lengths(CU))
 
 
 def test_gpu_conv_halo_orders_a_cached_context_on_every_stream(device) -> None:
@@ -708,26 +838,29 @@ def _holders(refs) -> list:
     return out
 
 
-def test_gpu_fresh_context_with_conv_halo_releases_everything(device) -> None:
+def test_gpu_fresh_context_with_conv_halo_releases_everything(
+    device, record_property
+) -> None:
     """A T7 / critique #3: a loop that builds a new context per step and runs the conv halo and the KDA step with
     ``workspace=None`` keeps nothing once the conv module's host cache is cleared: the context, its table sets and
     its blobs are freed by reference counting alone (the cycle collector disabled; the table set holds its context
     through a weak proxy; the workspaces the package keeps for the ``workspace=None`` calls hold neither) and
-    ``memory_allocated`` returns to its level after the first step."""
+    ``memory_allocated`` returns to its level after the first step.  Every draw (new operands): the release checks of
+    the checkpointed steps, the conv halo's ``y`` (a deterministic package) bitwise the first step's, and out and the
+    five gradients of the KDA passes of the first step (``first``) and of three later steps (``later``, repeats)
+    judged."""
     from cake_pplx._backends.cake_causal_conv1d_det_train import kcp as conv
 
     H = 2
     part = kp.cake_kda_nondet_train_kcp_partition(list(CU), 1)
-    o = _ops(
-        kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device), H, device
-    )
-    q, k, v, g, beta, dout = (o[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+    probe = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
     gen = torch.Generator(device=device).manual_seed(11)
     T = int(CU[-1])
     x = torch.randn(T, C_CONV, device=device, generator=gen).to(torch.bfloat16)
     w = (0.5 * torch.randn(C_CONV, 4, device=device, generator=gen)).contiguous()
 
-    def step(checkpointed: bool):
+    def step(o: dict, checkpointed: bool):
+        q, k, v, g, beta, dout = (o[n] for n in ("q", "k", "v", "g", "beta", "dout"))
         ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device, heads=H)
         y, _hist = conv.cake_causal_conv1d_det_train_kcp_forward(x, w, ctx)
         if checkpointed:
@@ -763,13 +896,16 @@ def test_gpu_fresh_context_with_conv_halo_releases_everything(device) -> None:
         assert isinstance(tb.ctx, weakref.ProxyType)
         return res, [weakref.ref(ctx), weakref.ref(tb)]
 
+    o = _ops(
+        probe, H, device, draw_seed(SEED, 0)
+    )  # probe: the token count of the operands of every draw
     conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
     gc.collect()
     enabled = gc.isenabled()
     gc.disable()
     try:  # reference counting alone (a strong context <-> table set cycle would survive here)
         for i in range(2):
-            _res, refs = step(checkpointed=False)
+            _res, refs = step(o, checkpointed=False)
             del _res
             conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
             torch.cuda.synchronize(device)
@@ -779,18 +915,31 @@ def test_gpu_fresh_context_with_conv_halo_releases_everything(device) -> None:
     finally:
         if enabled:
             gc.enable()
-    first, refs = step(checkpointed=True)
-    conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
-    gc.collect()
-    torch.cuda.synchronize(device)
-    assert all(r() is None for r in refs), "the first step's context is retained"
-    base = torch.cuda.memory_allocated(device)
-    for i in range(3):
-        res, refs = step(checkpointed=True)
-        assert all(torch.equal(a, b) for a, b in zip(first, res, strict=True)), i
-        del res
+    judge = NaiveJudge()
+    for j in range(DRAWS):
+        if j:
+            o = _ops(probe, H, device, draw_seed(SEED, j))
+        ref, tier = judge.refs(_inputs(CU, o, device))
+        first, refs = step(o, checkpointed=True)
         conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
         gc.collect()
         torch.cuda.synchronize(device)
-        assert all(r() is None for r in refs), (i, "a context is retained")
-        assert torch.cuda.memory_allocated(device) == base, i
+        assert all(r() is None for r in refs), (
+            j,
+            "the first step's context is retained",
+        )
+        judge.add_refs(j, "", pass_arms(first[1:], "first"), ref, tier)
+        base = torch.cuda.memory_allocated(device)
+        for i in range(3):
+            res, refs = step(o, checkpointed=True)
+            # mode contract: the conv halo (deterministic package) is run-to-run bitwise
+            assert torch.equal(first[0], res[0]), (j, i)
+            judge.add_refs(j, "", pass_arms(res[1:], "later"), ref, tier)
+            del res
+            conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
+            gc.collect()
+            torch.cuda.synchronize(device)
+            assert all(r() is None for r in refs), (j, i, "a context is retained")
+            assert torch.cuda.memory_allocated(device) == base, (j, i)
+        del first, ref, tier
+    judge.settle(record_property, lengths=_lengths(CU))

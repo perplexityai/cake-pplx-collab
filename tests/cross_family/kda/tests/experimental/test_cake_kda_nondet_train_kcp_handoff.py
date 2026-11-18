@@ -14,36 +14,41 @@ Checkpoint hand-off of the non-deterministic context-parallel (KCP) KDA training
 (``cake_kda_nondet_kcp(..., checkpoint_handoff=)``): under ``torch.utils.checkpoint`` the forward keeps its tape set and
 the backward reads it instead of re-running the intra program, WY and the K1 tape walk.
 
+Accuracy: this package has no bit contract, so no run is compared with another's bits.  The GPU rows run every check
+on each of the 32 draws of the operands of ``tests/cake_naive.py`` (all draws in one process group), gather every
+run's outputs to rank 0 and judge them there (``"<run>.<output>"``) against the FP64 reference of the row's whole
+operands beside the naive BF16 tier (the owner-accepted gaps only).  A NaN that reached an output breaks the judge's
+contract.  The flags (records, launches, bytes, counters, pools, refusals) must hold on every draw and every rank.
+
 Multi-GPU rows (``HANDOFF_ROWS``: the checkpoint rows ``CKPT_ROWS`` of ``test_cake_kda_nondet_train_kcp_dist.py``, the
 same launch forms, and two rows at H8 and H32): ``out``, the five gradients and ``dw`` (the checkpointed function
-returns ``out * w``) with the hand-off on are bitwise those with it off and those of the direct pass, for
-``use_reentrant`` False and True, with a recompute handle (both tiers), on a lean arena and a per-call workspace,
-with the ring exchange (where the partition allows it) and the overlap schedule, and over two backwards
-(``retain_graph``); a forward that keeps the tape set runs the tape walk and ``fwd_o`` where the light forward
-runs the fused walk ``kcp_fwdh_o``, its other launches and every collective unchanged; the backward launches no intra
-program, WY or K1 tape walk; the saved set grows by the byte query's difference; a NaN-filled tape set, poisoned free
-blocks and a poisoned local arena (between the recompute and the backward) change no bit; ranks that decide
-differently (``"on"`` on some, ``"off"`` on others) change no bit; the refusals (``"off"``, no checkpoint, a blocked
-state such as a CUDA-graph capture, a selective-checkpoint policy) keep the light set in both passes and change no
-bit; a Python dispatch mode in one pass only follows the original forward's decision in both; ``"auto"`` follows the
-admission rule: the shipped work bound refuses these small rows, with the bound at 0 it engages on a verified device
-at an admitted head count and refuses as ``"unverified"`` with the verified set emptied (each refusal counted once);
-the facade ``cake_pplx.cake_kda_nondet_train_kcp`` forwards the mode to this package; a checkpointed forward with the
-hand-off retains nothing.  A check whose light path does not
-run under its dispatch mode or policy has nothing to compare: the row lists it under ``not_run``.
+returns ``out * w``) judged with the hand-off off and on and for the direct pass, for ``use_reentrant`` False and
+True, with a recompute handle (both tiers), on a lean arena and a per-call workspace, with the ring exchange (where the
+partition allows it) and the overlap schedule, and over two backwards (``retain_graph``; the accumulated gradients
+halved); a forward that keeps the tape set runs the tape walk and ``fwd_o`` where the light forward runs the fused
+walk ``kcp_fwdh_o``, its other launches and every collective unchanged; the backward launches no intra program, WY or
+K1 tape walk; the saved set grows by the byte query's difference; runs from a NaN-filled tape set, poisoned free
+blocks and a poisoned local arena (between the recompute and the backward) are judged; ranks that decide differently
+(``"on"`` on some, ``"off"`` on others) do not hang and are judged; the refusals (``"off"``, no checkpoint, a blocked
+state such as a CUDA-graph capture, a selective-checkpoint policy) keep the light set in both passes; a Python
+dispatch mode in one pass only follows the original forward's decision in both; ``"auto"`` follows the admission
+rule: the shipped work bound refuses these small rows, with the bound at 0 it engages on a verified device at an
+admitted head count and refuses as ``"unverified"`` with the verified set emptied (each refusal counted once); the
+facade ``cake_pplx.cake_kda_nondet_train_kcp`` forwards the mode to this package; a checkpointed forward with the
+hand-off retains nothing.  A check whose light path does not run under its dispatch mode or policy has nothing to
+check: the row lists it under ``not_run``.
 Mode rows (``HANDOFF_MODE_ROWS``: raw gate mode, the in-kernel Q / K L2 norm and both, at W = 2 and W = 4, on the
 segmented and the serial route and with a rank without tokens): every output and gradient, in raw gate mode the
-``A_log`` / ``dt_bias`` partials of each rank and their cross-rank sums too, bitwise ``"off"`` and the direct pass in
-the same forms (non-reentrant, reentrant, both handle tiers, a per-call workspace, NaN tape set and poisoned free
-blocks, a poisoned caller arena with and without a handle, mixed ranks, ring and overlap, the previous host path
-(``host_trim`` 0), ``save_transfer=False`` without a handle, two backwards, the facade),
-the hand-off engaged with the launches it skips (with the norm the separate normalization exactly where the intra
-program normalized first), the saved bytes, the fallback form, ``"auto"`` under the mode's verified set and nothing
-retained (:func:`test_checkpoint_handoff_mode_rows`).
-Rows of ``saved_rows`` (``SAVED_ROWS_GPU_ROWS``: W = 1, 2, 4, H 12 to 48, both gate modes, the norm off and on): the
-``"intra"`` / ``"wy"`` rows sets of a plain node and of the hand-off's rows form within the light path's FP64 error
-budget, with their launches, bytes, counters, refusals, poisons, handles and graph replay
-(:func:`test_saved_rows_gpu_rows`).
+cross-rank sums of the ``A_log`` / ``dt_bias`` partials too, judged in the same forms (off, direct, on,
+non-reentrant, reentrant, both handle tiers, a per-call workspace, NaN tape set and poisoned free blocks, a poisoned
+caller arena with and without a handle, mixed ranks, ring and overlap, the previous host path (``host_trim`` 0),
+``save_transfer=False`` without a handle, two backwards, ``"auto"``, the facade), the hand-off engaged with the
+launches it skips (with the norm the separate normalization exactly where the intra program normalized first), the
+saved bytes, the fallback form, ``"auto"`` under the mode's verified set and nothing retained
+(:func:`test_checkpoint_handoff_mode_rows`).
+Rows of ``saved_rows`` (``SAVED_ROWS_GPU_ROWS``: W = 1, 2, 4, H 12 to 48, both gate modes, the norm off and on): every
+run of the ``"intra"`` / ``"wy"`` rows sets of a plain node and of the hand-off's rows form judged, with their
+launches, bytes, counters, refusals, poisons, handles and graph replay (:func:`test_saved_rows_gpu_rows`).
 Single-process rows: the static rule, the admission table (also per mode), the L2 norm's refusal without its direct
 normalization record, the phase probe, the once-per-call decision (a refusal by
 the call's own arguments records nothing in either pass), the device key, the host values kept across calls (default
@@ -59,7 +64,6 @@ import gc
 import hashlib
 import itertools
 import json
-import math
 import os
 import tempfile
 import traceback
@@ -71,11 +75,10 @@ import torch.distributed as dist
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import cake_pplx.cake_kda_nondet_train_kcp as kcp_api
+from tests.cake_naive import DRAWS, draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
-    ATOL,
     CKPT_ROWS,
     GRAPH_EVENTS,
-    RTOL,
     SCALE,
     _bound_rank_threads,
     _bwd_sequence_first_main,
@@ -91,16 +94,15 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     cake_kcp,
     cake_kcp_plan,
 )
+from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
+    RankJudge,
+    judged,
+    settle_naive,
+)
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
-    kda_exact_raw_with_grads,
-    kda_exact_with_grads,
     make_inputs,
     make_raw_inputs,
-)
-from tests.experimental.test_helpers.cake_kda_det_train_reference_l2n import (
-    kda_exact_l2n_with_grads,
-    kda_exact_raw_l2n_with_grads,
 )
 
 TENSORS = ("out", "dq", "dk", "dv", "dg", "dbeta", "dw")
@@ -171,9 +173,8 @@ SAVED_ROWS_GPU_ROWS = [
     ((3000,), 48, 4, "zigzag", "g", True),
     ((1200 + 900 + 900,), 32, 4, "ragged:1200,0,900,900", "raw", False),
 ]
-# a saved_rows run against the light path of the same row: its FP64 error (rel_rms and max_abs, every output and
-# gradient) at most ACC_GATE times the light path's, as the raw gate and L2N rows bound KCP against the single rank
-ACC_GATE = 1.10
+# the judged operands of the GPU rows: draw j at draw_seed(HANDOFF_SEED, j) (tests/cake_naive.py)
+HANDOFF_SEED = 0x7818
 
 
 def _handoff_delta(
@@ -211,15 +212,6 @@ def _handoff_delta(
 def _bits(t: torch.Tensor) -> torch.Tensor:
     # bit view: -0.0 vs 0.0 and NaN payloads count as differences
     return t.contiguous().view(torch.int16 if t.element_size() == 2 else torch.int32)
-
-
-def _same(a: dict, b: dict) -> bool:
-    return set(a) == set(b) and all(
-        a[n].dtype == b[n].dtype
-        and a[n].shape == b[n].shape
-        and torch.equal(_bits(a[n]), _bits(b[n]))
-        for n in a
-    )
 
 
 def _collectives(seq) -> list:
@@ -271,449 +263,485 @@ def _run_rank_handoff(
     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
         part, group, rank, device
     )
-    glob = make_inputs(lengths, H, device)
-    ops = _local_slices(part, rank, cu, glob)
-    q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
-    ws = cake_kcp.CakeKDANondetKcpWorkspace()
-    ws_lean = cake_kcp.CakeKDANondetKcpWorkspace(local_arena="lean")
-    T_r = int(q.shape[0])
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    arch = cake_kcp.cake_jit.device_arch(index)
-    sms = int(cake_kcp.cake_jit.sm_count(index))
-    toolkit = cake_kcp._handoff_toolkit(arch)
-    key = (arch, sms, toolkit)
-    info: dict[str, object] = {
-        "T_r": T_r,
-        "n_frag": int(ctx.n_frag),
-        "n_in": int(ctx.n_in),
-        "P": int(ctx.heads(H).P),
-        "key": list(key),
-        "torch": torch.__version__,
-    }
-    flags: dict[str, bool] = {}
-    # the flags that passed without a comparison (the light path does not run under the check's mode or policy)
-    not_run: list[str] = []
+    judge = RankJudge(part, cu, W, rank, SCALE)
 
-    def leaves():
-        return [x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)]
-
-    def run(
-        mode: str,
-        *,
-        ckpt: bool = True,
-        reentrant: bool = False,
-        workspace=ws,
-        handle=None,
-        keep=None,
-        context_fn=None,
-        poison_free: bool = False,
-        poison_tape: bool = False,
-        fwd_mode: bool = False,
-        bwd_mode: bool = False,
-        twice: bool = False,
-        **opts,
-    ):
-        """One checkpointed (or direct) step of ``out * w``: the results and the LAST_CALL records of the original
-        forward, the recompute (None without one) and the backward.  ``fwd_mode`` / ``bwd_mode``: a pass-through
-        Python dispatch mode around the forward / the backward (the recompute) only.  ``twice``: two backwards
-        (``retain_graph`` on the first; the gradients accumulate, the records are the second's).  ``opts``: options
-        of the call (``exchange``, ``_kcp_test_knobs``)."""
-        if poison_free:
-            _poison(device)
-        lv = leaves()
-        wl = torch.ones_like(dout).requires_grad_(True)
-        kw = dict(opts)
-        if handle is not None:
-            kw["recompute_handle"] = handle
-        if keep is not None:
-            kw["checkpoint_keep"] = keep
-
-        def top(q_, k_, v_, g_, b_, w_):
-            y = cake_kcp.cake_kda_nondet_kcp(
-                q_,
-                k_,
-                v_,
-                g_,
-                b_,
-                ctx,
-                workspace=workspace,
-                checkpoint_handoff=mode,
-                saved_rows="tape",  # the tape set (saved_rows="auto" keeps the wy rows form)
-                **kw,
-            )
-            return y * w_
-
-        cake_kcp.LAST_CALL.pop("fwd", None)
-        cake_kcp.LAST_CALL.pop("bwd", None)
-        prev = cake_kcp._HANDOFF_POISON
-        cake_kcp._HANDOFF_POISON = bool(poison_tape)
-        try:
-            with _PassThroughMode() if fwd_mode else contextlib.nullcontext():
-                if not ckpt:
-                    out = top(*lv, wl)
-                elif reentrant:
-                    out = checkpoint(top, *lv, wl, use_reentrant=True)
-                elif context_fn is not None:
-                    out = checkpoint(
-                        top, *lv, wl, use_reentrant=False, context_fn=context_fn
-                    )
-                else:
-                    out = checkpoint(top, *lv, wl, use_reentrant=False)
-            rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
-            if ckpt:
-                cake_kcp.LAST_CALL.pop("fwd")
-            with _PassThroughMode() if bwd_mode else contextlib.nullcontext():
-                for i in range(2 if twice else 1):
-                    out.backward(dout, retain_graph=twice and i == 0)
-        finally:
-            cake_kcp._HANDOFF_POISON = prev
-        rec_fwd = cake_kcp.LAST_CALL.get("fwd")
-        rec_bwd = dict(cake_kcp.LAST_CALL["bwd"])
-        res = {"out": out.detach(), "dw": wl.grad}
-        res.update(
-            {
-                f"d{n}": lf.grad
-                for n, lf in zip(("q", "k", "v", "g", "beta"), lv, strict=True)
-            }
+    def one_draw(j: int) -> tuple[dict, dict, list]:
+        """Draw ``j``: every check of the row on the draw's operands; every run judged (``judge``)."""
+        glob = make_inputs(lengths, H, device, seed=draw_seed(HANDOFF_SEED, j))
+        judge.draw(j, glob)
+        ops = _local_slices(part, rank, cu, glob)
+        q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+        ws = cake_kcp.CakeKDANondetKcpWorkspace()
+        ws_lean = cake_kcp.CakeKDANondetKcpWorkspace(local_arena="lean")
+        T_r = int(q.shape[0])
+        index = (
+            device.index if device.index is not None else torch.cuda.current_device()
         )
-        return res, {"orig": rec_orig, "fwd": rec_fwd, "bwd": rec_bwd}
+        arch = cake_kcp.cake_jit.device_arch(index)
+        sms = int(cake_kcp.cake_jit.sm_count(index))
+        toolkit = cake_kcp._handoff_toolkit(arch)
+        key = (arch, sms, toolkit)
+        info: dict[str, object] = {
+            "T_r": T_r,
+            "n_frag": int(ctx.n_frag),
+            "n_in": int(ctx.n_in),
+            "P": int(ctx.heads(H).P),
+            "key": list(key),
+            "torch": torch.__version__,
+        }
+        flags: dict[str, bool] = {}
+        # the flags that passed without a comparison (the light path does not run under the check's mode or policy)
+        not_run: list[str] = []
 
-    def engaged(recs) -> bool:
-        """The original forward and the recompute kept a tape set and the backward read it (a rank with tokens), or
-        none of them did (a rank without)."""
-        want = ("save", "save", "bound") if T_r > 0 else (None, None, None)
-        got = (
-            recs["orig"].get("checkpoint_handoff"),
-            (recs["fwd"] or {}).get("checkpoint_handoff"),
-            recs["bwd"].get("checkpoint_handoff"),
-        )
-        return got == want
+        def leaves():
+            return [x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)]
 
-    def light(recs) -> bool:
-        return all(
-            (r or {}).get("checkpoint_handoff") is None
-            for r in (recs["orig"], recs["fwd"], recs["bwd"])
-        )
+        def run(
+            mode: str,
+            *,
+            ckpt: bool = True,
+            reentrant: bool = False,
+            workspace=ws,
+            handle=None,
+            keep=None,
+            context_fn=None,
+            poison_free: bool = False,
+            poison_tape: bool = False,
+            fwd_mode: bool = False,
+            bwd_mode: bool = False,
+            twice: bool = False,
+            arm: str,
+            **opts,
+        ):
+            """One checkpointed (or direct) step of ``out * w``: the results and the LAST_CALL records of the original
+            forward, the recompute (None without one) and the backward; the results judged as ``arm`` (every rank).
+            ``fwd_mode`` / ``bwd_mode``: a pass-through Python dispatch mode around the forward / the backward (the
+            recompute) only.  ``twice``: two backwards (``retain_graph`` on the first; the gradients accumulate and are
+            judged halved, the records are the second's).  ``opts``: options of the call (``exchange``,
+            ``_kcp_test_knobs``)."""
+            if poison_free:
+                _poison(device)
+            lv = leaves()
+            wl = torch.ones_like(dout).requires_grad_(True)
+            kw = dict(opts)
+            if handle is not None:
+                kw["recompute_handle"] = handle
+            if keep is not None:
+                kw["checkpoint_keep"] = keep
 
-    def light_form(rec) -> list:
-        """A forward's launches in the light path's form: a forward that kept the tape set runs the tape walk and
-        ``fwd_o`` where the light forward runs the fused walk ``kcp_fwdh_o`` (its backward reads the tapes)."""
-        seq = rec["sequence"]
-        if rec.get("checkpoint_handoff") != "save":
-            return list(seq)
-        if seq.count("fwd_o") != 1 or "kcp_fwdh_o" in seq:
-            return ["not the tape form", *seq]  # never the light path's sequence
-        return [
-            ("kcp_fwdh_o" if x == "kcp_fwdh_tape" else x) for x in seq if x != "fwd_o"
-        ]
-
-    def skips(recs_on, recs_off) -> bool:
-        """The hand-off's backward launches none of SKIPPED; the forward's launches (in the light path's form,
-        :func:`light_form`) and the backward's collectives are the light path's."""
-        on_b, off_b = recs_on["bwd"]["sequence"], recs_off["bwd"]["sequence"]
-        ok = light_form(recs_on["orig"]) == recs_off["orig"]["sequence"]
-        ok = ok and light_form(recs_on["fwd"]) == recs_off["fwd"]["sequence"]
-        ok = ok and _collectives(on_b) == _collectives(off_b)
-        ok = ok and recs_on["bwd"]["n_collectives"] == recs_off["bwd"]["n_collectives"]
-        if T_r > 0:
-            ok = ok and not any(x in SKIPPED for x in on_b)
-            ok = ok and all(x in off_b for x in ("fwd_intra", "wy", "kcp_fwdh_tape"))
-        return ok
-
-    direct, recs_direct = run("off", ckpt=False)
-    base, recs_base = run("off")
-    flags["off_light"] = light(recs_base) and light(recs_direct)
-    flags["off_equals_direct"] = _same(base, direct)
-    # the hand-off on: non-reentrant and reentrant
-    on_nr, recs_on = run("on")
-    flags["on_nonreentrant_bitwise"] = _same(on_nr, base)
-    flags["on_nonreentrant_engaged"] = engaged(recs_on)
-    flags["on_launches"] = skips(recs_on, recs_base)
-    want_bytes = (
-        cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(ctx, H=H, saved_rows="tape")
-        if T_r > 0
-        else None
-    )
-    flags["on_bytes"] = (
-        recs_on["fwd"].get("checkpoint_handoff_bytes") == want_bytes
-        and recs_on["bwd"].get("checkpoint_handoff_bytes") == want_bytes
-    )
-    # the saved set: the hand-off forward's minus the light forward's is the byte query's difference (the tape set
-    # in, the carry plane out); the absolute figures are recorded (the query also counts the int32 tables)
-    st = recs_on["fwd"]["save_transfer"]
-    query = {
-        flag: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
-            ctx,
-            H=H,
-            with_conv=False,
-            save_transfer=st,
-            checkpoint_handoff=flag,
-            saved_rows="tape",
-        )
-        for flag in (False, True)
-    }
-    got = {"off": recs_base["fwd"]["saved_bytes"], "on": recs_on["fwd"]["saved_bytes"]}
-    info["saved_bytes"] = {
-        "got": got,
-        "query": query,
-        "tables": cake_kcp_plan.tables_bytes(ctx.NC_pad, ctx.n_frag, ctx.heads(H).NSEG),
-    }
-    flags["on_saved_bytes"] = got["on"] - got["off"] == (
-        query[True] - query[False] if T_r > 0 else 0
-    )
-    off_r, recs_off_r = run("off", reentrant=True)
-    on_r, recs_on_r = run("on", reentrant=True)
-    flags["on_reentrant_bitwise"] = _same(on_r, base) and _same(off_r, base)
-    flags["on_reentrant_engaged"] = (
-        recs_on_r["fwd"] is not None
-        and recs_on_r["fwd"].get("checkpoint_handoff") == ("save" if T_r > 0 else None)
-        and recs_on_r["bwd"].get("checkpoint_handoff") == ("bound" if T_r > 0 else None)
-        # the reentrant first pass runs under no_grad: no request
-        and recs_on_r["orig"].get("checkpoint_handoff") is None
-        and light(recs_off_r)
-    )
-    # with a recompute handle (both tiers: "states" runs save_transfer=False, so a P > 1 backward re-walks K3)
-    for keep in ("states", "transfer"):
-        _, recs_h_off = run(
-            "off", handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(), keep=keep
-        )
-        res_h, recs_h = run(
-            "on", handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(), keep=keep
-        )
-        flags[f"handle_{keep}_bitwise"] = _same(res_h, base)
-        flags[f"handle_{keep}_engaged"] = engaged(recs_h)
-        flags[f"handle_{keep}_launches"] = skips(recs_h, recs_h_off)
-    # a lean arena (the tail's per-range views of the bound buffers) and a per-call workspace
-    res_lean_off, _ = run("off", workspace=ws_lean)
-    res_lean, recs_lean = run("on", workspace=ws_lean)
-    flags["lean_bitwise"] = _same(res_lean, base) and _same(res_lean_off, base)
-    flags["lean_engaged"] = engaged(recs_lean)
-    res_pc, recs_pc = run("on", workspace=None)
-    flags["per_call_bitwise"] = _same(res_pc, base)
-    flags["per_call_engaged"] = engaged(recs_pc)
-    # NaN poison: a NaN-filled tape set and poisoned free blocks (per-call workspace: its arena comes from them), and
-    # the caller arena poisoned between the recompute and the backward (both modes)
-    res_p, recs_p = run("on", workspace=None, poison_free=True, poison_tape=True)
-    flags["poison_tape_free_bitwise"] = _same(res_p, base)
-    flags["poison_tape_free_engaged"] = engaged(recs_p)
-    arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
-    res_pa_off, _ = run("off", context_fn=arena_fn)
-    res_pa_on, recs_pa = run("on", context_fn=arena_fn, poison_tape=True)
-    flags["poison_arena_off_bitwise"] = _same(res_pa_off, base)
-    flags["poison_arena_on_bitwise"] = _same(res_pa_on, base)
-    flags["poison_arena_engaged"] = engaged(recs_pa)
-    # ranks that decide differently ("on" on the even ranks, "off" on the odd ones): the hand-off moves no
-    # collective, so nothing hangs and no bit changes
-    mixed = "on" if rank % 2 == 0 else "off"
-    res_mx, recs_mx = run(mixed)
-    flags["mixed_ranks_bitwise"] = _same(res_mx, base)
-    flags["mixed_ranks_engaged"] = engaged(recs_mx) if mixed == "on" else light(recs_mx)
-    # the ring exchange (where the partition allows it) and the overlap schedule (test knob; with a2a and the ring),
-    # from a poisoned allocator: bitwise "off", whose launches the hand-off's are minus SKIPPED
-    ring_ok = int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
-    info["ring_eligible"] = ring_ok
-    overlap = {"_kcp_test_knobs": {"schedule": "overlap"}}
-    forms = {"overlap": overlap}
-    if ring_ok:
-        forms["ring"] = {"exchange": "ring"}
-        forms["ring_overlap"] = {"exchange": "ring", **overlap}
-    previous_knobs = cake_kcp_plan.enable_test_knobs(True)
-    try:
-        for form, opts in forms.items():
-            res_f_off, recs_f_off = run("off", poison_free=True, **opts)
-            res_f_on, recs_f_on = run("on", poison_free=True, **opts)
-            flags[f"{form}_bitwise"] = _same(res_f_off, base) and _same(res_f_on, base)
-            flags[f"{form}_engaged"] = engaged(recs_f_on) and light(recs_f_off)
-            flags[f"{form}_launches"] = skips(recs_f_on, recs_f_off)
-            if "exchange" in opts:
-                flags[f"{form}_exchange"] = (
-                    recs_f_on["orig"]["exchange"] == opts["exchange"]
-                    and recs_f_off["orig"]["exchange"] == opts["exchange"]
+            def top(q_, k_, v_, g_, b_, w_):
+                y = cake_kcp.cake_kda_nondet_kcp(
+                    q_,
+                    k_,
+                    v_,
+                    g_,
+                    b_,
+                    ctx,
+                    workspace=workspace,
+                    checkpoint_handoff=mode,
+                    saved_rows="tape",  # the tape set (saved_rows="auto" keeps the wy rows form)
+                    **kw,
                 )
-    finally:
-        cake_kcp_plan.enable_test_knobs(previous_knobs)
-    # retain_graph: each backward replays the original forward's decision; exactly twice the gradients
-    res_tw, recs_tw = run("on", twice=True)
-    flags["twice_bitwise"] = _same(
-        res_tw, {n: base[n] if n == "out" else base[n] + base[n] for n in base}
-    )
-    flags["twice_engaged"] = engaged(recs_tw)
-    # refusals: no checkpoint (no phase), a blocked state (CUDA-graph capture / torch.compile tracing, simulated in both
-    # passes), a selective-checkpoint policy (a dispatch mode in both passes), "auto" off the verified set
-    res_nc, recs_nc = run("on", ckpt=False)
-    flags["refuse_no_checkpoint"] = _same(res_nc, direct) and light(recs_nc)
-    blocked = cake_kcp._handoff_blocked
-    cake_kcp._handoff_blocked = lambda: True
-    try:
-        res_bl, recs_bl = run("on")
-    finally:
-        cake_kcp._handoff_blocked = blocked
-    flags["refuse_blocked"] = _same(res_bl, base) and light(recs_bl)
-    sac = lambda: create_selective_checkpoint_contexts(  # noqa: E731
-        lambda c, op, *a, **kw: CheckpointPolicy.PREFER_RECOMPUTE
-    )
-    try:
-        res_sac_off, _ = run("off", context_fn=sac)
-    except Exception:  # noqa: BLE001 - the light path itself does not run under the policy: nothing to compare
-        info["sac_unsupported"] = traceback.format_exc()[-1500:]
-        res_sac_off = None
-    if res_sac_off is None:
-        flags["refuse_sac"] = True
-        not_run.append("refuse_sac")
-    else:
-        try:
-            res_sac, recs_sac = run("on", context_fn=sac)
-            flags["refuse_sac"] = (
-                _same(res_sac, res_sac_off) and _same(res_sac, base) and light(recs_sac)
-            )
-        except Exception:  # noqa: BLE001 - recorded; the flag fails
-            info["sac_error"] = traceback.format_exc()[-1500:]
-            flags["refuse_sac"] = False
-    # a Python dispatch mode in one pass only: the original forward decides (refused under the mode, engaged without
-    # it) and the recompute replays that decision, so the two passes save the same tensors (each side on its own)
-    for side in ("fwd", "bwd"):
-        mode_kw = {f"{side}_mode": True}
-        try:
-            res_m_off, _ = run("off", **mode_kw)
-        except Exception:  # noqa: BLE001 - the light path itself does not run under the mode: nothing to compare
-            info[f"mode_{side}_only_unsupported"] = traceback.format_exc()[-1500:]
-            flags[f"mode_{side}_only"] = True
-            not_run.append(f"mode_{side}_only")
-            continue
-        try:
-            res_m, recs_m = run("on", **mode_kw)
-            flags[f"mode_{side}_only"] = (
-                _same(res_m, res_m_off)
-                and _same(res_m, base)
-                and (light(recs_m) if side == "fwd" else engaged(recs_m))
-            )
-        except Exception:  # noqa: BLE001 - recorded; the flag fails
-            info[f"mode_{side}_only_error"] = traceback.format_exc()[-1500:]
-            flags[f"mode_{side}_only"] = False
-    # "auto": the shipped rule (on these small rows the work bound refuses, or the head count at H1), then the work
-    # bound at 0 (cake_kcp_plan's constants are read at call time): engaged on a verified device at an admitted head
-    # count, refused as "unverified" with the verified set emptied.  Decided once per checkpointed call: a refusal is
-    # counted once (in the original forward), an engaged call saves twice and binds once
-    total = ctx.partition.total
-    shipped = (
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
-        cake_kcp_plan.KCP_HANDOFF_VERIFIED,
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
-    )
-    kept = {"save": 2, "bound": 1} if T_r > 0 else {}
+                return y * w_
 
-    @contextlib.contextmanager
-    def auto_rule(min_head_tokens: int, verified, by_key):
-        """``"auto"``'s admission constants for the block; yields the rule's reason for this row (``None``:
-        admitted)."""
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS = min_head_tokens
-        cake_kcp_plan.KCP_HANDOFF_VERIFIED = verified
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY = by_key
-        try:
-            yield cake_kcp_plan.kcp_handoff_auto_refusal(key, H, total, W)
-        finally:
-            (
-                cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
-                cake_kcp_plan.KCP_HANDOFF_VERIFIED,
-                cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
-            ) = shipped
-
-    reasons = {}
-    for case, rule in (
-        ("shipped", shipped),
-        ("bound0", (0, shipped[1], {})),
-        ("bound0_unverified", (0, frozenset(), {})),
-    ):
-        with auto_rule(*rule) as reason:
-            before = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-            res_a, recs_a = run("auto")
-            after = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-        reasons[case] = reason
-        delta = {n: after[n] - before[n] for n in after if after[n] != before[n]}
-        if reason is None:
-            flags[f"auto_{case}"] = (
-                _same(res_a, base) and engaged(recs_a) and delta == kept
+            cake_kcp.LAST_CALL.pop("fwd", None)
+            cake_kcp.LAST_CALL.pop("bwd", None)
+            prev = cake_kcp._HANDOFF_POISON
+            cake_kcp._HANDOFF_POISON = bool(poison_tape)
+            try:
+                with _PassThroughMode() if fwd_mode else contextlib.nullcontext():
+                    if not ckpt:
+                        out = top(*lv, wl)
+                    elif reentrant:
+                        out = checkpoint(top, *lv, wl, use_reentrant=True)
+                    elif context_fn is not None:
+                        out = checkpoint(
+                            top, *lv, wl, use_reentrant=False, context_fn=context_fn
+                        )
+                    else:
+                        out = checkpoint(top, *lv, wl, use_reentrant=False)
+                rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
+                if ckpt:
+                    cake_kcp.LAST_CALL.pop("fwd")
+                with _PassThroughMode() if bwd_mode else contextlib.nullcontext():
+                    for i in range(2 if twice else 1):
+                        out.backward(dout, retain_graph=twice and i == 0)
+            finally:
+                cake_kcp._HANDOFF_POISON = prev
+            rec_fwd = cake_kcp.LAST_CALL.get("fwd")
+            rec_bwd = dict(cake_kcp.LAST_CALL["bwd"])
+            res = {"out": out.detach(), "dw": wl.grad}
+            res.update(
+                {
+                    f"d{n}": lf.grad
+                    for n, lf in zip(("q", "k", "v", "g", "beta"), lv, strict=True)
+                }
             )
-        else:
-            flags[f"auto_{case}"] = (
-                _same(res_a, base)
-                and light(recs_a)
-                and delta == {"refused_" + reason: 1}
+            judge(arm, res, halve=twice)
+            return res, {"orig": rec_orig, "fwd": rec_fwd, "bwd": rec_bwd}
+
+        def engaged(recs) -> bool:
+            """The original forward and the recompute kept a tape set and the backward read it (a rank with tokens), or
+            none of them did (a rank without)."""
+            want = ("save", "save", "bound") if T_r > 0 else (None, None, None)
+            got = (
+                recs["orig"].get("checkpoint_handoff"),
+                (recs["fwd"] or {}).get("checkpoint_handoff"),
+                recs["bwd"].get("checkpoint_handoff"),
             )
-    info["auto_reasons"] = reasons
+            return got == want
 
-    # the facade forwards the mode to this package (engaged as the package decides)
-    def run_facade(mode: str):
-        lv = leaves()
-        wl = torch.ones_like(dout).requires_grad_(True)
+        def light(recs) -> bool:
+            return all(
+                (r or {}).get("checkpoint_handoff") is None
+                for r in (recs["orig"], recs["fwd"], recs["bwd"])
+            )
 
-        def top(q_, k_, v_, g_, b_, w_):
-            y = kcp_api.cake_kda_nondet_kcp(
-                q_,
-                k_,
-                v_,
-                g_,
-                b_,
+        def light_form(rec) -> list:
+            """A forward's launches in the light path's form: a forward that kept the tape set runs the tape walk and
+            ``fwd_o`` where the light forward runs the fused walk ``kcp_fwdh_o`` (its backward reads the tapes)."""
+            seq = rec["sequence"]
+            if rec.get("checkpoint_handoff") != "save":
+                return list(seq)
+            if seq.count("fwd_o") != 1 or "kcp_fwdh_o" in seq:
+                return ["not the tape form", *seq]  # never the light path's sequence
+            return [
+                ("kcp_fwdh_o" if x == "kcp_fwdh_tape" else x)
+                for x in seq
+                if x != "fwd_o"
+            ]
+
+        def skips(recs_on, recs_off) -> bool:
+            """The hand-off's backward launches none of SKIPPED; the forward's launches (in the light path's form,
+            :func:`light_form`) and the backward's collectives are the light path's."""
+            on_b, off_b = recs_on["bwd"]["sequence"], recs_off["bwd"]["sequence"]
+            ok = light_form(recs_on["orig"]) == recs_off["orig"]["sequence"]
+            ok = ok and light_form(recs_on["fwd"]) == recs_off["fwd"]["sequence"]
+            ok = ok and _collectives(on_b) == _collectives(off_b)
+            ok = (
+                ok
+                and recs_on["bwd"]["n_collectives"] == recs_off["bwd"]["n_collectives"]
+            )
+            if T_r > 0:
+                ok = ok and not any(x in SKIPPED for x in on_b)
+                ok = ok and all(
+                    x in off_b for x in ("fwd_intra", "wy", "kcp_fwdh_tape")
+                )
+            return ok
+
+        _, recs_direct = run("off", ckpt=False, arm="direct")
+        _, recs_base = run("off", arm="off")
+        flags["off_light"] = light(recs_base) and light(recs_direct)
+        # the hand-off on: non-reentrant and reentrant
+        _, recs_on = run("on", arm="on")
+        flags["on_nonreentrant_engaged"] = engaged(recs_on)
+        flags["on_launches"] = skips(recs_on, recs_base)
+        want_bytes = (
+            cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(
+                ctx, H=H, saved_rows="tape"
+            )
+            if T_r > 0
+            else None
+        )
+        flags["on_bytes"] = (
+            recs_on["fwd"].get("checkpoint_handoff_bytes") == want_bytes
+            and recs_on["bwd"].get("checkpoint_handoff_bytes") == want_bytes
+        )
+        # the saved set: the hand-off forward's minus the light forward's is the byte query's difference (the tape set
+        # in, the carry plane out); the absolute figures are recorded (the query also counts the int32 tables)
+        st = recs_on["fwd"]["save_transfer"]
+        query = {
+            flag: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
                 ctx,
-                workspace=ws,
-                checkpoint_handoff=mode,
+                H=H,
+                with_conv=False,
+                save_transfer=st,
+                checkpoint_handoff=flag,
                 saved_rows="tape",
             )
-            return y * w_
-
-        before = kcp_api.cake_kda_nondet_train_kcp_handoff_stats()
-        out = checkpoint(top, *lv, wl, use_reentrant=False)
-        out.backward(dout)
-        after = kcp_api.cake_kda_nondet_train_kcp_handoff_stats()
-        res = {"out": out.detach(), "dw": wl.grad}
-        res.update(
-            {
-                f"d{n}": lf.grad
-                for n, lf in zip(("q", "k", "v", "g", "beta"), lv, strict=True)
-            }
+            for flag in (False, True)
+        }
+        got = {
+            "off": recs_base["fwd"]["saved_bytes"],
+            "on": recs_on["fwd"]["saved_bytes"],
+        }
+        info["saved_bytes"] = {
+            "got": got,
+            "query": query,
+            "tables": cake_kcp_plan.tables_bytes(
+                ctx.NC_pad, ctx.n_frag, ctx.heads(H).NSEG
+            ),
+        }
+        flags["on_saved_bytes"] = got["on"] - got["off"] == (
+            query[True] - query[False] if T_r > 0 else 0
         )
-        return res, {k: after[k] - before[k] for k in after if after[k] != before[k]}
-
-    for mode in ("auto", "on", "off"):
-        # the work bound at 0: "auto" engages as on a production-size batch of a verified device
-        with auto_rule(0, shipped[1], {}) as reason:
-            res_f, delta = run_facade(mode)
-        want = kept if (mode == "on" or (mode == "auto" and reason is None)) else {}
-        flags[f"facade_{mode}_bitwise"] = _same(res_f, base)
-        flags[f"facade_{mode}_engaged"] = {
-            k: n for k, n in delta.items() if k in ("save", "bound")
-        } == want
-    # #7039: a checkpointed forward with the hand-off retains nothing (its original forward's set goes at return),
-    # after one warm-up step of the same form: per call, on this row's workspace and on a fresh caller-held workspace
-    # (its first backward binds a new backward arena that no intra program of the hand-off backward touches)
-    retained = {}
-    for form, wsp in (
-        ("per_call", None),
-        ("caller_ws", ws),
-        ("fresh_ws", cake_kcp.CakeKDANondetKcpWorkspace()),
-    ):
-
-        def fn0(*a, _w=wsp):
-            return cake_kcp.cake_kda_nondet_kcp(
-                *a, ctx, workspace=_w, checkpoint_handoff="on", saved_rows="tape"
+        _, recs_off_r = run("off", reentrant=True, arm="off_reentrant")
+        _, recs_on_r = run("on", reentrant=True, arm="on_reentrant")
+        flags["on_reentrant_engaged"] = (
+            recs_on_r["fwd"] is not None
+            and recs_on_r["fwd"].get("checkpoint_handoff")
+            == ("save" if T_r > 0 else None)
+            and recs_on_r["bwd"].get("checkpoint_handoff")
+            == ("bound" if T_r > 0 else None)
+            # the reentrant first pass runs under no_grad: no request
+            and recs_on_r["orig"].get("checkpoint_handoff") is None
+            and light(recs_off_r)
+        )
+        # with a recompute handle (both tiers: "states" runs save_transfer=False, so a P > 1 backward re-walks K3)
+        for keep in ("states", "transfer"):
+            _, recs_h_off = run(
+                "off",
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep=keep,
+                arm=f"handle_{keep}_off",
             )
-
-        for step in ("warm", "measure"):
-            lv = leaves()
-            torch.cuda.synchronize(device)
-            gc.collect()
-            before = _requested(device)
-            out = checkpoint(fn0, *lv, use_reentrant=False)
-            torch.cuda.synchronize(device)
-            if step == "measure":
-                retained[form] = (
-                    _requested(device) - before - out.numel() * out.element_size()
+            _, recs_h = run(
+                "on",
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep=keep,
+                arm=f"handle_{keep}_on",
+            )
+            flags[f"handle_{keep}_engaged"] = engaged(recs_h)
+            flags[f"handle_{keep}_launches"] = skips(recs_h, recs_h_off)
+        # a lean arena (the tail's per-range views of the bound buffers) and a per-call workspace
+        run("off", workspace=ws_lean, arm="lean_off")
+        _, recs_lean = run("on", workspace=ws_lean, arm="lean_on")
+        flags["lean_engaged"] = engaged(recs_lean)
+        _, recs_pc = run("on", workspace=None, arm="per_call")
+        flags["per_call_engaged"] = engaged(recs_pc)
+        # NaN poison: a NaN-filled tape set and poisoned free blocks (per-call workspace: its arena comes from them), and
+        # the caller arena poisoned between the recompute and the backward (both modes)
+        _, recs_p = run(
+            "on",
+            workspace=None,
+            poison_free=True,
+            poison_tape=True,
+            arm="poison_tape_free",
+        )
+        flags["poison_tape_free_engaged"] = engaged(recs_p)
+        arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
+        run("off", context_fn=arena_fn, arm="poison_arena_off")
+        _, recs_pa = run(
+            "on", context_fn=arena_fn, poison_tape=True, arm="poison_arena_on"
+        )
+        flags["poison_arena_engaged"] = engaged(recs_pa)
+        # ranks that decide differently ("on" on the even ranks, "off" on the odd ones): the hand-off moves no
+        # collective, so nothing hangs
+        mixed = "on" if rank % 2 == 0 else "off"
+        _, recs_mx = run(mixed, arm="mixed_ranks")
+        flags["mixed_ranks_engaged"] = (
+            engaged(recs_mx) if mixed == "on" else light(recs_mx)
+        )
+        # the ring exchange (where the partition allows it) and the overlap schedule (test knob; with a2a and the ring),
+        # from a poisoned allocator: the hand-off's launches are those of "off" minus SKIPPED
+        ring_ok = int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
+        info["ring_eligible"] = ring_ok
+        overlap = {"_kcp_test_knobs": {"schedule": "overlap"}}
+        forms = {"overlap": overlap}
+        if ring_ok:
+            forms["ring"] = {"exchange": "ring"}
+            forms["ring_overlap"] = {"exchange": "ring", **overlap}
+        previous_knobs = cake_kcp_plan.enable_test_knobs(True)
+        try:
+            for form, opts in forms.items():
+                _, recs_f_off = run("off", poison_free=True, arm=f"{form}_off", **opts)
+                _, recs_f_on = run("on", poison_free=True, arm=f"{form}_on", **opts)
+                flags[f"{form}_engaged"] = engaged(recs_f_on) and light(recs_f_off)
+                flags[f"{form}_launches"] = skips(recs_f_on, recs_f_off)
+                if "exchange" in opts:
+                    flags[f"{form}_exchange"] = (
+                        recs_f_on["orig"]["exchange"] == opts["exchange"]
+                        and recs_f_off["orig"]["exchange"] == opts["exchange"]
+                    )
+        finally:
+            cake_kcp_plan.enable_test_knobs(previous_knobs)
+        # retain_graph: each backward replays the original forward's decision (the accumulated gradients judged
+        # halved)
+        _, recs_tw = run("on", twice=True, arm="twice")
+        flags["twice_engaged"] = engaged(recs_tw)
+        # refusals: no checkpoint (no phase), a blocked state (CUDA-graph capture / torch.compile tracing, simulated in both
+        # passes), a selective-checkpoint policy (a dispatch mode in both passes), "auto" off the verified set
+        _, recs_nc = run("on", ckpt=False, arm="refuse_no_checkpoint")
+        flags["refuse_no_checkpoint"] = light(recs_nc)
+        blocked = cake_kcp._handoff_blocked
+        cake_kcp._handoff_blocked = lambda: True
+        try:
+            _, recs_bl = run("on", arm="refuse_blocked")
+        finally:
+            cake_kcp._handoff_blocked = blocked
+        flags["refuse_blocked"] = light(recs_bl)
+        sac = lambda: create_selective_checkpoint_contexts(  # noqa: E731
+            lambda c, op, *a, **kw: CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        try:
+            res_sac_off, _ = run("off", context_fn=sac, arm="sac_off")
+        except Exception:  # noqa: BLE001 - the light path itself does not run under the policy: nothing to compare
+            info["sac_unsupported"] = traceback.format_exc()[-1500:]
+            res_sac_off = None
+        if res_sac_off is None:
+            flags["refuse_sac"] = True
+            not_run.append("refuse_sac")
+        else:
+            try:
+                _, recs_sac = run("on", context_fn=sac, arm="refuse_sac")
+                flags["refuse_sac"] = light(recs_sac)
+            except Exception:  # noqa: BLE001 - recorded; the flag fails
+                info["sac_error"] = traceback.format_exc()[-1500:]
+                flags["refuse_sac"] = False
+        # a Python dispatch mode in one pass only: the original forward decides (refused under the mode, engaged without
+        # it) and the recompute replays that decision, so the two passes save the same tensors (each side on its own)
+        for side in ("fwd", "bwd"):
+            mode_kw = {f"{side}_mode": True}
+            try:
+                run("off", arm=f"mode_{side}_only_off", **mode_kw)
+            except Exception:  # noqa: BLE001 - the light path itself does not run under the mode: nothing to compare
+                info[f"mode_{side}_only_unsupported"] = traceback.format_exc()[-1500:]
+                flags[f"mode_{side}_only"] = True
+                not_run.append(f"mode_{side}_only")
+                continue
+            try:
+                _, recs_m = run("on", arm=f"mode_{side}_only", **mode_kw)
+                flags[f"mode_{side}_only"] = (
+                    light(recs_m) if side == "fwd" else engaged(recs_m)
                 )
+            except Exception:  # noqa: BLE001 - recorded; the flag fails
+                info[f"mode_{side}_only_error"] = traceback.format_exc()[-1500:]
+                flags[f"mode_{side}_only"] = False
+        # "auto": the shipped rule (on these small rows the work bound refuses, or the head count at H1), then the work
+        # bound at 0 (cake_kcp_plan's constants are read at call time): engaged on a verified device at an admitted head
+        # count, refused as "unverified" with the verified set emptied.  Decided once per checkpointed call: a refusal is
+        # counted once (in the original forward), an engaged call saves twice and binds once
+        total = ctx.partition.total
+        shipped = (
+            cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
+            cake_kcp_plan.KCP_HANDOFF_VERIFIED,
+            cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
+        )
+        kept = {"save": 2, "bound": 1} if T_r > 0 else {}
+
+        @contextlib.contextmanager
+        def auto_rule(min_head_tokens: int, verified, by_key):
+            """``"auto"``'s admission constants for the block; yields the rule's reason for this row (``None``:
+            admitted)."""
+            cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS = min_head_tokens
+            cake_kcp_plan.KCP_HANDOFF_VERIFIED = verified
+            cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY = by_key
+            try:
+                yield cake_kcp_plan.kcp_handoff_auto_refusal(key, H, total, W)
+            finally:
+                (
+                    cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
+                    cake_kcp_plan.KCP_HANDOFF_VERIFIED,
+                    cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
+                ) = shipped
+
+        reasons = {}
+        for case, rule in (
+            ("shipped", shipped),
+            ("bound0", (0, shipped[1], {})),
+            ("bound0_unverified", (0, frozenset(), {})),
+        ):
+            with auto_rule(*rule) as reason:
+                before = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+                _, recs_a = run("auto", arm=f"auto_{case}")
+                after = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+            reasons[case] = reason
+            delta = {n: after[n] - before[n] for n in after if after[n] != before[n]}
+            if reason is None:
+                flags[f"auto_{case}"] = engaged(recs_a) and delta == kept
+            else:
+                flags[f"auto_{case}"] = light(recs_a) and delta == {
+                    "refused_" + reason: 1
+                }
+        info["auto_reasons"] = reasons
+
+        # the facade forwards the mode to this package (engaged as the package decides)
+        def run_facade(mode: str):
+            lv = leaves()
+            wl = torch.ones_like(dout).requires_grad_(True)
+
+            def top(q_, k_, v_, g_, b_, w_):
+                y = kcp_api.cake_kda_nondet_kcp(
+                    q_,
+                    k_,
+                    v_,
+                    g_,
+                    b_,
+                    ctx,
+                    workspace=ws,
+                    checkpoint_handoff=mode,
+                    saved_rows="tape",
+                )
+                return y * w_
+
+            before = kcp_api.cake_kda_nondet_train_kcp_handoff_stats()
+            out = checkpoint(top, *lv, wl, use_reentrant=False)
             out.backward(dout)
-            del out, lv
-    info["retained_bytes"] = retained
-    flags["retained_zero"] = all(r == 0 for r in retained.values())
-    info["not_run"] = not_run
+            after = kcp_api.cake_kda_nondet_train_kcp_handoff_stats()
+            res = {"out": out.detach(), "dw": wl.grad}
+            res.update(
+                {
+                    f"d{n}": lf.grad
+                    for n, lf in zip(("q", "k", "v", "g", "beta"), lv, strict=True)
+                }
+            )
+            return res, {
+                k: after[k] - before[k] for k in after if after[k] != before[k]
+            }
+
+        for mode in ("auto", "on", "off"):
+            # the work bound at 0: "auto" engages as on a production-size batch of a verified device
+            with auto_rule(0, shipped[1], {}) as reason:
+                res_f, delta = run_facade(mode)
+            judge(f"facade_{mode}", res_f)
+            want = kept if (mode == "on" or (mode == "auto" and reason is None)) else {}
+            flags[f"facade_{mode}_engaged"] = {
+                k: n for k, n in delta.items() if k in ("save", "bound")
+            } == want
+        # #7039: a checkpointed forward with the hand-off retains nothing (its original forward's set goes at return),
+        # after one warm-up step of the same form: per call, on this row's workspace and on a fresh caller-held workspace
+        # (its first backward binds a new backward arena that no intra program of the hand-off backward touches)
+        retained = {}
+        for form, wsp in (
+            ("per_call", None),
+            ("caller_ws", ws),
+            ("fresh_ws", cake_kcp.CakeKDANondetKcpWorkspace()),
+        ):
+
+            def fn0(*a, _w=wsp):
+                return cake_kcp.cake_kda_nondet_kcp(
+                    *a, ctx, workspace=_w, checkpoint_handoff="on", saved_rows="tape"
+                )
+
+            for step in ("warm", "measure"):
+                lv = leaves()
+                torch.cuda.synchronize(device)
+                gc.collect()
+                before = _requested(device)
+                out = checkpoint(fn0, *lv, use_reentrant=False)
+                torch.cuda.synchronize(device)
+                if step == "measure":
+                    retained[form] = (
+                        _requested(device) - before - out.numel() * out.element_size()
+                    )
+                out.backward(dout)
+                del out, lv
+        info["retained_bytes"] = retained
+        flags["retained_zero"] = all(r == 0 for r in retained.values())
+        info["not_run"] = not_run
+        return flags, info, not_run
+
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {}
+    not_run: set[str] = set()
+    for j in range(DRAWS if judged(lengths, H) else 1):
+        f_j, info_j, not_run_j = one_draw(j)
+        for name, ok in f_j.items():
+            flags[name] = flags.get(name, True) and ok
+        if j == 0:
+            info.update(info_j)
+        not_run.update(not_run_j)
+    info["not_run"] = sorted(not_run)
 
     gathered: list = [None] * W
     dist.all_gather_object(gathered, (flags, info))
@@ -731,6 +759,8 @@ def _run_rank_handoff(
     report["pass"] = all(report["flags"].values()) and all(
         set(f) == set(flag_list[0]) for f in flag_list
     )
+    if rank == 0:
+        report["naive"] = judge.result()
     dist.barrier()
     if rank == 0 and result_dir:
         os.makedirs(result_dir, exist_ok=True)
@@ -759,14 +789,16 @@ def _mode_row_id(row) -> str:
     return _row_id((lengths, H, W, layout)) + f"-{gate}" + ("-l2n" if l2n else "")
 
 
-def _mode_inputs(lengths, H: int, device, gate: str, l2n: bool) -> dict:
-    """The row's operands: the in-kernel norm's raw q / k rows (zero and subnormal rows among them) with ``l2n``,
-    the raw gate with ``A_log`` / ``dt_bias`` in raw gate mode."""
+def _mode_inputs(
+    lengths, H: int, device, gate: str, l2n: bool, *, seed: int | None = None
+) -> dict:
+    """The row's operands drawn from ``seed``: the in-kernel norm's raw q / k rows (zero and subnormal rows among them)
+    with ``l2n``, the raw gate with ``A_log`` / ``dt_bias`` in raw gate mode."""
     if l2n:
         from tests.experimental.test_cake_kda_nondet_train_kcp_l2n import _l2n_inputs
 
-        return _l2n_inputs(lengths, H, device, raw_gate=gate == "raw")
-    return make_raw_inputs(lengths, H, device)
+        return _l2n_inputs(lengths, H, device, raw_gate=gate == "raw", seed=seed)
+    return make_raw_inputs(lengths, H, device, seed=seed)
 
 
 def _run_rank_handoff_mode(
@@ -787,420 +819,456 @@ def _run_rank_handoff_mode(
     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
         part, group, rank, device
     )
-    glob = _mode_inputs(lengths, H, device, gate, l2n)
-    names = ("q", "k", "v", "g", "beta", "dout")
-    ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
-    q, k, v, g, beta, dout = (ops[n] for n in names)
-    params = (glob["A_log"], glob["dt_bias"]) if raw else ()
-    mode_kw = {"use_qk_l2norm_in_kernel": l2n}
-    ws_kw = {"use_gate_in_kernel": raw, "use_qk_l2norm_in_kernel": l2n}
-    ws = cake_kcp.CakeKDANondetKcpWorkspace(**ws_kw)
-    T_r = int(q.shape[0])
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    arch = cake_kcp.cake_jit.device_arch(index)
-    sms = int(cake_kcp.cake_jit.sm_count(index))
-    key = (arch, sms, cake_kcp._handoff_toolkit(arch))
-    # the fused form's backward normalizes in its intra program first on this rank's plan: the hand-off then runs the
-    # separate normalization from the saved rstd before its prep (cake_kcp._handoff_l2n_rows)
-    intra_first = bool(
-        l2n
-        and T_r > 0
-        and cake_kcp_plan.qk_l2norm_intra_first(
-            cake_kcp.cake_backend.plan(
-                T_r, int(ctx.n_frag), H, sms, arch, gate=gate, l2n="fused"
+    judge = RankJudge(part, cu, W, rank, SCALE)
+
+    def one_draw(j: int) -> tuple[dict, dict]:
+        """Draw ``j``: every check of the row on the draw's operands; every run judged (``judge``)."""
+        glob = _mode_inputs(
+            lengths, H, device, gate, l2n, seed=draw_seed(HANDOFF_SEED, j)
+        )
+        judge.draw(j, glob, l2n=l2n)
+        names = ("q", "k", "v", "g", "beta", "dout")
+        ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
+        q, k, v, g, beta, dout = (ops[n] for n in names)
+        params = (glob["A_log"], glob["dt_bias"]) if raw else ()
+        mode_kw = {"use_qk_l2norm_in_kernel": l2n}
+        ws_kw = {"use_gate_in_kernel": raw, "use_qk_l2norm_in_kernel": l2n}
+        ws = cake_kcp.CakeKDANondetKcpWorkspace(**ws_kw)
+        T_r = int(q.shape[0])
+        index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+        arch = cake_kcp.cake_jit.device_arch(index)
+        sms = int(cake_kcp.cake_jit.sm_count(index))
+        key = (arch, sms, cake_kcp._handoff_toolkit(arch))
+        # the fused form's backward normalizes in its intra program first on this rank's plan: the hand-off then runs the
+        # separate normalization from the saved rstd before its prep (cake_kcp._handoff_l2n_rows)
+        intra_first = bool(
+            l2n
+            and T_r > 0
+            and cake_kcp_plan.qk_l2norm_intra_first(
+                cake_kcp.cake_backend.plan(
+                    T_r, int(ctx.n_frag), H, sms, arch, gate=gate, l2n="fused"
+                )
             )
         )
-    )
-    info: dict[str, object] = {
-        "T_r": T_r,
-        "n_frag": int(ctx.n_frag),
-        "P": int(ctx.heads(H).P),
-        "key": list(key),
-        "intra_first": intra_first,
-        "torch": torch.__version__,
-    }
-    flags: dict[str, bool] = {}
-    grad_names = ("dq", "dk", "dv", "dg", "dbeta") + (
-        ("dA_log", "ddt_bias") if raw else ()
-    )
-
-    def leaves():
-        return [
-            x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta, *params)
-        ]
-
-    def gate_kw(lv) -> dict:
-        if not raw:
-            return {}
-        return {
-            "use_gate_in_kernel": True,
-            "A_log": lv[5],
-            "dt_bias": lv[6],
-            "lower_bound": LOWER_BOUND,
+        info: dict[str, object] = {
+            "T_r": T_r,
+            "n_frag": int(ctx.n_frag),
+            "P": int(ctx.heads(H).P),
+            "key": list(key),
+            "intra_first": intra_first,
+            "torch": torch.__version__,
         }
-
-    def run(
-        mode: str,
-        *,
-        ckpt: bool = True,
-        reentrant: bool = False,
-        workspace=ws,
-        handle=None,
-        keep=None,
-        context_fn=None,
-        poison_free: bool = False,
-        poison_tape: bool = False,
-        twice: bool = False,
-        entry=None,
-        **opts,
-    ):
-        """One checkpointed (or direct) step of ``out * w``: every output and gradient (in raw gate mode the
-        parameter partials of this rank and their cross-rank sums) and the LAST_CALL records of the original forward,
-        the recompute (None without one) and the backward."""
-        if poison_free:
-            _poison(device)
-        lv = leaves()
-        wl = torch.ones_like(dout).requires_grad_(True)
-        kw = dict(opts)
-        if handle is not None:
-            kw["recompute_handle"] = handle
-        if keep is not None:
-            kw["checkpoint_keep"] = keep
-        call = entry or cake_kcp.cake_kda_nondet_kcp
-
-        def top(q_, k_, v_, g_, b_, w_, *p_):
-            y = call(
-                q_,
-                k_,
-                v_,
-                g_,
-                b_,
-                ctx,
-                workspace=workspace,
-                checkpoint_handoff=mode,
-                saved_rows="tape",  # the tape set (saved_rows="auto" keeps the wy rows form)
-                **gate_kw([q_, k_, v_, g_, b_, *p_]),
-                **mode_kw,
-                **kw,
-            )
-            return y * w_
-
-        cake_kcp.LAST_CALL.pop("fwd", None)
-        cake_kcp.LAST_CALL.pop("bwd", None)
-        prev = cake_kcp._HANDOFF_POISON
-        cake_kcp._HANDOFF_POISON = bool(poison_tape)
-        args = (*lv[:5], wl, *lv[5:])
-        try:
-            if not ckpt:
-                out = top(*args)
-            elif context_fn is not None:
-                out = checkpoint(top, *args, use_reentrant=False, context_fn=context_fn)
-            else:
-                out = checkpoint(top, *args, use_reentrant=reentrant)
-            rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
-            if ckpt:
-                cake_kcp.LAST_CALL.pop("fwd")
-            for i in range(2 if twice else 1):
-                out.backward(dout, retain_graph=twice and i == 0)
-        finally:
-            cake_kcp._HANDOFF_POISON = prev
-        rec_fwd = cake_kcp.LAST_CALL.get("fwd")
-        rec_bwd = dict(cake_kcp.LAST_CALL["bwd"])
-        res = {"out": out.detach(), "dw": wl.grad}
-        res.update({n: lf.grad for n, lf in zip(grad_names, lv, strict=True)})
-        if raw and not twice:
-            # the cross-rank sums of the partials (a collective: every rank of every run)
-            sums = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-                ctx, res["dA_log"], res["ddt_bias"]
-            )
-            res["dA_log_sum"], res["ddt_bias_sum"] = sums
-        return res, {"orig": rec_orig, "fwd": rec_fwd, "bwd": rec_bwd}
-
-    def engaged(recs) -> bool:
-        want = ("save", "save", "bound") if T_r > 0 else (None, None, None)
-        got = (
-            recs["orig"].get("checkpoint_handoff"),
-            (recs["fwd"] or {}).get("checkpoint_handoff"),
-            recs["bwd"].get("checkpoint_handoff"),
-        )
-        return got == want
-
-    def light(recs) -> bool:
-        return all(
-            (r or {}).get("checkpoint_handoff") is None
-            for r in (recs["orig"], recs["fwd"], recs["bwd"])
+        flags: dict[str, bool] = {}
+        grad_names = ("dq", "dk", "dv", "dg", "dbeta") + (
+            ("dA_log", "ddt_bias") if raw else ()
         )
 
-    def light_form(rec) -> list:
-        seq = rec["sequence"]
-        if rec.get("checkpoint_handoff") != "save":
-            return list(seq)
-        if seq.count("fwd_o") != 1 or "kcp_fwdh_o" in seq:
-            return ["not the tape form", *seq]
-        return [
-            ("kcp_fwdh_o" if x == "kcp_fwdh_tape" else x) for x in seq if x != "fwd_o"
-        ]
+        def leaves():
+            return [
+                x.detach().clone().requires_grad_(True)
+                for x in (q, k, v, g, beta, *params)
+            ]
 
-    def skips(recs_on, recs_off) -> bool:
-        """The forwards' launches in the light form, the backward's collectives the light path's; with tokens no
-        launch of SKIPPED in the hand-off's backward, and the separate normalization exactly where the skipped intra
-        program normalized (the fused form's intra-first plans)."""
-        on_b, off_b = recs_on["bwd"]["sequence"], recs_off["bwd"]["sequence"]
-        ok = light_form(recs_on["orig"]) == recs_off["orig"]["sequence"]
-        ok = ok and light_form(recs_on["fwd"]) == recs_off["fwd"]["sequence"]
-        ok = ok and _collectives(on_b) == _collectives(off_b)
-        ok = ok and recs_on["bwd"]["n_collectives"] == recs_off["bwd"]["n_collectives"]
-        if T_r > 0:
-            ok = ok and not any(x in SKIPPED for x in on_b)
-            ok = ok and all(x in off_b for x in SKIPPED)
-            ok = ok and on_b.count("qk_apply") == int(intra_first)
-            ok = ok and "qk_apply" not in off_b
-        return ok
+        def gate_kw(lv) -> dict:
+            if not raw:
+                return {}
+            return {
+                "use_gate_in_kernel": True,
+                "A_log": lv[5],
+                "dt_bias": lv[6],
+                "lower_bound": LOWER_BOUND,
+            }
 
-    direct, recs_direct = run("off", ckpt=False)
-    base, recs_base = run("off")
-    flags["off_light"] = light(recs_base) and light(recs_direct)
-    flags["off_equals_direct"] = _same(base, direct)
-    # the hand-off on, non-reentrant: every output, gradient, partial and sum bitwise; the launches skipped
-    on_nr, recs_on = run("on")
-    flags["on_nonreentrant_bitwise"] = _same(on_nr, base)
-    flags["on_nonreentrant_engaged"] = engaged(recs_on)
-    flags["on_launches"] = skips(recs_on, recs_base)
-    want_bytes = (
-        cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(ctx, H=H, saved_rows="tape")
-        if T_r > 0
-        else None
-    )
-    flags["on_bytes"] = (
-        recs_on["fwd"].get("checkpoint_handoff_bytes") == want_bytes
-        and recs_on["bwd"].get("checkpoint_handoff_bytes") == want_bytes
-    )
-    st = recs_on["fwd"]["save_transfer"]
-    query = {
-        flag: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
-            ctx,
-            H=H,
-            with_conv=False,
-            save_transfer=st,
-            checkpoint_handoff=flag,
-            saved_rows="tape",
-            **ws_kw,
-        )
-        for flag in (False, True)
-    }
-    got = {"off": recs_base["fwd"]["saved_bytes"], "on": recs_on["fwd"]["saved_bytes"]}
-    info["saved_bytes"] = {"got": got, "query": query}
-    flags["on_saved_bytes"] = got["on"] - got["off"] == (
-        query[True] - query[False] if T_r > 0 else 0
-    )
-    # reentrant: the recompute decides and keeps the set
-    on_r, recs_on_r = run("on", reentrant=True)
-    flags["on_reentrant_bitwise"] = _same(on_r, base)
-    flags["on_reentrant_engaged"] = (
-        recs_on_r["fwd"] is not None
-        and recs_on_r["fwd"].get("checkpoint_handoff") == ("save" if T_r > 0 else None)
-        and recs_on_r["bwd"].get("checkpoint_handoff") == ("bound" if T_r > 0 else None)
-        and recs_on_r["orig"].get("checkpoint_handoff") is None
-    )
-    # with a recompute handle, both tiers
-    for keep in ("states", "transfer"):
-        _, recs_h_off = run(
-            "off", handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(), keep=keep
-        )
-        res_h, recs_h = run(
-            "on", handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(), keep=keep
-        )
-        flags[f"handle_{keep}_bitwise"] = _same(res_h, base)
-        flags[f"handle_{keep}_engaged"] = engaged(recs_h)
-        flags[f"handle_{keep}_launches"] = skips(recs_h, recs_h_off)
-    # a per-call workspace; a NaN-filled tape set from poisoned free blocks; the caller arena poisoned between the
-    # recompute and the backward (a byte the hand-off's backward read from the recompute's arena would show)
-    res_pc, recs_pc = run("on", workspace=None)
-    flags["per_call_bitwise"] = _same(res_pc, base)
-    flags["per_call_engaged"] = engaged(recs_pc)
-    res_p, recs_p = run("on", workspace=None, poison_free=True, poison_tape=True)
-    flags["poison_tape_free_bitwise"] = _same(res_p, base)
-    flags["poison_tape_free_engaged"] = engaged(recs_p)
-    arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
-    res_pa_off, _ = run("off", context_fn=arena_fn)
-    res_pa_on, recs_pa = run("on", context_fn=arena_fn, poison_tape=True)
-    flags["poison_arena_off_bitwise"] = _same(res_pa_off, base)
-    flags["poison_arena_on_bitwise"] = _same(res_pa_on, base)
-    flags["poison_arena_engaged"] = engaged(recs_pa)
-    for keep in ("states", "transfer"):
-        res_hp, recs_hp = run(
-            "on",
-            handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
-            keep=keep,
-            context_fn=arena_fn,
-            poison_tape=True,
-        )
-        flags[f"poison_arena_handle_{keep}_bitwise"] = _same(res_hp, base)
-        flags[f"poison_arena_handle_{keep}_engaged"] = engaged(recs_hp)
-    # ranks that decide differently
-    mixed = "on" if rank % 2 == 0 else "off"
-    res_mx, recs_mx = run(mixed)
-    flags["mixed_ranks_bitwise"] = _same(res_mx, base)
-    flags["mixed_ranks_engaged"] = engaged(recs_mx) if mixed == "on" else light(recs_mx)
-    # the ring exchange (where the partition allows it) and the overlap schedule
-    ring_ok = int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
-    info["ring_eligible"] = ring_ok
-    overlap = {"_kcp_test_knobs": {"schedule": "overlap"}}
-    # also the previous host path (every launch, the separate normalization included, through the arena's
-    # launcher) and save_transfer=False without a handle
-    forms = {
-        "overlap": overlap,
-        "host_trim0": {"_kcp_test_knobs": {"host_trim": 0}},
-        "save_transfer_off": {"save_transfer": False},
-    }
-    if ring_ok:
-        forms["ring"] = {"exchange": "ring"}
-    previous_knobs = cake_kcp_plan.enable_test_knobs(True)
-    try:
-        for form, opts in forms.items():
-            res_f_off, recs_f_off = run("off", **opts)
-            res_f_on, recs_f_on = run("on", **opts)
-            flags[f"{form}_bitwise"] = _same(res_f_off, base) and _same(res_f_on, base)
-            flags[f"{form}_engaged"] = engaged(recs_f_on) and light(recs_f_off)
-            flags[f"{form}_launches"] = skips(recs_f_on, recs_f_off)
-        ws_fb = None
-        if l2n:
-            # the fallback form (the workspace's test knob): the separate normalization of the light backward
+        def run(
+            mode: str,
+            *,
+            ckpt: bool = True,
+            reentrant: bool = False,
+            workspace=ws,
+            handle=None,
+            keep=None,
+            context_fn=None,
+            poison_free: bool = False,
+            poison_tape: bool = False,
+            twice: bool = False,
+            entry=None,
+            arm: str,
+            **opts,
+        ):
+            """One checkpointed (or direct) step of ``out * w``: every output and gradient (in raw gate mode the
+            parameter partials of this rank and their cross-rank sums) and the LAST_CALL records of the original
+            forward, the recompute (None without one) and the backward; the results judged as ``arm`` (every rank;
+            ``twice``: two backwards, the accumulated gradients judged halved)."""
+            if poison_free:
+                _poison(device)
+            lv = leaves()
+            wl = torch.ones_like(dout).requires_grad_(True)
+            kw = dict(opts)
+            if handle is not None:
+                kw["recompute_handle"] = handle
+            if keep is not None:
+                kw["checkpoint_keep"] = keep
+            call = entry or cake_kcp.cake_kda_nondet_kcp
+
+            def top(q_, k_, v_, g_, b_, w_, *p_):
+                y = call(
+                    q_,
+                    k_,
+                    v_,
+                    g_,
+                    b_,
+                    ctx,
+                    workspace=workspace,
+                    checkpoint_handoff=mode,
+                    saved_rows="tape",  # the tape set (saved_rows="auto" keeps the wy rows form)
+                    **gate_kw([q_, k_, v_, g_, b_, *p_]),
+                    **mode_kw,
+                    **kw,
+                )
+                return y * w_
+
+            cake_kcp.LAST_CALL.pop("fwd", None)
+            cake_kcp.LAST_CALL.pop("bwd", None)
+            prev = cake_kcp._HANDOFF_POISON
+            cake_kcp._HANDOFF_POISON = bool(poison_tape)
+            args = (*lv[:5], wl, *lv[5:])
             try:
-                ws_fb = cake_kcp.CakeKDANondetKcpWorkspace(
-                    **ws_kw, _qk_l2norm_form="fallback"
+                if not ckpt:
+                    out = top(*args)
+                elif context_fn is not None:
+                    out = checkpoint(
+                        top, *args, use_reentrant=False, context_fn=context_fn
+                    )
+                else:
+                    out = checkpoint(top, *args, use_reentrant=reentrant)
+                rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
+                if ckpt:
+                    cake_kcp.LAST_CALL.pop("fwd")
+                for i in range(2 if twice else 1):
+                    out.backward(dout, retain_graph=twice and i == 0)
+            finally:
+                cake_kcp._HANDOFF_POISON = prev
+            rec_fwd = cake_kcp.LAST_CALL.get("fwd")
+            rec_bwd = dict(cake_kcp.LAST_CALL["bwd"])
+            res = {"out": out.detach(), "dw": wl.grad}
+            res.update({n: lf.grad for n, lf in zip(grad_names, lv, strict=True)})
+            if raw:
+                # the cross-rank sums of the partials (a collective: every rank of every run)
+                sums = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
+                    ctx, res["dA_log"], res["ddt_bias"]
                 )
-            except NotImplementedError as exc:
-                # the form's programs are not delivered: reported, not run
-                info["fallback_pending"] = str(exc)
-                # only the form's capability refusal (rank-independent) skips it, never another error
-                flags["fallback_pending_is_capability"] = str(exc).startswith(
-                    cake_kcp_plan.QK_L2NORM_PENDING
-                )
-            info["fallback_form"] = "pending" if ws_fb is None else "ran"
-        if ws_fb is not None:
-            res_fb_off, recs_fb_off = run("off", workspace=ws_fb)
-            res_fb_on, recs_fb_on = run("on", workspace=ws_fb)
-            flags["fallback_bitwise"] = _same(res_fb_on, res_fb_off)
-            flags["fallback_engaged"] = engaged(recs_fb_on) and light(recs_fb_off)
-            info["fallback_eq_fused"] = _same(res_fb_off, base)
-            on_b = recs_fb_on["bwd"]["sequence"]
-            flags["fallback_launches"] = T_r == 0 or (
-                not any(x in SKIPPED for x in on_b)
-                and on_b.count("qk_apply") == 1
-                and _collectives(on_b) == _collectives(recs_fb_off["bwd"]["sequence"])
-            )
-    finally:
-        cake_kcp_plan.enable_test_knobs(previous_knobs)
-    # retain_graph: twice the gradients (the partials too)
-    res_tw, recs_tw = run("on", twice=True)
-    base_tw = {n: t for n, t in base.items() if not n.endswith("_sum")}
-    flags["twice_bitwise"] = _same(
-        res_tw, {n: t if n == "out" else t + t for n, t in base_tw.items()}
-    )
-    flags["twice_engaged"] = engaged(recs_tw)
-    # "auto": the shipped rule, then the work bound at 0 with this device verified in the call's mode (engaged), with
-    # the mode's set emptied while the activated gate's still lists the device ("unverified"), each decided once
-    total = ctx.partition.total
-    shipped = (
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
-        cake_kcp_plan.KCP_HANDOFF_VERIFIED,
-        cake_kcp_plan.KCP_HANDOFF_VERIFIED_MODES,
-        cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
-    )
-    kind = (gate, l2n)
-    kept = {"save": 2, "bound": 1} if T_r > 0 else {}
+                res["dA_log_sum"], res["ddt_bias_sum"] = sums
+            judge(arm, res, halve=twice)
+            return res, {"orig": rec_orig, "fwd": rec_fwd, "bwd": rec_bwd}
 
-    @contextlib.contextmanager
-    def auto_rule(min_head_tokens: int, verified, modes, by_key):
-        (
+        def engaged(recs) -> bool:
+            want = ("save", "save", "bound") if T_r > 0 else (None, None, None)
+            got = (
+                recs["orig"].get("checkpoint_handoff"),
+                (recs["fwd"] or {}).get("checkpoint_handoff"),
+                recs["bwd"].get("checkpoint_handoff"),
+            )
+            return got == want
+
+        def light(recs) -> bool:
+            return all(
+                (r or {}).get("checkpoint_handoff") is None
+                for r in (recs["orig"], recs["fwd"], recs["bwd"])
+            )
+
+        def light_form(rec) -> list:
+            seq = rec["sequence"]
+            if rec.get("checkpoint_handoff") != "save":
+                return list(seq)
+            if seq.count("fwd_o") != 1 or "kcp_fwdh_o" in seq:
+                return ["not the tape form", *seq]
+            return [
+                ("kcp_fwdh_o" if x == "kcp_fwdh_tape" else x)
+                for x in seq
+                if x != "fwd_o"
+            ]
+
+        def skips(recs_on, recs_off) -> bool:
+            """The forwards' launches in the light form, the backward's collectives the light path's; with tokens no
+            launch of SKIPPED in the hand-off's backward, and the separate normalization exactly where the skipped intra
+            program normalized (the fused form's intra-first plans)."""
+            on_b, off_b = recs_on["bwd"]["sequence"], recs_off["bwd"]["sequence"]
+            ok = light_form(recs_on["orig"]) == recs_off["orig"]["sequence"]
+            ok = ok and light_form(recs_on["fwd"]) == recs_off["fwd"]["sequence"]
+            ok = ok and _collectives(on_b) == _collectives(off_b)
+            ok = (
+                ok
+                and recs_on["bwd"]["n_collectives"] == recs_off["bwd"]["n_collectives"]
+            )
+            if T_r > 0:
+                ok = ok and not any(x in SKIPPED for x in on_b)
+                ok = ok and all(x in off_b for x in SKIPPED)
+                ok = ok and on_b.count("qk_apply") == int(intra_first)
+                ok = ok and "qk_apply" not in off_b
+            return ok
+
+        _, recs_direct = run("off", ckpt=False, arm="direct")
+        _, recs_base = run("off", arm="off")
+        flags["off_light"] = light(recs_base) and light(recs_direct)
+        # the hand-off on, non-reentrant: engaged, the launches skipped
+        _, recs_on = run("on", arm="on")
+        flags["on_nonreentrant_engaged"] = engaged(recs_on)
+        flags["on_launches"] = skips(recs_on, recs_base)
+        want_bytes = (
+            cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(
+                ctx, H=H, saved_rows="tape"
+            )
+            if T_r > 0
+            else None
+        )
+        flags["on_bytes"] = (
+            recs_on["fwd"].get("checkpoint_handoff_bytes") == want_bytes
+            and recs_on["bwd"].get("checkpoint_handoff_bytes") == want_bytes
+        )
+        st = recs_on["fwd"]["save_transfer"]
+        query = {
+            flag: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
+                ctx,
+                H=H,
+                with_conv=False,
+                save_transfer=st,
+                checkpoint_handoff=flag,
+                saved_rows="tape",
+                **ws_kw,
+            )
+            for flag in (False, True)
+        }
+        got = {
+            "off": recs_base["fwd"]["saved_bytes"],
+            "on": recs_on["fwd"]["saved_bytes"],
+        }
+        info["saved_bytes"] = {"got": got, "query": query}
+        flags["on_saved_bytes"] = got["on"] - got["off"] == (
+            query[True] - query[False] if T_r > 0 else 0
+        )
+        # reentrant: the recompute decides and keeps the set
+        _, recs_on_r = run("on", reentrant=True, arm="on_reentrant")
+        flags["on_reentrant_engaged"] = (
+            recs_on_r["fwd"] is not None
+            and recs_on_r["fwd"].get("checkpoint_handoff")
+            == ("save" if T_r > 0 else None)
+            and recs_on_r["bwd"].get("checkpoint_handoff")
+            == ("bound" if T_r > 0 else None)
+            and recs_on_r["orig"].get("checkpoint_handoff") is None
+        )
+        # with a recompute handle, both tiers
+        for keep in ("states", "transfer"):
+            _, recs_h_off = run(
+                "off",
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep=keep,
+                arm=f"handle_{keep}_off",
+            )
+            _, recs_h = run(
+                "on",
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep=keep,
+                arm=f"handle_{keep}_on",
+            )
+            flags[f"handle_{keep}_engaged"] = engaged(recs_h)
+            flags[f"handle_{keep}_launches"] = skips(recs_h, recs_h_off)
+        # a per-call workspace; a NaN-filled tape set from poisoned free blocks; the caller arena poisoned between the
+        # recompute and the backward (a NaN the hand-off's backward read from the recompute's arena would reach an
+        # output: the judge's contract)
+        _, recs_pc = run("on", workspace=None, arm="per_call")
+        flags["per_call_engaged"] = engaged(recs_pc)
+        _, recs_p = run(
+            "on",
+            workspace=None,
+            poison_free=True,
+            poison_tape=True,
+            arm="poison_tape_free",
+        )
+        flags["poison_tape_free_engaged"] = engaged(recs_p)
+        arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
+        run("off", context_fn=arena_fn, arm="poison_arena_off")
+        _, recs_pa = run(
+            "on", context_fn=arena_fn, poison_tape=True, arm="poison_arena_on"
+        )
+        flags["poison_arena_engaged"] = engaged(recs_pa)
+        for keep in ("states", "transfer"):
+            _, recs_hp = run(
+                "on",
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep=keep,
+                context_fn=arena_fn,
+                poison_tape=True,
+                arm=f"poison_arena_handle_{keep}",
+            )
+            flags[f"poison_arena_handle_{keep}_engaged"] = engaged(recs_hp)
+        # ranks that decide differently
+        mixed = "on" if rank % 2 == 0 else "off"
+        _, recs_mx = run(mixed, arm="mixed_ranks")
+        flags["mixed_ranks_engaged"] = (
+            engaged(recs_mx) if mixed == "on" else light(recs_mx)
+        )
+        # the ring exchange (where the partition allows it) and the overlap schedule
+        ring_ok = int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
+        info["ring_eligible"] = ring_ok
+        overlap = {"_kcp_test_knobs": {"schedule": "overlap"}}
+        # also the previous host path (every launch, the separate normalization included, through the arena's
+        # launcher) and save_transfer=False without a handle
+        forms = {
+            "overlap": overlap,
+            "host_trim0": {"_kcp_test_knobs": {"host_trim": 0}},
+            "save_transfer_off": {"save_transfer": False},
+        }
+        if ring_ok:
+            forms["ring"] = {"exchange": "ring"}
+        previous_knobs = cake_kcp_plan.enable_test_knobs(True)
+        try:
+            for form, opts in forms.items():
+                _, recs_f_off = run("off", arm=f"{form}_off", **opts)
+                _, recs_f_on = run("on", arm=f"{form}_on", **opts)
+                flags[f"{form}_engaged"] = engaged(recs_f_on) and light(recs_f_off)
+                flags[f"{form}_launches"] = skips(recs_f_on, recs_f_off)
+            ws_fb = None
+            if l2n:
+                # the fallback form (the workspace's test knob): the separate normalization of the light backward
+                try:
+                    ws_fb = cake_kcp.CakeKDANondetKcpWorkspace(
+                        **ws_kw, _qk_l2norm_form="fallback"
+                    )
+                except NotImplementedError as exc:
+                    # the form's programs are not delivered: reported, not run
+                    info["fallback_pending"] = str(exc)
+                    # only the form's capability refusal (rank-independent) skips it, never another error
+                    flags["fallback_pending_is_capability"] = str(exc).startswith(
+                        cake_kcp_plan.QK_L2NORM_PENDING
+                    )
+                info["fallback_form"] = "pending" if ws_fb is None else "ran"
+            if ws_fb is not None:
+                _, recs_fb_off = run("off", workspace=ws_fb, arm="fallback_off")
+                _, recs_fb_on = run("on", workspace=ws_fb, arm="fallback_on")
+                flags["fallback_engaged"] = engaged(recs_fb_on) and light(recs_fb_off)
+                on_b = recs_fb_on["bwd"]["sequence"]
+                flags["fallback_launches"] = T_r == 0 or (
+                    not any(x in SKIPPED for x in on_b)
+                    and on_b.count("qk_apply") == 1
+                    and _collectives(on_b)
+                    == _collectives(recs_fb_off["bwd"]["sequence"])
+                )
+        finally:
+            cake_kcp_plan.enable_test_knobs(previous_knobs)
+        # retain_graph: two backwards (the accumulated gradients and parameter sums judged halved)
+        _, recs_tw = run("on", twice=True, arm="twice")
+        flags["twice_engaged"] = engaged(recs_tw)
+        # "auto": the shipped rule, then the work bound at 0 with this device verified in the call's mode (engaged), with
+        # the mode's set emptied while the activated gate's still lists the device ("unverified"), each decided once
+        total = ctx.partition.total
+        shipped = (
             cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
             cake_kcp_plan.KCP_HANDOFF_VERIFIED,
             cake_kcp_plan.KCP_HANDOFF_VERIFIED_MODES,
             cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
-        ) = (min_head_tokens, verified, modes, by_key)
-        try:
-            yield cake_kcp_plan.kcp_handoff_auto_refusal(
-                key, H, total, W, gate=gate, l2n=l2n
-            )
-        finally:
+        )
+        kind = (gate, l2n)
+        kept = {"save": 2, "bound": 1} if T_r > 0 else {}
+
+        @contextlib.contextmanager
+        def auto_rule(min_head_tokens: int, verified, modes, by_key):
             (
                 cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
                 cake_kcp_plan.KCP_HANDOFF_VERIFIED,
                 cake_kcp_plan.KCP_HANDOFF_VERIFIED_MODES,
                 cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
-            ) = shipped
-
-    reasons = {}
-    for case, rule in (
-        ("shipped", shipped),
-        (
-            "bound0_verified",
-            (0, shipped[1], {**shipped[2], kind: frozenset({key})}, {}),
-        ),
-        (
-            "bound0_unverified",
-            (0, frozenset({key}), {**shipped[2], kind: frozenset()}, {}),
-        ),
-    ):
-        with auto_rule(*rule) as reason:
-            before = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-            res_a, recs_a = run("auto")
-            after = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-        reasons[case] = reason
-        delta = {n: after[n] - before[n] for n in after if after[n] != before[n]}
-        if reason is None:
-            flags[f"auto_{case}"] = (
-                _same(res_a, base) and engaged(recs_a) and delta == kept
-            )
-        else:
-            flags[f"auto_{case}"] = (
-                _same(res_a, base)
-                and light(recs_a)
-                and delta == {"refused_" + reason: 1}
-            )
-    info["auto_reasons"] = reasons
-    flags["auto_rule_reasons"] = (
-        reasons["bound0_verified"] is None
-        and reasons["bound0_unverified"] == "unverified"
-    )
-    # the facade forwards the mode keywords and the hand-off mode
-    for mode in ("on", "off"):
-        res_f, recs_f = run(mode, entry=kcp_api.cake_kda_nondet_kcp)
-        flags[f"facade_{mode}_bitwise"] = _same(res_f, base)
-        flags[f"facade_{mode}_engaged"] = (
-            engaged(recs_f) if mode == "on" else light(recs_f)
-        )
-    # #7039: a checkpointed forward with the hand-off retains nothing, after one warm-up step of the same form
-    retained = {}
-    for form, wsp in (("per_call", None), ("caller_ws", ws)):
-
-        def fn0(*a, _w=wsp):
-            return cake_kcp.cake_kda_nondet_kcp(
-                *a[:5],
-                ctx,
-                workspace=_w,
-                checkpoint_handoff="on",
-                saved_rows="tape",
-                **gate_kw(a),
-                **mode_kw,
-            )
-
-        for step in ("warm", "measure"):
-            lv = leaves()
-            torch.cuda.synchronize(device)
-            gc.collect()
-            before = _requested(device)
-            out = checkpoint(fn0, *lv, use_reentrant=False)
-            torch.cuda.synchronize(device)
-            if step == "measure":
-                retained[form] = (
-                    _requested(device) - before - out.numel() * out.element_size()
+            ) = (min_head_tokens, verified, modes, by_key)
+            try:
+                yield cake_kcp_plan.kcp_handoff_auto_refusal(
+                    key, H, total, W, gate=gate, l2n=l2n
                 )
-            out.backward(dout)
-            del out, lv
-    info["retained_bytes"] = retained
-    flags["retained_zero"] = all(r == 0 for r in retained.values())
+            finally:
+                (
+                    cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS,
+                    cake_kcp_plan.KCP_HANDOFF_VERIFIED,
+                    cake_kcp_plan.KCP_HANDOFF_VERIFIED_MODES,
+                    cake_kcp_plan.KCP_HANDOFF_MIN_HEAD_TOKENS_BY_KEY,
+                ) = shipped
+
+        reasons = {}
+        for case, rule in (
+            ("shipped", shipped),
+            (
+                "bound0_verified",
+                (0, shipped[1], {**shipped[2], kind: frozenset({key})}, {}),
+            ),
+            (
+                "bound0_unverified",
+                (0, frozenset({key}), {**shipped[2], kind: frozenset()}, {}),
+            ),
+        ):
+            with auto_rule(*rule) as reason:
+                before = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+                _, recs_a = run("auto", arm=f"auto_{case}")
+                after = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+            reasons[case] = reason
+            delta = {n: after[n] - before[n] for n in after if after[n] != before[n]}
+            if reason is None:
+                flags[f"auto_{case}"] = engaged(recs_a) and delta == kept
+            else:
+                flags[f"auto_{case}"] = light(recs_a) and delta == {
+                    "refused_" + reason: 1
+                }
+        info["auto_reasons"] = reasons
+        flags["auto_rule_reasons"] = (
+            reasons["bound0_verified"] is None
+            and reasons["bound0_unverified"] == "unverified"
+        )
+        # the facade forwards the mode keywords and the hand-off mode
+        for mode in ("on", "off"):
+            _, recs_f = run(
+                mode, entry=kcp_api.cake_kda_nondet_kcp, arm=f"facade_{mode}"
+            )
+            flags[f"facade_{mode}_engaged"] = (
+                engaged(recs_f) if mode == "on" else light(recs_f)
+            )
+        # #7039: a checkpointed forward with the hand-off retains nothing, after one warm-up step of the same form
+        retained = {}
+        for form, wsp in (("per_call", None), ("caller_ws", ws)):
+
+            def fn0(*a, _w=wsp):
+                return cake_kcp.cake_kda_nondet_kcp(
+                    *a[:5],
+                    ctx,
+                    workspace=_w,
+                    checkpoint_handoff="on",
+                    saved_rows="tape",
+                    **gate_kw(a),
+                    **mode_kw,
+                )
+
+            for step in ("warm", "measure"):
+                lv = leaves()
+                torch.cuda.synchronize(device)
+                gc.collect()
+                before = _requested(device)
+                out = checkpoint(fn0, *lv, use_reentrant=False)
+                torch.cuda.synchronize(device)
+                if step == "measure":
+                    retained[form] = (
+                        _requested(device) - before - out.numel() * out.element_size()
+                    )
+                out.backward(dout)
+                del out, lv
+        info["retained_bytes"] = retained
+        flags["retained_zero"] = all(r == 0 for r in retained.values())
+        return flags, info
+
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {}
+    for j in range(DRAWS if judged(lengths, H) else 1):
+        f_j, info_j = one_draw(j)
+        for name, ok in f_j.items():
+            flags[name] = flags.get(name, True) and ok
+        if j == 0:
+            info.update(info_j)
 
     gathered: list = [None] * W
     dist.all_gather_object(gathered, (flags, info))
@@ -1217,6 +1285,8 @@ def _run_rank_handoff_mode(
     report["pass"] = all(report["flags"].values()) and all(
         set(f) == set(flag_list[0]) for f in flag_list
     )
+    if rank == 0:
+        report["naive"] = judge.result()
     dist.barrier()
     if rank == 0 and result_dir:
         os.makedirs(result_dir, exist_ok=True)
@@ -1240,21 +1310,31 @@ def _spawn_entry_handoff_mode(
             dist.destroy_process_group()
 
 
+def _settle_report(record_property, report: dict, lengths) -> None:
+    """Assert a row's gathered flags, then record and settle rank 0's verdicts (``report["naive"]``,
+    :func:`settle_naive`; the gaps' scope: the row's documents).  Another rank's report holds no verdicts."""
+    assert report["pass"], {k: v for k, v in report.items() if k != "naive"}
+    if report.get("naive") is not None:
+        settle_naive(record_property, report["naive"], tuple(lengths))
+
+
 @pytest.mark.parametrize("row", HANDOFF_MODE_ROWS, ids=_mode_row_id)
-def test_checkpoint_handoff_mode_rows(row) -> None:
+def test_checkpoint_handoff_mode_rows(row, record_property) -> None:
     """The hand-off in raw gate mode, with the in-kernel Q / K L2 norm and with both (``HANDOFF_MODE_ROWS``), on every
-    rank of the row: every output and gradient -- the raw gate's, the raw ``q`` / ``k``'s, the ``A_log`` /
-    ``dt_bias`` partials of each rank and their cross-rank sums (:func:`cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads`)
-    -- with the hand-off on is bitwise that with it off and that of the direct pass, non-reentrant and reentrant, with
-    a recompute handle of both tiers, on a per-call workspace, from a NaN-filled tape set and poisoned free blocks, from
-    a caller arena poisoned between the recompute and the backward (with and without a handle), with ranks that decide
-    differently, with the ring exchange and the overlap schedule, on the previous host path (``host_trim`` 0), with
-    ``save_transfer=False`` without a handle, over two backwards and through the facade; the
-    hand-off engages (the original forward and the recompute keep the set, the backward reads it), the forwards run
+    rank of the row, on each of the judge's 32 draws of the operands: every output and gradient -- the raw gate's, the
+    raw ``q`` / ``k``'s and the cross-rank sums of the ``A_log`` / ``dt_bias`` partials
+    (:func:`cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads`) -- of every run is judged on rank 0 (the
+    gathered row against its FP64 reference beside the naive BF16 tier, ``"<run>.<output>"``): the hand-off off and
+    on, the direct pass, reentrant, with a recompute handle of both tiers, on a per-call workspace, from a NaN-filled
+    tape set and poisoned free blocks, from a caller arena poisoned between the recompute and the backward (with and
+    without a handle), with ranks that decide differently, with the ring exchange and the overlap schedule, on the
+    previous host path (``host_trim`` 0), with ``save_transfer=False`` without a handle, over two backwards (the
+    accumulated gradients halved), with ``"auto"`` and through the facade; the hand-off engages (the original forward and the recompute keep the set, the backward reads it), the forwards run
     the tape form of the light launches, the backward launches no intra program, WY or K1 tape walk and, with the
     norm, the separate normalization from the saved rstd exactly where the plan's intra program is the replay's first
     q / k reader; the saved set grows by the byte query's difference in the mode; with the norm the fallback form
-    (the workspace's test knob) is bitwise its own light path; ``"auto"`` follows the rule of the mode (this device
+    (the workspace's test knob; off and on judged) engages and runs the separate normalization once in its backward;
+    ``"auto"`` follows the rule of the mode (this device
     verified in the mode: engaged; the mode's set emptied: ``"unverified"`` even with the device in
     ``KCP_HANDOFF_VERIFIED``); a checkpointed forward with the hand-off retains nothing."""
     W = row[2]
@@ -1274,7 +1354,7 @@ def test_checkpoint_handoff_mode_rows(row) -> None:
             os.environ.get("KCP_TEST_RESULT_DIR"),
             int(os.environ.get("SLURM_LOCALID", "0")),
         )
-        assert report["pass"], report
+        _settle_report(record_property, report, row[0])
         return
     _skip_unless_runnable(W)
     with tempfile.TemporaryDirectory(prefix="cake_kcp_handoff_mode_") as tmp:
@@ -1284,12 +1364,15 @@ def test_checkpoint_handoff_mode_rows(row) -> None:
             os.path.join(result_dir, "handoff-" + _mode_row_id(row) + ".json")
         ) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _settle_report(record_property, report, row[0])
 
 
 @pytest.mark.parametrize("row", HANDOFF_ROWS, ids=_row_id)
-def test_checkpoint_handoff_rows(row) -> None:
-    """The hand-off rows of ``_run_rank_handoff`` on every rank of the row."""
+def test_checkpoint_handoff_rows(row, record_property) -> None:
+    """The hand-off rows of ``_run_rank_handoff`` on every rank of the row, on each of the judge's 32 draws of the
+    operands: the records, launches, bytes, counters and refusals of the module docstring, and every run's output and
+    gradients judged on rank 0 (the gathered row against its FP64 reference beside the naive BF16 tier,
+    ``"<run>.<output>"``)."""
     W = row[2]
     ntasks = int(os.environ.get("SLURM_NTASKS", "1") or 1)
     if os.environ.get("SLURM_PROCID") is not None and ntasks > 1:
@@ -1307,7 +1390,7 @@ def test_checkpoint_handoff_rows(row) -> None:
             os.environ.get("KCP_TEST_RESULT_DIR"),
             int(os.environ.get("SLURM_LOCALID", "0")),
         )
-        assert report["pass"], report
+        _settle_report(record_property, report, row[0])
         return
     _skip_unless_runnable(W)
     with tempfile.TemporaryDirectory(prefix="cake_kcp_handoff_") as tmp:
@@ -1315,70 +1398,11 @@ def test_checkpoint_handoff_rows(row) -> None:
         _start_ranks(_spawn_entry_handoff, W, row, tmp, result_dir)
         with open(os.path.join(result_dir, "handoff-" + _row_id(row) + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _settle_report(record_property, report, row[0])
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # saved_rows on GPU: the rows forms of a plain autograd node and of the checkpoint hand-off
-
-
-def _rows_stats(res: dict, refs: dict) -> dict:
-    """Per tensor of ``res`` with a reference in ``refs`` (this rank's rows of the FP64 reference; the parameter
-    gradients' sums on rank 0 only): the sum of squared errors, the reference's sum of squares, the largest absolute
-    error, whether every element is finite and the elements outside ``ATOL + RTOL * |ref|``."""
-    out = {}
-    for n, ref in refs.items():
-        if n not in res:
-            continue
-        c = res[n].detach().to(torch.float64)
-        err = c - ref
-        out[n] = (
-            float(err.pow(2).sum()),
-            float(ref.pow(2).sum()),
-            float(err.abs().max()) if err.numel() else 0.0,
-            bool(torch.isfinite(c).all()),
-            int(((err.abs() - (ATOL + RTOL * ref.abs())) > 0).sum()),
-        )
-    return out
-
-
-def _rows_combine(per_rank: list[dict]) -> dict:
-    """One run's metrics over the ranks from their :func:`_rows_stats`: ``rel_rms`` (the root of the summed squared
-    errors over the summed squared reference), ``max_abs``, ``finite`` and ``mismatch``."""
-    tot: dict[str, list] = {}
-    for st in per_rank:
-        for n, (se, sr, mx, fin, mism) in st.items():
-            a = tot.setdefault(n, [0.0, 0.0, 0.0, True, 0])
-            a[0] += se
-            a[1] += sr
-            a[2] = max(a[2], mx)
-            a[3] = a[3] and fin
-            a[4] += mism
-    return {
-        n: {
-            "rel_rms": math.sqrt(se / sr) if sr > 0 else (math.inf if se > 0 else 0.0),
-            "max_abs": mx,
-            "finite": fin,
-            "mismatch": mism,
-        }
-        for n, (se, sr, mx, fin, mism) in tot.items()
-    }
-
-
-def _rows_within(m: dict, light: dict) -> bool:
-    """A run's tensor against the light path's of the same row: finite, ``rel_rms`` and ``max_abs`` at most
-    ACC_GATE times the light path's (an exact zero on both sides passes) and no more elements outside the
-    ``ATOL`` / ``RTOL`` budget than the light path."""
-
-    def ratio(a: float, b: float) -> float:
-        return a / b if b > 0 else (1.0 if a == 0 else math.inf)
-
-    return (
-        m["finite"]
-        and ratio(m["rel_rms"], light["rel_rms"]) <= ACC_GATE
-        and ratio(m["max_abs"], light["max_abs"]) <= ACC_GATE
-        and m["mismatch"] <= light["mismatch"]
-    )
 
 
 def _run_rank_rows(
@@ -1399,680 +1423,657 @@ def _run_rank_rows(
     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
         part, group, rank, device
     )
-    if raw or l2n:
-        glob = _mode_inputs(lengths, H, device, gate, l2n)
-    else:
-        glob = make_inputs(lengths, H, device)
-    names = ("q", "k", "v", "g", "beta", "dout")
-    ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
-    q, k, v, g, beta, dout = (ops[n] for n in names)
-    params = (glob["A_log"], glob["dt_bias"]) if raw else ()
-    ws_kw = {"use_gate_in_kernel": raw, "use_qk_l2norm_in_kernel": l2n}
-    ws = cake_kcp.CakeKDANondetKcpWorkspace(**ws_kw)
-    # a lean arena: the activated gate without the norm only (raw gate mode and the norm refuse local_arena="lean")
-    ws_lean = (
-        None if raw or l2n else cake_kcp.CakeKDANondetKcpWorkspace(local_arena="lean")
-    )
-    T_r = int(q.shape[0])
-    R = int(ctx.R)
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    arch = cake_kcp.cake_jit.device_arch(index)
-    sms = int(cake_kcp.cake_jit.sm_count(index))
-    key = (arch, sms, cake_kcp._handoff_toolkit(arch))
-    # the fused form's backward normalizes in its intra program first on this rank's plan: a rows backward then runs
-    # the separate normalization from the saved rstd in that program's place (cake_kcp._handoff_l2n_rows)
-    intra_first = bool(
-        l2n
-        and T_r > 0
-        and cake_kcp_plan.qk_l2norm_intra_first(
-            cake_kcp.cake_backend.plan(
-                T_r, int(ctx.n_frag), H, sms, arch, gate=gate, l2n="fused"
-            )
+    judge = RankJudge(part, cu, W, rank, SCALE)
+
+    def one_draw(j: int) -> tuple[dict, dict, list]:
+        """Draw ``j``: every check of the row on the draw's operands; every run judged (``judge``)."""
+        seed = draw_seed(HANDOFF_SEED, j)
+        if raw or l2n:
+            glob = _mode_inputs(lengths, H, device, gate, l2n, seed=seed)
+        else:
+            glob = make_inputs(lengths, H, device, seed=seed)
+        judge.draw(j, glob, l2n=l2n)
+        names = ("q", "k", "v", "g", "beta", "dout")
+        ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
+        q, k, v, g, beta, dout = (ops[n] for n in names)
+        params = (glob["A_log"], glob["dt_bias"]) if raw else ()
+        ws_kw = {"use_gate_in_kernel": raw, "use_qk_l2norm_in_kernel": l2n}
+        ws = cake_kcp.CakeKDANondetKcpWorkspace(**ws_kw)
+        # a lean arena: the activated gate without the norm only (raw gate mode and the norm refuse local_arena="lean")
+        ws_lean = (
+            None
+            if raw or l2n
+            else cake_kcp.CakeKDANondetKcpWorkspace(local_arena="lean")
         )
-    )
-    info: dict[str, object] = {
-        "T_r": T_r,
-        "R": R,
-        "n_frag": int(ctx.n_frag),
-        "P": int(ctx.heads(H).P),
-        "key": list(key),
-        "intra_first": intra_first,
-        "torch": torch.__version__,
-    }
-    flags: dict[str, bool] = {}
-    # per run: this rank's _rows_stats; bitwise equality with the light path (reported, not gated)
-    acc: dict[str, dict] = {}
-    bitwise: dict[str, bool] = {}
-    not_run: list[str] = []
-    grad_names = ("dq", "dk", "dv", "dg", "dbeta") + (
-        ("dA_log", "ddt_bias") if raw else ()
-    )
-    # the FP64 reference of the whole pack on this rank's device, then this rank's rows of it; the parameter
-    # gradients (raw gate mode) are compared as cross-rank sums, counted on rank 0
-    cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
-    ref_in = [glob[n] for n in ("q", "k", "v", "g", "beta")]
-    if raw:
-        exact = kda_exact_raw_l2n_with_grads if l2n else kda_exact_raw_with_grads
-        ref_out, ref_g = exact(*ref_in, *params, glob["dout"], cu_t, SCALE, LOWER_BOUND)
-    else:
-        exact = kda_exact_l2n_with_grads if l2n else kda_exact_with_grads
-        ref_out, ref_g = exact(*ref_in, glob["dout"], cu_t, SCALE)
-    token_refs = {"out": ref_out, **{n: ref_g[n] for n in grad_names[:5]}}
-    refs = _local_slices(part, rank, cu, token_refs)
-    if raw and rank == 0:
-        refs["dA_log_sum"], refs["ddt_bias_sum"] = ref_g["dA_log"], ref_g["ddt_bias"]
-    del ref_out, ref_g, token_refs
-
-    def leaves():
-        return [
-            x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta, *params)
-        ]
-
-    def gate_kw(lv) -> dict:
-        if not raw:
-            return {}
-        return {
-            "use_gate_in_kernel": True,
-            "A_log": lv[5],
-            "dt_bias": lv[6],
-            "lower_bound": LOWER_BOUND,
-        }
-
-    def sums(res: dict) -> dict:
-        """In raw gate mode the cross-rank sums of the parameter partials (a collective: every rank, every set)."""
-        if raw:
-            res["dA_log_sum"], res["ddt_bias_sum"] = (
-                cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-                    ctx, res["dA_log"], res["ddt_bias"]
+        T_r = int(q.shape[0])
+        R = int(ctx.R)
+        index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+        arch = cake_kcp.cake_jit.device_arch(index)
+        sms = int(cake_kcp.cake_jit.sm_count(index))
+        key = (arch, sms, cake_kcp._handoff_toolkit(arch))
+        # the fused form's backward normalizes in its intra program first on this rank's plan: a rows backward then runs
+        # the separate normalization from the saved rstd in that program's place (cake_kcp._handoff_l2n_rows)
+        intra_first = bool(
+            l2n
+            and T_r > 0
+            and cake_kcp_plan.qk_l2norm_intra_first(
+                cake_kcp.cake_backend.plan(
+                    T_r, int(ctx.n_frag), H, sms, arch, gate=gate, l2n="fused"
                 )
             )
-        return res
-
-    def delta(before: dict, after: dict) -> dict:
-        return {n: after[n] - before[n] for n in after if after[n] != before[n]}
-
-    def run(
-        rows: str = "none",
-        *,
-        mode: str = "auto",
-        ckpt: bool = False,
-        workspace=ws,
-        handle=None,
-        keep=None,
-        context_fn=None,
-        poison_free: bool = False,
-        poison_rows: bool = False,
-        poison_arena: bool = False,
-        hooks=None,
-        grad: bool = True,
-        twice: bool = False,
-        entry=None,
-        knobs=None,
-    ):
-        """One step of the autograd entry with ``saved_rows=rows`` and ``checkpoint_handoff=mode``, direct or under a
-        non-reentrant checkpoint: the outputs and gradients of each backward (``twice``: two, the first with
-        ``retain_graph``; in raw gate mode with the cross-rank parameter sums) and the LAST_CALL records of the
-        original forward, the recompute (None without a checkpoint) and the backward (None without one), with the
-        moves of SAVED_ROWS_STATS and HANDOFF_STATS.  ``poison_rows``: NaN-filled kept rows before the forward's
-        launches (``_HANDOFF_POISON``); ``poison_arena``: the caller workspace's local arena NaN-filled between the
-        forward and the backward (direct); ``hooks``: a saved-tensor hooks context around the forward; ``grad=False``:
-        the forward under no_grad and no backward; ``knobs``: the call's ``_kcp_test_knobs``."""
-        if poison_free:
-            _poison(device)
-        lv = leaves()
-        kw = {}
-        if knobs is not None:
-            kw["_kcp_test_knobs"] = knobs
-        if handle is not None:
-            kw["recompute_handle"] = handle
-        if keep is not None:
-            kw["checkpoint_keep"] = keep
-        call = entry or cake_kcp.cake_kda_nondet_kcp
-
-        def top(q_, k_, v_, g_, b_, *p_):
-            return call(
-                q_,
-                k_,
-                v_,
-                g_,
-                b_,
-                ctx,
-                workspace=workspace,
-                checkpoint_handoff=mode,
-                saved_rows=rows,
-                **gate_kw([q_, k_, v_, g_, b_, *p_]),
-                use_qk_l2norm_in_kernel=l2n,
-                **kw,
-            )
-
-        cake_kcp.LAST_CALL.pop("fwd", None)
-        cake_kcp.LAST_CALL.pop("bwd", None)
-        rows0 = dict(cake_kcp.SAVED_ROWS_STATS)
-        hand0 = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-        prev = cake_kcp._HANDOFF_POISON
-        cake_kcp._HANDOFF_POISON = bool(poison_rows)
-        sets = []
-        try:
-            hook_cm = hooks() if hooks is not None else contextlib.nullcontext()
-            grad_cm = contextlib.nullcontext() if grad else torch.no_grad()
-            with hook_cm, grad_cm:
-                if not ckpt:
-                    out = top(*lv)
-                elif context_fn is not None:
-                    out = checkpoint(
-                        top, *lv, use_reentrant=False, context_fn=context_fn
-                    )
-                else:
-                    out = checkpoint(top, *lv, use_reentrant=False)
-            rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
-            if ckpt:
-                cake_kcp.LAST_CALL.pop("fwd")
-            if poison_arena and not ckpt:
-                _ArenaPoison(workspace).__exit__(None, None, None)
-            if grad:
-                for i in range(2 if twice else 1):
-                    sets.append(
-                        torch.autograd.grad(
-                            out, lv, dout, retain_graph=twice and i == 0
-                        )
-                    )
-        finally:
-            cake_kcp._HANDOFF_POISON = prev
-        rec_fwd = cake_kcp.LAST_CALL.get("fwd") if ckpt else None
-        rec_bwd = cake_kcp.LAST_CALL.get("bwd")
-        recs = {
-            "orig": rec_orig,
-            "fwd": None if rec_fwd is None else dict(rec_fwd),
-            "bwd": None if rec_bwd is None else dict(rec_bwd),
-            "rows": delta(rows0, dict(cake_kcp.SAVED_ROWS_STATS)),
-            "handoff": delta(hand0, cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()),
+        )
+        info: dict[str, object] = {
+            "T_r": T_r,
+            "R": R,
+            "n_frag": int(ctx.n_frag),
+            "P": int(ctx.heads(H).P),
+            "key": list(key),
+            "intra_first": intra_first,
+            "torch": torch.__version__,
         }
-        res = [
-            sums({"out": out.detach(), **dict(zip(grad_names, s, strict=True))})
-            for s in sets
-        ]
-        return res or [{"out": out.detach()}], recs
+        flags: dict[str, bool] = {}
+        not_run: list[str] = []
+        grad_names = ("dq", "dk", "dv", "dg", "dbeta") + (
+            ("dA_log", "ddt_bias") if raw else ()
+        )
 
-    def kept(recs, form: str | None, passes=("orig", "bwd")) -> bool:
-        """The passes ``passes`` kept (forward) / read (backward) the rows set ``form`` -- ``None``: no rows set; none
-        on a rank without tokens -- with the byte query's bytes, and no pass took the hand-off's tape form."""
-        want = form if T_r > 0 else None
-        nbytes = (
-            None
-            if want is None
-            else cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(
-                ctx, H=H, saved_rows=want
+        def leaves():
+            return [
+                x.detach().clone().requires_grad_(True)
+                for x in (q, k, v, g, beta, *params)
+            ]
+
+        def gate_kw(lv) -> dict:
+            if not raw:
+                return {}
+            return {
+                "use_gate_in_kernel": True,
+                "A_log": lv[5],
+                "dt_bias": lv[6],
+                "lower_bound": LOWER_BOUND,
+            }
+
+        def sums(res: dict) -> dict:
+            """In raw gate mode the cross-rank sums of the parameter partials (a collective: every rank, every set)."""
+            if raw:
+                res["dA_log_sum"], res["ddt_bias_sum"] = (
+                    cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
+                        ctx, res["dA_log"], res["ddt_bias"]
+                    )
+                )
+            return res
+
+        def delta(before: dict, after: dict) -> dict:
+            return {n: after[n] - before[n] for n in after if after[n] != before[n]}
+
+        def run(
+            rows: str = "none",
+            *,
+            mode: str = "auto",
+            ckpt: bool = False,
+            workspace=ws,
+            handle=None,
+            keep=None,
+            context_fn=None,
+            poison_free: bool = False,
+            poison_rows: bool = False,
+            poison_arena: bool = False,
+            hooks=None,
+            grad: bool = True,
+            twice: bool = False,
+            entry=None,
+            knobs=None,
+        ):
+            """One step of the autograd entry with ``saved_rows=rows`` and ``checkpoint_handoff=mode``, direct or under a
+            non-reentrant checkpoint: the outputs and gradients of each backward (``twice``: two, the first with
+            ``retain_graph``; in raw gate mode with the cross-rank parameter sums) and the LAST_CALL records of the
+            original forward, the recompute (None without a checkpoint) and the backward (None without one), with the
+            moves of SAVED_ROWS_STATS and HANDOFF_STATS.  ``poison_rows``: NaN-filled kept rows before the forward's
+            launches (``_HANDOFF_POISON``); ``poison_arena``: the caller workspace's local arena NaN-filled between the
+            forward and the backward (direct); ``hooks``: a saved-tensor hooks context around the forward; ``grad=False``:
+            the forward under no_grad and no backward; ``knobs``: the call's ``_kcp_test_knobs``."""
+            if poison_free:
+                _poison(device)
+            lv = leaves()
+            kw = {}
+            if knobs is not None:
+                kw["_kcp_test_knobs"] = knobs
+            if handle is not None:
+                kw["recompute_handle"] = handle
+            if keep is not None:
+                kw["checkpoint_keep"] = keep
+            call = entry or cake_kcp.cake_kda_nondet_kcp
+
+            def top(q_, k_, v_, g_, b_, *p_):
+                return call(
+                    q_,
+                    k_,
+                    v_,
+                    g_,
+                    b_,
+                    ctx,
+                    workspace=workspace,
+                    checkpoint_handoff=mode,
+                    saved_rows=rows,
+                    **gate_kw([q_, k_, v_, g_, b_, *p_]),
+                    use_qk_l2norm_in_kernel=l2n,
+                    **kw,
+                )
+
+            cake_kcp.LAST_CALL.pop("fwd", None)
+            cake_kcp.LAST_CALL.pop("bwd", None)
+            rows0 = dict(cake_kcp.SAVED_ROWS_STATS)
+            hand0 = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+            prev = cake_kcp._HANDOFF_POISON
+            cake_kcp._HANDOFF_POISON = bool(poison_rows)
+            sets = []
+            try:
+                hook_cm = hooks() if hooks is not None else contextlib.nullcontext()
+                grad_cm = contextlib.nullcontext() if grad else torch.no_grad()
+                with hook_cm, grad_cm:
+                    if not ckpt:
+                        out = top(*lv)
+                    elif context_fn is not None:
+                        out = checkpoint(
+                            top, *lv, use_reentrant=False, context_fn=context_fn
+                        )
+                    else:
+                        out = checkpoint(top, *lv, use_reentrant=False)
+                rec_orig = dict(cake_kcp.LAST_CALL["fwd"])
+                if ckpt:
+                    cake_kcp.LAST_CALL.pop("fwd")
+                if poison_arena and not ckpt:
+                    _ArenaPoison(workspace).__exit__(None, None, None)
+                if grad:
+                    for i in range(2 if twice else 1):
+                        sets.append(
+                            torch.autograd.grad(
+                                out, lv, dout, retain_graph=twice and i == 0
+                            )
+                        )
+            finally:
+                cake_kcp._HANDOFF_POISON = prev
+            rec_fwd = cake_kcp.LAST_CALL.get("fwd") if ckpt else None
+            rec_bwd = cake_kcp.LAST_CALL.get("bwd")
+            recs = {
+                "orig": rec_orig,
+                "fwd": None if rec_fwd is None else dict(rec_fwd),
+                "bwd": None if rec_bwd is None else dict(rec_bwd),
+                "rows": delta(rows0, dict(cake_kcp.SAVED_ROWS_STATS)),
+                "handoff": delta(
+                    hand0, cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+                ),
+            }
+            res = [
+                sums({"out": out.detach(), **dict(zip(grad_names, s, strict=True))})
+                for s in sets
+            ]
+            return res or [{"out": out.detach()}], recs
+
+        def kept(recs, form: str | None, passes=("orig", "bwd")) -> bool:
+            """The passes ``passes`` kept (forward) / read (backward) the rows set ``form`` -- ``None``: no rows set; none
+            on a rank without tokens -- with the byte query's bytes, and no pass took the hand-off's tape form."""
+            want = form if T_r > 0 else None
+            nbytes = (
+                None
+                if want is None
+                else cake_kcp.cake_kda_nondet_train_kcp_handoff_bytes(
+                    ctx, H=H, saved_rows=want
+                )
             )
-        )
-        ok = all(
-            recs[p] is not None
-            and recs[p].get("saved_rows") == want
-            and recs[p].get("saved_rows_bytes") == nbytes
-            for p in passes
-        )
-        return ok and all(
-            (recs[p] or {}).get("checkpoint_handoff") is None
-            for p in ("orig", "fwd", "bwd")
-        )
-
-    def rows_stats(form: str | None, saves: int, binds: int) -> dict:
-        """The SAVED_ROWS_STATS moves of a run that kept the rows set ``form`` in ``saves`` forwards and read it in
-        ``binds`` backwards (nothing on a rank without tokens)."""
-        if form is None or T_r == 0:
-            return {}
-        return {f"save_{form}": saves, f"bound_{form}": binds}
-
-    def launches(recs, light_recs, form: str | None, first: bool = intra_first) -> bool:
-        """The forwards' launches are the light path's; with tokens and a rows set the backward's are the light
-        backward's without the intra program (the separate normalization in its place where the plan's intra program
-        normalizes first) and, with ``"wy"``, without the WY program, the K1 tape replay kept; the collective counts
-        are the light path's in every pass.  The two backwards' launches compare in the ``"first"`` / ``"main"``
-        order (:func:`_bwd_sequence_first_main`): each run decides its K1 tape replay's place and its K3's stream
-        itself (a kept ``u`` admits the replay under b1 on a lean arena, and the table set's first K3 runs on the
-        call's stream), so the two may differ there."""
-        passes = ("orig", "bwd") if recs["fwd"] is None else ("orig", "fwd", "bwd")
-        ok = all(light_recs[p] is not None for p in passes)
-        ok = ok and recs["orig"]["sequence"] == light_recs["orig"]["sequence"]
-        if recs["fwd"] is not None:
-            ok = ok and recs["fwd"]["sequence"] == light_recs["fwd"]["sequence"]
-        on_b = _bwd_sequence_first_main(recs["bwd"])
-        off_b = _bwd_sequence_first_main(light_recs["bwd"])
-        if T_r > 0 and form is not None:
-            want = []
-            for x in off_b:
-                if x == "fwd_intra":
-                    if first:
-                        want.append("qk_apply")
-                elif not (x == "wy" and form == "wy"):
-                    want.append(x)
-            ok = ok and on_b == want and off_b.count("fwd_intra") == 1
-            ok = ok and ("wy" in on_b) == (form == "intra") and "kcp_fwdh_tape" in on_b
-        else:
-            ok = ok and on_b == off_b
-        for p in passes:
-            ok = ok and recs[p]["n_collectives"] == light_recs[p]["n_collectives"]
-        return ok
-
-    def measure(name: str, res: dict, base: dict | None = None) -> None:
-        acc[name] = _rows_stats(res, refs)
-        if base is not None:
-            bitwise[name] = _same(res, base)
-
-    # the light path (no rows) and "auto", the shipped default (outside a checkpoint the light set, as before)
-    (light,), recs_light = run("none")
-    measure("light", light)
-    flags["light_kept_nothing"] = kept(recs_light, None) and recs_light["rows"] == {}
-    (res_a,), recs_auto = run("auto")
-    measure("auto", res_a, light)
-    flags["auto_is_light"] = (
-        kept(recs_auto, None)
-        and recs_auto["rows"] == {}
-        and launches(recs_auto, recs_light, None)
-    )
-    st = recs_light["orig"]["save_transfer"]
-    query = {
-        form: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
-            ctx, H=H, with_conv=False, save_transfer=st, saved_rows=form, **ws_kw
-        )
-        for form in ("none", *SAVED_ROWS_SETS)
-    }
-    got_bytes = {"none": recs_light["orig"]["saved_bytes"]}
-    info["saved_bytes"] = {"query": query, "got": got_bytes}
-    # "auto" outside a checkpoint is the light path: the same bits and the same saved bytes
-    flags["auto_bitwise_light"] = (
-        _same(res_a, light) and recs_auto["orig"]["saved_bytes"] == got_bytes["none"]
-    )
-    # (light arena poisoned between the forward and the backward: the control of the rows runs below; the backward
-    # reads nothing of the arena the forward left, so the bits do not move)
-    (res_p,), _ = run("none", poison_arena=True)
-    measure("light_poison_arena", res_p, light)
-    flags["light_poison_arena_bitwise"] = _same(res_p, light)
-    if ws_lean is not None:  # the same control on the lean arena
-        (res_ll,), _ = run("none", workspace=ws_lean)
-        measure("light_lean", res_ll, light)
-        (res_p,), _ = run("none", workspace=ws_lean, poison_arena=True)
-        measure("light_lean_poison_arena", res_p, light)
-        flags["light_lean_poison_arena_bitwise"] = _same(res_p, res_ll)
-    for form in SAVED_ROWS_SETS:
-        # a plain node: the rows kept, the launches, the counters, the saved bytes
-        (res_f,), recs = run(form)
-        measure(form, res_f, light)
-        flags[f"{form}_kept"] = kept(recs, form)
-        # outside a checkpoint the rows stay in the caching allocator's default pool
-        flags[f"{form}_default_pool"] = (
-            T_r == 0 or recs["orig"].get("kept_pool") is False
-        )
-        flags[f"{form}_launches"] = launches(recs, recs_light, form)
-        flags[f"{form}_stats"] = (
-            recs["rows"] == rows_stats(form, 1, 1)
-            and recs["handoff"] == recs_auto["handoff"]
-        )
-        got_bytes[form] = recs["orig"]["saved_bytes"]
-        flags[f"{form}_saved_bytes"] = got_bytes[form] - got_bytes["none"] == (
-            query[form] - query["none"] if T_r > 0 else 0
-        )
-        # a per-call workspace and a lean arena (the tail's row views rebuilt over the kept rows); on the lean arena
-        # also the arena NaN-filled between the forward and the backward and two backwards (its kept members' arena
-        # slots are shared with other buffers there)
-        res_ws = {}
-        for tag, wsp in (("per_call", None), ("lean", ws_lean)):
-            if tag == "lean" and wsp is None:
-                continue
-            (res_w,), recs_w = run(form, workspace=wsp)
-            res_ws[tag] = res_w
-            measure(f"{form}_{tag}", res_w, light)
-            flags[f"{form}_{tag}_kept"] = kept(recs_w, form)
-        if ws_lean is not None:
-            (res_lp,), recs_lp = run(form, workspace=ws_lean, poison_arena=True)
-            measure(f"{form}_lean_poison_arena", res_lp, light)
-            flags[f"{form}_lean_poison_arena_kept"] = kept(recs_lp, form)
-            flags[f"{form}_lean_poison_arena_bitwise"] = _same(res_lp, res_ws["lean"])
-            (res_l1, res_l2), recs_lt = run(form, workspace=ws_lean, twice=True)
-            measure(f"{form}_lean_twice_1", res_l1, light)
-            measure(f"{form}_lean_twice_2", res_l2, res_l1)
-            rows_ok = recs_lt["rows"] == rows_stats(form, 1, 2)
-            flags[f"{form}_lean_twice_kept"] = kept(recs_lt, form) and rows_ok
-            flags[f"{form}_lean_twice_bitwise"] = _same(res_l2, res_l1)
-        # NaN-filled rows from poisoned free blocks (per-call workspace); the caller arena NaN-filled between the
-        # forward and the backward.  Neither moves a bit: the forward writes every kept row and the backward reads
-        # nothing of the arena the forward left
-        (res_p,), recs_p = run(form, workspace=None, poison_free=True, poison_rows=True)
-        measure(f"{form}_poison_rows", res_p, light)
-        flags[f"{form}_poison_rows_kept"] = kept(recs_p, form)
-        flags[f"{form}_poison_rows_bitwise"] = _same(res_p, res_ws["per_call"])
-        (res_p,), recs_p = run(form, poison_arena=True)
-        measure(f"{form}_poison_arena", res_p, light)
-        flags[f"{form}_poison_arena_kept"] = kept(recs_p, form)
-        flags[f"{form}_poison_arena_bitwise"] = _same(res_p, res_f)
-        # two backwards (retain_graph): each reads the kept rows, and the first writes none of them (the same bits)
-        (res_1, res_2), recs_t = run(form, twice=True)
-        measure(f"{form}_twice_1", res_1, light)
-        measure(f"{form}_twice_2", res_2, res_1)
-        rows_ok = recs_t["rows"] == rows_stats(form, 1, 2)
-        flags[f"{form}_twice_kept"] = kept(recs_t, form) and rows_ok
-        flags[f"{form}_twice_bitwise"] = _same(res_2, res_1)
-
-    # the norm's fallback form (the workspace's test knob: the separate normalization of the light backward first),
-    # against its own light path; where the form's programs are not delivered the row lists it under not_run and fails
-    ws_fb = None
-    if l2n:
-        try:
-            ws_fb = cake_kcp.CakeKDANondetKcpWorkspace(
-                **ws_kw, _qk_l2norm_form="fallback"
+            ok = all(
+                recs[p] is not None
+                and recs[p].get("saved_rows") == want
+                and recs[p].get("saved_rows_bytes") == nbytes
+                for p in passes
             )
-        except NotImplementedError as exc:
-            info["fallback_pending"] = str(exc)
-            not_run.append("fallback")  # fails the row, as the L2N rows' protocol
-    if ws_fb is not None:
-        (light_fb,), recs_light_fb = run("none", workspace=ws_fb)
-        measure("light_fallback", light_fb, light)
+            return ok and all(
+                (recs[p] or {}).get("checkpoint_handoff") is None
+                for p in ("orig", "fwd", "bwd")
+            )
+
+        def rows_stats(form: str | None, saves: int, binds: int) -> dict:
+            """The SAVED_ROWS_STATS moves of a run that kept the rows set ``form`` in ``saves`` forwards and read it in
+            ``binds`` backwards (nothing on a rank without tokens)."""
+            if form is None or T_r == 0:
+                return {}
+            return {f"save_{form}": saves, f"bound_{form}": binds}
+
+        def launches(
+            recs, light_recs, form: str | None, first: bool = intra_first
+        ) -> bool:
+            """The forwards' launches are the light path's; with tokens and a rows set the backward's are the light
+            backward's without the intra program (the separate normalization in its place where the plan's intra program
+            normalizes first) and, with ``"wy"``, without the WY program, the K1 tape replay kept; the collective counts
+            are the light path's in every pass.  The two backwards' launches compare in the ``"first"`` / ``"main"``
+            order (:func:`_bwd_sequence_first_main`): each run decides its K1 tape replay's place and its K3's stream
+            itself (a kept ``u`` admits the replay under b1 on a lean arena, and the table set's first K3 runs on the
+            call's stream), so the two may differ there."""
+            passes = ("orig", "bwd") if recs["fwd"] is None else ("orig", "fwd", "bwd")
+            ok = all(light_recs[p] is not None for p in passes)
+            ok = ok and recs["orig"]["sequence"] == light_recs["orig"]["sequence"]
+            if recs["fwd"] is not None:
+                ok = ok and recs["fwd"]["sequence"] == light_recs["fwd"]["sequence"]
+            on_b = _bwd_sequence_first_main(recs["bwd"])
+            off_b = _bwd_sequence_first_main(light_recs["bwd"])
+            if T_r > 0 and form is not None:
+                want = []
+                for x in off_b:
+                    if x == "fwd_intra":
+                        if first:
+                            want.append("qk_apply")
+                    elif not (x == "wy" and form == "wy"):
+                        want.append(x)
+                ok = ok and on_b == want and off_b.count("fwd_intra") == 1
+                ok = (
+                    ok
+                    and ("wy" in on_b) == (form == "intra")
+                    and "kcp_fwdh_tape" in on_b
+                )
+            else:
+                ok = ok and on_b == off_b
+            for p in passes:
+                ok = ok and recs[p]["n_collectives"] == light_recs[p]["n_collectives"]
+            return ok
+
+        # the light path (no rows) and "auto", the shipped default (outside a checkpoint the light set, as before)
+        (light,), recs_light = run("none")
+        judge("light", light)
+        flags["light_kept_nothing"] = (
+            kept(recs_light, None) and recs_light["rows"] == {}
+        )
+        (res_a,), recs_auto = run("auto")
+        judge("auto", res_a)
+        flags["auto_is_light"] = (
+            kept(recs_auto, None)
+            and recs_auto["rows"] == {}
+            and launches(recs_auto, recs_light, None)
+        )
+        st = recs_light["orig"]["save_transfer"]
+        query = {
+            form: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
+                ctx, H=H, with_conv=False, save_transfer=st, saved_rows=form, **ws_kw
+            )
+            for form in ("none", *SAVED_ROWS_SETS)
+        }
+        got_bytes = {"none": recs_light["orig"]["saved_bytes"]}
+        info["saved_bytes"] = {"query": query, "got": got_bytes}
+        # "auto" outside a checkpoint is the light path: the same saved bytes
+        flags["auto_saved_bytes_light"] = (
+            recs_auto["orig"]["saved_bytes"] == got_bytes["none"]
+        )
+        # (light arena poisoned between the forward and the backward: the control of the rows runs below; the backward
+        # reads nothing of the arena the forward left, so no NaN reaches an output: the judge's contract)
+        (res_p,), _ = run("none", poison_arena=True)
+        judge("light_poison_arena", res_p)
+        if ws_lean is not None:  # the same control on the lean arena
+            (res_ll,), _ = run("none", workspace=ws_lean)
+            judge("light_lean", res_ll)
+            (res_p,), _ = run("none", workspace=ws_lean, poison_arena=True)
+            judge("light_lean_poison_arena", res_p)
         for form in SAVED_ROWS_SETS:
-            (res_fb,), recs_fb = run(form, workspace=ws_fb)
-            measure(f"{form}_fallback", res_fb, light_fb)
-            flags[f"{form}_fallback_kept"] = kept(recs_fb, form)
-            flags[f"{form}_fallback_launches"] = launches(
-                recs_fb, recs_light_fb, form, first=False
+            # a plain node: the rows kept, the launches, the counters, the saved bytes
+            (res_f,), recs = run(form)
+            judge(form, res_f)
+            flags[f"{form}_kept"] = kept(recs, form)
+            # outside a checkpoint the rows stay in the caching allocator's default pool
+            flags[f"{form}_default_pool"] = (
+                T_r == 0 or recs["orig"].get("kept_pool") is False
             )
-    # under a checkpoint: the hand-off's rows form ("on"), with and without a recompute handle (both tiers)
-    handle_type = cake_kcp.CakeKDANondetKcpRecomputeHandle
-    every = ("orig", "fwd", "bwd")
-    (res_c,), recs_light_ck = run("none", mode="off", ckpt=True)
-    measure("light_ckpt", res_c, light)
-    flags["light_ckpt_kept_nothing"] = (
-        kept(recs_light_ck, None, every) and recs_light_ck["rows"] == {}
-    )
-    recs_light_h = {}
-    for keep in ("states", "transfer"):
-        _, recs_light_h[keep] = run(
-            "none", mode="off", ckpt=True, handle=handle_type(), keep=keep
-        )
-    for form in SAVED_ROWS_SETS:
-        (res_c,), recs = run(form, mode="on", ckpt=True)
-        measure(f"{form}_handoff", res_c, light)
-        flags[f"{form}_handoff_kept"] = (
-            kept(recs, form, every)
-            and recs["rows"] == rows_stats(form, 2, 1)
-            and recs["handoff"] == {}
-        )
-        flags[f"{form}_handoff_launches"] = launches(recs, recs_light_ck, form)
-        # a caller-held workspace: both passes keep the set in the default pool (its arena is not freed per call);
-        # workspace=None: both passes keep it in the package-private pool of the device (the knob kept_pool, shipped
-        # 1), and with kept_pool=0 in the default pool, bitwise the same
-        flags[f"{form}_handoff_held_default_pool"] = T_r == 0 or (
-            recs["orig"].get("kept_pool") is False
-            and recs["fwd"].get("kept_pool") is False
-        )
-        (res_n,), recs_n = run(form, mode="on", ckpt=True, workspace=None)
-        measure(f"{form}_handoff_per_call", res_n, light)
-        flags[f"{form}_handoff_per_call_kept"] = kept(recs_n, form, every)
-        flags[f"{form}_handoff_kept_pool"] = T_r == 0 or (
-            recs_n["orig"].get("kept_pool") is True
-            and recs_n["fwd"].get("kept_pool") is True
-            and device.index in cake_kcp._KEPT_POOLS
-        )
-        previous_knobs = cake_kcp_plan.enable_test_knobs(True)
-        try:
-            (res_k,), recs_k = run(
-                form, mode="on", ckpt=True, workspace=None, knobs={"kept_pool": 0}
+            flags[f"{form}_launches"] = launches(recs, recs_light, form)
+            flags[f"{form}_stats"] = (
+                recs["rows"] == rows_stats(form, 1, 1)
+                and recs["handoff"] == recs_auto["handoff"]
             )
-        finally:
-            cake_kcp_plan.enable_test_knobs(previous_knobs)
-        flags[f"{form}_handoff_kept_pool0_bitwise"] = _same(res_k, res_n) and (
-            T_r == 0
-            or (
+            got_bytes[form] = recs["orig"]["saved_bytes"]
+            flags[f"{form}_saved_bytes"] = got_bytes[form] - got_bytes["none"] == (
+                query[form] - query["none"] if T_r > 0 else 0
+            )
+            # a per-call workspace and a lean arena (the tail's row views rebuilt over the kept rows); on the lean arena
+            # also the arena NaN-filled between the forward and the backward and two backwards (its kept members' arena
+            # slots are shared with other buffers there)
+            for tag, wsp in (("per_call", None), ("lean", ws_lean)):
+                if tag == "lean" and wsp is None:
+                    continue
+                (res_w,), recs_w = run(form, workspace=wsp)
+                judge(f"{form}_{tag}", res_w)
+                flags[f"{form}_{tag}_kept"] = kept(recs_w, form)
+            if ws_lean is not None:
+                (res_lp,), recs_lp = run(form, workspace=ws_lean, poison_arena=True)
+                judge(f"{form}_lean_poison_arena", res_lp)
+                flags[f"{form}_lean_poison_arena_kept"] = kept(recs_lp, form)
+                (res_l1, res_l2), recs_lt = run(form, workspace=ws_lean, twice=True)
+                judge(f"{form}_lean_twice", [res_l1, res_l2])
+                rows_ok = recs_lt["rows"] == rows_stats(form, 1, 2)
+                flags[f"{form}_lean_twice_kept"] = kept(recs_lt, form) and rows_ok
+            # NaN-filled rows from poisoned free blocks (per-call workspace); the caller arena NaN-filled between the
+            # forward and the backward.  No NaN reaches an output (the judge's contract): the forward writes every kept row
+            # and the backward reads nothing of the arena the forward left
+            (res_p,), recs_p = run(
+                form, workspace=None, poison_free=True, poison_rows=True
+            )
+            judge(f"{form}_poison_rows", res_p)
+            flags[f"{form}_poison_rows_kept"] = kept(recs_p, form)
+            (res_p,), recs_p = run(form, poison_arena=True)
+            judge(f"{form}_poison_arena", res_p)
+            flags[f"{form}_poison_arena_kept"] = kept(recs_p, form)
+            # two backwards (retain_graph): each reads the kept rows (both judged, repeats)
+            (res_1, res_2), recs_t = run(form, twice=True)
+            judge(f"{form}_twice", [res_1, res_2])
+            rows_ok = recs_t["rows"] == rows_stats(form, 1, 2)
+            flags[f"{form}_twice_kept"] = kept(recs_t, form) and rows_ok
+
+        # the norm's fallback form (the workspace's test knob: the separate normalization of the light backward first),
+        # against its own light path; where the form's programs are not delivered the row lists it under not_run and fails
+        ws_fb = None
+        if l2n:
+            try:
+                ws_fb = cake_kcp.CakeKDANondetKcpWorkspace(
+                    **ws_kw, _qk_l2norm_form="fallback"
+                )
+            except NotImplementedError as exc:
+                info["fallback_pending"] = str(exc)
+                not_run.append("fallback")  # fails the row, as the L2N rows' protocol
+        if ws_fb is not None:
+            (light_fb,), recs_light_fb = run("none", workspace=ws_fb)
+            judge("light_fallback", light_fb)
+            for form in SAVED_ROWS_SETS:
+                (res_fb,), recs_fb = run(form, workspace=ws_fb)
+                judge(f"{form}_fallback", res_fb)
+                flags[f"{form}_fallback_kept"] = kept(recs_fb, form)
+                flags[f"{form}_fallback_launches"] = launches(
+                    recs_fb, recs_light_fb, form, first=False
+                )
+        # under a checkpoint: the hand-off's rows form ("on"), with and without a recompute handle (both tiers)
+        handle_type = cake_kcp.CakeKDANondetKcpRecomputeHandle
+        every = ("orig", "fwd", "bwd")
+        (res_c,), recs_light_ck = run("none", mode="off", ckpt=True)
+        judge("light_ckpt", res_c)
+        flags["light_ckpt_kept_nothing"] = (
+            kept(recs_light_ck, None, every) and recs_light_ck["rows"] == {}
+        )
+        recs_light_h = {}
+        for keep in ("states", "transfer"):
+            _, recs_light_h[keep] = run(
+                "none", mode="off", ckpt=True, handle=handle_type(), keep=keep
+            )
+        for form in SAVED_ROWS_SETS:
+            (res_c,), recs = run(form, mode="on", ckpt=True)
+            judge(f"{form}_handoff", res_c)
+            flags[f"{form}_handoff_kept"] = (
+                kept(recs, form, every)
+                and recs["rows"] == rows_stats(form, 2, 1)
+                and recs["handoff"] == {}
+            )
+            flags[f"{form}_handoff_launches"] = launches(recs, recs_light_ck, form)
+            # a caller-held workspace: both passes keep the set in the default pool (its arena is not freed per call);
+            # workspace=None: both passes keep it in the package-private pool of the device (the knob kept_pool, shipped
+            # 1), and with kept_pool=0 in the default pool
+            flags[f"{form}_handoff_held_default_pool"] = T_r == 0 or (
+                recs["orig"].get("kept_pool") is False
+                and recs["fwd"].get("kept_pool") is False
+            )
+            (res_n,), recs_n = run(form, mode="on", ckpt=True, workspace=None)
+            judge(f"{form}_handoff_per_call", res_n)
+            flags[f"{form}_handoff_per_call_kept"] = kept(recs_n, form, every)
+            flags[f"{form}_handoff_kept_pool"] = T_r == 0 or (
+                recs_n["orig"].get("kept_pool") is True
+                and recs_n["fwd"].get("kept_pool") is True
+                and device.index in cake_kcp._KEPT_POOLS
+            )
+            previous_knobs = cake_kcp_plan.enable_test_knobs(True)
+            try:
+                (res_k,), recs_k = run(
+                    form, mode="on", ckpt=True, workspace=None, knobs={"kept_pool": 0}
+                )
+            finally:
+                cake_kcp_plan.enable_test_knobs(previous_knobs)
+            judge(f"{form}_handoff_kept_pool0", res_k)
+            flags[f"{form}_handoff_kept_pool0"] = T_r == 0 or (
                 recs_k["orig"].get("kept_pool") is False
                 and recs_k["fwd"].get("kept_pool") is False
             )
-        )
-        for keep in ("states", "transfer"):
-            (res_h,), recs_h = run(
-                form, mode="on", ckpt=True, handle=handle_type(), keep=keep
-            )
-            measure(f"{form}_handle_{keep}", res_h, light)
-            rows_ok = recs_h["rows"] == rows_stats(form, 2, 1)
-            flags[f"{form}_handle_{keep}_kept"] = kept(recs_h, form, every) and rows_ok
-            # the recompute binds the handle's states: no collective
-            flags[f"{form}_handle_{keep}_recompute"] = (
-                recs_h["fwd"].get("recompute_handle") == "replay"
-                and recs_h["fwd"]["n_collectives"] == 0
-            )
-            flags[f"{form}_handle_{keep}_launches"] = launches(
-                recs_h, recs_light_h[keep], form
-            )
-    # the default saved_rows="auto" where the hand-off engages: the wy rows form (KCP_HANDOFF_AUTO_ROWS), not the
-    # tape set
-    (res_c,), recs = run("auto", mode="on", ckpt=True)
-    measure("auto_handoff", res_c, light)
-    flags["auto_handoff_keeps_wy"] = (
-        kept(recs, cake_kcp_plan.KCP_HANDOFF_AUTO_ROWS, every)
-        and recs["rows"] == rows_stats("wy", 2, 1)
-        and recs["handoff"] == {}
-    )
-    flags["auto_handoff_launches"] = launches(recs, recs_light_ck, "wy")
-    # NaN-filled rows and the caller arena NaN-filled between the recompute and the backward, with and without a
-    # handle
-    arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
-    for tag, hkw in (
-        ("handoff", {}),
-        ("handle", {"handle": handle_type(), "keep": "states"}),
-    ):
-        (res_p,), recs_p = run(
-            "wy", mode="on", ckpt=True, context_fn=arena_fn, poison_rows=True, **hkw
-        )
-        measure(f"wy_{tag}_poison", res_p, light)
-        flags[f"wy_{tag}_poison_kept"] = kept(recs_p, "wy", every)
-    # "off" in a checkpoint pass: the light set in both passes; "auto": the hand-off's shipped rule decides
-    (res_c,), recs = run("wy", mode="off", ckpt=True)
-    measure("wy_ckpt_off", res_c, light)
-    flags["wy_ckpt_off_light"] = (
-        kept(recs, None, every) and recs["rows"] == {} and recs["handoff"] == {}
-    )
-    reason = cake_kcp_plan.kcp_handoff_auto_refusal(
-        key, H, ctx.partition.total, W, gate=gate, l2n=l2n
-    )
-    info["auto_reason"] = reason
-    (res_c,), recs = run("wy", mode="auto", ckpt=True)
-    measure("wy_ckpt_auto", res_c, light)
-    if reason is None:
-        flags["wy_ckpt_auto"] = (
-            kept(recs, "wy", every)
+            for keep in ("states", "transfer"):
+                (res_h,), recs_h = run(
+                    form, mode="on", ckpt=True, handle=handle_type(), keep=keep
+                )
+                judge(f"{form}_handle_{keep}", res_h)
+                rows_ok = recs_h["rows"] == rows_stats(form, 2, 1)
+                flags[f"{form}_handle_{keep}_kept"] = (
+                    kept(recs_h, form, every) and rows_ok
+                )
+                # the recompute binds the handle's states: no collective
+                flags[f"{form}_handle_{keep}_recompute"] = (
+                    recs_h["fwd"].get("recompute_handle") == "replay"
+                    and recs_h["fwd"]["n_collectives"] == 0
+                )
+                flags[f"{form}_handle_{keep}_launches"] = launches(
+                    recs_h, recs_light_h[keep], form
+                )
+        # the default saved_rows="auto" where the hand-off engages: the wy rows form (KCP_HANDOFF_AUTO_ROWS), not the
+        # tape set
+        (res_c,), recs = run("auto", mode="on", ckpt=True)
+        judge("auto_handoff", res_c)
+        flags["auto_handoff_keeps_wy"] = (
+            kept(recs, cake_kcp_plan.KCP_HANDOFF_AUTO_ROWS, every)
             and recs["rows"] == rows_stats("wy", 2, 1)
             and recs["handoff"] == {}
         )
-    else:
-        flags["wy_ckpt_auto"] = (
-            kept(recs, None, every)
-            and recs["rows"] == {}
-            and recs["handoff"] == {"refused_" + reason: 1}
-        )
-    # a caller's saved-tensor hooks (save_on_cpu): refused once, the light set
-    cpu_hooks = lambda: save_on_cpu(pin_memory=True)  # noqa: E731
-    try:
-        run("none", hooks=cpu_hooks)
-        hooks_ok = True
-    except Exception:  # noqa: BLE001 - the light path itself does not run under the hooks: nothing to compare
-        info["save_on_cpu_unsupported"] = traceback.format_exc()[-1500:]
-        hooks_ok = False
-    if hooks_ok:
-        (res_k,), recs = run("wy", hooks=cpu_hooks)
-        measure("wy_hooks", res_k, light)
-        rows_ok = recs["rows"] == {"refused_hooks": 1}
-        flags["wy_hooks_refused"] = kept(recs, None) and rows_ok
-    else:
-        # not run: the refusal under hooks is unchecked, so the row fails (the traceback is in the report)
-        flags["wy_hooks_refused"] = False
-        not_run.append("wy_hooks_refused")
-    # no grad: no node, nothing kept
-    (res_n,), recs = run("wy", grad=False)
-    measure("wy_no_grad", res_n)
-    flags["wy_no_grad"] = (
-        recs["orig"].get("saved_rows") is None
-        and recs["rows"] == {}
-        and recs["bwd"] is None
-    )
-    # ranks that keep different sets (even ranks "wy", odd ranks none): the rows move no collective
-    mixed = "wy" if rank % 2 == 0 else "none"
-    mixed_form = None if mixed == "none" else mixed
-    (res_m,), recs = run(mixed)
-    measure("mixed", res_m, light)
-    flags["mixed_kept"] = kept(recs, mixed_form)
-    (res_m,), recs = run(mixed, mode="on" if mixed == "wy" else "off", ckpt=True)
-    measure("mixed_ckpt", res_m, light)
-    flags["mixed_ckpt_kept"] = kept(recs, mixed_form, every)
-    # the facade forwards saved_rows
-    (res_fc,), recs = run("wy", entry=kcp_api.cake_kda_nondet_kcp)
-    measure("wy_facade", res_fc, light)
-    flags["wy_facade_kept"] = kept(recs, "wy")
-
-    # the functional entries: the saved set's members, dtypes, shapes and bytes; graph="replay"
-    fgate = gate_kw([q, k, v, g, beta, *params])
-    fnames = ("dq", "dk", "dv", "dbeta", "dg") + (("dA_log", "ddt_bias") if raw else ())
-
-    def functional(form: str, **opts):
-        out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            ctx,
-            workspace=ws,
-            saved_rows=form,
-            use_qk_l2norm_in_kernel=l2n,
-            **fgate,
-            **opts,
-        )
-        rec_f = dict(cake_kcp.LAST_CALL["fwd"])
-        grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            ctx,
-            dout,
-            saved=saved,
-            workspace=ws,
-            use_qk_l2norm_in_kernel=l2n,
-            **fgate,
-            **opts,
-        )
-        res = {"out": out.clone()}
-        res.update({n: t.clone() for n, t in zip(fnames, grads, strict=True)})
-        return sums(res), saved, (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
-
-    _, saved_none, _ = functional("none")
-    bytes_none, carry_none = saved_none.bytes, saved_none.carry is None
-    del saved_none
-    for form, (members, per) in SAVED_ROWS_SETS.items():
-        res_f, saved, (rec_f, rec_b) = functional(form)
-        measure(f"{form}_functional", res_f, light)
-        if T_r > 0:
-            kept_rows = saved.rows or {}
-            ok = (
-                saved.saved_rows == form
-                and tuple(kept_rows) == members
-                and saved.tape is None
-                and (saved.carry is None) == carry_none
-                and saved.bytes - bytes_none == R * H * per
+        flags["auto_handoff_launches"] = launches(recs, recs_light_ck, "wy")
+        # NaN-filled rows and the caller arena NaN-filled between the recompute and the backward, with and without a
+        # handle
+        arena_fn = lambda: (contextlib.nullcontext(), _ArenaPoison(ws))  # noqa: E731
+        for tag, hkw in (
+            ("handoff", {}),
+            ("handle", {"handle": handle_type(), "keep": "states"}),
+        ):
+            (res_p,), recs_p = run(
+                "wy", mode="on", ckpt=True, context_fn=arena_fn, poison_rows=True, **hkw
             )
-            # BF16 [R, H, 64] (the chunk's Aqk / Akk columns) and [R, H, 128] (w / u)
-            ok = ok and all(
-                t.dtype == torch.bfloat16
-                and tuple(t.shape) == (R, H, 64 if n.endswith("_int") else 128)
-                for n, t in kept_rows.items()
+            judge(f"wy_{tag}_poison", res_p)
+            flags[f"wy_{tag}_poison_kept"] = kept(recs_p, "wy", every)
+        # "off" in a checkpoint pass: the light set in both passes; "auto": the hand-off's shipped rule decides
+        (res_c,), recs = run("wy", mode="off", ckpt=True)
+        judge("wy_ckpt_off", res_c)
+        flags["wy_ckpt_off_light"] = (
+            kept(recs, None, every) and recs["rows"] == {} and recs["handoff"] == {}
+        )
+        reason = cake_kcp_plan.kcp_handoff_auto_refusal(
+            key, H, ctx.partition.total, W, gate=gate, l2n=l2n
+        )
+        info["auto_reason"] = reason
+        (res_c,), recs = run("wy", mode="auto", ckpt=True)
+        judge("wy_ckpt_auto", res_c)
+        if reason is None:
+            flags["wy_ckpt_auto"] = (
+                kept(recs, "wy", every)
+                and recs["rows"] == rows_stats("wy", 2, 1)
+                and recs["handoff"] == {}
             )
         else:
-            ok = (
-                saved.saved_rows is None
-                and saved.rows is None
-                and saved.bytes == bytes_none
+            flags["wy_ckpt_auto"] = (
+                kept(recs, None, every)
+                and recs["rows"] == {}
+                and recs["handoff"] == {"refused_" + reason: 1}
             )
-        want = form if T_r > 0 else None
-        flags[f"{form}_functional_saved_set"] = (
-            ok and rec_f.get("saved_rows") == want and rec_b.get("saved_rows") == want
+        # a caller's saved-tensor hooks (save_on_cpu): refused once, the light set
+        cpu_hooks = lambda: save_on_cpu(pin_memory=True)  # noqa: E731
+        try:
+            run("none", hooks=cpu_hooks)
+            hooks_ok = True
+        except Exception:  # noqa: BLE001 - the light path itself does not run under the hooks: nothing to compare
+            info["save_on_cpu_unsupported"] = traceback.format_exc()[-1500:]
+            hooks_ok = False
+        if hooks_ok:
+            (res_k,), recs = run("wy", hooks=cpu_hooks)
+            judge("wy_hooks", res_k)
+            rows_ok = recs["rows"] == {"refused_hooks": 1}
+            flags["wy_hooks_refused"] = kept(recs, None) and rows_ok
+        else:
+            # not run: the refusal under hooks is unchecked, so the row fails (the traceback is in the report)
+            flags["wy_hooks_refused"] = False
+            not_run.append("wy_hooks_refused")
+        # no grad: no node, nothing kept
+        (res_n,), recs = run("wy", grad=False)
+        judge("wy_no_grad", res_n)
+        flags["wy_no_grad"] = (
+            recs["orig"].get("saved_rows") is None
+            and recs["rows"] == {}
+            and recs["bwd"] is None
         )
-        del saved
-    # graph="replay" on every rank (a rank without tokens too): eager, capture, then replays of the rows form
-    cake_kcp.graph_cache_clear()
-    events = []
-    graph_rows = True
-    try:
-        for _ in range(len(GRAPH_EVENTS)):
-            res_g, saved_g, (rec_f, rec_b) = functional("wy", graph="replay")
-            events.append(
-                [str(rec_f.get("graph_event")), str(rec_b.get("graph_event"))]
-            )
-            want = "wy" if T_r > 0 else None
-            graph_rows = graph_rows and (
-                rec_f.get("saved_rows") == want and rec_b.get("saved_rows") == want
-            )
-            del saved_g
-        torch.cuda.synchronize(device)
-    except BaseException as exc:
-        # the failed call's frames still reference its cache entry and graph: release them before the cleanup
-        traceback.clear_frames(exc.__traceback__)
-        raise
-    finally:
-        # a cached graph holding a NCCL collective blocks the process group's destruction
-        cake_kcp.graph_cache_clear()
-    measure("wy_graph", res_g, light)
-    info["graph_events"] = events
-    flags["wy_graph_replay"] = events == GRAPH_EVENTS and graph_rows
-    info["not_run"] = not_run
-    info["bitwise_light"] = bitwise
+        # ranks that keep different sets (even ranks "wy", odd ranks none): the rows move no collective
+        mixed = "wy" if rank % 2 == 0 else "none"
+        mixed_form = None if mixed == "none" else mixed
+        (res_m,), recs = run(mixed)
+        judge("mixed", res_m)
+        flags["mixed_kept"] = kept(recs, mixed_form)
+        (res_m,), recs = run(mixed, mode="on" if mixed == "wy" else "off", ckpt=True)
+        judge("mixed_ckpt", res_m)
+        flags["mixed_ckpt_kept"] = kept(recs, mixed_form, every)
+        # the facade forwards saved_rows
+        (res_fc,), recs = run("wy", entry=kcp_api.cake_kda_nondet_kcp)
+        judge("wy_facade", res_fc)
+        flags["wy_facade_kept"] = kept(recs, "wy")
 
-    payload = (flags, info, acc)
+        # the functional entries: the saved set's members, dtypes, shapes and bytes; graph="replay"
+        fgate = gate_kw([q, k, v, g, beta, *params])
+        fnames = ("dq", "dk", "dv", "dbeta", "dg") + (
+            ("dA_log", "ddt_bias") if raw else ()
+        )
+
+        def functional(form: str, **opts):
+            out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                ctx,
+                workspace=ws,
+                saved_rows=form,
+                use_qk_l2norm_in_kernel=l2n,
+                **fgate,
+                **opts,
+            )
+            rec_f = dict(cake_kcp.LAST_CALL["fwd"])
+            grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                ctx,
+                dout,
+                saved=saved,
+                workspace=ws,
+                use_qk_l2norm_in_kernel=l2n,
+                **fgate,
+                **opts,
+            )
+            res = {"out": out.clone()}
+            res.update({n: t.clone() for n, t in zip(fnames, grads, strict=True)})
+            return sums(res), saved, (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
+
+        _, saved_none, _ = functional("none")
+        bytes_none, carry_none = saved_none.bytes, saved_none.carry is None
+        del saved_none
+        for form, (members, per) in SAVED_ROWS_SETS.items():
+            res_f, saved, (rec_f, rec_b) = functional(form)
+            judge(f"{form}_functional", res_f)
+            if T_r > 0:
+                kept_rows = saved.rows or {}
+                ok = (
+                    saved.saved_rows == form
+                    and tuple(kept_rows) == members
+                    and saved.tape is None
+                    and (saved.carry is None) == carry_none
+                    and saved.bytes - bytes_none == R * H * per
+                )
+                # BF16 [R, H, 64] (the chunk's Aqk / Akk columns) and [R, H, 128] (w / u)
+                ok = ok and all(
+                    t.dtype == torch.bfloat16
+                    and tuple(t.shape) == (R, H, 64 if n.endswith("_int") else 128)
+                    for n, t in kept_rows.items()
+                )
+            else:
+                ok = (
+                    saved.saved_rows is None
+                    and saved.rows is None
+                    and saved.bytes == bytes_none
+                )
+            want = form if T_r > 0 else None
+            flags[f"{form}_functional_saved_set"] = (
+                ok
+                and rec_f.get("saved_rows") == want
+                and rec_b.get("saved_rows") == want
+            )
+            del saved
+        # graph="replay" on every rank (a rank without tokens too): eager, capture, then replays of the rows form
+        cake_kcp.graph_cache_clear()
+        events = []
+        graph_rows = True
+        try:
+            for _ in range(len(GRAPH_EVENTS)):
+                res_g, saved_g, (rec_f, rec_b) = functional("wy", graph="replay")
+                events.append(
+                    [str(rec_f.get("graph_event")), str(rec_b.get("graph_event"))]
+                )
+                want = "wy" if T_r > 0 else None
+                graph_rows = graph_rows and (
+                    rec_f.get("saved_rows") == want and rec_b.get("saved_rows") == want
+                )
+                del saved_g
+            torch.cuda.synchronize(device)
+        except BaseException as exc:
+            # the failed call's frames still reference its cache entry and graph: release them before the cleanup
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            # a cached graph holding a NCCL collective blocks the process group's destruction
+            cake_kcp.graph_cache_clear()
+        judge("wy_graph", res_g)
+        info["graph_events"] = events
+        flags["wy_graph_replay"] = events == GRAPH_EVENTS and graph_rows
+        info["not_run"] = not_run
+        return flags, info, not_run
+
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {}
+    not_run: set[str] = set()
+    for j in range(DRAWS if judged(lengths, H) else 1):
+        f_j, info_j, not_run_j = one_draw(j)
+        for name, ok in f_j.items():
+            flags[name] = flags.get(name, True) and ok
+        if j == 0:
+            info.update(info_j)
+        not_run.update(not_run_j)
+    info["not_run"] = sorted(not_run)
+
+    payload = (flags, info)
     if W > 1:
         gathered: list = [None] * W
         dist.all_gather_object(gathered, payload)
     else:
         gathered = [payload]
-    flag_list = [f for f, _, _ in gathered]
-    runs = sorted({n for _, _, a in gathered for n in a})
-    metrics = {n: _rows_combine([a[n] for _, _, a in gathered if n in a]) for n in runs}
-    # every run against the light path of its form: the norm's fallback form against its own light path
-    accuracy = {
-        n: {
-            t: _rows_within(
-                m[t], metrics["light_fallback" if "fallback" in n else "light"][t]
-            )
-            for t in m
-        }
-        for n, m in metrics.items()
-        if n not in ("light", "light_fallback")
-    }
+    flag_list = [f for f, _ in gathered]
     report = {
         "row": list(map(str, row)),
         "flags": {key_: all(f[key_] for f in flag_list) for key_ in flags},
         "failing_ranks": {
             key_: [r for r, f in enumerate(flag_list) if not f[key_]] for key_ in flags
         },
-        "light_finite": all(m["finite"] for m in metrics["light"].values()),
-        # the activated gate without the norm: the light path within ATOL / RTOL everywhere (the absolute gate of
-        # the dist rows), so every run is too (_rows_within: no more misses than the light path); the raw gate and
-        # the norm keep their protocols' relative gate (against the light path here)
-        "light_budget": gate != "g"
-        or l2n
-        or all(m["mismatch"] == 0 for m in metrics["light"].values()),
-        "accuracy": {n: all(v.values()) for n, v in accuracy.items()},
-        "accuracy_failing": {
-            n: [t for t, ok in v.items() if not ok]
-            for n, v in accuracy.items()
-            if not all(v.values())
-        },
-        "metrics": metrics,
-        "not_run": sorted({n for _, i, _ in gathered for n in i["not_run"]}),
-        "info_by_rank": [i for _, i, _ in gathered],
+        "not_run": sorted({n for _, i in gathered for n in i["not_run"]}),
+        "info_by_rank": [i for _, i in gathered],
     }
     report["pass"] = (
         all(report["flags"].values())
-        and report["light_finite"]
-        and report["light_budget"]
-        and all(report["accuracy"].values())
         and all(set(f) == set(flag_list[0]) for f in flag_list)
         and not report["not_run"]
     )
+    if rank == 0:
+        report["naive"] = judge.result()
     if W > 1:
         dist.barrier()
     if rank == 0 and result_dir:
@@ -2099,32 +2100,29 @@ def _spawn_entry_rows(
 
 
 @pytest.mark.parametrize("row", SAVED_ROWS_GPU_ROWS, ids=_mode_row_id)
-def test_saved_rows_gpu_rows(row) -> None:
+def test_saved_rows_gpu_rows(row, record_property) -> None:
     """``saved_rows="intra"`` / ``"wy"`` of :func:`cake_kcp.cake_kda_nondet_kcp` on every rank of the row
     (``SAVED_ROWS_GPU_ROWS``: W = 1, 2, 4; H 12, 16, 32, 48; the activated and the raw gate; the in-kernel Q / K L2
-    norm off and on): every output and gradient (in raw gate mode the raw gate's and the cross-rank sums of the
-    ``A_log`` / ``dt_bias`` partials) against the FP64 reference within ACC_GATE times the light path's error
-    (``rel_rms`` and ``max_abs``), finite and with no more elements outside ``ATOL`` / ``RTOL`` (activated gate
-    without the norm: the light path, so every run, with none outside) -- for ``"auto"`` (the light set outside a
-    checkpoint: bitwise the light path, the same saved bytes), each rows set on a caller workspace, a per-call
-    workspace and (activated gate, no norm) a lean arena, with the norm's fallback form (against its own light path;
-    a form that cannot run fails the row), from NaN-filled rows and poisoned free blocks, with the caller arena
-    NaN-filled between the forward and the backward (and the light path so poisoned; each poisoned run bitwise its
-    unpoisoned twin), over two backwards (``retain_graph``, the second bitwise the first; also on the lean arena),
-    as the checkpoint hand-off's rows form (``checkpoint_handoff="on"``) with and without a recompute handle of both
-    tiers (the recompute issues no collective; on a caller workspace both passes keep the rows in the default pool,
-    on a per-call workspace in the package-private pool of the device, and with the test knob ``kept_pool=0`` in the
-    default pool, bitwise the same; a plain node keeps them in the default pool) and with a poisoned arena, with
-    ``"off"`` and ``"auto"`` in a
-    checkpoint pass, under ``save_on_cpu`` (refused, the light set; a run that cannot run fails the row), with ranks
-    that keep different sets, through the facade, through the functional entries and under ``graph="replay"``
-    (eager, capture, replays); the rows kept by the forwards and read by the backward with the byte query's bytes
-    (none on a rank without tokens, never as the hand-off's tape form),
-    SAVED_ROWS_STATS counting them and HANDOFF_STATS untouched by them, the saved set growing by the query's
-    difference (members, BF16 shapes and bytes of the functional saved set), the forwards' launches and every
-    collective count the light path's, the backward without the intra program (the separate normalization in its
-    place where the plan's intra program normalizes first) and with ``"wy"`` without the WY program; under no_grad
-    nothing is kept.  Bitwise equality of a rows run with the light path is reported, not required."""
+    norm off and on), on each of the judge's 32 draws of the operands.  Every output and gradient (in raw gate mode the
+    raw gate's and the cross-rank sums of the ``A_log`` / ``dt_bias`` partials) of every run is judged on rank 0 (the
+    gathered row against its FP64 reference beside the naive BF16 tier, ``"<run>.<output>"``): the light path,
+    ``"auto"`` (outside a checkpoint the light set, with the light path's saved bytes), each rows set on a caller
+    workspace, a per-call workspace and (activated gate, no norm) a lean arena, with the norm's fallback form (a form
+    that cannot run fails the row), from NaN-filled rows and poisoned free blocks, with the caller arena NaN-filled
+    between the forward and the backward (the light path too; no NaN reaches an output), over two backwards
+    (``retain_graph``, both judged; also on the lean arena), as the checkpoint hand-off's rows form
+    (``checkpoint_handoff="on"``) with and without a recompute handle of both tiers (the recompute issues no
+    collective; on a caller workspace both passes keep the rows in the default pool, on a per-call workspace in the
+    package-private pool of the device, and with the test knob ``kept_pool=0`` in the default pool; a plain node keeps
+    them in the default pool) and with a poisoned arena, with ``"off"`` and ``"auto"`` in a checkpoint pass, under
+    ``save_on_cpu`` (refused, the light set; a run that cannot run fails the row), with ranks that keep different sets,
+    through the facade, through the functional entries and under ``graph="replay"`` (eager, capture, replays); the
+    rows kept by the forwards and read by the backward with the byte query's bytes (none on a rank without tokens,
+    never as the hand-off's tape form), SAVED_ROWS_STATS counting them and HANDOFF_STATS untouched by them, the saved
+    set growing by the query's difference (members, BF16 shapes and bytes of the functional saved set), the forwards'
+    launches and every collective count the light path's, the backward without the intra program (the separate
+    normalization in its place where the plan's intra program normalizes first) and with ``"wy"`` without the WY
+    program; under no_grad nothing is kept."""
     W = row[2]
     ntasks = int(os.environ.get("SLURM_NTASKS", "1") or 1)
     if os.environ.get("SLURM_PROCID") is not None and ntasks > 1:
@@ -2142,7 +2140,7 @@ def test_saved_rows_gpu_rows(row) -> None:
             os.environ.get("KCP_TEST_RESULT_DIR"),
             int(os.environ.get("SLURM_LOCALID", "0")),
         )
-        assert report["pass"], report
+        _settle_report(record_property, report, row[0])
         return
     _skip_unless_runnable(W)
     if W == 1:
@@ -2154,7 +2152,7 @@ def test_saved_rows_gpu_rows(row) -> None:
             os.environ.get("KCP_TEST_RESULT_DIR"),
             torch.cuda.current_device(),
         )
-        assert report["pass"], report
+        _settle_report(record_property, report, row[0])
         return
     with tempfile.TemporaryDirectory(prefix="cake_kcp_rows_") as tmp:
         result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
@@ -2163,7 +2161,7 @@ def test_saved_rows_gpu_rows(row) -> None:
             os.path.join(result_dir, "rows-" + _mode_row_id(row) + ".json")
         ) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _settle_report(record_property, report, row[0])
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2256,9 +2254,12 @@ def test_saved_rows_forward_rows_are_the_replay_rows(row, monkeypatch) -> None:
     under ``saved_rows="wy"`` (``aqk_int`` / ``akk_int`` of its intra program, ``w`` / ``u`` of its WY program) is bitwise
     the member the light backward's replay writes (its intra program, its WY program) on every real token row, in the
     same layout (BF16 ``[R, H, 64]`` / ``[R, H, 128]``, the replay's view of the same element count, compared row by
-    row); the replay writes every member.  Reported, not gated: the pad rows' differences (as the SPEC-3 probe), the
-    forward output's bitwise equality with the light forward's, the producer records each pass launched and the
-    contract key (SAVED_ROWS_CONTRACT_KEY)."""
+    row); the replay writes every member.  The kept rows stand in for the rows the replay would write: they are internal
+    stage tensors of the single-rank local programs (not outputs of the package, not judged), so this is a contract of
+    the saved set's contents (plumbing); the outputs of these paths are judged by :func:`test_saved_rows_gpu_rows`.
+    Reported, not gated: the pad rows'
+    differences (as the SPEC-3 probe), the producer records each pass launched and the contract key
+    (SAVED_ROWS_CONTRACT_KEY)."""
     _skip_unless_runnable(1)
     lengths, H, gate, l2n = row
     raw = gate == "raw"
@@ -2313,17 +2314,15 @@ def test_saved_rows_forward_rows_are_the_replay_rows(row, monkeypatch) -> None:
                     replay[n] = t.clone()
 
     monkeypatch.setattr(cake_kcp.KernelBackend, "_launch", staticmethod(logged))
-    out_w, saved_w = cake_kcp.cake_kda_nondet_train_kcp_forward(
+    _out_w, saved_w = cake_kcp.cake_kda_nondet_train_kcp_forward(
         q, k, v, g, beta, ctx, saved_rows="wy", **common
     )
     kept = {n: t.clone() for n, t in (saved_w.rows or {}).items()}
-    out_w = out_w.clone()
     fwd_launches = list(launches)
     del saved_w
-    out_n, saved_n = cake_kcp.cake_kda_nondet_train_kcp_forward(
+    _out_n, saved_n = cake_kcp.cake_kda_nondet_train_kcp_forward(
         q, k, v, g, beta, ctx, saved_rows="none", **common
     )
-    out_n = out_n.clone()
     launches.clear()
     cake_kcp.cake_kda_nondet_train_kcp_backward(
         q, k, v, g, beta, ctx, dout, saved=saved_n, **common
@@ -2343,7 +2342,6 @@ def test_saved_rows_forward_rows_are_the_replay_rows(row, monkeypatch) -> None:
         "kept": list(kept),
         "fwd_producers": sorted({(s, r) for _b, s, r in fwd_launches}),
         "bwd_producers": sorted({(s, r) for _b, s, r in bwd_launches}),
-        "out_bitwise_light": _same({"out": out_w}, {"out": out_n}),
         "fields": {},
     }
     ok = tuple(kept) == members
@@ -3203,9 +3201,7 @@ def test_handoff_byte_queries_and_counters_are_public() -> None:
     import importlib
     import inspect
 
-    package = importlib.import_module(
-        "cake_pplx._backends.cake_kda_nondet_train_kcp"
-    )
+    package = importlib.import_module("cake_pplx._backends.cake_kda_nondet_train_kcp")
     assert (
         package.cake_kda_nondet_train_kcp_handoff_bytes
         is cake_kcp_plan.cake_kda_nondet_train_kcp_handoff_bytes

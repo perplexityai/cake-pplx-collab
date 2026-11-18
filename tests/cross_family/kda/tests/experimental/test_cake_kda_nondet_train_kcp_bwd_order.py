@@ -25,17 +25,23 @@ launches; the defaults the ``"under_b1"`` / ``"side"`` order) and :func:`_bwd_se
 order back to the ``"first"`` / ``"main"`` one, the side stream's join on an error, and that the GPU rows reach
 ``P = 1`` with ``H >= 16`` on every target SM count.
 GPU rows (``BWD_ORDER_ROWS``: W = 2 and 4, H 12 to 64, both gate modes, the norm off and on): every output and
-gradient of each knob pair (the defaults among them) bitwise the forced ``"first"`` / ``"main"`` form's in the plain
-node (the saved c1 receive tensor: no dm form), with
-``save_transfer=False`` (the dm form), under a recompute handle (``"states"``) with the hand-off off and ``"auto"``,
-and with ``saved_rows="wy"`` plain and under the handle; every backward's recorded order / stream and refusal as the
-rank's facts decide (hand-off bound, ``P``, tokens, the plan's fused-gradient record, the K3 list and the
-``walk_streams`` rule), the launches the ``"first"`` / ``"main"`` form's with the moved launch where the knob puts it
-(:func:`_bwd_sequence_first_main` gives back exactly the reference sequence) and the collectives in the same order;
-the dAqk rows NaN-filled right after the ``dav`` stage change no bit where the backward skips ``kcp_dav`` (both
-orders) and reach the gradients on the H12 row (the negative control: ``kcp_dav`` runs there and its fused gradient
-reads ``kcp_dav``'s dAqk); in the activated gate without the norm, ``graph="replay"`` with both knobs (eager, capture,
-replays: one capture per kind) bitwise the eager ``"first"`` / ``"main"`` form.
+gradient of each knob pair (the defaults among them) and of the forced ``"first"`` / ``"main"`` form, in the plain
+node (the saved c1 receive tensor: no dm form), with ``save_transfer=False`` (the dm form), under a recompute handle
+(``"states"``) with the hand-off off and ``"auto"``, and with ``saved_rows="wy"`` plain and under the handle, finite
+and judged; every backward's recorded order / stream and refusal as the rank's facts decide (hand-off bound, ``P``,
+tokens, the plan's fused-gradient record, the K3 list and the ``walk_streams`` rule), the launches the ``"first"`` /
+``"main"`` form's with the moved launch where the knob puts it (:func:`_bwd_sequence_first_main` gives back exactly
+the reference sequence) and the collectives in the same order; the dAqk rows NaN-filled right after the ``dav`` stage
+reach no output where the backward skips ``kcp_dav`` (both orders) and reach the gradients on the H12 row (the
+negative control: ``kcp_dav`` runs there and its fused gradient reads ``kcp_dav``'s dAqk); in the activated gate
+without the norm, ``graph="replay"`` with both knobs (eager, capture, replays: one capture per kind) judged beside the
+eager forced form.
+
+Accuracy: this package has no bit contract, so no run is compared with another's bits.  On a judged row (up to the
+judged size of ``test_cake_kda_nondet_train_kcp_shared_ws.judged``) every run's outputs are gathered to rank 0 and
+judged there (``"<node form>.<knob pair>.<output>"``) against the FP64 reference of the row's whole operands beside
+the naive BF16 tier of ``tests/cake_naive.py`` over 32 draws (the owner-accepted gaps only).  The H64 rows keep their
+exact checks only.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from tests.cake_naive import DRAWS, draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     GRAPH_EVENTS,
     _bound_rank_threads,
@@ -69,7 +76,12 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
 from tests.experimental.test_cake_kda_nondet_train_kcp_handoff import (
     _mode_inputs,
     _mode_row_id,
-    _same,
+)
+from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
+    BWD_GRADS,
+    RankJudge,
+    judged,
+    settle_naive,
 )
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
@@ -77,8 +89,10 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 )
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# the judged operands of the GPU rows: draw j at draw_seed(BWD_ORDER_SEED, j) (tests/cake_naive.py)
+BWD_ORDER_SEED = 0x7819
 # the knob pairs of the GPU rows (the private test knobs): "first_main" forces the previous order, the reference of
-# the bitwise and the launch-sequence checks; "base" = no knob, the shipped defaults (as "both"); "tape_b1" / "k3_side" move one
+# the launch-sequence checks; "base" = no knob, the shipped defaults (as "both"); "tape_b1" / "k3_side" move one
 # launch each; "both_two" forces two streams by the walk_streams rule (also for the forward's summary pairs) where the
 # K3 list alone keeps one
 ARMS = {
@@ -108,6 +122,9 @@ DM_MODES = ("plain_nt", "handle_off", "handle_auto", "handle_wy")
 # interior ranks: P = 1, two streams by the rule on the K3 list), a W2 H32 row with the norm, an H16 row (the dAqk
 # allowlist's head bound) and the H12 row whose fused gradient takes its dAqk from kcp_dav (refusal and the poison's
 # control)
+# The H64 rows (16384 tokens) are above the judged size (tests/cake_naive.py's FP64 reference runs per token): they keep
+# their exact checks (records, launches, collectives, finite outputs, the poison by finiteness); the W2 H32, W4 H16
+# and W4 H12 rows judge every node form and knob pair over the judge's 32 draws.
 BWD_ORDER_ROWS = [
     ((6144, 4096, 3584, 2560), 64, 4, "zigzag_per_document", "g", False),
     ((6144, 4096, 3584, 2560), 64, 4, "zigzag_per_document", "raw", True),
@@ -673,7 +690,9 @@ def _collectives(seq: list) -> list:
 def _run_rank_order(
     rank: int, W: int, row, rdzv: str | None, result_dir: str | None, local_id: int
 ) -> dict:
-    """One rank of a GPU row (see :func:`test_bwd_order_gpu_rows`)."""
+    """One rank of a GPU row (see :func:`test_bwd_order_gpu_rows`): every check on each draw of the operands (the
+    judge's 32 draws on a judged row, :func:`judged`; one draw otherwise), every run judged on rank 0 on a judged
+    row."""
     from torch.utils.checkpoint import checkpoint
 
     lengths, H, _w, layout, gate, l2n = row
@@ -688,16 +707,7 @@ def _run_rank_order(
         ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
             part, dist.group.WORLD if W > 1 else None, rank, device
         )
-        glob = (
-            _mode_inputs(lengths, H, device, gate, l2n)
-            if (raw or l2n)
-            else make_inputs(lengths, H, device)
-        )
-        names = ("q", "k", "v", "g", "beta", "dout")
-        ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
-        q, k, v, g, beta, dout = (ops[n] for n in names)
-        params = (glob["A_log"], glob["dt_bias"]) if raw else ()
-        T_r = int(q.shape[0])
+        T_r = sum(int(f.length) for f in part.fragments[rank])
         index = (
             device.index if device.index is not None else torch.cuda.current_device()
         )
@@ -733,83 +743,11 @@ def _run_rank_order(
         }
         flags: dict[str, bool] = {}
         engaged = {"tape_b1": 0, "k3_side": 0}
-
-        def leaves():
-            return [
-                x.detach().clone().requires_grad_(True)
-                for x in (q, k, v, g, beta, *params)
-            ]
-
-        def gate_kw(lv) -> dict:
-            if not raw:
-                return {}
-            return {
-                "use_gate_in_kernel": True,
-                "A_log": lv[5],
-                "dt_bias": lv[6],
-                "lower_bound": LOWER_BOUND,
-            }
-
-        def step(mode: str, knobs: dict, poison: bool = False):
-            """One autograd step of the node form ``mode`` under ``knobs``: outputs, gradients and the backward's
-            LAST_CALL record.  ``poison``: the dAqk rows NaN-filled right after the ``dav`` stage (stream-ordered;
-            ``kcp_dav`` launches there only where the plan dispatches dav)."""
-            save_transfer, handle, handoff, rows = MODES[mode]
-            lv = leaves()
-            kw = {
-                "use_qk_l2norm_in_kernel": l2n,
-                "checkpoint_handoff": handoff,
-                "saved_rows": rows,
-                "_kcp_test_knobs": dict(knobs),
-            }
-            if save_transfer is not None:
-                kw["save_transfer"] = save_transfer
-            orig = cake_kcp.KernelBackend.stage
-
-            def poisoned(self, name, call, **extra):
-                orig(self, name, call, **extra)
-                if name == "dav":
-                    views = call.scratch["views"]
-                    t = getattr(views, "dAqk_sink", None)
-                    t = call.local_values["dAqk"] if t is None else t
-                    t.fill_(float("nan"))
-
-            if poison:
-                cake_kcp.KernelBackend.stage = poisoned
-            try:
-                cake_kcp.LAST_CALL.pop("bwd", None)
-                if handle:
-                    h = cake_kcp.CakeKDANondetKcpRecomputeHandle()
-
-                    def layer(*a):
-                        return cake_kcp.cake_kda_nondet_kcp(
-                            *a[:5],
-                            ctx,
-                            **gate_kw(a),
-                            **kw,
-                            recompute_handle=a[-1],
-                            checkpoint_keep="states",
-                        )
-
-                    out = checkpoint(layer, *lv, h, use_reentrant=False)
-                else:
-                    out = cake_kcp.cake_kda_nondet_kcp(
-                        *lv[:5], ctx, **gate_kw(lv), **kw
-                    )
-                out.backward(dout)
-                torch.cuda.synchronize(device)
-            finally:
-                cake_kcp.KernelBackend.stage = orig
-            res = {"out": out.detach()}
-            for n, x in zip(
-                ("q", "k", "v", "g", "beta", "A_log", "dt_bias")[: len(lv)],
-                lv,
-                strict=True,
-            ):
-                res["d" + n] = x.grad
-            return res, dict(cake_kcp.LAST_CALL.get("bwd") or {})
-
-        k3_first_launch = []
+        k3_first_launch: list = []
+        record_fail: list = []
+        judge = (
+            RankJudge(part, cu, W, rank, cake_kcp.SCALE) if judged(lengths, H) else None
+        )
 
         def check_record(mode: str, arm: str, rec: dict, ref_rec: dict) -> bool:
             """The recorded order / stream and refusal as this rank's facts decide (a knob the arm leaves out: its
@@ -890,130 +828,259 @@ def _run_rank_order(
                 ok = ok and _seq_index(seq, "kcp_dhu_offset") < k3 < b1
             return ok
 
-        # every node form: each knob pair twice (the shipped defaults among them), bitwise the forced "first" /
-        # "main" form's first run, records as the facts decide
-        bitwise_fail, record_fail = [], []
-        finite = True
-        for mode in MODES:
-            ref, ref_rec = step(mode, ARMS["first_main"])
-            finite = finite and all(
-                bool(torch.isfinite(t.float()).all())
-                for t in ref.values()
-                if t is not None
+        def one_draw(j: int) -> tuple[dict, dict]:
+            """Draw ``j``: every check of the row on the draw's operands and every run judged on a judged row; the
+            draw's flags and facts."""
+            seed = draw_seed(BWD_ORDER_SEED, j)
+            glob = (
+                _mode_inputs(lengths, H, device, gate, l2n, seed=seed)
+                if (raw or l2n)
+                else make_inputs(lengths, H, device, seed=seed)
             )
-            if not check_record(mode, "first_main", ref_rec, ref_rec):
-                record_fail.append((mode, "first_main", 0))
-            for arm in ARMS:
-                for r in range(2):
-                    if arm == "first_main" and r == 0:
-                        continue
-                    res, rec = step(mode, ARMS[arm])
-                    if not _same(res, ref):
-                        bitwise_fail.append((mode, arm, r))
-                    if not check_record(mode, arm, rec, ref_rec):
-                        record_fail.append(
-                            (
-                                mode,
-                                arm,
-                                r,
-                                rec.get("bwd_tape_order"),
-                                rec.get("bwd_tape_order_refusal"),
-                                rec.get("bwd_k3_stream"),
-                                rec.get("bwd_k3_stream_refusal"),
+            if judge is not None:
+                judge.draw(j, glob, l2n=l2n)
+            names = ("q", "k", "v", "g", "beta", "dout")
+            ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
+            q, k, v, g, beta, dout = (ops[n] for n in names)
+            params = (glob["A_log"], glob["dt_bias"]) if raw else ()
+            flags_j: dict[str, bool] = {}
+            info_j: dict = {}
+
+            def leaves():
+                return [
+                    x.detach().clone().requires_grad_(True)
+                    for x in (q, k, v, g, beta, *params)
+                ]
+
+            def gate_kw(lv) -> dict:
+                if not raw:
+                    return {}
+                return {
+                    "use_gate_in_kernel": True,
+                    "A_log": lv[5],
+                    "dt_bias": lv[6],
+                    "lower_bound": LOWER_BOUND,
+                }
+
+            def step(mode: str, knobs: dict, poison: bool = False):
+                """One autograd step of the node form ``mode`` under ``knobs``: outputs, gradients and the backward's
+                LAST_CALL record.  ``poison``: the dAqk rows NaN-filled right after the ``dav`` stage (stream-ordered;
+                ``kcp_dav`` launches there only where the plan dispatches dav)."""
+                save_transfer, handle, handoff, rows = MODES[mode]
+                lv = leaves()
+                kw = {
+                    "use_qk_l2norm_in_kernel": l2n,
+                    "checkpoint_handoff": handoff,
+                    "saved_rows": rows,
+                    "_kcp_test_knobs": dict(knobs),
+                }
+                if save_transfer is not None:
+                    kw["save_transfer"] = save_transfer
+                orig = cake_kcp.KernelBackend.stage
+
+                def poisoned(self, name, call, **extra):
+                    orig(self, name, call, **extra)
+                    if name == "dav":
+                        views = call.scratch["views"]
+                        t = getattr(views, "dAqk_sink", None)
+                        t = call.local_values["dAqk"] if t is None else t
+                        t.fill_(float("nan"))
+
+                if poison:
+                    cake_kcp.KernelBackend.stage = poisoned
+                try:
+                    cake_kcp.LAST_CALL.pop("bwd", None)
+                    if handle:
+                        h = cake_kcp.CakeKDANondetKcpRecomputeHandle()
+
+                        def layer(*a):
+                            return cake_kcp.cake_kda_nondet_kcp(
+                                *a[:5],
+                                ctx,
+                                **gate_kw(a),
+                                **kw,
+                                recompute_handle=a[-1],
+                                checkpoint_keep="states",
                             )
+
+                        out = checkpoint(layer, *lv, h, use_reentrant=False)
+                    else:
+                        out = cake_kcp.cake_kda_nondet_kcp(
+                            *lv[:5], ctx, **gate_kw(lv), **kw
                         )
-            del ref
-        flags["finite"] = finite
-        flags["bitwise"] = not bitwise_fail
+                    out.backward(dout)
+                    torch.cuda.synchronize(device)
+                finally:
+                    cake_kcp.KernelBackend.stage = orig
+                res = {"out": out.detach()}
+                for n, x in zip(
+                    ("q", "k", "v", "g", "beta", "A_log", "dt_bias")[: len(lv)],
+                    lv,
+                    strict=True,
+                ):
+                    res["d" + n] = x.grad
+                return res, dict(cake_kcp.LAST_CALL.get("bwd") or {})
+
+            def finite(res: dict) -> bool:
+                return all(
+                    bool(torch.isfinite(t.float()).all())
+                    for t in res.values()
+                    if t is not None
+                )
+
+            def judged_params(res: dict) -> dict:
+                """In raw gate mode the cross-rank sums of the parameter gradients (a collective: every rank of every
+                judged run), as the judge reads them."""
+                if raw and judge is not None:
+                    res["dA_log_sum"], res["ddt_bias_sum"] = (
+                        cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
+                            ctx, res["dA_log"], res["ddt_bias"]
+                        )
+                    )
+                return res
+
+            def keep(arm: str, runs) -> None:
+                if judge is not None:
+                    judge(arm, runs)
+
+            # every node form: each knob pair twice (the shipped defaults among them; the forced "first" / "main"
+            # form's first run is the reference of the launch checks), every run finite and judged as
+            # "<mode>.<knob pair>" (repeats), the records as the facts decide
+            all_finite = True
+            for mode in MODES:
+                ref, ref_rec = step(mode, ARMS["first_main"])
+                all_finite = all_finite and finite(ref)
+                if not check_record(mode, "first_main", ref_rec, ref_rec):
+                    record_fail.append((j, mode, "first_main", 0))
+                keep(f"{mode}.first_main", [judged_params(ref)])
+                del ref
+                for arm in ARMS:
+                    runs = []
+                    for r in range(2):
+                        if arm == "first_main" and r == 0:
+                            continue
+                        res, rec = step(mode, ARMS[arm])
+                        all_finite = all_finite and finite(res)
+                        runs.append(judged_params(res))
+                        if not check_record(mode, arm, rec, ref_rec):
+                            record_fail.append(
+                                (
+                                    j,
+                                    mode,
+                                    arm,
+                                    r,
+                                    rec.get("bwd_tape_order"),
+                                    rec.get("bwd_tape_order_refusal"),
+                                    rec.get("bwd_k3_stream"),
+                                    rec.get("bwd_k3_stream_refusal"),
+                                )
+                            )
+                    keep(f"{mode}.{arm}", runs)
+                    del runs
+            flags_j["finite"] = all_finite
+            # the dAqk rows NaN-filled after the dav stage: where the backward skips kcp_dav no NaN reaches an output
+            # (both orders: "first" forced, and the shipped "under_b1"; finite on every row, judged on a judged row);
+            # where kcp_dav runs (a rank with tokens of the H12 row) it reaches the gradients (the fused gradient
+            # reads its dAqk): an output holds a NaN or an inf
+            # (judged where no rank of the row runs kcp_dav, H outside 9..15: the same decision on every rank)
+            poison_finite = {}
+            for arm in ("first_main", "base"):
+                res, _ = step("plain", ARMS[arm], poison=True)
+                poison_finite[arm] = finite(res)
+                if not 9 <= H <= 15:
+                    keep(f"poisoned.{arm}", [judged_params(res)])
+                del res
+            info_j["poison_finite"] = poison_finite
+            if T_r > 0 and not dav_live:
+                flags_j["poison_covered"] = all(poison_finite.values())
+            info_j["poison_uncovered_reached"] = bool(
+                T_r > 0 and dav_live and not poison_finite["first_main"]
+            )
+            # graph replay with both knobs (activated gate, no norm): eager, capture, replays of the functional pass,
+            # each judged (the eager forced "first" / "main" form: "graph.eager"; the rounds: "graph.replay")
+            if not raw and not l2n:
+
+                def saved_pass(knobs: dict, **opts):
+                    out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                        q,
+                        k,
+                        v,
+                        g,
+                        beta,
+                        ctx,
+                        save_transfer=False,
+                        _kcp_test_knobs=dict(knobs),
+                        **opts,
+                    )
+                    grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+                        q,
+                        k,
+                        v,
+                        g,
+                        beta,
+                        ctx,
+                        dout,
+                        saved=saved,
+                        save_transfer=False,
+                        _kcp_test_knobs=dict(knobs),
+                        **opts,
+                    )
+                    return {
+                        "out": out.clone(),
+                        **{n: t.clone() for n, t in zip(BWD_GRADS, grads, strict=True)},
+                    }
+
+                ws0 = cake_kcp.CakeKDANondetKcpWorkspace()
+                eager = saved_pass(ARMS["first_main"], workspace=ws0)
+                ws1 = cake_kcp.CakeKDANondetKcpWorkspace()
+                cake_kcp.graph_cache_clear()
+                events, rounds, streams = [], [], []
+                try:
+                    # two more rounds than GRAPH_EVENTS: a kind may run eagerly more than once before its capture
+                    for _ in range(len(GRAPH_EVENTS) + 2):
+                        rounds.append(
+                            saved_pass(ARMS["both_two"], workspace=ws1, graph="replay")
+                        )
+                        events.append(
+                            [
+                                str(cake_kcp.LAST_CALL["fwd"].get("graph_event")),
+                                str(cake_kcp.LAST_CALL["bwd"].get("graph_event")),
+                            ]
+                        )
+                        streams.append(cake_kcp.LAST_CALL["bwd"].get("bwd_k3_stream"))
+                    torch.cuda.synchronize(device)
+                except BaseException as exc:
+                    traceback.clear_frames(exc.__traceback__)
+                    raise
+                finally:
+                    cake_kcp.graph_cache_clear()
+                flags_j["graph_replay"] = (
+                    all(finite(r) for r in [eager, *rounds])
+                    and all(
+                        _eager_capture_replay([e[i] for e in events]) for i in (0, 1)
+                    )
+                    and events[-1] == ["replay", "replay"]
+                )
+                keep("graph.eager", [eager])
+                keep("graph.replay", rounds)
+                info_j["graph_events"] = events
+                info_j["graph_k3_streams"] = streams
+                del ws0, ws1, eager, rounds
+            return flags_j, info_j
+
+        reached = True
+        for j in range(DRAWS if judge is not None else 1):
+            flags_j, info_j = one_draw(j)
+            for name, ok in flags_j.items():
+                flags[name] = flags.get(name, True) and ok
+            reached = reached and info_j.pop("poison_uncovered_reached")
+            if j == 0:
+                info.update(info_j)
         flags["records"] = not record_fail
-        info["bitwise_fail"] = bitwise_fail
         info["record_fail"] = record_fail
         info["engaged"] = dict(engaged)
         info["k3_first_launch"] = k3_first_launch
-        # the dAqk rows NaN-filled after the dav stage: where the backward skips kcp_dav no bit moves (both orders:
-        # "first" forced, and the shipped "under_b1"); where kcp_dav runs (a rank with tokens of the H12 row) it reaches
-        # the gradients (the fused gradient reads its dAqk)
-        ref, _ = step("plain", ARMS["first_main"])
-        poison = {}
-        for arm in ("first_main", "base"):
-            res, _ = step("plain", ARMS[arm], poison=True)
-            poison[arm] = _same(res, ref)
-        info["poison_same"] = poison
-        if T_r > 0 and not dav_live:
-            flags["poison_covered"] = all(poison.values())
-        info["poison_uncovered_reached"] = bool(
-            T_r > 0 and dav_live and not poison["first_main"]
-        )
-        # graph replay with both knobs (activated gate, no norm): eager, capture, replays bitwise the eager forced
-        # "first" / "main" form
-        if not raw and not l2n:
-
-            def saved_pass(knobs: dict, **opts):
-                out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-                    q,
-                    k,
-                    v,
-                    g,
-                    beta,
-                    ctx,
-                    save_transfer=False,
-                    _kcp_test_knobs=dict(knobs),
-                    **opts,
-                )
-                grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
-                    q,
-                    k,
-                    v,
-                    g,
-                    beta,
-                    ctx,
-                    dout,
-                    saved=saved,
-                    save_transfer=False,
-                    _kcp_test_knobs=dict(knobs),
-                    **opts,
-                )
-                return {"out": out, **{f"t{i}": t for i, t in enumerate(grads)}}
-
-            ws0 = cake_kcp.CakeKDANondetKcpWorkspace()
-            eager = {
-                n: t.clone()
-                for n, t in saved_pass(ARMS["first_main"], workspace=ws0).items()
-            }
-            ws1 = cake_kcp.CakeKDANondetKcpWorkspace()
-            cake_kcp.graph_cache_clear()
-            events, graph_same, streams = [], True, []
-            try:
-                # two more rounds than GRAPH_EVENTS: a kind may run eagerly more than once before its capture
-                for _ in range(len(GRAPH_EVENTS) + 2):
-                    res = {
-                        n: t.clone()
-                        for n, t in saved_pass(
-                            ARMS["both_two"], workspace=ws1, graph="replay"
-                        ).items()
-                    }
-                    graph_same = graph_same and _same(res, eager)
-                    events.append(
-                        [
-                            str(cake_kcp.LAST_CALL["fwd"].get("graph_event")),
-                            str(cake_kcp.LAST_CALL["bwd"].get("graph_event")),
-                        ]
-                    )
-                    streams.append(cake_kcp.LAST_CALL["bwd"].get("bwd_k3_stream"))
-                torch.cuda.synchronize(device)
-            except BaseException as exc:
-                traceback.clear_frames(exc.__traceback__)
-                raise
-            finally:
-                cake_kcp.graph_cache_clear()
-            flags["graph_replay"] = (
-                graph_same
-                and all(_eager_capture_replay([e[i] for e in events]) for i in (0, 1))
-                and events[-1] == ["replay", "replay"]
-            )
-            info["graph_events"] = events
-            info["graph_k3_streams"] = streams
-            del ws0, ws1, eager
+        info["poison_uncovered_reached"] = reached
         gathered = [None] * W
         mine = (rank, flags, info)
         if W > 1:
@@ -1045,6 +1112,8 @@ def _run_rank_order(
             i["poison_uncovered_reached"] for _, _, i in gathered
         )
     report["pass"] = all(report["flags"].values())
+    if rank == 0 and judge is not None:
+        report["naive"] = judge.result()
     if W > 1:
         dist.barrier()
     if rank == 0 and result_dir:
@@ -1071,22 +1140,27 @@ def _spawn_entry_order(
 
 
 @pytest.mark.parametrize("row", BWD_ORDER_ROWS, ids=_mode_row_id)
-def test_bwd_order_gpu_rows(row) -> None:
-    """Every knob pair of ``ARMS`` (the shipped defaults, ``"base"``, among them) against the forced ``"first"`` /
+def test_bwd_order_gpu_rows(row, record_property) -> None:
+    """Every knob pair of ``ARMS`` (the shipped defaults, ``"base"``, among them) and the forced ``"first"`` /
     ``"main"`` form (``ARMS["first_main"]``) on every rank of the row, in every node form of ``MODES`` (plain,
     ``save_transfer=False``, a recompute handle with the hand-off off and ``"auto"``, ``saved_rows="wy"`` plain and
-    under the handle), each pair twice: ``out`` and every gradient (raw gate mode: of the raw gate, ``A_log`` and
-    ``dt_bias``) bitwise the forced form's first run and finite; each backward's ``bwd_tape_order`` /
-    ``bwd_k3_stream`` record and refusal as the rank's facts decide (hand-off bound, ``P``, tokens, whether the plan
-    dispatches its dav stage (``kcp_dav_needed``), the dm form, the K3 list and the ``walk_streams`` rule; the table
-    set's first K3 over its list once on the call's stream); the backward's launches the forced form's in another
-    order -- the K1 tape replay between the b1 issue and the adjoint merge under ``"under_b1"``, K3 before ``kcp_dav``
-    on the side stream; :func:`_bwd_sequence_first_main` gives back the forced form's sequence exactly -- and its
-    collectives in the same order; both knobs engaged somewhere on the rows that can (``H >= 16``, ``P = 1``, a K3
-    list).  The dAqk rows NaN-filled after the ``dav`` stage: bitwise the unpoisoned run where the backward skips
-    ``kcp_dav`` in both orders, and on the H12 row (``kcp_dav`` runs) the poison reaches the gradients on some rank.
-    Activated gate without the norm: ``graph="replay"`` under both knobs (forced two streams) over four functional
-    steps (eager, capture, replays) bitwise the eager forced form."""
+    under the handle), each pair twice, on each draw of the operands (the judge's 32 on a judged row, one on the H64
+    rows): ``out`` and every gradient (raw gate mode: of the raw gate and the cross-rank sums of ``A_log`` /
+    ``dt_bias``) finite and, on a judged row, judged on rank 0 as ``"<node form>.<knob pair>"`` (repeats; the gathered
+    row against its FP64 reference beside the naive BF16 tier); each backward's ``bwd_tape_order`` / ``bwd_k3_stream``
+    record and refusal as the rank's facts decide (hand-off bound, ``P``, tokens, whether the plan dispatches its dav
+    stage (``kcp_dav_needed``), the dm form, the K3 list and the ``walk_streams`` rule; the table set's first K3 over
+    its list once on the call's stream); the backward's launches the forced form's in another order -- the K1 tape
+    replay between the b1 issue and the adjoint merge under ``"under_b1"``, K3 before ``kcp_dav`` on the side stream;
+    :func:`_bwd_sequence_first_main` gives back the forced form's sequence exactly -- and its collectives in the same
+    order; both knobs engaged somewhere on the rows that can (``H >= 16``, ``P = 1``, a K3 list).  The dAqk rows
+    NaN-filled after the ``dav`` stage: where the backward skips ``kcp_dav`` (both orders) no NaN reaches an output
+    (finite; judged as ``"poisoned.<knob pair>"`` on a judged row without a ``kcp_dav`` rank), and on the H12 row
+    (``kcp_dav`` runs) the poison reaches the gradients on some rank on every draw (an output holds a NaN or an inf).
+    Activated gate without the norm: ``graph="replay"`` under both knobs (forced two streams) over the functional steps
+    (eager, capture, replays: one capture per kind), every step finite and judged (``"graph.replay"``, repeats) beside
+    the eager forced form (``"graph.eager"``).  The H64 rows keep the exact checks only: the W2 H32, W4 H16 and W4 H12
+    rows judge the same node forms and knob pairs."""
     W = row[2]
     ntasks = int(os.environ.get("SLURM_NTASKS", "1") or 1)
     if os.environ.get("SLURM_PROCID") is not None and ntasks > 1:
@@ -1104,7 +1178,7 @@ def test_bwd_order_gpu_rows(row) -> None:
             os.environ.get("KCP_TEST_RESULT_DIR"),
             int(os.environ.get("SLURM_LOCALID", "0")),
         )
-        assert report["pass"], report
+        _settle_order(record_property, report, row[0])
         return
     _skip_unless_runnable(W)
     with tempfile.TemporaryDirectory(prefix="cake_kcp_bwd_order_") as tmp:
@@ -1114,4 +1188,12 @@ def test_bwd_order_gpu_rows(row) -> None:
             os.path.join(result_dir, "bwd-order-" + _mode_row_id(row) + ".json")
         ) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _settle_order(record_property, report, row[0])
+
+
+def _settle_order(record_property, report: dict, lengths) -> None:
+    """Assert a row's gathered flags, then record and settle rank 0's verdicts on a judged row (``report["naive"]``,
+    :func:`settle_naive`; the gaps' scope: the row's documents)."""
+    assert report["pass"], {k: v for k, v in report.items() if k != "naive"}
+    if report.get("naive") is not None:
+        settle_naive(record_property, report["naive"], tuple(lengths))
