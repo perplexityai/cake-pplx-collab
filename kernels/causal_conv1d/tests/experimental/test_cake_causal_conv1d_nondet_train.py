@@ -35,10 +35,12 @@ resident on another stream.  The pre-zeroed capture buffers: captures record no 
 one fill per captured call, as ``_CAPTURE_FILL_FALLBACKS`` counts, and the package keeps no reference to those
 buffers), two graphs replayed at once, eager calls interleaved with replays, buffers returned after graph deletion
 (also with a replay in flight and after an aborted capture), a capture without synchronization, more captures than the
-pool holds, a capture larger than the pool, pool growth, no ``cuda.bindings``, no ``torch.cuda.MemPool`` (eager calls
-judged too), and CUDA Graph trees (``torch.compile``, backend ``"cudagraphs"``; one with more recorded backward nodes
+pool holds, a capture larger than the pool, pool growth (on a stream held on the device until the checks end; a
+graph's released buffer smaller than the grown size dropped), one thread at a time inside the package's memory pool
+(a refill and two threads' first eager calls), no ``cuda.bindings``, no ``torch.cuda.MemPool`` (eager calls judged
+too), and CUDA Graph trees (``torch.compile``, backend ``"cudagraphs"``; one with more recorded backward nodes
 than the pool holds).  The default backward route's ``FALLBACK_ROWS`` programs under CUDA Graph replay (``bwd_grid_mult``
-1 to 4), programmatic dependent launch, repeated launches and two streams.  Programmatic dependent
+1 to 4, the program checked per row), programmatic dependent launch, repeated launches and two streams.  Programmatic dependent
 launch: ``enable_pdl`` follows ``PDL_EAGER`` / ``PDL_GRAPH``; with the policy forced on, and with the shipped graph
 policy, a launch reads what the kernel before it wrote and does not overwrite what that kernel reads, and back-to-back
 launches share the package's workspaces; both packages in one process.  Autograd, non-reentrant activation checkpointing (2 x forward +
@@ -68,6 +70,7 @@ and ``csrc/``).
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import gc
 import os
@@ -75,6 +78,7 @@ import re
 import statistics
 import sys
 import tempfile
+import threading
 import time
 import weakref
 
@@ -474,13 +478,14 @@ def _expected_backward_program(S: int, C: int) -> str:
 
 
 def _record_programs(monkeypatch) -> list:
-    """From now on, the module name of every launch of the package is appended to the returned list."""
+    """From now on, every launch of the package appends ``(module name, S, C)`` (the launch's plan scalars) to the
+    returned list."""
 
     seen = []
     launch = pkg.run_module
 
     def record(name, values, *, device_index, grid=None):
-        seen.append(name)
+        seen.append((name, values.get("S"), values.get("C")))
         return launch(name, values, device_index=device_index, grid=grid)
 
     monkeypatch.setattr(pkg, "run_module", record)
@@ -488,10 +493,21 @@ def _record_programs(monkeypatch) -> list:
 
 
 def _backward_programs(seen: list) -> set:
-    """The default backward route's programs among the launched module names ``seen``."""
+    """The default backward route's programs among the launches ``seen``."""
 
     route = set(loader.route_modules(_arch(), "bwd"))
-    return {name for name in seen if name in route}
+    return {name for name, _, _ in seen if name in route}
+
+
+def _backward_programs_by_shape(seen: list) -> dict:
+    """The default backward route's programs among the launches ``seen``, per launched ``(S, C)``."""
+
+    route = set(loader.route_modules(_arch(), "bwd"))
+    found: dict = {}
+    for name, S, C in seen:
+        if name in route:
+            found.setdefault((int(S), int(C)), set()).add(name)
+    return found
 
 
 def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
@@ -1614,8 +1630,8 @@ def test_fallback_row_graph_replays(bwd_grid_mult, fresh_pool, monkeypatch) -> N
     """CUDA Graph capture / replay of forward + backward at the default backward route's ``FALLBACK_ROWS`` rows
     (:func:`_fallback_row_cases`: inside the keys' token ranges and above one) at ``bwd_grid_mult`` 1 to 4, with a
     caller-owned workspace and with the package's pre-zeroed buffers (no capture zeroes a buffer of its own): each row
-    launches the expected program, every replay judged against the naive tier, the workspaces zero after every
-    replay."""
+    launches the expected program (checked per ``(S, C)`` of the launches), every replay judged against the naive tier,
+    the workspaces zero after every replay."""
 
     _require_route("bwd")
     device = _device()
@@ -1629,8 +1645,8 @@ def test_fallback_row_graph_replays(bwd_grid_mult, fresh_pool, monkeypatch) -> N
         )
         assert replays == DRAWS * len(cases)
         assert _fallbacks(device) == before, (own_workspace, before, _fallbacks(device))
-        expected = {_expected_backward_program(S, C) for S, C, _ in cases}
-        assert _backward_programs(seen) == expected, (own_workspace, set(seen), expected)
+        expected = {(S, C): {_expected_backward_program(S, C)} for S, C, _ in cases}
+        assert _backward_programs_by_shape(seen) == expected, (own_workspace, seen, expected)
 
 
 def test_capture_takes_one_prezeroed_backward_workspace_per_capture_and_stream(
@@ -1978,6 +1994,50 @@ def _posted(sem: int) -> bool:
     value = ctypes.c_int(0)
     assert _LIBC.sem_getvalue(sem, ctypes.byref(value)) == 0
     return value.value > 0
+
+
+# The seconds after which :func:`_stream_held` lets its stream go on by itself (the block then fails).
+HOLD_TIMEOUT = 120.0
+
+
+@contextlib.contextmanager
+def _stream_held(stream: torch.cuda.Stream):
+    """The work queued on ``stream`` inside the block starts on the device only when the block ends: the stream first
+    waits (``cuStreamWaitValue32``) for a mapped pinned host word that the block's end sets to 1, so checks inside the
+    block see that work not started, whatever the host's speed.  If the host waits for the stream inside the block, a
+    watchdog sets the word after ``HOLD_TIMEOUT`` seconds and the block fails."""
+
+    from cuda.bindings import driver, runtime
+
+    err, word = runtime.cudaHostAlloc(4, getattr(runtime, "cudaHostAllocMapped", 2))  # cudaHostAllocMapped = 2
+    assert err == runtime.cudaError_t.cudaSuccess, f"cudaHostAlloc: {err}"
+    value = ctypes.c_int32.from_address(int(word))
+    value.value = 0
+    try:
+        err, address = runtime.cudaHostGetDevicePointer(word, 0)
+        assert err == runtime.cudaError_t.cudaSuccess, f"cudaHostGetDevicePointer: {err}"
+        geq = int(driver.CUstreamWaitValue_flags.CU_STREAM_WAIT_VALUE_GEQ)
+        (err,) = driver.cuStreamWaitValue32(stream.cuda_stream, int(address), 1, geq)
+        assert err == driver.CUresult.CUDA_SUCCESS, f"cuStreamWaitValue32: {err}"
+        fired = threading.Event()
+
+        def release() -> None:
+            fired.set()
+            value.value = 1
+
+        watchdog = threading.Timer(HOLD_TIMEOUT, release)
+        watchdog.start()
+        try:
+            yield
+        finally:
+            watchdog.cancel()
+            value.value = 1
+            stream.synchronize()
+        assert not fired.is_set(), f"the host waited for the held stream (released after {HOLD_TIMEOUT} s)"
+    finally:
+        value.value = 1
+        stream.synchronize()
+        runtime.cudaFreeHost(word)
 
 
 def _record_capture_workspaces(monkeypatch) -> list:
@@ -2436,13 +2496,158 @@ def test_out_of_memory_keeps_the_package_pool(fresh_pool) -> None:
                    buffers=cap["taken"])  # fmt: skip
 
 
+class _WatchedLock:
+    """A lock that records, in ``waiting``, the names of the threads waiting to take it (``cond`` notified on every
+    change): ``pkg._POOL_LOCK`` with the package's ``with`` statements unchanged."""
+
+    def __init__(self, lock, cond: threading.Condition, waiting: set) -> None:
+        self.lock, self.cond, self.waiting = lock, cond, waiting
+
+    def __enter__(self):
+        me = threading.current_thread().name
+        with self.cond:
+            self.waiting.add(me)
+            self.cond.notify_all()
+        self.lock.acquire()
+        with self.cond:
+            self.waiting.discard(me)
+            self.cond.notify_all()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.lock.release()
+
+
+# The threads of the pool-lock test: a refill and two first eager steps on new streams.
+LOCK_THREADS = ("refill", "worker-0", "worker-1")
+# The seconds any thread of the pool-lock test waits for the others before it fails.
+LOCK_TIMEOUT = 60.0
+
+
+def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch) -> None:
+    """``_POOL_LOCK`` lets one thread at a time into the package's memory pool.  ``torch.cuda.use_mem_pool`` is
+    wrapped to count the threads inside each pool, and a thread that enters stays at the entry until another thread
+    is inside too, or every other thread waits for ``_POOL_LOCK`` or has finished.  A refill that grows the backward
+    pool enters first; only then two threads make their first eager steps on two new streams (each zeroes its
+    per-stream workspaces in the pool).  With the lock they wait for it while the refill is inside (forced contention,
+    no timing); a ``_package_zeros`` or refill without it would put a second thread inside the pool.  At most one
+    thread is ever inside, the refill entered once and each step twice, all into the device's pool, which stays on
+    (no ``_pool_off``, the grown pre-zeroed buffers in place) and the steps' workspaces read back zero."""
+
+    kind, case, device = "bwd", GRAPH_CASES[2], _device()
+    d = device.index
+    monkeypatch.setattr(pkg, "_FORWARD_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_BACKWARD_WORKSPACES", {})
+    inputs = _draw_inputs(*case, kind, key=149)
+    warm = torch.cuda.Stream(device=device)
+    warm.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(warm):
+        _phase_step("step", inputs, _phase_outs("step", inputs[0], inputs[1], inputs[4], kind), kind)
+    torch.cuda.synchronize(device)
+    mem_pool = pkg._MEM_POOLS.get(d)
+    assert mem_pool is not None
+    ready = {k: pkg._POOL_READY[k][d] for k in ("fwd", "bwd")}
+    grown = 2 * pkg._POOL_SIZE[(d, "bwd")]
+    streams = [torch.cuda.Stream(device=device) for _ in range(2)]
+    outs = [_phase_outs("step", inputs[0], inputs[1], inputs[4], kind) for _ in streams]
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream(device))
+
+    cond = threading.Condition()
+    waiting: set = set()
+    done: set = set()
+    inside: dict = {}
+    entries: list = []
+    errors: list = []
+    entered = threading.Event()  # the refill is inside the pool
+    real = torch.cuda.use_mem_pool
+
+    @contextlib.contextmanager
+    def counted(pool, *args, **kwargs):
+        me = threading.current_thread().name
+        others = [name for name in LOCK_THREADS if name != me]
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        with cond:
+            inside[id(pool)] = inside.get(id(pool), 0) + 1
+            entry = [me, id(pool), inside[id(pool)]]  # + the threads waiting for the lock when it went in
+            entries.append(entry)
+            cond.notify_all()
+            if me == "refill":
+                entered.set()
+            while inside[id(pool)] < 2 and not all(name in waiting or name in done for name in others):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    errors.append(AssertionError(f"{me}: the other threads neither waited for the lock nor ended"))
+                    break
+                cond.wait(left)
+            entry.append(frozenset(waiting))
+        try:
+            with real(pool, *args, **kwargs):
+                yield
+        finally:
+            with cond:
+                inside[id(pool)] -= 1
+                cond.notify_all()
+
+    def run(name: str, body) -> None:
+        try:
+            with torch.cuda.device(d):
+                body()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the test's thread
+            errors.append(exc)
+        finally:
+            with cond:
+                done.add(name)
+                cond.notify_all()
+
+    def refill() -> None:
+        with torch.cuda.stream(warm):
+            pkg._pool_refill(d, "bwd", grown, device)
+
+    def step(i: int) -> None:
+        if not entered.wait(LOCK_TIMEOUT):
+            raise AssertionError("the refill never entered the package's memory pool")
+        with torch.cuda.stream(streams[i]):
+            _phase_step("step", inputs, outs[i], kind)
+
+    bodies = (refill, lambda: step(0), lambda: step(1))
+    threads = [
+        threading.Thread(target=run, args=(name, body), name=name, daemon=True)
+        for name, body in zip(LOCK_THREADS, bodies, strict=True)
+    ]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pkg, "_POOL_LOCK", _WatchedLock(pkg._POOL_LOCK, cond, waiting))
+        patch.setattr(torch.cuda, "use_mem_pool", counted)
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(3 * LOCK_TIMEOUT)
+        assert not any(thread.is_alive() for thread in threads), "a thread of the pool-lock test did not end"
+    torch.cuda.synchronize(device)
+    if errors:
+        raise errors[0]
+    assert max(count for _, _, count, _ in entries) == 1, f"two threads were inside the package's pool: {entries}"
+    assert sorted(name for name, *_ in entries) == ["refill", "worker-0", "worker-0", "worker-1", "worker-1"], entries
+    assert {pool for _, pool, _, _ in entries} == {id(mem_pool)}, entries
+    (refill_entry,) = [entry for entry in entries if entry[0] == "refill"]
+    assert {"worker-0", "worker-1"} <= refill_entry[3], f"the steps did not wait for the lock: {entries}"
+    assert pkg._MEM_POOLS.get(d) is mem_pool, "the device left its memory pool"
+    assert pkg._POOL_READY["fwd"][d] == ready["fwd"] and pkg._POOL_READY["bwd"][d] == grown, pkg._POOL_READY
+    idle = pkg._ZEROED_POOL[(d, "bwd")]
+    assert len(idle) == pkg._POOL_DEPTH and all(buf.tensor.numel() == grown for buf in idle), "the refill"
+    for stream in streams:
+        key = (d, stream.cuda_stream)
+        for table in (pkg._FORWARD_WORKSPACES, pkg._BACKWARD_WORKSPACES):
+            assert key in table and int(torch.count_nonzero(table[key])) == 0, "a step's workspace is not zero"
+
+
 def test_more_captures_than_the_pool_keep_no_capture_memory(fresh_pool, monkeypatch) -> None:
     """``_POOL_DEPTH`` + 2 step graphs (forward + backward, no caller workspace) captured back to back by
     ``torch.cuda.graph`` after one eager step, with no eager call between the captures: the first ``_POOL_DEPTH`` take
-    one pre-zeroed buffer per kind, each call of the later ones zeroes a buffer of its own (a fill node and a fallback
-    per kind and capture).  After the captures the package's tables hold only pre-zeroed buffers and none of the
-    buffers the captured calls zeroed; every graph's replays are judged against the naive tier, with its buffers zero
-    after each."""
+    one pre-zeroed buffer per kind and their launches use exactly those buffers, each call of the later ones zeroes a
+    buffer of its own (a fill node and a fallback per kind and capture).  After the captures the package's tables hold
+    only pre-zeroed buffers and none of the buffers the captured calls zeroed; every graph's replays are judged
+    against the naive tier, with its buffers zero after each."""
 
     kind, case, device = "bwd", GRAPH_CASES[2], _device()
     stream = torch.cuda.Stream(device=device)
@@ -2469,8 +2674,13 @@ def test_more_captures_than_the_pool_keep_no_capture_memory(fresh_pool, monkeypa
         assert {k: after[k] - before[k] for k in after} == expected, (index, before, after)
         assert len(taken) == (2 if index < depth else 0), (index, len(taken))
         assert _graph_nodes(graph)["fill"] == sum(expected.values()), index
-        own = [] if index < depth else list(captured)
-        assert len({t.untyped_storage().data_ptr() for t in own}) == sum(expected.values()), index
+        launched = {t.untyped_storage().data_ptr() for t in captured}
+        if index < depth:  # the capture's launches use the buffers it took
+            assert launched == {t.untyped_storage().data_ptr() for t in taken}, index
+            own = []
+        else:
+            own = list(captured)
+            assert len(launched) == sum(expected.values()), index
         graphs.append((graph, outs, taken + own))
     _assert_tables_hold_only_pool_buffers()
     own = {t.untyped_storage().data_ptr() for _, _, buffers in graphs[depth:] for t in buffers}
@@ -2526,13 +2736,17 @@ def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypa
 
 def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
     """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
-    C 1280 and then C 2560 on another stream, queued behind a ``torch.cuda._sleep`` (their zero fills and readiness
-    copies wait), each raise the pool size: the idle buffers below the new size leave the pool and ``_POOL_DEPTH``
-    buffers of the new size replace them, a released buffer whose readiness copy has not run gives its flag back as
-    pending, and no semaphore or flag serves two buffers.  After the copies complete, a capture at C 2560 (G2) takes
-    new buffers (no fallback) and the next eager step gives back the released semaphores (posted) and the pending
-    flags.  On every draw G1 and G2 replay at once on two streams: both judged against the naive tier, their buffers
-    zero after the replays and held by one graph each."""
+    C 1280 and then C 2560 on another stream, held on the device until the checks end (:func:`_stream_held`: their
+    zero fills and readiness copies wait), each raise the pool size: the idle buffers below the new size leave the
+    pool and ``_POOL_DEPTH`` buffers of the new size replace them, a released buffer whose readiness copy has not run
+    gives its flag back as pending, and no semaphore or flag serves two buffers.  CUDA gets the released idle buffers'
+    user objects only after the checks, so their semaphores are not posted at the second growth's drain: they stay
+    retired and no new buffer takes one.  After the copies complete and the semaphores are posted, a capture at
+    C 2560 (G2) takes new buffers (no fallback) and the next eager step's drain gives the posted semaphores back (free,
+    or taken by a new buffer; none retired) and the pending flags.  On every draw G1 and G2 replay at once on two
+    streams: both judged against the naive tier, their buffers zero after the replays and held by one graph each.
+    Then G1 is deleted: after a capture at C 2560 (G3), an eager step's drain drops each of G1's released buffers that
+    is smaller than the grown size (the package keeps no reference to it) and gives its semaphore back."""
 
     kind, device = "bwd", _device()
     d = device.index
@@ -2551,6 +2765,9 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
             {k: pkg._POOL_SIZE[(d, k)] for k in kinds},
         )
 
+    def live_sems() -> set:
+        return {buf.sem for p in pkg._ZEROED_POOL.values() for buf in p} | {buf.sem for buf in pkg._GRAPH_HELD}
+
     def check_unique(label: str) -> None:
         live = [buf for p in pkg._ZEROED_POOL.values() for buf in p] + list(pkg._GRAPH_HELD)
         sems = [buf.sem for buf in live]
@@ -2562,33 +2779,49 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
         assert not set(flags) & spare, f"{label}: a buffer's flag is free"
 
     stages = [state()]
-    stream_b.wait_stream(torch.cuda.current_stream(device))
-    with torch.cuda.stream(stream_b):
-        torch.cuda._sleep(BUSY_CYCLES)
-        for i in (1, 2):
-            _phase_step("step", inputs[i], outs[i], kind)
-            stages.append(state())
-    in_flight = not stream_b.query()
-    pending = {f[2] for f in uo.pending_flags}
-    free = {f[2] for f in uo.free_flags}
-    assert in_flight, "the eager steps completed before the checks (BUSY_CYCLES too short for this host)"
-    check_unique("after the growth")
     released = []
-    for (old, old_size), (new, new_size) in zip(stages, stages[1:]):
-        assert new_size["bwd"] > old_size["bwd"], (old_size, new_size)
-        for k in kinds:
-            assert len(new[k]) == pkg._POOL_DEPTH and all(b.tensor.numel() >= new_size[k] for b in new[k]), k
-            if new_size[k] > old_size[k]:
-                assert not {id(b) for b in old[k]} & {id(b) for b in new[k]}, f"{k}: a smaller buffer stayed idle"
-                released += old[k]
-    for k in kinds:
-        assert pkg._POOL_READY[k][d] == stages[-1][1][k], (k, pkg._POOL_READY[k][d])
-    # the second growth released the first growth's buffers before their readiness copies ran
-    for buf in stages[1][0]["bwd"]:
-        assert buf.flag[2] in pending and buf.flag[2] not in free, "a flag whose copy had not run was freed"
+    deferred: list = []  # (user object, semaphore) of each idle buffer the growth released; CUDA gets it later
+
+    def release_later(obj, sem: int) -> None:
+        deferred.append((obj, sem))
+        uo.retired.append(sem)
+
+    stream_b.wait_stream(torch.cuda.current_stream(device))
+    try:
+        with pytest.MonkeyPatch.context() as patch, _stream_held(stream_b):
+            patch.setattr(uo, "release", release_later)
+            with torch.cuda.stream(stream_b):
+                for i in (1, 2):
+                    _phase_step("step", inputs[i], outs[i], kind)
+                    stages.append(state())
+            assert not stream_b.query(), "the held stream ran"
+            pending = {f[2] for f in uo.pending_flags}
+            free = {f[2] for f in uo.free_flags}
+            check_unique("after the growth")
+            for (old, old_size), (new, new_size) in zip(stages, stages[1:]):
+                assert new_size["bwd"] > old_size["bwd"], (old_size, new_size)
+                for k in kinds:
+                    assert len(new[k]) == pkg._POOL_DEPTH and all(b.tensor.numel() >= new_size[k] for b in new[k]), k
+                    if new_size[k] > old_size[k]:
+                        stayed = {id(b) for b in old[k]} & {id(b) for b in new[k]}
+                        assert not stayed, f"{k}: a smaller buffer stayed idle"
+                        released += old[k]
+            for k in kinds:
+                assert pkg._POOL_READY[k][d] == stages[-1][1][k], (k, pkg._POOL_READY[k][d])
+            # the second growth released the first growth's buffers before their readiness copies ran
+            for buf in stages[1][0]["bwd"]:
+                assert buf.flag[2] in pending and buf.flag[2] not in free, "a flag whose copy had not run was freed"
+            # the later refills' drains kept the semaphores that were not posted retired and gave none to a new buffer
+            retired = {sem for _, sem in deferred}
+            assert retired == {buf.sem for buf in released}, "a released idle buffer was not released by the refill"
+            assert retired <= set(uo.retired), "a drain recycled a semaphore that was not posted"
+            assert not retired & live_sems(), "a new buffer took a semaphore that was not posted"
+    finally:
+        for obj, _ in deferred:
+            uo.cudart.cudaUserObjectRelease(obj, 1)
     torch.cuda.synchronize(device)
     deadline = time.monotonic() + 10.0
-    while not all(_posted(buf.sem) for buf in released if buf.sem in uo.retired):
+    while not all(_posted(sem) for sem in retired):
         assert time.monotonic() < deadline, "CUDA did not release the released buffers' user objects"
         time.sleep(0.001)
     second = _capture(lambda: _phase_step("step", inputs[2], outs[2], kind), stream_b, debug=False)
@@ -2596,7 +2829,8 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
     with torch.cuda.stream(stream_b):
         _phase_step("step", inputs[2], _phase_outs("step", inputs[2][0], inputs[2][1], inputs[2][4], kind), kind)
     torch.cuda.synchronize(device)
-    assert not {buf.sem for buf in released} & set(uo.retired), "a posted semaphore stayed retired"
+    assert not retired & set(uo.retired), "a posted semaphore stayed retired"
+    assert retired <= set(uo.free_sems) | live_sems(), "a drain lost a posted semaphore"
     assert not uo.pending_flags, "a flag whose copy completed stayed pending"
     check_unique("after the refill")
     taken = first["taken"] + second["taken"]
@@ -2621,6 +2855,35 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
         ]
 
     assert_judged(launch, seed=SEED, label="graphs before and after the pool growth at once")
+    # G1 deleted after the growth: the next drain drops its buffers that are smaller than the grown size
+    g1 = {buf.kind: buf for buf in pkg._GRAPH_HELD if any(buf.tensor is t for t in first["taken"])}
+    assert sorted(g1) == sorted(kinds), sorted(g1)
+    smaller = {k: buf.tensor.numel() < pkg._POOL_SIZE[(d, k)] for k, buf in g1.items()}
+    assert smaller["bwd"], "G1's backward buffer is not smaller than the grown pool size"
+    old_sems = {buf.sem for buf in g1.values()}
+    old_refs = {k: weakref.ref(buf.tensor) for k, buf in g1.items()}
+    del g1, launch, graphs, taken, idle, first
+    gc.collect()
+    torch.cuda.synchronize(device)
+    deadline = time.monotonic() + 10.0
+    while not all(_posted(sem) for sem in old_sems):
+        assert time.monotonic() < deadline, "CUDA did not release G1's buffers"
+        time.sleep(0.001)
+    third = _capture(lambda: _phase_step("step", inputs[2], outs[2], kind), stream_b, debug=False)
+    assert third["fallbacks"] == {"fwd": 0, "bwd": 0} and len(third["taken"]) == 2, third["fallbacks"]
+    with torch.cuda.stream(stream_b):
+        _phase_step("step", inputs[2], _phase_outs("step", inputs[2][0], inputs[2][1], inputs[2][4], kind), kind)
+    torch.cuda.synchronize(device)
+    gc.collect()
+    held = [buf.tensor for buf in pkg._GRAPH_HELD] + [buf.tensor for buf in uo.released]
+    for k, ref in old_refs.items():
+        if smaller[k]:
+            assert ref() is None, f"{k}: the package kept a released buffer smaller than the pool size"
+        else:  # a released buffer of the pool size returns to the idle pool
+            assert any(buf.tensor is ref() for buf in pkg._ZEROED_POOL[(d, k)]), k
+        assert not any(t is ref() for t in held), f"{k}: G1's released buffer was not drained"
+    assert not old_sems & set(uo.retired) and old_sems <= set(uo.free_sems) | live_sems(), "G1's semaphores"
+    check_unique("after G1's buffers were drained")
 
 
 _TREE_OPS: dict = {}
