@@ -82,6 +82,7 @@ backward name equals a name the det package ships).
 from __future__ import annotations
 
 import functools
+import sys
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
@@ -5512,7 +5513,8 @@ class RowPlan(NamedTuple):
     split: tuple[int, int, int]
     # ``(S_min, S_max, split)`` of the backward record's :data:`TILE_OVERRIDES` row, else of its :data:`NARROW_TILES`
     # row (the two tables share no ``(route, C)``), or of the forward record's :data:`FORWARD_NARROW_WIDTHS` row from
-    # its token floor (``S_max`` :data:`INT32_MAX`); ``None`` without one.
+    # its token floor with no ceiling (``S_max`` ``sys.maxsize``: :func:`channel_split`'s forward width rule has none,
+    # so the row's plan is the per-call plan for every ``S``); ``None`` without one.
     override: tuple[int, int, tuple[int, int, int]] | None
     # The launch grid, ``None`` where :func:`launch_grid` may trim it by ``S`` (planned per call).
     grid: tuple[int, int, int] | None
@@ -5556,7 +5558,7 @@ def plan_row(
                 C, geometry=geometry, role=role, route=route, S=floor, arch=arch
             )
             if wide != split:
-                override = (floor, INT32_MAX, wide)
+                override = (floor, sys.maxsize, wide)
     else:
         split = channel_split(C, geometry=geometry, role=role)
         route = record_route(record, arch)
