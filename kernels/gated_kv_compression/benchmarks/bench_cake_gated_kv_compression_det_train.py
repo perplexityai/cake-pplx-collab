@@ -30,7 +30,7 @@ math, on one GPU, single rank.
   device ``cu_seqlens``, the caller's ``G``; the node saves the forward's pair prefix for the backward, as the Cake
   node saves its pair table), ``eager`` (the same functions uncompiled: the reference),
   ``compile_autograd`` (the reference forward with autograd's softmax backward: informational) and ``copy`` (an SM
-  elementwise kernel that reads and writes the bytes each phase must move: the bandwidth context; see
+  elementwise kernel that reads and writes the bytes of a dense pass of each phase: the bandwidth context; see
   :func:`copy_calls`).
 * phases (``--phases``): ``fwd`` (the training forward, its graph recorded), ``bwd`` (the backward of a recorded
   forward), ``step`` (both) and ``ckpt`` (``torch.utils.checkpoint(..., use_reentrant=False)`` around the entry,
@@ -56,8 +56,9 @@ math, on one GPU, single rank.
 * comparison per phase and mode: the best baseline (the fastest eligible ``compile_*`` arm), its time and Cake's,
   ``speedup = baseline / Cake`` (above 1: Cake faster) with its range, ``eager / Cake``, the copy's time and
   ``copy / Cake`` (the fraction of the copy speed Cake reaches), and the achieved TB/s of every arm for the phase's
-  minimal bytes (``fwd`` ``4096 T + 1024 G``, ``bwd`` ``8192 T + 1024 G``).  Each arm's saved-for-backward bytes
-  (``saved_tensors_hooks``: all, and those beyond the operands) and Cake's own memory report are recorded per row.
+  dense-pass bytes (``fwd`` ``4096 T + 1024 G``, ``bwd`` ``8192 T + 1024 G``; more than a phase must move on rows
+  with many tail tokens).  Each arm's saved-for-backward bytes (``saved_tensors_hooks``: all, and those beyond the
+  operands) and Cake's own memory report are recorded per row.
 
 Output: ``--json PATH``, rewritten after every row: the environment (GPU, SMs, L2, driver, torch, Triton, CUDA,
 ``tvm_ffi``, the package's version and a digest of its files, Dynamo settings), the arguments, the edge-pack gate,
@@ -232,8 +233,8 @@ def autograd_calls(layer: Callable[..., torch.Tensor], leaves: Sequence[torch.Te
 
 
 def copy_calls(nbytes: dict[str, int], device: torch.device) -> Calls:
-    """Per phase, one SM elementwise kernel that reads half of the phase's minimal bytes and writes the other half:
-    ``torch.neg(src, out=dst)`` on FP32 slices of ``nbytes // 8`` elements each (``fwd`` reads and writes
+    """Per phase, one SM elementwise kernel that reads half of the phase's dense-pass bytes and writes the other
+    half: ``torch.neg(src, out=dst)`` on FP32 slices of ``nbytes // 8`` elements each (``fwd`` reads and writes
     ``2048 T + 512 G`` bytes, ``4096 T + 1024 G`` in all; ``bwd`` ``4096 T + 512 G`` each way, ``8192 T + 1024 G`` in
     all; ``step`` and ``ckpt`` their sums).  It is the same kernel launch in eager mode and in a CUDA graph, unlike a
     ``copy_``, which a graph records as a memcpy node (a copy-engine transfer, not an SM kernel)."""
@@ -271,7 +272,7 @@ def describe(name: str, layout: str, args) -> dict:
     if name == "copy":
         return {
             "implementation": "SM elementwise kernel (torch.neg, out=, FP32) reading half and writing half of each "
-            "phase's minimal bytes; the same kernel in graph and eager mode"
+            "phase's dense-pass bytes; the same kernel in graph and eager mode"
         }
     return baselines.describe(name, args.compile_dynamic)
 

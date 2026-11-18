@@ -170,9 +170,11 @@ def tail_rows(lengths: Sequence[int]) -> list[int]:
 
 
 def phase_bytes(T: int, G: int) -> dict[str, int]:
-    """The bytes a phase must move at least (``cu_seqlens`` and the pair table neglected): ``fwd`` reads ``C`` and
-    ``Z`` (``4096 T``) and writes ``out`` (``1024 G``); ``bwd`` reads ``C``, ``Z`` and ``dout`` and writes ``dC`` and
-    ``dZ`` (``8192 T + 1024 G``); ``step`` is both; ``ckpt`` two forwards and a backward."""
+    """The bytes of a dense pass of each phase (``cu_seqlens`` and the pair table neglected): ``fwd`` reads ``C`` and
+    ``Z`` of every token (``4096 T``) and writes ``out`` (``1024 G``); ``bwd`` reads ``C``, ``Z`` and ``dout`` and
+    writes ``dC`` and ``dZ`` (``8192 T + 1024 G``); ``step`` is both; ``ckpt`` two forwards and a backward.  No pass
+    reads ``C`` or ``Z`` of a tail token, so on rows with many tail tokens (length-1 documents) these figures are more
+    than a phase must move."""
     fwd = 2 * WIDTH * 4 * T + WIDTH * 2 * G
     bwd = 2 * (2 * WIDTH * 4 * T) + WIDTH * 2 * G
     return {"fwd": fwd, "bwd": bwd, "step": fwd + bwd, "ckpt": 2 * fwd + bwd}
