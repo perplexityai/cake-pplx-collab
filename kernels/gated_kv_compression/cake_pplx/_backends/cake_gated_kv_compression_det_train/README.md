@@ -97,7 +97,7 @@ plain stream-ordered launch on the current torch stream of the operands' device;
 synchronizes.  Numerics: FP32 throughout, IEEE round to nearest, no flush to zero; the
 logit gap is `u = z1 - z0`, `e = exp(-|u|)` (precise `expf`), the larger-logit token's
 weight `1 / (1 + e)` and the other's `e / (1 + e)`, both correctly rounded divisions; the
-forward value is `fma(e, c_small, c_big) / (1 + e)`.  Gate gaps of about 88 and more give a
+forward value is `fma(e, c_small, c_big) / (1 + e)`.  Gate gaps of about 87.3 and more give a
 subnormal or zero `e` (zero from about 104), and exact ties give `e = 1`: every output stays
 finite.  No FP64 arithmetic.
 
