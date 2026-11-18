@@ -5812,8 +5812,8 @@ def test_one_wave_table_route_on_a_one_stream_row(
     # one-wave table and runs the one-wave route (the summaries, the stitch and one walk of every piece, all on the
     # caller's stream); a device outside the set keeps the piece table, wave 1 on one stream, also after its layout was
     # cached with the device in the set (the layout cache keys on the set).  Two runs of the one-wave route per draw
-    # (judged by the worst) and the serial walk on the same small device are judged with an initial state and a
-    # final-state gradient
+    # (judged by the worst) and the serial walk on the SPLIT_SMS device of _split_device are judged with an initial
+    # state and a final-state gradient
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
     chunks = cake_plan.chunk_counts(seq_lens)
@@ -8691,7 +8691,8 @@ def test_a_capture_neither_replays_nor_records_a_backward_plan(
 # per call class (cake_chain.FWD_PLAN) and replays them afterwards.  The tests below hold every replay to the general
 # path's launches, stream switches, events and memory peak (FWD_PLAN off) on every route and tape mode, judge the
 # general path's calls and the planned ones each under its own name, and pin down the plan's key, its invalidation, the
-# calls it never serves (a CUDA graph capture, the device route) and the caller's stream and device after a replay.
+# calls it never serves (a CUDA graph capture, the device route, a host q) and the caller's stream and device after a
+# replay.
 
 
 def _counted_forward_replays(monkeypatch) -> list:
@@ -9551,6 +9552,44 @@ def test_a_capture_neither_replays_nor_records_a_forward_plan(
         return {"warm": want, "eager": eager, "graph": runs}
 
     _judge_forms(record_property, 7187, seq_lens, heads, device, forms)
+
+
+def test_a_host_call_never_replays_the_forward_plan_of_the_device(
+    device, monkeypatch
+) -> None:
+    # a host q's call can make a device call's plan key: its index is the current device's, so it takes the device
+    # layout's ChunkMeta and stream, and its inputs have the device inputs' shapes, strides, dtypes and alignment.
+    # It runs the general path (refused at the first launch), neither replaying nor recording a plan: the device's plan
+    # stays the one plan of the key, the watched functions stay as they were, and the next device call replays it
+    monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+    replays = _counted_forward_replays(monkeypatch)
+    q, v = (
+        torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        for h in (1, 2)
+    )
+    g, beta = torch.zeros(1, 64, 2, device=device), torch.zeros(1, 64, 2, device=device)
+    # the arguments of _entry_calls' CakeGDNNondetFunction call, on the device
+    options = cake_chain.make_options()
+    apply_args = (q, q, v, g, beta, 1.0, None, False, None, None, True, options)
+    inputs = (q, q, v, g, beta, None)
+    host = tuple(t if t is None else t.cpu() for t in inputs)
+    assert cake_chain._slot_layout(host) == cake_chain._slot_layout(inputs)
+    for _ in range(2):  # the recording, then a replay
+        cake_chain.CakeGDNNondetFunction.apply(*apply_args)
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert plan.ops is not None and len(replays) == 1 and replays[0] is plan
+    watched = _watched_functions()
+    for call in _entry_calls().values():
+        with pytest.raises(Exception):  # noqa: PT011 - the entry's operand refusal
+            call()
+    assert len(replays) == 1, "a host call replayed the device's forward plan"
+    (kept,) = cake_chain._FWD_PLANS.values()
+    assert kept is plan
+    assert all(a is b for a, b in zip(_watched_functions(), watched, strict=True))
+    o, _ = cake_chain.CakeGDNNondetFunction.apply(*apply_args)
+    torch.cuda.synchronize()
+    assert len(replays) == 2 and replays[1] is plan
+    assert bool(torch.isfinite(o).all())
 
 
 @pytest.mark.parametrize("route", ROW_ROUTES)

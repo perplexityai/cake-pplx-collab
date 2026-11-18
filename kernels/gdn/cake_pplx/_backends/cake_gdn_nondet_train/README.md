@@ -468,9 +468,8 @@ tensor (such as `k` given as `q`), and the stream's pool tables and side
 stream, the cached tables and the module tables and settings the record was
 made with; otherwise the call runs the general path and records again.  A
 replay makes the general path's allocations, PyTorch operations, launches and
-event records and waits in the same order on the same streams, so its output,
-final state and saved tensors have the same bits as the general path's, and
-it leaves the caller's current device and stream as the general path does.
+event records and waits in the same order on the same streams, and it leaves
+the caller's current device and stream as the general path does.
 A call whose steps the record cannot hold runs the general path, and so do
 the later calls of its key.  A forward inside a CUDA graph capture neither
 replays nor records a plan: it runs the general path on the capture's own

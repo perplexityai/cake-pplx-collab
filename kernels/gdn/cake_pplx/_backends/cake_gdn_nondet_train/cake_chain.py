@@ -4608,8 +4608,8 @@ _BWD_PLANS_LIMIT = 256
 # that sequence afterwards (:func:`_replay_forward`): the inputs and the tensors the call allocates, views and computes
 # eagerly fill its slots, every other operand is a constant of the plan (a per-stream workspace of the pool, a chunk
 # table of the layout's ``ChunkMeta``, the cached walk, a scalar).  A replay makes the general path's allocations,
-# eager calls, launches and event records and waits in its order on its streams, so the bits are the same; the plan
-# holds no tensor of a call.  ``FWD_PLAN = False`` keeps every forward on the general path.
+# eager calls, launches and event records and waits in its order on its streams; the plan holds no tensor of a call.
+# ``FWD_PLAN = False`` keeps every forward on the general path.
 FWD_PLAN = True
 # plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first
 _FWD_PLANS: dict = {}
