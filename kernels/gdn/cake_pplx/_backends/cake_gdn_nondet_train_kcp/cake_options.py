@@ -101,7 +101,7 @@ Public fields (defaults are the shipped behaviour)::
                                             the exact derivative at the stored point; the backward needs the same value
     test_knobs      None | dict             private levers (schedule, fused_walks, cols_rule, debug_sequence,
                                             record_states, record_qk, p_rule, fwdh_vh, dhu_vh, walk_pair, fused_o,
-                                            fused_o_tape) and the names of the
+                                            fused_o_tape, prep_form) and the names of the
                                             test-only values above;
                                             keyword argument only, never an environment variable
 """
@@ -196,6 +196,10 @@ TEST_KNOBS: dict[str, tuple[Any, ...] | None] = {
     # kcp_fwdh_out_tape (the output walk that also writes the saved h / v_new tapes) wherever the registry ships its
     # records (cake_kcp._fuse_o_tape); 0 = the tape walk, then #5.  Light forwards (fused_o) are unaffected
     "fused_o_tape": (0, 1),
+    # 1 (shipped) = a forward whose akk / g_cum have no reader (not a replay-mode or hand-off forward, no saved set
+    # that keeps them) runs the forward form of #1_l2n, fwd_prep_l2n_fwd (no akk / g_cum stores), wherever the
+    # registry ships its record (cake_kcp._prep_backward_tapes); 0 = the full fwd_prep_l2n
+    "prep_form": (0, 1),
 }
 TEST_KNOB_DEFAULTS: dict[str, Any] = {
     "schedule": SCHEDULE_DEFAULT,
@@ -211,6 +215,7 @@ TEST_KNOB_DEFAULTS: dict[str, Any] = {
     "walk_pair": None,
     "fused_o": 1,
     "fused_o_tape": 1,
+    "prep_form": 1,
 }
 
 

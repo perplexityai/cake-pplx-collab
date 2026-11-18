@@ -28,7 +28,9 @@ Mode rules
   falls back to it.
 * Every launch is fixed-order today, so two runs of one call on one device give
   the same bits.  The contract does not promise run-to-run bits.  The results
-  match the deterministic package within its accuracy budgets, not bitwise.
+  are not bitwise equal to the deterministic package's.  The tests record
+  each output's error against an FP64 reference beside the BF16 naive
+  implementation's; a miss is recorded and does not fail a test.
 * ``torch.use_deterministic_algorithms(True)``, with or without
   ``warn_only=True``, runs the call unchanged: no alert, no warning, no
   fallback.
