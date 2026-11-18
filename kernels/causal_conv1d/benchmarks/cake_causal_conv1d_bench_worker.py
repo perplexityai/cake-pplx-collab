@@ -32,8 +32,9 @@ and drops it after); ``counters``; ``drop_graphs``; ``free``; ``quit``.
 Provenance (outside every timed request): the ``row`` reply gives each Cake arm the programs, channel split and grid
 the package plans for the row's forward and backward, the records' ``use_pdl`` and the PDL value each mode launches
 with; the ``graph`` mode ``prepare`` capture is made with the graph's debug dump kept and reports the captured
-graph's node counts (kernel nodes and the ``FillFunctor`` kernel nodes of a captured ``torch.zeros``); ``counters``
-reads the package's count of captures that fell back to a captured zero fill (``None`` where the package has none).
+graph's node counts (kernel nodes, the ``FillFunctor`` kernel nodes of a captured ``torch.zeros``, memset nodes) and
+the change of the package's fill-fallback count over that capture; ``counters`` reads the package's count of captured
+calls that zeroed a buffer of their own (``None`` where the package keeps no such count).
 """
 
 from __future__ import annotations
@@ -151,7 +152,7 @@ def _dot_nodes(text: str) -> dict:
         m = re.search(r"(cake_causal_conv1d_\w+?_[0-9a-f]{20})", name)
         short.append(m.group(1) if m else ("FillFunctor" if "FillFunctor" in name else name[:60]))
     return {"types": dict(counts), "kernel": counts["KERNEL"], "fill": sum("FillFunctor" in k for k in kernels),
-            "kernels": short}
+            "memset": counts["MEMSET"], "kernels": short}
 
 
 def _graph_nodes(graph: torch.cuda.CUDAGraph) -> dict:
@@ -397,9 +398,13 @@ class Worker:
                         else:
                             if arm.pop("ys_recorded", None):
                                 calls.release()
+                            before = self.counters({})["fill_fallbacks"]
                             graph = self._graph(arm, phase, debug=True)
+                            after = self.counters({})["fill_fallbacks"]
                             graph.replay()
                             nodes = _graph_nodes(graph)
+                            if before is not None and after is not None:
+                                nodes["fill_fallbacks"] = {k: v - before.get(k, 0) for k, v in after.items()}
                             del graph
                             out[key] = {"graph": True, "nodes": nodes}
                 except Exception as exc:  # noqa: BLE001 -- recorded: this arm and phase have no such mode
