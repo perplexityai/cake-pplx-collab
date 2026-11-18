@@ -49,6 +49,34 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
+__device__ __forceinline__ float approx_rcp(float x) {
+    float y;
+    asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+
+__device__ __forceinline__ unsigned int __as_u32(float v) {
+    unsigned int u;
+    asm("mov.b32 %0, %1;" : "=r"(u) : "f"(v));
+    return u;
+}
+__device__ __forceinline__ unsigned int __as_u32(__nv_bfloat162 v) {
+    return *reinterpret_cast<const unsigned int*>(&v);
+}
+__device__ __forceinline__ unsigned int __as_u32(unsigned int v) { return v; }
+__device__ __forceinline__ unsigned int __as_u32(int v) {
+    unsigned int u;
+    asm("mov.b32 %0, %1;" : "=r"(u) : "r"(v));
+    return u;
+}
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(64) void
@@ -168,9 +196,70 @@ kernel_cake_rmsnorm_det_train_a4da85136fba4588239f(__nv_bfloat16* __restrict__ x
         for (int rr_5 = 0; rr_5 < 2; rr_5++) {
             float total_r = sums[rr_5];
             float mean_r = total_r * 0.00048828125f;
-            float _sqrt_2;
-            asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(_sqrt_2) : "f"(mean_r + eps));
-            float rstd_r = __frcp_rn(_sqrt_2);
+            float rs_a = mean_r + eps;
+            unsigned int rs_ab = __as_u32(rs_a);
+            float rs_y;
+            asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(rs_y) : "f"(rs_a));
+            float rs_t;
+            asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_t) : "f"(rs_a), "f"(rs_y));
+            float _neg_2;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_2) : "f"(rs_t));
+            float rs_tl;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_tl) : "f"(rs_a), "f"(rs_y), "f"(_neg_2));
+            float _neg_3;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_3) : "f"(rs_t));
+            float rs_e;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_e) : "f"(_neg_3), "f"(rs_y), "f"(1.0f));
+            float _neg_5;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_5) : "f"(rs_tl));
+            float _fma_4;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_4) : "f"(_neg_5), "f"(rs_y), "f"(rs_e));
+            rs_e = _fma_4;
+            float rs_h;
+            asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_h) : "f"(rs_y), "f"(0.5f));
+            float _sub_6;
+            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_6) : "f"(rs_e), "f"(3.637979e-12f));
+            float rs_lo;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_lo) : "f"(_sub_6), "f"(rs_h), "f"(rs_y));
+            float _add_7;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_7) : "f"(rs_e), "f"(3.637979e-12f));
+            float rs_hi;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_hi) : "f"(_add_7), "f"(rs_h), "f"(rs_y));
+            float rs_r = rs_lo;
+            unsigned int rs_slow = ((rs_ab - 8388608 >= 2130706432) ? 1 : 0);
+            if (__as_u32(rs_lo) != __as_u32(rs_hi)) {
+                rs_slow = 1;
+            }
+            if (rs_slow != 0) {
+                float _sqrt_9;
+                asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(_sqrt_9) : "f"(rs_a));
+                float _rcp_8 = approx_rcp(_sqrt_9);
+                rs_y = _rcp_8;
+                rs_t = mul_f32_rn_noftz(rs_a, rs_y);
+                float _neg_11;
+                asm("neg.f32 %0, %1;" : "=f"(_neg_11) : "f"(rs_t));
+                float _fma_10;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_10) : "f"(rs_a), "f"(rs_y), "f"(_neg_11));
+                rs_tl = _fma_10;
+                float _neg_13;
+                asm("neg.f32 %0, %1;" : "=f"(_neg_13) : "f"(rs_t));
+                float _fma_12;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_12) : "f"(_neg_13), "f"(rs_y), "f"(1.0f));
+                rs_e = _fma_12;
+                float _neg_15;
+                asm("neg.f32 %0, %1;" : "=f"(_neg_15) : "f"(rs_tl));
+                float _fma_14;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_14) : "f"(_neg_15), "f"(rs_y), "f"(rs_e));
+                rs_e = _fma_14;
+                float _fma_16;
+                asm("fma.rz.f32 %0, %1, %2, %3;" : "=f"(_fma_16) : "f"(rs_e), "f"(mul_f32_rn_noftz(rs_y, 0.5f)), "f"(rs_y));
+                unsigned int rs_fb = __as_u32(_fma_16);
+                unsigned long long rs_m = (unsigned long long)((rs_fb & 8388607) << 1 | 16777217);
+                unsigned int rs_an = ((rs_ab < 8388608) ? __as_u32((float)rs_ab) : rs_ab);
+                unsigned long long rs_p = rs_m * rs_m * (unsigned long long)(rs_an & 8388607 | 8388608);
+                rs_r = ((rs_ab - 1 < 2139095039) ? __uint_as_float(rs_fb + (unsigned int)(rs_p >> 63ull)) : rs_y);
+            }
+            float rstd_r = rs_r;
             int rowc = row0 + group * 2 + rr_5;
             if (rowc < T) {
                 long long row64c = (long long)rowc;
@@ -182,26 +271,26 @@ kernel_cake_rmsnorm_det_train_a4da85136fba4588239f(__nv_bfloat16* __restrict__ x
                 for (int v_2 = 0; v_2 < 2; v_2++) {
                     float _vec_load_1[16];
                     {
-                        const void* _v8p_3 = (const void*)(w + (gtid * 16 + v_2 * (64 * 16)) + (0));
-                        uint32_t _v8_3_0[8];
+                        const void* _v8p_17 = (const void*)(w + (gtid * 16 + v_2 * (64 * 16)) + (0));
+                        uint32_t _v8_17_0[8];
                         asm volatile("ld.global.nc.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                            : "=r"(_v8_3_0[0]), "=r"(_v8_3_0[1]), "=r"(_v8_3_0[2]), "=r"(_v8_3_0[3]), "=r"(_v8_3_0[4]), "=r"(_v8_3_0[5]), "=r"(_v8_3_0[6]), "=r"(_v8_3_0[7]) : "l"((const void*)((const char*)_v8p_3 + 0)) : "memory");
-                        (&_vec_load_1[0 + 0])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[0]) << 16);
-                        (&_vec_load_1[0 + 0])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[0]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 2])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[1]) << 16);
-                        (&_vec_load_1[0 + 2])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[1]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 4])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[2]) << 16);
-                        (&_vec_load_1[0 + 4])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[2]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 6])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[3]) << 16);
-                        (&_vec_load_1[0 + 6])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[3]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 8])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[4]) << 16);
-                        (&_vec_load_1[0 + 8])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[4]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 10])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[5]) << 16);
-                        (&_vec_load_1[0 + 10])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[5]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 12])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[6]) << 16);
-                        (&_vec_load_1[0 + 12])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[6]) & 0xffff0000u);
-                        (&_vec_load_1[0 + 14])[0] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[7]) << 16);
-                        (&_vec_load_1[0 + 14])[1] = __uint_as_float(static_cast<uint32_t>(_v8_3_0[7]) & 0xffff0000u);
+                            : "=r"(_v8_17_0[0]), "=r"(_v8_17_0[1]), "=r"(_v8_17_0[2]), "=r"(_v8_17_0[3]), "=r"(_v8_17_0[4]), "=r"(_v8_17_0[5]), "=r"(_v8_17_0[6]), "=r"(_v8_17_0[7]) : "l"((const void*)((const char*)_v8p_17 + 0)) : "memory");
+                        (&_vec_load_1[0 + 0])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[0]) << 16);
+                        (&_vec_load_1[0 + 0])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[0]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 2])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[1]) << 16);
+                        (&_vec_load_1[0 + 2])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[1]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 4])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[2]) << 16);
+                        (&_vec_load_1[0 + 4])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[2]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 6])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[3]) << 16);
+                        (&_vec_load_1[0 + 6])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[3]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 8])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[4]) << 16);
+                        (&_vec_load_1[0 + 8])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[4]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 10])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[5]) << 16);
+                        (&_vec_load_1[0 + 10])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[5]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 12])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[6]) << 16);
+                        (&_vec_load_1[0 + 12])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[6]) & 0xffff0000u);
+                        (&_vec_load_1[0 + 14])[0] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[7]) << 16);
+                        (&_vec_load_1[0 + 14])[1] = __uint_as_float(static_cast<uint32_t>(_v8_17_0[7]) & 0xffff0000u);
                     }
                     #pragma unroll
                     for (int j_2 = 0; j_2 < 16; j_2++) {
@@ -249,10 +338,10 @@ kernel_cake_rmsnorm_det_train_a4da85136fba4588239f(__nv_bfloat16* __restrict__ x
                         packed_1[_lp + 7] = *(uint32_t*)&_bf2;
                     }
                     {
-                        const unsigned* _raw_stv8_4 = reinterpret_cast<const unsigned*>(packed_1);
+                        const unsigned* _raw_stv8_18 = reinterpret_cast<const unsigned*>(packed_1);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(y + (obasec + (long long)(gtid * 16 + v_2 * (64 * 16))))), "r"(_raw_stv8_4[0]), "r"(_raw_stv8_4[1]), "r"(_raw_stv8_4[2]), "r"(_raw_stv8_4[3]), "r"(_raw_stv8_4[4]), "r"(_raw_stv8_4[5]), "r"(_raw_stv8_4[6]), "r"(_raw_stv8_4[7]) : "memory");
+                            :: "l"((void*)(y + (obasec + (long long)(gtid * 16 + v_2 * (64 * 16))))), "r"(_raw_stv8_18[0]), "r"(_raw_stv8_18[1]), "r"(_raw_stv8_18[2]), "r"(_raw_stv8_18[3]), "r"(_raw_stv8_18[4]), "r"(_raw_stv8_18[5]), "r"(_raw_stv8_18[6]), "r"(_raw_stv8_18[7]) : "memory");
                     }
                 }
             }
