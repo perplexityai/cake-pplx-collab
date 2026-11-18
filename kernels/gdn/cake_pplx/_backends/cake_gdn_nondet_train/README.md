@@ -111,9 +111,11 @@ state (forward only, one seed per case), the split forward's rel-L2 error is
 On GB200 and GB300 this version runs some of the 66 cases on other routes
 than the build measured here, with other bits: the backward of the `(2, 6)`
 pair on GB200 and GB300 and of the `(1, 3)` pair on GB300 on the longer pieces
-of `bwd_one_wave_table` (see Chain).  The largest-ratio columns and the ratio
-figures below were measured on the earlier routes; the pack columns keep their
-routes.
+of `bwd_one_wave_table` (see Chain).  On GB300 this version also runs the
+split forward on `fwd_ho_a` where its pieces are 63 to 95 chunks long, which
+the build measured here ran on `wy_tc2` (see Chain), with other bits in the
+cases that cut such pieces.  The largest-ratio columns and the ratio figures
+below were measured on the earlier routes; the pack columns keep their routes.
 
 On B200 every ratio is at most 1.069.  On GB300, GB200 and R200 every ratio is
 at most 1.1 but one: the ratio of the worst `dg` element on the small `(1, 3)`
@@ -266,12 +268,13 @@ call that neither of the two takes runs the third, the prep forward (below).
   sequence from its initial state beside the affine maps `[B | M]` of the
   middle pieces (on a side stream; `streams=1` keeps one stream), the stitch
   gives every piece its start state, and wave 2 runs every other piece.  On
-  `sm_100a`, and on `sm_103a` for pieces of at least 96 chunks
+  `sm_100a`, and on `sm_103a` for pieces of at least 63 chunks
   (`FWD_SPLIT_A_MIN_PIECE`), the waves run `fwd_ho_a` and the maps
   `fwd_summary_a`, which form `u` and `w` in the CTA; on shorter `sm_103a`
-  pieces `wy_tc2` forms `w` and `u` from `A`, and the waves run `fwd_fused` and
-  the maps `fwd_summary`.  Where the backward splits its adjoint walk on the
-  same pieces and the device has a cost entry that prices it
+  pieces (48 to 62 chunks, not measured) `wy_tc2` forms `w` and `u` from `A`,
+  and the waves run `fwd_fused` and the maps `fwd_summary`.  Where the
+  backward splits its adjoint walk on the same pieces and the device has a
+  cost entry that prices it
   (`cake_plan.M_SHARE_COSTS`: B200) at a priced saving of at least
   `cake_plan.M_SHARE_MIN_SAVING` (15 us), the taped forward also keeps the middle
   pieces' maps for the backward's first wave (M-share, `M_SHARE_ARCHS`; see
@@ -287,10 +290,9 @@ call that neither of the two takes runs the third, the prep forward (below).
   split one and its sequences x `HV` CTAs fill at least 0.65 of the SMs; this
   route then runs it.
 
-On the shapes of the speed table below, `sm_100a` (B200, GB200) runs the
-split forward on `fwd_ho_a` on the three `(2, 6)` packs and the `(8, 24)`
-pair, and `sm_103a` (GB300) on the packs, with the `wy_tc2` form on the
-`(8, 24)` pair (pieces of 63 chunks); on all four GPUs the 64 x 4,096-token
+On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
+(GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
+the `(8, 24)` pair (63-chunk pieces); on all four GPUs the 64 x 4,096-token
 pack and the `(16, 48)` pair run the serial A form.  The pairs `(4, 12)`,
 `(2, 6)` and `(1, 3)`, whose pieces are shorter than 48 chunks, every other
 timed shape on R200, and every call outside the two routes above run the prep
@@ -592,8 +594,10 @@ four GPUs of one node), PyTorch 2.14.1 on its CUDA 13.0 runtime inside a CUDA
 bound to the GPU-local Grace socket).  B200, GB200 and GB300 ran a build with
 this version's kernels, routes and bits, except the backward of the `(2, 6)`
 pair on GB200 and GB300 and of the `(1, 3)` pair on GB300, which this version
-runs on the longer pieces of `bwd_one_wave_table` (see Chain), with other
-bits; R200 ran an earlier build whose
+runs on the longer pieces of `bwd_one_wave_table` (see Chain), and the split
+forward of the `(8, 24)` pair on GB300, which this version runs on `fwd_ho_a`
+instead of the `wy_tc2` form (see Chain), with other bits; R200 ran an
+earlier build whose
 routes and plans on these rows, and bits under two of the three gate regimes,
 are this version's.  The deterministic
 package is that of revision `18c327b4` (on R200 `c8a4d8a2`, with the

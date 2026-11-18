@@ -3717,11 +3717,17 @@ FWD_SPLIT_A_ARCHS = ("sm_100a", "sm_103a")
 # the shortest piece (chunks, the planned piece length) whose split forward runs on wy_a's A, per architecture (none
 # listed: every split forward).  GB300 (sm_103a, 152 SMs, CUPTI, cold L2, A-form / W-form time, four fresh processes):
 # the rows of 152- and 155-chunk pieces (the issue row, P3) take 0.91 per forward, 0.97 per forward and backward and
-# 0.94 per checkpointed step, the row of 132-chunk pieces (P1) 0.90 / 0.97 / 0.96; the 63-chunk pieces of the
-# pair_h8_hv24 row take 0.88 / 0.97 but 1.028 (gL) / 1.032 (gB) per checkpointed step, so pieces below 96 chunks keep
-# the waves on the WY stage's w / u there.  B200 (sm_100a) takes the A form on every split row, 63-chunk pieces
-# included (pair_h8_hv24: 0.85 / 0.95 / 0.98).
-FWD_SPLIT_A_MIN_PIECE: Mapping[str, int] = MappingProxyType({"sm_103a": 96})
+# 0.94 per checkpointed step, the row of 132-chunk pieces (P1) 0.90 / 0.97 / 0.96.  The 63-chunk pieces of the
+# pair_h8_hv24 row took 0.88 / 0.97 there but 1.028 (gL) / 1.032 (gB) per checkpointed step before the forward replayed
+# its launches (FWD_PLAN).  With the replay (GB300, CUPTI, W-form / A-form time: above 1 the A form is faster, six
+# fresh processes per form in ABBA order, three gate regimes) they take 1.179-1.188 per forward (1.168-1.175 in a CUDA
+# graph), 1.051-1.056 per forward and backward (eager and in a CUDA graph) and 1.093-1.095 per checkpointed step in a
+# CUDA graph; the backward is unchanged (0.999-1.000) and the eager checkpointed step is within the noise (0.979-0.996,
+# bands 0.040-0.092), so pieces of 63 chunks and more run on A.  No piece of 48-62 chunks (the split's shape class,
+# cake_plan.FORWARD_SPLIT_MIN_PIECE, starts at 48) was measured: those keep the waves on the WY stage's w / u.  B200
+# (sm_100a) takes the A form on every split row, 63-chunk pieces included (pair_h8_hv24: 0.85 / 0.95 / 0.98).  B300
+# (sm_103a, 148 SMs; the pair_h8_hv24 row cuts 63-chunk pieces there too) is not measured.
+FWD_SPLIT_A_MIN_PIECE: Mapping[str, int] = MappingProxyType({"sm_103a": 63})
 # the stages of the split forward on wy_a's A, and of the split forward on the WY stage's w / u
 FWD_SPLIT_A_STAGES = ("wy_a", "fwd_ho_a", "fwd_summary_a", "stitch")
 FWD_SPLIT_W_STAGES = ("wy_a", "wy_tc2", "fwd_fused", "fwd_summary", "stitch")
