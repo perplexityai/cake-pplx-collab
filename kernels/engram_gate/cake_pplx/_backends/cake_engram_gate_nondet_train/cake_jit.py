@@ -150,15 +150,15 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3}
 # program: (architecture, SM count) -> {CTAs per SM: clusters}, as
 # ``cudaOccupancyMaxActiveClusters`` reported them (spread cluster scheduling,
 # as the programs launch).  The count follows the CTAs per SM, not the program:
-# builds of this family with one count of CTAs per SM gave one count of
-# clusters.  So one measurement serves every program of that count:
-# B200 (148 SMs) 4 -> 142 (the forward programs); GB300 (152 SMs) 4 -> 148
-# (the forward programs), 3 -> 110 (the backward program); VR200 (212 SMs)
-# 4 -> 184 (the forward programs), 3 -> 138 (a forward build that held three
-# CTAs per SM).  The four CTAs of a cluster share one GPC, so a device holds
+# the programs of this family with one count of CTAs per SM gave one count of
+# clusters.  Every entry was measured on the shipped programs, 4 on the two
+# forward programs and 3 on the backward program: B200 (148 SMs) 142 / 104;
+# GB200 (152 SMs) 148 / 110; GB300 (152 SMs) 148 / 110; VR200 (212 SMs)
+# 184 / 138.  The four CTAs of a cluster share one GPC, so a device holds
 # fewer clusters than CTAs per SM * SMs / 4.
 RESIDENT_CLUSTERS: dict[tuple[str, int], dict[int, int]] = {
-    ("sm_100a", 148): {4: 142},
+    ("sm_100a", 148): {3: 104, 4: 142},
+    ("sm_100a", 152): {3: 110, 4: 148},
     ("sm_103a", 152): {3: 110, 4: 148},
     ("sm_107a", 212): {3: 138, 4: 184},
 }

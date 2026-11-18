@@ -65,13 +65,14 @@ Output rows must not overlap.
 resident clusters are the four-CTA clusters the device holds at once for the record's CTAs per SM
 (`cake_jit.CTAS_PER_SM`: four for `fwd`, three for `bwd`). A cluster stays in one GPC, so a device holds fewer of them
 than `CTAs per SM * SM count / 4`. `cake_jit.RESIDENT_CLUSTERS` holds the counts `cudaOccupancyMaxActiveClusters`
-gave, per count of CTAs per SM. The count follows the CTAs per SM, not the program: the builds of this family measured
-with one count of CTAs per SM gave one count of clusters. The entries come from the shipped programs, except VR200 at
-three CTAs per SM, which comes from a forward build that also held three CTAs per SM:
+gave, per count of CTAs per SM. The count follows the CTAs per SM, not the program: the programs of this family with
+one count of CTAs per SM gave one count of clusters. Every entry was measured on the shipped programs (the two forward
+programs gave the same count):
 
 | Device | Architecture, SMs | 4 CTAs per SM (`fwd`) | 3 CTAs per SM (`bwd`) |
 | --- | --- | --- | --- |
-| B200 | `sm_100a`, 148 | 142 | not measured |
+| B200 | `sm_100a`, 148 | 142 | 104 |
+| GB200 | `sm_100a`, 152 | 148 | 110 |
 | GB300 | `sm_103a`, 152 | 148 | 110 |
 | VR200 | `sm_107a`, 212 | 184 | 138 |
 

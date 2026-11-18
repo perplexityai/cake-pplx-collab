@@ -165,6 +165,10 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
 MEASURED = {
     ("sm_100a", 148, "fwd_dot2"): 142,
     ("sm_100a", 148, "fwd_f32"): 142,
+    ("sm_100a", 148, "bwd_dot2"): 104,
+    ("sm_100a", 152, "fwd_dot2"): 148,
+    ("sm_100a", 152, "fwd_f32"): 148,
+    ("sm_100a", 152, "bwd_dot2"): 110,
     ("sm_103a", 152, "fwd_dot2"): 148,
     ("sm_103a", 152, "fwd_f32"): 148,
     ("sm_103a", 152, "bwd_dot2"): 110,
@@ -191,9 +195,9 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
         for per_sm, held in table.items():
             assert 1 <= held <= per_sm * sms // cake_jit.CLUSTER_CTAS, (arch, sms, per_sm)
             assert int(fraction * per_sm * sms) // cake_jit.CLUSTER_CTAS <= held, (arch, sms, per_sm)
-    # A device or a CTA count the table does not hold: the fallback fraction (B200 at three CTAs per SM: 94).
-    assert cake_jit.resident_clusters("bwd_dot2", "sm_100a", 148) == int(fraction * 3 * 148) // 4 == 94
-    assert cake_jit.resident_clusters("fwd_dot2", "sm_100a", 152) == int(fraction * 4 * 152) // 4
+    # A device the table does not hold takes the fallback fraction (a 148-SM sm_103a part: 94 and 125).
+    assert cake_jit.resident_clusters("bwd_dot2", "sm_103a", 148) == int(fraction * 3 * 148) // 4 == 94
+    assert cake_jit.resident_clusters("fwd_dot2", "sm_103a", 148) == int(fraction * 4 * 148) // 4 == 125
     assert cake_jit.resident_clusters("bwd_dot2", "sm_103a", 160) == int(fraction * 3 * 160) // 4
     assert cake_jit.resident_clusters("fwd_f32", "sm_107a", 1) == 1
 
