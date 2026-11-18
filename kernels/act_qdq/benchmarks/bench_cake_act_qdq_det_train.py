@@ -421,6 +421,9 @@ def _bench_deepseek(args: argparse.Namespace, case: _Case, out: list[dict[str, A
 
 
 def _bench_torch_compile(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]], env: dict) -> None:
+    # Each case compiles afresh: the cases share code objects, and their static shapes would exhaust dynamo's
+    # recompile limit after a few cases.
+    torch._dynamo.reset()
     rule = _composite_rule(case.fmt)
     compiled = torch.compile(rule, dynamic=False, fullgraph=True)
     compiled_inplace = torch.compile(lambda x: x.copy_(rule(x)), dynamic=False, fullgraph=True)
