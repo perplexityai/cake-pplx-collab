@@ -4543,8 +4543,9 @@ UNBANDED_LIBRARIES = {
 # backward up to 64 rows per SM (one row block a CTA of its grid of 8 CTAs per
 # SM); the row-claims backwards past one wave of their CTAs (64 and 80 rows per
 # SM) up to the end of the band of a BF16 weight gradient that may vary on
-# sm_100a and sm_103a (1000 rows per SM); the claimed backward past the static
-# backward's 4 row blocks a CTA (256 rows per SM), with no end.  A forced
+# sm_100a and sm_103a (1000 rows per SM); the claimed backward past every
+# static backward band (at most 128 rows per SM: 2 row blocks a CTA of the
+# static backward's grid of 8 CTAs per SM), with no end.  A forced
 # route runs every call of the role's kind on the module, so these cases run
 # each library whatever the bands; each case runs on every architecture the
 # module is built for (also one where a band selects it).

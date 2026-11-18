@@ -1479,7 +1479,8 @@ def _band_modules(
     over the rows past the ends of the bands before it up to its own end
     (``suite._band_end``); the last band has no last row.  A band role may
     hold more than one band (on sm_107a the BF16 repeatable role runs on both
-    sides of the fused band)."""
+    sides of the fused band, on sm_100a and sm_103a the FP32 one on both sides
+    of the static band)."""
     return [
         (band, loader.route_module(arch, band), first, last)
         for band, first, last in suite._backward_bands(arch, role, sms)
@@ -2108,6 +2109,33 @@ BACKWARD_BAND_EDGES = [
 BACKWARD_BAND_CASES = [
     pytest.param(band, nth, id=_band_id(band, nth)) for band, nth in BACKWARD_BAND_NTHS
 ]
+# Each long role (a band role with a cut in ``LONG_BACKWARD_ROWS_PER_SM`` on
+# some architecture, and ``LONG``) as ``(long role, 1)``: the packed rows of
+# its band from the cut on (:func:`_long_band_modules`).
+LONG_BACKWARD_CASES = [
+    pytest.param(band + loader.LONG, 1, id=band + loader.LONG)
+    for band in sorted(
+        {band for cuts in loader.LONG_BACKWARD_ROWS_PER_SM.values() for band in cuts}
+    )
+]
+
+
+def _case_occurrence(
+    arch: str, role: str, sms: int, band: str, nth: int
+) -> tuple[str, int, int | None] | None:
+    """``(module, first rows, last rows or None)`` of the case ``(band,
+    nth)`` of ``BACKWARD_BAND_CASES`` or ``LONG_BACKWARD_CASES`` on ``arch``
+    with ``sms`` SMs: the ``nth`` band of a band role (:func:`_band_occurrence`)
+    or the long role ``band``'s packed rows (:func:`_long_band_modules`), or
+    ``None`` where ``arch`` with ``sms`` SMs has no such band."""
+    if not band.endswith(loader.LONG):
+        return _band_occurrence(arch, role, sms, band, nth)
+    found = [
+        (module, first, last)
+        for name, module, first, last in _long_band_modules(arch, role, sms)
+        if name == band
+    ]
+    return found[nth - 1] if len(found) >= nth else None
 
 
 @requires_device
@@ -2307,25 +2335,26 @@ def test_layouts_in_the_row_claims_and_claimed_backward_bands_meet_the_naive_tie
 
 
 @requires_device
-@pytest.mark.parametrize("band,nth", BACKWARD_BAND_CASES)
+@pytest.mark.parametrize("band,nth", BACKWARD_BAND_CASES + LONG_BACKWARD_CASES)
 def test_backward_with_infinite_grad_out_keeps_the_fp64_classes(
     band, nth, determinism_setting, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Infinite ``grad_out`` in rows that are not the last, in each
     ``BACKWARD_BANDS`` band of this device (:func:`_band_modules`: a band's
-    last rows, 4097 rows past the first of the last band, which has no end),
-    into the band's weight-gradient dtype: the weight gradient of the
-    columns holding them is not finite and every launch's has the float64
-    oracle's classes (an infinity its sign, a ``NaN`` a ``NaN``, every other
-    column finite), and ``dx`` and ``dz`` have the oracle's ``NaN``,
-    ``+inf`` and ``-inf`` positions, on every repeat the same bits (but a
-    BF16 ``dw`` in a fused or row-claims band), with the workspace zero
-    after every call."""
+    last rows, 4097 rows past the first of the last band, which has no end)
+    and in each long role's packed rows (:func:`_long_band_modules`: 4097
+    rows past its cut), into the band's weight-gradient dtype: the weight
+    gradient of the columns holding them is not finite and every launch's
+    has the float64 oracle's classes (an infinity its sign, a ``NaN`` a
+    ``NaN``, every other column finite), and ``dx`` and ``dz`` have the
+    oracle's ``NaN``, ``+inf`` and ``-inf`` positions, on every repeat the
+    same bits (but a BF16 ``dw`` in a fused or row-claims band), with the
+    workspace zero after every call."""
     arch = loader.device_arch(torch.cuda.current_device())
     sms = _sm_count()
     dw_dtype = _band_role_dtype(band)
     role = _role_of(dw_dtype)
-    found = _band_occurrence(arch, role, sms, band, nth)
+    found = _case_occurrence(arch, role, sms, band, nth)
     if found is None:
         pytest.skip(f"{arch} routes no {_band_id(band, nth)} band on {sms} SMs")
     name, first, last = found
@@ -2410,15 +2439,16 @@ def _last_block_rows(block: int, first: int, last: int | None) -> dict[str, int]
 
 @requires_device
 @pytest.mark.parametrize("count", ["rem1", "half", "remmax"])
-@pytest.mark.parametrize("band,nth", BACKWARD_BAND_CASES)
+@pytest.mark.parametrize("band,nth", BACKWARD_BAND_CASES + LONG_BACKWARD_CASES)
 def test_backward_with_infinite_grad_out_in_the_last_row_keeps_the_fp64_classes(
     count, band, nth, determinism_setting, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Infinite ``grad_out`` in the last row, at row counts that are not a
     multiple of the program's row block (``_last_block_rows``: one row, half
     a block and one row short of a whole block in the last block), in each
-    ``BACKWARD_BANDS`` band of this device (:func:`_band_modules`) into the
-    band's weight-gradient dtype: ``+inf`` in column 3, ``-inf`` in
+    ``BACKWARD_BANDS`` band of this device (:func:`_band_modules`) and each
+    long role's packed rows (:func:`_long_band_modules`) into the band's
+    weight-gradient dtype: ``+inf`` in column 3, ``-inf`` in
     column 40, and ``+inf`` in column 77 beside ``-inf`` in the row before.
     The weight gradient of those columns has the float64 oracle's class
     (``+inf``, ``-inf`` and ``NaN``) in every band and every other column is
@@ -2430,7 +2460,7 @@ def test_backward_with_infinite_grad_out_in_the_last_row_keeps_the_fp64_classes(
     sms = _sm_count()
     dw_dtype = _band_role_dtype(band)
     role = _role_of(dw_dtype)
-    found = _band_occurrence(arch, role, sms, band, nth)
+    found = _case_occurrence(arch, role, sms, band, nth)
     if found is None:
         pytest.skip(f"{arch} routes no {_band_id(band, nth)} band on {sms} SMs")
     name, first, last = found
