@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The KCP registry (``cake_kcp_jit``) and manifests of the Cake packed KDA training package: the records against the
-frozen kernel ABIs, the program names against the identity rule, ``build.json`` (the shipped programs, never a
+frozen kernel ABIs, the program each record launches, ``build.json`` (the shipped programs, never a
 test-only one) and ``build.test.json`` (the test-only programs, loadable only after ``cake_kcp_plan.enable_test_knobs()``),
 and the architecture the workspace byte query selects the local arena's records for.
 No device is needed; nothing is built or launched.
@@ -89,7 +89,6 @@ DAV_PLAN = [
 # The K4 merge records (the register-blocked v2 builds the rule names): record -> (build keywords, threads per CTA =
 # 128 * cols_per_cta / the thread tile's outputs, architectures).  The pairs builds are scalar on sm_107a (the
 # exporter's per-architecture keywords; the program name hashes the keywords above).
-MERGE_V2_MODULE = "tart.kda_chunk_kcp_affine_merge.sm100_sm103_sm107.kda_chunk_det_affine_merge_fp32_v2_kcp"
 MERGE_RECORDS = {
     "kcp_affine_merge_c8": (
         {"chunk_k": 16, "cols_per_cta": 8, "pairs": True, "ring": 4, "tile": "4x4"},
@@ -163,79 +162,33 @@ BLOCKS = {
     "kcp_fwdh_o": 320,
     "kcp_fwdh_o_vh64": 320,
 }
-# The identity rule: ``cake_kda_det_train_<20 hex of sha256("<source module>\\n<sorted JSON of the build keywords>")>``,
-# then ``_kcp`` for a program only the context-parallel route runs (every one but the single-rank ``dav`` stage).
-# The digest hashes the source module path the program shipped under, so the digests are those of the previous names
-# (``kcp_fwd_o``'s KCP module is new: its path is its own).
-_W = "sm100_sm103_sm107"
-IDENTITIES = {
-    "kcp_fwdh_offset": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_v2_kcp",
-        {"program": "offset", "tile_prefetch": 0},
-    ),
-    "kcp_fwdh_offset_vh64": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "offset", "vh": 64, "prefetch": True, "tmem_batch": True},
-    ),
-    "kcp_fwdh_tape": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "tape", "vh": 64, "tape_store": "tma"},
-    ),
-    "kcp_dhu_offset": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "offset", "fuse_dv1": 1},
-    ),
-    "kcp_dhu_offset_overlap": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_det_dhu_v2_kcp",
-        {"program": "offset", "tile_prefetch": 0, "fuse_dv1": 1},
-    ),
-    "kcp_dhu_offset_vh64": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "offset", "vh": 64, "fuse_dv1": 1},
-    ),
-    "kcp_dhu_tape": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "tape", "vh": 64, "tape_store": "tma", "fuse_dv1": 1},
-    ),
-    "kcp_transfer_walk": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_det_transfer_walk_bf16x3_v2_kcp",
-        {"vh": 64},
-    ),
-    **{name: (MERGE_V2_MODULE, row[0]) for name, row in MERGE_RECORDS.items()},
-    "kcp_fwd_o": (f"tart.kda_chunk_kcp_fwd_o.{_W}.kda_chunk_det_fwd_o_v1_kcp", {}),
-    "kcp_dav": (f"tart.kda_chunk_bwd_dav.{_W}.kda_chunk_train_bwd_dav_v1", {}),
-    "kcp_fwdh_o": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_o_v1_kcp",
-        {"vh": 128},
-    ),
-    "kcp_fwdh_o_vh64": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_o_v1_kcp",
-        {"vh": 64},
-    ),
-    "kcp_transfer_walk_three_mma": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 1},
-    ),
-    "kcp_transfer_walk_plain_tf32": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 2},
-    ),
-    "kcp_transfer_walk_bf16x3": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_bf16x3_v1",
-        {"vh": 128},
-    ),
-    "kcp_transfer_walk_tf32_hilo": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 0},
-    ),
-    "kcp_fwdh_tape_full": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "tape"},
-    ),
-    "kcp_dhu_tape_full": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "tape", "fuse_dv1": 1},
-    ),
+# The program every record launches.  The exporter names a program after its kernel and build keywords, so a changed
+# kernel build ships under a new name; this table pins each record's program, and a renamed program fails here until the
+# table is reviewed and updated.  Every name carries the package's ``cake_kda_det_train_`` prefix and, but for the
+# single-rank ``dav`` stage, the ``_kcp`` suffix of a program only the context-parallel route runs.
+PROGRAM_NAMES = {
+    "kcp_fwdh_offset": "cake_kda_det_train_7d43005ed0adb9ffadf2_kcp",
+    "kcp_fwdh_offset_vh64": "cake_kda_det_train_5a20cd12bb62bb6f3ac5_kcp",
+    "kcp_fwdh_tape": "cake_kda_det_train_6fac4410ba86c48541c4_kcp",
+    "kcp_dhu_offset": "cake_kda_det_train_c18b6c39ed72603017e6_kcp",
+    "kcp_dhu_offset_overlap": "cake_kda_det_train_7886f9703ccdc5a28f12_kcp",
+    "kcp_dhu_offset_vh64": "cake_kda_det_train_0897f215cbb985961807_kcp",
+    "kcp_dhu_tape": "cake_kda_det_train_daf0600c550c5f707ac4_kcp",
+    "kcp_transfer_walk": "cake_kda_det_train_8ffd931ca0595948b608_kcp",
+    "kcp_affine_merge_c8": "cake_kda_det_train_7b6b22d3423f3138baf7_kcp",
+    "kcp_affine_merge_c16": "cake_kda_det_train_9ab870ac43ee331f2dd3_kcp",
+    "kcp_affine_merge_c32": "cake_kda_det_train_7634c7541a6836a5146a_kcp",
+    "kcp_affine_merge_c64": "cake_kda_det_train_8cda0d1f1291e740f798_kcp",
+    "kcp_fwd_o": "cake_kda_det_train_c811c1b52ed680d0a515_kcp",
+    "kcp_dav": "cake_kda_det_train_f227dd21f1f3cb464b29",
+    "kcp_fwdh_o": "cake_kda_det_train_051de8b4660b1587fc85_kcp",
+    "kcp_fwdh_o_vh64": "cake_kda_det_train_5e6f3ba0b9b429241ab2_kcp",
+    "kcp_transfer_walk_three_mma": "cake_kda_det_train_b1477ed31fad32a5c2c9_kcp",
+    "kcp_transfer_walk_plain_tf32": "cake_kda_det_train_64ba2583f28f7d4c0102_kcp",
+    "kcp_transfer_walk_bf16x3": "cake_kda_det_train_b1a95a8ee8110e47558e_kcp",
+    "kcp_transfer_walk_tf32_hilo": "cake_kda_det_train_1ac972f0cb7cc7b13cf7_kcp",
+    "kcp_fwdh_tape_full": "cake_kda_det_train_9cfe05bce78410f1304b_kcp",
+    "kcp_dhu_tape_full": "cake_kda_det_train_e1f82c1cff44a51988f7_kcp",
 }
 
 
@@ -317,15 +270,13 @@ def test_record_matches_the_frozen_abi(name: str) -> None:
         assert record["logical"][parameter] in vocabulary, (name, parameter)
 
 
-def test_program_names_follow_the_identity_rule() -> None:
-    for name, (module, kwargs) in IDENTITIES.items():
-        digest = hashlib.sha256(
-            f"{module}\n{json.dumps(kwargs, sort_keys=True)}".encode()
-        ).hexdigest()
+def test_every_record_launches_its_pinned_program() -> None:
+    for name, library in PROGRAM_NAMES.items():
+        assert _records()[name]["library"] == library, name
         suffix = "" if name in CHUNK_STAGES else "_kcp"
-        assert (
-            _records()[name]["library"] == f"cake_kda_det_train_{digest[:20]}{suffix}"
-        ), name
+        assert library.startswith("cake_kda_det_train_") and library.endswith(suffix), (
+            name
+        )
     libraries = [record["library"] for record in _records().values()]
     assert len(set(libraries)) == len(libraries), "every record is its own program"
     assert not set(libraries) & {r["library"] for r in cake_jit.MODULES.values()}, (
