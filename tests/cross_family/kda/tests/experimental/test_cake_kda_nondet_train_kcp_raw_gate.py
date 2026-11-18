@@ -41,8 +41,9 @@ under the mode's name, and the single-rank raw path on the whole pack (arm ``sin
 of the unsplit pack.  On the first draw, exactly: a recompute handle's recompute issues no collective (the call's
 counter and sequence, and no torch.distributed call in the recompute phase), the hand-off counters, the graph
 events, the mode refusals, the explicit-gate path on the same activated gate runs the same stages in the same order
-with the same collectives (``gate_epilogue`` -> ``param_finalize``), and the reduction helper's documented bits:
-one call's result is the same on every rank, the FP32 rank-order sum of the partials.
+with the same collectives (``gate_epilogue`` -> ``param_finalize``), the deterministic package's raw KCP route on the
+same rank has the same launch sequence (its launch records only: its outputs are not used), and the reduction
+helper's documented bits: one call's result is the same on every rank, the FP32 rank-order sum of the partials.
 """
 
 from __future__ import annotations
@@ -917,8 +918,8 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
     path on the whole pack (arm ``single``), against the FP64 reference of the unsplit pack beside the naive BF16
     tier.  On the first draw also: :data:`REPEATS` more saved passes (arm ``repeat``, the worst launch kept), the
     recompute handles' collectives, the hand-off counters, the graph events, the mode refusals, the explicit-mode
-    launch comparison and the reduction helper's bits (one call's result on every rank; the FP32 rank-order sum of
-    the partials)."""
+    launch comparison, the deterministic raw KCP route's launch sequence (its records only) and the reduction
+    helper's bits (one call's result on every rank; the FP32 rank-order sum of the partials)."""
     from torch.utils.checkpoint import checkpoint
 
     lengths, H, _w, layout = row
@@ -1222,6 +1223,27 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
                 and launch_cmp["gates"] == ["raw", "raw", "g", "g"]
             )  # fmt: skip
             del ws_g, saved_e
+            # the deterministic package's raw KCP route on the same operands and the same context (the context holds
+            # no mode and serves both packages): the same launch sequence, the backward's in the deterministic
+            # package's order (_bwd_sequence_first_main puts back the K1 tape replay this package issues under b1 and
+            # the dm-form K3 it issues on the side stream).  Its launch records only: its outputs are discarded.
+            ws_det = det_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True)
+            # mode contract: launch records only
+            _, saved_d = det_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws_det, **GK
+            )
+            rec_fd = dict(det_kcp.LAST_CALL["fwd"])
+            # mode contract: launch records only
+            det_kcp.cake_kda_det_train_kcp_backward(
+                q, k, v, g, beta, ctx, dout, saved=saved_d, workspace=ws_det, **GK
+            )
+            rec_bd = dict(det_kcp.LAST_CALL["bwd"])
+            flags["det_launches_eq"] = (
+                rec_fr["sequence"] == rec_fd["sequence"]
+                and _bwd_sequence_first_main(rec_br) == rec_bd["sequence"]
+                and rec_fd["gate"] == rec_bd["gate"] == "raw"
+            )
+            del ws_det, saved_d
             # a backend with local stages whose probe was pending must have run it on the first pass (reported,
             # not gated beyond 'checked': the forward's intra program writes gk row 63 alone)
             flags["spec3"] = (
