@@ -1417,6 +1417,7 @@ class ArmCakeNope:
         if size is None:
             return None
         inp = self.inp
+        # sized for the route of :meth:`versions` (``dkv_direct``): the environment override resolved
         return int(
             size(
                 inp.total_q,
@@ -1425,6 +1426,7 @@ class ArmCakeNope:
                 inp.q.device,
                 backward=True,
                 num_segments=inp.num_segments,
+                dkv_direct=_dkv_direct_from_environment(),
             )
         )
 
