@@ -282,19 +282,21 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # ``_GRAPH_HELD`` (or in ``uo.released``, where a refill on another device moves the
 # released buffers of every other device) until a refill of the device's other kind
 # takes them (``_pool_drain`` returns the released buffers of every kind of its
-# device): it keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``, at least the
-# kind's ``_POOL_SIZE``, which the failed refill already raised) or drops it; with no
-# such refill (the other kind off too, or the device without its memory pool) they
-# stay.  A dropped buffer's memory stays cached in the package's memory pool.
-# ``_POOL_READY[kind][device index]`` is the size up to which the device's pool is
-# full (absent or 0: the next eager call refills it; a capture that takes a buffer
-# or finds none sets 0): the one lookup of an eager call while the pool needs
-# nothing.  ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards the
-# take (``_pool_take``), the refill and its drain (``_pool_refill``), every entry
-# into the package's memory pool (the refill's and ``_package_zeros``': two threads
-# never route their allocations to one pool at once) and the writes and drops of
-# the ``_CAPTURE_*WORKSPACES`` entries.  Nothing that runs under it may call a
-# function that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
+# device): it keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``,
+# at least the kind's ``_POOL_SIZE``, which the failed refill already raised) or
+# drops it; with no such refill (the other kind off too, or the device without its
+# memory pool) they stay.  A dropped buffer's memory stays cached in the package's
+# memory pool.  ``_POOL_READY[kind][device index]`` is the need up to which an eager
+# call does not refill: the pool's size after a refill that succeeded, 0 (or absent:
+# the next eager call refills) once a capture took a buffer or found none, and the
+# call's need after a refill that ran out of memory (the pool and its size stay as
+# they were): the one lookup of an eager call while the pool needs nothing.
+# ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards the take
+# (``_pool_take``), the refill and its drain (``_pool_refill``), every entry into the
+# package's memory pool (the refill's and ``_package_zeros``': two threads never
+# route their allocations to one pool at once) and the writes and drops of the
+# ``_CAPTURE_*WORKSPACES`` entries.  Nothing that runs under it may call a function
+# that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
 # ``_capture_buffer``): the thread would wait for itself.
 _POOL_DEPTH = 4
 # torch's out-of-memory error: a refill that meets it leaves the pool as it was.
@@ -1200,8 +1202,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
     object, or freed), raise the device's pool size to ``need``, free idle buffers below it and zero new buffers on
     the current stream until the pool holds ``_POOL_DEPTH``; each new buffer's flag is set by a device-to-host copy,
     queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error leaves the pool
-    as it was (the next refill waits for the next take); any other failure leaves the device without pre-zeroed
-    buffers of ``kind``."""
+    and its size as they were and sets ``_POOL_READY[kind][device_index]`` to ``need`` (the next refill comes at a
+    larger need or after the next take); any other failure leaves the device without pre-zeroed buffers of
+    ``kind``."""
 
     uo = _user_objects()
     if not uo:
