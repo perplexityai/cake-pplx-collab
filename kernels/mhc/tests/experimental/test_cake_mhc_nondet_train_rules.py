@@ -3655,7 +3655,9 @@ def _cpu_calls(**keywords) -> dict:
         "cake_mhc_nondet_train_handoff_prepare": lambda: pkg.cake_mhc_nondet_train_handoff_prepare(
             X, pre, fn, scale, base, **keywords
         ),
-        "cake_mhc_nondet_train_collapse_forward": lambda: pkg.cake_mhc_nondet_train_collapse_forward(X, pre, **keywords),
+        "cake_mhc_nondet_train_collapse_forward": lambda: pkg.cake_mhc_nondet_train_collapse_forward(
+            X, pre, **keywords
+        ),
         "cake_mhc_nondet_train_collapse_backward": lambda: pkg.cake_mhc_nondet_train_collapse_backward(
             X, pre, dU, **keywords
         ),

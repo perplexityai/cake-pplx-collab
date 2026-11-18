@@ -313,7 +313,7 @@ def _reference_block_handoff(i: dict, lo: int, hi: int, dtype: torch.dtype) -> d
             grad_outputs=[i["dU"][lo:hi].to(dtype), i["dY"][lo:hi].to(dtype), i["dpre_next"][lo:hi].to(dtype)],
         )
     out = {"U": U.detach(), "Y": Y.detach(), "pre_next": pre_next.detach()}
-    out.update(zip(("dX", "dfn", "dscale", "dbase", "dB", "dpre_in"), grads))
+    out.update(zip(("dX", "dfn", "dscale", "dbase", "dB", "dpre_in"), grads, strict=True))
     return out
 
 
