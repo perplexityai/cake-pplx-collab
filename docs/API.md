@@ -18,7 +18,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 ## det and nondet
 
 - **det:** reductions run in a fixed order, so the same inputs, hardware and plan give bitwise identical outputs and gradients. Some families add conditions, such as the same token count, the same SM count or the same topology.
-- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other. fmha has no det module; its accuracy reference is an FP64 oracle beside the same math in BF16.
+- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. gdn promises neither: see its row below (its tests record each output's error against an FP64 reference beside the BF16 naive implementation's). Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other. fmha has no det module; its accuracy reference is an FP64 oracle beside the same math in BF16.
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
@@ -26,7 +26,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
-| gdn | Fixed order today, with no run-to-run promise. Within det budgets but not bitwise det. | Runs unchanged |
+| gdn | Fixed order today, with no run-to-run promise. Not bitwise det. As with det, the tests record each output's error against an FP64 reference beside the BF16 naive implementation's. | Runs unchanged |
 | mhc | `dfn` differs from det only near an FP32 rounding boundary; everything else is bitwise det. Repeats run to run. | Not stated |
 | mhc_head | Same kernels as det | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
@@ -35,7 +35,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | dsa_sparse_attention | `dkv` uses unordered FP32 atomics. No output is promised to repeat bit for bit. | Backward raises |
 | dense_gemm | Some routes add partials in arrival order. No run-to-run guarantee. | Alerts only for order-varying launches (explicit split counts) |
 | moe_grouped_gemm | Every shipped launch has a fixed order. `dW` can differ from det on a split 512 tail. | No shipped launch alerts |
-| lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for gradients. | Alerts before a K-sliced `dX` reduction |
+| lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for any output. | Alerts before a K-sliced `dX` reduction |
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
 
@@ -519,7 +519,7 @@ Other public names:
 
 ### `cake_pplx.cake_gdn_nondet_train`
 
-Every launch has a fixed order today, so two runs on one device give the same bits, but the contract does not promise run-to-run bits. Results match det within its accuracy budgets, not bitwise. Deterministic algorithms run unchanged. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train.py).
+Every launch has a fixed order today, so two runs on one device give the same bits, but the contract does not promise run-to-run bits. Results are not bitwise det. The tests measure each output's error against an FP64 reference over 32 random inputs, beside the error of PyTorch on the same BF16 inputs, and record whether it is within 1.005 times PyTorch's (L2 norm: the median and the largest over the inputs; max norm: input by input, on at least half of them) as a `TIER` line. A miss is recorded and does not fail a test ([`kernels/gdn/tests/cake_naive.py`](../kernels/gdn/tests/cake_naive.py)). Deterministic algorithms run unchanged. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -562,7 +562,7 @@ Other public names:
 
 ### `cake_pplx.cake_gdn_nondet_train_kcp`
 
-Every launch has a fixed order today, but run-to-run bits are not promised. This module keeps det's contract and accuracy budgets, not det's bits. An options instance from another package raises `TypeError`, and a det saved set raises `ValueError`. Use this package's own context. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py).
+Every launch has a fixed order today, but run-to-run bits are not promised. This module keeps det's contract, not det's bits. The tests record each output's error against an FP64 reference beside the BF16 naive implementation's, as for `cake_gdn_nondet_train`. An options instance from another package raises `TypeError`, and a det saved set raises `ValueError`. Use this package's own context. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -570,7 +570,7 @@ Every launch has a fixed order today, but run-to-run bits are not promised. This
 | `cake_gdn_nondet_train_kcp_partition` | `(cu_seqlens_global_cpu, world_size, layout="contiguous", fragments=None, *, cut_points=None)` | As det | Returns `CakeGDNNondetKcpPartition`. Same algorithm as det. |
 | `cake_gdn_nondet_train_kcp_build_context` | `(part, group, rank, device, conv_kernel_size=4, *, sm_count=None, graph_replay=False)` | `graph_replay=True` builds the context for `graph='replay'` calls; a non-bool value raises `TypeError` | This rank's context, with this package's own head plan. |
 | `cake_gdn_nondet_train_kcp_forward` | `(q, k, v, g, beta, ctx, *, scale=None, save_for_backward=True, workspace=None, options=None, **knobs)` | As det KCP | Returns `(out, saved)`. Only this package's backward can read the saved set. `save_mode` adds `'light_akk'`. |
-| `cake_gdn_nondet_train_kcp_backward` | `(q, k, v, g, beta, ctx, dout, *, saved=None, scale=None, workspace=None, options=None, **knobs)` | `dout` BF16 | Returns `(dq, dk, dv, dbeta, dg)`, within det's budgets but not bitwise det. |
+| `cake_gdn_nondet_train_kcp_backward` | `(q, k, v, g, beta, ctx, dout, *, saved=None, scale=None, workspace=None, options=None, **knobs)` | `dout` BF16 | Returns `(dq, dk, dv, dbeta, dg)`, not bitwise det. |
 
 Other public names:
 
@@ -1561,7 +1561,7 @@ No vocab-sized tensor larger than `chunk_size` rows is ever materialized.
 - The logprob backward recomputes the logits per chunk.
 - The family also computes log-probabilities, and the unreduced forward KL from a detached teacher, over a ragged per-token candidate support, with an optional per-row temperature.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.4 for `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.5 for `sm_107a`.
 
 **Inputs.**
 
@@ -1594,10 +1594,10 @@ The module exports exactly these five functions. The backend `cake_pplx._backend
 
 Same computation, arguments and precision boundaries as det, with these differences:
 
-- A sliced `dX` GEMM stores K slices into FP32 slabs that are summed in slice order. `dX` repeats run to run but may differ from det's bits.
-- Zero-weight policy rows and zero-`dlogp` rows skip the gradient GEMMs, so loss and `dW` bits may differ from det within the accuracy budget.
+- A sliced `dX` GEMM stores K slices into FP32 slabs that are summed in slice order. That fixed order is a design note, not a run-to-run promise, and `dX` bits may differ from det's.
+- Both packages leave zero-weight policy rows out of the gradient path and skip the GEMM work of zero-`dlogp` rows. Nondet adds no loss term for a zero-weight row (det's default `"exact"` loss mode keeps the loss bits of the unsplit call), and its zero-`dlogp` skip starts at 1946 valid rows on `sm_107a` (det: 4097), so loss and `dW` bits may differ from det. Both modules are judged against the BF16 naive tier.
 - A one-row CE call at H=6144 can run one-pass programs.
-- The module makes no run-to-run bitwise promise for gradients.
+- The module makes no run-to-run bit-equality promise for any output.
 - Under deterministic algorithms, the backend raises PyTorch's alert before a K-sliced `dX` reduction (`RuntimeError`, or `UserWarning` with `warn_only`).
 - There is no automatic memory form: `memory_mode=None` is the fastest form.
 
@@ -1608,7 +1608,7 @@ There is no KCP module. Source: [`kernels/lm_head/cake_pplx/cake_lm_head_nondet_
 | `cake_lm_head_nondet_train_loss` | Same as the det loss | As det. `dx_finalize` here only selects the one-pass scatter of the compacted `dX` output. | Returns the FP32 loss, plus `logp` with `return_logp=True`. |
 | `cake_lm_head_nondet_train_logprob` | Same as the det logprob | As det. `None`, or a number whose FP32 value is 1.0, runs without temperature. A bool temperature raises `ValueError`. With `'keep_logits'`, a `hidden_count` left at `None` is passed down as `None` unless `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` is `'0'`. | Returns FP32 `logp [T]`. |
 | `cake_lm_head_nondet_train_preload` | `(device=None, *, temperature=False)` | As det | Per-thread state (side streams, events, count cells) belongs to the calling thread. |
-| `cake_lm_head_nondet_train_support_logprob` | Same as det | As det | No run-to-run promise for gradients. The backward alerts before a dense `dX` of more than one K slice. |
+| `cake_lm_head_nondet_train_support_logprob` | Same as det | As det | No run-to-run bit promise for any output. The backward alerts before a dense `dX` of more than one K slice. |
 | `cake_lm_head_nondet_train_support_kl` | Same as det | As det | Gradients behave as in `support_logprob`. |
 
 The module exports exactly these five functions. The nondet backend also provides `set_gradient_placement`, `set_one_pass_rows`, `set_kept_logits_form` (which decides `hidden_count` for `'keep_logits'` when it is left at `None`), `memory_report`, `BINDING_CACHE` and `SUPPORTED_COMPUTE_CAPABILITIES`.
@@ -1658,6 +1658,6 @@ logp2.sum().backward()
 - A wrong `num_valid_rows` value ends the CUDA context through a device-side assertion, unless `check_num_valid_rows=True`. An `sm_103a` call whose library was built with CUDA 13.0 keeps the host-count schedule and reads the count back once.
 - An invalid temperature tensor or support layout also ends the CUDA context through a device assertion, unless `check_temperature` / `check_inputs` is `True`.
 - `memory_mode='budget'` (or an automatic budget form) releases the saved accumulators after a graph-freeing backward, so a second backward raises.
-- Nondet: the deterministic-algorithms alert is part of the contract. The zero-weight and zero-`dlogp` row skips can change loss and `dW` bits relative to det, within the accuracy budgets.
+- Nondet: the deterministic-algorithms alert is part of the contract. Its zero-weight loss sum and its `sm_107a` zero-`dlogp` floor differ from det's, so loss and `dW` bits can differ from det; both modules are judged against the BF16 naive tier.
 - The binding-cache environment variables are read once at import, so a malformed capacity fails at import.
 - Each backend package's README (`cake_pplx/_backends/<pkg>/README.md`) holds the memory-margin and toolchain notes that the docstrings refer to.

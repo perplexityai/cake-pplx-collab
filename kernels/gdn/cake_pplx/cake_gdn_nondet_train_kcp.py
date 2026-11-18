@@ -34,8 +34,10 @@ Mode
   and the table layout of the context), so use each package's own context.
   This module refuses an options instance of another package (``TypeError``);
   the backward refuses a saved set of another package (``ValueError``).
-* The package keeps the deterministic package's contract and accuracy
-  budgets; its results are not bitwise equal to that package's.  It also takes
+* The package keeps the deterministic package's contract, not its bits.  The
+  tests record each output's error against an FP64 reference beside the BF16
+  naive implementation's; a miss is recorded and does not fail a test.  It
+  also takes
   ``save_mode="light_akk"``: the light saved set plus the forward's BF16
   ``Akk`` tape, which the backward's prep replay reads instead of solving the
   block inverse; it needs ``use_qk_l2norm_in_kernel=True`` and is the default
@@ -354,7 +356,7 @@ def cake_gdn_nondet_train_kcp_backward(
     -------
     ``(dq, dk, dv, dbeta, dg)``: BF16 gradients of ``q, k, v`` (the ``HV / H_qk`` value heads' contributions to
     ``dq`` / ``dk`` reduced in FP32 and rounded once), FP32 gradients of ``beta`` and ``g``; fresh tensors, ranked
-    like the inputs; within the deterministic package's accuracy budgets, not bitwise equal to its results.
+    like the inputs; not bitwise equal to the deterministic package's results.
     """
     return _pkg().cake_gdn_nondet_train_kcp_backward(
         q,

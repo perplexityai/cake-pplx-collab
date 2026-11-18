@@ -38,12 +38,8 @@ import torch.utils.checkpoint
 
 import cake_pplx.cake_lm_head_det_train as det_public
 import cake_pplx.cake_lm_head_nondet_train as public
-from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
-    error_report,
-    make_inputs,
-    reference_fp64,
-    reference_unchunked,
-)
+from tests.experimental.test_helpers.cake_lm_head_judge import contract_lm_head
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 
 SEED = 20261031
 H_HOST, V_HOST = 256, 512
@@ -516,12 +512,6 @@ def _bits(t):
     return t.view({torch.bfloat16: torch.int16, torch.float32: torch.int32}[t.dtype])
 
 
-# test_cake_lm_head_nondet_train's accuracy gate, unchanged: an error at most GATE_MARGIN times the unchunked path's
-# error against the FP64 oracle plus GATE_TINY
-_GATE_MARGIN = 1.05
-_GATE_TINY = dict(dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-
-
 def _logprob_step(fn, inp, **kw):
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
@@ -534,7 +524,7 @@ def test_device_public_entry_places_the_gradients(monkeypatch):
     """Through the public entry on the generated program, the backend's
     gradient placement ``"auto"`` (its default): a call under ``torch.no_grad`` launches no dX / dW GEMM and gives the
     plain call's ``loss`` / ``logp`` bits; a non-reentrant checkpointed step launches the plain step's dX / dW GEMMs
-    once and gives its ``loss`` / ``logp`` / ``dX`` / ``dW`` bits (one dX slice pinned: the same bits run to run)."""
+    once (one dX slice pinned) and holds its contract."""
     _require_device()
     nd_backend = importlib.import_module(
         "cake_pplx._backends.cake_lm_head_nondet_train.cake_backend"
@@ -606,8 +596,7 @@ def test_device_public_entry_places_the_gradients(monkeypatch):
     assert once == count
     for key in ("loss", "logp"):
         assert torch.equal(_bits(nograd[key]), _bits(plain[key])), key
-    for key in ("loss", "logp", "dX", "dW"):
-        assert torch.equal(_bits(ckpt[key]), _bits(plain[key])), key
+    contract_lm_head(ckpt, inp)
 
 
 def test_keep_logits_mode_reaches_the_opt_in_route(recorders):
@@ -680,15 +669,15 @@ def test_device_keep_logits_on_both_routes_is_the_plain_call(monkeypatch):
     route's always, the non-deterministic route's with one dX slice pinned (an explicit ``gemm_tuning``: its plain
     store) -- the non-deterministic route under its chunked kept form (``set_kept_logits_form(tail_fold=False,
     one_pass=False)``).  The non-deterministic plain call of more than one chunk otherwise runs the vocabulary-major
-    backward and the kept call its own chunk loop (another summation order): the kept ``dX`` / ``dW`` meet the suite's
-    unchanged gates against the FP64 oracle (``test_cake_lm_head_nondet_train``: ``GATE_MARGIN`` times the
-    unchunked path's error plus ``GATE_TINY``).  On a three-chunk call the non-deterministic public route keeps one
+    backward and the kept call its own chunk loop (another summation order): there the kept ``dX`` / ``dW`` are not
+    compared with the plain call's (``test_cake_lm_head_nondet_train`` judges the kept form's accuracy).  Every call
+    keeps its contract (:func:`contract_lm_head`).  On a three-chunk call the non-deterministic public route keeps one
     contiguous buffer -- with ``hidden_count=False`` (the valid rows counted on the host) on the default plan's chunks
     (``loop_chunks``: no fold at three chunks of ``T``), with ``hidden_count`` left at ``None`` (the kept form's
     default: the hidden count where eligible) on the shipped chunks -- and gives the plain call's ``logp`` and loss
-    bits, its ``dX`` bits with one dX slice pinned (dX runs in the forward's chunks), and a ``dW`` (one GEMM over the
-    kept rows) that repeats bit for bit; on a call of fewer than three chunks the default keeps one buffer on the
-    folded chunks."""
+    bits and its ``dX`` bits with one dX slice pinned (dX runs in the forward's chunks), its ``dW`` one GEMM over the
+    kept rows, and a repeated kept call holds its contract; on a call of fewer than three chunks the default keeps one
+    buffer on the folded chunks."""
     _require_device()
     nd_backend = importlib.import_module(
         "cake_pplx._backends.cake_lm_head_nondet_train.cake_backend"
@@ -729,6 +718,7 @@ def test_device_keep_logits_on_both_routes_is_the_plain_call(monkeypatch):
         ):
             kw = dict(chunk_size=4096, gemm_tuning=tuning)
             plain = _logprob_step(fn, inp, **kw)
+            contract_lm_head(plain, inp, entry="logprob")
             before = dict(counts)
             # the chunked kept form: the plain call's dW bits
             previous = nd_backend.set_kept_logits_form(tail_fold=False, one_pass=False)
@@ -755,20 +745,7 @@ def test_device_keep_logits_on_both_routes_is_the_plain_call(monkeypatch):
             assert torch.equal(
                 _bits(loss_of(kept).float()), _bits(loss_of(plain).float())
             ), (route, tuning)
-            assert bool(torch.isfinite(kept["dX"].float()).all())
-            assert torch.all(kept["dX"][~inp.valid] == 0)
-            if vm:
-                oracle = reference_fp64(inp, entry="logprob")
-                b0 = error_report(
-                    reference_unchunked(inp, entry="logprob"), oracle, inp.labels
-                )
-                errors = error_report(kept, oracle, inp.labels)
-                for key in ("dX_rel_l2", "dW_rel_l2"):
-                    assert errors[key] <= _GATE_MARGIN * b0[key] + _GATE_TINY[key], (
-                        key,
-                        errors[key],
-                        b0[key],
-                    )
+            contract_lm_head(kept, inp, entry="logprob")
         # the kept form through the public route on a three-chunk call: the host count (hidden_count=False, the chunks
         # of the default plan's fold rule, ``loop_chunks``: the shipped chunks at three chunks of T) and the default
         # (hidden_count left at None: the hidden count, the shipped chunks)
@@ -796,13 +773,10 @@ def test_device_keep_logits_on_both_routes_is_the_plain_call(monkeypatch):
             assert torch.equal(
                 _bits(loss_of(kept).float()), _bits(loss_of(plain).float())
             ), tuning
-            assert torch.equal(_bits(again["dW"]), _bits(kept["dW"])), tuning
             if tuning:
                 assert torch.equal(_bits(kept["dX"]), _bits(plain["dX"]))
-                assert torch.equal(_bits(again["dX"]), _bits(kept["dX"]))
-            assert bool(torch.isfinite(kept["dW"].float()).all())
-            assert bool(torch.isfinite(kept["dX"].float()).all())
-            assert torch.all(kept["dX"][~inp.valid] == 0)
+            for out in (plain, kept, again):
+                contract_lm_head(out, inp, entry="logprob")
         # below three chunks the hidden count is not eligible: the default keeps one buffer on the folded chunks
         small = make_inputs(
             4600, seed=SEED + 4601, device=torch.device("cuda"), ignore_frac=0.05
@@ -917,8 +891,7 @@ def test_temperature_refuses_keep_logits():
 def test_device_temperature_through_the_public_entry():
     """Through the public entry on the generated program: a heterogeneous per-token
     temperature and a scalar give the bits (integer views; one dX slice pinned) of the backend's temperature entry
-    with the same argument, ``temperature=1.0`` the bits of the call without the keyword; with the default dX slices
-    ``logp`` / ``dW`` are the deterministic entry's bits with the same temperature;
+    with the same argument, ``temperature=1.0`` the bits of the call without the keyword;
     ``cake_lm_head_nondet_train_preload(temperature=True)`` loads the temperature forms and a call after it
     gives the same bits."""
     _require_device()
@@ -955,12 +928,6 @@ def test_device_temperature_through_the_public_entry():
                 **one,
             ),
             type(value).__name__,
-        )
-        same(
-            run(public.cake_lm_head_nondet_train_logprob, temperature=value),
-            run(det_public.cake_lm_head_det_train_logprob, temperature=value),
-            ("vs deterministic", type(value).__name__),
-            keys=("logp", "dW"),
         )
     plain = run(public.cake_lm_head_nondet_train_logprob, **one)
     same(

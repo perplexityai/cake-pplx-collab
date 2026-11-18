@@ -31,10 +31,10 @@ CPU tests of ``save_mode="light_akk"`` of the non-deterministic KCP GDN package
   ``torch.utils.checkpoint(use_reentrant=False)`` a ``"light_akk"`` call binds the ``save_mode="light"`` figure.
 
 The bitwise checks here hold on the deterministic fake backend (host plumbing), which is not bitwise the device
-programs.  The device rows (``"light_akk"`` within the budgets of ``"light"`` on NaN-filled allocations with the launch
-census and the saved bytes, ``graph="replay"`` steps, the multi-rank rows; bits recorded as data, never gated) are in
-``test_cake_gdn_nondet_train_kcp_cp1.py`` and ``test_cake_gdn_nondet_train_kcp_dist.py``; the two-rank fake-backend rows in
-``test_cake_gdn_nondet_train_kcp.py``.
+programs.  The device rows (``"light_akk"`` and ``"light"`` each judged against the FP64 oracle with the naive BF16
+tier on NaN-filled allocations, with the launch census and the saved bytes, ``graph="replay"`` steps, the multi-rank
+rows) are in ``test_cake_gdn_nondet_train_kcp_cp1.py`` and ``test_cake_gdn_nondet_train_kcp_dist.py``; the two-rank
+fake-backend rows in ``test_cake_gdn_nondet_train_kcp.py``.
 """
 
 from __future__ import annotations
@@ -629,7 +629,12 @@ def test_workspace_layout_loses_the_akk_arena_tape() -> None:
             light["bwd.akk"] == akk and light["bwd.qk_rstd"] == got["bwd.qk_rstd"] > 0
         ), kw
         assert got["bwd.kept_tapes"] == 0, kw
-        assert light["fwd.phase.prep"] - got["fwd.phase.prep"] == akk, kw
+        # the light forward runs the forward form of #1_l2n (shipped): its #1 binds neither akk nor gcum; the
+        # "light_akk" forward runs the full #1, its Akk into the saved set and its gcum into the arena
+        assert not ({"fwd.akk", "fwd.gcum"} & set(light)), kw
+        assert got["fwd.phase.prep"] - light["fwd.phase.prep"] == got["fwd.gcum"] > 0, (
+            kw
+        )
         phases = [k for k in light if k.startswith("bwd.phase.")]
         assert phases and phases == [k for k in got if k.startswith("bwd.phase.")], kw
         for k in phases:  # every backward phase holds the replayed tapes: Akk is the saved set's in "light_akk"

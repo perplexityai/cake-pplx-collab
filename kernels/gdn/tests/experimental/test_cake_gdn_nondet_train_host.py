@@ -18,20 +18,21 @@ Host-side contract of the Cake non-deterministic GDN chunked-training package
 (``cu_seqlens_cpu`` given), the device route (``cu_seqlens`` only), the equal-length batch (no offsets) and the
 packed row (q / k / v as head views of one row that requires grad).
 
-* Every output repeats bit for bit: the output, the final state and every gradient of three identical calls, plain
-  and under non-reentrant activation checkpointing, and a second backward into the same leaves adds exactly the
-  first one's gradients (gradient accumulation).
-* Reused plans on recycled scratch: a call with new inputs on a layout whose plans and tables are cached, after a
-  call of another layout reused the workspaces, has the bits of the same call in a fresh process (plain and
-  checkpointed; a row the adjoint walk splits and a row it does not).
+* Accuracy without a tolerance: the output, the final state and every gradient of three calls on each route, plain
+  and under non-reentrant activation checkpointing (the worst judged), the gradients accumulated by a second backward
+  into the same leaves (twice the oracle's), a call on cached plans and tables after a call of another layout reused
+  the workspaces, and the calls under PyTorch's deterministic algorithms are judged by ``tests/cake_naive.py`` over
+  32 random draws: the error against the FP64 token recurrence (``token_recurrence`` in FP64, the oracle) beside the
+  error of its PyTorch BF16 form (the naive tier), median and largest, L2 and max norm.  The package is not run-to-run
+  bitwise; no call is held to the bits of another.
 * No steady-state host synchronization: once a layout's libraries, tables and workspaces exist, a forward and
   backward (plain or checkpointed) runs under the error sync-debug mode.
 * A checkpointed forward keeps nothing on the device beyond its output (no hidden retention) on every route.
 * The host time of a steady-state call: each forward call and each backward call returns to the caller within
   ``HOST_CALL_MAX_US``.  The package takes tensors and keywords only (no context object), so this is the whole
   per-call host cost a wrapper such as ``fully_shard`` adds around the module.
-* PyTorch's deterministic algorithms (strict and ``warn_only``) change nothing on the packed row and under
-  checkpointing either: no alert, no warning, the same bits.
+* PyTorch's deterministic algorithms (strict and ``warn_only``) raise no alert and no warning on the packed row and
+  under checkpointing either.
 
 The suite names its package through the shared alias helper and imports nothing else from cake_pplx.
 """
@@ -41,21 +42,23 @@ from __future__ import annotations
 import contextlib
 import gc
 import math
+import random
 import statistics
-import subprocess
-import sys
 import time
+import types
 import warnings
-from pathlib import Path
 
 import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed, seed_all
+from tests.experimental.test_helpers.cake_gdn_naive import token_recurrence
 
 cake_backend = cake_package("cake_gdn_nondet_train", "cake_backend")
 cake_chain = cake_package("cake_gdn_nondet_train", "cake_chain")
+cake_plan = cake_package("cake_gdn_nondet_train", "cake_plan")
 cake_gdn_nondet = cake_package("cake_gdn_nondet_train").cake_gdn_nondet
 
 HEAD_DIM = 128
@@ -70,12 +73,16 @@ HEADS = (2, 6)  # the value-head group of three of the source issue (#7074)
 HOST_CALL_MAX_US = 1000.0
 HOST_LAYOUT = (131071, 87531, 43385)
 HOST_SAMPLES = 9
-# The rows of the reuse test, (lengths, heads): one the one-wave split of the adjoint walk takes on every exported
-# architecture's SM count and one it never takes (the (16, 48) group of three stays on the serial walk).
+# The rows of the reuse test, (lengths, heads), all of the judge's size: two layouts, groups of three and two, that the
+# one-wave split of the adjoint walk never takes on an exported architecture's SM count (the serial walk), and the
+# split layout of the main suite's split tests, which takes the split on a REUSE_SPLIT_SMS-SM view of the device whose
+# pricing selects it (:func:`_price_the_adjoint_split`).
 REUSE_LAYOUTS = {
-    "split": ((11000, 12000, 9768), (4, 12)),
-    "unsplit": ((11000, 12000, 9768), (16, 48)),
+    "g3": ((1000, 300, 77), (2, 6)),
+    "g2": ((640, 100, 257), (2, 4)),
+    "split": ((700, 1500, 230), (2, 4)),
 }
+REUSE_SPLIT_SMS = 40
 _ALERT = "does not have a deterministic implementation"
 
 
@@ -223,13 +230,55 @@ class _Problem:
         return {name: t.detach().clone() for name, t in out.items()}
 
 
-def _assert_same_bits(got: dict, want: dict) -> None:
-    assert set(got) == set(want), (sorted(got), sorted(want))
-    for name in want:
-        a, b = got[name], want[name]
-        assert a.dtype == b.dtype and a.shape == b.shape, name
-        a, b = (t.contiguous().view(torch.uint8) for t in (a, b))
-        assert torch.equal(a, b), f"{name} differs bit for bit"
+def _oracle(problem: _Problem) -> tuple[dict, dict]:
+    """The FP64 oracle (``token_recurrence`` in FP64: the in-kernel norm, the recurrence and its autograd from the raw
+    inputs) of a problem and its naive tier (the same in PyTorch BF16), keyed as :meth:`_Problem.results`."""
+    q, k, v = problem.qkv
+    inputs = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "g": problem.g,
+        "beta": problem.beta,
+        "do": problem.do,
+    }
+    kwargs = {"initial_state": problem.h0, "dht": problem.dht}
+    return (
+        token_recurrence(inputs, problem.seq_lens, dtype=torch.float64, **kwargs),
+        token_recurrence(inputs, problem.seq_lens, **kwargs),
+    )
+
+
+def _judge(record_property, seed: int, draw) -> None:
+    """Judge a case over ``DRAWS`` draws: draw ``j`` seeds the Python and torch random state with
+    ``s = draw_seed(seed, j)``, and ``draw(j, s)`` returns ``(runs, oracle)``: arm -> result or a list of results (judged
+    by the worst; arm ``""`` names the outputs plainly, any other ``<arm>.<output>``) and :func:`_oracle` of the draw's
+    problem.  Every value is held to its contract and the rest judged against the naive tier (recorded: a miss does
+    not fail the test); the random state is restored."""
+    judge, failures = TierJudge(), []
+    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    state = (random.getstate(), torch.get_rng_state())
+    try:
+        for j in range(DRAWS):
+            s = draw_seed(seed, j)
+            seed_all(s)
+            runs, (ref, naive) = draw(j, s)
+            for arm, results in runs.items():
+                for result in results if isinstance(results, list) else [results]:
+                    for name, value in result.items():
+                        label = f"{arm}.{name}" if arm else name
+                        if (message := contract(label, value, ref[name])) is not None:
+                            failures.append(f"draw {j}: {message}")
+                            continue
+                        judge.add(label, j, value, ref[name], {"bf16": naive[name]})
+    finally:
+        random.setstate(state[0])
+        torch.set_rng_state(state[1])
+        if cuda is not None:
+            torch.cuda.set_rng_state_all(cuda)
+    failures += judge.failures()
+    judge.record(record_property)
+    assert not failures, failures
 
 
 def _allocator_bytes(device) -> int:
@@ -261,94 +310,142 @@ def _deterministic_algorithms(mode: bool, *, warn_only: bool = False):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Every output repeats bit for bit
+# Repeated calls, accumulated gradients, reused plans
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
 @pytest.mark.parametrize("route", ROUTES)
-def test_every_output_repeats_bit_for_bit(route, checkpointed, device) -> None:
-    # three identical calls: the output, the final state and the gradients of q, k, v (or the packed row), g, beta
-    # and the initial state have the same bits every time
-    problem = _Problem(route, device, seed=11)
-    runs = []
-    for _ in range(3):
-        leaves = problem.leaves()
-        o, final = problem.step(leaves, checkpointed)
-        torch.cuda.synchronize()
-        runs.append(problem.results(leaves, o, final))
-    assert set(runs[0]) == {"o", "final_state", "dq", "dk", "dv", "dg", "dbeta", "dh0"}
-    for later in runs[1:]:
-        _assert_same_bits(later, runs[0])
+def test_repeated_calls_naive_tier_verdict(
+    route, checkpointed, device, record_property
+) -> None:
+    # three calls per draw: the output, the final state and the gradients of q, k, v (or the packed row), g, beta and
+    # the initial state, judged by the worst of the three
+    def draw(j, s):
+        problem = _Problem(route, device, seed=s)
+        runs = []
+        for _ in range(3):
+            leaves = problem.leaves()
+            o, final = problem.step(leaves, checkpointed)
+            torch.cuda.synchronize()
+            runs.append(problem.results(leaves, o, final))
+        assert set(runs[0]) == {
+            "o",
+            "final_state",
+            "dq",
+            "dk",
+            "dv",
+            "dg",
+            "dbeta",
+            "dh0",
+        }
+        return {"": runs}, _oracle(problem)
+
+    _judge(record_property, 11, draw)
 
 
 @pytest.mark.parametrize("route", ROUTES)
-def test_gradients_accumulate_bit_for_bit(route, device) -> None:
-    # a second backward into the same leaves adds the same gradients again: every accumulated gradient is exactly
-    # twice the first one (a lost, duplicated or reordered update would show)
-    problem = _Problem(route, device, seed=13)
-    leaves = problem.leaves()
-    o, final = problem.step(leaves)
-    torch.cuda.synchronize()
-    once = problem.results(leaves, o, final)
-    o, final = problem.step(leaves)
-    torch.cuda.synchronize()
-    twice = problem.results(leaves, o, final)
-    _assert_same_bits(
-        {n: twice[n] for n in ("o", "final_state")},
-        {n: once[n] for n in ("o", "final_state")},
-    )
+def test_accumulated_gradients_naive_tier_verdict(
+    route, device, record_property
+) -> None:
+    # a second backward into the same leaves adds its gradients to the first one's: the accumulated gradients are
+    # judged against twice the oracle's (and twice the naive tier's), o and the final state of both calls as they are
     grads = ("dq", "dk", "dv", "dg", "dbeta", "dh0")
-    _assert_same_bits({n: twice[n] for n in grads}, {n: once[n] * 2 for n in grads})
+
+    def draw(j, s):
+        problem = _Problem(route, device, seed=s)
+        leaves = problem.leaves()
+        o, final = problem.step(leaves)
+        torch.cuda.synchronize()
+        once = problem.results(leaves, o, final)
+        o, final = problem.step(leaves)
+        torch.cuda.synchronize()
+        twice = problem.results(leaves, o, final)
+        ref, naive = _oracle(problem)
+        doubled = (
+            {**ref, **{n: 2 * ref[n] for n in grads}},
+            {**naive, **{n: 2 * naive[n] for n in grads}},
+        )
+        runs = {
+            "first": {n: once[n] for n in ("o", "final_state")},
+            "second": {n: twice[n] for n in ("o", "final_state")},
+            "accumulated": {n: twice[n] for n in grads},
+        }
+        return runs, doubled
+
+    _judge(record_property, 13, draw)
 
 
-# ---------------------------------------------------------------------------------------------------------------------
-# Reused plans on recycled scratch
-
-
-def _reuse_call(layout: str, seed: int, checkpointed: bool, device) -> dict:
+def _reuse_call(
+    layout: str, seed: int, checkpointed: bool, device
+) -> tuple[dict, _Problem]:
     """One host-route forward and backward (under non-reentrant checkpointing when ``checkpointed``) of the
-    :data:`REUSE_LAYOUTS` row ``layout`` on the operands of ``seed``: its outputs and gradients, on the host."""
+    :data:`REUSE_LAYOUTS` row ``layout`` on the operands of ``seed``: its outputs and gradients, and its problem."""
     seq_lens, heads = REUSE_LAYOUTS[layout]
     problem = _Problem("host", device, seq_lens=seq_lens, heads=heads, seed=seed)
     leaves = problem.leaves()
     o, final = problem.step(leaves, checkpointed)
     torch.cuda.synchronize()
-    return {name: t.cpu() for name, t in problem.results(leaves, o, final).items()}
+    return problem.results(leaves, o, final), problem
+
+
+def _price_the_adjoint_split(monkeypatch, device) -> None:
+    """As the main suite's split tests: a REUSE_SPLIT_SMS-SM view of the device (fresh layout caches), its architecture
+    in ADJOINT_SPLIT_ARCHS with costs that select the split of the adjoint walk, no adjoint form, the two-stream route;
+    skips where the split's stages or a chain stage are not delivered."""
+    index = cake_chain._device_index(device)
+    arch = cake_backend.device_arch(index)
+    if (
+        not all(
+            cake_chain._available(stage, arch)
+            for stage in cake_chain.ADJOINT_SPLIT_STAGES
+        )
+        or cake_chain._adjoint_chain_stage(arch) is None
+    ):
+        pytest.skip(f"the split of the adjoint walk is not delivered for {arch}")
+    _sm, smem, major = cake_chain._device_props(index)
+    monkeypatch.setattr(
+        cake_chain, "_device_props", lambda _index: (REUSE_SPLIT_SMS, smem, major)
+    )
+    for cache in ("_META_FRONT", "_DHU_AUTO", "_SDT_AUTO", "_BWD_PLANS"):
+        monkeypatch.setattr(cake_chain, cache, {})
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_ARCHS", frozenset({arch}))
+    costs = {"walk": 1.0, "summary": 1.0, "serial_low": 1.0, "serial_full": 1.0, "stitch": 0.0, "stitch_piece": 0.0,
+             "fixed": 0.0}  # fmt: skip
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_COSTS", {arch: costs})
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_DEVICE_COSTS", {})
+    monkeypatch.setattr(cake_plan, "ADJOINT_FORMS", types.MappingProxyType({}))
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_SPLIT_ARCHS", frozenset())
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
 @pytest.mark.parametrize("layout", sorted(REUSE_LAYOUTS))
-def test_reused_plans_on_recycled_scratch_give_the_fresh_process_bits(
-    layout, checkpointed, device, tmp_path
+def test_reused_plans_on_recycled_scratch_naive_tier_verdict(
+    layout, checkpointed, device, monkeypatch, record_property
 ) -> None:
     # a layout's call with new inputs, after a call of the same layout (its plans and tables cached) and a call of
-    # another layout in between (the workspaces taken and released at other shapes), has the bits of the same call
-    # as the only call of a fresh process: outputs, final state and every gradient
+    # another layout in between (the workspaces taken and released at other shapes): outputs, final state and every
+    # gradient of the last call are judged.  The "split" row runs all three calls on the split pricing; each row first
+    # checks the adjoint route it exists for
+    if layout == "split":
+        _price_the_adjoint_split(monkeypatch, device)
     seq_lens, (h, hv) = REUSE_LAYOUTS[layout]
-    index = cake_chain._device_index(device)
     split = cake_chain._adjoint_split_length(
-        seq_lens, hv, index, cake_chain.make_options(), hv // h
+        seq_lens,
+        hv,
+        cake_chain._device_index(device),
+        cake_chain.make_options(),
+        hv // h,
     )
     assert (split is not None) is (layout == "split"), (layout, split)
     other = next(name for name in REUSE_LAYOUTS if name != layout)
-    _reuse_call(layout, 41, checkpointed, device)
-    _reuse_call(other, 43, checkpointed, device)
-    got = _reuse_call(layout, 47, checkpointed, device)
-    path = tmp_path / "fresh.pt"
-    code = (
-        "import importlib.util, sys, torch\n"
-        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})\n"
-        f"spec = importlib.util.spec_from_file_location('reuse_host', {str(Path(__file__).resolve())!r})\n"
-        "suite = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(suite)\n"
-        "device = torch.device('cuda', torch.cuda.current_device())\n"
-        f"torch.save(suite._reuse_call({layout!r}, 47, {checkpointed!r}, device), {str(path)!r})\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=900
-    )
-    assert result.returncode == 0, result.stderr[-4000:]
-    _assert_same_bits(got, torch.load(path))
+
+    def draw(j, s):
+        _reuse_call(layout, s + 1, checkpointed, device)
+        _reuse_call(other, s + 2, checkpointed, device)
+        got, problem = _reuse_call(layout, s, checkpointed, device)
+        return {"": got}, _oracle(problem)
+
+    _judge(record_property, 47, draw)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -449,27 +546,31 @@ def test_steady_state_host_time_per_call(route, device) -> None:
 
 
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
-def test_deterministic_algorithms_change_nothing_on_the_packed_row(
-    checkpointed, device
+def test_deterministic_algorithms_raise_no_alert_on_the_packed_row(
+    checkpointed, device, record_property
 ) -> None:
-    # every launch is fixed-order: under torch.use_deterministic_algorithms(True), strict and warn_only, the packed
-    # row (and its checkpoint replay) runs without an alert or a warning, to the bits of the default mode
-    problem = _Problem("packed", device, seed=29)
-    leaves = problem.leaves()
-    o, final = problem.step(leaves, checkpointed)
-    torch.cuda.synchronize()
-    want = problem.results(leaves, o, final)
-    for warn_only in (False, True):
-        with (
-            _deterministic_algorithms(True, warn_only=warn_only),
-            warnings.catch_warnings(record=True) as caught,
-        ):
-            warnings.simplefilter("always")
-            leaves = problem.leaves()
-            o, final = problem.step(leaves, checkpointed)
-            torch.cuda.synchronize()
-        assert not [w for w in caught if _ALERT in str(w.message)], warn_only
-        assert type(o.grad_fn).__name__ == "CakeGDNNondetPackedFunctionBackward", type(
-            o.grad_fn
-        ).__name__
-        _assert_same_bits(problem.results(leaves, o, final), want)
+    # under torch.use_deterministic_algorithms(True), strict and warn_only, the packed row (and its checkpoint replay)
+    # runs without an alert or a warning; the default mode and both alert modes are judged
+    def draw(j, s):
+        problem = _Problem("packed", device, seed=s)
+        leaves = problem.leaves()
+        o, final = problem.step(leaves, checkpointed)
+        torch.cuda.synchronize()
+        runs = {"default": problem.results(leaves, o, final)}
+        for warn_only in (False, True):
+            with (
+                _deterministic_algorithms(True, warn_only=warn_only),
+                warnings.catch_warnings(record=True) as caught,
+            ):
+                warnings.simplefilter("always")
+                leaves = problem.leaves()
+                o, final = problem.step(leaves, checkpointed)
+                torch.cuda.synchronize()
+            assert not [w for w in caught if _ALERT in str(w.message)], warn_only
+            assert type(o.grad_fn).__name__ == "CakeGDNNondetPackedFunctionBackward", (
+                type(o.grad_fn).__name__
+            )
+            runs["warn" if warn_only else "strict"] = problem.results(leaves, o, final)
+        return runs, _oracle(problem)
+
+    _judge(record_property, 29, draw)
