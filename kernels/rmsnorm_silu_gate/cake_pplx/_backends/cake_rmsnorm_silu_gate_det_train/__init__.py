@@ -178,9 +178,9 @@ from .cake_jit import (
     ROLES,
     ROUTES,
     arch_for_capability,
+    backward_module,
     backward_packed,
     device_sm_count,
-    module_for_rows,
     nodw_module,
     workspace_elements,
 )
@@ -866,14 +866,25 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     index = _device_index(device)
     sm_count = device_sm_count(index)
     role = "bwd_f32" if dw is not None and dw.dtype == torch.float32 else "bwd_bf16"
-    # backward_module's choice, its packed test made once for both lookups.
-    packed = backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
-    name = module_for_rows(arch, role, rows, sm_count, packed)
+    name = backward_module(
+        arch,
+        role,
+        rows,
+        heads,
+        sm_count,
+        dy_tok,
+        dy_head,
+        x_tok,
+        x_head,
+        z_tok,
+        z_head,
+    )
     if dw is None:
         # The program built without the weight gradient (the same dx and dz
         # bits): strided up to its cut (or at every row count where no claimed
         # one is routed; its 128-thread build on packed rows), else claimed,
         # or the long one.
+        packed = backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
         name = nodw_module(arch, name, rows, sm_count, packed)
     if dw is None and "workspace" not in _loader.MODULES[name]:
         # The strided program reads and writes no workspace word: no stream
