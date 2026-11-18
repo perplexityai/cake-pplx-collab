@@ -2194,6 +2194,48 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 }
 # fmt: on
 
+# Package-only token ranges of ragged ``ROW_RULES`` keys that apply on a part of exactly one SM count,
+# ``(arch, sm_count) -> {key: ((lo, hi, rule), ...)}`` (a ragged key as ``ROW_RULES``: ``K = None`` of a weight
+# gradient, ``M = None`` of a forward / input gradient; the ranges of a key are sorted and disjoint).  At a token count
+# T (``K`` of a weight-gradient key, ``M`` of a forward / input-gradient key) with ``lo <= T <= hi`` the range's rule
+# replaces the row's rule on that part, as an exact ``ROW_RULES`` key at that T would (``row_rule`` still merges
+# ``ARCH_RULE_DEFAULTS`` under it).  The architecture's other parts, its child architectures (``RULE_PARENT``) and
+# every other token count keep the row's ``ROW_RULES`` entry and its ``ROW_RULE_MIN_T`` tiers, and the weight-gradient
+# orientation reads ``ROW_RULES`` alone.  The 212-SM sm_107a entries serve every 212-SM part of the architecture: FP32
+# rows measured on two VR200 nodes against the plan the row had without them, at T 4096, 8192, 16172, 16231 and 16384,
+# in eager launches and CUDA graph replays.  Each range runs from the lowest to the highest measured T at which the
+# rule was faster on both nodes in both modes (the plan has the same form at the T between), within the naive BF16
+# tier and with the same bits run to run:
+#   * the 12288 -> 4096 (T 4096 - 16384) and 4096 -> 12288 (T 8192 - 16231) weight gradients: the synchronised split
+#     of the 26-tile tail (26 collectors, margin 38, slab path 2) through the FP32 v8 evict-first register epilogue
+#     (``nn_n256_f32_v8_ef_sks_sb2_pro7``), 1.05 to 1.09 times faster, another summation order than the plan before;
+#   * the 17408 -> 5120 (T 4096 - 8192), 5120 -> 17408 (T 8192), dense_gate_up 6144 -> 12288 (T 4096 - 8192) and
+#     dense_down 12288 -> 6144 (T 8192) weight gradients: whole 128-row tiles through the FP32 v8 register epilogue
+#     (``nn_n256_f32_v8_pro15``), 1.02 to 1.17 times faster, the bits of the plan before;
+#   * the o_proj 16384 -> 6144 weight gradient at T 4096 and 8192 only: the same program with a two-way K split of
+#     its 52 tail tiles (104 units, each the whole K half of a tile at these T), 1.06 to 1.14 times faster, another
+#     summation order than the plan before;
+#   * the o_proj 16384 -> 6144 input gradient at T 8192 only: the half-height tail wave of the 128-row tiles
+#     (``kn_n256_f32_v8_ht_pro7``, 68 half items of the 34-tile tail), 1.02 to 1.06 times faster, the bits of the
+#     plan before.
+# fmt: off
+_SM107A_212_F32_SKS = {"epi": 'reg', "f32_v8": True, "store_ef": True, "sk_sync": True, "sk_sync_m": 38, "sk_slab": 2}
+_SM107A_212_F32_V8 = {"epi": 'reg', "f32_v8": True, "pro": 15}
+_SM107A_212_F32_V8_SK2 = {"epi": 'reg', "f32_v8": True, "sk_parts": 2, "pro": 15}
+ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, dict], ...]]] = {
+    ("sm_107a", 212): {
+        ('sm_107a', True, True, True, False, False, 12288, None, 4096): ((4096, 16384, _SM107A_212_F32_SKS),),
+        ('sm_107a', True, True, True, False, False, 4096, None, 12288): ((8192, 16231, _SM107A_212_F32_SKS),),
+        ('sm_107a', True, True, True, False, False, 17408, None, 5120): ((4096, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 5120, None, 17408): ((8192, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 16384, None, 6144): ((4096, 4096, _SM107A_212_F32_V8_SK2), (8192, 8192, _SM107A_212_F32_V8_SK2)),
+        ('sm_107a', True, True, True, False, False, 6144, None, 12288): ((4096, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 12288, None, 6144): ((8192, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', False, True, True, False, False, 16384, 6144, None): ((8192, 8192, {"epi": 'reg', "f32_v8": True, "htail": True, "pro": 7}),),
+    },
+}
+# fmt: on
+
 #: Package-only: the K blocks of one promoted chunk of the weight-gradient programs (``promote_blocks``, the twin
 #: templates ``..._kc128_pro<n>`` of :func:`instance_symbol`).  One FP32 accumulator that adds a long token range is
 #: less accurate than the reference, so the promoted program cuts each segment of ``n`` K blocks (a whole tile's K
@@ -2238,15 +2280,23 @@ def _measured_row_rule(
     of Cake ``row_rule``; package-only split so the registry fallback can drop the MEASURED rule alone, see
     ``cake_dense_gemm_det_train_projection_plan``).  A ragged key with token tiers (``ROW_RULE_MIN_T``) yields the
     first tier whose bound exceeds the token count (``M`` of a ragged-M key, ``K`` of a ragged-K key).  Package-only:
-    with ``sm_count``, an exact key of ``ROW_RULES_BY_SM`` for ``(arch, sm_count)`` comes first (the architecture's own
-    table only; the parent lookup does not read it)."""
+    with ``sm_count``, the part's tables for ``(arch, sm_count)`` come first - an exact key of ``ROW_RULES_BY_SM``, then
+    the range of ``ROW_RULE_RANGES_BY_SM`` that holds the token count (the ragged-M key, then the ragged-K key) - for
+    the architecture's own tables only (the parent lookup does not read them)."""
     ident = (arch, bool(a_mn), bool(b_mn), bool(out_f32), bool(out_t), bool(batched))
     if sm_count is not None:
-        part_rule = ROW_RULES_BY_SM.get((arch, int(sm_count)), {}).get(
-            ident + (int(N), int(K), int(M))
-        )
+        part = (arch, int(sm_count))
+        part_rule = ROW_RULES_BY_SM.get(part, {}).get(ident + (int(N), int(K), int(M)))
         if part_rule is not None:
             return dict(part_rule)
+        ranges = ROW_RULE_RANGES_BY_SM.get(part, {})
+        for tail, tokens in (
+            ((int(N), int(K), None), int(M)),
+            ((int(N), None, int(M)), int(K)),
+        ):
+            for lo, hi, rule in ranges.get(ident + tail, ()):
+                if lo <= tokens <= hi:
+                    return dict(rule)  # the part's rule at this token count
     for tail in (
         (int(N), int(K), int(M)),
         (int(N), int(K), None),
@@ -2282,7 +2332,8 @@ def row_rule(
     ragged-M (N, K, None) rule, else the ragged-K (N, None, M) rule, else the parent architecture's rule
     (``RULE_PARENT``), else empty (the class defaults apply) - each merged over the architecture's
     ``ARCH_RULE_DEFAULTS`` (round 33: a row rule overrides an architecture default).  Package-only: ``sm_count`` reads
-    the part's exact keys of ``ROW_RULES_BY_SM`` first (``_measured_row_rule``).  [Cake ``row_rule``]"""
+    the part's exact keys of ``ROW_RULES_BY_SM`` and token ranges of ``ROW_RULE_RANGES_BY_SM`` first
+    (``_measured_row_rule``).  [Cake ``row_rule``]"""
     merged = dict(ARCH_RULE_DEFAULTS.get(arch, {}))
     merged.update(
         _measured_row_rule(
@@ -3220,8 +3271,14 @@ def cake_dense_gemm_det_train_projection_plan(
     ``sk_exact`` keeps its parts, and the rule's split stays where the fitted one is not admitted).  The 12288 -> 4096
     and 4096 -> 12288 BF16 weight gradients of sm_100a and sm_103a name 74 pairs (148 SMs): their 16-way split of a
     14-tile tail (224 units) becomes a 5-way split (70 units), measured on B200 and B300 at T 8192 - 32768; their
-    plans on every other pair count are the launcher's.  A seventh, the per-part rules (:data:`ROW_RULES_BY_SM`): an exact key of the table for
-    the device's architecture and SM count replaces the row's rule on that part alone."""
+    plans on every other pair count are the launcher's.
+
+    A seventh, the per-part rules: an exact key of :data:`ROW_RULES_BY_SM` for the device's architecture and SM count
+    replaces the row's rule on that part alone, and so does a token range of :data:`ROW_RULE_RANGES_BY_SM` (a ragged
+    key) at the token counts of the range, as an exact key at that token count would.  The 212-SM sm_107a ranges plan
+    FP32 weight gradients of 4096 to 17408 features at T 4096 - 16384 (the synchronised split of the tail, or whole
+    128-row tiles, or a two-way K split of the tail) and the o_proj FP32 input gradient at T 8192 (the half-height tail
+    wave), each measured faster on two VR200 nodes; on every other part and token count these rows plan as before."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
@@ -4008,7 +4065,9 @@ def cake_dense_gemm_det_train_projection_plan(
     check_stream_k_plan(plan, arch)
     if promote is None or promote:
         plan = _promoted_plan(plan, key, arch, forced=bool(promote))
-    if _fallback and not _serves(arch, plan, _caller_knobs["epi"], _use_rules):
+    if _fallback and not _serves(
+        arch, plan, _caller_knobs["epi"], _use_rules, sm_count=sm_count
+    ):
         # nearest registered plan: drop the swap first (keeps the measured rule), then the rule, then both
         for allow_swap, use_rules in ((False, True), (True, False), (False, False)):
             if (allow_swap, use_rules) == (_allow_swap, _use_rules):
@@ -4026,7 +4085,9 @@ def cake_dense_gemm_det_train_projection_plan(
                 _use_rules=use_rules,
                 **_caller_knobs,
             )
-            if _serves(arch, candidate[0], _caller_knobs["epi"], use_rules):
+            if _serves(
+                arch, candidate[0], _caller_knobs["epi"], use_rules, sm_count=sm_count
+            ):
                 return candidate
         # last resort: the nearest registered knob variant of the same layout / output kind (every knob set
         # computes the same GEMM; only the tile walk and the store path differ): the hand-ordered variants first
@@ -4074,7 +4135,9 @@ def cake_dense_gemm_det_train_projection_plan(
                     )
                 except ValueError:
                     continue  # a knob the row cannot take (e.g. epi="tma" with a transposed store)
-                if _serves(arch, candidate[0], merged.get("epi"), False):
+                if _serves(
+                    arch, candidate[0], merged.get("epi"), False, sm_count=sm_count
+                ):
                     return (
                         dataclasses.replace(candidate[0], knob_fallback=True),
                         *candidate[1:],
@@ -4082,12 +4145,19 @@ def cake_dense_gemm_det_train_projection_plan(
     return plan, a_desc, b_desc, O3
 
 
-def _serves(arch: str, plan, caller_epi: Optional[str], use_rules: bool) -> bool:
+def _serves(
+    arch: str,
+    plan,
+    caller_epi: Optional[str],
+    use_rules: bool,
+    *,
+    sm_count: Optional[int] = None,
+) -> bool:
     """Whether the registry of ``arch`` serves ``plan`` as planned (package-only, see
     ``cake_dense_gemm_det_train_projection_plan``): its program is generated, and a synchronised stream-K plan that stores its
     bf16 tiles through the TMA store (``_tma<slots>_sks``) has its epilogue named by the caller (``caller_epi``) or by
-    the row's rule (``use_rules``: the merged row rule; else the architecture default).  Those bf16 programs were
-    generated for the measured T-exact rows whose rule names ``epi="tma"``; a ragged row whose short K
+    the row's rule (``use_rules``: the merged row rule on a part of ``sm_count`` SMs; else the architecture default).
+    Those bf16 programs were generated for the measured T-exact rows whose rule names ``epi="tma"``; a ragged row whose short K
     (``K_TMA_BF16``) turns the bf16 epilogue default to the TMA store plans the same symbol unmeasured and keeps the
     registry fallback.  The fp32-output programs (``_f32_tma<slots>_sks``) take the TMA store by default at every K
     and are served as before."""
@@ -4110,6 +4180,7 @@ def _serves(arch: str, plan, caller_epi: Optional[str], use_rules: bool) -> bool
             plan.N,
             plan.K,
             plan.M,
+            sm_count=sm_count,
         )
         if use_rules
         else ARCH_RULE_DEFAULTS.get(arch, {})

@@ -15780,6 +15780,104 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
         assert routed == default, (K, N, T, routed.template, default.template)
 
 
+def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
+    """The FP32 rows of the deterministic package's 212-SM ``sm_107a`` token ranges (its ``ROW_RULE_RANGES_BY_SM``,
+    version 0.3.5), as this package runs them on a 212-SM ``sm_107a`` part: no row of this package's tables
+    (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K, deterministic-program,
+    input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's program at the ends of
+    each range."""
+    bf16, f32 = torch.bfloat16, torch.float32
+    arch, sms = "sm_107a", 212
+    l2 = K1_DGRAD_PARTS[(arch, sms)]
+    prefix = "dense_proj_det_gemm_"
+    # (d_in, d_out) -> the deterministic program inside the range
+    wgrad_rows = {
+        (12288, 4096): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+        (4096, 12288): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+        (17408, 5120): "nn_n256_f32_v8_pro15",
+        (5120, 17408): "nn_n256_f32_v8_pro15",
+        (16384, 6144): "nn_n256_f32_v8_pro15",
+        (6144, 12288): "nn_n256_f32_v8_pro15",
+        (12288, 6144): "nn_n256_f32_v8_pro15",
+    }
+    dgrad_rows = {(16384, 6144): "kn_n256_f32_v8_ht_pro7"}
+    table = det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)]
+    assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {(arch, sms)}
+    assert {(key[6], key[8]) for key in table if key[7] is None} == set(wgrad_rows)
+    assert {(key[6], key[7]) for key in table if key[8] is None} == set(dgrad_rows)
+    for key, ranges in table.items():
+        d_in = key[6]
+        d_out = key[8] if key[7] is None else key[7]
+        for T in sorted({t for lo, hi, _ in ranges for t in (lo, hi)}):
+            what = (key, T)
+            if key[7] is None:
+                G = torch.empty(T, d_out, dtype=bf16)
+                X = torch.empty(T, d_in, dtype=bf16)
+                out = torch.empty(d_out, d_in, dtype=f32)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    X.t(), G, out, transposed_out=True, arch=arch, sm_count=sms
+                )
+                assert plan is None, (what, reason)
+                assert not any(
+                    (d_in, d_out, T, "f32") in rows
+                    for rows in cake_backend.K1_WGRAD_SK_RULES_BY_SM.values()
+                ), what
+                assert (
+                    cake_backend.k1_wgrad_det_knobs(
+                        arch=arch,
+                        sm_count=sms,
+                        d_in=d_in,
+                        d_out=d_out,
+                        T=T,
+                        out_f32=True,
+                    )
+                    == ()
+                ), what
+                A, B, transposed = det_backend.wgrad_views(
+                    G, X, arch=arch, out_f32=True
+                )
+                assert not transposed, what
+                det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+                    A,
+                    B,
+                    out,
+                    sm_count=sms,
+                    l2_bytes=l2,
+                    transposed_out=False,
+                    arch=arch,
+                )[0]
+                assert det_plan.template == prefix + wgrad_rows[(d_in, d_out)], (
+                    what,
+                    det_plan.template,
+                )
+            else:
+                G = torch.empty(T, d_out, dtype=bf16)
+                W = torch.empty(d_out, d_in, dtype=bf16)
+                out = torch.empty(T, d_in, dtype=f32)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    G, W, out, transposed_out=False, arch=arch, sm_count=sms
+                )
+                assert plan is None, (what, reason)
+                row = (d_in, d_out, T, "f32")
+                for rules in (
+                    cake_backend.K1_DGRAD_RULES_BY_SM,
+                    cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+                    cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+                ):
+                    assert not any(row in rows for rows in rules.values()), what
+                assert (
+                    cake_backend.k1_dgrad_knobs(
+                        arch=arch, sm_count=sms, K=d_in, N=d_out, T=T, out_f32=True
+                    )
+                    == ()
+                ), what
+                det_plan = _plan_of_knobs(G, W, out, arch, sms, ())
+                assert det_plan.template == prefix + dgrad_rows[(d_in, d_out)], (
+                    what,
+                    det_plan.template,
+                )
+
+
 def test_k1_program_knobs_are_planner_keywords(monkeypatch):
     """Every knob set this package hands the deterministic package's planner names keywords of
     ``cake_dense_gemm_det_train_projection_plan``: the knobs of every deterministic program its tables name

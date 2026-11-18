@@ -13036,8 +13036,8 @@ def test_sm107a_212_tranche_token_floors(monkeypatch, key):
 
 # ---------------------------------------------------------------------------
 # The routing of version 0.3.4: the exact-split fit and the exact-wave yield of BF16 weight gradients on 148-SM parts,
-# the 148-SM sm_100a FP32 input-gradient part rules (ROW_RULES_BY_SM) and the long-token 5120 -> 64 / 128 BF16 weight
-# gradients of sm_100a
+# the 148-SM sm_100a FP32 input-gradient part rules (ROW_RULES_BY_SM), the long-token 5120 -> 64 / 128 BF16 weight
+# gradients of sm_100a and the 212-SM sm_107a FP32 token ranges (ROW_RULE_RANGES_BY_SM)
 # ---------------------------------------------------------------------------
 
 #: The token tiers of the sm_100a 5120 -> 64 / 128 BF16 weight gradients (cake_backend.ROW_RULE_MIN_T): below T 32768
@@ -13083,6 +13083,29 @@ SM100A_148_DGRAD_F32_PROGRAM = "dense_proj_det_gemm_kn_n128_f32_tma2_s4_c1"
 EXACT_FIT_PROGRAM = "dense_proj_det_gemm_nn_n256_m256_skx_skf_pro7"
 WAVE_YIELD_PROGRAM = "dense_proj_det_gemm_nn_n256_m256_sks_sb2_pro7"
 LONG_5120_WGRAD_PROGRAM = "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7"
+#: The 212-SM sm_107a token ranges (cake_backend.ROW_RULE_RANGES_BY_SM): ragged key -> (op, d_in, d_out, ((lo, hi,
+#: rule), ...), the program the rule plans, its form, the program of the row's plan without the range).  The forms:
+#: ``sync`` the synchronised split of the tail, ``whole`` whole tiles, ``parts2`` a two-way K split of the tail tiles,
+#: ``htail`` the half-height tail wave.  The rules are the measured ones, each injected as an exact key of the row.
+# fmt: off
+_VR212_SKS = {"epi": "reg", "f32_v8": True, "store_ef": True, "sk_sync": True, "sk_sync_m": 38, "sk_slab": 2}
+_VR212_V8 = {"epi": "reg", "f32_v8": True, "pro": 15}
+_VR212_V8_SK2 = {"epi": "reg", "f32_v8": True, "sk_parts": 2, "pro": 15}
+_VR212_V8_HT = {"epi": "reg", "f32_v8": True, "htail": True, "pro": 7}
+_VR212_SKS_PROGRAM = "dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7"
+_VR212_V8_PROGRAM = "dense_proj_det_gemm_nn_n256_f32_v8_pro15"
+_VR212_M256 = "dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7"
+SM107A_212_F32_RANGES = {
+    ("sm_107a", True, True, True, False, False, 12288, None, 4096): ("wgrad", 12288, 4096, ((4096, 16384, _VR212_SKS),), _VR212_SKS_PROGRAM, "sync", _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 4096, None, 12288): ("wgrad", 4096, 12288, ((8192, 16231, _VR212_SKS),), _VR212_SKS_PROGRAM, "sync", _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 17408, None, 5120): ("wgrad", 17408, 5120, ((4096, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 5120, None, 17408): ("wgrad", 5120, 17408, ((8192, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 16384, None, 6144): ("wgrad", 16384, 6144, ((4096, 4096, _VR212_V8_SK2), (8192, 8192, _VR212_V8_SK2)), _VR212_V8_PROGRAM, "parts2", _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 6144, None, 12288): ("wgrad", 6144, 12288, ((4096, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", "dense_proj_det_gemm_nn_n256_m256_f32_ht_tma1_pro7"),
+    ("sm_107a", True, True, True, False, False, 12288, None, 6144): ("wgrad", 12288, 6144, ((8192, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", "dense_proj_det_gemm_nn_n256_m256_f32_v8_ef_ht_pro7"),
+    ("sm_107a", False, True, True, False, False, 16384, 6144, None): ("dgrad", 16384, 6144, ((8192, 8192, _VR212_V8_HT),), "dense_proj_det_gemm_kn_n256_f32_v8_ht_pro7", "htail", "dense_proj_det_gemm_kn_n256_m256_f32_tma1_pro7"),
+}
+# fmt: on
 #: The device classes the CPU checks plan for: (arch, SM count).
 ROUTING_034_CLASSES = (
     ("sm_100a", 148),
@@ -13090,8 +13113,28 @@ ROUTING_034_CLASSES = (
     ("sm_103a", 148),
     ("sm_103a", 152),
     ("sm_103a", 160),
+    ("sm_107a", 208),
     ("sm_107a", 212),
+    ("sm_107a", 216),
 )
+
+
+def _vr212_exact_key(key, T):
+    """The exact ``ROW_RULES`` key of the ragged key ``key`` at the token count ``T`` (its ``K`` of a weight gradient,
+    its ``M`` of an input gradient)."""
+    slot = 7 if key[7] is None else 8
+    return key[:slot] + (T,) + key[slot + 1 :]
+
+
+def _vr212_rule_at(op, d_in, d_out, T):
+    """``(program, form)`` of the 212-SM sm_107a FP32 range that holds the row at ``T`` tokens, else ``None``."""
+    for value in SM107A_212_F32_RANGES.values():
+        row_op, row_in, row_out, ranges, program, form, _before = value
+        if (row_op, row_in, row_out) == (op, d_in, d_out) and any(
+            lo <= T <= hi for lo, hi, _ in ranges
+        ):
+            return program, form
+    return None
 
 
 def _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype="bf16", **knobs):
@@ -13119,7 +13162,7 @@ def _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype="bf16", **knobs):
 def _pre_034_tables(m):
     """Put the routing tables of version 0.3.3 in place (``m``: a monkeypatch context): the rules without the
     exact-split fit and the exact-wave yield (and without the token tier of the latter), no part rules, and the
-    5120 -> 64 / 128 BF16 weight-gradient rule of sm_100a without its token tier."""
+    5120 -> 64 / 128 BF16 weight-gradient rule of sm_100a without its token tier, no part token ranges."""
     for key, rule in list(ROW_RULES.items()):
         if "sk_exact_fit" in rule or "wave_yield" in rule:
             m.setitem(
@@ -13132,6 +13175,7 @@ def _pre_034_tables(m):
                 },
             )
     m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+    m.setattr(cake_backend, "ROW_RULE_RANGES_BY_SM", {})
     for key, tiers in SM100A_5120_WGRAD_TIERS.items():
         m.setitem(ROW_RULES, key, dict(tiers[0][1]))
         m.delitem(cake_backend.ROW_RULE_MIN_T, key)
@@ -13149,6 +13193,12 @@ ROUTING_034_SWEEP = (
     ("wgrad", 5120, 64, "f32", (32767, 32768, 65535)),
     *(("dgrad", d_in, d_out, "f32", (16171, 16172, 16231, 16232, 16384, 16385))
       for d_in, d_out in (*SM100A_148_DGRAD_F32_ROWS, (6144, 32))),
+    # the rows of the 212-SM sm_107a ranges at the measured token counts and around each range end, and their BF16 forms
+    *((op, d_in, d_out, "f32", tuple(sorted({4096, 8192, 16172, 16231, 16384}
+                                            | {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)})))
+      for op, d_in, d_out, ranges, *_ in SM107A_212_F32_RANGES.values()),
+    *(("wgrad", d_in, d_out, "bf16", (4096, 8192)) for d_in, d_out in ((16384, 6144), (17408, 5120), (6144, 12288))),
+    ("dgrad", 16384, 6144, "bf16", (8192,)),
 )
 # fmt: on
 
@@ -13157,6 +13207,10 @@ def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
     """The program a plan of version 0.3.4 runs where it differs from the plan of version 0.3.3, else ``None``."""
     k_blocks = -(-T // 64)
     gb = arch in ("sm_100a", "sm_103a")
+    if (arch, sm_count) == ("sm_107a", 212) and out_dtype == "f32":
+        # the 212-SM sm_107a FP32 token ranges
+        ranged = _vr212_rule_at(op, d_in, d_out, T)
+        return ranged[0] if ranged else None
     if op == "dgrad":
         part = (arch, sm_count) == ("sm_100a", 148) and out_dtype == "f32"
         held = part and T in SM100A_148_DGRAD_F32_ROWS.get((d_in, d_out), ())
@@ -13178,12 +13232,14 @@ def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
 def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
     """Byte for byte against the tables of version 0.3.3 (``_pre_034_tables``), over the changed rows, their
     neighbours and the token counts around each bound, on sm_100a and sm_103a at 148 and 152 SMs, sm_103a at 160 SMs and
-    sm_107a at 212 SMs: a plan changes exactly where ``_changed_034`` names a program, and runs that program - the
-    exact-split fit and the exact-wave yield on the 148-SM parts of both architectures where the rule's split is
-    admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a part at their token counts, the
-    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on.  Every other plan (the 152- and 160-SM parts
-    but for the last, sm_107a, the FP32 output, the other rows and token counts) is the plan of version 0.3.3."""
-    changed = 0
+    sm_107a at 208, 212 and 216 SMs: a plan changes exactly where ``_changed_034`` names a program, and runs that
+    program - the exact-split fit and the exact-wave yield on the 148-SM parts of both architectures where the rule's
+    split is admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a part at their token counts, the
+    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on, the FP32 rows of the 212-SM sm_107a token ranges
+    inside their ranges on that part.  Every other plan (the 152- and 160-SM parts but for the 5120 -> 64 / 128 rows,
+    the 208- and 216-SM sm_107a parts, the other FP32 outputs, the BF16 forms of the ranged rows, one token count
+    outside each range, the other rows and token counts) is the plan of version 0.3.3."""
+    changed = changed_212 = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_034_SWEEP:
         for T in token_counts:
             for arch, sm_count in ROUTING_034_CLASSES:
@@ -13201,11 +13257,17 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
                     )
                 else:
                     changed += 1
+                    changed_212 += arch == "sm_107a"
                     assert plan.template == program, (where, plan.template)
                     assert _plan_signature(plan) != _plan_signature(before), where
                     assert program in _registered(arch), (where, program)
-    # 2 rows x 4 T x 2 architectures + 4 T x 2 architectures + 19 part keys + 2 rows x 3 T x 2 parts
-    assert changed == 16 + 8 + 19 + 12
+    # 2 rows x 4 T x 2 architectures + 4 T x 2 architectures + 19 part keys + 2 rows x 3 T x 2 parts + the 212-SM
+    # ranges: 12288 -> 4096 at 6 T, 4096 -> 12288 at 4 T, 17408 -> 5120 and 6144 -> 12288 at 3 T each, the o_proj
+    # weight gradient at 2 T, 5120 -> 17408, 12288 -> 6144 and the o_proj input gradient at 1 T each
+    assert (changed, changed_212) == (
+        16 + 8 + 19 + 12 + 21,
+        6 + 4 + 3 + 3 + 2 + 1 + 1 + 1,
+    )
 
 
 def test_exact_split_fit_plans_one_wave_of_units(monkeypatch):
@@ -13435,6 +13497,142 @@ def test_sm100a_5120_wgrad_long_token_rule():
                 assert plan.iters_per_unit > cake_backend.K1_PROMOTE_MIN_SEGMENT, where
 
 
+def test_sm107a_212_f32_range_table():
+    """``ROW_RULE_RANGES_BY_SM`` holds the 212-SM sm_107a FP32 ranges alone (``SM107A_212_F32_RANGES``): ragged keys in
+    the orientation the rows plan (the weight gradients direct: no ``ROW_RULES`` key swaps them), sorted disjoint
+    inclusive ranges, rules whose program the sm_107a registry ships, no token tiers on the keys and no exact
+    ``ROW_RULES`` key of a row inside its ranges (such a key would lose to the range).  ``_measured_row_rule`` reads a
+    range with the part's SM count alone: the range's rule at its ends and middle, the row's ``ROW_RULES`` entry one
+    token count outside, on the 208- and 216-SM parts and without an SM count."""
+    table = cake_backend.ROW_RULE_RANGES_BY_SM
+    assert set(table) == {("sm_107a", 212)}
+    assert table[("sm_107a", 212)] == {
+        key: value[3] for key, value in SM107A_212_F32_RANGES.items()
+    }
+    registered = _registered("sm_107a")
+    for key, value in SM107A_212_F32_RANGES.items():
+        op, d_in, d_out, ranges, program, form, before = value
+        arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M = key
+        assert (arch, b_mn, out_f32, out_t, batched) == (
+            "sm_107a",
+            True,
+            True,
+            False,
+            False,
+        ), key
+        if op == "wgrad":
+            assert (a_mn, N, K, M) == (True, d_in, None, d_out), key
+            assert not wgrad_swapped(d_out, d_in, arch=arch, out_f32=True), key
+        else:
+            assert (a_mn, N, K, M) == (False, d_in, d_out, None), key
+        assert key not in cake_backend.ROW_RULE_MIN_T, key
+        assert program in registered and before in registered, key
+        assert form in ("sync", "whole", "parts2", "htail"), key
+        bounds = [(lo, hi) for lo, hi, _ in ranges]
+        assert all(1 <= lo <= hi for lo, hi in bounds), key
+        assert all(a[1] < b[0] for a, b in zip(bounds, bounds[1:])), key
+        slot = 7 if K is None else 8
+        assert not [
+            exact
+            for exact in ROW_RULES
+            if exact[:slot] == key[:slot]
+            and exact[slot + 1 :] == key[slot + 1 :]
+            and exact[slot] is not None
+            and any(lo <= exact[slot] <= hi for lo, hi in bounds)
+        ], key
+        plain = ROW_RULES.get(key, {})
+        for lo, hi, rule in ranges:
+            for T in {lo, (lo + hi) // 2, hi}:
+                ident = _vr212_exact_key(key, T)[1:]
+                assert (
+                    cake_backend._measured_row_rule(arch, *ident, sm_count=212) == rule
+                )
+                for sm_count in (None, 208, 216):
+                    assert (
+                        cake_backend._measured_row_rule(arch, *ident, sm_count=sm_count)
+                        == plain
+                    ), (key, T, sm_count)
+            for T in (lo - 1, hi + 1):
+                if not any(a <= T <= b for a, b in bounds):
+                    ident = _vr212_exact_key(key, T)[1:]
+                    assert (
+                        cake_backend._measured_row_rule(arch, *ident, sm_count=212)
+                        == plain
+                    ), (key, T)
+
+
+@pytest.mark.parametrize("key", list(SM107A_212_F32_RANGES))
+def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
+    """At the ends and the middle of each 212-SM sm_107a range the plan on a 212-SM part equals the plan of the range's
+    rule as an exact ``ROW_RULES`` key at that token count without the range (the form the rule was measured in): the
+    rule's program with no fallback flag, in the direct orientation, and the form of the range - the synchronised split
+    of the 26-tile tail (26 collectors, s = ceil((k_blocks + 38) / 2)), whole 128-row tiles, a two-way K split of the 52
+    tail tiles (104 units of half the K blocks each) or the half-height tail wave (68 half items of the 34-tile tail of
+    the input gradient).  Without the range the row plans the program of versions 0.3.3 and 0.3.4.  One token count outside each
+    range on the 212-SM part, and at every checked token count on the 208- and 216-SM parts, the plan is the plan
+    without the range."""
+    op, d_in, d_out, ranges, program, form, before_program = SM107A_212_F32_RANGES[key]
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
+
+    def plan_at(T, sm_count):
+        return _sm107a_tranche_plan(d_in, d_out, op, "f32", T, sm_count)
+
+    def plan_without(T, sm_count, rule=None):
+        # the range table without this row; with ``rule``, the rule as an exact key of the row at T
+        with monkeypatch.context() as m:
+            m.setitem(
+                cake_backend.ROW_RULE_RANGES_BY_SM,
+                ("sm_107a", 212),
+                {k: v for k, v in part.items() if k != key},
+            )
+            if rule is not None:
+                m.setitem(ROW_RULES, _vr212_exact_key(key, T), dict(rule))
+            return plan_at(T, sm_count)
+
+    checked = set()
+    for lo, hi, rule in ranges:
+        for T in sorted({lo, (lo + hi) // 2, hi}):
+            checked.add(T)
+            plan = plan_at(T, 212)
+            before = plan_without(T, 212)
+            where = (T, plan.template, before.template)
+            assert plan == plan_without(T, 212, rule), where
+            assert plan.template == program and before.template == before_program, where
+            assert not (
+                plan.rule_fallback
+                or plan.knob_fallback
+                or plan.swap_fallback
+                or plan.wave_fallback
+            ), where
+            assert not plan.transposed_out and plan.cta_rows == 128, where
+            k_blocks = plan.k_blocks
+            fields = (
+                plan.num_full,
+                plan.tail_tiles,
+                plan.sk_units,
+                plan.iters_per_unit,
+            )
+            if form == "sync":
+                assert plan.sk_sync and plan.sk_slab == 2, where
+                assert fields == (742, 26, 52, -(-(k_blocks + 38) // 2)), where
+            elif form == "whole":
+                assert not plan.sk_sync and not plan.htail_plan, where
+                assert fields == (d_in * d_out // 65536, 0, 0, k_blocks), where
+            elif form == "parts2":
+                assert not plan.sk_sync and k_blocks % 2 == 0, where
+                assert fields == (1484, 52, 104, k_blocks // 2), where
+            else:
+                assert plan.htail_plan and not plan.sk_sync, where
+                assert fields == (2014, 34, 68, k_blocks), where
+    outside = {T for lo, hi, _ in ranges for T in (lo - 1, hi + 1)}
+    outside -= {T for T in outside for lo, hi, _ in ranges if lo <= T <= hi}
+    for T in sorted(outside):
+        assert plan_at(T, 212) == plan_without(T, 212), T
+    for sm_count in (208, 216):
+        for T in sorted(checked | outside):
+            assert plan_at(T, sm_count) == plan_without(T, sm_count), (sm_count, T)
+
+
 class _Routing034Case(NamedTuple):
     """A GPU case of a plan version 0.3.4 changed (``ROUTING_034_GPU_CASES``)."""
 
@@ -13448,7 +13646,7 @@ class _Routing034Case(NamedTuple):
     #: only the listed device classes run the case (the plan changed there alone); else every supported device does
     scoped: bool = False
     #: on a listed device class the output also equals, bit for bit, the output of the plan before
-    #: (``ROW_RULES_BY_SM`` empty)
+    #: (``ROW_RULES_BY_SM`` and ``ROW_RULE_RANGES_BY_SM`` empty)
     same_bits: bool = False
 
 
@@ -13474,6 +13672,12 @@ ROUTING_034_GPU_CASES = (
     # the floor of these rules at T 32768: run on the sm_100a parts alone (every other device class plans the rows
     # with its own, unchanged rules)
     *(_Routing034Case("wgrad", 5120, d_out, 32768, "bf16", _LONG_5120_GPU, scoped=True) for d_out in (64, 128)),
+    # the 212-SM sm_107a FP32 ranges at their measured token counts: run on that device class alone (every other class
+    # plans these rows as versions 0.3.3 and 0.3.4 did); the whole-tile and half-height tail forms keep the bits of the plan before
+    *(_Routing034Case(op, d_in, d_out, T, "f32", {("sm_107a", 212): program}, scoped=True,
+                      same_bits=form in ("whole", "htail"))
+      for op, d_in, d_out, ranges, program, form, _before in SM107A_212_F32_RANGES.values()
+      for T in (4096, 8192, 16172, 16231, 16384) if any(lo <= T <= hi for lo, hi, _ in ranges)),
 )
 # fmt: on
 
@@ -13490,7 +13694,8 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
     scoped case, which runs on its listed classes alone; on a listed class the plan runs the listed program): its
     output is judged against the FP64 oracle beside the naive BF16 tier over the draws, and it returns the same bits on
     three more launches into NaN.  On a listed class a ``same_bits`` case also equals, bit for bit, the plan it had
-    before (``ROW_RULES_BY_SM`` empty): the FP32 input gradients of the 148-SM sm_100a part rules."""
+    before (``ROW_RULES_BY_SM`` and ``ROW_RULE_RANGES_BY_SM`` empty): the FP32 input gradients of the 148-SM sm_100a
+    part rules, and the whole-tile and half-height tail forms of the 212-SM sm_107a ranges."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -13560,6 +13765,7 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
         before_out = torch.full_like(out, float("nan"))
         with monkeypatch.context() as m:
             m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            m.setattr(cake_backend, "ROW_RULE_RANGES_BY_SM", {})
             cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
             before = prepare(before_out)
         assert before.template != prepared.template, before.template
