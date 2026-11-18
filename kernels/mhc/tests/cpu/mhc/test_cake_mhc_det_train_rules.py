@@ -215,7 +215,34 @@ FINISH_LIBRARY = {
     "r2": "cake_mhc_det_train_fwd_finish__r2",
 }
 # Library -> the architectures whose routes name a record of it (generated from the records).
+# The two-word programs of the opt-in accumulation="fp32x2" (ACC_WORDS_PROGRAMS, hidden 4096): one record per library,
+# in no route (only that mode selects them), on the architectures of their program table.  A record keeps the
+# selection rule of the one-word library it stands beside (PAIR_RULE_OF; inert, since no route names the record).
+PAIR_LIBRARY = {
+    "cake_mhc_det_train_fwd_map__pair": ("sm_100a", "sm_103a", "sm_107a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": ("sm_107a",),
+    "cake_mhc_det_train_bwd_slab__dynr_pair": ("sm_100a", "sm_103a"),
+    "cake_mhc_det_train_bwd_slab__dynl_pair": ("sm_107a",),
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": ("sm_100a", "sm_107a"),
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": ("sm_103a",),
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": ("sm_103a",),
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": ("sm_100a",),
+}
+PAIR_RULE_OF = {
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": "cake_mhc_det_train_bwd_token__dot_ao8",
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn",
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": "cake_mhc_det_train_bwd_token__dot_ao8_l2l",
+    "cake_mhc_det_train_bwd_slab__dynr_pair": "cake_mhc_det_train_bwd_slab__dynr",
+    "cake_mhc_det_train_bwd_slab__dynl_pair": "cake_mhc_det_train_bwd_slab__dynl",
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": "cake_mhc_det_train_bwd_reduce__s27_wcvt_fadd_fshfl",
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": "cake_mhc_det_train_bwd_reduce__pt64",
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": "cake_mhc_det_train_bwd_reduce__pt64",
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows",
+}
 LIBRARY_ARCHES = {
+    **PAIR_LIBRARY,
     "cake_mhc_det_train_bwd_prepare": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_bwd_prepare__t128": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_bwd_reduce__pt32": ("sm_103a",),
@@ -355,7 +382,7 @@ MULTI_RECORDS = {
         "cake_mhc_det_train_bwd_token__dot_ao8__a3",
     ],
 }
-N_RECORDS, N_LIBRARIES = 85, 67
+N_RECORDS, N_LIBRARIES = 95, 77
 # the tail forms each architecture routes beside their X-hint forms (FWD_MAP_XNRM)
 XN_KEPT_TAILS = {"sm_100a": ("ns96_g2_ol2l_ct",), "sm_103a": ("nsx_ct",)}
 RECORD_SCALARS = {
@@ -1201,48 +1228,48 @@ RULES_ROWS = (
     (8192, 152, 'sm_103a', 8192, True, 16, 1024, 304, 7, 448, 152, 1216, 304, 32, 512, 608, 16384, 4096, 8192, 16253184, 16554240, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'nsx_g2_ol2l', 'ao22_rae7_pd1_ntr', 'dynr', 'pt32', 3099, 't128', 'production'),
     (8192, 208, 'sm_107a', 8192, True, 16, 1024, 416, 13, 832, 208, 640, 416, 24, 512, 832, 16384, 8192, 8192, 16253184, 26005760, 'b16', 'tv128_t128', 256, 512, 'st16_lp2_as_el_qd', 'nsx_g2_ol2l_xn', 'ao22_rae7_pd1_ntr', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (8192, 216, 'sm_107a', 8192, True, 16, 1024, 432, 10, 640, 216, 832, 432, 24, 512, 864, 16384, 8192, 8192, 16253184, 21289216, 'b16', 'tv128_t128', 256, 512, 'st16_lp2_as_el_qd', 'nsx_g2_ol2l_xn', 'ao22_rae7_pd1_ntr', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (14928, 148, 'sm_100a', 14976, True, 8, 936, 296, 9, 576, 148, 1664, 296, 56, 933, 592, 29856, 7464, 7464, 15126784, 22032896, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (14928, 152, 'sm_103a', 14976, True, 16, 1872, 304, 7, 448, 152, 2176, 304, 56, 933, 608, 29856, 7464, 7464, 27107584, 18887168, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (14928, 148, 'sm_100a', 14976, True, 8, 936, 296, 9, 576, 148, 1664, 296, 56, 933, 592, 29856, 7464, 7464, 15126784, 21853696, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (14928, 152, 'sm_103a', 14976, True, 16, 1872, 304, 7, 448, 152, 2176, 304, 56, 933, 608, 29856, 7464, 7464, 27107584, 18707968, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (14928, 208, 'sm_107a', 14976, True, 16, 1872, 416, 13, 832, 208, 1152, 416, 40, 933, 832, 29856, 14928, 14928, 27107584, 27959552, 'b16', 'tv128_t128', 256, 512, 'g2_el', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (14928, 216, 'sm_107a', 14976, True, 16, 1872, 432, 10, 640, 216, 1536, 432, 40, 933, 864, 29856, 14928, 14928, 27107584, 23243008, 'b16', 'tv128_t128', 256, 512, 'g2_el', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (15288, 148, 'sm_100a', 15360, True, 8, 960, 296, 16, 1024, 148, 960, 296, 56, 956, 592, 30576, 7644, 7644, 15433984, 33163776, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
-    (15288, 152, 'sm_103a', 15360, True, 16, 1920, 304, 7, 448, 152, 2240, 304, 56, 956, 608, 30576, 7644, 7644, 27721984, 19008000, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (15288, 148, 'sm_100a', 15360, True, 8, 960, 296, 16, 1024, 148, 960, 296, 56, 956, 592, 30576, 7644, 7644, 15433984, 32980224, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
+    (15288, 152, 'sm_103a', 15360, True, 16, 1920, 304, 7, 448, 152, 2240, 304, 56, 956, 608, 30576, 7644, 7644, 27721984, 18824448, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (15288, 208, 'sm_107a', 15360, True, 8, 960, 416, 16, 1024, 208, 960, 416, 40, 956, 832, 30576, 15288, 15288, 15433984, 32788736, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l', 'dot_ao8_l2l', 'dynl', 'wpu4_fadd', 411, 't128', 'r2'),
     (15288, 216, 'sm_107a', 15360, True, 16, 1920, 432, 10, 640, 216, 1536, 432, 40, 956, 864, 30576, 15288, 15288, 27721984, 23353600, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (15566, 148, 'sm_100a', 15616, True, 8, 976, 296, 9, 576, 148, 1792, 296, 56, 973, 592, 31132, 7783, 7783, 15638784, 22235136, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (15566, 152, 'sm_103a', 15616, True, 16, 1952, 304, 7, 448, 152, 2240, 304, 56, 973, 608, 31132, 7783, 7783, 28131584, 19089408, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (15566, 148, 'sm_100a', 15616, True, 8, 976, 296, 9, 576, 148, 1792, 296, 56, 973, 592, 31132, 7783, 7783, 15638784, 22048256, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (15566, 152, 'sm_103a', 15616, True, 16, 1952, 304, 7, 448, 152, 2240, 304, 56, 973, 608, 31132, 7783, 7783, 28131584, 18902528, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (15566, 208, 'sm_107a', 15616, True, 8, 976, 416, 13, 832, 208, 1216, 416, 40, 973, 832, 31132, 15566, 15566, 15638784, 28143872, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (15566, 216, 'sm_107a', 15616, True, 8, 976, 432, 10, 640, 216, 1600, 432, 40, 973, 864, 31132, 15566, 15566, 15638784, 23427328, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (15590, 148, 'sm_100a', 15616, True, 8, 976, 296, 9, 576, 148, 1792, 296, 56, 975, 592, 31180, 7795, 7795, 15638784, 22235904, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (15590, 152, 'sm_103a', 15616, True, 16, 1952, 304, 7, 448, 152, 2240, 304, 56, 975, 608, 31180, 7795, 7795, 28131584, 19090176, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (15590, 148, 'sm_100a', 15616, True, 8, 976, 296, 9, 576, 148, 1792, 296, 56, 975, 592, 31180, 7795, 7795, 15638784, 22048768, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (15590, 152, 'sm_103a', 15616, True, 16, 1952, 304, 7, 448, 152, 2240, 304, 56, 975, 608, 31180, 7795, 7795, 28131584, 18903040, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (15590, 208, 'sm_107a', 15616, True, 8, 976, 416, 13, 832, 208, 1216, 416, 40, 975, 832, 31180, 15590, 15590, 15638784, 28143872, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (15590, 216, 'sm_107a', 15616, True, 8, 976, 432, 10, 640, 216, 1600, 432, 40, 975, 864, 31180, 15590, 15590, 15638784, 23427328, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (16114, 148, 'sm_100a', 16128, True, 8, 1008, 296, 9, 576, 148, 1792, 296, 56, 1008, 592, 32228, 8057, 8057, 16048384, 22398208, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (16114, 152, 'sm_103a', 16128, True, 16, 2016, 304, 7, 448, 152, 2304, 304, 56, 1008, 608, 32228, 8057, 8057, 28950784, 19252480, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (16114, 148, 'sm_100a', 16128, True, 8, 1008, 296, 9, 576, 148, 1792, 296, 56, 1008, 592, 32228, 8057, 8057, 16048384, 22204672, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (16114, 152, 'sm_103a', 16128, True, 16, 2016, 304, 7, 448, 152, 2304, 304, 56, 1008, 608, 32228, 8057, 8057, 28950784, 19058944, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (16114, 208, 'sm_107a', 16128, True, 8, 1008, 416, 13, 832, 208, 1280, 416, 40, 1008, 832, 32228, 16114, 16114, 16048384, 28291328, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (16114, 216, 'sm_107a', 16128, True, 8, 1008, 432, 10, 640, 216, 1664, 432, 40, 1008, 864, 32228, 16114, 16114, 16048384, 23574784, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (16132, 148, 'sm_100a', 16256, True, 8, 1016, 296, 23, 1472, 148, 704, 296, 56, 1009, 592, 32264, 8066, 8066, 16150784, 44455424, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (16132, 152, 'sm_103a', 16256, True, 16, 2032, 304, 7, 448, 152, 2368, 304, 56, 1009, 608, 32264, 8066, 8066, 29155584, 19289600, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (16132, 148, 'sm_100a', 16256, True, 8, 1016, 296, 23, 1472, 148, 704, 296, 56, 1009, 592, 32264, 8066, 8066, 16150784, 44261888, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (16132, 152, 'sm_103a', 16256, True, 16, 2032, 304, 7, 448, 152, 2368, 304, 56, 1009, 608, 32264, 8066, 8066, 29155584, 19096064, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (16132, 208, 'sm_107a', 16256, True, 8, 1016, 416, 13, 832, 208, 1280, 416, 40, 1009, 832, 32264, 16132, 16132, 16150784, 28328192, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (16132, 216, 'sm_107a', 16256, True, 8, 1016, 432, 10, 640, 216, 1664, 432, 40, 1009, 864, 32264, 16132, 16132, 16150784, 23611648, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (16164, 148, 'sm_100a', 16256, True, 8, 1016, 296, 23, 1472, 148, 704, 296, 56, 1011, 592, 32328, 8082, 8082, 16150784, 44456448, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (16164, 152, 'sm_103a', 16256, True, 16, 2032, 304, 7, 448, 152, 2368, 304, 56, 1011, 608, 32328, 8082, 8082, 29155584, 19290624, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (16164, 148, 'sm_100a', 16256, True, 8, 1016, 296, 23, 1472, 148, 704, 296, 56, 1011, 592, 32328, 8082, 8082, 16150784, 44262400, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct_ef_cap', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (16164, 152, 'sm_103a', 16256, True, 16, 2032, 304, 7, 448, 152, 2368, 304, 56, 1011, 608, 32328, 8082, 8082, 29155584, 19096576, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (16164, 208, 'sm_107a', 16256, True, 8, 1016, 416, 13, 832, 208, 1280, 416, 40, 1011, 832, 32328, 16164, 16164, 16150784, 28328192, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (16164, 216, 'sm_107a', 16256, True, 8, 1016, 432, 10, 640, 216, 1664, 432, 40, 1011, 864, 32328, 16164, 16164, 16150784, 23611648, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (16263, 148, 'sm_100a', 16384, True, 8, 1024, 296, 16, 1024, 148, 1024, 296, 56, 1017, 592, 32526, 8132, 8132, 16253184, 33485824, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'nsx_g2_ol2l', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
-    (16263, 152, 'sm_103a', 16384, True, 16, 2048, 304, 7, 448, 152, 2368, 304, 56, 1017, 608, 32526, 8132, 8132, 29360384, 19330048, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (16263, 148, 'sm_100a', 16384, True, 8, 1024, 296, 16, 1024, 148, 1024, 296, 56, 1017, 592, 32526, 8132, 8132, 16253184, 33290752, 'b16', 'tv128', 256, 256, 'st8_lp2_as_el_qd', 'nsx_g2_ol2l', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
+    (16263, 152, 'sm_103a', 16384, True, 16, 2048, 304, 7, 448, 152, 2368, 304, 56, 1017, 608, 32526, 8132, 8132, 29360384, 19134976, 'b16', 'tv128', 256, 256, 'st16_lp2_as_el_qd', 'tk_nsx_g2_ol2l_ct', 'ao15_rae8_tma_ntr_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (16263, 208, 'sm_107a', 16384, True, 8, 1024, 416, 13, 832, 208, 1280, 416, 40, 1017, 832, 32526, 16263, 16263, 16253184, 28365056, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (16263, 216, 'sm_107a', 16384, True, 8, 1024, 432, 10, 640, 216, 1664, 432, 40, 1017, 864, 32526, 16263, 16263, 16253184, 23648512, 'b16', 'tv128_t128', 256, 512, 'qe_mb10_tree', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (20001, 148, 'sm_100a', 20096, True, 8, 1256, 296, 9, 576, 148, 2240, 296, 72, 1251, 592, 40002, 10001, 10001, 19222784, 23649792, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
-    (20001, 152, 'sm_103a', 20096, True, 8, 1256, 304, 7, 448, 152, 2880, 304, 72, 1251, 608, 40002, 10001, 10001, 19222784, 20504064, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (20001, 148, 'sm_100a', 20096, True, 8, 1256, 296, 9, 576, 148, 2240, 296, 72, 1251, 592, 40002, 10001, 10001, 19222784, 23409664, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_spred_trows', 411, 'production', 'production'),
+    (20001, 152, 'sm_103a', 20096, True, 8, 1256, 304, 7, 448, 152, 2880, 304, 72, 1251, 608, 40002, 10001, 10001, 19222784, 20263936, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (20001, 208, 'sm_107a', 20096, True, 8, 1256, 416, 13, 832, 208, 1600, 416, 56, 1251, 832, 40002, 20001, 20001, 19222784, 29434112, 'b16', 'tv128_t128', 256, 512, 'st8_lp2_tree_asel_qd', 'nsx_g2_ol2l_xn', 'ao15_rae8_tma_ntr', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (20001, 216, 'sm_107a', 20096, True, 8, 1256, 432, 10, 640, 216, 2048, 432, 48, 1251, 864, 40002, 20001, 20001, 19222784, 24717568, 'b16', 'tv128_t128', 256, 512, 'st8_lp2_tree_asel_qd', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
-    (32768, 148, 'sm_100a', 32768, True, 8, 2048, 296, 16, 1024, 148, 2048, 296, 112, 2048, 592, 65536, 16384, 16384, 29360384, 38666496, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
-    (32768, 152, 'sm_103a', 32768, True, 8, 2048, 304, 19, 1216, 152, 1728, 304, 112, 2048, 608, 65536, 16384, 16384, 29360384, 43385088, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (32768, 148, 'sm_100a', 32768, True, 8, 2048, 296, 16, 1024, 148, 2048, 296, 112, 2048, 592, 65536, 16384, 16384, 29360384, 38273280, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
+    (32768, 152, 'sm_103a', 32768, True, 8, 2048, 304, 19, 1216, 152, 1728, 304, 112, 2048, 608, 65536, 16384, 16384, 29360384, 42991872, 'b16', 'tv128', 256, 256, 'st8_lp2', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (32768, 208, 'sm_107a', 32768, True, 8, 2048, 416, 13, 832, 208, 2560, 416, 80, 2048, 832, 65536, 32768, 32768, 29360384, 33083648, 'b16', 'tv128_t128', 256, 512, 'st8_lp2_tree_asel_qd', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (32768, 216, 'sm_107a', 32768, True, 8, 2048, 432, 27, 1728, 216, 1216, 432, 80, 2048, 864, 65536, 32768, 32768, 29360384, 55105792, 'b16', 'tv128_t128', 256, 512, 'st8_lp2_tree_asel_qd', 'nsx_g2_ol2l_xn', 'dot_ao8_l2l', 'dynl', 'wpu4_fadd', 411, 't128', 'r2'),
-    (65536, 148, 'sm_100a', 65536, True, 8, 4096, 296, 16, 1024, 148, 4096, 296, 224, 4096, 592, 131072, 32768, 32768, 55574784, 49021184, 'b16', 'tv128', 256, 256, 'lp2_w8_adj', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
-    (65536, 152, 'sm_103a', 65536, True, 8, 4096, 304, 19, 1216, 152, 3456, 304, 216, 4096, 608, 131072, 32768, 32768, 55574784, 53739776, 'b16', 'tv128', 256, 256, 'lp2_w8_adj', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
+    (65536, 148, 'sm_100a', 65536, True, 8, 4096, 296, 16, 1024, 148, 4096, 296, 224, 4096, 592, 131072, 32768, 32768, 55574784, 48234752, 'b16', 'tv128', 256, 256, 'lp2_w8_adj', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'wpu4_fadd_trows', 411, 'production', 'production'),
+    (65536, 152, 'sm_103a', 65536, True, 8, 4096, 304, 19, 1216, 152, 3456, 304, 216, 4096, 608, 131072, 32768, 32768, 55574784, 52953344, 'b16', 'tv128', 256, 256, 'lp2_w8_adj', 'tk_nsx_g2_ol2l_ct', 'dot_ao8_trows_dyn', 'dynr', 'pt32_trows', 3099, 'production', 'production'),
     (65536, 208, 'sm_107a', 65536, True, 8, 4096, 416, 13, 832, 208, 5056, 416, 160, 4096, 832, 131072, 65536, 65536, 55574784, 42520832, 'b16', 'tv128_t128', 256, 512, 'lp2_w8_adj_qe', 'ss_st4_xn', 'dot_ao8_l2l', 'dynl', 'wpu4', 411, 't128', 'r2'),
     (65536, 216, 'sm_107a', 65536, True, 8, 4096, 432, 27, 1728, 216, 2432, 432, 152, 4096, 864, 131072, 65536, 65536, 55574784, 64542976, 'b16', 'tv128_t128', 256, 512, 'lp2_w8_adj_qe', 'ss_st4_xn', 'dot_ao8_l2l', 'dynl', 'wpu4_fadd', 411, 't128', 'r2'),
 )  # fmt: skip
@@ -1338,8 +1365,21 @@ LAUNCH_FACTS = {
     "cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_trows": ((256, 1, 1), 128, 1),
     "cake_mhc_det_train_bwd_reduce__s27_wcvt_spred": ((256, 1, 1), 4224, 1),
     "cake_mhc_det_train_bwd_reduce__wpu4": ((256, 1, 1), 4224, 1),
+    # the two-word programs: the launch of the one-word form they are built from (the mapping pass's production
+    # form, dot_ao8 (trows_dyn: 2048 B more), dynr / dynl, s27_wcvt, pt64, wpu4_fadd_trows)
+    "cake_mhc_det_train_fwd_map__pair": ((192, 1, 1), 115712, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_pair": ((256, 1, 1), 91136, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_trows_dyn_pair": ((256, 1, 1), 93184, 2),
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_pair": ((256, 1, 1), 91136, 2),
+    "cake_mhc_det_train_bwd_slab__dynr_pair": ((384, 1, 1), 228480, 1),
+    "cake_mhc_det_train_bwd_slab__dynl_pair": ((384, 1, 1), 228480, 1),
+    "cake_mhc_det_train_bwd_reduce__s27_wcvt_pair": ((256, 1, 1), 4224, 1),
+    "cake_mhc_det_train_bwd_reduce__pt64_pair": ((64, 1, 1), 2688, 1),
+    "cake_mhc_det_train_bwd_reduce__pt64_trows_pair": ((64, 1, 1), 2688, 1),
+    "cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_pair": ((256, 1, 1), 128, 1),
 }
 RECORD_ARCHES = {
+    **PAIR_LIBRARY,
     "cake_mhc_det_train_fn_split": ("sm_100a", "sm_103a", "sm_107a"),
     "cake_mhc_det_train_fn_split__tv128__t": ("sm_100a", "sm_103a"),
     "cake_mhc_det_train_fn_split__tv128_t128__t": ("sm_107a",),
@@ -2124,7 +2164,7 @@ def test_records_are_consistent() -> None:
     assert set(libraries) == {
         *SPLIT_LIBRARY.values(), *MAP_LIBRARY.values(), *COEF_LIBRARY.values(), *TOKEN_LIBRARY.values(),
         *SLAB_LIBRARY.values(), *REDUCE_LIBRARY.values(), *FINISH_LIBRARY.values(), *EVERYWHERE,
-        *K5_FORM_LIBRARY.values(), *RUN_TIME_ITERS,
+        *K5_FORM_LIBRARY.values(), *RUN_TIME_ITERS, *PAIR_LIBRARY,
     }  # fmt: skip
     for library, names in MULTI_RECORDS.items():
         # several records, or one record not named after its library (the `__hi` / `__t` records)
@@ -2136,7 +2176,8 @@ def test_records_are_consistent() -> None:
         assert [
             name for name, record in modules.items() if record["library"] == library
         ] == [library], library
-    # the checkpoint carry's dual-layout fn split is named by FN_SPLIT_CARRY, not by a route
+    # the checkpoint carry's dual-layout fn split is named by FN_SPLIT_CARRY, not by a route; the two-word programs by
+    # the two-word table (ACC_WORDS_PROGRAMS), not by a route
     routed = {
         arch: {name for names in H4096_ROUTES[arch].values() for name in names}
         | {
@@ -2144,8 +2185,21 @@ def test_records_are_consistent() -> None:
             for carry_arch, entry in loader.FN_SPLIT_CARRY.items()
             if carry_arch == arch
         }
+        | {
+            name
+            for by_arch in loader.ACC_WORDS_PROGRAMS.values()
+            for pair_arch, name in by_arch.items()
+            if pair_arch == arch
+        }
         for arch in loader.ARCHES
     }
+    on_routes = {
+        name
+        for routes in H4096_ROUTES.values()
+        for names in routes.values()
+        for name in names
+    }
+    assert set(PAIR_LIBRARY) <= set(modules) and not set(PAIR_LIBRARY) & on_routes
     for name, record in modules.items():
         assert record["kernel"] == record["library"], name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
@@ -2221,10 +2275,9 @@ def test_records_are_consistent() -> None:
                 ), name
                 kernel = next(p for p in PROGRAM_RULE_KERNELS if _is(name, p))
                 table, rule_name = PROGRAM_RULE_KERNELS[kernel]
-                assert (
-                    rule["rule"] == rule_name
-                    and table[rule["program"]] == record["library"]
-                ), name
+                assert rule["rule"] == rule_name and table[
+                    rule["program"]
+                ] == PAIR_RULE_OF.get(name, record["library"]), name
                 # the K1 and K7 records are the plain ones; a K6 / K8 program record takes the architecture suffix
                 # (`__a3` sm_100a, `__a7` sm_107a) where the plain name is another architecture's record under another
                 # rule (sm_100a's token-owner forms beside sm_103a's R-range records; sm_107a's beside both)
