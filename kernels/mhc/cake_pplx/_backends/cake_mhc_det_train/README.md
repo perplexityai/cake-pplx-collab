@@ -115,7 +115,7 @@ dX, dpre_in = cake_mhc_det_train_collapse_backward(X, pre_in, dU)
 ```
 
 - `U = BF16(sum_i pre_in_i X_i)`; `pre_next` is the FP32 `pre` of the coefficient pass (the `pre` columns of `stats`, bit for bit).
-- The coefficient VJP takes `dpre_next`; `dpre_in_i = sum_d dU_d X_id`; `dX` is rounded once.
+- The coefficient VJP takes `dpre_next`; `dpre_in_i = sum_d dU_d X_id`, computed with FP32 compensated summation (no FP64); `dX` is rounded once.
 - Routes (`cake_jit.HANDOFF_KINDS`): the standard forward with the collapse `fwd_collapse__pi_pn`, the standard backward with the token-owner forms `bwd_token__<form>_ho`, and the standalone `collapse_fwd` / `collapse_bwd` records (no workspace). The workspaces and the retained state are the standard ones; `pre_next` (16 bytes per token) lives until its consumer's backward.
 - The det outputs repeat bit for bit as in [Determinism](#determinism); `is_cake_mhc_det_train_handoff_supported(device, hidden=None)` reports the coverage.
 

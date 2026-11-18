@@ -22,10 +22,11 @@ programs a standard call launches, with the same grids, PDL arguments and worksp
   of the coefficient pass's ``pre`` and writes ``pre_next``) in place of ``fwd_collapse``;
 * ``bwd_finish_handoff`` is ``bwd_finish`` with each token-owner form ``bwd_token__<form>`` replaced by its
   ``bwd_token__<form>_ho`` twin (the base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
-  record, before ``T``);
+  record, before ``T``, and the compensation region of its FP32 compensated ``dpre_in`` reduction added to its
+  dynamic shared memory);
 * ``collapse_forward`` / ``collapse_backward`` are one record each (``collapse_fwd`` / ``collapse_bwd``) with their own
   library stems and no workspace; the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on),
-  the VJP none.
+  the VJP none; the VJP's dynamic shared memory holds its partial sums and their compensations.
 
 The routes exist at hidden 5120 on sm_100a and sm_103a; the nondeterministic records are the deterministic ones under
 the nondeterministic prefix.
@@ -53,6 +54,15 @@ HANDOFF_KINDS = (
 HANDOFF_ARCHES = ("sm_100a", "sm_103a")
 BOARDS = (("sm_100a", 148), ("sm_103a", 152))
 TOKEN_FORMS = ("ao22_rae7_pd1_ntr", "dot_ao8", "dot_ao8_trows_dyn", "rt64")
+# The bytes the FP32 compensated dpre_in reduction adds to each token-owner form's dynamic shared memory, and the
+# standalone VJP's dynamic shared memory (partial sums and compensations).
+TOKEN_COMP_SMEM = {
+    "ao22_rae7_pd1_ntr": 2048,
+    "dot_ao8": 2048,
+    "dot_ao8_trows_dyn": 2048,
+    "rt64": 1024,
+}
+VJP_SMEM = 512
 HANDOFF_OPERANDS = (
     ["buffer", "pre_in"],
     ["buffer", "dpre_next"],
@@ -152,9 +162,11 @@ def test_token_owner_twins_are_the_base_records_with_the_handoff_operands(
         name,
         f"kernel_{name}",
     )
-    assert _strip(twin, "arches", "arg_plan", "logical") == _strip(
-        base, "arches", "arg_plan", "logical"
+    assert _strip(twin, "arches", "arg_plan", "logical", "launch") == _strip(
+        base, "arches", "arg_plan", "logical", "launch"
     )
+    smem = base["launch"]["dynamic_smem_bytes"] + TOKEN_COMP_SMEM[form]
+    assert twin["launch"] == {**base["launch"], "dynamic_smem_bytes": smem}
     assert twin["arches"] == [a for a in base["arches"] if a in HANDOFF_ARCHES]
     plan = copy.deepcopy(base["arg_plan"])
     at = plan.index(["buffer", "param_partial"]) + 1
@@ -219,11 +231,10 @@ def test_collapse_records(mode: str) -> None:
     assert fwd["launch"]["use_pdl"] == "runtime" and bwd["launch"]["use_pdl"] is False
     assert REGISTRIES[mode].pdl_edge(fwd["library"]) == "K4->C"
     assert REGISTRIES[mode].pdl_edge(bwd["library"]) is None
-    for rec in (fwd, bwd):
+    for rec, smem in ((fwd, 0), (bwd, VJP_SMEM)):
         assert rec["workspace_rule"] is None and rec["select_rule"] is None
-        assert rec["launch"]["dynamic_smem_bytes"] == 0 and tuple(
-            rec["launch"]["block"]
-        ) == (256, 1, 1)
+        assert rec["launch"]["dynamic_smem_bytes"] == smem
+        assert tuple(rec["launch"]["block"]) == (256, 1, 1)
     assert fwd["grid_rule"] == base["grid_rule"]
     one_token_per_cta = {
         "col_split": 1,

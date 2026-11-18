@@ -736,7 +736,7 @@ Other public names:
 A sublayer of [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) collapses its streams with the `pre` of the previous sublayer and hands its own `pre` on. Both packages have entry points for this, under their own prefix (`<mode>` is `det` or `nondet`):
 
 - Forward: `(pre_next, post, C)` are the coefficients of `X`, as above. `U = BF16(sum_i pre_in_i X_i)` uses the incoming FP32 `pre_in [T, 4]`, not `pre_next`. `pre_next` is the FP32 `pre` of the coefficient pass, bit for bit the `pre` columns of `stats`. `Y` is computed by `forward_finish` as before.
-- Backward: `dpre_next [T, 4]` FP32 is the gradient of `pre_next` from its consumer. The coefficient VJP takes `dpre_next`, not a gradient derived from `dU`. `dpre_in_i = sum_d dU_d X_id` (one FP32 sum per token and stream). `dX = BF16(dX_mix + pre_in_i dU + dX_coef)` is rounded once.
+- Backward: `dpre_next [T, 4]` FP32 is the gradient of `pre_next` from its consumer. The coefficient VJP takes `dpre_next`, not a gradient derived from `dU`. `dpre_in_i = sum_d dU_d X_id` per token and stream, in FP32 compensated summation (each partial sum keeps its rounding error in a second FP32 word; no FP64), also in the standalone VJP. `dX = BF16(dX_mix + pre_in_i dU + dX_coef)` is rounded once.
 - The first sublayer passes a one-hot `pre_in = [1, 0, 0, 0]`; its `U` is stream 0 bit for bit. The final collapse before the model head is the standalone collapse `(X, pre_in) -> U` with the VJP `(X, pre_in, dU) -> (dX, dpre_in)`.
 - Coverage: hidden 5120 on `sm_100a` and `sm_103a` (`is_cake_mhc_<mode>_train_handoff_supported(device, hidden=None)`). Other sizes and architectures raise `ValueError`. The standard entry points are unchanged.
 
