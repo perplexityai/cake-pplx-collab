@@ -5779,6 +5779,235 @@ def test_adjoint_split_one_wave_naive_tier_verdict(
     _judge_forms(record_property, 7031, seq_lens, heads, device, forms, names=names, states=states)  # fmt: skip
 
 
+# The one-wave table on a row whose wave 1 runs on the caller's stream: SPLIT_LAYOUT (11, 24 and 4 chunks) with HV 4 on
+# ONE_WAVE_TABLE_SMS SMs, the costs of _split_device (walk and summary 1 us per chunk, no stitch or fixed cost) and a
+# fork cost that no overlap repays.  The piece table (4 chunks: 3 + 6 + 1 pieces, 40 CTAs) does not fit one wave: wave
+# 1 on one stream runs the summaries (4 chunks), the last pieces' walks (4), the stitch and the other walks (4) in
+# series, 12 us; the one-wave table (5 chunks: 3 + 5 + 1 pieces, 36 CTAs) runs the summaries (5), the stitch and one
+# walk of every piece (5), 10 us.
+ONE_WAVE_TABLE_SMS = 36
+
+
+def _one_wave_table_device(monkeypatch, device, *, listed: bool = True) -> str:
+    """The small device of :func:`_split_device` (the split priced) with ONE_WAVE_TABLE_SMS SMs, wave 1 on the
+    caller's stream and the one-wave route; ``listed``: the device in ONE_WAVE_TABLE_DEVICES (else no device is)."""
+    arch = _split_device(monkeypatch, device, split=True)
+    if cake_chain._adjoint_chain_stage(arch) != "stitch":
+        pytest.skip(f"the one-wave route needs the stitch on {arch}")
+    _small_device(monkeypatch, device, ONE_WAVE_TABLE_SMS)
+    monkeypatch.setitem(cake_chain.ADJOINT_SPLIT_COSTS[arch], "fork", 1e9)
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_SPLIT_ARCHS", frozenset({arch}))
+    devices = {(arch, ONE_WAVE_TABLE_SMS)} if listed else set()
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset(devices))
+    return arch
+
+
+def test_one_wave_table_route_on_a_one_stream_row(
+    device, monkeypatch, record_property
+) -> None:
+    # wave 1 on the caller's stream over pieces that do not fit one wave: a device of ONE_WAVE_TABLE_DEVICES takes the
+    # one-wave table and runs the one-wave route (the summaries, the stitch and one walk of every piece, all on the
+    # caller's stream); a device outside the set keeps the piece table, wave 1 on one stream, also after its layout was
+    # cached with the device in the set (the layout cache keys on the set).  Two runs of the one-wave route per draw
+    # (judged by the worst) and the serial walk on the same small device are judged with an initial state and a
+    # final-state gradient
+    seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
+    index = cake_chain._device_index(device)
+    chunks = cake_plan.chunk_counts(seq_lens)
+    main = torch.cuda.current_stream(device).cuda_stream
+    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+    options = cake_chain.make_options()
+
+    def planned():
+        meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], options,
+                                      heads[1] // heads[0])  # fmt: skip
+        return meta.bwd_split, meta.bwd_segments
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for listed in (False, True):
+            with monkeypatch.context() as m:
+                arch = _one_wave_table_device(m, device, listed=listed)
+                if j == 0:
+                    rec = cake_chain.adjoint_split_pricing(chunks, heads[1], ONE_WAVE_TABLE_SMS, arch)  # fmt: skip
+                    got = (rec["segment_len"], rec["one_stream"], rec["one_wave_len"])
+                    assert got == (4, True, 5), rec
+                    assert (rec["one_stream_us"], rec["one_wave_us"]) == (12.0, 10.0), rec  # fmt: skip
+                split, segs = planned()
+                assert split is not None and split.one_stream, split
+                if not listed:
+                    assert (segs.segment_len, segs.num_segments) == (4, 10), segs
+                    assert not split.one_wave and split.num_every == 0, split
+                    continue
+                assert (segs.segment_len, segs.num_segments) == (5, 9), segs
+                assert split.one_wave and split.num_every == 9, split
+                launches = _record_streams(m)
+                runs["one_wave_table"] = [_run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)
+                                          for _ in range(2)]  # fmt: skip
+                stages = [stage for stage, _ in launches]
+                # per run one launch of the summaries and one walk of every piece; the backward's stitch (the
+                # forward's plan may stitch too)
+                assert (
+                    stages.count("dhu_tc2_dvl32_gm") == 2
+                    and stages.count("dhu_tc2_dvl32_modes") == 2
+                ), stages
+                assert stages.count("stitch") >= 2, stages
+                assert not [
+                    s for s in stages if s.startswith(("dhu_pre", "dv_local", "dhu_r"))
+                ], stages
+                split_streams = {
+                    stream for stage, stream in launches if stage in _SPLIT_STAGES
+                }
+                assert split_streams == {main}, split_streams
+                if j == 0:
+                    # the layout cache keys on the device set: a device taken out of it plans the piece table again
+                    m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+                    split, segs = planned()
+                    assert (segs.segment_len, segs.num_segments) == (4, 10), segs
+                    assert (
+                        split is not None and split.one_stream and not split.one_wave
+                    ), split
+        with monkeypatch.context() as m:
+            _split_device(m, device, split=False)
+            runs["serial"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        return runs
+
+    _judge_forms(record_property, 7041, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
+
+
+# --------------------------------------------------------------------------- the serial scan of a host-built table
+# at low residency (dhu_tc_host_pricing), routed by the plan
+
+
+def _serial_scan_device(monkeypatch, device, reg_fixed: float | None) -> str:
+    """The small device of :func:`_split_device` with SPLIT_LAYOUT on a serial adjoint table (the split never priced
+    cheaper, no table priced for dhu_tc2: TC_PLAN off; 12 resident (sequence, value head) pairs at HV 4) and, unless
+    ``reg_fixed`` is None, the device's host-table entry with that fixed register cost (us): 1e6 selects dhu_tc2, -1e6
+    the register path."""
+    arch = _split_device(monkeypatch, device, split=False)
+    if not cake_chain._available(cake_chain.dhu_tc2_stage(arch), arch):
+        pytest.skip(f"{cake_chain.dhu_tc2_stage(arch)} is not delivered for {arch}")
+    if cake_chain._dhu_tc_constants(arch) is None:
+        pytest.skip(f"the dhu_tc2 record carries no selection constants for {arch}")
+    monkeypatch.setattr(cake_chain, "TC_PLAN", False)
+    entries = {}
+    if reg_fixed is not None:
+        entries[(arch, SPLIT_SMS)] = types.MappingProxyType(
+            {"reg_fixed": reg_fixed, "reg_scale": 1.0}
+        )
+    monkeypatch.setattr(cake_chain, "DHU_TC_HOST_COSTS", types.MappingProxyType({}))
+    monkeypatch.setattr(
+        cake_chain, "DHU_TC_HOST_DEVICE_COSTS", types.MappingProxyType(entries)
+    )
+    return arch
+
+
+def test_serial_scan_choice_routes_the_serial_table(
+    device, monkeypatch, record_property
+) -> None:
+    # the host-table rule's answer for a serial table, kept in the plan (ChunkMeta.bwd_serial_tc), runs dhu_tc2
+    # (dv_local fused) or dv_local + the register scan without the rule at the call (_dhu_tc_selected); a pinned call
+    # and a device without an entry keep that rule, the pin's scan winning over the entry; a replaced host table prices
+    # a cached layout again (the layout cache keys on the tables' ids).  Two runs of each case per draw (judged by the
+    # worst) are judged with an initial state and a final-state gradient
+    seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
+    index = cake_chain._device_index(device)
+    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+    calls: list = []
+    rule = cake_chain._dhu_tc_selected
+
+    def recording(meta, num_v_heads, device_index, options):
+        calls.append(options.dhu_scan)
+        return rule(meta, num_v_heads, device_index, options)
+
+    def planned(pins):
+        return cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1],
+                                      cake_chain.make_options(**pins), heads[1] // heads[0])  # fmt: skip
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for case, reg_fixed, pins, want in (
+            ("tc", 1e6, {}, True),
+            ("reg", -1e6, {}, False),
+            ("pinned", 1e6, {"segment_chunks": 0, "dhu_scan": "reg"}, None),
+            ("no_entry", None, {}, None),
+        ):
+            with monkeypatch.context() as m:
+                arch = _serial_scan_device(m, device, reg_fixed)
+                m.setattr(cake_chain, "_dhu_tc_selected", recording)
+                calls.clear()
+                meta = planned(pins)
+                assert meta.bwd_split is None and not meta.bwd_tc, case
+                assert meta.bwd_segments.num_segments == len(seq_lens), (case, meta.bwd_segments)  # fmt: skip
+                assert meta.bwd_serial_tc is want, (case, meta.bwd_serial_tc)
+                launches = _record_streams(m)
+                runs[case] = [_run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, **pins)
+                              for _ in range(2)]  # fmt: skip
+                stages = {stage for stage, _ in launches}
+                tc = cake_chain.dhu_tc2_stage(arch) in stages
+                reg = "dv_local" in stages and any(s.startswith("dhu_r") for s in stages)  # fmt: skip
+                pre = any(s.startswith("dhu_pre") for s in stages)
+                assert tc is not reg and not pre, (case, sorted(stages))
+                if case in ("tc", "reg"):
+                    assert tc is (case == "tc") and not calls, (case, sorted(stages), calls)  # fmt: skip
+                else:
+                    # the rule at the call decides (its pin, or its price without an entry)
+                    assert calls and set(calls) == {pins.get("dhu_scan")}, (case, calls)
+                    assert case != "pinned" or reg, (case, sorted(stages))
+                if case == "tc" and j == 0:
+                    # the layout cache keys on the host tables' ids: a replaced table prices the layout again
+                    entry = types.MappingProxyType({"reg_fixed": -1e6, "reg_scale": 1.0})  # fmt: skip
+                    table = types.MappingProxyType({(arch, SPLIT_SMS): entry})
+                    m.setattr(cake_chain, "DHU_TC_HOST_DEVICE_COSTS", table)
+                    assert planned(pins).bwd_serial_tc is False, case
+        return runs
+
+    _judge_forms(record_property, 7051, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
+
+
+@pytest.mark.parametrize("route", ["one_wave_table", "serial_tc", "serial_reg"])
+def test_planned_routes_plain_and_checkpointed_naive_tier_verdict(
+    route, device, monkeypatch, record_property
+) -> None:
+    # the one-wave table's route and the two scans the host-table rule chooses, plain and under non-reentrant
+    # activation checkpointing (the forward recomputed for the backward, one route in both passes): two runs of each
+    # per draw (judged by the worst) are judged with an initial state and a final-state gradient
+    seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
+    index = cake_chain._device_index(device)
+    if route == "one_wave_table":
+        _one_wave_table_device(monkeypatch, device)
+        marker, absent = "dhu_tc2_dvl32_gm", "dv_local"
+    else:
+        arch = _serial_scan_device(
+            monkeypatch, device, 1e6 if route == "serial_tc" else -1e6
+        )
+        marker, absent = cake_chain.dhu_tc2_stage(arch), "dv_local"
+        if route == "serial_reg":
+            marker, absent = absent, marker
+    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+    meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], cake_chain.make_options(),
+                                  heads[1] // heads[0])  # fmt: skip
+    if route == "one_wave_table":
+        split = meta.bwd_split
+        assert split is not None and split.one_wave, split
+        assert meta.bwd_segments.segment_len == 5, meta.bwd_segments
+    else:
+        assert meta.bwd_serial_tc is (route == "serial_tc"), meta.bwd_serial_tc
+    stages = _record_launches(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for ckpt in (False, True):
+            stages.clear()
+            runs["ckpt" if ckpt else "plain"] = [
+                _run_rows(inputs, seq_lens, h0, dht, ckpt=ckpt) for _ in range(2)
+            ]
+            assert marker in stages and absent not in stages, (route, ckpt, stages)
+        return runs
+
+    _judge_forms(record_property, 7061, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
+
+
 def _record_gm_flags(monkeypatch) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """(seg_index, seg_flag) of every ``dhu_tc2_dvl32_gm`` launch from here on (its last argument and the fourth from
     last in the record's order)."""
