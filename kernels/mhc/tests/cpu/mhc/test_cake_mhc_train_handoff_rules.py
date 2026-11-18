@@ -22,11 +22,12 @@ programs a standard call launches, with the same grids, PDL arguments and worksp
   of the coefficient pass's ``pre`` and writes ``pre_next``) in place of ``fwd_collapse``;
 * ``bwd_finish_handoff`` is ``bwd_finish`` with each token-owner form ``bwd_token__<form>`` replaced by its
   ``bwd_token__<form>_ho`` twin (the base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
-  record, before ``T``, and the compensation region of its FP32 compensated ``dpre_in`` reduction added to its
-  dynamic shared memory);
+  record, before ``T``; its launch, dynamic shared memory included, is the base record's: ``dpre_in`` is one FP32
+  word per stream, reduced in the kernel's own order);
 * ``collapse_forward`` / ``collapse_backward`` are one record each (``collapse_fwd`` / ``collapse_bwd``) with their own
   library stems and no workspace; the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on),
-  the VJP none; the VJP's dynamic shared memory holds its partial sums and their compensations.
+  the VJP none; the VJP is the coalesced form: its dynamic shared memory stages each warp's slab of the ``dU`` row and
+  of the four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial sums.
 
 The routes exist at hidden 5120 on sm_100a, sm_103a and sm_107a (each token-owner twin on the architectures of its
 base form: sm_107a's backward runs the ``dot_ao8_l2l`` form where the others run ``dot_ao8`` and its group-row form);
@@ -61,16 +62,8 @@ TOKEN_FORMS = (
     "rt64",
     "dot_ao8_l2l",
 )
-# The bytes the FP32 compensated dpre_in reduction adds to each token-owner form's dynamic shared memory, and the
-# standalone VJP's dynamic shared memory (partial sums and compensations).
-TOKEN_COMP_SMEM = {
-    "ao22_rae7_pd1_ntr": 2048,
-    "dot_ao8": 2048,
-    "dot_ao8_trows_dyn": 2048,
-    "rt64": 1024,
-    "dot_ao8_l2l": 2048,
-}
-VJP_SMEM = 512
+# The standalone VJP's dynamic shared memory: 8 warps x 6400 bytes of staged dU / X words + 256 bytes of partial sums.
+VJP_SMEM = 8 * 6400 + 256
 HANDOFF_OPERANDS = (
     ["buffer", "pre_in"],
     ["buffer", "dpre_next"],
@@ -171,8 +164,7 @@ def test_token_owner_twins_are_the_base_records_with_the_handoff_operands(
     assert _strip(twin, "arches", "arg_plan", "logical", "launch") == _strip(
         base, "arches", "arg_plan", "logical", "launch"
     )
-    smem = base["launch"]["dynamic_smem_bytes"] + TOKEN_COMP_SMEM[form]
-    assert twin["launch"] == {**base["launch"], "dynamic_smem_bytes": smem}
+    assert twin["launch"] == base["launch"]
     assert twin["arches"] == [a for a in base["arches"] if a in HANDOFF_ARCHES]
     plan = copy.deepcopy(base["arg_plan"])
     at = plan.index(["buffer", "param_partial"]) + 1
