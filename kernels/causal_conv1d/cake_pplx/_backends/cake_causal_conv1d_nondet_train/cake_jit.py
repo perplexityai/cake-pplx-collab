@@ -88,9 +88,10 @@ per architecture and per mode (outside or inside a CUDA Graph capture;
 :data:`PDL_EAGER`, :data:`PDL_GRAPH`, :func:`pdl_enabled`).  Each program
 waits for the stream's preceding kernel (``griddepcontrol.wait``) before it
 reads or writes global memory, so the attribute changes only when a launch may
-start, never what it computes.  The det package's programs launch without it;
-a forward copy differs from its det program in the kernel symbol, the library
-name and this launch scalar.
+start, never what it computes.  The det package's forward programs, which this
+package's forward copies run, launch without it (its backward reduce programs
+set it on every launch); a forward copy differs from its det program in the
+kernel symbol, the library name and this launch scalar.
 """
 
 from __future__ import annotations
@@ -4892,7 +4893,14 @@ SPLIT_ROLES = ("fwd", "bwd")
 # vectors) keeps 12288 on every route: on the default route, the one route
 # timed at C = 704, its 32-vector tiles were not slower than the single tile
 # in either measurement at any timed token count from 12288 to 250340.  C =
-# 712 to 760 are not measured and take the floors of C = 768 on each route.
+# 736 (92 vectors) was timed on the ``fwd`` and ``fwd_dt`` routes on the GB300:
+# under CUDA Graph replay the 32-vector tiles ran 1.023 / 1.023 times as fast
+# as the single tile at 12288 / 16384 x 736 on the default route (14.40 ->
+# 14.08 us, 16.54 -> 16.18 us) and 1.030 / 1.014 times as fast with BF16 taps
+# (14.05 -> 13.63 us, 16.00 -> 15.78 us).  The other channel counts from C =
+# 712 to 760 are not measured and take the floors of C = 768 on each route;
+# the ``fwd_bias`` rows of C = 712 to 760 take C = 768's 20480 without a
+# measurement at those widths.
 # The backward plans its narrower rows by :data:`TILE_OVERRIDES` and
 # :data:`NARROW_TILES` instead.
 FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
