@@ -29,7 +29,7 @@ out = cake_engram_gate_det(x, key, value, q_weight, k_weight, token_mask, eps=1e
 out = cake_engram_gate_det_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
 out.backward(dout)
 
-# opt-in: sum the dot product P in one FP32 word (less accurate where the products nearly cancel; see Accuracy)
+# opt-in: the forward sums the dot product P in one FP32 word (faster; see Accuracy); the backward is the same
 out = cake_engram_gate_det_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="fp32")
 ```
 
@@ -58,14 +58,16 @@ Output rows must not overlap.
 | Stage | Records | Grid | Work |
 | --- | --- | --- | --- |
 | `fwd` | `fwd_dot2`, `fwd_f32` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: the four CTAs of a cluster each sum 1280 columns of every stream, exchange the partial sums, and write `out` |
-| `bwd` | `bwd_dot2`, `bwd_f32` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
+| `bwd` | `bwd_dot2` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
 | `dw_reduce` | `dw_reduce` | over the `4 * 5120` weight-gradient columns | sum the partial rows, multiply by `k_weight` / `q_weight` |
 
 `clusters = min(T, resident clusters)` (`cake_jit.clusters`); a cluster walks the tokens `c, c + clusters, ...`. The
 resident clusters are the four-CTA clusters the device holds at once for the record's CTAs per SM
 (`cake_jit.CTAS_PER_SM`: four for `fwd`, three for `bwd`). A cluster stays in one GPC, so a device holds fewer of them
 than `CTAs per SM * SM count / 4`. `cake_jit.RESIDENT_CLUSTERS` holds the counts `cudaOccupancyMaxActiveClusters`
-gave for this family's programs at each count of CTAs per SM:
+gave, per count of CTAs per SM. The count follows the CTAs per SM, not the program: the builds of this family measured
+with one count of CTAs per SM gave one count of clusters. The entries come from the shipped programs, except VR200 at
+three CTAs per SM, which comes from a forward build that also held three CTAs per SM:
 
 | Device | Architecture, SMs | 4 CTAs per SM (`fwd`) | 3 CTAs per SM (`bwd`) |
 | --- | --- | --- | --- |
@@ -78,30 +80,38 @@ than any measured device holds. Any grid is correct. A larger grid than the devi
 resident starts only after a resident one has walked all of its tokens. Every launch is a plain stream-ordered launch
 on the current torch stream: nothing cooperative.
 
-The `_dot2` and `_f32` records differ only in the sum of `P`, which every entry selects with `dot_sum`:
+The two forward records differ only in the sum of `P`, which the autograd entries and the explicit forward select
+with `dot_sum`:
 
-- `dot_sum="compensated"` (the default) launches `_dot2`: a compensated FP32 dot product (each product split by an
+- `dot_sum="compensated"` (the default) launches `fwd_dot2`: a compensated FP32 dot product (each product split by an
   FMA, each running sum by an error-free two-sum, the error words added once at the end).
-- `dot_sum="fp32"` (opt-in) launches `_f32`: one FP32 word.
+- `dot_sum="fp32"` (opt-in) launches `fwd_f32`: one FP32 word.
 
-The autograd entries save the choice with the inputs: the backward (and a checkpoint's recomputed forward) sums `P`
-as the forward did.
+There is one backward, `bwd_dot2`: it recomputes `P` as a compensated dot product after either forward, so the
+gradients do not depend on `dot_sum`, and the explicit backward and `*_workspace_bytes` take no `dot_sum`. A
+checkpoint's recomputed forward uses the forward's `dot_sum`.
 
 ## Accuracy
 
 The acceptance tests compare each output with an FP64 reference: the median and the largest relative L2 error over
 25 or more draws must be at most twice those of an FP32 evaluation of the same formula. The draws are random, or
 built so that the dot products nearly cancel (`|dot|` from 2e-6 to 2e-5); on those rows the gate's derivative
-`1 / (2 sqrt|dot|)` magnifies any error of `P`. The default sum meets every bound. The `"fp32"` sum meets the bounds
-on `out`, `dvalue` and the random `dx` and `dkey`, and misses the others. Measured on GB300 (`T = 16`, 25 draws
-each), relative L2 error, median / largest:
+`1 / (2 sqrt|dot|)` magnifies any error of `P`. Both `dot_sum` choices meet every bound, measured on GB300 (`T = 16`,
+25 draws of each kind); relative L2 error, median / largest:
 
-| Output, draws | `"compensated"` | `"fp32"` | Bound |
-| --- | --- | --- | --- |
-| `dx`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 1.0e-2 / 2.6e-2 | 3.3e-3 / 3.4e-3 |
-| `dkey`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 1.0e-2 / 2.6e-2 | 3.3e-3 / 3.4e-3 |
-| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 9.8e-3 / 2.6e-2 | 3.2e-7 / 4.7e-7 |
-| `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 8.0e-7 / 1.1e-4 | 1.8e-6 / 7.7e-5 |
+| Output, draws | Error | Bound |
+| --- | --- | --- |
+| `out`, random (either `dot_sum`) | 1.448e-3 / 1.457e-3 | 2.896e-3 / 2.914e-3 |
+| `out`, near-cancelling (either `dot_sum`) | 1.661e-3 / 1.669e-3 | 3.321e-3 / 3.338e-3 |
+| `dx`, `dkey`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 3.3e-3 / 3.4e-3 |
+| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
+| `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
+
+The gradients are those of the one backward. The `out` errors of the two forwards agree to four digits, but
+`dot_sum="fp32"` rounds more output elements away from the correctly rounded (BF16 of FP64) result where the products
+nearly cancel: 17802 of the 8.19 million output elements of the near-cancelling draws, against 117 for the default
+(an FP32 evaluation of the formula: 21917); 152 against 113 on the random draws. The `"fp32"` forward takes about
+13% less time (GB300, `T = 16384`: 0.326 ms against 0.375 ms).
 
 ## Workspace and retained state
 
@@ -110,13 +120,13 @@ each), relative L2 error, median / largest:
 - Forward workspace: the FP32 weight product (80 KiB), plus an FP32 copy of a BF16 `q_weight` (80 KiB).
 - Backward workspace: the weight product, FP32 copies of BF16 weights (80 KiB each) and one FP32 `[4, 5120]` row of
   weight-gradient partial sums per cluster of the backward grid (80 KiB each);
-  `cake_engram_gate_det_train_workspace_bytes(T, device, dot_sum=...)`.
+  `cake_engram_gate_det_train_workspace_bytes(T, device)`.
 
 ## Determinism
 
 Every sum has one fixed order: each cluster writes its own row of weight-gradient partial sums, and `dw_reduce` adds
-the rows in one order. Every output is bitwise reproducible run to run on one device (the cluster count follows the
-token count, the device and `dot_sum`). Nothing reads `torch.use_deterministic_algorithms`.
+the rows in one order. Every output is bitwise reproducible run to run on one device (the backward's cluster count
+follows the token count and the device). Nothing reads `torch.use_deterministic_algorithms`.
 
 ## Limitations
 

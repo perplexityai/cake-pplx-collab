@@ -32,7 +32,8 @@ Arms (each called as ``fn(x, kv, q_weight, k_weight, token_mask)`` through autog
 * ``torch_compile_fp64dot`` (optional diagnostic): ``torch_compile`` with ``P`` summed in FP64.
 * ``cake_nondet`` / ``cake_det``: ``cake_pplx.cake_engram_gate_<mode>_train.cake_engram_gate_<mode>_kv`` with the
   default sum of the dot product (``dot_sum="compensated"``: a compensated FP32 dot product); ``cake_nondet_fp32`` /
-  ``cake_det_fp32``: the same entry with the opt-in ``dot_sum="fp32"`` (one FP32 word).
+  ``cake_det_fp32``: the same entry with the opt-in ``dot_sum="fp32"`` (the forward sums in one FP32 word; the
+  backward is the same).
 
 Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(x, kv, qw, kw, mask)`` (weight product,
 output allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
@@ -95,7 +96,7 @@ FE_BWD_CHUNK = 8192
 FE_FWD_MAX = 64 * 65535
 FE_TOKEN_MULTIPLE = 64
 SCALES = (0.25, 1.0, 2.0, 4.0)
-# The Cake arms: the default sum of the dot product, then the opt-in one-word FP32 sum (``dot_sum="fp32"``).
+# The Cake arms: the default sum of the dot product, then the opt-in one-word FP32 forward sum (``dot_sum="fp32"``).
 CAKE_ARMS = ("cake_nondet", "cake_det")
 CAKE_FP32_ARMS = ("cake_nondet_fp32", "cake_det_fp32")
 DEFAULT_ARMS = CAKE_ARMS + CAKE_FP32_ARMS + ("cudnn_fe", "torch_compile", "torch_compile_tuned", "eager")

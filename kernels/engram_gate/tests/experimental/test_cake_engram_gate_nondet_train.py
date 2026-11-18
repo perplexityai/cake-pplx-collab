@@ -17,17 +17,16 @@ Backend suite of ``cake_pplx._backends.cake_engram_gate_nondet_train``, the non-
 context gate (four streams of width 5120).
 
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
-product summation, and the record suffix of each ``dot_sum`` choice; the persistent grid sizes and the resident
-cluster table they come from; every stage launcher passes every kernel parameter of its records by name (the FFI
-entry replaced by a recorder); ``build.json`` covers every record on every architecture and its source
-digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment variable
-but the JIT shim's.
+product summation (two forwards, one backward), and the forward record of each ``dot_sum`` choice; the persistent grid
+sizes and the resident cluster table they come from; every stage launcher passes every kernel parameter of its records
+by name (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its source
+digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment variable but
+the JIT shim's.
 
-On SM100 / SM103 / SM107: every record loads; the forward of each summation record writes every element of a
-NaN-filled ``out`` and meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the
-backward of each ``dot_sum`` choice meets the tier for ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and
-``dk_weight``;
-``dw_reduce`` alone meets the tier on random partial rows.
+On SM100 / SM103 / SM107: every record loads; each forward record writes every element of a NaN-filled ``out`` and
+meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the backward meets the tier for
+``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and ``dk_weight``; ``dw_reduce`` alone meets the tier on random partial
+rows.
 """
 
 from __future__ import annotations
@@ -53,9 +52,11 @@ cake_jit = cake_package(PACKAGE, "cake_jit")
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-RECORDS = ("bwd_dot2", "bwd_f32", "dw_reduce", "fwd_dot2", "fwd_f32")
-ACC_MODES = ("f32", "dot2")
-# The public ``dot_sum`` choices and the record suffix each launches; the first is the default.
+RECORDS = ("bwd_dot2", "dw_reduce", "fwd_dot2", "fwd_f32")
+# The summations of the dot product each stage ships: the forward both, the backward the compensated one only.
+ACC_MODES = {"fwd": ("f32", "dot2"), "bwd": ("dot2",)}
+FWD_ACCS = ACC_MODES["fwd"]
+# The public ``dot_sum`` choices and the forward record suffix each launches; the first is the default.
 DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
 ENTRIES = (
     "cake_engram_gate_nondet",
@@ -102,7 +103,7 @@ def test_registry_records_are_well_formed() -> None:
     assert tuple(cake_jit.ARCHES) == ARCHES
     assert cake_jit.ARCH_BY_CAPABILITY == {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
     assert cake_jit.STAGES == ("fwd", "bwd", "dw_reduce")
-    assert tuple(cake_jit.ACC_MODES) == ACC_MODES
+    assert cake_jit.ACC_MODES == ACC_MODES
     assert sorted(cake_jit.MODULES) == sorted(RECORDS)
     for name, rec in cake_jit.MODULES.items():
         assert rec["arches"] == list(ARCHES), name
@@ -121,24 +122,29 @@ def test_registry_records_are_well_formed() -> None:
         assert cake_backend.parameters(name), name
 
 
-def test_every_summation_has_its_records() -> None:
-    """Both summations of the dot product ship a forward and a backward record, and each ``dot_sum`` choice names
-    one of them (``"compensated"``: ``dot2``, ``"fp32"``: ``f32``); another choice is refused."""
+def test_each_dot_sum_has_a_forward_record_and_one_backward_serves_both() -> None:
+    """Each ``dot_sum`` choice names one forward record (``"compensated"``: ``fwd_dot2``, ``"fp32"``: ``fwd_f32``);
+    the backward ships ``bwd_dot2`` only (no one-word backward record); another choice or summation is refused."""
     assert cake_backend._DOT_SUMS == DOT_SUMS
-    assert sorted(DOT_SUMS.values()) == sorted(ACC_MODES)
+    assert sorted(DOT_SUMS.values()) == sorted(FWD_ACCS)
     for choice, acc in DOT_SUMS.items():
         assert cake_backend._dot_acc(choice) == acc
+        assert cake_jit.record("fwd", acc) == f"fwd_{acc}"
+        assert cake_jit.MODULES[f"fwd_{acc}"]["stage"] == "fwd"
     for bad in ("dot2", "f32", "FP32", "", "compensated "):
         with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
             cake_backend._dot_acc(bad)
     for bad in (None, 1, b"fp32", ("fp32",)):
         with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
             cake_backend._dot_acc(bad)
-    for acc in ACC_MODES:
-        for stage in ("fwd", "bwd"):
-            assert cake_jit.record(stage, acc) == f"{stage}_{acc}"
-            assert cake_jit.MODULES[f"{stage}_{acc}"]["stage"] == stage
+    assert cake_jit.record("bwd", "dot2") == cake_jit.record("bwd") == "bwd_dot2"
+    assert cake_jit.MODULES["bwd_dot2"]["stage"] == "bwd"
+    assert "bwd_f32" not in cake_jit.MODULES
+    with pytest.raises(ValueError, match=r"unknown acc 'f32' for 'bwd'; it ships \['dot2'\]"):
+        cake_jit.record("bwd", "f32")
+    for acc in FWD_ACCS:
         assert cake_jit.record("dw_reduce", acc) == "dw_reduce"
+    assert cake_jit.record("dw_reduce") == "dw_reduce"
     with pytest.raises(ValueError):
         cake_jit.record("fwd", "f64")
     with pytest.raises(ValueError):
@@ -162,13 +168,11 @@ MEASURED = {
     ("sm_103a", 152, "fwd_dot2"): 148,
     ("sm_103a", 152, "fwd_f32"): 148,
     ("sm_103a", 152, "bwd_dot2"): 110,
-    ("sm_103a", 152, "bwd_f32"): 110,
     ("sm_107a", 212, "fwd_dot2"): 184,
     ("sm_107a", 212, "fwd_f32"): 184,
     ("sm_107a", 212, "bwd_dot2"): 138,
-    ("sm_107a", 212, "bwd_f32"): 138,
 }
-PERSISTENT_RECORDS = ("bwd_dot2", "bwd_f32", "fwd_dot2", "fwd_f32")
+PERSISTENT_RECORDS = ("bwd_dot2", "fwd_dot2", "fwd_f32")
 
 
 def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
@@ -187,7 +191,8 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
         for per_sm, held in table.items():
             assert 1 <= held <= per_sm * sms // cake_jit.CLUSTER_CTAS, (arch, sms, per_sm)
             assert int(fraction * per_sm * sms) // cake_jit.CLUSTER_CTAS <= held, (arch, sms, per_sm)
-    # A device or a CTA count the table does not hold: the fallback fraction.
+    # A device or a CTA count the table does not hold: the fallback fraction (B200 at three CTAs per SM: 94).
+    assert cake_jit.resident_clusters("bwd_dot2", "sm_100a", 148) == int(fraction * 3 * 148) // 4 == 94
     assert cake_jit.resident_clusters("fwd_dot2", "sm_100a", 152) == int(fraction * 4 * 152) // 4
     assert cake_jit.resident_clusters("bwd_dot2", "sm_103a", 160) == int(fraction * 3 * 160) // 4
     assert cake_jit.resident_clusters("fwd_f32", "sm_107a", 1) == 1
@@ -231,10 +236,11 @@ def _cpu_operands(T: int) -> dict:
 
 
 @pytest.mark.parametrize("masked", (False, True), ids=("no-mask", "mask"))
-@pytest.mark.parametrize("acc", ACC_MODES)
+@pytest.mark.parametrize("acc", FWD_ACCS)
 def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -> None:
     """Each stage launcher passes every parameter of its records' argument plans, in order, then the grid
-    (``_entry`` replaced by a recorder; nothing is launched)."""
+    (``_entry`` replaced by a recorder; nothing is launched): the forward record of ``acc``, the backward, then
+    ``dw_reduce``."""
     recorder = _Recorder()
     monkeypatch.setattr(cake_backend, "_entry", recorder.entry)
     monkeypatch.setattr(cake_backend, "device_arch", lambda index: "sm_100a")
@@ -257,7 +263,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
     rows = 1  # the accumulator
     dw = torch.zeros(rows, STREAMS, HIDDEN)
     cake_backend.launch_bwd(
-        cake_jit.record("bwd", acc),
+        cake_jit.record("bwd"),
         dout=ops["dout"],
         x=ops["x"],
         key=ops["key"],
@@ -274,7 +280,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
     )
     vec = torch.zeros(STREAMS, HIDDEN)
     cake_backend.launch_dw_reduce("dw_reduce", dw=dw, qw=vec, kw=vec, dq=vec.clone(), dk=vec.clone())
-    assert [name for name, _ in recorder.calls] == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    assert [name for name, _ in recorder.calls] == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     for name, args in recorder.calls:
         params = cake_backend.parameters(name)
         assert len(args) == len(params) + 3, (name, params)
@@ -454,7 +460,7 @@ def _record_failures(judge, failures, record_property) -> None:
     assert not failures, failures
 
 
-@pytest.mark.parametrize("acc", ACC_MODES)
+@pytest.mark.parametrize("acc", FWD_ACCS)
 @pytest.mark.parametrize(("T", "weights", "mask", "layout"), CASES, ids=CASE_IDS)
 def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout, device, record_property) -> None:
     """The forward record of ``acc`` launched directly writes every element of a NaN-filled ``out`` and meets the
@@ -485,11 +491,10 @@ def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout,
     _record_failures(*judge_draws(run, make, seed=11 + T), record_property)
 
 
-@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize(("T", "weights", "mask", "layout"), CASES, ids=CASE_IDS)
-def test_the_backward_records_match_the_reference(dot_sum, T, weights, mask, layout, device, record_property):
-    """The backward of ``dot_sum`` (``bwd_<acc>`` then ``dw_reduce``), with NaN-filled ``dx``, ``dkey`` and
-    ``dvalue``, meets the tier for every gradient."""
+def test_the_backward_matches_the_reference(T, weights, mask, layout, device, record_property) -> None:
+    """The backward (``bwd_dot2`` then ``dw_reduce``), with NaN-filled ``dx``, ``dkey`` and ``dvalue``, meets the
+    tier for every gradient."""
 
     def run(ns):
         dx = torch.full_like(ns.x, math.nan)
@@ -503,7 +508,6 @@ def test_the_backward_records_match_the_reference(dot_sum, T, weights, mask, lay
             ns.q_weight,
             ns.k_weight,
             ns.token_mask,
-            dot_sum=dot_sum,
             dx=dx,
             dkey=dkey,
             dvalue=dvalue,

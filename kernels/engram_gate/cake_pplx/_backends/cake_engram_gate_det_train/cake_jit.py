@@ -46,12 +46,14 @@ persistently: cluster ``c`` of ``n`` serves the tokens ``c, c + n, ...``.
 The grid is ``(4 * n, 1, 1)`` with ``n = min(T, resident clusters)``, the
 clusters one device holds at once (:func:`resident_clusters`: measured per
 architecture, SM count and CTAs per SM); any grid is correct (the clusters
-never wait on each other).  The two programs of a stage differ only in how the
-dot product ``P = sum_d w_d h_d k_d`` is summed: ``dot2`` as a compensated
-FP32 dot product (each product split with an FMA, each running sum with an
-error-free two-sum, the error words summed in FP32 and added once at the end;
-the default), ``f32`` in one FP32 word (opt-in).  Every other sum is one FP32
-word.  Nothing launches cooperatively.
+never wait on each other).  The dot product ``P = sum_d w_d h_d k_d`` is
+summed in one of two ways: ``dot2`` as a compensated FP32 dot product (each
+product split with an FMA, each running sum with an error-free two-sum, the
+error words summed in FP32 and added once at the end) or ``f32`` in one FP32
+word.  ``fwd`` ships both (``fwd_dot2`` the default, ``fwd_f32`` opt-in);
+``bwd`` ships ``bwd_dot2`` only, which serves either forward (it recomputes
+``P`` from the inputs).  Every other sum is one FP32 word.  Nothing launches
+cooperatively.
 """
 
 from __future__ import annotations
@@ -70,9 +72,10 @@ MANIFEST = "build.json"
 # The stages of one training step, in launch order (``fwd`` in the forward,
 # ``bwd`` then ``dw_reduce`` in the backward).
 STAGES = ("fwd", "bwd", "dw_reduce")
-# The two summations of the dot product P; a record of ``fwd`` or ``bwd`` is
-# named ``<stage>_<acc>``.
-ACC_MODES = ("f32", "dot2")
+# The summations of the dot product P each stage that sums it ships; a record
+# of ``fwd`` or ``bwd`` is named ``<stage>_<acc>``.  The one backward sums P
+# compensated after either forward.
+ACC_MODES: dict[str, tuple[str, ...]] = {"fwd": ("f32", "dot2"), "bwd": ("dot2",)}
 
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_dot2": {
@@ -88,21 +91,6 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_engram_gate_det_train_00000000000000000011",
-        "stage": "bwd",
-    },
-    "bwd_f32": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
-        "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_det_train_00000000000000000012",
-        "launch": {
-            "block": (1, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 0,
-            "use_pdl": False,
-        },
-        "library": "cake_engram_gate_det_train_00000000000000000012",
         "stage": "bwd",
     },
     "dw_reduce": {
@@ -157,17 +145,22 @@ CLUSTER_CTAS = 4
 # CTAs per SM each ``fwd`` / ``bwd`` program holds at once: the launch bound of
 # its build, which its register count reaches on every architecture (its
 # threads and shared memory would allow more).
-CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_f32": 3, "bwd_dot2": 3}
-# Whole four-CTA clusters one device holds at once for a count of CTAs per SM,
-# as ``cudaOccupancyMaxActiveClusters`` reports it for this family's programs
-# (spread cluster scheduling, as they launch): (architecture, SM count) ->
-# {CTAs per SM: clusters}.  The four CTAs of a cluster share one GPC, so a device holds
-# fewer clusters than CTAs per SM * SMs / 4: at four CTAs per SM, B200 (148
-# SMs) holds 142, GB300 (152 SMs) 148 and VR200 (212 SMs) 184.
+CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3}
+# Whole four-CTA clusters one device holds at once, by the CTAs per SM of a
+# program: (architecture, SM count) -> {CTAs per SM: clusters}, as
+# ``cudaOccupancyMaxActiveClusters`` reported them (spread cluster scheduling,
+# as the programs launch).  The count follows the CTAs per SM, not the program:
+# builds of this family with one count of CTAs per SM gave one count of
+# clusters.  So one measurement serves every program of that count:
+# B200 (148 SMs) 4 -> 142 (the forward programs); GB300 (152 SMs) 4 -> 148
+# (the forward programs), 3 -> 110 (the backward program); VR200 (212 SMs)
+# 4 -> 184 (the forward programs), 3 -> 138 (a forward build that held three
+# CTAs per SM).  The four CTAs of a cluster share one GPC, so a device holds
+# fewer clusters than CTAs per SM * SMs / 4.
 RESIDENT_CLUSTERS: dict[tuple[str, int], dict[int, int]] = {
-    ("sm_100a", 148): {4: 142, 6: 213},
-    ("sm_103a", 152): {2: 74, 3: 110, 4: 148},
-    ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 6: 276},
+    ("sm_100a", 148): {4: 142},
+    ("sm_103a", 152): {3: 110, 4: 148},
+    ("sm_107a", 212): {3: 138, 4: 184},
 }
 # On a device or a count of CTAs per SM the table does not hold, the grid takes
 # this fraction of CTAs per SM * SMs / 4 clusters: less than every measured
@@ -181,15 +174,16 @@ UNMEASURED_CLUSTER_FRACTION = 0.85
 DW_REDUCE_COLUMNS_PER_CTA = 128
 
 
-def record(stage: str, acc: str) -> str:
+def record(stage: str, acc: str = "dot2") -> str:
     """The ``MODULES`` record of ``stage`` for the dot-product summation ``acc``
-    (``dw_reduce`` has one record)."""
+    (default ``dot2``, the one every stage ships; ``dw_reduce`` has one record
+    and ignores it)."""
     if stage not in STAGES:
         raise ValueError(f"unknown stage {stage!r}; the stages are {list(STAGES)}")
     if stage == "dw_reduce":
         return stage
-    if acc not in ACC_MODES:
-        raise ValueError(f"unknown acc {acc!r}; the summations are {list(ACC_MODES)}")
+    if acc not in ACC_MODES[stage]:
+        raise ValueError(f"unknown acc {acc!r} for {stage!r}; it ships {list(ACC_MODES[stage])}")
     return f"{stage}_{acc}"
 
 

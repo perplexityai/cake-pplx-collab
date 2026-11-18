@@ -16,13 +16,15 @@ limitations under the License.
 Public-API suite of ``cake_pplx.cake_engram_gate_nondet_train``, the non-deterministic Engram context gate.
 
 Without a device: the entries are stable APIs, importing the module imports no backend, the module reads no
-environment variable, every keyword of an entry is the backend's keyword of the same name, every entry takes the
-keyword-only ``dot_sum="compensated"`` and refuses another choice before it looks at the operands, the entries
-document their behaviour under ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a
-device of capability (10, 7) maps to ``sm_107a``.
+environment variable, every keyword of an entry is the backend's keyword of the same name, the autograd entries and
+the explicit forward take the keyword-only ``dot_sum="compensated"`` (the explicit backward and the workspace query do
+not) and refuse another choice before they look at the operands, the entries document their behaviour under
+``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a device of capability (10, 7)
+maps to ``sm_107a``.
 
 On SM100 / SM103 / SM107, for both ``dot_sum`` choices unless a test names the default: each choice launches its own
-forward and backward records, the backward with its forward's choice (also under checkpoint); the autograd entry
+forward record and the one backward record (also under checkpoint), and the gradients of both choices are the same
+bits (the weight gradients of the non-deterministic package excepted); the autograd entry
 (``key`` and ``value`` contiguous or views of a packed ``kv``; BF16, FP32 or mixed weights; with and without a mask)
 and the packed entry meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws) for the
 output and every gradient; the packed entry equals the split entry bit
@@ -34,7 +36,7 @@ gradient through the gate; ``T = 0`` and ``T = 1`` work; every documented ``Valu
 ``torch.use_deterministic_algorithms`` behaviour; with the default choice, the launches run on the current stream
 without synchronizing, a call captured in a CUDA graph replays, ``torch.utils.checkpoint(use_reentrant=False)`` gives
 the gradients of plain autograd and the retained state and the workspace are reported; a device outside the
-architectures is a ``RuntimeError``.  The issue's accuracy bound judges the default choice only
+architectures is a ``RuntimeError``.  The issue's accuracy bound judges both choices
 (``test_cake_engram_gate_acceptance.py``).
 The weight gradients promise no bits: they are compared bit for bit with nothing; ``out``, ``dx``, ``dkey`` and
 ``dvalue`` have one fixed order.
@@ -78,10 +80,11 @@ ENTRIES = (
     "is_cake_engram_gate_nondet_train_supported",
 )
 GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
-# The ``dot_sum`` choices (the default first) and the record suffix each launches.
+# The ``dot_sum`` choices (the default first) and the forward record suffix each launches; every backward launches
+# ``bwd_dot2``.
 DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
-# The entries that take ``dot_sum``.
-SUM_ENTRIES = ENTRIES[:-1]
+# The entries that take ``dot_sum``: the forward's sum (the backward is the same for both).
+SUM_ENTRIES = ("cake_engram_gate_nondet", "cake_engram_gate_nondet_kv", "cake_engram_gate_nondet_train_forward")
 # The gradients with one fixed order (the weight gradients are summed with atomics).
 EXACT_GRADS = ("dx", "dkey", "dvalue")
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
@@ -218,7 +221,8 @@ def test_keywords_match_the_backend() -> None:
     for name in SUM_ENTRIES:
         param = inspect.signature(inspect.unwrap(getattr(api, name))).parameters["dot_sum"]
         assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "compensated", name
-    assert "dot_sum" not in inspect.signature(api.is_cake_engram_gate_nondet_train_supported).parameters
+    for name in sorted(set(ENTRIES) - set(SUM_ENTRIES)):
+        assert "dot_sum" not in inspect.signature(inspect.unwrap(getattr(api, name))).parameters, name
     for cls in ("CakeEngramGateNondetFunction", "CakeEngramGateNondetKvFunction"):
         assert list(inspect.signature(getattr(_backend(), cls).forward).parameters)[-1] == "dot_sum", cls
 
@@ -237,12 +241,6 @@ def test_another_dot_sum_is_refused_before_the_operands() -> None:
         ),
         "cake_engram_gate_nondet_train_forward": lambda **kw: api.cake_engram_gate_nondet_train_forward(
             ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, **kw
-        ),
-        "cake_engram_gate_nondet_train_backward": lambda **kw: api.cake_engram_gate_nondet_train_backward(
-            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, **kw
-        ),
-        "cake_engram_gate_nondet_train_workspace_bytes": lambda **kw: api.cake_engram_gate_nondet_train_workspace_bytes(
-            16, "cpu", **kw
         ),
         "CakeEngramGateNondetFunction": lambda dot_sum: backend.CakeEngramGateNondetFunction.apply(
             ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, None, 1e-20, 1e-6, dot_sum
@@ -265,7 +263,6 @@ def test_another_dot_sum_is_refused_before_the_operands() -> None:
     for choice in DOT_SUMS:
         with pytest.raises(ValueError, match="CUDA"):
             calls["cake_engram_gate_nondet"](dot_sum=choice)
-        assert api.cake_engram_gate_nondet_train_workspace_bytes(0, dot_sum=choice) == 0
 
 
 def test_the_entries_document_their_determinism() -> None:
@@ -309,10 +306,10 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
 
 @pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
-def test_each_dot_sum_launches_its_records_forward_and_backward(dot_sum, packed, monkeypatch) -> None:
-    """``dot_sum`` selects the forward and the backward records (``fwd_<acc>``, ``bwd_<acc>``, then ``dw_reduce``):
-    the autograd entry runs its backward with the forward's choice, also when ``torch.utils.checkpoint`` recomputes
-    the forward; the explicit halves launch the records of the choice each is given."""
+def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, packed, monkeypatch) -> None:
+    """``dot_sum`` selects the forward record (``fwd_<acc>``); every backward launches ``bwd_dot2`` then
+    ``dw_reduce``, also when ``torch.utils.checkpoint`` recomputes the forward with the forward's choice; the explicit
+    forward launches the record of the choice it is given."""
     device = _device_or_skip()
     backend = _backend()
     acc = DOT_SUMS[dot_sum]
@@ -331,19 +328,31 @@ def test_each_dot_sum_launches_its_records_forward_and_backward(dot_sum, packed,
     monkeypatch.setattr(backend, "_entry", recording)
     ns = make_inputs(129, seed=53, device=device, weights="bf16", mask="some", layout="kv")
     _autograd(ns, packed=packed, dot_sum=dot_sum)
-    assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    assert launched == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     launched.clear()
     _autograd(ns, packed=packed, checkpoint=True, dot_sum=dot_sum)
-    assert launched == [f"fwd_{acc}", f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    assert launched == [f"fwd_{acc}", f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     launched.clear()
     args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
     api.cake_engram_gate_nondet_train_forward(*args, dot_sum=dot_sum)
-    api.cake_engram_gate_nondet_train_backward(ns.dout, *args, dot_sum=dot_sum)
-    assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
+    assert launched == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     if dot_sum == "compensated":
         launched.clear()
         _autograd(ns, packed=packed)
-        assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"], "the default is the compensated sum"
+        assert launched == ["fwd_dot2", "bwd_dot2", "dw_reduce"], "the default is the compensated sum"
+
+
+@pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
+def test_the_gradients_do_not_depend_on_dot_sum(packed) -> None:
+    """The one backward recomputes ``P`` from the inputs: for one ``dout``, both ``dot_sum`` choices give the same
+    gradient bits (the weight gradients of the non-deterministic package are compared with nothing)."""
+    device = _device_or_skip()
+    ns = make_inputs(1031, seed=59, device=device, weights="mixed", mask="some", layout="kv")
+    compensated = _autograd(ns, packed=packed, dot_sum="compensated")
+    fp32 = _autograd(ns, packed=packed, dot_sum="fp32")
+    for name in EXACT_GRADS:
+        assert _same_bits(compensated[name], fp32[name]), name
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -423,7 +432,7 @@ def test_views_and_contiguous_operands_give_the_same_bits(T, dot_sum) -> None:
     dkv = torch.full((T, KV_WIDTH), math.nan, dtype=torch.bfloat16, device=device)
     dkey_v = dkv[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN))
     dvalue_v = dkv[:, STREAMS * HIDDEN :]
-    bwd = functools.partial(api.cake_engram_gate_nondet_train_backward, dot_sum=dot_sum)
+    bwd = api.cake_engram_gate_nondet_train_backward
     views = bwd(ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask, dkey=dkey_v, dvalue=dvalue_v)
     plain = bwd(ns.dout, ns.x, key_c, value_c, ns.q_weight, ns.k_weight, ns.token_mask)
     assert views[1] is dkey_v and views[2] is dvalue_v
@@ -518,7 +527,7 @@ def test_no_token(dot_sum) -> None:
         got = _autograd(ns, dot_sum=dot_sum)
         packed = _autograd(ns, packed=True, dot_sum=dot_sum)
         explicit = api.cake_engram_gate_nondet_train_backward(
-            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask, dot_sum=dot_sum
+            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask
         )
     assert tuple(got["out"].shape) == (0, STREAMS, HIDDEN)
     for result in (got, packed):

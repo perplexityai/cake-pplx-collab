@@ -31,22 +31,24 @@ masked token (``token_mask[t]`` False) gives ``out[t] = x[t]`` and
 ``dx[t] = dout[t]`` exactly, zero ``dkey[t]`` and ``dvalue[t]``, and adds
 nothing to the weight gradients.
 
-Every entry takes ``dot_sum``, how ``P`` is summed (the backward of an
-autograd entry sums it as its forward did).  The default, ``"compensated"``,
-is a compensated FP32 dot product: each product split with an FMA, each
-running sum with an error-free two-sum, the error words added once at the
-end.  It meets the accuracy bound of the acceptance tests on every output:
-the median and the largest relative L2 error against an FP64 reference, over
-random draws and over draws whose dot products nearly cancel (``|dot|`` from
-2e-6 to 2e-5), at most twice those of an FP32 evaluation of the formula.
-``"fp32"`` (opt-in) sums ``P`` in one FP32 word.  Where the products nearly
-cancel, that sum loses most of its digits and the gate's derivative magnifies
-the loss: measured on GB300, ``dx``, ``dkey``, ``dq_weight`` and
-``dk_weight`` per stream are off by a relative L2 error of about 1e-2 (at most
-2.6e-2), against bounds of 3.4e-3 (``dx``, ``dkey``) and 4.7e-7 (the weight
-gradients); on random draws its largest weight-gradient error is 1.1e-4,
-against 7.7e-5.  ``out``, ``dvalue`` and, on random draws, ``dx`` and
-``dkey`` meet the bound with either sum.
+The autograd entries and the explicit forward take ``dot_sum``, how the
+forward sums ``P``.  The default, ``"compensated"``, is a compensated FP32 dot
+product: each product split with an FMA, each running sum with an error-free
+two-sum, the error words added once at the end.  ``"fp32"`` (opt-in) sums
+``P`` in one FP32 word: the forward takes about 13% less time (GB300,
+``T = 16384``: 0.326 ms against 0.375 ms) and, where the products nearly
+cancel, rounds more output elements away from the correctly rounded result
+(17802 of the 8.19 million output elements of 25 near-cancelling draws,
+against 117; an FP32 evaluation of the formula: 21917).  The backward is the
+same for both: it recomputes ``P`` as a compensated dot product, so the
+gradients do not depend on ``dot_sum`` (the explicit backward does not take
+it).  As measured on GB300, both choices meet every accuracy bound of the
+acceptance tests: the median and the largest relative L2 error against an
+FP64 reference, over random draws and over draws whose dot products nearly
+cancel (``|dot|`` from 2e-6 to 2e-5), at most twice those of an FP32
+evaluation of the formula.  The ``out`` errors of the two forwards agree to
+four digits (near-cancelling: 1.661e-3 median and 1.669e-3 largest, against
+bounds of 3.321e-3 and 3.338e-3).
 
 Entries: :func:`cake_engram_gate_nondet` (with autograd; ``key`` and ``value``
 contiguous or views into one packed ``[T, 25600]``),
@@ -90,7 +92,7 @@ Usage::
     kv = projection(rows)                          # BF16 [T, 25600]: four keys, then the value
     out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
     out.backward(dout)                             # x.grad, kv.grad [T, 25600], q_weight.grad, k_weight.grad
-    # opt-in: one FP32 word per dot product (less accurate where the products nearly cancel)
+    # opt-in: the forward sums each dot product in one FP32 word (faster); the backward is the same
     out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="fp32")
 """
 
@@ -188,10 +190,10 @@ def cake_engram_gate_nondet(
     eps, clamp_value : float
         The RMS epsilon and the clamp of ``|dot|`` (run-time values; finite, non-negative).
     dot_sum : {"compensated", "fp32"}
-        How the forward and its backward sum ``P = sum_d w_d h_d k_d``: ``"compensated"`` (default), a
-        compensated FP32 dot product that meets the accuracy bound on every output; ``"fp32"`` (opt-in), one FP32
-        word, about 1e-2 off in ``dx``, ``dkey`` and the weight gradients where the products nearly cancel (see the
-        module notes).
+        How the forward sums ``P = sum_d w_d h_d k_d``: ``"compensated"`` (default), a compensated FP32 dot product;
+        ``"fp32"`` (opt-in), one FP32 word, faster, with more output elements rounded away from the correctly
+        rounded result where the products nearly cancel.  Both meet the accuracy bounds as measured on GB300 (see
+        the module notes); the backward is the same for both.
 
     Returns
     -------
@@ -317,7 +319,6 @@ def cake_engram_gate_nondet_train_backward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
     dx: Optional[torch.Tensor] = None,
     dkey: Optional[torch.Tensor] = None,
     dvalue: Optional[torch.Tensor] = None,
@@ -329,9 +330,8 @@ def cake_engram_gate_nondet_train_backward(
     dout : torch.Tensor
         BF16 ``[T, 4, 5120]``, contiguous: the gradient of ``out``.
     x, key, value, q_weight, k_weight, token_mask, eps, clamp_value
-        The forward's operands, as in :func:`cake_engram_gate_nondet`.
-    dot_sum : {"compensated", "fp32"}
-        How ``P`` is summed, as in :func:`cake_engram_gate_nondet`; pass the forward's choice.
+        The forward's operands, as in :func:`cake_engram_gate_nondet`.  The backward recomputes ``P`` as a
+        compensated dot product: it is the same after either ``dot_sum`` of the forward.
     dx : torch.Tensor, optional
         BF16 ``[T, 4, 5120]``, contiguous.
     dkey, dvalue : torch.Tensor, optional
@@ -345,7 +345,7 @@ def cake_engram_gate_nondet_train_backward(
 
     Raises
     ------
-    TypeError, ValueError, RuntimeError
+    ValueError, RuntimeError
         As in :func:`cake_engram_gate_nondet`.
         ``RuntimeError`` also under ``torch.use_deterministic_algorithms(True)`` (``warn_only=True``: a warning).
 
@@ -365,7 +365,6 @@ def cake_engram_gate_nondet_train_backward(
         token_mask,
         eps=eps,
         clamp_value=clamp_value,
-        dot_sum=dot_sum,
         dx=dx,
         dkey=dkey,
         dvalue=dvalue,
@@ -373,9 +372,7 @@ def cake_engram_gate_nondet_train_backward(
 
 
 @cake_api
-def cake_engram_gate_nondet_train_workspace_bytes(
-    T: int, device: Union[torch.device, int, str, None] = None, *, dot_sum: str = "compensated"
-) -> int:
+def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.device, int, str, None] = None) -> int:
     r"""Bytes of device memory one backward call allocates beside its operands and outputs.
 
     Parameters
@@ -384,9 +381,6 @@ def cake_engram_gate_nondet_train_workspace_bytes(
         The token count.
     device : torch.device, int or str, optional
         The CUDA device (None: the current one).
-    dot_sum : {"compensated", "fp32"}
-        The backward's sum of ``P``, as in :func:`cake_engram_gate_nondet`.
-        Both sums use the same workspace.
 
     Returns
     -------
@@ -397,9 +391,10 @@ def cake_engram_gate_nondet_train_workspace_bytes(
 
     Notes
     -----
-    Workspace sizes do not depend on ``torch.use_deterministic_algorithms``.
+    Workspace sizes do not depend on ``torch.use_deterministic_algorithms`` or on the forward's ``dot_sum`` (one
+    backward serves both).
     """
-    return _pkg().cake_engram_gate_nondet_train_workspace_bytes(T, device, dot_sum=dot_sum)
+    return _pkg().cake_engram_gate_nondet_train_workspace_bytes(T, device)
 
 
 @cake_api

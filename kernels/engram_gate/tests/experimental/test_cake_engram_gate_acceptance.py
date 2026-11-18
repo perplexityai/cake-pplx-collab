@@ -13,11 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The accuracy acceptance of issue #82 for both modules (``det`` and ``nondet``), through the autograd entry with its
-default sum of the dot product (``dot_sum="compensated"``), on operands as the issue's script draws them (``T = 16``,
-BF16 operands, FP32 weights rounded from BF16).  The opt-in ``dot_sum="fp32"`` is not held to these bounds: it misses
-the near-cancelling ones (the module documentation gives its measured errors); the API suites judge it against the
-naive BF16 tier and its exact semantics.
+The accuracy acceptance of issue #82 for both modules (``det`` and ``nondet``), through the autograd entry with each
+forward sum of the dot product (``dot_sum="compensated"``, the default, and the opt-in ``"fp32"``; the backward is the
+same for both), on operands as the issue's script draws them (``T = 16``, BF16 operands, FP32 weights rounded from
+BF16).
 
 * random draws (:data:`DRAWS`; ``x`` scaled 0.25, 1, 2, 4 per stream, ``key`` 4, 2, 1, 0.25, every fourth token
   masked): for each of ``out``, ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and ``dk_weight``, the median and the
@@ -51,6 +50,8 @@ from tests.cake.test_helpers.cake_engram_gate_naive import (
 )
 
 MODES = ("det", "nondet")
+# The ``dot_sum`` choices, the default first.
+DOT_SUMS = ("compensated", "fp32")
 #: Draws of each kind (the issue asks for 25 or more).
 DRAWS = 32
 T = 16
@@ -71,17 +72,17 @@ def _device_or_skip(mode: str) -> torch.device:
     return torch.device("cuda:0")
 
 
-def _kernel(mode: str, ns) -> dict[str, torch.Tensor]:
-    """Output and gradients of the module's autograd entry with its default ``dot_sum``."""
+def _kernel(mode: str, ns, dot_sum: str) -> dict[str, torch.Tensor]:
+    """Output and gradients of the module's autograd entry with ``dot_sum``."""
     api = _api(mode)
     entry = getattr(api, f"cake_engram_gate_{mode}")
-    assert inspect.signature(inspect.unwrap(entry)).parameters["dot_sum"].default == "compensated"
+    assert inspect.signature(inspect.unwrap(entry)).parameters["dot_sum"].default == DOT_SUMS[0]
     x = ns.x.detach().clone().requires_grad_(True)
     key = ns.key.detach().clone().requires_grad_(True)
     value = ns.value.detach().clone().requires_grad_(True)
     qw = ns.q_weight.detach().clone().requires_grad_(True)
     kw = ns.k_weight.detach().clone().requires_grad_(True)
-    out = entry(x, key, value, qw, kw, ns.token_mask)
+    out = entry(x, key, value, qw, kw, ns.token_mask, dot_sum=dot_sum)
     out.backward(ns.dout)
     return {"out": out.detach(), "dx": x.grad, "dkey": key.grad, "dvalue": value.grad, "dq": qw.grad, "dk": kw.grad}
 
@@ -102,38 +103,40 @@ def _per_stream(t: torch.Tensor, s: int) -> torch.Tensor:
     return t[:, s] if t.dim() == 3 else t[s]
 
 
+@pytest.mark.parametrize("dot_sum", DOT_SUMS)
 @pytest.mark.parametrize("mode", MODES)
-def test_random_draws_meet_twice_the_fp32_evaluation(mode, record_property) -> None:
+def test_random_draws_meet_twice_the_fp32_evaluation(mode, dot_sum, record_property) -> None:
     device = _device_or_skip(mode)
     ours = {name: [] for name in RANDOM_OUTPUTS}
     fp32 = {name: [] for name in RANDOM_OUTPUTS}
     for draw in range(DRAWS):
         ns = make_inputs(T, seed=8200 + draw, device=device, weights="fp32", mask="some")
         want = issue_fp64(ns)
-        got = _kernel(mode, ns)
+        got = _kernel(mode, ns, dot_sum)
         evaluation = issue_fp32_random(ns)
         for name in RANDOM_OUTPUTS:
             ours[name].append(rel_l2(got[name], want[name]))
             fp32[name].append(rel_l2(evaluation[name], want[name]))
     rows = acceptance_rows(ours, fp32)
-    _report(rows, f"{mode}-random", record_property)
+    _report(rows, f"{mode}-{dot_sum}-random", record_property)
     assert all(row["ok"] for row in rows), [row["output"] for row in rows if not row["ok"]]
 
 
+@pytest.mark.parametrize("dot_sum", DOT_SUMS)
 @pytest.mark.parametrize("mode", MODES)
-def test_near_cancelling_draws_meet_twice_the_fp32_evaluation_per_stream(mode, record_property) -> None:
+def test_near_cancelling_draws_meet_twice_the_fp32_evaluation_per_stream(mode, dot_sum, record_property) -> None:
     device = _device_or_skip(mode)
     ours = {name: [] for name in NEAR_OUTPUTS}
     fp32 = {name: [] for name in NEAR_OUTPUTS}
     for draw in range(DRAWS):
         ns = make_inputs(T, seed=8300 + draw, device=device, weights="fp32", near_cancel=True)
         want = issue_fp64(ns)
-        got = _kernel(mode, ns)
+        got = _kernel(mode, ns, dot_sum)
         evaluation = issue_fp32_near(ns)
         for name in NEAR_OUTPUTS:
             for s in range(STREAMS):
                 ours[name].append(rel_l2(_per_stream(got[name], s), _per_stream(want[name], s)))
                 fp32[name].append(rel_l2(_per_stream(evaluation[name], s), _per_stream(want[name], s)))
     rows = acceptance_rows(ours, fp32)
-    _report(rows, f"{mode}-near", record_property)
+    _report(rows, f"{mode}-{dot_sum}-near", record_property)
     assert all(row["ok"] for row in rows), [row["output"] for row in rows if not row["ok"]]

@@ -6,10 +6,11 @@ autograd entry) on `sm_100a`, `sm_103a` and `sm_107a`. Public modules:
 - `cake_pplx.cake_engram_gate_det_train`
 - `cake_pplx.cake_engram_gate_nondet_train`
 
-Every entry takes `dot_sum`, the sum of the gate's dot product. The default, `"compensated"`, is a compensated FP32
-dot product and meets every accuracy bound of the tests. `"fp32"` (opt-in) sums in one FP32 word; where the products
-nearly cancel, its `dx`, `dkey` and weight gradients are about 1e-2 off in relative L2 error, more than the bounds
-allow. The measured numbers are in [`docs/API.md`](../../docs/API.md#engram_gate).
+The autograd entries and the explicit forward take `dot_sum`, the forward's sum of the gate's dot product. The
+default, `"compensated"`, is a compensated FP32 dot product. `"fp32"` (opt-in) sums in one FP32 word: a faster
+forward that rounds more output elements away from the correctly rounded result where the products nearly cancel. The
+backward is the same for both. Both choices meet every accuracy bound of the tests, as measured on GB300; the numbers
+are in [`docs/API.md`](../../docs/API.md#engram_gate).
 
 Install this family alone, pinned to a commit:
 
