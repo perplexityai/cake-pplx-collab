@@ -1258,10 +1258,13 @@ def test_one_cluster_programs_without_the_weight_gradient(band, launches):
         assert torch.equal(dz, dz_d), f"{band} at {rows} rows: dz"
 
 
+# The layouts of ``BULK_BAND_CASES`` (64 heads: a gate and ``grad_out``
+# sliced from projections, head-major ``x`` and ``z``, contiguous tokens; one
+# token of many heads).
+NODW_LAYOUTS = ("projection", "head_major", "one_token", "contiguous")
 # The BF16 bands of a call with ``compute_grad_weight=False`` and the layouts
-# of ``BULK_BAND_CASES`` (:func:`_bulk_band_shape`: 64 heads, a gate and
-# ``grad_out`` sliced from projections, head-major ``x`` and ``z``, one token
-# of many heads, contiguous tokens; a long role's band packed rows only).
+# of ``NODW_LAYOUTS`` (:func:`_nodw_layout_shape`; a long role's band packed
+# rows only).
 NODW_LAYOUT_CASES = [
     pytest.param(band, layout, id=f"{band}-{layout}")
     for band in (
@@ -1271,29 +1274,32 @@ NODW_LAYOUT_CASES = [
         "bwd_bf16_rep",
         "bwd_bf16_rep_long",
     )
-    for layout in ("projection", "head_major", "one_token", "contiguous")
+    for layout in NODW_LAYOUTS
 ]
 
 
-@pytest.mark.parametrize("band,layout", NODW_LAYOUT_CASES)
-def test_programs_without_the_weight_gradient_on_strided_layouts(
-    band, layout, launches
-):
-    """``NODW_LAYOUT_CASES`` at the band's first rows of 64 heads on this
-    device: a call with ``compute_grad_weight=False`` runs the program
-    ``nodw_module`` names for the band's module (one cluster, strided,
-    claimed or look-ahead; skipped where this device routes no such band or
-    shape), gives the ``dx`` and ``dz`` bits of the BF16 call on the band's
-    module on the same inputs and leaves a caller workspace zero."""
+def _nodw_layout_shape(band: str, layout: str) -> tuple[int, int, str] | None:
+    """``(T, H, make's layout)`` of the ``NODW_LAYOUT_CASES`` case ``(band,
+    layout)`` on this device: :func:`_bulk_band_shape`, but ``one_token``
+    takes at least 64 heads (the small-row band's first rows are one row);
+    ``None`` where this device routes no such band or no such shape lies in
+    it."""
     shape = _bulk_band_shape(band, layout)
-    if shape is None:
-        pytest.skip(f"this device routes no {band} band with a {layout} input")
+    if shape is None or layout != "one_token":
+        return shape
     T, H, layout = shape
+    _, last = _device_band(band)
+    H = max(H, 64)
+    return None if last is not None and last < H else (T, H, layout)
+
+
+def _check_nodw_layout(band: str, T: int, H: int, layout: str, nodw: str, launches):
+    """A call with ``compute_grad_weight=False`` on ``make(T, H,
+    layout=layout)`` runs ``nodw`` after the BF16 call on the band's module
+    (``launches``), gives that call's ``dx`` and ``dz`` bits and leaves a
+    caller workspace zero."""
     rows = T * H
-    name = _backward_module(rows, packed=_backward_packed(T, H, layout))
-    assert name == _routes()[band], (rows, name)
-    nodw = _nodw_module(name, rows)
-    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, (band, nodw)
+    name = _routes()[band]
     x, z, w, dy = make(T, H, layout=layout, seed=91)
     ws = workspace_for(rows, x.device)
     launches.clear()
@@ -1306,6 +1312,60 @@ def test_programs_without_the_weight_gradient_on_strided_layouts(
     assert torch.equal(dz, dz_d), f"{what}: dz"
     torch.cuda.synchronize()
     assert not bool(ws.any()), f"the workspace after {what}"
+
+
+@pytest.mark.parametrize("band,layout", NODW_LAYOUT_CASES)
+def test_programs_without_the_weight_gradient_on_strided_layouts(
+    band, layout, launches
+):
+    """``NODW_LAYOUT_CASES`` at the band's first rows of 64 heads (one token
+    of at least 64 heads) on this device: a call with
+    ``compute_grad_weight=False`` runs the program ``nodw_module`` names for
+    the band's module (one cluster, strided, claimed or look-ahead; skipped
+    where this device routes no such band or shape), gives the ``dx`` and
+    ``dz`` bits of the BF16 call on the band's module on the same inputs and
+    leaves a caller workspace zero."""
+    shape = _nodw_layout_shape(band, layout)
+    if shape is None:
+        pytest.skip(f"this device routes no {band} band with a {layout} input")
+    T, H, layout = shape
+    rows = T * H
+    name = _backward_module(rows, packed=_backward_packed(T, H, layout))
+    assert name == _routes()[band], (rows, name)
+    nodw = _nodw_module(name, rows)
+    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, (band, nodw)
+    _check_nodw_layout(band, T, H, layout, nodw, launches)
+
+
+@pytest.mark.parametrize("layout", NODW_LAYOUTS)
+def test_claimed_programs_without_the_weight_gradient_on_strided_layouts(
+    layout, launches
+):
+    """For each band with a cut on this device (``NODW_STRIDED_ROWS_PER_SM``:
+    its strided program up to the cut, its claimed program past it), the
+    ``NODW_LAYOUTS`` layout a row past the cut (64 heads; one token of a head
+    past it): a call with ``compute_grad_weight=False`` runs the band's
+    claimed program without the weight gradient, gives the ``dx`` and ``dz``
+    bits of the BF16 call on the band's module on the same inputs and leaves
+    a caller workspace zero (skipped where this device has no cut)."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    cuts = loader.NODW_STRIDED_ROWS_PER_SM[arch]
+    if not cuts:
+        pytest.skip(f"{arch} routes no claimed program without the weight gradient")
+    sms = loader.device_sm_count(device_index)
+    for band, cut in sorted(cuts.items()):
+        if layout == "one_token":
+            T, H, make_layout = 1, cut * sms + 1, "contiguous"
+        else:
+            T, H, make_layout = cut * sms // 64 + 1, 64, layout
+        rows = T * H
+        name = _backward_module(rows, packed=_backward_packed(T, H, make_layout))
+        assert name == _routes()[band], (band, rows, name)
+        nodw = _nodw_module(name, rows)
+        assert nodw == _routes()[band + loader.NODW], (band, rows, nodw)
+        assert loader.workspace_bytes(nodw), (band, nodw)
+        _check_nodw_layout(band, T, H, make_layout, nodw, launches)
 
 
 # The band roles of the backwards that run on a workspace: the static
