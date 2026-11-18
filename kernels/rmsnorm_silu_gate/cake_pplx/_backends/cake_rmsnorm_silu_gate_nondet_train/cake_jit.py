@@ -3125,6 +3125,25 @@ def module_for_rows(
     return route_module(arch, role)
 
 
+def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
+    """The ROUTES keys :func:`nodw_module` looks up for a module of backward
+    ``role``: for a long role ``base + LONG`` the key ``base + NODW + LONG``
+    (the other three empty), else ``None``, ``role + NODW + STRIDED``, that
+    key ``+ PACKED`` and ``role + NODW``."""
+
+    if role.endswith(LONG):
+        return role[: -len(LONG)] + NODW + LONG, "", "", ""
+    return None, role + NODW + STRIDED, role + NODW + STRIDED + PACKED, role + NODW
+
+
+# The keys of every role a module record names, spelled once at import: a
+# call without the weight gradient then builds no string (its host path is
+# most of the time of a small call).
+_NODW_KEYS = {
+    record["role"]: _nodw_keys(record["role"]) for record in MODULES.values()
+}
+
+
 def nodw_module(
     arch: str, name: str, rows: int, sm_count: int, packed: bool = False
 ) -> str:
@@ -3149,15 +3168,17 @@ def nodw_module(
 
     routes = ROUTES.get(arch, {})
     band = MODULES[name]["role"]
-    if band.endswith(LONG):
-        return routes.get(band[: -len(LONG)] + NODW + LONG, name)
-    strided = routes.get(band + NODW + STRIDED)
+    keys = _NODW_KEYS.get(band) or _nodw_keys(band)
+    long_key, strided_key, packed_key, claimed_key = keys
+    if long_key is not None:
+        return routes.get(long_key, name)
+    strided = routes.get(strided_key)
     if packed and strided is not None:
-        strided = routes.get(band + NODW + STRIDED + PACKED, strided)
+        strided = routes.get(packed_key, strided)
     cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(band)
     if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
         return strided
-    own = routes.get(band + NODW)
+    own = routes.get(claimed_key)
     if own is not None:
         return own
     return name if strided is None else strided

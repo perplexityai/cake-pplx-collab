@@ -1210,11 +1210,39 @@ def backward_module(
     the token and head strides (in elements) the kernel reads ``dy``, ``x`` and
     ``z`` with: :func:`module_for_rows`, told the rows are packed when all
     three head strides are 128 and all three token strides ``heads * 128`` (the
-    kernel's own test, :func:`backward_packed`).  Every module of the role
-    gives the same bits."""
+    kernel's own test, :func:`backward_packed`, spelled out here: a call of
+    it would cost a small backward's host path more than the test).  Every
+    module of the role gives the same bits."""
 
-    packed = backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
+    row = heads * HEAD_DIM
+    packed = (
+        dy_head == HEAD_DIM
+        and x_head == HEAD_DIM
+        and z_head == HEAD_DIM
+        and dy_tok == row
+        and x_tok == row
+        and z_tok == row
+    )
     return module_for_rows(arch, role, rows, sm_count, packed)
+
+
+def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
+    """The ROUTES keys :func:`nodw_module` looks up for a module of backward
+    ``role``: for a long role ``base + LONG`` the key ``base + NODW + LONG``
+    (the other three empty), else ``None``, ``role + NODW + STRIDED``, that
+    key ``+ PACKED`` and ``role + NODW``."""
+
+    if role.endswith(LONG):
+        return role[: -len(LONG)] + NODW + LONG, "", "", ""
+    return None, role + NODW + STRIDED, role + NODW + STRIDED + PACKED, role + NODW
+
+
+# The keys of every role a module record names, spelled once at import: a
+# call without the weight gradient then builds no string (its host path is
+# most of the time of a small call).
+_NODW_KEYS = {
+    record["role"]: _nodw_keys(record["role"]) for record in MODULES.values()
+}
 
 
 def nodw_module(
@@ -1238,15 +1266,17 @@ def nodw_module(
 
     routes = ROUTES.get(arch, {})
     role = MODULES[name]["role"]
-    if role.endswith(LONG):
-        return routes.get(role[: -len(LONG)] + NODW + LONG, name)
-    strided = routes.get(role + NODW + STRIDED)
+    keys = _NODW_KEYS.get(role) or _nodw_keys(role)
+    long_key, strided_key, packed_key, claimed_key = keys
+    if long_key is not None:
+        return routes.get(long_key, name)
+    strided = routes.get(strided_key)
     if packed and strided is not None:
-        strided = routes.get(role + NODW + STRIDED + PACKED, strided)
+        strided = routes.get(packed_key, strided)
     cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
     if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
         return strided
-    claimed = routes.get(role + NODW)
+    claimed = routes.get(claimed_key)
     if claimed is not None:
         return claimed
     return name if strided is None else strided

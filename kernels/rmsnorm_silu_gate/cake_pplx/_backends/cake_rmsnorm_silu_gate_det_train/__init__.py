@@ -179,7 +179,6 @@ from .cake_jit import (
     ROUTES,
     arch_for_capability,
     backward_module,
-    backward_packed,
     device_sm_count,
     nodw_module,
     workspace_elements,
@@ -883,8 +882,17 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         # The program built without the weight gradient (the same dx and dz
         # bits): strided up to its cut (or at every row count where no claimed
         # one is routed; its 128-thread build on packed rows), else claimed,
-        # or the long one.
-        packed = backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
+        # or the long one.  The packed-row test is cake_jit.backward_packed,
+        # spelled out: a call would cost this host path more than the test.
+        row = heads * HEAD_DIM
+        packed = (
+            dy_head == HEAD_DIM
+            and x_head == HEAD_DIM
+            and z_head == HEAD_DIM
+            and dy_tok == row
+            and x_tok == row
+            and z_tok == row
+        )
         name = nodw_module(arch, name, rows, sm_count, packed)
     if dw is None and "workspace" not in _loader.MODULES[name]:
         # The strided program reads and writes no workspace word: no stream
