@@ -973,9 +973,6 @@ def test_operand_and_limit_errors(device) -> None:
         "a limit that rounds to 0 in FP32": lambda: forward(gate, up, weight, limit=1e-50),
         "a negative limit in the backward": lambda: backward(dh, gate, up, weight, limit=-10.0),
     }
-    for what, call in value_errors.items():
-        with pytest.raises(ValueError):
-            call()
     type_errors = {
         "a tensor limit": lambda: forward(gate, up, weight, limit=torch.tensor(10.0, device=device)),
         "a boolean limit": lambda: forward(gate, up, weight, limit=True),
@@ -984,9 +981,18 @@ def test_operand_and_limit_errors(device) -> None:
         "a list gate": lambda: forward([1.0], up, weight, limit=L),
         "a tensor limit in the autograd entry": lambda: clamped_swiglu(gate, up, weight, limit=torch.tensor(10.0)),
     }
-    for what, call in type_errors.items():
-        with pytest.raises(TypeError):
-            call()
+    misses = []
+    for kind, calls in ((ValueError, value_errors), (TypeError, type_errors)):
+        for what, call in calls.items():
+            try:
+                call()
+            except kind:
+                continue
+            except Exception as e:
+                misses.append(f"{what}: {type(e).__name__} ({e}), not {kind.__name__}")
+            else:
+                misses.append(f"{what}: no {kind.__name__}")
+    assert not misses, misses
     # An integer limit is a Python number: accepted, the same bits as the float.
     assert_same_bits(forward(gate, up, weight, limit=10), forward(gate, up, weight, limit=10.0), "integer limit")
 
