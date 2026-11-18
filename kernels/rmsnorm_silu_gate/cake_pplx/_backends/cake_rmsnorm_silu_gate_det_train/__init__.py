@@ -424,11 +424,15 @@ def cake_rmsnorm_silu_gate_det_train_forward(
     return y
 
 
+@functools.cache
 def _workspace_elements(arch: str) -> int:
     """FP32 elements of a workspace that serves every backward module of
     ``arch`` (both weight-gradient dtypes and their long modules, any row
     count; the claimed and long programs without the weight gradient take
-    the BF16 backward's layout, and the strided one none)."""
+    the BF16 backward's layout, and the strided one none).  Cached: the
+    module tables are constant, and a backward call with a workspace checks
+    it against this size, which would otherwise lay out every backward
+    module's workspace on every call."""
 
     routes = ROUTES[arch]
     return max(
@@ -690,6 +694,16 @@ def _check_workspace(
     return workspace.view(-1)
 
 
+@functools.cache
+def _module_workspace_elements(name: str) -> int:
+    """``cake_jit.workspace_elements`` of backward module ``name`` (a module
+    with a workspace).  Cached: the module records are constant, and every
+    backward call with a workspace reads it, which would otherwise lay out
+    the module's workspace on every call."""
+
+    return workspace_elements(name)
+
+
 def _workspace_views(
     workspace: torch.Tensor, name: str, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -698,7 +712,7 @@ def _workspace_views(
     two ``uint32`` words ``[0]`` the arrival ticket and ``[1]`` the claim
     counter."""
 
-    elements = workspace_elements(name)
+    elements = _module_workspace_elements(name)
     flat = _check_workspace(workspace, device, elements)
     digits = elements - HEAD_DIM - 2
     acc = flat[:digits].view(torch.uint64)
