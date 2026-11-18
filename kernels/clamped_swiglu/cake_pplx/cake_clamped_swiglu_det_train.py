@@ -66,9 +66,13 @@ Mode rules:
    under ``torch.use_deterministic_algorithms(True)`` no call alerts.
 4. Autograd: ``CakeClampedSwiGLUDetFunction`` saves only its inputs (the
    gate and up, or the merged tensor, and the weight; no activation) and
-   recomputes the activation in the backward: retained state is the inputs,
-   and ``torch.utils.checkpoint(..., use_reentrant=False)`` keeps nothing but
-   the output.  No call uses a workspace.
+   recomputes the activation in the backward: retained state is the inputs.
+   ``torch.utils.checkpoint(..., use_reentrant=False)`` keeps the same inputs;
+   the function adds no saved state of its own and no activation.  No call
+   uses a workspace.  An unweighted call passes a one-element FP32 buffer of
+   the device as the weight, set to 1 by the device's first unweighted call
+   with ``R > 0`` (one more launch, once); the kernels read its one element
+   and ignore it.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
@@ -150,8 +154,9 @@ def cake_clamped_swiglu_det_train_forward(
 ) -> torch.Tensor:
     r"""Clamped SwiGLU forward: ``h = BF16(weight * silu(min(gate, L)) * clamp(up, -L, L))``.
 
-    The activation and the product with the FP32 route weight are FP32; ``h`` is rounded once.  One kernel launch,
-    no workspace.  The same inputs give the same bits at every call.
+    The activation and the product with the FP32 route weight are FP32; ``h`` is rounded once.  One kernel launch
+    (the device's first unweighted call with ``R > 0`` also fills its one-element weight buffer once), no workspace.
+    The same inputs give the same bits at every call.
 
     Parameters
     ----------
@@ -167,7 +172,7 @@ def cake_clamped_swiglu_det_train_forward(
         ``L``, a finite positive Python number, rounded to FP32 (a run-time launch argument).  Required.
     out : torch.Tensor, optional
         Preallocated BF16 ``[R, 2304]`` output: 2-D, unit last stride, a row stride that is a multiple of 8 and at
-        least 2304, a 16-byte aligned base.
+        least 2304, a 16-byte aligned base.  It must not overlap any input (not checked).
 
     Returns
     -------
@@ -215,8 +220,9 @@ def cake_clamped_swiglu_det_train_backward(
         d_up     = BF16(dh * w * g' s * [-L <= u <= L])
         d_weight = sum over c of dh * a        # FP32, one fixed order per row
 
-    in FP32, each BF16 output rounded once; the masks are inclusive.  One kernel launch, no workspace.  The same
-    inputs give the same bits at every call.
+    in FP32, each BF16 output rounded once; the masks are inclusive.  One kernel launch (the device's first
+    unweighted call with ``R > 0`` also fills its one-element weight buffer once), no workspace.  The same inputs give
+    the same bits at every call.
 
     Parameters
     ----------
@@ -229,11 +235,13 @@ def cake_clamped_swiglu_det_train_backward(
     grad_gate_up_or_gate : torch.Tensor, optional
         Preallocated BF16 output: ``d_gate [R, 2304]`` for two input tensors, or the merged ``[R, 4608]`` gradient
         (``d_gate`` columns ``[0, 2304)``, ``d_up`` ``[2304, 4608)``) for a merged input.  Same layout rules as
-        ``out`` of the forward.
+        ``out`` of the forward.  It must not overlap any input or another output (not checked).
     grad_up : torch.Tensor, optional
-        Preallocated BF16 ``d_up [R, 2304]`` for two input tensors; must be None for a merged input.
+        Preallocated BF16 ``d_up [R, 2304]`` for two input tensors; must be None for a merged input.  It must not
+        overlap any input or another output (not checked).
     grad_weight : torch.Tensor, optional
-        Preallocated contiguous FP32 ``[R]`` route-weight gradient (needs ``weight``).
+        Preallocated contiguous FP32 ``[R]`` route-weight gradient (needs ``weight``).  It must not overlap any input
+        or another output (not checked).
 
     Returns
     -------

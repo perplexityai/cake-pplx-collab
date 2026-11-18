@@ -32,10 +32,11 @@ Host design (every control is an argument; no environment variable):
   stride that is not a multiple of 8 elements, a base address that is not
   16-byte aligned) is copied once to a contiguous tensor.  ``weight`` is FP32
   ``[R]`` (copied once when not contiguous), or ``None`` for an unweighted
-  expert (``w = 1``; the kernels then read no weight and get a cached
-  one-element buffer of the device).  ``limit`` is ``L``, a positive finite
-  Python number rounded to FP32; it is a launch argument, as are ``R``, the
-  weight flag and the strides, so one build serves every call.
+  expert (``w = 1``; the kernels then get a cached one-element FP32 buffer of
+  the device, set to 1, and read its one element and ignore it).  ``limit``
+  is ``L``, a positive finite Python number rounded to FP32; it is a launch
+  argument, as are ``R``, the weight flag and the strides, so one build
+  serves every call.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, 2304]`` tensor, or the
   caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout
   of the inputs: two new contiguous ``[R, 2304]`` tensors, or one new
@@ -45,14 +46,16 @@ Host design (every control is an argument; no environment variable):
   be a layout the kernels write (2-D, unit last stride, a row stride that is a
   multiple of 8 elements and at least the row width, 16-byte aligned; FP32
   ``[R]`` contiguous for the weight gradient): it is refused with a
-  ``ValueError`` otherwise, never copied.  Outputs must not overlap the
-  inputs (not checked).
+  ``ValueError`` otherwise, never copied.  An output must not overlap any
+  input or another output (not checked).
 - Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
   stage through ``cake_jit.PROGRAM_OF``), CTAs of ``threads / lanes`` rows
   (32 lanes a row; 256 threads and 8 rows in the forward, 128 threads and
   4 rows in the backward), one CTA per block of rows on the
   grid's x axis (``cake_jit.grid``).  ``R == 0`` launches nothing and loads no
-  library.
+  library.  A device's first unweighted launch also fills that device's
+  cached one-element weight buffer with 1 once (``torch.ones``, one more
+  launch on the same stream, captured with it during a CUDA graph capture).
   Every launch is a plain stream-ordered launch on the current torch stream
   of the operands' device (a tvm-ffi call whose arguments include PyTorch
   CUDA tensors runs on that stream, a CUDA graph's capture stream during
@@ -89,8 +92,9 @@ Host design (every control is an argument; no environment variable):
 - Workspace: none.  Retained state: the autograd function saves only its
   inputs (``gate`` and ``up`` or the merged tensor, and ``weight``) through
   ``save_for_backward``, references to the caller's tensors with no copy; the
-  backward recomputes the activation.  So a non-reentrant checkpointed
-  forward keeps nothing but its output.
+  backward recomputes the activation.
+  ``torch.utils.checkpoint(..., use_reentrant=False)`` keeps the same inputs;
+  the function adds no saved state of its own and no activation.
 - Mode: the mode is part of the name (``det``).  Every output is elementwise
   or a sum within one row in one fixed order, so every launch gives the same
   bits for the same inputs on the same architecture, whatever the row count,
@@ -238,10 +242,10 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
 
 
 @functools.cache
-def _unread_weight(device_index: int) -> torch.Tensor:
-    """The one-element FP32 buffer an unweighted launch passes as ``w`` (``weighted`` 0: the kernels never read
-    it), one per device for the process."""
-    return torch.empty(1, dtype=torch.float32, device=torch.device("cuda", device_index))
+def _ignored_weight(device_index: int) -> torch.Tensor:
+    """The one-element FP32 buffer, set to 1, that an unweighted launch passes as ``w`` (``weighted`` 0: the kernels
+    read its one element and ignore it), one per device for the process."""
+    return torch.ones(1, dtype=torch.float32, device=torch.device("cuda", device_index))
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -404,7 +408,7 @@ def cake_clamped_swiglu_det_train_forward(
     values = {
         "gate": gate,
         "up": up_view,
-        "w": _unread_weight(index) if w is None else w,
+        "w": _ignored_weight(index) if w is None else w,
         "h": h,
         "rows": rows,
         "gate_stride": _row_stride(gate),
@@ -454,7 +458,7 @@ def cake_clamped_swiglu_det_train_backward(
         "gate": gate,
         "up": up_view,
         "dh": dh,
-        "w": _unread_weight(index) if w is None else w,
+        "w": _ignored_weight(index) if w is None else w,
         "d_gate": d_gate,
         "d_up": d_up,
         "d_weight": d_weight,

@@ -52,7 +52,8 @@ required keyword everywhere.
   last stride and a 16-byte aligned base are read in place (the halves of a merged tensor, row slices of a wider
   tensor).  Another input layout is copied once; a non-contiguous `weight` too.
 - A caller's output buffer must already have such a layout, with rows that do not overlap (row stride at least the
-  row width); otherwise it is refused (`ValueError`).  Outputs must not overlap the inputs.
+  row width); otherwise it is refused (`ValueError`).  An output (`out`, `grad_gate_up_or_gate`, `grad_up`,
+  `grad_weight`) must not overlap any input or another output; this is not checked.
 - A wrong type, or a `limit` that is not a Python number, raises `TypeError` (a tensor `limit` would need a host
   read).  A wrong device, dtype or shape, a non-finite or non-positive `limit`, or an unfit output raises
   `ValueError`.  An unsupported device raises `RuntimeError`, also with `R = 0`.
@@ -98,8 +99,9 @@ reorder.
 ## Workspace and retained state
 
 - Workspace: none.  An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops
-  them.  The device's one-element FP32 buffer that an unweighted launch passes as the (unread) weight is kept for the
-  process.
+  them.  An unweighted launch passes the device's one-element FP32 buffer, set to 1, as the weight.  The kernels read
+  its one element and ignore it.  The buffer is kept for the process; the device's first unweighted launch fills it
+  once, one more launch on the same stream.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
   the backward recomputes it.
