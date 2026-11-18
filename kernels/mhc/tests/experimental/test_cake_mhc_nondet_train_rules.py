@@ -1534,7 +1534,10 @@ def test_pdl_band_overrides_at_the_measured_points() -> None:
         for name in _runtime_pdl_records(arch, hidden):
             edge = nd.pdl_edge(nd.MODULES[name]["library"])
             by_edge.setdefault(edge, []).append(name)
-        assert set(by_edge) == {"K1->K3", "K1->K5", "K6->K7"}, (hidden, by_edge)
+        edges = {"K1->K3", "K1->K5", "K6->K7"}
+        if hidden in nd.handoff_hidden_sizes(arch):
+            edges.add("K4->C")  # the pre handoff's standalone collapse: no band, no measured point
+        assert set(by_edge) == edges, (hidden, by_edge)
         for size, edge, path, T, b200, gb200, base in PDL_POINTS:
             if size not in (None, hidden):
                 continue
