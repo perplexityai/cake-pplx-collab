@@ -107,12 +107,14 @@ forward value is `fma(e, c_small, c_big) / (1 + e)`.  Gate gaps of 100 and more 
 | pair table (`cu_pairs`) | `4 (S + 1)` | workspace of an explicit forward, and of an explicit backward without `pair_offsets`; freed on return |
 | autograd node | `4 (S + 1)` | its forward's pair table, retained until its backward |
 | inputs the autograd node references | `4096 T + 4 (S + 1)` | `C` and `Z` (or `cz`) and `cu_seqlens`, the caller's tensors: no copy |
+| incoming-gradient copy | `1024 G` | workspace of the autograd backward only when its incoming gradient is not contiguous and 16-byte aligned (for example the expanded gradient of `out.sum().backward()`); freed on return |
 
-`cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs)` returns these
-figures.  The autograd node saves its inputs and the pair table only (no activation, no
-probability); under `torch.utils.checkpoint(..., use_reentrant=False)` the recompute
-rebuilds the same bits.  The outputs (`out`, `dC`, `dZ`) are allocated from PyTorch's caching
-allocator unless the caller passes them.
+`cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs)` returns the figures
+of the first three rows; it takes no `G` and leaves out the incoming-gradient copy, the only
+workspace of the autograd backward.  The autograd node saves its inputs and the pair table
+only (no activation, no probability); under `torch.utils.checkpoint(..., use_reentrant=False)`
+the recompute rebuilds the same bits.  The outputs (`out`, `dC`, `dZ`) are allocated from
+PyTorch's caching allocator unless the caller passes them.
 
 ## Determinism
 

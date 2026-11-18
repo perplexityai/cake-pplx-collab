@@ -306,7 +306,9 @@ def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: 
 
     * ``forward_workspace``: ``4 (S + 1)``, the pair table an explicit forward allocates and frees;
     * ``backward_workspace``: ``4 (S + 1)``, the pair table an explicit backward without ``pair_offsets`` allocates
-      and frees (the autograd backward allocates none);
+      and frees.  The autograd backward allocates none, except a ``1024 G``-byte contiguous copy of an incoming
+      gradient that is not contiguous and 16-byte aligned (for example the expanded gradient of
+      ``out.sum().backward()``), freed on return; the report takes no ``G`` and leaves this copy out;
     * ``retained_for_backward``: ``4 (S + 1)``, the bytes the autograd node allocates in its forward and keeps until
       its backward (its pair table);
     * ``retained_inputs``: ``4096 T + 4 (S + 1)``, the caller's tensors the autograd node keeps referenced (``C`` and

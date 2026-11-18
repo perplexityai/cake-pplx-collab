@@ -30,7 +30,8 @@ beside the repository's naive-tier judge (``tests/cake_naive.py``), which every 
 * Gate gaps of 100 and more, and exact ties, give finite ``out``, ``dC`` and ``dZ``.
 * Any ``T``, ``S`` and ``G`` without recompiling; works under ``torch.utils.checkpoint(..., use_reentrant=False)``;
   no host synchronization in steady state.
-* Workspace and state retained for the backward are reported separately.
+* Workspace and state retained for the backward are reported separately; the measured peak of a backward is the
+  reported workspace (and, for the autograd backward of an expanded incoming gradient, its documented copy).
 
 Every test runs on SM100 / SM103 / SM107 and skips elsewhere.  Each measured figure is recorded with pytest's
 ``record_property`` (``acceptance``).
@@ -370,3 +371,61 @@ def test_workspace_and_retained_state_are_reported_separately(pack, record_prope
     assert workspace == _rounded(report["forward_workspace"]) and after == 0
     assert retained == _rounded(report["retained_for_backward"])
     assert report["retained_inputs"] == 4096 * x.T + 4 * (x.S + 1)
+
+
+def _accounted(device: torch.device, requests) -> int:
+    """Bytes the caching allocator accounts for the ``(shape, dtype)`` requests, made in this order from the current
+    state with its cache emptied (a large block keeps the rest of its segment when that rest is at most 1 MiB)."""
+    torch.cuda.empty_cache()
+    base = torch.cuda.memory_allocated(device)
+    held = [torch.empty(shape, dtype=dtype, device=device) for shape, dtype in requests]
+    found = torch.cuda.memory_allocated(device) - base
+    del held
+    torch.cuda.empty_cache()
+    return found
+
+
+@pytest.mark.parametrize("pack", (MIXED, *PERF_PACKS), ids=lambda p: p.id)
+def test_the_backward_workspace_is_reported(pack, record_property) -> None:
+    """The peak a backward allocates: the report's ``backward_workspace`` (the pair table) for an explicit backward
+    without ``pair_offsets`` into caller buffers; for the autograd backward of ``cake_gated_kv_compression_det_cz``,
+    only its ``[T, 1024]`` gradient (an output) with a contiguous incoming gradient, and that gradient plus the
+    documented ``1024 G``-byte copy with an expanded one."""
+    device = _device_or_skip()
+    x = make_inputs(pack, seed=149, device=device, layout="halves")
+    report = api.cake_gated_kv_compression_det_train_memory_bytes(x.T, x.S)
+    _explicit(x, "halves")
+    _, dc, dz = nan_halves(x.T, device)
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    base = torch.cuda.memory_allocated(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    api.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, dc=dc, dz=dz)
+    torch.cuda.synchronize(device)
+    explicit = torch.cuda.max_memory_allocated(device) - base
+    after = torch.cuda.memory_allocated(device) - base
+    gradient = ((x.T, 2 * WIDTH), torch.float32)
+    copy = ((x.G, WIDTH), torch.bfloat16)
+    expanded = x.dout[:1].expand(x.G, WIDTH)
+    found = {}
+    for label, dout, requests in (("contiguous", x.dout, [gradient]), ("expanded", expanded, [gradient, copy])):
+        cz = x.cz.detach().clone().requires_grad_(True)
+        out = api.cake_gated_kv_compression_det_cz(cz, x.cu, x.G)
+        torch.cuda.synchronize(device)
+        # The backward allocates its gradient first, then the copy of a non-contiguous incoming gradient.
+        want = _accounted(device, requests)
+        base = torch.cuda.memory_allocated(device)
+        torch.cuda.reset_peak_memory_stats(device)
+        (grad,) = torch.autograd.grad(out, cz, dout)
+        torch.cuda.synchronize(device)
+        found[label] = (torch.cuda.max_memory_allocated(device) - base, want)
+        del out, grad, cz
+    copied = found["expanded"][1] - found["contiguous"][1]
+    record_property(
+        "acceptance",
+        {"criterion": "backward workspace", "report": report, "explicit": explicit, "autograd": found, "G": x.G},
+    )
+    assert explicit == _rounded(report["backward_workspace"]) and after == 0
+    for label, (peak, want) in found.items():
+        assert peak == want, f"autograd backward, {label} incoming gradient: peak {peak} B, expected {want} B"
+    assert copied >= _rounded(1024 * x.G), (copied, x.G)
