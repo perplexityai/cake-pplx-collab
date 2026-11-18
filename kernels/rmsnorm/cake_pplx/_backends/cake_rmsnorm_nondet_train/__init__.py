@@ -1084,7 +1084,12 @@ def cake_rmsnorm_nondet_train_backward(
     record (``cake_jit.MODULES``) has the ``workspace_rule``
     ``claim_sum_f32`` with a nonzero ``sum_bytes`` (the single kernel) or
     ``claim_part_f32`` (the part-row single kernel); the other unmarked
-    windows run a column-task program.
+    windows run a column-task program.  The notes' prose has the same gap:
+    where it says that the lowest window of 9 backward routes (T 1 up to a
+    token count from 1 to 31) or of sm_103a ``bwd_h4096`` and
+    ``bwd_w32_h4096`` runs a single kernel, the registry runs the
+    one-cluster kernel there and, in every other window that starts below T
+    31, a column-task program.
 
     While ``torch.use_deterministic_algorithms(True)`` is in effect every call
     raises ``RuntimeError`` naming

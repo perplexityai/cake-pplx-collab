@@ -28,10 +28,13 @@ rounded BF16 sum.  The tests never compare this package with the deterministic
 one.
 
 A backward window runs one of two forms (the registry's records for the call's
-token count): the single kernel, which adds the CTAs' FP32 ``dw`` sums in a
-scheduling-dependent order (``claim_sum_f32``) or keeps one FP32 partial row
-per CTA (``claim_part_f32``), or a deterministic pair rendered into this
-package.  Every case derives its form from its own window (the records of its
+token count): one kernel or a deterministic pair rendered into this package.
+The one kernel is the single kernel (``claim_sum_f32`` with a nonzero
+``sum_bytes``), which adds the CTAs' FP32 ``dw`` sums in a
+scheduling-dependent order; the part-row single kernel (``claim_part_f32``),
+which keeps one FP32 partial row per CTA and folds the rows in a
+scheduling-dependent order; or a fixed-order kernel (``claim_sum_f32`` with
+``sum_bytes`` 0): the one-cluster kernel or a column-task program.  Every case derives its form from its own window (the records of its
 architecture, width, residual flag, weight dtype and token count, read from
 ``ROUTES`` and the select rules) and checks that the call launched exactly
 those records.

@@ -85,10 +85,14 @@ backward notes' table marks only the one-cluster and det pair windows; its
 legend's remarks that the other windows run the single kernel and that
 ``dw`` is not bitwise reproducible hold only for the single and part-row
 single kernels, and the other unmarked windows run a column-task program.
-The package also accepts ``[..., H]`` inputs whose leading dimensions
-collapse into rows (for example a ``[T, heads, 256]`` per-head view sharing
-one ``w[256]``) and an FP32 weight on the routes that ship the FP32-weight
-programs.
+The notes' prose has the same gap: where it says that the lowest window of 9
+backward routes (T 1 up to a token count from 1 to 31) or of sm_103a
+``bwd_h4096`` and ``bwd_w32_h4096`` runs a single kernel, the registry runs
+the one-cluster kernel there and, in every other window that starts below T
+31, a column-task program.  The package also accepts ``[..., H]`` inputs
+whose leading dimensions collapse into rows (for example a ``[T, heads,
+256]`` per-head view sharing one ``w[256]``) and an FP32 weight on the
+routes that ship the FP32-weight programs.
 
 All kernels use FP32 statistics and accumulation, one FP32 word per sum and
 no FP64, except the FP32-pair det pairs the backward notes name, which add
@@ -333,7 +337,12 @@ def cake_rmsnorm_nondet_train_backward(
     record (``cake_jit.MODULES``) has the ``workspace_rule``
     ``claim_sum_f32`` with a nonzero ``sum_bytes`` (the single kernel) or
     ``claim_part_f32`` (the part-row single kernel); the other unmarked
-    windows run a column-task program.
+    windows run a column-task program.  The notes' prose has the same gap:
+    where it says that the lowest window of 9 backward routes (T 1 up to a
+    token count from 1 to 31) or of sm_103a ``bwd_h4096`` and
+    ``bwd_w32_h4096`` runs a single kernel, the registry runs the
+    one-cluster kernel there and, in every other window that starts below T
+    31, a column-task program.
 
     While ``torch.use_deterministic_algorithms(True)`` is in effect every call
     raises ``RuntimeError`` naming
