@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 16 families and 33 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 17 families and 34 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -95,6 +95,7 @@ The repository has 16 families and 33 backend packages, about 212 MB in total. M
 | `gqa` | det, nondet | `cake-pplx-gqa` |
 | `fmha` | nondet | `cake-pplx-fmha` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
+| `clamped_swiglu` | det | `cake-pplx-clamped-swiglu` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
