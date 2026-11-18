@@ -34,8 +34,8 @@ forward (``out``) and the backward (``dC``, ``dZ``, the tail rows exactly +0.0) 
 column halves of one ``[T, 1024]`` tensor (the gradients written into the halves of one ``[T, 1024]`` buffer), on
 small packs with empty and one-token documents, close pairs, gate extremes, many small odd documents and the two
 performance packs; the forward rows past the pair count stored as +0.0.  Then the documented invariances, bit for
-bit: repeated calls, the two layouts, each document alone against the pack, the tail tokens' values, and the records
-each call launches.
+bit: repeated calls, the two layouts, one call with four different row strides (judged too), each document alone
+against the pack, the tail tokens' values, and the records each call launches.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -713,6 +713,38 @@ def test_column_halves_give_the_bits_of_contiguous_operands(pack, device) -> Non
     assert torch.equal(halves.c, dense.c) and torch.equal(halves.z, dense.z)
     for name, got, want in zip(("out", "dc", "dz"), _run(halves, "halves"), _run(dense, "contiguous"), strict=True):
         assert_bitwise(got, want, f"{pack.id}: {name} of the halves against contiguous")
+
+
+def _mixed_strides(x) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(c, z, dc, dz)`` with four row strides: ``C`` contiguous (512), ``Z`` the right half of a ``[T, 1024]`` tensor
+    whose left half is NaN (1024), ``dC`` the left half of a NaN ``[T, 1024]`` buffer (1024) and ``dZ`` the first 512
+    columns of a NaN ``[T, 520]`` buffer (520)."""
+    device = x.c.device
+    z_buffer = torch.full((x.T, 2 * WIDTH), float("nan"), dtype=torch.float32, device=device)
+    z_buffer[:, WIDTH:] = x.z
+    _, dc, _ = nan_halves(x.T, device)
+    dz = torch.full((x.T, WIDTH + 8), float("nan"), dtype=torch.float32, device=device)[:, :WIDTH]
+    return x.c.contiguous(), z_buffer[:, WIDTH:], dc, dz
+
+
+def test_mixed_row_strides_give_the_bits_of_contiguous_operands(device, record_property) -> None:
+    """``C`` contiguous beside ``Z`` the right half of a ``[T, 1024]`` tensor, and ``dC`` the left half of a NaN
+    ``[T, 1024]`` buffer beside ``dZ`` the first 512 columns of a NaN ``[T, 520]`` buffer: every operand is read or
+    written at its own row stride, so the outputs meet the tier and have the bits of the all-contiguous call."""
+
+    def draw(seed: int):
+        x = make_inputs(MIXED, seed=seed, device=device)
+        c, z, dc, dz = _mixed_strides(x)
+        assert (c.stride(0), z.stride(0), dc.stride(0), dz.stride(0)) == (WIDTH, 2 * WIDTH, 2 * WIDTH, WIDTH + 8)
+        out = pkg.cake_gated_kv_compression_det_train_forward(c, z, x.cu, x.G)
+        pkg.cake_gated_kv_compression_det_train_backward(x.dout, c, z, x.cu, dc=dc, dz=dz)
+        for name, got, want in zip(("out", "dc", "dz"), (out, dc, dz), _run(x, "contiguous"), strict=True):
+            assert_bitwise(got, want, f"{name} of mixed row strides against contiguous")
+        assert_forward_contract("forward", x, out)
+        assert_backward_contract("backward", x, dc, dz)
+        return judged(x, {"mixed": {"out": out, "dc": dc, "dz": dz}})
+
+    judge_draws(record_property, draw)
 
 
 @pytest.mark.parametrize("pack", (Pack((0, 1, 3, 2, 7, 4)), MIXED), ids=["L0-1-3-2-7-4", MIXED.id])
