@@ -989,6 +989,14 @@ def ptxas_version(path):
     return f"{path}: {line[-1].strip() if line else '?'}"
 
 
+def _donated_buffer():
+    """``torch._functorch.config.donated_buffer`` (the module loads on first import), or None without it."""
+    try:
+        return importlib.import_module("torch._functorch.config").donated_buffer
+    except (ImportError, AttributeError):
+        return None
+
+
 def environment():
     env = {
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1004,7 +1012,7 @@ def environment():
         "TRITON_PTXAS_PATH": os.environ.get("TRITON_PTXAS_PATH"),
         "TRITON_PTXAS_BLACKWELL_PATH": os.environ.get("TRITON_PTXAS_BLACKWELL_PATH"),
         "timer": timer_kind(),
-        "functorch_donated_buffer": getattr(getattr(torch, "_functorch", None) and torch._functorch.config, "donated_buffer", None),
+        "functorch_donated_buffer": _donated_buffer(),
     }
     for dist in ("triton", "nvidia-cudnn-frontend", "nvidia-cutlass-dsl", "nvidia-cutlass-dsl-libs-base",
                  "apache-tvm-ffi", "cupti-python", "nvidia-cuda-runtime", "nvidia-cuda-nvrtc", "nvidia-cuda-cupti",
