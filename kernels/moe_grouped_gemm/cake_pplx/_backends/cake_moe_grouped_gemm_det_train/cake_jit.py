@@ -100,6 +100,35 @@ from . import cake_build
 # probed SM pairs of each locality domain instead of evenly (``cake_backend``,
 # stream workspaces).
 PROGRAMS: dict[str, dict[str, Any]] = {
+    "cake_moe_grouped_det_gemm_09a336207c15c131f5dc": {
+        "library": "cake_moe_grouped_det_gemm_09a336207c15c131f5dc",
+        "ffi_entry": "run",
+        "arg_plan": [
+            ["tma_buffer", "A"],
+            ["tma_buffer", "B"],
+            ["buffer", "C"],
+            ["buffer", "offs"],
+            ["buffer", "tensormap_workspace"],
+            ["buffer", "partials"],
+            ["parameter", "tail_splits"],
+            ["parameter", "raster_rows"],
+            ["parameter", "num_groups"],
+            ["parameter", "sum_m"],
+            ["parameter", "N"],
+            ["parameter", "K"],
+            ["parameter", "ldc"],
+            ["parameter", "stride_e"],
+            ["buffer", "A_rows"],
+            ["buffer", "B_rows"],
+            ["parameter", "lda"],
+            ["parameter", "ldb"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "launch": {"block": [192, 1, 1], "cluster": [2, 1, 1]},
+        "arches": ["sm_107a"],
+    },
     "cake_moe_grouped_det_gemm_0b2f2facc57c8bb9de08": {
         "library": "cake_moe_grouped_det_gemm_0b2f2facc57c8bb9de08",
         "ffi_entry": "run",
@@ -740,12 +769,14 @@ PROGRAMS: dict[str, dict[str, Any]] = {
             ["parameter", "K"],
             ["parameter", "ldc"],
             ["parameter", "stride_e"],
+            ["buffer", "A_rows"],
+            ["buffer", "B_rows"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
         "launch": {"block": [192, 1, 1], "cluster": [2, 1, 1]},
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
     },
     "cake_moe_grouped_det_gemm_f95641c4d3138b139ce2": {
         "library": "cake_moe_grouped_det_gemm_f95641c4d3138b139ce2",
@@ -894,6 +925,11 @@ ROUTES: dict[str, dict[str, Any]] = {
                 "specializations": {},
             },
             {
+                "name": "main",
+                "program": "cake_moe_grouped_det_gemm_09a336207c15c131f5dc",
+                "specializations": {},
+            },
+            {
                 "name": "main_wave",
                 "program": "cake_moe_grouped_det_gemm_fc0a5c2da4d4782f42eb",
                 "specializations": {},
@@ -958,6 +994,11 @@ ROUTES: dict[str, dict[str, Any]] = {
             {
                 "name": "main",
                 "program": "cake_moe_grouped_det_gemm_ed9a74f36ba13a52183d",
+                "specializations": {"WGRAD_OUT": 32},
+            },
+            {
+                "name": "main",
+                "program": "cake_moe_grouped_det_gemm_09a336207c15c131f5dc",
                 "specializations": {"WGRAD_OUT": 32},
             },
             {

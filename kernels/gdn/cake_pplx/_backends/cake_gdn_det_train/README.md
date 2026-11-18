@@ -90,7 +90,10 @@ grid needs a second, short wave: with `slots = 6 x SMs` and
 `CTAs = chunks x H`, the plain prep runs for `slots < CTAs <= 2.5 x slots`
 (`sm_100a`, `sm_103a`; `sm_107a` has no plain-prep band and runs `prep_tma`
 for every grid), and
-for Q or K not 16-byte aligned.  Both preps give the same bits.  The WY stage
+for Q or K not 16-byte aligned.  Q and K that are the head views of a packed
+row (strided, row-major views that `prep_tma` reads in place) run `prep_tma`
+inside that band too, so the forward copies no Q / K; a `prep` pin still
+decides.  Both preps give the same bits.  The WY stage
 runs `wy_tc2`: the chains and outputs of `wy_tc` (the same bits) with a
 64-column TMEM accumulator and packed shared-memory operands, so five CTAs fit
 on an SM where `wy_tc` fits four.  A long sequence can be
@@ -166,9 +169,11 @@ FP32-`beta` host-table calls change from the previous release of this package.
 Every other call (a BF16 `beta`, Q/K not
 normalized, the device route, a larger value-head group, a `prep`,
 `scan_config` or `segment_chunks` pin) runs the prep forward with the same
-launches and bits as before.  The other options (`dhu_scan`, `finalize`,
-`warmup_log2`, `lpt`, `streams`, `save_state`, `host_cache`) do not change the
-forward route.
+bits as before, and with the same launches except one: Q and K that are the
+head views of a packed row run `prep_tma` inside the plain-prep band unless a
+`prep` pin decides (no copy; see the prep above).  The other options
+(`dhu_scan`, `finalize`, `warmup_log2`, `lpt`, `streams`, `save_state`,
+`host_cache`) do not change the forward route.
 
 The forward keeps for the backward only the state of the architecture's tape
 level (`T_full`: `w`, `h` and `v_new`; `u` is read only to rebuild `h` and

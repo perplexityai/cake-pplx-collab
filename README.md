@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 17 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 20 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -15,6 +15,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | gdn | `cake-pplx-gdn` | `cake_gdn_{det,nondet}_train[_kcp]` | Gated DeltaNet chunked gated delta rule | [API](docs/API.md#gdn) |
 | mhc | `cake-pplx-mhc` | `cake_mhc_{det,nondet}_train` | Four-stream mHC hyper-connection layer | [API](docs/API.md#mhc) |
 | mhc_head | `cake-pplx-mhc-head` | `cake_mhc_head_{det,nondet}_train` | Stream mean at the mHC model head | [API](docs/API.md#mhc_head) |
+| engram_gate | `cake-pplx-engram-gate` | `cake_engram_gate_{det,nondet}_train` | Four-stream Engram context gate, width 5120 | [API](docs/API.md#engram_gate) |
 | gqa | `cake-pplx-gqa` | `cake_gqa_{det,nondet}_train` | Packed-varlen causal GQA attention, head dim 256 | [API](docs/API.md#gqa) |
 | fmha | `cake-pplx-fmha` | `cake_fmha_nondet_train` | Dense multi-head attention, head dim 64/128 (backward only) | [API](docs/API.md#fmha) |
 | gated_kv_compression | `cake-pplx-gated-kv-compression` | `cake_gated_kv_compression_det_train` | Ratio-2 gated KV compression: per-document token-pair softmax pooling, width 512 | [API](docs/API.md#gated_kv_compression) |
@@ -24,7 +25,9 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | moe_grouped_gemm | `cake-pplx-moe-grouped-gemm` | `cake_moe_grouped_gemm_{det,nondet}_train` | Ragged BF16 MoE grouped GEMM | [API](docs/API.md#moe_grouped_gemm) |
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
 | clamped_swiglu | `cake-pplx-clamped-swiglu` | `cake_clamped_swiglu_det_train` | Routed-expert clamped SwiGLU, FP32 route weight before the one BF16 rounding (I = 2304) | [API](docs/API.md#clamped_swiglu) |
+| engram_lookup | `cake-pplx-engram-lookup` | `cake_engram_lookup_det_train` | Engram row lookup: FP8 E4M3 rows with E8M0 scales to BF16 (forward only) | [API](docs/API.md#engram_lookup) |
 | lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
+| act_qdq | `cake-pplx-act-qdq` | `cake_act_qdq_det_train` | FP4 / MXFP4 / MXFP8 quantize-dequantize of BF16 activations (forward only) | [API](docs/API.md#act_qdq) |
 
 Each family's source is in `kernels/<family>/`. Distribution names use hyphens, and the subdirectory names use underscores. pip treats `-` and `_` in distribution names as the same character.
 
@@ -70,7 +73,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, fmha, gated_kv_compression, gdn, gqa, lm_head, mhc, mhc_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gated_kv_compression, gdn, gqa, lm_head, mhc, mhc_head, moe_grouped_gemm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
@@ -108,6 +111,8 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | Validated | NVIDIA GB300 (`sm_103a`), driver 580.159.03, CUDA 13.4.92, torch 2.14.1+cu130, apache-tvm-ffi 0.1.15 |
 | Supported by the code, not yet validated here | `sm_100a`, `sm_107a` |
 | fmha, causal_conv1d, mhc, mhc_head | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| engram_lookup | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5. The `out` criterion of issue #76 (1 BF16 ulp per element) fails on cancellation elements and awaits the issue owner's decision |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |

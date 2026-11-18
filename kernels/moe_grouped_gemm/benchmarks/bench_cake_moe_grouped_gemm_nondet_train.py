@@ -946,9 +946,9 @@ def _memory(arm, row, t, device):
 
 
 def _error_vs_det(row, t, outs):
-    """The ``cake_nondet`` output against ``cake_det``'s in the deterministic budget's unit
-    (bf16: worst |d| / (1e-2 + 1e-2 |ref|); fp32: rel-L2 / 1e-4) and the count of
-    differing elements."""
+    """The ``cake_nondet`` output against ``cake_det``'s, scaled by a fixed scale (bf16:
+    worst |d| / (1e-2 + 1e-2 |ref|); fp32: rel-L2 / 1e-4), and the count of differing
+    elements.  The record only reports them; no check reads them."""
     if "cake_nondet" not in outs or "cake_det" not in outs:
         return None
     out, ref = outs["cake_nondet"].float(), outs["cake_det"].float()
@@ -957,7 +957,7 @@ def _error_vs_det(row, t, outs):
         err = float((out - ref).norm() / ref.norm().clamp_min(1e-30)) / 1e-4
     else:
         err = float(((out - ref).abs() / (1e-2 + 1e-2 * ref.abs())).max())
-    return dict(budget_fraction=err, differing_elements=differing)
+    return dict(scaled_error=err, differing_elements=differing)
 
 
 def _autograd_outputs(fn):
