@@ -16,7 +16,7 @@ limitations under the License.
 Cake mHC training head, non-deterministic mode: the stream mean
 ``Y = mean_i X[:, i, :]`` of the last layer's four residual streams of the
 four-stream mHC training layers (:mod:`cake_pplx.cake_mhc_nondet_train`) and
-its gradient, for hidden sizes 4096, 5120 and 7168 on SM100 / SM103 and 4096 on
+its gradient, for hidden sizes 4096, 5120 and 7168 on SM100 / SM103 /
 SM107.  The function, the tensor contracts and the autograd wiring are those of
 the deterministic head module :mod:`cake_pplx.cake_mhc_head_det_train`::
 
@@ -36,9 +36,15 @@ re-exports none of them: import this module by its full name.  No entry point
 takes a ``deterministic`` keyword, and nothing falls back to the deterministic
 module.
 
-Numerical contract: the same arithmetic and accuracy as the deterministic head,
-bit for bit torch's BF16 ``X.mean(dim=1)`` and its gradient.  As for every
-``nondet`` module, the contract does not promise run-to-run identical bits.
+Numerical contract: the same function as the deterministic head.  The tests
+judge every output (``Y``, the written ``dX`` and the accumulated ``dX``) over
+32 inputs against a float64 oracle of the mean and its gradient: its error, in
+the L2 and the max norm, median and max, is at most 1.005 times that of the
+naive BF16 tier (PyTorch on the same BF16 inputs: ``X.mean(dim=1)``,
+``dY * 0.25`` on each stream and ``dX0 + dY * 0.25``), and zero where the
+tier's error is zero.  As for every ``nondet`` module, the contract makes no
+bit promise: no output is promised to repeat run to run or to equal torch's
+bits, and no test compares bits.
 This implementation is fixed-order all the same: the head is elementwise per
 token, with no cross-token reduction, no atomic operation and no order-varying
 step, and its kernels are the deterministic head's (exported under the library
@@ -82,9 +88,9 @@ def cake_mhc_head_nondet_train_forward(
     r"""The model's head: the mean of the four residual streams, ``Y = mean_i X[:, i, :]``.
 
     ``Y[t, d] = BF16(((X[t, 0, d] + X[t, 1, d]) + X[t, 2, d] + X[t, 3, d]) * 0.25)``
-    with the sum in FP32 from zero in stream order and one rounding: bit for
-    bit torch's ``X.mean(dim=1)`` of a BF16 ``X``, signed zeros and the NaN
-    encoding included.
+    with the sum in FP32 from zero in stream order and one rounding.  The tests
+    judge ``Y`` against the float64 mean within the naive BF16 tier (torch's
+    ``X.mean(dim=1)``); the module makes no bit promise.
 
     Parameters
     ----------
@@ -118,12 +124,12 @@ def cake_mhc_head_nondet_train_backward(
 ) -> torch.Tensor:
     r"""Gradient of the head: ``dX[t, i, d] = BF16(dY[t, d] * 0.25)`` for each of the four streams.
 
-    Bit for bit torch's ``MeanBackward`` of ``X.mean(dim=1)`` (the quarter is
-    exact unless it is subnormal, and then rounds once).  With
+    The quarter is exact unless it is subnormal, and then rounds once.  With
     ``accumulate=True`` the kernel adds instead,
-    ``dX[t, i, d] = BF16(dX[t, i, d] + BF16(dY[t, d] * 0.25))``, bit for bit
-    torch's BF16 ``dX.add_(...)`` of that gradient (autograd's accumulation
-    into an existing ``X.grad``).
+    ``dX[t, i, d] = BF16(dX[t, i, d] + BF16(dY[t, d] * 0.25))`` (autograd's
+    accumulation into an existing ``X.grad``).  The tests judge both forms
+    against the float64 gradient within the naive BF16 tier (torch's BF16
+    ``dY * 0.25`` and ``dX0 + dY * 0.25``); the module makes no bit promise.
 
     Parameters
     ----------
@@ -160,9 +166,9 @@ def cake_mhc_head_nondet(X: torch.Tensor) -> torch.Tensor:
     Returns
     -------
     BF16 ``Y`` of shape ``[T, H]``.  Its backward is
-    :func:`cake_mhc_head_nondet_train_backward` (bit for bit torch's gradient of
-    ``X.mean(dim=1)``); the node saves no tensor, so an activation checkpoint
-    around it keeps nothing alive and its backward needs no recomputation.
+    :func:`cake_mhc_head_nondet_train_backward`; the node saves no tensor, so
+    an activation checkpoint around it keeps nothing alive and its backward
+    needs no recomputation.
     """
 
     return _pkg().cake_mhc_head_nondet(X)

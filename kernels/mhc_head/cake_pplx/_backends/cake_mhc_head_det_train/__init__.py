@@ -214,7 +214,7 @@ def _run(
 def cake_mhc_head_det_train_forward(
     X: torch.Tensor, *, out: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
-    """``Y = BF16(((X0 + X1) + X2 + X3) * 0.25)``, bit-identical to ``X.mean(dim=1)``; see
+    """``Y = BF16(((X0 + X1) + X2 + X3) * 0.25)``, the FP32 sum in stream order rounded once; see
     :func:`cake_pplx.cake_mhc_head_det_train.cake_mhc_head_det_train_forward`."""
 
     rows, hidden, device, arch = _rows_hidden(X, "X", 3)
