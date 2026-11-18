@@ -21,8 +21,7 @@ and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2
 Without a device: the registry (one program per stage, every record delivered for the three architectures and for no
 other, the launch facts, the argument plans), the launch grid and the arguments of a launch in its plan's order, the
 build manifest (every record's library, the recorded source digests), the capability map, the required ``limit``
-keyword, the refusal of CPU tensors, the ignored weight of an unweighted launch (the gate's own memory) and no
-environment read outside the JIT shim.
+keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) judged against the
 naive BF16 tier (``tests/cake/test_helpers/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32
@@ -42,8 +41,8 @@ the other rows), on a side stream with no host synchronization, in CUDA graph re
 gives the same bits under non-reentrant checkpointing, and gradients computed with ``create_graph=True`` have the
 steps' bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit
 outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call
-give the launches of the full checks; an unweighted step captured in a CUDA graph before any eager unweighted call
-reads the gate's own memory as its ignored weight.  On one fixed draw, the L2 error against the FP64 oracle of
+give the launches of the full checks; every unweighted launch of a device passes one cached FP32 buffer, set to 1,
+as its ignored weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against the FP64 oracle of
 ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output, and the L2
 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
@@ -418,27 +417,6 @@ def test_cpu_tensors_are_refused() -> None:
         forward(x, limit=L)
     with pytest.raises(ValueError, match="CUDA"):
         backward(x[:, :WIDTH], x, limit=L)
-
-
-def test_the_ignored_weight_is_the_gates_memory() -> None:
-    """An unweighted launch's ``w`` (its one FP32 element read and ignored) is the gate's first two BF16 values as one
-    FP32 value, for a merged and a two-tensor gate and a row slice of a wider buffer: no buffer of its own.  A gate at
-    an odd BF16 offset of its storage, which has no FP32 view, gets a new one-element FP32 tensor set to 1."""
-    for gate in (
-        torch.zeros(3, 2 * WIDTH, dtype=torch.bfloat16),
-        torch.zeros(1, WIDTH, dtype=torch.bfloat16),
-        torch.zeros(3, WIDTH + 16, dtype=torch.bfloat16)[:, 8 : 8 + WIDTH],
-    ):
-        w = pkg._ignored_weight(gate)
-        assert w.dtype == torch.float32 and tuple(w.shape) == (1,) and w.is_contiguous()
-        assert w.data_ptr() == gate.data_ptr()
-        assert w.untyped_storage().data_ptr() == gate.untyped_storage().data_ptr()
-    odd = torch.zeros(3, WIDTH + 1, dtype=torch.bfloat16)[:, 1:]
-    assert odd.storage_offset() % 2 == 1
-    w = pkg._ignored_weight(odd)
-    assert w.dtype == torch.float32 and tuple(w.shape) == (1,) and w.is_contiguous()
-    assert w.untyped_storage().data_ptr() != odd.untyped_storage().data_ptr()
-    assert w.tolist() == [1.0]
 
 
 def test_manifest_covers_every_record_and_its_sources() -> None:
@@ -1004,9 +982,10 @@ def test_cuda_graph_capture_and_replay(device) -> None:
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, device, launches) -> None:
     """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted call
-    on their inputs before (only a weighted call, which loads the libraries): each captured launch reads the gate's own
-    memory as its ignored weight (the package keeps no buffer for it, so a process's first unweighted call may be a
-    capture), and each replay on new inputs copied into the captured tensors gives the bits of eager calls."""
+    in the process before (only a weighted call, which loads the libraries; the ignored weight's cache is cleared): the
+    capture makes the device's cached FP32 buffer, both captured launches pass it as their ignored weight, later eager
+    unweighted calls pass the same buffer, and each replay on new inputs copied into the captured tensors gives the
+    bits of eager calls."""
     R = 129
     step_outputs(forward, backward, make_inputs(Case(R, layout), seed=70, device=device))
     a = make_inputs(Case(R, layout, "none"), seed=71, device=device)
@@ -1016,16 +995,22 @@ def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, de
     h = torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
     d_first = torch.empty(R, WIDTH if second is not None else 2 * WIDTH, dtype=torch.bfloat16, device=device)
     d_up = None if second is None else torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
+    pkg._ignored_weight.cache_clear()
     launches.clear()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         forward(first, second, None, limit=a.L, out=h)
         backward(dh, first, second, None, limit=a.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
     assert [stage for stage, _, _ in launches] == ["fwd", "bwd"]
+    cached = pkg._ignored_weight(first.get_device())
+    assert cached.dtype == torch.float32 and tuple(cached.shape) == (1,) and cached.device == first.device
     for stage, _, values in launches:
         assert values["weighted"] == 0, stage
-        assert values["w"].dtype == torch.float32 and values["w"].numel() == 1, stage
-        assert values["w"].data_ptr() == values["gate"].data_ptr() == first.data_ptr(), stage
+        assert values["w"] is cached, stage
+    launches.clear()
+    forward(first, second, None, limit=a.L)
+    backward(dh, first, second, None, limit=a.L)
+    assert [values["w"] is cached for _, _, values in launches] == [True, True]
     for k in range(3):
         n = make_inputs(Case(R, layout, "none"), seed=80 + k, device=device)
         first.copy_(n.first)

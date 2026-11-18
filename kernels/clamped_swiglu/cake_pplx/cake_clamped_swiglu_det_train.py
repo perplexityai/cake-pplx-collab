@@ -78,9 +78,9 @@ Mode rules:
    the function adds no saved state of its own and no activation.  No double
    backward: differentiating gradients computed with ``create_graph=True``
    raises ``RuntimeError``.  No call uses a workspace or keeps state between
-   calls.  An unweighted call passes the gate's first two BF16 values, as one
-   FP32 value, as the weight: the kernels read it and ignore it, so the call
-   allocates nothing for it.
+   calls, but for the ignored weight of unweighted calls: one cached
+   one-element FP32 buffer per device, set to 1, which the kernels read and
+   ignore.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.

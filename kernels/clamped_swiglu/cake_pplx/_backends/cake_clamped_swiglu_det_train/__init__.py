@@ -34,9 +34,9 @@ JIT variables):
   stride, a row stride that is not a multiple of 8 elements, a base address
   that is not 16-byte aligned) is copied once to a contiguous tensor.
   ``weight`` is FP32 ``[R]`` (copied once when not contiguous), or ``None``
-  for an unweighted expert (``w = 1``; the kernels then get the gate's first
-  two BF16 values as one FP32 value, memory they already read, and ignore
-  it).  ``limit`` is ``L``, a positive finite Python number rounded to FP32;
+  for an unweighted expert (``w = 1``; the kernels then get a cached
+  one-element FP32 buffer of the device, set to 1, and read its one element
+  and ignore it).  ``limit`` is ``L``, a positive finite Python number rounded to FP32;
   it is a launch argument, as are ``R``, the weight flag and the strides, so
   one build serves every call.
 - Checks.  An entry point checks every argument (the limit, the operands'
@@ -277,16 +277,13 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     _entry(name, device_arch(device_index))(*args, -(-rows // per_cta), 1, 1)
 
 
-def _ignored_weight(gate: torch.Tensor) -> torch.Tensor:
-    """The ``w`` of an unweighted launch (``weighted`` 0: the kernels read its one element and ignore it): the first
-    two BF16 values of ``gate`` (at least one row, a unit last stride, a 16-byte aligned base) as one FP32 value, so
-    the kernels read memory they already read, and the call allocates, fills and keeps nothing for it.  A ``gate`` at
-    an odd BF16 offset of its storage (a storage that is not 4-byte aligned, which PyTorch's allocator never makes)
-    has no FP32 view; that call passes a new one-element FP32 tensor set to 1."""
-    try:
-        return gate.as_strided((2,), (1,)).view(torch.float32)
-    except RuntimeError:
-        return torch.ones(1, dtype=torch.float32, device=gate.device)
+@functools.cache
+def _ignored_weight(device_index: int) -> torch.Tensor:
+    """The ``w`` of an unweighted launch (``weighted`` 0: the kernels read its one element and ignore it): one
+    one-element FP32 buffer per device for the process, set to 1, made by the first unweighted call on the device.
+    That call may be a CUDA graph capture: the buffer then lives in the graph's memory pool for the process, and its
+    value is never used.  An unweighted call pays one cache lookup for it."""
+    return torch.ones(1, dtype=torch.float32, device=torch.device("cuda", device_index))
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -536,7 +533,7 @@ def _forward(
     values = {
         "gate": first,
         "up": up_view,
-        "w": _ignored_weight(first) if w is None else w,
+        "w": _ignored_weight(index) if w is None else w,
         "h": h,
         "rows": rows,
         "gate_stride": gate_stride,
@@ -619,7 +616,7 @@ def _backward(
         "gate": first,
         "up": up_view,
         "dh": dh,
-        "w": _ignored_weight(first) if w is None else w,
+        "w": _ignored_weight(index) if w is None else w,
         "d_gate": d_first,
         "d_up": d_up,
         "d_weight": d_weight,

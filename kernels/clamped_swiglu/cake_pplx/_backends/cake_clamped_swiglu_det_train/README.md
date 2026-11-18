@@ -112,9 +112,9 @@ reaches a result.
 ## Workspace and retained state
 
 - Workspace: none.  An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops
-  them.  An unweighted launch passes the gate's first two BF16 values, as one FP32 value, as the weight.  The kernels
-  read it and ignore it, so the call allocates, fills and keeps nothing for it, also when it is captured in a CUDA
-  graph.
+  them.  An unweighted launch passes, as the weight, one cached one-element FP32 buffer of the device, set to 1, which
+  the process's first unweighted call on that device makes (that call may be a CUDA graph capture).  The kernels read
+  it and ignore it.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
   the backward recomputes it.

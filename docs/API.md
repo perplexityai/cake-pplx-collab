@@ -1659,7 +1659,7 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 **Caveats.**
 
 - The intermediate width is 2304 only.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes the gate's first two BF16 values, as one FP32 value, as the ignored weight, so it allocates nothing for it.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output (also the weight gradient an unweighted backward drops) and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
