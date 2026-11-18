@@ -54,25 +54,38 @@ fresh process. No output depends on which cluster computed which tile.
 | `out += dW`, fused (`accumulate=True`, fp32 `out`) | fp32 | the fp32 `dW` above, then one fp32 add per element of `out` | yes; the same bits as the composed route |
 | `out += dW`, composed (`accumulate=True`) | bf16, fp32 | the `dW` above in `out`'s dtype, then `out.add_` | yes |
 
-Error against an fp64 reference, measured by
+Accuracy has no tolerance. The tests judge every floating output against a naive
+BF16 implementation (`tests/cake/test_helpers/cake_naive.py`, the family adapter
+`tests/cake/test_helpers/cake_moe_judge.py`): torch's matmul of the same BF16
+operands per group, rounded once to BF16 (widened exactly for an fp32 output).
+The oracle is the float64 product of the BF16 operands of each group (an empty
+group gives 0); an accumulated `out` has the oracle `out0 + n dW`. Over 32
+independent random inputs per case, the output's error against the oracle in
+the L2 and in the max norm (absolute, over the finite oracle elements) must
+have a median and a largest value at most 1.005 times the naive tier's, and the
+error must be 0 on every input where the tier's is 0. Where an op's whole
+oracle exceeds 2^37 multiply-adds (the MoE projection rows), the judge takes
+sampled rows with all their columns: the first and last row of every group (of
+`N` for `dW`) and one row in every 64; the whole output still has to be finite
+where the oracle is. The pytest summary prints one `TIER` line per judged
+output with both errors.
 `test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output`
-over a sample of every group (the first and last 16 rows by 512 columns of `Y`
-and `dX`, a 64 x 256 block of each `dW[e]`) of the E4 (112576 balanced and
+judges a sample of every group (the first and last 16 rows by 512 columns of
+`Y` and `dX`, a 64 x 256 block of each `dW[e]`) of the E4 (112576 balanced and
 136064 skewed rows), E8, E32 and E32-with-hot-groups rows (131072 rows), on both
-projections (gate/up `N` 4096, `K` 6144; down `N` 6144, `K` 2048). The budgets
-are the package's test budgets: bf16 every element within `1e-2 + 1e-2 |ref|`,
-fp32 relative L2 at most `1e-4`. The table gives the range over those rows.
-The R200 column comes from a 212-SM board, except the fused row (216 SMs).
+projections (gate/up `N` 4096, `K` 6144; down `N` 6144, `K` 2048).
 On each board the fused route gives the composed route's bits.
 
-| output | budget | GB300 (`sm_103a`): relative L2; max abs | B200 (`sm_100a`): relative L2; max abs | R200 (`sm_107a`): relative L2; max abs |
-| --- | --- | --- | --- | --- |
-| `Y` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.651e-3 to 1.664e-3; 2.441e-4 | 1.649e-3 to 1.665e-3; 2.443e-4 | 1.649e-3 to 1.665e-3; 2.439e-4 |
-| `dX` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.650e-3 to 1.666e-3; 2.543e-2 | 1.643e-3 to 1.659e-3; 2.830e-2 | 1.645e-3 to 1.668e-3; 1.566e-2 |
-| `dW` bf16 | `1e-2 + 1e-2 \|ref\|` | 1.639e-3 to 1.665e-3; 6.233e-2 | 1.653e-3 to 1.666e-3; 6.330e-2 | 1.649e-3 to 1.670e-3; 6.322e-2 |
-| `dW` fp32 | rel L2 `1e-4` | 4.406e-6 to 7.548e-5; 1.898e-3 | 4.396e-6 to 7.553e-5; 1.829e-3 | 4.404e-6 to 7.568e-5; 1.801e-3 |
-| `out += dW` fp32, composed | rel L2 `1e-4` | 2.782e-6 to 6.716e-5; 2.191e-3 | 2.783e-6 to 6.720e-5; 2.254e-3 | 2.790e-6 to 6.712e-5; 1.883e-3 |
-| `out += dW` fp32, fused | rel L2 `1e-4` | 2.782e-6 to 6.716e-5; 2.191e-3 | 2.783e-6 to 6.720e-5; 2.254e-3 | 2.782e-6 to 6.707e-5; 2.135e-3 (216 SMs) |
+Known gaps: on B200, GB200, GB300 and VR200 some tests miss the naive tier on a
+BF16 output, in the max norm only (their L2 error meets it). They are BF16
+rounding near ties: the kernel's FP32 sum lands on the other side of a BF16
+rounding midpoint a little more often than torch's. `tests/known_gaps.py` lists
+them per GPU model, each output with two caps, one for the ratio of its median
+max-norm error over the inputs to the tier's and one for that of its largest:
+the largest value of that ratio the validation runs measured on that model,
+rounded up to four decimals, or the tier's own 1.005 where the runs met it.
+The suites mark each one a strict xfail on that model only; a ratio above its
+cap, and any other failure of such a test, still fails.
 
 ## Mode rules
 
@@ -197,7 +210,8 @@ how it adds, and every other plan key is the overwrite's:
 
 A build can load when its prebuilt library is under `aot/` or the JIT shim's
 toolkit reaches its `build.json` `min_cuda` (13.4 for the main stages'
-accumulate builds, which use the PTX ISA 9.4 `red.global.add.noftz.f32`), with
+accumulate builds on `sm_100a` and `sm_103a`, which use the PTX ISA 9.4
+`red.global.add.noftz.f32`; 13.5 for every `sm_107a` build), with
 `nvcc` under the CUDA path and `CAKE_PPLX_DISABLE_JIT` unset;
 `cake_backend.acc_library_loadable` applies that rule without building or
 loading anything, and
@@ -217,8 +231,9 @@ Numerical contract:
   in a fixed order (the split tail by the ordered tail reduce) and added once.
   `torch.use_deterministic_algorithms(True)` changes nothing (no alert, no
   warning).
-- Accuracy: the deterministic `dW`'s error budget plus one rounding in
-  `out`'s dtype.
+- Accuracy: the deterministic `dW` plus one rounding in `out`'s dtype; the
+  tests judge `out` against `out0 + n dW` in float64 beside the naive BF16
+  tier (above).
 - An empty group adds exact zeros, with the semantics of `out.add_`: its values
   are kept, `-0.0` becomes `+0.0` and a signaling NaN is quieted. `sum_m == 0`
   launches nothing and leaves `out` unchanged.
@@ -410,7 +425,7 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   architecture is listed in `k512_archs` and the average rows per group reach
   the architecture's `k512_min_rows_per_group`; 256 otherwise. The two tiles
   are separate registered programs; the fp32 output is the compile-line
-  specialization `-DWGRAD_OUT=32` of the bf16 program.
+  specialization `-DCAKE_WGRAD_OUT=32` of the bf16 program.
 - Weight-gradient tail: the tiles of the last partial wave are split into
   `tail_splits` k-step chunks over all clusters (`wgrad_tail_tiles`,
   `wgrad_tail_plan`, a closed-form cost model of rounds, partial traffic and one
@@ -488,11 +503,12 @@ fused one.
 | `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
 | `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
-| CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.4 |
+| CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
+| CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.5 |
 
 The programs are exact-architecture tcgen05 payloads built for the exact
 targets `sm_100a`, `sm_103a` and `sm_107a` (`build.json` `arch_flags`).
-`cake_jit.PROGRAMS` lists twenty-nine libraries, one per kernel and build,
+`cake_jit.PROGRAMS` lists thirty libraries, one per kernel and build,
 each a kernel and a host-binding translation unit under
 `csrc/cake_moe_grouped_det_gemm/` shared by the architectures it is built for (an
 architecture-dependent line is folded under `__CUDA_ARCH__`):
@@ -524,23 +540,26 @@ architecture-dependent line is folded under `__CUDA_ARCH__`):
   `sm_100a` and `sm_103a`, one for `sm_107a`), `main_wave_halves` (`sm_100a`,
   `sm_103a`) and `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
   route, which add the weight gradient into `C` with one fp32 add per element
-  (their `build.json` entries need CUDA 13.4, `min_cuda`), and the twin of the
-  tail-reduce that adds the ordered sum of a split tail's partials into `C`
-  (`tail_reduce_acc`, on the fp32 512- and 256-wide k tile routes, for all
-  three architectures).
-- the weight-gradient main kernel with a 256- or 512-wide k tile and the
-  weight-gradient tail-reduce, as the previous delivery shipped them.
+  (their `build.json` entries need CUDA 13.4 on `sm_100a` and `sm_103a`,
+  `min_cuda`), and the twin of the tail-reduce that adds the ordered sum of a
+  split tail's partials into `C` (`tail_reduce_acc`, on the fp32 512- and
+  256-wide k tile routes, for all three architectures).
+- the weight-gradient main kernel with a 256- or 512-wide k tile (the routes'
+  `main` stage): the 512-wide one for `sm_100a` and `sm_103a`, the 256-wide
+  one in two builds, one for `sm_100a` and `sm_103a` and one for `sm_107a`
+  that also reads the rows of `g` and `x` through `A_rows` / `B_rows` at
+  their row strides, which the host passes as `lda` / `ldb`.
+- the weight-gradient tail-reduce, one kernel for both k tiles.
 
 The host launches a stage only where the constants above list the
 architecture, so a library may be built for an architecture its stage is not
 launched on.
 
 A specialization is a compile-line definition on its `build.json` entries:
-the tail-reduce k tile (`-DWGRAD_TILE=256|512`) and the fp32 weight-gradient
-output (`-DWGRAD_OUT=32` on the kernels of the last list item,
-`-DCAKE_WGRAD_OUT=32` on the other weight-gradient kernels; the bf16 output is
-the default). `cake_jit.ROUTES` maps each public route (operation, output dtype, k tile) to its stage programs
-and specializations. `build.json` (schema `cake-build/1`, written by the
+the tail-reduce k tile (`-DCAKE_WGRAD_TILE=512`; 256 is the default) and the
+fp32 weight-gradient output (`-DCAKE_WGRAD_OUT=32`; the bf16 output is the
+default). `cake_jit.ROUTES` maps each public route (operation, output dtype,
+k tile) to its stage programs and specializations. `build.json` (schema `cake-build/1`, written by the
 export) is the only record of what to compile: one entry per build
 `<library>[<specialization tag>]_<arch>` -- the tag is `_wgrad_tile256` /
 `_wgrad_tile512` for the specialized tail-reduce builds, `_wgrad_out32` for the
@@ -555,19 +574,11 @@ cache name carries the exact target and the closure digest; the target comes
 only from the entry's `-gencode` flags). The bindings include the package's
 `csrc/cake_ffi_checks.h`.
 
-The kernel translation units of the first four list items are
-self-contained. Programs whose bindings differ only in the kernel they launch,
-its block size and its dynamic shared memory share one binding, which a
-member's entries compile under `-DCAKE_KERNEL_SYMBOL`, `-DCAKE_PROGRAM_SHIM`
-and, where they differ from the owner's, `-DCAKE_BINDING_THREADS` /
-`-DCAKE_BINDING_SMEM`. The previous weight-gradient and tail-reduce kernels
-share one device header, `cake_moe_grouped_det_gemm_device.cuh` (their common preamble:
-typedefs, tensor-map ABI, math constants and the tcgen05 helpers behind
-need-guards), and their bindings share the dynamic shared-memory opt-in and
-TMA descriptor encoders through the fragment headers
-`cake_moe_grouped_det_gemm_binding_*.h` included inside each host-shim namespace.
-These headers are hand folds of exported text that no `build.json` entry
-lists, so the build's dependency tracking, not a manifest digest, covers them.
+Every kernel translation unit is self-contained. Programs whose bindings
+differ only in the kernel they launch, its block size and its dynamic shared
+memory share one binding, which a member's entries compile under
+`-DCAKE_KERNEL_SYMBOL`, `-DCAKE_PROGRAM_SHIM` and, where they differ from the
+owner's, `-DCAKE_BINDING_THREADS` / `-DCAKE_BINDING_SMEM`.
 
 Measured on B200 (`sm_100a`), GB300 (`sm_103a`) and R200 (`sm_107a`); the
 performance summary is in the delivery pull requests.
@@ -590,8 +601,8 @@ python benchmarks/bench_cake_moe_grouped_gemm_det_train.py --help
 ```
 
 `test_cake_moe_grouped_gemm_det_train.py` (the backend suite, which imports the package
-through `tests.cake.test_helpers.cake_package`) compares against a per-group fp64
-reference (including an empty group, a one-row group, padded outputs,
+through `tests.cake.test_helpers.cake_package`) judges every output against the
+naive BF16 tier (above; including an empty group, a one-row group, padded outputs,
 determinism and the fp32 output) and skips when no supported device or no
 registered program is present. `test_cake_moe_grouped_gemm_det_train_api.py` covers the
 entry points of `cake_pplx.cake_moe_grouped_gemm_det_train` (stable APIs with the
@@ -620,12 +631,13 @@ Megatron contract with CPU stand-ins for the preparations; on a GPU every
 weight-gradient form with and without a split tail, fp32 and bf16, bitwise
 against `out0.add_(dW)` and run to run, the fused route bitwise against the
 composed one (split tails, the planned walk with empty groups last, the wave
-halves, the k256 tail, `-0.0` and subnormals, 32 groups), CUDA graph replays,
-streams, layouts, and the autograd flag with the generated programs.
+halves, the k256 tail, `-0.0`, 32 groups), each judged against the naive BF16
+tier, CUDA graph replays, streams, layouts, and the autograd flag with the
+generated programs.
 `test_cake_moe_grouped_gemm_det_train_acceptance.py` repeats every output of
 the reproducibility table five times into a zeroed and five times into a
 filled output under concurrent copy streams, over changing offsets, and
-measures the errors of the accuracy table. The accumulation is timed by the accumulation rows of
+judges the outputs of the accuracy sample above against the naive BF16 tier. The accumulation is timed by the accumulation rows of
 `benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py` (arm `det_mgX`, beside the
 deterministic baselines `det_acc` and `det_mgB` and the non-deterministic arms).
 The benchmark `benchmarks/bench_cake_moe_grouped_gemm_det_train.py` times the prepared

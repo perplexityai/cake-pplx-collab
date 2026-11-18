@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 16 families and 34 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 18 families and 36 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -95,6 +95,8 @@ The repository has 16 families and 34 backend packages, about 212 MB in total. M
 | `gqa` | det, nondet | `cake-pplx-gqa` |
 | `fmha` | nondet | `cake-pplx-fmha` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
+| `clamped_swiglu` | det | `cake-pplx-clamped-swiglu` |
+| `engram_lookup` | det | `cake-pplx-engram-lookup` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
@@ -222,6 +224,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc and mhc_head are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc and mhc_head are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`), and engram_lookup on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
