@@ -37,7 +37,7 @@ import torch
 from cake_pplx.cake_kda_det_train import DEFAULT_SCALE
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.experimental.test_helpers.cake_kda_det_train_reference import LOWER_BOUND
-from tests.experimental.test_helpers.cake_kda_naive_kcp import judge_kcp
+from tests.experimental.test_helpers.cake_kda_naive_kcp import judge_kcp_case
 
 cake_jit = cake_package("cake.cake_kda_det_train", "cake_jit")
 
@@ -68,13 +68,10 @@ def _skip_unless_runnable(W: int) -> None:
 def test_cake_kda_det_kcp_meets_the_naive_tier(name, record_property) -> None:
     lengths, H, gate, l2n, layout, W = CASES[name]
     _skip_unless_runnable(W)
-    verdicts, failures = judge_kcp(
+    judge_kcp_case(
+        record_property,
         MODE,
         (lengths, H, gate, l2n, layout, DEFAULT_SCALE, LOWER_BOUND),
         SEEDS[name],
         W,
     )
-    for verdict in verdicts.values():
-        record_property("naive_tier", verdict)
-    assert verdicts, failures
-    assert not failures, failures

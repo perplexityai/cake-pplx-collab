@@ -69,7 +69,8 @@ def device() -> torch.device:
 
 @pytest.mark.parametrize("name", list(CASES))
 def test_cake_kda_det_meets_the_naive_tier(name, device, record_property) -> None:
-    judge, failures = judge_single_rank(
+    judge_single_rank(
+        record_property,
         cake_kda_det,
         CASES[name],
         SEEDS[name],
@@ -78,5 +79,3 @@ def test_cake_kda_det_meets_the_naive_tier(name, device, record_property) -> Non
         LOWER_BOUND,
         det=True,
     )
-    judge.record(record_property)
-    assert not failures, failures

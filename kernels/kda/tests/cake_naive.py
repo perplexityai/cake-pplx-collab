@@ -62,7 +62,7 @@ the same bytes.
 
 The comparisons work in blocks of about :data:`BLOCK` elements along dim 0, so
 the float64 copies of a large output stay bounded.  Only torch is imported.
-This file is the same in every family that uses it.
+This file is the same in the family's own tests and in its cross-family tests.
 """
 
 from __future__ import annotations

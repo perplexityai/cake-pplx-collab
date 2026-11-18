@@ -35,6 +35,13 @@ Per document and head, with the state ``S`` ``[K, V]`` starting from zero::
 In the raw gate mode the gate is activated in the same graph: ``g = lb * sigmoid(exp(A_log)[h] * (raw +
 dt_bias[h]))``.  The recurrence is checkpointed in 64-token blocks, as the reference is, so the backward of a few
 thousand tokens fits in memory.
+
+:func:`judge_arms` is the judge of every accuracy check of the family's tests: a case's arms (routes, paths, forms,
+repeated launches) on each draw's operands (:func:`draw_case`, or :func:`kcp_row_inputs` for a KCP harness row), each
+output against :func:`oracle_with_grads` beside :func:`naive_of`, its verdicts recorded and settled against the
+owner-accepted gaps (``cake_kda_known_gaps.py``).  There is no tolerance: an output that misses the tier fails, unless
+it is listed there within its gap's scope and caps.  :func:`assert_bitwise` is the deterministic package's run-to-run
+contract; the non-deterministic package has no bit contract, and no output of one package is compared with the other's.
 """
 
 from __future__ import annotations
@@ -42,11 +49,15 @@ from __future__ import annotations
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from .cake_kda_det_train_reference import LOWER_BOUND
+
 D = 128
 L2NORM_EPS = 1e-6  # the in-kernel Q/K L2 norm: x / sqrt(sum x^2 + 1e-6)
 NAIVE_DTYPE = torch.bfloat16
 GRAD_NAMES = ("dq", "dk", "dv", "dg", "dbeta")
 RAW_GRAD_NAMES = GRAD_NAMES + ("dA_log", "ddt_bias")
+# the operands with a token axis: a batched draw holds them with a leading batch axis of 1
+BATCHED = ("q", "k", "v", "g", "beta", "dout")
 
 
 def stored(x: torch.Tensor, dtype: torch.dtype = NAIVE_DTYPE) -> torch.Tensor:
@@ -144,16 +155,42 @@ def naive_with_grads(
 
 
 def draw_case(
-    lengths, H: int, gate: str, l2n: bool, seed: int, device="cuda"
+    lengths,
+    H: int,
+    gate: str,
+    l2n: bool,
+    seed: int,
+    device="cuda",
+    *,
+    dt_bias_mean: float = 0.0,
+    dt_bias_2d: bool = False,
+    batched: bool = False,
 ) -> dict[str, torch.Tensor]:
     """The operands of one draw of a judged case, every tensor a function of ``seed``: the reference helper's
     :func:`make_inputs` (``gate="g"``: the activated FP32 gate) or :func:`make_raw_inputs` (``"raw"``: the BF16 raw
-    gate, FP32 ``A_log`` / ``dt_bias``), and with ``l2n`` raw BF16 ``q`` / ``k`` rows of a few magnitudes per token
-    (the caller's projections) in place of the normalized ones."""
+    gate, FP32 ``A_log`` / ``dt_bias``, the draw of ``dt_bias`` shifted by ``dt_bias_mean`` and ``[H, 128]`` with
+    ``dt_bias_2d``), and with ``l2n`` raw BF16 ``q`` / ``k`` rows of a few magnitudes per token (the caller's
+    projections) in place of the normalized ones.  ``batched`` adds the leading batch axis of 1 to ``q, k, v, g, beta,
+    dout`` (the judge's :func:`flat_inputs` takes it off again)."""
     from .cake_kda_det_train_reference import make_inputs, make_raw_inputs
 
-    make = {"g": make_inputs, "raw": make_raw_inputs}[gate]
-    inputs = make(lengths, H, device, seed=seed)
+    if gate == "g":
+        if dt_bias_mean or dt_bias_2d:
+            raise ValueError(
+                "dt_bias_mean / dt_bias_2d are operands of the raw gate mode"
+            )
+        inputs = make_inputs(lengths, H, device, seed=seed)
+    elif gate == "raw":
+        inputs = make_raw_inputs(
+            lengths,
+            H,
+            device,
+            seed=seed,
+            dt_bias_mean=dt_bias_mean,
+            dt_bias_2d=dt_bias_2d,
+        )
+    else:
+        raise ValueError(f"gate must be 'g' or 'raw', got {gate!r}")
     if l2n:
         S = int(sum(lengths))
         gen = torch.Generator().manual_seed(int(seed) + 7817)
@@ -166,7 +203,40 @@ def draw_case(
             .to(torch.bfloat16)
             .to(device)
         )
+    if batched:
+        for name in BATCHED:
+            inputs[name] = inputs[name].unsqueeze(0)
     return inputs
+
+
+def flat_inputs(inputs: dict) -> dict[str, torch.Tensor]:
+    """``inputs`` without the leading batch axis of 1 of a batched draw (:func:`draw_case` ``batched``), as the
+    reference and the naive tier read them."""
+    if inputs["q"].dim() != 4:
+        return inputs
+    if inputs["q"].shape[0] != 1:
+        raise ValueError(
+            f"a batched draw has a batch axis of 1, got {tuple(inputs['q'].shape)}"
+        )
+    return {n: t.squeeze(0) if n in BATCHED else t for n, t in inputs.items()}
+
+
+def kcp_row_draw(row, seed: int):
+    """The KCP harness row ``row`` (``cake_kda_kcp_shapes.Row``) whose operands are those of draw seed ``seed``:
+    ``cake_kda_kcp_inputs`` seeds a row's operands by its name, so the drawn row carries ``row.name`` and the seed in
+    its name.  Partition with the original row (an explicit ragged table is keyed by the original name)."""
+    import dataclasses
+
+    return dataclasses.replace(row, name=f"{row.name}@{int(seed)}")
+
+
+def kcp_row_inputs(row, seed: int, device) -> dict[str, torch.Tensor]:
+    """The operands of draw seed ``seed`` of the KCP harness row ``row`` in :func:`draw_case`'s form (the whole pack
+    in global order: ``q, k, v, dout`` BF16, ``g`` FP32 activated, ``beta`` BF16, ``cu_seqlens`` int32 on
+    ``device``), for :func:`judge_arms`."""
+    from .cake_kda_kcp_inputs import global_operands
+
+    return global_operands(kcp_row_draw(row, seed), int(row.h), device)
 
 
 def oracle_with_grads(
@@ -249,7 +319,103 @@ def cake_step(
     return out
 
 
+def lengths_of(inputs: dict) -> tuple[int, ...]:
+    """The document lengths of a draw's ``cu_seqlens``."""
+    cu = [int(x) for x in inputs["cu_seqlens"].tolist()]
+    return tuple(b - a for a, b in zip(cu, cu[1:]))
+
+
+def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    # the reference's / the tier's tensor in the shape of the kernel's result (a batched [1, S, H, 128] result, a
+    # [H, 128] or [H * 128] ddt_bias): a reshape of the same elements, else unchanged (the contract reports the shape)
+    if t.shape != actual.shape and t.numel() == actual.numel():
+        return t.reshape(actual.shape)
+    return t
+
+
+def assert_bitwise(a: dict, b: dict, names=None, tag=None) -> None:
+    """The deterministic package's run-to-run contract: ``a[name]`` and ``b[name]`` hold the same bytes for every
+    ``name`` (default: every key of ``a``).  Never for the non-deterministic package, never across the packages."""
+    names = tuple(a) if names is None else tuple(names)
+    differ = [n for n in names if not torch.equal(a[n], b[n])]
+    assert not differ, (tag, f"not bitwise equal: {differ}")
+
+
+def judge_arms(
+    record_property,
+    draw,
+    *,
+    seed: int,
+    scale: float,
+    l2n: bool = False,
+    lower_bound: float = LOWER_BOUND,
+    draws: int | None = None,
+):
+    """Judge every arm of one case against the FP64 reference beside the naive BF16 tier over the judge's draws
+    (``tests/cake_naive.py``), record the verdicts and settle them against the owner-accepted gaps
+    (``cake_kda_known_gaps.settle``).
+
+    ``draw(j, s)`` makes draw ``j``'s operands from the seed ``s`` (:func:`draw_case` or :func:`kcp_row_inputs`:
+    ``q, k, v, g, beta, dout, cu_seqlens`` and in the raw gate mode ``A_log, dt_bias``; batched or not), launches every
+    arm of the case on them, runs the draw's own checks (the deterministic package's run-to-run bits on the first draw,
+    launch records, plan fields) and returns ``(arms, inputs)``: ``arms`` maps an arm's name to its results, a dict
+    ``{output: tensor}`` with the names of :func:`oracle_with_grads` (``out``, ``dq``, ``dk``, ``dv``, ``dg``,
+    ``dbeta`` and in the raw gate mode ``dA_log``, ``ddt_bias``; any subset), or a list of such dicts (launches of the
+    arm repeated on the draw: each is judged and the judge keeps the worst).  An output of the arm ``""`` is judged as
+    ``name``, of another arm as ``"<arm>.<name>"``.  The reference (:func:`oracle_with_grads`) and the tier
+    (:func:`naive_of`) are formed once per draw from ``inputs`` and read in each result's shape.  ``l2n``: ``q`` /
+    ``k`` are the raw rows the kernels normalize; ``scale`` the kernels' scale; ``lower_bound`` the raw gate's.
+
+    Every output is held to its contract on every draw; the case's document lengths (of the first draw's
+    ``cu_seqlens``) are the scope of the gaps.  Returns the judge."""
+    import random
+
+    from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed, seed_all
+
+    from .cake_kda_known_gaps import settle
+
+    judge = TierJudge(DRAWS if draws is None else draws)
+    failures: list[str] = []
+    lengths = None
+    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    state = (random.getstate(), torch.get_rng_state())
+    try:
+        for j in range(judge.draws):
+            s = draw_seed(seed, j)
+            seed_all(s)
+            arms, inputs = draw(j, s)
+            flat = flat_inputs(inputs)
+            if lengths is None:
+                lengths = lengths_of(flat)
+            ref = oracle_with_grads(flat, scale, lower_bound, l2n)
+            tier = naive_of(flat, scale, lower_bound, l2n)
+            for arm, results in arms.items():
+                for res in (
+                    results if isinstance(results, (list, tuple)) else (results,)
+                ):
+                    for name, actual in res.items():
+                        key = f"{arm}.{name}" if arm else name
+                        want = _like(ref[name], actual)
+                        if message := contract(key, actual, want):
+                            failures.append(f"draw {j}: {message}")
+                            if actual.shape != want.shape:
+                                continue
+                        judge.add(
+                            key, j, actual, want, {"bf16": _like(tier[name], actual)}
+                        )
+    finally:
+        random.setstate(state[0])
+        torch.set_rng_state(state[1])
+        if cuda is not None:
+            torch.cuda.set_rng_state_all(cuda)
+    failures += judge.failures()
+    judge.record(record_property)
+    settle(judge.verdicts(), failures, lengths=lengths)
+    return judge
+
+
 def judge_single_rank(
+    record_property,
     entry,
     case: tuple,
     seed: int,
@@ -259,54 +425,44 @@ def judge_single_rank(
     *,
     det: bool,
 ):
-    """Judge one single-rank case ``(lengths, H, gate, l2n, ckpt)`` of the autograd entry ``entry`` over the judge's
-    draws (``tests/cake_naive.py``, :func:`judge_case`): every output of :func:`cake_step` against
-    :func:`oracle_with_grads` beside :func:`naive_of`, and with ``ckpt`` the same step under
-    ``torch.utils.checkpoint`` (outputs ``ckpt.<name>``).  ``det``: on the first draw the step runs twice and every
-    output must repeat bit for bit (the deterministic package's run-to-run contract).  Returns ``(judge,
-    failures)``."""
-    from tests.cake_naive import judge_case
-
+    """Judge one single-rank case ``(lengths, H, gate, l2n, ckpt)`` of the autograd entry ``entry`` with
+    :func:`judge_arms`: every output of :func:`cake_step`, and with ``ckpt`` the same step under
+    ``torch.utils.checkpoint`` (arm ``ckpt``: outputs ``ckpt.<name>``).  ``det``: on the first draw the step runs twice
+    and every output must repeat bit for bit (the deterministic package's run-to-run contract).  Returns the judge."""
     lengths, H, gate, l2n, ckpt = case
-    seen = {}
 
-    def run(j, s):
+    def draw(j, s):
         inputs = draw_case(lengths, H, gate, l2n, s, device)
-        seen["inputs"] = inputs
         got = cake_step(entry, inputs, lower_bound, l2n)
         if det and j == 0:
-            again = cake_step(entry, inputs, lower_bound, l2n)
-            differ = [n for n in got if not torch.equal(got[n], again[n])]
-            assert not differ, (
-                f"run to run: {differ} differ bitwise between two identical calls"
+            assert_bitwise(
+                got, cake_step(entry, inputs, lower_bound, l2n), tag="run to run"
             )
-        ref = oracle_with_grads(inputs, scale, lower_bound, l2n)
-        outputs, oracle = dict(got), dict(ref)
+        arms = {"": got}
         if ckpt:
-            for name, t in cake_step(
-                entry, inputs, lower_bound, l2n, ckpt=True
-            ).items():
-                outputs[f"ckpt.{name}"] = t
-                oracle[f"ckpt.{name}"] = ref[name]
-        return outputs, oracle
+            arms["ckpt"] = cake_step(entry, inputs, lower_bound, l2n, ckpt=True)
+        return arms, inputs
 
-    def naive(j, tier):
-        nv = naive_of(seen["inputs"], scale, lower_bound, l2n)
-        if ckpt:
-            nv.update({f"ckpt.{name}": t for name, t in list(nv.items())})
-        return nv
-
-    return judge_case(run, naive, seed=seed)
+    return judge_arms(
+        record_property, draw, seed=seed, scale=scale, l2n=l2n, lower_bound=lower_bound
+    )
 
 
 __all__ = [
+    "BATCHED",
     "GRAD_NAMES",
     "L2NORM_EPS",
     "NAIVE_DTYPE",
     "RAW_GRAD_NAMES",
+    "assert_bitwise",
     "cake_step",
     "draw_case",
+    "flat_inputs",
+    "judge_arms",
     "judge_single_rank",
+    "kcp_row_draw",
+    "kcp_row_inputs",
+    "lengths_of",
     "naive_forward",
     "naive_of",
     "naive_with_grads",
