@@ -189,32 +189,43 @@ def _extent(t: torch.Tensor) -> tuple[int, int]:
     return lo, hi
 
 
+def _rows(t: torch.Tensor) -> Optional[tuple[int, Optional[int], int]]:
+    """``(rows, row stride, width)`` in elements of a view of at most two dimensions whose rows are dense (a unit
+    inner stride); the row stride is ``None`` for a single row (any stride describes it).  ``None`` otherwise."""
+    if t.dim() == 1:
+        return (1, None, int(t.shape[0])) if t.stride(0) == 1 or t.shape[0] == 1 else None
+    if t.dim() == 2 and (t.stride(1) == 1 or t.shape[1] == 1):
+        rows = int(t.shape[0])
+        return rows, (int(t.stride(0)) if rows > 1 else None), int(t.shape[1])
+    return None
+
+
 def _overlaps(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Whether ``a`` and ``b`` may share a byte.  Exact for two row-strided 2-D views with one row stride (the two
-    column halves of one ``[T, 1024]`` buffer share none); otherwise any overlap of their byte ranges counts."""
+    """Whether ``a`` and ``b`` may share a byte.  Exact for two views of dense rows (at most two dimensions, a unit
+    inner stride) with one row stride, a single row taking the other's (the two column halves of one ``[T, 1024]``
+    buffer share none); otherwise any overlap of their byte ranges counts."""
     if a.numel() == 0 or b.numel() == 0:
         return False
     a0, a1 = _extent(a)
     b0, b1 = _extent(b)
     if a1 <= b0 or b1 <= a0:
         return False
-    if (
-        a.dim() == 2
-        and b.dim() == 2
-        and a.stride(1) == 1
-        and b.stride(1) == 1
-        and a.stride(0) == b.stride(0)
-        and a.element_size() == b.element_size()
-    ):
-        row = int(a.stride(0)) * a.element_size()
-        wa, wb = int(a.shape[1]) * a.element_size(), int(b.shape[1]) * b.element_size()
-        if row >= max(wa, wb):
-            # Row i of a is [a0 + i row, + wa), row k of b is [b0 + k row, + wb): they meet when
-            # -wb < (b0 - a0) + (k - i) row < wa for some i < rows(a), k < rows(b).
-            d = b0 - a0
-            low = max(-(int(a.shape[0]) - 1), (-wb - d) // row + 1)
-            high = min(int(b.shape[0]) - 1, -((d - wa) // row) - 1)
-            return low <= high
+    ra, rb = _rows(a), _rows(b)
+    if ra is not None and rb is not None and a.element_size() == b.element_size():
+        strides = {stride for stride in (ra[1], rb[1]) if stride is not None}
+        size = a.element_size()
+        if not strides:
+            return True  # two single rows whose byte ranges meet
+        if len(strides) == 1:
+            row = strides.pop() * size
+            wa, wb = ra[2] * size, rb[2] * size
+            if row >= max(wa, wb):
+                # Row i of a is [a0 + i row, + wa), row k of b is [b0 + k row, + wb): they meet when
+                # -wb < (b0 - a0) + (k - i) row < wa for some i < rows(a), k < rows(b).
+                d = b0 - a0
+                low = max(-(ra[0] - 1), (-wb - d) // row + 1)
+                high = min(rb[0] - 1, -((d - wa) // row) - 1)
+                return low <= high
     return True
 
 

@@ -357,7 +357,7 @@ def test_the_prebuilt_library_is_preferred() -> None:
     for name, rec in cake_jit.MODULES.items():
         for arch in rec["arches"]:
             library = cake_jit.library_name(name, arch)
-            assert cake_build.prebuilt_path(library) == PACKAGE_DIR / "aot" / f"{library}.so"
+            assert cake_build.prebuilt_path(library).resolve() == PACKAGE_DIR / "aot" / f"{library}.so"
 
 
 # The variables the JIT shim (``_cake_pplx_jit.py``) reads: the toolchain, cache and JIT switches.
