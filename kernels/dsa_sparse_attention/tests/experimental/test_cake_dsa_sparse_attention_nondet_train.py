@@ -858,6 +858,80 @@ def test_backward_binding_keys_hold_the_direct_decision_of_a_packed_row(
                 assert (keys[a] == keys[b]) is ((a in natural) == (b in natural))
 
 
+def test_backward_binding_keys_resolve_the_direct_rule_once_per_record_and_device(
+    monkeypatch,
+):
+    """Host only (``arch_for`` stood in): a multi-segment backward key parses its program's ``dkv_direct`` policy and
+    queries the device's architecture once per program and device; the later keys of that pair do neither, on an
+    architecture without a rule (sm_100a) as on sm_107a.  One segment never does.  Another ``arch_for`` or a record
+    swapped into ``cake_jit.MODULES`` resolves anew, and the keys follow the new rule."""
+    T, S, K = 960, 8192, 2048
+    q = torch.empty(T, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    q_rope = torch.empty(T, NUM_HEADS, D_ROPE, dtype=torch.bfloat16)
+    kv = torch.empty(S, D_LATENT, dtype=torch.bfloat16)
+    k_rope = torch.empty(S, D_ROPE, dtype=torch.bfloat16)
+    idx = torch.empty(T, K, dtype=torch.int32)
+    lse = torch.empty(T, NUM_HEADS)
+    scale = default_softmax_scale()
+
+    def key(program, n):
+        if program == cake_jit.PROGRAM:
+            full = backward_binding_key(
+                q, q_rope, kv, k_rope, idx, q, q, lse, q, None, scale, False, None, n
+            )
+            return full[14]
+        return backward_binding_key_nope(
+            q, kv, idx, q, q, lse, q, None, scale, None, n
+        )[11]
+
+    parses, queries = [], []
+    parse = cake_backend.DkvDirectPolicy.from_record
+
+    def counted_parse(record):
+        parses.append(record)
+        return parse(record)
+
+    monkeypatch.setattr(
+        cake_backend.DkvDirectPolicy, "from_record", staticmethod(counted_parse)
+    )
+    monkeypatch.setattr(cake_backend, "_SEGMENT_RULES", {})
+
+    def stand_in(arch):
+        def arch_for(device=None):
+            queries.append(arch)
+            return arch
+
+        monkeypatch.setattr(cake_backend, "arch_for", arch_for)
+
+    counts = (2, 3, 4, 8, 16)
+    for arch in ("sm_100a", "sm_107a"):
+        stand_in(arch)
+        for program in cake_jit.PROGRAMS:
+            del parses[:], queries[:]
+            assert key(program, 1) == 1 and (parses, queries) == ([], [])
+            first = {n: key(program, n) for n in counts}
+            assert (len(parses), queries) == (1, [arch]), (program, arch)
+            del parses[:], queries[:]
+            assert {n: key(program, n) for n in counts * 3} == first
+            assert (parses, queries) == ([], []), (program, arch)
+            for n in counts:
+                if arch == "sm_107a":
+                    want = _dkv_direct_expected(program, arch, T, S, K, n)
+                    assert first[n] == (2, want), (program, n)
+                else:
+                    assert first[n] == 2, (program, n)
+    # a record without rules swapped in: resolved anew, the class alone on sm_107a
+    swapped = dict(cake_jit.record(NOPE_PROGRAM))
+    swapped["dkv_direct"] = {"min_keys_per_query": 1}
+    monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, swapped)
+    del parses[:], queries[:]
+    assert [key(NOPE_PROGRAM, n) for n in counts] == [2] * len(counts)
+    assert (parses, queries) == ([swapped], ["sm_107a"])
+    # the rope program's entry is untouched by the swap
+    del parses[:], queries[:]
+    assert key(cake_jit.PROGRAM, 4) == (2, False) and (parses, queries) == ([], [])
+
+
 def test_main_accumulator_constants_and_direct_bound_values():
     """A direct plan binds the caller's packed rows to the main stage's accumulator operands (``dkv_f32`` /
     ``dkr_f32`` addressed through ``dkv_stride`` / ``dkr_stride`` / ``dkr_col0`` / ``dkv_dst_map`` / ``dkv_has_map``)

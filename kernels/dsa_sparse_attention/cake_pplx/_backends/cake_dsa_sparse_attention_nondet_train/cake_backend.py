@@ -2567,6 +2567,36 @@ def _segment_class(num_segments: int) -> int:
     return n if n <= 1 else 2
 
 
+# The ``dkv_direct`` rule the multi-segment backward keys read (:func:`_segment_key`), resolved once per program and
+# device: ``(program, device index) -> (record, arch_for, policy, arch)``, where ``arch`` is the device's
+# architecture and ``policy`` the parsed :class:`DkvDirectPolicy` of ``record`` when it has a rule for ``arch``,
+# ``None`` otherwise.  An entry serves while ``record`` is the program's registered record and ``arch_for`` the
+# module's architecture query: a record swapped into ``cake_jit.MODULES`` or a stand-in ``arch_for`` resolves anew
+# (an in-place edit of the registered record is not seen, as for :class:`_RopeVarlenBinding`).
+_SEGMENT_RULES: dict[
+    tuple[str, int],
+    tuple[dict[str, Any], Callable, Optional[DkvDirectPolicy], Optional[str]],
+] = {}
+
+
+def _segment_rule(
+    program: str, q_latent: torch.Tensor
+) -> tuple[Optional[DkvDirectPolicy], Optional[str]]:
+    """``(policy, arch)`` of ``program`` on ``q_latent``'s device (see :data:`_SEGMENT_RULES`): the parsed policy
+    only when it has a rule for the device's architecture.  Parsed and resolved on the first key of a program and
+    device; every later key costs one lookup (no record parse, no device query)."""
+    record = cake_jit.record(program)
+    slot = (program, q_latent.get_device())
+    entry = _SEGMENT_RULES.get(slot)
+    if entry is None or entry[0] is not record or entry[1] is not arch_for:
+        policy = DkvDirectPolicy.from_record(record)
+        arch = arch_for(q_latent.device)
+        if policy is not None and policy.rule_for(arch) is None:
+            policy = None
+        entry = _SEGMENT_RULES[slot] = (record, arch_for, policy, arch)
+    return entry[2], entry[3]
+
+
 def _segment_key(
     num_segments: int,
     q_latent: torch.Tensor,
@@ -2582,18 +2612,18 @@ def _segment_key(
     shared.  The key holds the decision, not the count: a training step with a new document count still reuses the
     binding of the last one while the drain stays the same (two multi-segment keys per geometry at most), and an
     architecture without a rule keeps the class alone.  A geometry the planner refuses keeps the class alone
-    (planning it raises)."""
+    (planning it raises).  The rule of the program and device is resolved once (:func:`_segment_rule`): a
+    multi-segment key on an architecture without a rule costs one lookup beyond the class."""
     segment_class = _segment_class(num_segments)
+    if segment_class <= 1:
+        return segment_class
+    policy, arch = _segment_rule(program, q_latent)
     if (
-        segment_class <= 1
+        policy is None
         or q_latent.dim() < 1
         or kv_latent.dim() < 1
         or indices.dim() != 2
     ):
-        return segment_class
-    policy = DkvDirectPolicy.from_record(cake_jit.record(program))
-    arch = arch_for(q_latent.device)
-    if policy is None or policy.rule_for(arch) is None:
         return segment_class
     return (
         segment_class,
