@@ -341,6 +341,9 @@ def test_workspace_and_retained_state_are_reported_separately(pack, record_prope
     out_bytes = _rounded(x.G * WIDTH * 2)
     _explicit(x, "halves")
     torch.cuda.synchronize(device)
+    # No cached block: the caching allocator hands a large request a cached block up to 1 MiB larger, unsplit, which
+    # would count as workspace.
+    torch.cuda.empty_cache()
     base = torch.cuda.memory_allocated(device)
     torch.cuda.reset_peak_memory_stats(device)
     out = api.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
@@ -349,6 +352,7 @@ def test_workspace_and_retained_state_are_reported_separately(pack, record_prope
     after = torch.cuda.memory_allocated(device) - base - out_bytes
     del out
     cz = x.cz.detach().clone().requires_grad_(True)
+    torch.cuda.empty_cache()
     base = torch.cuda.memory_allocated(device)
     out = api.cake_gated_kv_compression_det_cz(cz, x.cu, x.G)
     torch.cuda.synchronize(device)

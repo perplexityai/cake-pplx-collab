@@ -379,7 +379,7 @@ VALUE_ERRORS = [
     ("out over c", _forward, lambda o: o.update(out=o["cz"].view(-1).view(torch.bfloat16)[: 3 * WIDTH].view(3, WIDTH))),
     ("no pair count", _forward, lambda o: o.update(num_pairs=None, out=None)),
     ("negative pair count", _forward, lambda o: o.update(num_pairs=-1, out=None)),
-    ("pair count past the limit", _forward, lambda o: o.update(num_pairs=4194304, out=None)),
+    ("pair count past the limit", _forward, lambda o: o.update(num_pairs=(1 << 26) + 1, out=None)),
     ("c feature stride", _forward, lambda o: o.update(c=torch.zeros(WIDTH, 7, device=o["c"].device).t())),
     ("c row stride off 8", _forward, lambda o: o.update(c=torch.zeros(7, 1028, device=o["c"].device)[:, :WIDTH])),
     (
@@ -584,7 +584,8 @@ def test_deterministic_algorithms_change_nothing() -> None:
             got_autograd = _autograd(x, "cz")
     finally:
         torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
-    for name, a, b in zip(("out", "dc", "dz"), got + got_autograd, want + want_autograd, strict=True):
+    names = [f"{entry} {name}" for entry in ("explicit", "autograd") for name in ("out", "dc", "dz")]
+    for name, a, b in zip(names, got + got_autograd, want + want_autograd, strict=True):
         assert_bitwise(a, b, f"deterministic mode: {name}")
     assert "use_deterministic_algorithms" in api.cake_gated_kv_compression_det_train_forward.__doc__
 
