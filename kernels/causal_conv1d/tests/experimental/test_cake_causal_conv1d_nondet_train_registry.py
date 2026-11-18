@@ -483,10 +483,10 @@ def test_own_copies_take_the_deterministic_band_rows() -> None:
         assert _strip(record, *own) == _strip(twin_record, *own), label
 
 
-# The host's programmatic dependent launch policy per architecture: on every call outside a CUDA Graph capture, off
-# inside one.
+# The host's programmatic dependent launch policy per architecture: on for every call, outside and inside a CUDA Graph
+# capture.
 PDL_EAGER_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
-PDL_GRAPH_OF_RECORD = {"sm_100a": False, "sm_103a": False, "sm_107a": False}
+PDL_GRAPH_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 
 
 def _pair_programs() -> set[str]:

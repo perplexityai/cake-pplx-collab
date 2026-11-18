@@ -6175,7 +6175,7 @@ def _stream_context(device_index: int) -> Any:
 # the attribute the launch may start while the stream's preceding kernel finishes; every program waits for that
 # kernel (``griddepcontrol.wait``) before it reads or writes global memory, so the results are the same either way.
 PDL_EAGER: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
-PDL_GRAPH: dict[str, bool] = {"sm_100a": False, "sm_103a": False, "sm_107a": False}
+PDL_GRAPH: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 
 
 def pdl_enabled(arch: str, *, capturing: bool) -> int:
