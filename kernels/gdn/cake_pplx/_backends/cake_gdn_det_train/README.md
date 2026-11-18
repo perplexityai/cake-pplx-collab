@@ -90,7 +90,10 @@ grid needs a second, short wave: with `slots = 6 x SMs` and
 `CTAs = chunks x H`, the plain prep runs for `slots < CTAs <= 2.5 x slots`
 (`sm_100a`, `sm_103a`; `sm_107a` has no plain-prep band and runs `prep_tma`
 for every grid), and
-for Q or K not 16-byte aligned.  Both preps give the same bits.  The WY stage
+for Q or K not 16-byte aligned.  Q and K that are the head views of a packed
+row (strided, row-major views that `prep_tma` reads in place) run `prep_tma`
+inside that band too, so the forward copies no Q / K; a `prep` pin still
+decides.  Both preps give the same bits.  The WY stage
 runs `wy_tc2`: the chains and outputs of `wy_tc` (the same bits) with a
 64-column TMEM accumulator and packed shared-memory operands, so five CTAs fit
 on an SM where `wy_tc` fits four.  A long sequence can be
