@@ -19,7 +19,8 @@ there against the FP64 reference of the unsplit batch beside the naive BF16 tier
 ``tests/experimental/test_helpers/cake_kda_naive.py``), each form under its own name, with no tolerance; the test records
 the verdicts and settles them against the owner-accepted gaps.  The package has no bit contract: no form is compared
 with another's bits, nor with the deterministic package's.  Bit checks remain for plumbing only (workspace bytes, carry
-slots, collective counts, graph events, the deterministic conv halo, ``dw`` read from its own forward).
+slots, collective counts, graph events, the deterministic conv halo and outputs -- KDA's operands in the checkpoint
+rows' layer core --, ``dw`` read from its own forward).
 
 Two launch forms: ``torch.multiprocessing.spawn`` (``pytest``: the ranks meet through a ``file://`` store under the
 test's temporary directory; skipped when fewer than ``W`` CUDA devices are visible or the KCP programs are not
@@ -2229,9 +2230,16 @@ def _run_rank_ckpt(
     - the one-time rank-agreement checks: exactly one ``all_gather_into_tensor`` per call key at its first call
       (``cake_kcp.RANK_CHECK_STATS``), in the phase of that call, none in a recompute; the exchange counts above
       leave them out (:func:`_exchange_counts`);
-    - the layer core: three KCP convolutions (with ``"conv"`` handles, one of them shared with KDA) + q / k
-      normalization + KDA under one checkpoint: the recompute issues no collective, the handles hold the queried
-      bytes (its outputs are not judged: no FP64 reference of the layer core).
+    - the layer core, on every draw (inputs of the draw): three KCP convolutions (with ``"conv"`` handles, one of them
+      shared with KDA) + q / k normalization + KDA, direct, under a plain checkpoint and under one with handles, and
+      the same with the multi convolution and ONE handle: KDA's ``out``, its recompute's ``out`` and KDA's gradients
+      at its operands (``dq`` / ``dk`` / ``dv`` kept on the normalized q / k and on v, ``dg`` / ``dbeta`` of the
+      leaves), gathered to rank 0 and judged there, each form under its own name (``layer_<form>``,
+      ``layer_multi_<form>``), against the FP64 reference of KDA's own operands (gathered) with the draw's ``g`` /
+      ``beta`` / ``dout``; plumbing, exact: every call's KDA operands (original forward and recompute, every form) are
+      the bits of the direct form's (the deterministic convolution package: run-to-run bits, the recompute binding
+      bitwise the exchanging recompute, the multi call bitwise the single calls), one recompute per checkpoint; on
+      the first draw the recompute issues no collective and the handles hold the queried bytes.
 
     A row of :data:`CKPT_EXACT_ONLY` runs the first draw only and judges nothing."""
     import contextlib
@@ -2276,9 +2284,11 @@ def _run_rank_ckpt(
             a.dtype == b.dtype and a.shape == b.shape and torch.equal(bits(a), bits(b))
         )
 
-    def one_draw(ops: dict, first: bool) -> dict:
-        """Every form of one draw on this rank's slices ``ops``: the arms to judge; the flags of the first draw go to
-        ``flags`` (later draws: the ``dw`` identity only)."""
+    def one_draw(ops: dict, j: int) -> tuple:
+        """Every form of draw ``j`` on this rank's slices ``ops``: the rows' arms to judge, the layer core's arms and
+        its KDA operands (local); the flags of the first draw go to ``flags`` (later draws: the ``dw`` identity, the
+        layer core's recompute counts and operand bits only)."""
+        first = j == 0
         q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
         fl = flags if first else {}
         inf = info if first else {}
@@ -2789,212 +2799,230 @@ def _run_rank_ckpt(
             )
             del out, lv, hd
 
-            # the layer core: three convolutions + q / k normalization + KDA in one region
-            C = H * 128
-            gen = torch.Generator(device="cpu").manual_seed(78150 + W)
-            T_all = cu[-1]
-            x_all = [
-                torch.randn(T_all, C, generator=gen).to(torch.bfloat16)
-                for _ in range(3)
+        # the layer core, on every draw: three convolutions + q / k normalization + KDA in one region, on inputs of the
+        # draw (seed draw_seed(78150 + W, j)).  KDA's operands are the deterministic convolutions' outputs (q / k
+        # normalized by torch): the same bits in every form, original forward and recompute (plumbing, exact: the conv
+        # package's run-to-run bits, its recompute binding bitwise the exchanging recompute, its multi call bitwise the
+        # single calls).  Each form's KDA ``out``, its recompute's ``out`` and KDA's gradients at its operands are
+        # judged on rank 0 against the FP64 reference of those operands (``layer_judge`` below)
+        C = H * 128
+        gen = torch.Generator(device="cpu").manual_seed(draw_seed(78150 + W, j))
+        T_all = cu[-1]
+        x_all = [
+            torch.randn(T_all, C, generator=gen).to(torch.bfloat16) for _ in range(3)
+        ]
+        w_all = [
+            (torch.randn(C, 4, generator=gen) * 0.5).contiguous() for _ in range(3)
+        ]
+        xs = [
+            _local_slices(part, rank, cu, {"x": x})["x"].to(device).contiguous()
+            for x in x_all
+        ]
+        wts = [w.to(device) for w in w_all]
+
+        def l2(x):
+            xf = x.float()
+            return (xf * torch.rsqrt((xf * xf).sum(-1, keepdim=True) + 1e-6)).to(
+                torch.bfloat16
+            )
+
+        l_outs: list[torch.Tensor] = []
+        l_ins: list[tuple] = []
+
+        def kda_operands(qq, kk, vv) -> tuple:
+            """KDA's ``q, k, v`` of one call (the original forward's first in ``l_ins``, then each recompute's); each
+            feeds KDA alone, so the gradient it keeps is KDA's ``dq`` / ``dk`` / ``dv``."""
+            T = qq.shape[0]
+            ops_ = (
+                l2(qq.view(T, H, 128)),
+                l2(kk.view(T, H, 128)),
+                vv.view(T, H, 128),
+            )
+            for t in ops_:
+                if t.requires_grad:
+                    t.retain_grad()
+            l_ins.append(ops_)
+            return ops_
+
+        def layer(xq, xk, xv, wq, wk, wv, g_, b_, w_, hq, hk, hv):
+            qq = conv_kcp.cake_causal_conv1d_det_kcp(xq, wq, ctx, recompute_handle=hq)
+            kk = conv_kcp.cake_causal_conv1d_det_kcp(xk, wk, ctx, recompute_handle=hk)
+            vv = conv_kcp.cake_causal_conv1d_det_kcp(xv, wv, ctx, recompute_handle=hv)
+            y = cake_kcp.cake_kda_nondet_kcp(
+                *kda_operands(qq, kk, vv),
+                g_,
+                b_,
+                ctx,
+                workspace=ws,
+                recompute_handle=hq,
+            )
+            l_outs.append(y.detach().clone())
+            return y * w_  # the product's backward reads the (recomputed) KDA out
+
+        def layer_leaves() -> list:
+            return [
+                x.detach().clone().requires_grad_(True)
+                for x in (*xs, *wts, g, beta, torch.ones_like(dout))
             ]
-            w_all = [
-                (torch.randn(C, 4, generator=gen) * 0.5).contiguous() for _ in range(3)
-            ]
-            xs = [
-                _local_slices(part, rank, cu, {"x": x})["x"].to(device).contiguous()
-                for x in x_all
-            ]
-            wts = [w.to(device) for w in w_all]
 
-            def l2(x):
-                xf = x.float()
-                return (xf * torch.rsqrt((xf * xf).sum(-1, keepdim=True) + 1e-6)).to(
-                    torch.bfloat16
-                )
-
-            l_outs: list[torch.Tensor] = []
-
-            def layer(xq, xk, xv, wq, wk, wv, g_, b_, w_, hq, hk, hv):
-                T = xq.shape[0]
-                qq = conv_kcp.cake_causal_conv1d_det_kcp(
-                    xq, wq, ctx, recompute_handle=hq
-                )
-                kk = conv_kcp.cake_causal_conv1d_det_kcp(
-                    xk, wk, ctx, recompute_handle=hk
-                )
-                vv = conv_kcp.cake_causal_conv1d_det_kcp(
-                    xv, wv, ctx, recompute_handle=hv
-                )
-                y = cake_kcp.cake_kda_nondet_kcp(
-                    l2(qq.view(T, H, 128)),
-                    l2(kk.view(T, H, 128)),
-                    vv.view(T, H, 128),
-                    g_,
-                    b_,
-                    ctx,
-                    workspace=ws,
-                    recompute_handle=hq,
-                )
-                l_outs.append(y.detach().clone())
-                return y * w_  # the product's backward reads the (recomputed) KDA out
-
-            def run_layer(mode: str):
-                l_outs.clear()
-                lv = [
-                    x.detach().clone().requires_grad_(True)
-                    for x in (*xs, *wts, g, beta, torch.ones_like(dout))
-                ]
-                hs = (
-                    (
-                        cake_kcp.CakeKDANondetKcpRecomputeHandle(),  # shared by the q convolution and KDA
-                        conv_kcp.CakeCausalConv1dDetKcpRecomputeHandle(),
-                        conv_kcp.CakeCausalConv1dDetKcpRecomputeHandle(),
+        def layer_pass(mode: str, fn, lv, hs: tuple):
+            """One pass of a layer form (``direct``, else under a non-reentrant checkpoint): its per-phase counts, and
+            the structural flags of every draw: one KDA forward (and one recompute under a checkpoint), and every
+            call's KDA operands the bits of the direct form's (the first pass)."""
+            l_outs.clear()
+            l_ins.clear()
+            with _Counter() as cc:
+                if mode.endswith("direct"):
+                    out = fn(*lv, *hs)
+                else:
+                    out = checkpoint(
+                        fn,
+                        *lv,
+                        *hs,
+                        use_reentrant=False,
+                        context_fn=lambda: (
+                            contextlib.nullcontext(),
+                            cc.recompute_cm(),
+                        ),
                     )
-                    if mode == "handle"
-                    else (None, None, None)
-                )
-                with _Counter() as cc:
-                    if mode == "direct":
-                        out = layer(*lv, *hs)
-                    else:
-                        out = checkpoint(
-                            layer,
-                            *lv,
-                            *hs,
-                            use_reentrant=False,
-                            context_fn=lambda: (
-                                contextlib.nullcontext(),
-                                cc.recompute_cm(),
-                            ),
-                        )
-                    cc.phase = "bwd"
-                    out.backward(dout)
-                names = ("xq", "xk", "xv", "wq", "wk", "wv", "g", "beta", "w")
-                res = {
-                    "out": out.detach(),
-                    **{f"d{n}": t.grad for n, t in zip(names, lv, strict=True)},
-                }
-                nb = sum(h.nbytes() for h in hs if h is not None)
-                info.setdefault("layer_n_outs", {})[mode] = len(l_outs)
-                # one KDA forward, and one recompute under a checkpoint (its outputs are not judged: no FP64 reference of
-                # the layer core; its KDA is the kernel the rows' arms judge)
-                flags[f"layer_{mode}_recomputes"] = len(l_outs) == (
-                    1 if mode == "direct" else 2
-                )
-                return res, _exchange_counts(cc.record()), nb, hs
-
-            _, counts["layer_direct"], _, _ = run_layer("direct")
-            _, counts["layer_plain"], _, _ = run_layer("plain")
-            _, counts["layer_handle"], l_nbytes, l_hs = run_layer("handle")
-            lp, lh = counts["layer_plain"], counts["layer_handle"]
-            flags["layer_positive_control"] = all(
-                lp[t]["orig"] > 0
-                and lp[t]["recompute"] == lp[t]["orig"]
-                and lp[t]["bwd"] > 0
-                for t in ("calls", "waits")
+                cc.phase = "bwd"
+                out.backward(dout)
+            inf.setdefault("layer_n_outs", {})[mode] = len(l_outs)
+            n_want = 1 if mode.endswith("direct") else 2
+            ok = len(l_outs) == n_want and len(l_ins) == n_want
+            flags[f"{mode}_recomputes"] = flags.get(f"{mode}_recomputes", True) and ok
+            if not layer_ref:
+                layer_ref.extend(t.detach() for t in l_ins[0])
+            ops_ok = all(
+                same(a.detach(), b)
+                for call_ops in l_ins
+                for a, b in zip(call_ops, layer_ref, strict=True)
             )
-            flags["layer_recompute_no_comm"] = all(
-                lh[t]["recompute"] == 0
-                and lh[t]["orig"] == lp[t]["orig"]
-                and lh[t]["bwd"] == lp[t]["bwd"]
-                for t in ("calls", "waits")
+            flags["layer_operands_bitwise"] = (
+                flags.get("layer_operands_bitwise", True) and ops_ok
             )
-            # the shared handle holds "conv" + "kda"; the three handles together = KDA states + three hist pools
-            flags["layer_nbytes"] = sorted(l_hs[0].entries) == [
-                "conv",
-                "kda",
-            ] and l_nbytes == (
-                cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
-                    ctx, H=H, checkpoint_keep="states", C=C
-                )
-                + 2 * int(ctx.halo.n_hist_rows) * C * 2
-            )
+            return out, _exchange_counts(cc.record())
 
-            # the same layer with cake_causal_conv1d_det_kcp_multi (the q / k / v convolutions in one call, one halo exchange
-            # per direction) and ONE handle for the convolutions and KDA: two halo collectives (and waits) fewer in every
-            # phase that exchanges halos, the same retained bytes
-            def layer_multi(xq, xk, xv, wq, wk, wv, g_, b_, w_, h):
-                T = xq.shape[0]
-                qq, kk, vv = conv_kcp.cake_causal_conv1d_det_kcp_multi(
-                    (xq, xk, xv), (wq, wk, wv), ctx, recompute_handle=h
-                )
-                y = cake_kcp.cake_kda_nondet_kcp(
-                    l2(qq.view(T, H, 128)),
-                    l2(kk.view(T, H, 128)),
-                    vv.view(T, H, 128),
-                    g_,
-                    b_,
-                    ctx,
-                    workspace=ws,
-                    recompute_handle=h,
-                )
-                l_outs.append(y.detach().clone())
-                return y * w_
+        def layer_judged(name: str, out, lv) -> None:
+            """The arms of one layer pass: ``out`` (``y * w``, ``w`` ones: ``y``'s bits) with KDA's gradients at its
+            operands (the original forward's) and at ``g`` / ``beta`` (leaves that feed KDA alone), NaN where no gradient
+            arrived (the judge's contract reports it); under a checkpoint the recompute's ``out`` (``.recompute``)."""
 
-            def run_layer_multi(mode: str):
-                l_outs.clear()
-                lv = [
-                    x.detach().clone().requires_grad_(True)
-                    for x in (*xs, *wts, g, beta, torch.ones_like(dout))
-                ]
-                h = (
-                    cake_kcp.CakeKDANondetKcpRecomputeHandle()
-                    if mode == "handle"
-                    else None
-                )
-                with _Counter() as cc:
-                    if mode == "direct":
-                        out = layer_multi(*lv, h)
-                    else:
-                        out = checkpoint(
-                            layer_multi,
-                            *lv,
-                            h,
-                            use_reentrant=False,
-                            context_fn=lambda: (
-                                contextlib.nullcontext(),
-                                cc.recompute_cm(),
-                            ),
-                        )
-                    cc.phase = "bwd"
-                    out.backward(dout)
-                names = ("xq", "xk", "xv", "wq", "wk", "wv", "g", "beta", "w")
-                res = {
-                    "out": out.detach(),
-                    **{f"d{n}": t.grad for n, t in zip(names, lv, strict=True)},
-                }
-                flags[f"layer_multi_{mode}_recomputes"] = len(l_outs) == (
-                    1 if mode == "direct" else 2
-                )
+            def grad(t):
                 return (
-                    res,
-                    _exchange_counts(cc.record()),
-                    (0 if h is None else h.nbytes()),
-                    h,
+                    t.grad if t.grad is not None else torch.full_like(t, float("nan"))
                 )
 
-            _, counts["layer_multi_direct"], _, _ = run_layer_multi("direct")
-            _, counts["layer_multi_plain"], _, _ = run_layer_multi("plain")
-            _, counts["layer_multi_handle"], lm_nbytes, lm_h = run_layer_multi("handle")
-            lmd, lmp, lmh = (
-                counts["layer_multi_direct"],
-                counts["layer_multi_plain"],
-                counts["layer_multi_handle"],
+            q0, k0, v0 = l_ins[0]
+            layer_arms[name] = {
+                "out": out.detach(),
+                "dq": grad(q0),
+                "dk": grad(k0),
+                "dv": grad(v0),
+                "dg": grad(lv[6]),
+                "dbeta": grad(lv[7]),
+            }
+            if l_outs[1:]:
+                layer_arms[f"{name}.recompute"] = [{"out": o} for o in l_outs[1:]]
+
+        layer_arms: dict = {}
+        layer_ref: list[torch.Tensor] = []
+        l_nbytes = 0
+        l_hs: tuple = ()
+        for mode in ("direct", "plain", "handle"):
+            lv = layer_leaves()
+            hs = (
+                (
+                    cake_kcp.CakeKDANondetKcpRecomputeHandle(),  # shared by the q convolution and KDA
+                    conv_kcp.CakeCausalConv1dDetKcpRecomputeHandle(),
+                    conv_kcp.CakeCausalConv1dDetKcpRecomputeHandle(),
+                )
+                if mode == "handle"
+                else (None, None, None)
             )
-            ld = counts["layer_direct"]
-            flags["layer_multi_counts"] = all(
-                lmd[t]["orig"] == ld[t]["orig"] - 2
-                and lmp[t]["orig"] == lp[t]["orig"] - 2
-                and lmp[t]["recompute"] == lp[t]["recompute"] - 2
-                and lmp[t]["bwd"] == lp[t]["bwd"] - 2
-                and lmh[t]["orig"] == lp[t]["orig"] - 2
-                and lmh[t]["recompute"] == 0
-                and lmh[t]["bwd"] == lp[t]["bwd"] - 2
-                for t in ("calls", "waits")
+            out, counts[f"layer_{mode}"] = layer_pass(f"layer_{mode}", layer, lv, hs)
+            layer_judged(f"layer_{mode}", out, lv)
+            if mode == "handle":
+                l_nbytes, l_hs = sum(h.nbytes() for h in hs), hs
+            del out, lv
+        lp, lh = counts["layer_plain"], counts["layer_handle"]
+        fl["layer_positive_control"] = all(
+            lp[t]["orig"] > 0
+            and lp[t]["recompute"] == lp[t]["orig"]
+            and lp[t]["bwd"] > 0
+            for t in ("calls", "waits")
+        )
+        fl["layer_recompute_no_comm"] = all(
+            lh[t]["recompute"] == 0
+            and lh[t]["orig"] == lp[t]["orig"]
+            and lh[t]["bwd"] == lp[t]["bwd"]
+            for t in ("calls", "waits")
+        )
+        # the shared handle holds "conv" + "kda"; the three handles together = KDA states + three hist pools
+        fl["layer_nbytes"] = sorted(l_hs[0].entries) == [
+            "conv",
+            "kda",
+        ] and l_nbytes == (
+            cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
+                ctx, H=H, checkpoint_keep="states", C=C
             )
-            flags["layer_multi_nbytes"] = (
-                sorted(lm_h.entries) == ["conv", "kda"] and lm_nbytes == l_nbytes
+            + 2 * int(ctx.halo.n_hist_rows) * C * 2
+        )
+
+        # the same layer with cake_causal_conv1d_det_kcp_multi (the q / k / v convolutions in one call, one halo exchange
+        # per direction) and ONE handle for the convolutions and KDA: two halo collectives (and waits) fewer in every
+        # phase that exchanges halos, the same retained bytes
+        def layer_multi(xq, xk, xv, wq, wk, wv, g_, b_, w_, h):
+            qq, kk, vv = conv_kcp.cake_causal_conv1d_det_kcp_multi(
+                (xq, xk, xv), (wq, wk, wv), ctx, recompute_handle=h
             )
+            y = cake_kcp.cake_kda_nondet_kcp(
+                *kda_operands(qq, kk, vv),
+                g_,
+                b_,
+                ctx,
+                workspace=ws,
+                recompute_handle=h,
+            )
+            l_outs.append(y.detach().clone())
+            return y * w_
+
+        lm_nbytes = 0
+        lm_h = None
+        for mode in ("direct", "plain", "handle"):
+            lv = layer_leaves()
+            h = cake_kcp.CakeKDANondetKcpRecomputeHandle() if mode == "handle" else None
+            out, counts[f"layer_multi_{mode}"] = layer_pass(
+                f"layer_multi_{mode}", layer_multi, lv, (h,)
+            )
+            layer_judged(f"layer_multi_{mode}", out, lv)
+            if mode == "handle":
+                lm_nbytes, lm_h = h.nbytes(), h
+            del out, lv
+        lmd, lmp, lmh = (
+            counts["layer_multi_direct"],
+            counts["layer_multi_plain"],
+            counts["layer_multi_handle"],
+        )
+        ld = counts["layer_direct"]
+        fl["layer_multi_counts"] = all(
+            lmd[t]["orig"] == ld[t]["orig"] - 2
+            and lmp[t]["orig"] == lp[t]["orig"] - 2
+            and lmp[t]["recompute"] == lp[t]["recompute"] - 2
+            and lmp[t]["bwd"] == lp[t]["bwd"] - 2
+            and lmh[t]["orig"] == lp[t]["orig"] - 2
+            and lmh[t]["recompute"] == 0
+            and lmh[t]["bwd"] == lp[t]["bwd"] - 2
+            for t in ("calls", "waits")
+        )
+        fl["layer_multi_nbytes"] = (
+            sorted(lm_h.entries) == ["conv", "kda"] and lm_nbytes == l_nbytes
+        )
+        layer_ops = dict(zip(("q", "k", "v"), layer_ref, strict=True))
+        l_ins.clear()
+        l_outs.clear()
+
+        if first:
             # the one-time rank-agreement checks (cake_kcp._rank_check), exactly: the #7039 warm-up above checked the default
             # key (a2a, save_transfer, saved set, no handle) outside any count; a run checks each key it is the first to use
             # -- the handle's original forward (whether a call carries a handle is a field), the states tier's backward
@@ -3020,17 +3048,31 @@ def _run_rank_ckpt(
             }
             info["counts"] = counts
 
-        return arms
+        return arms, layer_arms, layer_ops
 
+    # the layer core's KDA: judged against the FP64 reference of its own operands (the deterministic convolutions'
+    # outputs, the same bits in every form) with the draw's g / beta / dout
+    layer_judge = _RankJudge(part, cu, W, rank, SCALE)
     for j in range(DRAWS if judged else 1):
         # the same seeded operands on every rank; each takes its slices
         glob = draw_case(lengths, H, "g", False, draw_seed(JUDGE_SEED, j), device)
-        arms = one_draw(_local_slices(part, rank, cu, glob), j == 0)
+        arms, layer_arms, layer_ops = one_draw(_local_slices(part, rank, cu, glob), j)
         if judged:
             judge.draw(j, glob)
             for name, results in arms.items():
                 judge.arm(name, results)
-        del arms, glob
+            layer_glob = {
+                n: _gather_global(part, t, cu, cu[-1], W, rank)
+                for n, t in layer_ops.items()
+            }
+            if rank == 0:
+                layer_glob.update(
+                    {n: glob[n] for n in ("g", "beta", "dout", "cu_seqlens")}
+                )
+            layer_judge.draw(j, layer_glob)
+            for name, results in layer_arms.items():
+                layer_judge.arm(name, results)
+        del arms, layer_arms, layer_ops, glob
 
     flag_list = [None] * W
     info_list = [None] * W
@@ -3055,8 +3097,10 @@ def _run_rank_ckpt(
         and all(set(f) == set(flag_list[0]) for f in flag_list)
         and (tuple(row) == CKPT_NONCROSSING) == (max(report["n_in_by_rank"]) == 0)
     )
-    if judged:
-        report.update(judge.report())
+    if judged and rank == 0:
+        rows_rep, layer_rep = judge.report(), layer_judge.report()
+        report["verdicts"] = {**rows_rep["verdicts"], **layer_rep["verdicts"]}
+        report["failures"] = rows_rep["failures"] + layer_rep["failures"]
     dist.barrier()
     if rank == 0 and result_dir:
         os.makedirs(result_dir, exist_ok=True)

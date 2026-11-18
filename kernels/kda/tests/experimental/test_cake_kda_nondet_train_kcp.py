@@ -7396,8 +7396,9 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
     after the upgrade; ``forward_only``), the NaN-arena forwards (``nan_arena.out``: a read of a byte the call did not
     write, the output program's reads of the pad chunks' ``h`` entries included, breaks the judge's contract), the
     forward without a saved set (``no_saved_set.out``), the ``save_transfer=False`` forwards
-    (``no_save_transfer.out``), ``workspace=None`` explicitly (``per_call``) and through autograd (``autograd``), and
-    the first and the later training step (``first_step``, ``later_step``)."""
+    (``no_save_transfer.out``) and the saved-mode backward from that option's saved set (``no_save_transfer.bwd``: it
+    reads that set's ``S_in`` and, at ``P > 1``, its carry plane), ``workspace=None`` explicitly (``per_call``) and
+    through autograd (``autograd``), and the first and the later training step (``first_step``, ``later_step``)."""
     backend = cake_kcp.get_backend()
     assert backend.local_stages
     dt = backend.dtypes
@@ -7418,7 +7419,7 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
                 q, k, v, g, beta, ctx, workspace=ws, **kw
             )
 
-        def bwd(ws, saved):
+        def bwd(ws, saved, **kw):
             return cake_kcp.cake_kda_nondet_train_kcp_backward(
                 q,
                 k,
@@ -7429,6 +7430,7 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
                 dout,
                 saved=saved,
                 workspace=ws,
+                **kw,
             )
 
         # a backward workspace (the forward on the existing backend's fwd views of its arena)
@@ -7510,6 +7512,9 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
         out_t2, _ = fwd(ws_t, save_for_backward=False)
         lay_t = kp.kcp_arena_layout(ctx, H=H, backward=False, save_transfer=False)
         assert ws_t.bytes == pred_t + lay_t["lazy"] == pred_f + lazy, row
+        # the save_transfer=False saved set (fresh tensors, SPEC-4) feeds a saved-mode backward of the same option, after
+        # the byte states above (it upgrades ws_t): its gradients are judged (no_save_transfer.bwd)
+        grads_t = bwd(ws_t, saved_t, save_transfer=False)
         del ws_t, saved_t
         # workspace=None: every forward on a forward-only arena of its own, explicitly and through autograd
         out_0, saved_0 = fwd(None)
@@ -7547,6 +7552,7 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
             "nan_arena": nan_arena,
             "no_saved_set": {"out": out_n},
             "no_save_transfer": [{"out": out_t}, {"out": out_t2}],
+            "no_save_transfer.bwd": _named(None, grads_t),
             "per_call": _named(out_0, grads_0),
             "autograd": autograd,
             "first_step": first_step,
@@ -7663,7 +7669,9 @@ def test_gpu_graph_replay_after_a_forward_without_a_saved_set(
     again and replay.  Judged against the FP64 reference beside the naive BF16 tier over 32 draws: the eager forward
     (``eager.out``), the saving forwards before (``saving.out``), the forwards without a saved set (``no_saved_set.out``)
     and the saving forwards after them (``saving_after.out``), the worst of each kept; a replayed call's ``out`` (the
-    graph's static buffer) is copied at once."""
+    graph's static buffer) is copied at once.  The last (replayed) saving forward's saved set -- the graph's static
+    tensors -- feeds an eager saved-mode backward at once, the last call on the workspace (it upgrades it): its
+    gradients are judged (``saving_after.bwd``)."""
     backend = cake_kcp.get_backend()
     assert backend.local_stages
     dt = backend.dtypes
@@ -7678,7 +7686,7 @@ def test_gpu_graph_replay_after_a_forward_without_a_saved_set(
         ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
         assert ctx.heads(H).P > 1
         ops = _drawn(lengths, H, s, device)
-        q, k, v, g, beta = (ops[n] for n in ("q", "k", "v", "g", "beta"))
+        q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
 
         def fwd(ws, **kw):
             return cake_kcp.cake_kda_nondet_train_kcp_forward(
@@ -7694,32 +7702,42 @@ def test_gpu_graph_replay_after_a_forward_without_a_saved_set(
                 for e in cake_kcp._GRAPHS.values()
             )
 
-        def run(save: bool, n: int, outs: list) -> list[str]:
-            events = []
+        def run(save: bool, n: int, outs: list):
+            """``n`` forwards: their graph events and the last one's saved set."""
+            events, saved = [], None
             for _ in range(n):
                 out, saved = fwd(ws, save_for_backward=save, graph="replay")
                 events.append(cake_kcp.LAST_CALL["fwd"]["graph_event"])
                 outs.append({"out": out.clone()})
                 if not save:
                     assert saved is None, events
-            return events
+            return events, saved
 
         arms = {"eager": {"out": out_r}, "saving": [], "no_saved_set": []}
         arms["saving_after"] = []
         cake_kcp.graph_cache_clear()
         try:
-            events = run(True, 4, arms["saving"])
+            events, _ = run(True, 4, arms["saving"])
             assert events.count("capture") == 1 and events[-1] == "replay", events
             assert captured() == 1 and not any(ws.has(n) for n in kp.FWD_LAZY_POOLS)
-            events = run(False, 4, arms["no_saved_set"])
+            events, _ = run(False, 4, arms["no_saved_set"])
             assert events == ["eager", "eager", "capture", "replay"], events
             assert all(ws.has(n) for n in kp.FWD_LAZY_POOLS)
             assert captured() == 1, (
                 "the captured saving forward's unreachable entry stays cached"
             )
-            events = run(True, 3, arms["saving_after"])
+            events, saved = run(True, 3, arms["saving_after"])
             assert events == ["eager", "capture", "replay"], events
             assert captured() == 2
+            # the replayed saving forward's saved set (the graph's static tensors), consumed before any other call: an
+            # eager saved-mode backward, last (it upgrades ws)
+            arms["saving_after.bwd"] = _named(
+                None,
+                cake_kcp.cake_kda_nondet_train_kcp_backward(
+                    q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws
+                ),
+            )
+            del saved
         finally:  # the cached entries pin ws / ctx: never leak them into later tests
             cake_kcp.graph_cache_clear()
         return arms, ops
@@ -7872,7 +7890,9 @@ def test_gpu_walk_streams_graph_replay_is_judged(
     eager one-stream call (``one_stream``), the four two-stream ``graph="replay"`` calls (``two_stream_replay``, the
     worst kept) and the eager two-stream call after them (``two_stream``): the forward's ``out`` and the replay-mode
     backward's gradients (its forward runs the pair), each copied at once (a replayed call's outputs are the graph's
-    static buffers)."""
+    static buffers); and the saved-mode backward (``graph="off"``) from the saved set of a fifth two-stream
+    ``graph="replay"`` forward (a replay: the graph's static tensors, written by the pair on two streams, its staging
+    planes included), consumed at once (``two_stream_replay.saved_bwd``)."""
     monkeypatch.setattr(kp, "_TEST_KNOBS_ENABLED", True)
 
     def draw(j, s):
@@ -7920,10 +7940,25 @@ def test_gpu_walk_streams_graph_replay_is_judged(
                 events
             )
             assert cake_kcp.GRAPH_STATS["fallback"] == fallback0
+            # a fifth replayed forward: its saved set feeds a saved-mode backward at once (eager)
+            knobs = {"_kcp_test_knobs": {"walk_streams": "two"}}
+            _out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                *args, ctx, workspace=ws, graph="replay", **knobs
+            )
+            assert cake_kcp.LAST_CALL["fwd"]["graph_event"] == "replay"
+            saved_bwd = _named(
+                None,
+                cake_kcp.cake_kda_nondet_train_kcp_backward(
+                    *args, ctx, ops["dout"], saved=saved, workspace=ws, **knobs
+                ),
+            )
+            del _out, saved
             two, _ = run("two", "off")
         finally:
             cake_kcp.graph_cache_clear()
-        return {"one_stream": ref, "two_stream_replay": replays, "two_stream": two}, ops
+        arms = {"one_stream": ref, "two_stream_replay": replays, "two_stream": two}
+        arms["two_stream_replay.saved_bwd"] = saved_bwd
+        return arms, ops
 
     _judge(record_property, draw)
 
