@@ -181,12 +181,13 @@ Contract
   chunk-bounded buffers) when ``logp`` is returned, scattered into the same ``[T]`` output (the same per-row logits
   arithmetic as the loss path's); their ``dX`` rows are exact zeros.  A zero-weight row is treated like an ignored
   row for the gradients: a non-finite value in its ``X`` row, its logits or its ``infer_logp`` does not reach
-  ``loss`` / ``dX`` / ``dW`` (the deterministic package gives NaN there through ``0 * inf``).  Finite inputs: the
-  same mathematics; ``dW`` (and the FP32 loss sum) group their additions over different chunk rows, so their bits
-  may differ from the deterministic package's (both are judged against the naive tier).  Not applied (the plain path
-  runs): ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
-  (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits
-  the rows as here).
+  ``loss`` / ``dX`` / ``dW`` (the call without the split gives NaN there through ``0 * inf``).  Finite inputs: the
+  same mathematics.  The deterministic package splits the same rows from the same floor; this package adds no loss
+  term for a zero-weight row (the FP32 loss sum over ``G``), while the deterministic package's default ``"exact"``
+  loss mode keeps the loss bits of the call without the split, so the loss bits may differ from the deterministic
+  package's (both are judged against the naive tier).  Not applied (the plain path runs): ``compact_rows=False``,
+  ``objective="ce"``, the log-probability entry, the prepared runner (:func:`prepare_lm_head_loss`) and a
+  caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits the rows as here).
 * Non-deterministic mode (the only mode of this package; the mode is in its
   name, and no entry takes a ``deterministic`` keyword): the chunks
   run in sequential order; the dX GEMM's K-slice partials combine through the

@@ -33,9 +33,9 @@ takes a `deterministic` keyword, and passing one is Python's own `TypeError`.
 | backend package | `cake_pplx._backends.cake_lm_head_det_train` | `cake_pplx._backends.cake_lm_head_nondet_train` |
 | public call | `cake_lm_head_det_train_*(...)` | `cake_lm_head_nondet_train_*(...)` |
 | `loss`, `logp`, `lse` | fixed order, bitwise run to run | fixed order (the same programs), no run-to-run bit promise; a one-pass cross-entropy call (`set_one_pass_rows`, by default a one-row loss call) sums `lse` and the loss in its own fixed order, not the deterministic package's bits |
-| zero-weight policy rows (`loss_weights == 0`) | in the chunk loop | left out of the gradient path (see "Zero-weight policy rows") |
+| zero-weight policy rows (`loss_weights == 0`) | left out of the gradient path; the default `"exact"` loss mode keeps the loss bits of the call without the split | left out of the gradient path; no loss term for a zero-weight row, so `loss` bits may differ from the deterministic package's (see "Zero-weight policy rows") |
 | log-probability backward of 2 to 4 chunks (see the exception below) | the chunk loop | vocabulary-major by default: no FP32 `[V, H]` weight-gradient accumulator, `dX` / `dW` summed in one fixed order, no run-to-run bit promise (see "Vocabulary-major log-probability backward") |
-| log-probability rows with `dlogp == 0` | in the chunk loop | ordered last; the backward's GEMMs skip their work (see "Zero-gradient rows of the log-probability backward") |
+| log-probability rows with `dlogp == 0` | ordered last; the dz arm and the weight-gradient GEMMs skip their work (the dX GEMM computes every row), from 1946 valid rows on sm_100a, 3891 on sm_103a and 4097 elsewhere (sm_107a included) | ordered last; the backward's GEMMs skip their work, from 1946 valid rows on sm_107a (the other floors are the deterministic package's), so `dW` bits may differ from the deterministic package's (see "Zero-gradient rows of the log-probability backward") |
 | `dW` | chunk order, bitwise run to run | chunk order (the same programs); no run-to-run promise; the vocabulary-major log-probability backward forms each block in one GEMM (see "Vocabulary-major log-probability backward"); a one-pass cross-entropy call writes `dW` once from its kept logits, not the deterministic package's bits |
 | `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does; the slab sum then folds the rows' FP32 label residuals (the fold alone after one slice) |
 | precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each; `dX` also folds each row's FP32 label residual (what the BF16 `dz` store dropped from the label column's FP32 gradient), so `dX`, `ForwardResult.dx_acc` and the `dx_cast=False` accumulator round differently from version 0.2.1 | the same |
@@ -421,7 +421,8 @@ only.
 A policy row with a valid label whose `loss_weights` entry is exactly zero
 (`+0` or `-0`) contributes exactly zero loss and zero gradient.  Its weight is
 known before the forward, like a `-100` label, so this package leaves such a
-row out of the gradient path:
+row out of the gradient path, as the deterministic package does (its README,
+"Zero-weight policy rows of the loss entry"):
 
 * The chunk loop runs over the gradient rows `G = (labels >= 0) &
   (loss_weights != 0)` only: the row compaction machinery uses this mask (the
@@ -462,13 +463,18 @@ row out of the gradient path:
   so adding the two overstates the call's peak.
 * A call of fewer than `cake_backend.zero_weight_min_rows()` rows `T`
   (default 4096, `set_zero_weight_min_rows`) keeps its zero-weight rows in the
-  chunk loop, as the deterministic package does (the split adds row kernels
-  and a second count to every call that takes it).
+  chunk loop, as the deterministic package does below the same default floor
+  (the split adds row kernels and a second count to every call that takes it).
+* The loss differs from the deterministic package's: this package adds no
+  loss term for a zero-weight row (the chunk loop's sum over `G`), while the
+  deterministic package's default `"exact"` loss mode keeps the loss bits of
+  the call without the split.  So `loss` bits may differ from the
+  deterministic package's; both are judged against the naive tier.
 
-| | deterministic package | this package |
+| | without the split (a call below the floor) | with the split (this package) |
 | --- | --- | --- |
 | zero-weight row, finite inputs | full chunk path; its terms are exact zeros | skipped for the gradients; the same mathematics |
-| `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs) |
+| `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs; the deterministic package's `"exact"` mode keeps the bits of the call without the split instead) |
 | `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ, both are judged against the naive tier) |
 | `logp` of a zero-weight row | loss-path logits GEMM + `row_finalize` | logp-only pass (`return_logp=True`); 0 in the internal output otherwise |
 | non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `loss` / `dX` / `dW` (`0 * inf`) | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |
@@ -588,6 +594,11 @@ the partition's int32 outputs (12 bytes per valid row plus 4 per row of T,
 about 31 KB at T = 2048 with 1946 valid rows) for the whole backward, so its peak
 memory is that much higher than without the skip.
 `set_zero_dlogp_min_rows(4097)` keeps every architecture at the generic floor.
+The deterministic package skips the same rows with the same floors on sm_100a
+and sm_103a and from 4097 valid rows on sm_107a, so on sm_107a a backward of
+1946 to 4096 valid rows runs the skip here and not there: its `dW` bits may
+differ from the deterministic package's (both are judged against the naive
+tier).
 
 Not applied: `compact_rows=False`, a backward that recounts its valid rows,
 the kept-logits entry, the chunk-loop forms of `memory_mode="budget"`
