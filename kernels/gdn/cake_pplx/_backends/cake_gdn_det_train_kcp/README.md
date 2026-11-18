@@ -497,15 +497,15 @@ FP32 round-to-nearest); `g` and `beta` are FP32 until the operand tile is
 formed; `dq` / `dk` reduce their value heads in FP32 in a fixed order and
 round once; `dg` / `dbeta` are FP32 throughout.
 
-Differences from the reference, recorded for the precision budget: `Aqk` is a
+Differences from the reference: `Aqk` is a
 BF16 tape with `scale` inside the rounding (the reference rounds `A` with
 `scale` outside) and the backward consumes that tape; `do_g =
 bf16(scale * e^G * do)` is one extra BF16 rounding on the `dh` q-term and
 the `dq` h-term; the backward gate `rowscale * dv` is applied in FP32 to the
 accumulator (one fewer rounding than the reference's BF16 operand); the `dh`
-accumulation order is the template's.  The precision gates compare every
-tensor against an FP64 reference within 1.10 x the larger of the CP = 1 error
-and the reference's own error.
+accumulation order is the template's.  The tests compare every tensor with
+an FP64 reference beside the BF16 naive implementation (recorded, not
+gating).
 
 ## Kernel structure of one training step
 

@@ -16,9 +16,8 @@
 - `torch.use_deterministic_algorithms(True)` changes nothing: every launch is
   fixed-order, so no alert is raised and the outputs and gradients are the
   same bits as without it.
-- The non-deterministic route is a separate package.  Its results match this
-  package within this package's accuracy budgets, not bitwise.  Nothing here
-  routes to it.
+- The non-deterministic route is a separate package.  Its results are not
+  bitwise equal to this package's.  Nothing here routes to it.
 - The forward tape carries this package's tag, `"mode": "det"`.
   `cake_gdn_det_train_backward` refuses any other tape with `ValueError`; a
   tape of the non-deterministic package carries `"mode": "nondet"`.
@@ -38,7 +37,7 @@ are `@cake_api` functions.  This package, under `cake_pplx._backends`, is its
 backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
-CUDA 13.4 or newer.  The feature does not
+CUDA 13.5 or newer.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
 JIT-built by the package's JIT shim (`_cake_pplx_jit.py`) from the sources and
@@ -126,11 +125,11 @@ same bits as on the views.  The tcgen05 adjoint scan of such a call adds the
 FP32 `dv_local` values to `dv2` before its one rounding (`dhu_tc2_dvl32`), on
 serial plans and in the second pass of split ones.
 Both are fixed-order with one writer per element, so the gradients repeat bit
-for bit; they differ from the previous release of this package (within its
-accuracy budgets).  The register adjoint forms still round `dv_local` to BF16
+for bit; they differ from the previous release of this package.  The
+register adjoint forms still round `dv_local` to BF16
 first, so for such a call they give the same `o` and final state as
 `dhu_tc2_dvl32`, but other bits of `dk`, `dv`, `dg`, `dbeta` and the
-initial-state gradient (within the budgets): the cost rules and the `dhu_scan`
+initial-state gradient: the cost rules and the `dhu_scan`
 pin pick the bits, and on a split `(64, 1)` plan the device-table route always
 runs the register pass.  Groups of two keep `tail_g2` and `dhu_tc2`.
 
@@ -163,8 +162,8 @@ in place, or a `g` / `beta` not at a 16-byte aligned base, is copied first.
 Both forwards are fixed-order (no atomic, wave 1 and the maps write disjoint
 segments), so they are bitwise run to run with one or two streams.  Their
 bits differ from the prep forward's, so the outputs and gradients of these
-FP32-`beta` host-table calls change from the previous release of this package
-(within its accuracy budgets).  Every other call (a BF16 `beta`, Q/K not
+FP32-`beta` host-table calls change from the previous release of this package.
+Every other call (a BF16 `beta`, Q/K not
 normalized, the device route, a larger value-head group, a `prep`,
 `scan_config` or `segment_chunks` pin) runs the prep forward with the same
 launches and bits as before.  The other options (`dhu_scan`, `finalize`,
@@ -256,7 +255,7 @@ per-stream ones.
 | `segment_chunks` | planner | segment length in chunks of the segment-parallel scans; `0` forces the serial scan; lengths above 128 (the chunks one pre-scan CTA covers) are not supported: a call whose plan then splits a sequence raises `ValueError`; keeps the call on the prep forward |
 | `finalize` | by size | finalize of the unfused tail (`HV != 2 * H`): `"finalize"` or `"finalize_mlp"` (the latter needs `HV == 3 * H`); for `HV == 3 * H` a pin runs the unfused tail instead of the fused kernel (`dv`, `dg` and `dbeta` the same bits; `dq` / `dk` rounded per value head) |
 | `warmup_log2` | `-10 / ln 2` | warm-up threshold of the pre-scans |
-| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV == 3 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits within the budgets |
+| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV == 3 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits |
 | `prep` | rule | forward prep: `"plain"` or `"tma"` (`prep_tma`; Q or K not 16-byte aligned still take the plain prep); keeps the call on the prep forward |
 | `save_state` | `True` | keep the forward state of the tape level (`w`, `h`, `v_new`) for the backward; `False` recomputes them |
 | `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections and the per-stream workspaces between calls (a CUDA graph capture takes its own workspaces) |
@@ -267,7 +266,7 @@ per-stream ones.
 
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
-- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.4 or newer).
+- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
 
 ## Names
 

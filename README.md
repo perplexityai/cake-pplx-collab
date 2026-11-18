@@ -69,7 +69,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, dense_gemm, dsa_indexer, dsa_sparse_attention, fmha, gqa, lm_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, dense_gemm, dsa_indexer, dsa_sparse_attention, fmha, gdn, gqa, lm_head, mhc, mhc_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
@@ -106,8 +106,8 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 |---|---|
 | Validated | NVIDIA GB300 (`sm_103a`), driver 580.159.03, CUDA 13.4.92, torch 2.14.1+cu130, apache-tvm-ffi 0.1.15 |
 | Supported by the code, not yet validated here | `sm_100a`, `sm_107a` |
-| fmha, causal_conv1d | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
-| act_qdq | `sm_107a` validation pending |
+| fmha, causal_conv1d, mhc, mhc_head | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 

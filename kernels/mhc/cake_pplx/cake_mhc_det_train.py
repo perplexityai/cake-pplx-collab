@@ -67,6 +67,17 @@ without launching.  Calls of different hidden sizes may be mixed in one
 process.  Every behaviour
 switch is a keyword argument with its default in the docstring.
 
+Accumulation: every kernel keeps each sum in one plain FP32 word
+(``accumulation="fp32"``, the default).  The opt-in ``accumulation="fp32x2"``
+of ``forward_prepare``, ``forward_stats``, ``backward_finish`` and ``prepare``
+runs two-word programs of the mapping pass, the backward token-owner pass, the
+column slab and the final reduction: each of their sums is a compensated pair
+of FP32 words (the running sum and its rounding error), stored as one FP32
+word.  It is a compensated FP32 sum, not FP64.  The other passes keep their
+one-word programs, and the workspaces and records are unchanged.  The mode
+serves hidden 4096 with ``sinkhorn_iters=20`` only (otherwise
+``NotImplementedError``).
+
 Names and mode: this is the deterministic module.  Its backend package
 ``cake_pplx._backends.cake_mhc_det_train`` is imported on the first
 call or attribute access (importing this module imports no backend).  Every
@@ -213,6 +224,7 @@ def cake_mhc_det_train_forward_prepare(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     out: Optional[torch.Tensor] = None,
     stats_out: Optional[torch.Tensor] = None,
     workspace: Optional[torch.Tensor] = None,
@@ -242,6 +254,16 @@ def cake_mhc_det_train_forward_prepare(
         compiled programs, whose chain is unrolled for it; every other count runs
         the run-time-count programs of the coefficient and token-owner passes.  A
         count above 64 raises ``NotImplementedError``.
+    accumulation : str
+        ``"fp32"`` (default): every kernel keeps each sum in one plain FP32
+        word.  ``"fp32x2"`` (opt-in): the mapping pass (and, in the backward,
+        the token-owner pass, the column slab and the final reduction) keeps
+        each sum as a compensated pair of FP32 words, the running sum and its
+        rounding error, and stores one FP32 word: a compensated two-word FP32
+        sum, not FP64.  The workspaces and records are unchanged.  Hidden 4096
+        and ``sinkhorn_iters=20`` only; another hidden size or count raises
+        ``NotImplementedError``.  One two-word program per pass serves every
+        token count, in place of the token-count bands of the default.
     out : torch.Tensor, optional
         Preallocated BF16 ``[T, H]`` contiguous ``U``.
     stats_out : torch.Tensor, optional
@@ -265,6 +287,7 @@ def cake_mhc_det_train_forward_prepare(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
         out=out,
         stats_out=stats_out,
         workspace=workspace,
@@ -281,6 +304,7 @@ def cake_mhc_det_train_forward_stats(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     stats_out: Optional[torch.Tensor] = None,
     workspace: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -303,6 +327,9 @@ def cake_mhc_det_train_forward_stats(
     sinkhorn_iters : int
         Sinkhorn iteration count, 1 to 64 (default ``20``; as in
         :func:`cake_mhc_det_train_forward_prepare`).
+    accumulation : str
+        As in :func:`cake_mhc_det_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in); pass the mode of the forward.
     stats_out : torch.Tensor, optional
         Preallocated FP32 ``[T, 64]`` contiguous statistics record.
     workspace : torch.Tensor, optional
@@ -313,7 +340,7 @@ def cake_mhc_det_train_forward_stats(
     -------
     FP32 ``[T, 64]`` ``stats``, bitwise identical to the record
     :func:`cake_mhc_det_train_forward_prepare` returns for the same inputs on the
-    same device (the same work partition without the ``U`` write).
+    same device and mode (the same work partition without the ``U`` write).
     """
 
     return _pkg().cake_mhc_det_train_forward_stats(
@@ -324,6 +351,7 @@ def cake_mhc_det_train_forward_stats(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
         stats_out=stats_out,
         workspace=workspace,
     )
@@ -414,6 +442,7 @@ def cake_mhc_det_train_backward_finish(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     accumulate: bool = False,
     workspace: Optional[torch.Tensor] = None,
     dX: Optional[torch.Tensor] = None,
@@ -453,6 +482,9 @@ def cake_mhc_det_train_backward_finish(
     sinkhorn_iters : int
         Sinkhorn iteration count, 1 to 64 (default ``20``; as in
         :func:`cake_mhc_det_train_forward_prepare`).
+    accumulation : str
+        As in :func:`cake_mhc_det_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in); pass the mode of the forward.
     accumulate : bool
         ``False`` (default): ``dfn``, ``dscale`` and ``dbase`` are written.
         ``True``: the caller passes all three and the fixed-order sums are added
@@ -491,6 +523,7 @@ def cake_mhc_det_train_backward_finish(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
         accumulate=accumulate,
         workspace=workspace,
         dX=dX,
@@ -510,6 +543,7 @@ def cake_mhc_det_train_prepare(
     rms_eps: float = 1e-5,
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
     save_stats: bool = True,
     workspace: Optional[torch.Tensor] = None,
     backward_workspace: Optional[torch.Tensor] = None,
@@ -534,6 +568,11 @@ def cake_mhc_det_train_prepare(
     sinkhorn_iters : int
         Sinkhorn iteration count, 1 to 64 (default ``20``; as in
         :func:`cake_mhc_det_train_forward_prepare`).
+    accumulation : str
+        As in :func:`cake_mhc_det_train_forward_prepare` (``"fp32"`` default,
+        ``"fp32x2"`` opt-in).  The forward, its checkpoint replay and the
+        backward of this node run in this mode; the handle carries it, so
+        :func:`cake_mhc_det_train_finish` takes no mode.
     save_stats : bool
         ``True`` (default): the per-token statistics are kept for the backward.
         ``False``: they are dropped after the forward and recomputed from ``X``
@@ -561,6 +600,7 @@ def cake_mhc_det_train_prepare(
         rms_eps=rms_eps,
         hc_eps=hc_eps,
         sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
         save_stats=save_stats,
         workspace=workspace,
         backward_workspace=backward_workspace,

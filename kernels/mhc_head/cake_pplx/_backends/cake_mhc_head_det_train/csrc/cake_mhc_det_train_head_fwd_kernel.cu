@@ -153,37 +153,37 @@ kernel_cake_mhc_det_train_head_fwd(__nv_bfloat16* __restrict__ x, __nv_bfloat16*
         float acc0_0[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc0_0[0]), "=&f"(acc0_0[1]) : "r"(words[0]), "f"(0.0f), "f"(0.0f));
         float acc1_0[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc1_0[0]), "=&f"(acc1_0[1]) : "r"(words[4]), "f"(acc0_0[0]), "f"(acc0_0[1]));
         float acc2_0[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc2_0[0]), "=&f"(acc2_0[1]) : "r"(words[8]), "f"(acc1_0[0]), "f"(acc1_0[1]));
         float acc3_0[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc3_0[0]), "=&f"(acc3_0[1]) : "r"(words[12]), "f"(acc2_0[0]), "f"(acc2_0[1]));
         unsigned int mean_0 = __as_u32(__float22bfloat162_rn(make_float2(mul_f32_rn_noftz(acc3_0[0], 0.25f), mul_f32_rn_noftz(acc3_0[1], 0.25f))));
@@ -191,37 +191,37 @@ kernel_cake_mhc_det_train_head_fwd(__nv_bfloat16* __restrict__ x, __nv_bfloat16*
         float acc0_1[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc0_1[0]), "=&f"(acc0_1[1]) : "r"(words[1]), "f"(0.0f), "f"(0.0f));
         float acc1_1[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc1_1[0]), "=&f"(acc1_1[1]) : "r"(words[5]), "f"(acc0_1[0]), "f"(acc0_1[1]));
         float acc2_1[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc2_1[0]), "=&f"(acc2_1[1]) : "r"(words[9]), "f"(acc1_1[0]), "f"(acc1_1[1]));
         float acc3_1[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc3_1[0]), "=&f"(acc3_1[1]) : "r"(words[13]), "f"(acc2_1[0]), "f"(acc2_1[1]));
         unsigned int mean_1 = __as_u32(__float22bfloat162_rn(make_float2(mul_f32_rn_noftz(acc3_1[0], 0.25f), mul_f32_rn_noftz(acc3_1[1], 0.25f))));
@@ -229,37 +229,37 @@ kernel_cake_mhc_det_train_head_fwd(__nv_bfloat16* __restrict__ x, __nv_bfloat16*
         float acc0_2[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc0_2[0]), "=&f"(acc0_2[1]) : "r"(words[2]), "f"(0.0f), "f"(0.0f));
         float acc1_2[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc1_2[0]), "=&f"(acc1_2[1]) : "r"(words[6]), "f"(acc0_2[0]), "f"(acc0_2[1]));
         float acc2_2[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc2_2[0]), "=&f"(acc2_2[1]) : "r"(words[10]), "f"(acc1_2[0]), "f"(acc1_2[1]));
         float acc3_2[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc3_2[0]), "=&f"(acc3_2[1]) : "r"(words[14]), "f"(acc2_2[0]), "f"(acc2_2[1]));
         unsigned int mean_2 = __as_u32(__float22bfloat162_rn(make_float2(mul_f32_rn_noftz(acc3_2[0], 0.25f), mul_f32_rn_noftz(acc3_2[1], 0.25f))));
@@ -267,37 +267,37 @@ kernel_cake_mhc_det_train_head_fwd(__nv_bfloat16* __restrict__ x, __nv_bfloat16*
         float acc0_3[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc0_3[0]), "=&f"(acc0_3[1]) : "r"(words[3]), "f"(0.0f), "f"(0.0f));
         float acc1_3[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc1_3[0]), "=&f"(acc1_3[1]) : "r"(words[7]), "f"(acc0_3[0]), "f"(acc0_3[1]));
         float acc2_3[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc2_3[0]), "=&f"(acc2_3[1]) : "r"(words[11]), "f"(acc1_3[0]), "f"(acc1_3[1]));
         float acc3_3[2];
         asm(
             "{\n\t"
-            ".reg .b16 lo, hi;\n\t"
-            "mov.b32 {lo, hi}, %2;\n\t"
-            "add.rn.f32.bf16 %0, lo, %3;\n\t"
-            "add.rn.f32.bf16 %1, hi, %4;\n\t"
+            ".reg .b64 c, d;\n\t"
+            "mov.b64 c, {%3, %4};\n\t"
+            "add.rn.f32x2.bf16x2.f32x2 d, %2, c;\n\t"
+            "mov.b64 {%0, %1}, d;\n\t"
             "}\n"
             : "=&f"(acc3_3[0]), "=&f"(acc3_3[1]) : "r"(words[15]), "f"(acc2_3[0]), "f"(acc2_3[1]));
         unsigned int mean_3 = __as_u32(__float22bfloat162_rn(make_float2(mul_f32_rn_noftz(acc3_3[0], 0.25f), mul_f32_rn_noftz(acc3_3[1], 0.25f))));

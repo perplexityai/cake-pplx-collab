@@ -130,4 +130,3 @@ checkpointed recompute, steady-state calls without host synchronization, and no 
 - Non-finite inputs (NaN, ±Inf) are outside the rule; their outputs are unspecified.
 - Forward only: no backward and no autograd entry.  A straight-through estimator is the caller's choice.
 - One call takes at most `8 * (2^31 - 256)` elements.
-- `sm_107a`: the libraries are built and served, and their validation on R200 is pending.
