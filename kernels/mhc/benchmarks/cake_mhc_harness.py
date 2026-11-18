@@ -59,6 +59,9 @@ The pre handoff (hidden 5120 only, ``rms_eps`` 1e-20, ``hc_eps`` 1e-6; not in th
   statistics, then ``dX``, ``dpre_in``, ``dfn``, ``dscale``, ``dbase`` from ``dY``, ``dU`` and ``dpre_next``); a
   non-Cake arm's backward of a recorded handoff forward;
 * ``hckpt``: the handoff forward, the handoff forward recomputed in full, the handoff backward;
+* ``hcfwd``: ``hfwd`` followed by the final collapse of its ``Y`` with its ``pre_next`` (Cake ``collapse_forward``,
+  which takes the per-call PDL attribute on its edge ``K4->C``: ``--collapse-pdl off`` turns it off in the process,
+  before any call, so that two runs measure the collapse with and without it);
 * ``cfwd`` / ``cbwd``: the standalone collapse ``U = BF16(sum_i pre_in_i X_i)`` and its VJP ``(dX, dpre_in)`` (Cake
   ``collapse_forward`` / ``collapse_backward``, no workspace).
 
@@ -159,6 +162,7 @@ OP_DEFINITIONS = {
     "hbwd": "pre handoff, one sublayer: Cake backward_prepare + handoff_backward_finish (dY, dU, dpre_next); "
             "non-Cake: the backward of a recorded handoff forward",
     "hckpt": "pre handoff, one sublayer: the handoff forward, the handoff forward recomputed in full, the backward",
+    "hcfwd": "pre handoff: the last sublayer's handoff forward, then the final collapse of its Y with its pre_next",
     "cfwd": "standalone collapse U = BF16(sum_i pre_in_i X_i): Cake collapse_forward; non-Cake: the collapse forward",
     "cbwd": "standalone collapse VJP (dX, dpre_in): Cake collapse_backward; non-Cake: the backward of a recorded "
             "collapse",
@@ -497,8 +501,8 @@ class CakeArm(base.Arm):
             hb(X, dY, dU, pre_in, dpn, B, fn, scale, bse, stats, b["G"], workspace=b["bws"], dX=b["dX"],
                dpre_in=b["dpre_in"], dfn=b["dfn"], dscale=b["dscale"], dbase=b["dbase"], **kw)
 
-        def collapse() -> None:
-            cf(X, pre_in, out=b["Uc"])
+        def collapse(X=X, pre=pre_in) -> None:
+            cf(X, pre, out=b["Uc"])
 
         def collapse_vjp() -> None:
             cb(X, pre_in, dU, dX=b["dXc"], dpre_in=b["dpre_c"])
@@ -524,6 +528,13 @@ class CakeArm(base.Arm):
         forward, backward, collapse, collapse_vjp = self._handoff_calls(i, b)
         if op == "hfwd":
             return lambda: forward(b["S"])
+        if op == "hcfwd":  # the last sublayer's forward, then the final collapse of its Y with its pre_next
+
+            def call() -> None:
+                forward(b["S"])
+                collapse(b["Y"], b["pre_next"])
+
+            return call
         if op == "hbwd":
             forward(b["S"])
 
@@ -940,6 +951,9 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     p.add_argument("--hidden", type=int, nargs="*", default=None)
     p.add_argument("--tokens", type=int, nargs="*", default=None)
     p.add_argument("--ops", default="fwd,bwd,ckpt", help="comma-separated: " + ", ".join(base.OPS))
+    p.add_argument("--collapse-pdl", default="on", choices=("on", "off"),
+                   help="the per-call PDL attribute of the standalone collapse (edge K4->C); off: turned off in both "
+                   "packages before any call")
     p.add_argument("--sinkhorn-iters", type=int, default=base.SINKHORN_ITERS,
                    help="Sinkhorn count of every arm and reference (default 20; 1..64 for the Cake packages)")
     p.add_argument("--det-runs", type=int, default=5,
@@ -968,6 +982,34 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     return p
 
 
+def collapse_pdl_off() -> dict:
+    """Turn the per-call PDL attribute of the standalone collapse (each package's ``PDL_EDGES`` stem ``*_collapse_fwd``)
+    off on every architecture and path, in every band table of both packages (module, per hidden size, override
+    cells; the launch plans cache the argument: call this before any call).  Returns the edges per package."""
+    done = {}
+    for mode in CAKE_MODES:
+        loader = importlib.import_module(f"cake_pplx._backends.cake_mhc_{mode}_train.cake_jit")
+        edges = sorted({edge for stem, edge in loader.PDL_EDGES.items() if stem.endswith("_collapse_fwd")})
+        off = {path: ((0, None),) for path in loader.PDL_PATHS}
+        tables = [loader.PDL_OFF_BANDS]
+        try:
+            per_size = loader._tab("PDL_OFF_BANDS", base.HANDOFF_HIDDEN)
+        except (AttributeError, KeyError):
+            per_size = None
+        if per_size is not None and per_size is not loader.PDL_OFF_BANDS:
+            tables.append(per_size)
+        for table in tables:
+            for arch in loader.ARCHES:
+                for edge in edges:
+                    table.setdefault(arch, {})[edge] = dict(off)
+        for cell in getattr(loader, "PDL_BAND_OVERRIDES", {}).values():
+            for edge in edges:
+                if edge in cell:
+                    cell[edge] = dict(off)
+        done[mode] = edges
+    return done
+
+
 def make_arms(names: list, args) -> list:
     arms: list = []
     for name in names:
@@ -992,6 +1034,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
     if "liger" in args.arms and "TRITON_F32_DEFAULT" not in os.environ:
         os.environ["TRITON_F32_DEFAULT"] = "tf32x3"
     base.set_ieee_fp32()
+    collapse_pdl = collapse_pdl_off() if args.collapse_pdl == "off" else None
     device = torch.device("cuda", torch.cuda.current_device())
     timer = Timer(device, args.timer, args.calls, args.dry)
     try:  # a timer that cannot record (e.g. a CUPTI too old for the device) fails the run here, not per arm
@@ -1015,6 +1058,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                      "statistic": "median of group medians of per-call CUPTI active time (us)",
                      "judge_draws": args.judge_draws, "judge_tokens": args.judge_tokens, "check": args.check,
                      "sinkhorn_iters": args.sinkhorn_iters, "det_runs": args.det_runs,
+                     "collapse_pdl": args.collapse_pdl, "collapse_pdl_off_edges": collapse_pdl,
                      "op_definitions": {op: OP_DEFINITIONS[op] for op in args.ops}},
         "comparisons": [{"name": n, "ops": list(o), "arm": a} for n, o, a in base.COMPARISONS],
         "arms": {a.name: a.describe() for a in arms},

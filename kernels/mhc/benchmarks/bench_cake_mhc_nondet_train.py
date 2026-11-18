@@ -28,8 +28,10 @@ Example::
 
     python benchmarks/bench_cake_mhc_nondet_train.py --json nondet.json
     python benchmarks/bench_cake_mhc_nondet_train.py --arms cake_nondet,cake_det --aa --judge-draws 0 --json ab.json
-    python benchmarks/bench_cake_mhc_nondet_train.py --shapes 5120x16384,5120x65536 --ops hfwd,hbwd,hckpt,cfwd,cbwd \
+    python benchmarks/bench_cake_mhc_nondet_train.py --shapes 5120x16384,5120x65536 --ops hfwd,hbwd,hckpt,hcfwd,cfwd,cbwd \
         --json handoff.json
+    python benchmarks/bench_cake_mhc_nondet_train.py --shapes 5120x16384,5120x65536 --ops hcfwd,cfwd --collapse-pdl off \
+        --json collapse-pdl-off.json
 """
 
 from __future__ import annotations

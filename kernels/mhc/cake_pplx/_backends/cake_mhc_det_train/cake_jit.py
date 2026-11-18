@@ -129,7 +129,8 @@ reads ``pre_in`` in place of the coefficient pass's ``pre`` and writes
 base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
 record; same grid, launch facts and selection); ``collapse_forward_h5120`` /
 ``collapse_backward_h5120`` are one record each (``collapse_fwd__h5120``,
-``collapse_bwd__h5120``: own library stems, no PDL attribute, no workspace).
+``collapse_bwd__h5120``: own library stems, no workspace; the forward takes the per-call
+PDL attribute on its own edge ``K4->C``, no band).
 """
 
 from __future__ import annotations
@@ -10475,6 +10476,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["buffer", "pre_in"],
             ["buffer", "u"],
             ["parameter", "T"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -10496,7 +10498,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cooperative": False,
             "dynamic_smem_bytes": 0,
             "persistent_ctas_per_sm": 1,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_mhc_det_train_collapse_fwd__h5120",
         "logical": {
@@ -13628,11 +13630,13 @@ def selected_modules(
 # elsewhere, and on every edge without a band, the attribute is on.
 
 PDL_PATHS = ("forward", "backward", "checkpoint")
-# Library stem -> the edge its records sit on (predecessor -> dependent).
+# Library stem -> the edge its records sit on (predecessor -> dependent).  ``K4->C``: the standalone collapse
+# (``collapse_fwd``, the pre handoff's final collapse) after the last sublayer's residual mixing; no band (on).
 PDL_EDGES = {
     "cake_mhc_det_train_bwd_prepare": "K1->K5",
     "cake_mhc_det_train_bwd_reduce": "K7->K8",
     "cake_mhc_det_train_bwd_slab": "K6->K7",
+    "cake_mhc_det_train_collapse_fwd": "K4->C",
     "cake_mhc_det_train_fwd_collapse": "K1->K3",
 }
 PDL_OFF_BANDS: dict[str, dict[str, dict[str, tuple[tuple[int, int], ...]]]] = {

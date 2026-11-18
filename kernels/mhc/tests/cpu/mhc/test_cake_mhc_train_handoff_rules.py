@@ -24,7 +24,8 @@ programs a standard call launches, with the same grids, PDL arguments and worksp
   ``bwd_token__<form>_ho`` twin (the base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
   record, before ``T``);
 * ``collapse_forward`` / ``collapse_backward`` are one record each (``collapse_fwd`` / ``collapse_bwd``) with their own
-  library stems, no workspace and no PDL attribute.
+  library stems and no workspace; the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on),
+  the VJP none.
 
 The routes exist at hidden 5120 on sm_100a and sm_103a; the nondeterministic records are the deterministic ones under
 the nondeterministic prefix.
@@ -136,8 +137,16 @@ def test_collapse_records(mode: str) -> None:
         *grid,
     ]
     assert REGISTRIES[mode].pdl_edge(pi_pn["library"]) == REGISTRIES[mode].pdl_edge(base["library"]) is not None
-    # the standalone collapse: own library stems (no PDL edge, no per-call attribute), no workspace
-    assert fwd["arg_plan"] == [["buffer", "x"], ["buffer", "pre_in"], ["buffer", "u"], ["parameter", "T"], *grid]
+    # the standalone collapse: own library stems, no workspace; the forward takes the per-call PDL attribute on its own
+    # edge K4->C (after the last sublayer's residual mixing, no band: on), the VJP none
+    assert fwd["arg_plan"] == [
+        ["buffer", "x"],
+        ["buffer", "pre_in"],
+        ["buffer", "u"],
+        ["parameter", "T"],
+        ["launch", "enable_pdl"],
+        *grid,
+    ]
     assert bwd["arg_plan"] == [
         ["buffer", "x"],
         ["buffer", "pre_in"],
@@ -148,9 +157,10 @@ def test_collapse_records(mode: str) -> None:
         *grid,
     ]
     assert (fwd["role"], bwd["role"]) == ("collapse_fwd", "collapse_bwd")
+    assert fwd["launch"]["use_pdl"] == "runtime" and bwd["launch"]["use_pdl"] is False
+    assert REGISTRIES[mode].pdl_edge(fwd["library"]) == "K4->C"
+    assert REGISTRIES[mode].pdl_edge(bwd["library"]) is None
     for rec in (fwd, bwd):
-        assert rec["launch"]["use_pdl"] is False
-        assert REGISTRIES[mode].pdl_edge(rec["library"]) is None
         assert rec["workspace_rule"] is None and rec["select_rule"] is None
         assert rec["launch"]["dynamic_smem_bytes"] == 0 and tuple(rec["launch"]["block"]) == (256, 1, 1)
     assert fwd["grid_rule"] == base["grid_rule"]

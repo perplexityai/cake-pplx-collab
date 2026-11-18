@@ -80,7 +80,9 @@ The pre handoff (operations ``hfwd``, ``hbwd``, ``hckpt``; hidden 5120, ``rms_ep
 ``hc_eps`` 1e-6) is one sublayer of DeepSeek-V4.1-Flash: the coefficients of ``X`` as above, the collapse with the
 incoming ``pre_in`` (``U = BF16(sum_i pre_in_i X_i)``) and ``pre`` handed on as ``pre_next``; its backward from
 ``dY``, ``dU`` and ``dpre_next`` (the gradient of ``pre_next``) adds ``dpre_in = sum_d dU_d X_id``
-(:func:`reference_handoff`).  The standalone collapse (``cfwd``, ``cbwd``) is ``U = BF16(sum_i pre_in_i X_i)`` and its
+(:func:`reference_handoff`); ``hcfwd`` is the last sublayer's handoff forward followed by the final collapse of its
+``Y`` with its ``pre_next`` (the sequence where the collapse's launch can overlap its predecessor).  The standalone
+collapse (``cfwd``, ``cbwd``) is ``U = BF16(sum_i pre_in_i X_i)`` and its
 VJP ``(dX, dpre_in)`` (:func:`reference_collapse`).  :func:`make_inputs` draws ``pre_in`` (``sigmoid(N(0, 1)) +
 1e-6``) and ``dpre_next`` (``sqrt(H) N(0, 1)``) after the standard inputs, which keep their values.  The autograd arms
 run the handoff as the same Python function with ``pre_in`` (``eager_fp32``, ``compile_*``) and Liger as its
@@ -127,7 +129,7 @@ PER_TOKEN_OUTPUTS = ("U", "Y", "dX", "dB")
 PARAMETER_OUTPUTS = ("dfn", "dscale", "dbase")
 STANDARD_OPS = ("fwd", "bwd", "ckpt", "ckpt_stats", "bwd_acc")
 #: The pre-handoff operations (one sublayer) and the standalone collapse (hidden :data:`HANDOFF_HIDDEN`).
-HANDOFF_OPS = ("hfwd", "hbwd", "hckpt")
+HANDOFF_OPS = ("hfwd", "hbwd", "hckpt", "hcfwd")
 COLLAPSE_OPS = ("cfwd", "cbwd")
 OPS = STANDARD_OPS + HANDOFF_OPS + COLLAPSE_OPS
 HANDOFF_HIDDEN = 5120
@@ -165,6 +167,8 @@ COMPARISONS = (
     ("hbwd-liger", ("hbwd",), "liger"),
     ("hckpt", ("hckpt",), "compile_max_autotune"),
     ("hckpt-liger", ("hckpt",), "liger"),
+    ("hcfwd", ("hcfwd",), "compile_max_autotune"),
+    ("hcfwd-liger", ("hcfwd",), "liger"),
     ("cfwd", ("cfwd",), "compile_max_autotune"),
     ("cfwd-liger", ("cfwd",), "liger"),
     ("cbwd", ("cbwd",), "compile_max_autotune"),
@@ -640,7 +644,7 @@ class AutogradArm(Arm):
         return out
 
     def _make_handoff(self, i: dict, op: str) -> Callable[[], None]:
-        """The handoff (``hfwd``, ``hbwd``, ``hckpt``) and collapse (``cfwd``, ``cbwd``) operations."""
+        """The handoff (``hfwd``, ``hbwd``, ``hckpt``, ``hcfwd``) and collapse (``cfwd``, ``cbwd``) operations."""
         leaves = self.leaves(i)
         pre_in = i["pre_in"].detach().requires_grad_(True)
         X = leaves[0]
@@ -653,6 +657,13 @@ class AutogradArm(Arm):
 
         if op == "hfwd":
             return lambda: self.forward_handoff(leaves, pre_in, iters)
+        if op == "hcfwd":
+
+            def call() -> None:
+                _U, Y, pre_next = self.forward_handoff(leaves, pre_in, iters)
+                self.forward_collapse(Y, pre_next)
+
+            return call
         if op == "hbwd":
             outs = self.forward_handoff(leaves, pre_in, iters)
 
