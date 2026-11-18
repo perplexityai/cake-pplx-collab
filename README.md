@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 17 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 18 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -15,6 +15,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | gdn | `cake-pplx-gdn` | `cake_gdn_{det,nondet}_train[_kcp]` | Gated DeltaNet chunked gated delta rule | [API](docs/API.md#gdn) |
 | mhc | `cake-pplx-mhc` | `cake_mhc_{det,nondet}_train` | Four-stream mHC hyper-connection layer | [API](docs/API.md#mhc) |
 | mhc_head | `cake-pplx-mhc-head` | `cake_mhc_head_{det,nondet}_train` | Stream mean at the mHC model head | [API](docs/API.md#mhc_head) |
+| engram_gate | `cake-pplx-engram-gate` | `cake_engram_gate_{det,nondet}_train` | Four-stream Engram context gate, width 5120 | [API](docs/API.md#engram_gate) |
 | gqa | `cake-pplx-gqa` | `cake_gqa_{det,nondet}_train` | Packed-varlen causal GQA attention, head dim 256 | [API](docs/API.md#gqa) |
 | fmha | `cake-pplx-fmha` | `cake_fmha_nondet_train` | Dense multi-head attention, head dim 64/128 (backward only) | [API](docs/API.md#fmha) |
 | dsa_indexer | `cake-pplx-dsa-indexer` | `cake_dsa_indexer_{det,nondet}_train` | DSA indexer scores + exact top-k (forward only) | [API](docs/API.md#dsa_indexer) |
@@ -70,7 +71,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head, moe_grouped_gemm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head, moe_grouped_gemm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
