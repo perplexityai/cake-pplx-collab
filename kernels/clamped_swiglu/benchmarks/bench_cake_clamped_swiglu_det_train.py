@@ -30,9 +30,10 @@ Arms (``--arms``; default: every arm):
 * ``eager``: the same formulas in eager PyTorch.
 * ``cudnn``: a cuDNN frontend pointwise graph (``min``, ``max``, ``swish``, ``mul``; FP32 compute, BF16 output) for
   the forward.  For the backward the benchmark first builds one graph (pointwise ``d_gate`` / ``d_up`` with the masks
-  as ``binary_select``, and with a route weight the per-row ``reduction`` (ADD) of ``d_weight``), then, if a weighted
-  one is refused, a pointwise graph for ``d_gate`` / ``d_up`` plus a pointwise + ``reduction`` graph for ``d_weight``
-  (a composite that reads the inputs twice).  A stage no graph builds prints as unavailable with the error.
+  as ``binary_select`` on BOOLEAN comparisons, and with a route weight the per-row ``reduction`` (ADD) of
+  ``d_weight``), then, if a weighted one is refused, a pointwise graph for ``d_gate`` / ``d_up`` plus a pointwise +
+  ``reduction`` graph for ``d_weight`` (a composite that reads the inputs twice).  A stage no graph builds prints as
+  unavailable with the error.
 
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor and one
@@ -437,6 +438,9 @@ class CudnnGraphs:
             .set_stride([R * row_stride, row_stride, 1])
         )
 
+    def _mask(self, value) -> Any:
+        return value.set_data_type(self.c.data_type.BOOLEAN)
+
     def _clamped(self, g, t):
         gc = g.min(t["gate"], t["L"])
         uc = g.max(g.min(t["up"], t["L"]), t["negL"])
@@ -459,9 +463,15 @@ class CudnnGraphs:
                 out_stride = 2 * I if self.x.second is None else I
                 dws = g.mul(t["dh"], t["w"]) if self.weighted else t["dh"]
                 dsilu = g.add(g.mul(silu, g.sub(t["one"], s)), s)
-                d_gate = g.binary_select(g.mul(g.mul(dws, uc), dsilu), t["zero"], g.cmp_le(t["gate"], t["L"]))
-                in_range = g.logical_and(g.cmp_ge(t["up"], t["negL"]), g.cmp_le(t["up"], t["L"]))
-                d_up = g.binary_select(g.mul(dws, silu), t["zero"], in_range)
+                # binary_select takes a BOOLEAN mask; the graph's FP32 intermediate type would otherwise apply to it
+                # (CUDNN_STATUS_NOT_SUPPORTED_DATA_TYPE).  The up mask is two nested selects, one per bound.
+                gate_in = self._mask(g.cmp_le(t["gate"], t["L"]))
+                d_gate = g.binary_select(g.mul(g.mul(dws, uc), dsilu), t["zero"], gate_in)
+                d_up = g.binary_select(
+                    g.binary_select(g.mul(dws, silu), t["zero"], self._mask(g.cmp_le(t["up"], t["L"]))),
+                    t["zero"],
+                    self._mask(g.cmp_ge(t["up"], t["negL"])),
+                )
                 found["d_gate"] = self._bf16_output(d_gate, out_stride)
                 found["d_up"] = self._bf16_output(d_up, out_stride)
             if reduce:
