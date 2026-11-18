@@ -634,7 +634,8 @@ def test_autograd_backward_alerts_once_deterministic_algorithms_are_enabled(
     deterministic autograd function, immediately before the launch of the
     fused backward, whose weight-gradient sum's order depends on scheduling;
     under ``warn_only=True`` it warns and runs it.  A node there whose weight
-    needs no gradient, and a node in the first rows of every other band of a
+    needs no gradient (which runs the band's program without the weight
+    gradient, ``nodw_module``), and a node in the first rows of every other band of a
     BF16 weight gradient on this device whose module repeats its bits
     (``suite._varies``: the small-row bands of ``BAND_ROLES``, the short
     backward on every architecture and the exact tiny backward on sm_100a
@@ -714,7 +715,12 @@ def test_autograd_backward_alerts_once_deterministic_algorithms_are_enabled(
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             y.backward(torch.ones_like(y))
-        assert launched == [module(shape)], (shape, weight_grad, launched)
+        want = module(shape)
+        if not weight_grad:
+            # the band's program without the weight gradient
+            rows = shape[0] * shape[1]
+            want = loader.nodw_module(arch, want, rows, _sm_count())
+        assert launched == [want], (shape, weight_grad, launched)
 
 
 @requires_device

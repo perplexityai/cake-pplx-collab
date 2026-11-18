@@ -894,40 +894,27 @@ kernel_cake_dense_projection_det_gemm_3e221c28200b2919b600(const __grid_constant
                         }
                     }
                     if (role == 1) {
-                        if (part_4 == 0) {
-                            unsigned long long row_base_1 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row;
-                            if (global_row < M) {
-                                #pragma unroll
-                                for (int j_1 = 0; j_1 < 64; j_1++) {
-                                    int n_idx_1 = off_n_1 + col0 + j_1;
-                                    if (n_idx_1 < N) {
-                                        out[row_base_1 + (unsigned long long)n_idx_1 * (unsigned long long)ldo] = (__nv_bfloat16)_tmem_load_0[j_1];
-                                    }
+                        int slice_id = cta_rank * 8 + (warp - 2);
+                        unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 2048ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
+                        unsigned long long off_0 = off;
+                        int nvalid = N - (off_n_1 + col0);
+                        if (nvalid >= 64) {
+                            #pragma unroll
+                            for (int j_1 = 0; j_1 < 16; j_1++) {
+                                {
+                                    float4 _v4 = make_float4(_tmem_load_0[j_1 * 4 + 0], _tmem_load_0[j_1 * 4 + 1], _tmem_load_0[j_1 * 4 + 2], _tmem_load_0[j_1 * 4 + 3]);
+                                    *reinterpret_cast<float4*>((ws + (off_0 + (unsigned long long)(j_1 * 128))) + 0) = _v4;
                                 }
                             }
                         } else {
-                            int slice_id = cta_rank * 8 + (warp - 2);
-                            unsigned long long off = (unsigned long long)(slab * 16 + slice_id) * 2048ull + (unsigned long long)((col0 - slice_col0) * 32 + lane * 4);
-                            unsigned long long off_0 = off;
-                            int nvalid = N - (off_n_1 + col0);
-                            if (nvalid >= 64) {
-                                #pragma unroll
-                                for (int j_2 = 0; j_2 < 16; j_2++) {
-                                    {
-                                        float4 _v4 = make_float4(_tmem_load_0[j_2 * 4 + 0], _tmem_load_0[j_2 * 4 + 1], _tmem_load_0[j_2 * 4 + 2], _tmem_load_0[j_2 * 4 + 3]);
-                                        *reinterpret_cast<float4*>((ws + (off_0 + (unsigned long long)(j_2 * 128))) + 0) = _v4;
-                                    }
-                                }
-                            } else {
-                                #pragma unroll
-                                for (int g = 0; g < 4; g++) {
-                                    if (nvalid > g * 16) {
-                                        #pragma unroll
-                                        for (int q = 0; q < 4; q++) {
-                                            {
-                                                float4 _v4 = make_float4(_tmem_load_0[(g * 4 + q) * 4 + 0], _tmem_load_0[(g * 4 + q) * 4 + 1], _tmem_load_0[(g * 4 + q) * 4 + 2], _tmem_load_0[(g * 4 + q) * 4 + 3]);
-                                                *reinterpret_cast<float4*>((ws + (off_0 + (unsigned long long)((g * 4 + q) * 128))) + 0) = _v4;
-                                            }
+                            #pragma unroll
+                            for (int g = 0; g < 4; g++) {
+                                if (nvalid > g * 16) {
+                                    #pragma unroll
+                                    for (int q = 0; q < 4; q++) {
+                                        {
+                                            float4 _v4 = make_float4(_tmem_load_0[(g * 4 + q) * 4 + 0], _tmem_load_0[(g * 4 + q) * 4 + 1], _tmem_load_0[(g * 4 + q) * 4 + 2], _tmem_load_0[(g * 4 + q) * 4 + 3]);
+                                            *reinterpret_cast<float4*>((ws + (off_0 + (unsigned long long)((g * 4 + q) * 128))) + 0) = _v4;
                                         }
                                     }
                                 }
@@ -951,10 +938,10 @@ kernel_cake_dense_projection_det_gemm_3e221c28200b2919b600(const __grid_constant
                         int nvalid_1 = N - (off_n_1 + col0);
                         if (nvalid_1 >= 64) {
                             #pragma unroll
-                            for (int j_3 = 0; j_3 < 16; j_3++) {
+                            for (int j_2 = 0; j_2 < 16; j_2++) {
                                 float vec_load[4];
                                 {
-                                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (off_0_1 + (unsigned long long)(j_3 * 128)) + 0);
+                                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (off_0_1 + (unsigned long long)(j_2 * 128)) + 0);
                                     vec_load[0 + 0] = _v4.x;
                                     vec_load[0 + 1] = _v4.y;
                                     vec_load[0 + 2] = _v4.z;
@@ -962,7 +949,7 @@ kernel_cake_dense_projection_det_gemm_3e221c28200b2919b600(const __grid_constant
                                 }
                                 #pragma unroll
                                 for (int i = 0; i < 4; i++) {
-                                    _tmem_load_0[j_3 * 4 + i] = _tmem_load_0[j_3 * 4 + i] + vec_load[i];
+                                    _tmem_load_0[j_2 * 4 + i] = _tmem_load_0[j_2 * 4 + i] + vec_load[i];
                                 }
                             }
                         } else {
@@ -987,13 +974,13 @@ kernel_cake_dense_projection_det_gemm_3e221c28200b2919b600(const __grid_constant
                                 }
                             }
                         }
-                        unsigned long long row_base_2 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row;
+                        unsigned long long row_base_1 = (unsigned long long)bidx * (unsigned long long)out_l + (unsigned long long)global_row;
                         if (global_row < M) {
                             #pragma unroll
-                            for (int j_4 = 0; j_4 < 64; j_4++) {
-                                int n_idx_2 = off_n_1 + col0 + j_4;
-                                if (n_idx_2 < N) {
-                                    out[row_base_2 + (unsigned long long)n_idx_2 * (unsigned long long)ldo] = (__nv_bfloat16)_tmem_load_0[j_4];
+                            for (int j_3 = 0; j_3 < 64; j_3++) {
+                                int n_idx_1 = off_n_1 + col0 + j_3;
+                                if (n_idx_1 < N) {
+                                    out[row_base_1 + (unsigned long long)n_idx_1 * (unsigned long long)ldo] = (__nv_bfloat16)_tmem_load_0[j_3];
                                 }
                             }
                         }

@@ -106,15 +106,24 @@ Host design (the knobs are keywords; no environment variable):
   so a kernel on another stream that keeps one SM's shared memory does not
   push the top CTAs, each with a whole token stream, into a second wave.
   ``dx`` keeps its bits (the partition is read from ``gridDim.x``, as above).
-- The forward workspace (int32 token-chunk counters) follows the det
-  package's rules.
+- The forward plans its channel tiles by the det package's forward rule
+  (its route, ``S`` and the architecture: ``cake_jit.channel_split``) from
+  the row's token floor (``cake_jit.forward_narrow_min_s``: the
+  architecture's ``FORWARD_NARROW_MIN_S`` floor, or the
+  ``FORWARD_NARROW_ROW_MIN_S`` floor of the rows from a channel-vector
+  count upward: 20480 for C = 712 to 768 on sm_103a), so C = 576 to 768 run
+  the det forward's narrow tiles from that floor; below it (and on an
+  architecture without one) they keep 0.2.0's single tile.  The forward
+  workspace (int32 token-chunk counters) follows the det package's rules
+  and size, which cover every plan.
 - Host plan: the first call of a row (architecture, route, ``C``, device,
   ``bwd_grid_mult``) selects its program, splits ``C`` into channel tiles,
-  reads the row's ``TILE_OVERRIDES`` or ``NARROW_TILES`` entry and sizes the
-  grid (``cake_jit.plan_row``); later calls of the row only compare ``S`` with
-  the entry's token range (and size the grid where ``launch_grid`` trims it
-  by ``S``), so they launch the values a per-call plan gives.  A row whose
-  program selection reads ``S`` plans every call.
+  reads the row's ``TILE_OVERRIDES`` or ``NARROW_TILES`` entry (the forward:
+  its ``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS`` token floors)
+  and sizes the grid (``cake_jit.plan_row``); later calls of the row only
+  compare ``S`` with the entry's token ranges (and size the grid where
+  ``launch_grid`` trims it by ``S``), so they launch the values a per-call
+  plan gives.  A row whose program selection reads ``S`` plans every call.
   :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
 """
 
@@ -202,9 +211,9 @@ _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # The host plan of each call row, planned by the row's first call: ``(arch, route kind, C, device index,
 # bwd_grid_mult) -> (cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the backward's accumulator
 # layout})``.  Selecting the route's program, splitting C into channel tiles, looking up the TILE_OVERRIDES /
-# NARROW_TILES row and sizing the grid cost several us of host time in front of every launch; with the row's plan a
-# call only compares ``S`` with the row's token range (``cake_jit.row_launch``).  A row whose program selection reads
-# ``S`` (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then
+# NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host time in front of every
+# launch; with the row's plan a call only compares ``S`` with the row's token ranges (``cake_jit.row_launch``).  A row
+# whose program selection reads ``S`` (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then
 # emptied); :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry
 # tables, the SM count or the architecture a device reports, which the rows were planned from).
 _ROW_PLANS: dict[tuple, tuple[Optional[_loader.RowPlan], dict]] = {}
@@ -560,10 +569,11 @@ def _launch(
     unwritten.  The caller launches this grid, so a call plans it once.  A
     backward ``bwd_grid_mult`` above 1 launches that many times the record's
     untrimmed grid (``launch_grid`` without the row), never trimmed to whole
-    channel-tile ranks; the scalars do not depend on the grid.  A backward
-    record's plan takes the device's architecture ``arch`` and the record's
-    route, so a row of ``cake_jit.TILE_OVERRIDES`` or ``cake_jit.NARROW_TILES``
-    runs its narrower channel tiles.  At ``bwd_grid_mult`` 1 the grid is
+    channel-tile ranks; the scalars do not depend on the grid.  A record's
+    plan takes the device's architecture ``arch`` and the record's route, so a
+    backward row of ``cake_jit.TILE_OVERRIDES`` or ``cake_jit.NARROW_TILES``
+    and a forward narrow row (``cake_jit.channel_split``) run their narrower
+    channel tiles.  At ``bwd_grid_mult`` 1 the grid is
     :func:`_one_sm_trim` of the row's ``launch_grid``.
     """
 
@@ -703,7 +713,8 @@ def _call_plan(
 def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
-    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, the grid-trim tables), its
+    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, the forward's
+    ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its
     ``sm_count`` or ``device_arch``."""
 
     n = len(_ROW_PLANS)

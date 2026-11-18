@@ -98,8 +98,13 @@ a piece whose gates decay below the bound keeps only the chunks before it and
 copies ``B``), the stitch composing every other piece's end adjoint and their
 walks, all on a side stream (or every launch on the caller's stream where the
 host's fork and join would cost more than the overlap buys, or with
-``streams=1``).  The plan and its price do not depend on the gates; the time of
-the maps does.
+``streams=1``).  Where :func:`adjoint_split_pricing` puts wave 1 on the
+caller's stream (``one_stream``; ``streams=1`` does not enter this rule) and
+the pieces do not fit one wave, a device of ``ONE_WAVE_TABLE_DEVICES`` takes
+the longer pieces of :func:`bwd_one_wave_table`, at which every piece of every
+value head fits one wave, where they price no higher, and walks every piece
+once after the summaries and the stitch.  The plan and its price do not depend
+on the gates; the time of the maps does.
 
 Every launch is a record of :mod:`.cake_jit` selected by its stage and the
 device's architecture (:func:`.cake_backend.launch_stage`); the stages a plan
@@ -127,13 +132,14 @@ nothing here reads an environment variable.
 from __future__ import annotations
 
 import math
+import threading
 import warnings
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import cache, lru_cache
-from operator import itemgetter
+from operator import is_, itemgetter
 from types import CodeType, FunctionType, MappingProxyType
 from typing import Any, cast
 
@@ -165,7 +171,9 @@ __all__ = [
     "adjoint_split_lists",
     "adjoint_split_pricing",
     "adjoint_split_tables",
+    "bwd_one_wave_table",
     "bwd_piece_table",
+    "ONE_WAVE_TABLE_DEVICES",
     "CHAIN_PLAN",
     "FWD_HO_VH2_ARCHS",
     "FWD_HO_VH2_STEP",
@@ -459,8 +467,8 @@ class ChainOptions:
     grid (chunks, H), where q and k are 16-byte aligned; ``None``: the dispatch rule); ``save_state`` keeps the
     forward state of the architecture's tape level for the backward (``T_full``: ``w`` / ``h`` / ``v_new``,
     :data:`cake_plan.TAPE_LEVELS`; else they are recomputed); ``host_cache`` keeps the
-    chunk tables, the selection results, the per-stream workspaces and the backward's launch record
-    (:class:`_BackwardPlan`) between calls; ``lpt`` dispatches the
+    chunk tables, the selection results, the per-stream workspaces and the forward's and the backward's launch
+    records (:class:`_ForwardPlan`, :class:`_BackwardPlan`) between calls; ``lpt`` dispatches the
     sequences of a host-built table longest first (the same bits; ``False``: the caller's order); ``streams`` is
     ``2`` to let a host-built table's serial scans run as two sequence groups on the caller's stream and a side stream
     where their rule (:func:`two_stream_split`) fills the last round (the same bits), ``1`` to keep every launch on
@@ -1532,7 +1540,8 @@ class Workspaces:
             or tuple(buffer.shape[1:]) != tuple(row_shape)
         ):
             if buffer is not None:
-                _BWD_PLANS.clear()  # no backward plan keeps a buffer the pool let go
+                # no recorded plan keeps a buffer the pool let go
+                _clear_plans()
             buffer = buffers[role] = _zeros((rows, *row_shape), dtype, device)
         return buffer[:rows]
 
@@ -1547,7 +1556,8 @@ class Workspaces:
             buffer = buffers[key] = torch.empty(shape, dtype=dtype, device=device)
             if len(buffers) > WORKSPACE_SHAPES_PER_ROLE:
                 del buffers[next(iter(buffers))]
-                _BWD_PLANS.clear()  # no backward plan keeps a buffer the pool let go
+                # no recorded plan keeps a buffer the pool let go
+                _clear_plans()
         return buffer
 
 
@@ -2167,7 +2177,8 @@ def split_r_form(
 # the one-wave split of the adjoint walk (exact, independent of the gates)
 # --------------------------------------------------------------------------- #
 # On the architectures of ADJOINT_SPLIT_ARCHS a host-built table splits each long sequence's adjoint walk into pieces
-# of at most ``L`` chunks (:func:`bwd_piece_table`, the bounds of :func:`segment_bounds`) and runs it with the
+# of at most ``L`` chunks (:func:`bwd_piece_table`, or :func:`bwd_one_wave_table` on a one-stream wave 1 of a device of
+# ONE_WAVE_TABLE_DEVICES; the bounds of :func:`segment_bounds`) and runs it with the
 # ``dhu_tc2_dvl32`` forms.  The caller's stream: ``dhu_tc2_dvl32_modes`` walks each sequence's last piece from ``dht``
 # with its tapes.  A side stream: ``dhu_tc2_dvl32_gm`` walks the affine map ``[B | M]`` of every piece but each
 # sequence's first (``B`` from zero, ``M`` from the identity) under its warm-up bound (mode SPLIT_WARM, the register
@@ -2204,6 +2215,18 @@ M_SHARE_ONE_LAUNCH = False
 # fits one wave that overlap buys no device time (the summaries take at least as long), while the fork, the stream
 # switches and the join hold the device idle on the host.  The same kernels and bits as the two-stream route.
 ONE_WAVE_SPLIT_ARCHS: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
+# The one-wave table of a one-stream wave 1, by (architecture, SM count): where wave 1 runs on the caller's stream
+# (:func:`adjoint_split_pricing`'s ``one_stream``) its summaries, last pieces' walks, stitch and other pieces' walks run
+# in series, two walks of about ``L`` chunks.  Where the pieces of :func:`bwd_piece_table` do not fit one wave, a device
+# of ONE_WAVE_TABLE_DEVICES takes the longer pieces of :func:`bwd_one_wave_table`, at which every piece of every value
+# head fits one wave (``one_wave_len``), and the one-wave route above (one walk of every piece), where that prices no
+# higher than the series and the table it builds fits one wave.  Measured on the two 152-SM Grace-host boards: GB300
+# at the group-of-three pair rows of HV 3 and 6, GB200 at HV 6 (its HV 3 rows take the form of
+# cake_plan.ADJOINT_FORMS).  Elsewhere the piece table stays (B200 and R200 run no wave 1 on one stream; B300 is not
+# measured).
+ONE_WAVE_TABLE_DEVICES: frozenset[tuple[str, int]] = frozenset(
+    {("sm_100a", 152), ("sm_103a", 152)}
+)
 # the mode bits of an entry of the forms (``seg_mode``): seed the walk from ``dht`` (row of the segment, or of its
 # sequence with SPLIT_SEED_SEQ), write the dh / dv2 tapes, store the adjoint at the segment's start into the B half of
 # ``seg_state`` (the stitch's layout), bound a summary (``dhu_tc2_dvl32_gm``) by the warm-up and write its seg_flag
@@ -2281,8 +2304,33 @@ def bwd_piece_table(chunks, num_v_heads: int, sm_count: int) -> int | None:
     piece its whole walk); the second wave, ``sum_d (P_d - 1) * HV`` CTAs, fits too.  ``None`` where no ``L`` splits a
     sequence (more sequences x value heads than SMs, or every sequence one piece at the smallest fitting ``L``).
     Depends on the shapes, ``HV`` and the SM count alone: the piece table the forward and the backward share
-    (:func:`cake_plan.piece_length`)."""
+    (:func:`cake_plan.piece_length`), except on the one-stream rows where :func:`bwd_one_wave_table` applies
+    (:data:`ONE_WAVE_TABLE_DEVICES`)."""
     return cake_plan.piece_length(chunks, num_v_heads, sm_count)
+
+
+def bwd_one_wave_table(chunks, num_v_heads: int, sm_count: int) -> int | None:
+    """The piece length ``L`` (chunks) at which every piece of every value head fits one wave: the smallest ``L`` with
+    ``sum_d max(ceil(n_d / L), 1) * HV <= sm_count`` (an empty sequence is one piece, as :func:`segment_bounds` builds
+    it).  ``None`` where no ``L`` splits a sequence (more sequences x value heads than SMs, or every sequence one piece
+    at the smallest fitting ``L``).  The backward's alone (:data:`ONE_WAVE_TABLE_DEVICES`)."""
+    chunks = [int(n) for n in chunks]
+    hv, sms = int(num_v_heads), int(sm_count)
+    if not chunks or hv <= 0 or len(chunks) * hv > sms or max(chunks) < 2:
+        return None
+
+    def ctas(length: int) -> int:
+        # len(segment_bounds(n, length)) - 1 pieces per sequence
+        return sum(max(-(-n // length), 1) for n in chunks) * hv
+
+    lo, hi = 1, max(chunks)  # ctas(max(chunks)) = N x HV fits
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if ctas(mid) <= sms:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo if max(chunks) > lo else None
 
 
 def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) -> dict:
@@ -2291,7 +2339,12 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
     the walk's step, its longest middle piece at the summary's), the stitch over the most pieces of a sequence, wave 2
     (its longest other piece) and its fixed cost; the serial table pays its longest sequence at the step of its fill.
     ``select`` where the split is cheaper; ``segment_len`` is ``L`` (0 without a split); ``one_stream`` where wave 1
-    runs on the caller's stream: it has summaries and the shorter of its two launches is at most the ``fork`` cost."""
+    runs on the caller's stream: it has summaries and the shorter of its two launches is at most the ``fork`` cost.
+    Where wave 1 runs on one stream and the pieces do not fit one wave, ``one_stream_us`` prices that route (the
+    summaries of every piece but each sequence's first, the last pieces' walks, the stitch and the other pieces' walks
+    in series) and ``one_wave_us`` the one-wave route on the pieces of :func:`bwd_one_wave_table` (the summaries of
+    every piece but each sequence's first, the stitch and one walk of every piece); ``one_wave_len`` is that table's
+    ``L`` where it prices no higher (0 elsewhere).  The other keys do not depend on these."""
     chunks = tuple(int(n) for n in chunks)
     hv, sms = int(num_v_heads), int(sm_count)
     out: dict[str, Any] = {
@@ -2300,6 +2353,9 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
         "split_us": None,
         "serial_us": None,
         "one_stream": False,
+        "one_wave_len": 0,
+        "one_wave_us": None,
+        "one_stream_us": None,
     }
     costs = adjoint_split_costs(arch, sms)
     if costs is None or not chunks:
@@ -2311,17 +2367,19 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
     length = bwd_piece_table(chunks, hv, sms)
     if length is None:
         return out
-    last = middle = front = 0
+    last = middle = front = summary = count = 0
     pieces = 1
     for n in chunks:
         bounds = segment_bounds(n, length)
         lens = [b - a for a, b in zip(bounds[:-1], bounds[1:], strict=True)]
         pieces = max(pieces, len(lens))
+        count += len(lens)
         last = max(last, lens[-1])
         if len(lens) > 2:
             middle = max(middle, max(lens[1:-1]))
         if len(lens) > 1:
             front = max(front, max(lens[:-1]))
+            summary = max(summary, max(lens[1:]))
     split = (
         max(last * costs["walk"], middle * costs["summary"])
         + costs["stitch"]
@@ -2338,6 +2396,40 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
         split_us=split,
         one_stream=one_stream,
     )
+    length1 = (
+        bwd_one_wave_table(chunks, hv, sms) if one_stream and count * hv > sms else None
+    )
+    if length1 is not None:
+        # wave 1 on one stream runs its summaries, the last pieces' walks, the stitch and the other walks in series;
+        # the one-wave route runs the summaries, the stitch and one walk of every piece (every piece fits one wave);
+        # both price the summary launch at its longest piece, every piece of a split sequence but its first
+        series = (
+            summary * costs["summary"]
+            + last * costs["walk"]
+            + costs["stitch"]
+            + costs["stitch_piece"] * (pieces - 1)
+            + front * costs["walk"]
+            + costs["fixed"]
+        )
+        pieces1 = summary1 = walk1 = 0
+        for n in chunks:
+            bounds = segment_bounds(n, length1)
+            lens = [b - a for a, b in zip(bounds[:-1], bounds[1:], strict=True)]
+            pieces1, walk1 = max(pieces1, len(lens)), max(walk1, max(lens))
+            if len(lens) > 1:
+                summary1 = max(summary1, max(lens[1:]))
+        wave = (
+            summary1 * costs["summary"]
+            + costs["stitch"]
+            + costs["stitch_piece"] * (pieces1 - 1)
+            + walk1 * costs["walk"]
+            + costs["fixed"]
+        )
+        out.update(
+            one_stream_us=series,
+            one_wave_us=wave,
+            one_wave_len=length1 if wave <= series else 0,
+        )
     return out
 
 
@@ -2375,7 +2467,9 @@ def _adjoint_split_length(
     """``L`` of the one-wave split a host layout takes on device ``device_index``, ``None`` for the other plans: the
     device's architecture in ``ADJOINT_SPLIT_ARCHS`` with the forms and a chain stage delivered, no plan or ``dhu_scan``
     pin, no form of :data:`cake_plan.ADJOINT_FORMS` for the call (value-head group ``group``), and
-    :func:`adjoint_split_pricing` selecting it."""
+    :func:`adjoint_split_pricing` selecting it.  ``L`` is the pricing's ``segment_len``, or its ``one_wave_len`` on a
+    device of ``ONE_WAVE_TABLE_DEVICES`` whose architecture runs the one-wave route (``ONE_WAVE_SPLIT_ARCHS``, the
+    stitch) where the table built at that length fits one wave."""
     index = int(device_index)
     arch = cake_backend.device_arch(index)
     if (
@@ -2390,7 +2484,21 @@ def _adjoint_split_length(
     if _adjoint_chain_stage(arch) is None:
         return None
     priced = _adjoint_split_priced(seq_lens, num_v_heads, index, arch)
-    return int(priced["segment_len"]) if priced["select"] else None
+    if not priced["select"]:
+        return None
+    length1 = int(priced["one_wave_len"])
+    sm_count = _device_props(index)[0]
+    if (
+        length1
+        and (arch, sm_count) in ONE_WAVE_TABLE_DEVICES
+        and arch in ONE_WAVE_SPLIT_ARCHS
+        and _adjoint_chain_stage(arch) == "stitch"
+    ):
+        # the table _host_adjoint_split builds at length1 fits one wave, so it runs the one-wave route
+        pieces = sum(len(segment_bounds(n, length1)) - 1 for n in cake_plan.chunk_counts(seq_lens))  # fmt: skip
+        if pieces * int(num_v_heads) <= sm_count:
+            return length1
+    return int(priced["segment_len"])
 
 
 def _adjoint_split_priced(
@@ -2694,6 +2802,13 @@ def _aligned_rows(t: torch.Tensor) -> torch.Tensor:
     return _dense(t, torch.empty(t.shape, dtype=t.dtype, device=t.device))
 
 
+def _float_rows(t: torch.Tensor) -> torch.Tensor:
+    """:func:`_aligned_rows` of ``t`` as float32: ``t`` itself where it is contiguous float32 at a 16-byte aligned
+    base, else a new tensor (the copy that a cast reads is freed inside the call, as on the general path)."""
+    rows = _aligned_rows(t)
+    return rows if rows.dtype == torch.float32 else rows.float()
+
+
 def _row_stride(t: torch.Tensor) -> int:
     """The token-row stride in elements of a ``[..., T, heads, 128]`` tensor that a kernel addresses through that
     stride (its pointer declared strided, its binding checks no layout): a unit channel stride, head stride 128, rows
@@ -2739,20 +2854,22 @@ def _v_rows(v: torch.Tensor) -> int | None:
 
 
 def _prep_inputs(
-    q, k, num_chunks: int, num_heads: int, arch: str, options: ChainOptions
+    q, k, num_chunks: int, num_heads: int, arch: str, options: ChainOptions, ex=None
 ):
     """``(q, k, prep)``: the q / k the prep reads and its stage.  Strided views that ``prep_tma`` reads in place stay
     views when it runs (:data:`VIEWS_TAKE_PREP_TMA`: without the rule; a ``prep`` pin still decides); otherwise q / k
     become contiguous rows (:func:`_dense`; a fresh copy when the base is off :data:`PLAIN_PREP_ALIGN_BYTES`) and
-    :func:`_prep_stage` picks the stage, as for contiguous inputs."""
+    :func:`_prep_stage` picks the stage, as for contiguous inputs.  ``ex``: the forward's executor (:data:`_DIRECT`
+    when ``None``), which makes the copies."""
     if not (q.is_contiguous() and k.is_contiguous()) and _tma_rows(q) and _tma_rows(k):
         prep = _prep_stage(
             q, k, num_chunks, num_heads, arch, options, views=VIEWS_TAKE_PREP_TMA
         )
         if prep == "prep_tma":
             return q, k, prep
+    ex = ex or _DIRECT
     q, k = (
-        _aligned_rows(t) if t.data_ptr() % PLAIN_PREP_ALIGN_BYTES else _dense(t)
+        ex.rows(_aligned_rows if t.data_ptr() % PLAIN_PREP_ALIGN_BYTES else _dense, t)
         for t in (q, k)
     )
     return q, k, _prep_stage(q, k, num_chunks, num_heads, arch, options)
@@ -2997,16 +3114,19 @@ def _launch_wy(
     v_rows,
     out=None,
     deferred=None,
+    ex=None,
 ):
     """``v_rows``: v's token pitch in heads (:func:`_v_rows`), which ``wy_tc2`` takes.  ``deferred``: a list the
-    launch is appended to (:func:`_prepared`) for the caller to fire, else launched here."""
+    launch is appended to (:func:`_prepared`) for the caller to fire, else launched here.  ``ex``: the forward's
+    executor (:data:`_DIRECT` when ``None``)."""
+    ex = ex or _DIRECT
     w, u = _wy_outputs(kn, v, total_tokens, num_v_heads) if out is None else out
     stage = wy_stage(arch)
-    launch = _prepared(stage, meta.num_chunks, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start,
-                       meta.chunk_len, num_heads, num_v_heads, 1 if recompute else 0,
-                       *((v_rows,) if stage == "wy_tc2" else ()))  # fmt: skip
+    launch = ex.prepared(stage, meta.num_chunks, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start,
+                         meta.chunk_len, num_heads, num_v_heads, 1 if recompute else 0,
+                         *((v_rows,) if stage == "wy_tc2" else ()))  # fmt: skip
     if deferred is None:
-        _fire(launch)
+        ex.fire(launch)
     else:
         deferred.append(launch)
     return w, u
@@ -3093,22 +3213,28 @@ def fwd_ho_vh2_engaged(num_segments: int, num_v_heads: int, sm_count: int) -> bo
 _WALKS: dict = {}
 
 
-def _walk(device, segs: SegmentTable, options: ChainOptions) -> torch.Tensor:
+def _walk(device, segs: SegmentTable, options: ChainOptions, ex=None) -> torch.Tensor:
     """The walk of ``fwd_ho`` (CTA group ``b // HV`` runs segment ``walk[b]``): the table's own (longest first) when it
     has one, else the identity, a constant table per (device, segment count) kept between calls under
-    ``host_cache`` with its write (see "cached device tables"; one built inside a CUDA graph capture is not kept)."""
+    ``host_cache`` with its write (see "cached device tables"; one built inside a CUDA graph capture is not kept).
+    ``ex``: the forward's executor (:data:`_DIRECT` when ``None``): a missing table is built as a cache fill
+    (:meth:`_DirectExecutor.fill`), and the kept one is used through it (on the stream that built it, a use has
+    nothing to wait for)."""
     if segs.walk is not None:
         return segs.walk
+    ex = ex or _DIRECT
     num_segments = segs.num_segments
     key = (_device_index(device), int(num_segments))
     hit = _WALKS.get(key) if options.host_cache else None
-    if hit is not None:
-        _use_table(hit[1], key[0], hit[0])
-        return hit[0]
-    walk = torch.arange(int(num_segments), dtype=torch.int32, device=device)
-    if options.host_cache and not _capturing(key[0]):
-        _WALKS[key] = (walk, _table_ready(key[0]))
-    return walk
+    if hit is None:
+        with ex.fill():
+            walk = torch.arange(int(num_segments), dtype=torch.int32, device=device)
+            if options.host_cache and not _capturing(key[0]):
+                hit = _WALKS[key] = (walk, _table_ready(key[0]))
+        if hit is None:
+            return walk
+    ex.use(key, hit)
+    return hit[0]
 
 
 def _table_rows(state, meta: ChunkMeta):
@@ -3129,40 +3255,38 @@ def _caller_rows(state, meta: ChunkMeta):
 
 
 def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num_v_heads, *, store_final_state, table,
-                   workspaces, options, scale, wy=None, out=None, deferred=None):  # fmt: skip
+                   workspaces, options, scale, wy=None, out=None, deferred=None, ex=None):  # fmt: skip
     """The fused forward scan and output on the plan's forward segment table: a split plan first runs the pre-scan
     and the stitch (``reverse = 0``) for the segments' start states.  ``wy`` (``(v, beta32, A, v_rows)``, with
     ``meta.fwd_groups``): ``wy_tc`` has not run; it runs here with the scan as two sequence groups (P form).  ``out``:
     the caller's ``(h, v_new, o)``, else allocated here.  Every workspace is taken before the first launch, so the
     launches follow one another without host work between them.  ``deferred`` (a list; not with ``wy``): the
-    launches are appended to it in order (:func:`_prepared`) for the caller to fire, and nothing launches here."""
+    launches are appended to it in order (:func:`_prepared`) for the caller to fire, and nothing launches here.
+    ``ex``: the forward's executor (:data:`_DIRECT` when ``None``)."""
     if deferred is not None and wy is not None:
         raise ValueError("the P form launches its two sequence groups itself")
-    run = _fire if deferred is None else deferred.append
+    ex = ex or _DIRECT
+    run = ex.fire if deferred is None else deferred.append
     device = kn.device
     if out is None:
-        h = torch.empty(
-            (meta.num_chunks, num_v_heads, HEAD_DIM, HEAD_DIM),
-            dtype=kn.dtype,
-            device=device,
+        h = ex.empty(
+            (meta.num_chunks, num_v_heads, HEAD_DIM, HEAD_DIM), kn.dtype, device
         )
-        v_new = torch.empty(u.shape, dtype=u.dtype, device=device)
-        o = torch.empty(u.shape, dtype=u.dtype, device=device)
+        v_new = ex.empty(u.shape, u.dtype, device)
+        o = ex.empty(u.shape, u.dtype, device)
     else:
         h, v_new, o = out
     if store_final_state:
-        final_state = torch.empty(
-            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM),
-            dtype=torch.float32,
-            device=device,
+        final_state = ex.empty(
+            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), torch.float32, device
         )
     else:
         final_state = workspaces.take(table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), torch.float32,
                                       device)  # fmt: skip
     if initial_state is not None:
-        h0 = initial_state.contiguous()
+        h0 = ex.rows(torch.Tensor.contiguous, initial_state)
         if h0.dtype != torch.float32:
-            h0 = h0.float()
+            h0 = ex.call(torch.Tensor.float, h0)
         use_init = 1
     else:
         h0, use_init = final_state, 0
@@ -3184,16 +3308,16 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
         )
         seg_start = workspaces.take(table, "f_seg_start", (segs.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
                                     torch.float32, device)  # fmt: skip
-        walk = _walk(device, segs, options)
-        run(_prepared(pre, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, kn, w, u, g_cs, h0, h, v_new,
-                      final_state, seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
-                      meta.seq_chunk_start, num_heads, num_v_heads, use_init, 0, seg_flag,
-                      warmup_thresh_log2(options)))  # fmt: skip
-        run(_prepared("stitch", meta.num_seqs, num_v_heads, STITCH_VSPLIT, seg_state, h0, seg_start,
-                      segs.seq_seg_start, seg_flag, num_v_heads, use_init, 0))  # fmt: skip
+        walk = _walk(device, segs, options, ex)
+        run(ex.prepared(pre, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, kn, w, u, g_cs, h0, h, v_new,
+                        final_state, seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                        meta.seq_chunk_start, num_heads, num_v_heads, use_init, 0, seg_flag,
+                        warmup_thresh_log2(options)))  # fmt: skip
+        run(ex.prepared("stitch", meta.num_seqs, num_v_heads, STITCH_VSPLIT, seg_state, h0, seg_start,
+                        segs.seq_seg_start, seg_flag, num_v_heads, use_init, 0))  # fmt: skip
         use_seg = 1
     else:
-        walk = _walk(device, segs, options)
+        walk = _walk(device, segs, options, ex)
     if wy is None:
         stage, ctas = "fwd_ho", segs.num_segments * num_v_heads
         if arch in FWD_HO_VH2_ARCHS and fwd_ho_vh2_engaged(
@@ -3202,10 +3326,10 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
             stage = "fwd_ho_vh2"
             if fwd_ho_vh2_splits(arch):
                 ctas = 2 * ctas
-        run(_prepared(stage, ctas, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o, final_state,
-                      meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
-                      walk, num_heads, num_v_heads, use_init, 1 if store_final_state else 0, use_seg,
-                      float(scale)))  # fmt: skip
+        run(ex.prepared(stage, ctas, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o, final_state,
+                        meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
+                        walk, num_heads, num_v_heads, use_init, 1 if store_final_state else 0, use_seg,
+                        float(scale)))  # fmt: skip
         return h, v_new, final_state, o
     # P form: the side stream runs wy_tc and fwd_ho of group A (the partial round); the caller's stream runs those of
     # group B (the full rounds) once wy_tc(A) is done, then joins the side stream.  fwd_ho(A) can read w / u rows past
@@ -3220,32 +3344,26 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
     v_args = (v_rows,) if wy_name == "wy_tc2" else ()
 
     def wy_tc(c0, c1):
-        _launch(wy_name, c1 - c0, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start[c0:c1],
-                meta.chunk_len[c0:c1], num_heads, num_v_heads, 0, *v_args)  # fmt: skip
+        ex.launch(wy_name, c1 - c0, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start[c0:c1],
+                  meta.chunk_len[c0:c1], num_heads, num_v_heads, 0, *v_args)  # fmt: skip
 
     def fwd_ho(s0, s1):
-        _launch("fwd_ho", (s1 - s0) * num_v_heads, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o,
-                final_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
-                meta.seq_chunk_start, walk[s0:s1], num_heads, num_v_heads, use_init, 1 if store_final_state else 0,
-                use_seg, float(scale))  # fmt: skip
+        ex.launch("fwd_ho", (s1 - s0) * num_v_heads, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o,
+                  final_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                  meta.seq_chunk_start, walk[s0:s1], num_heads, num_v_heads, use_init, 1 if store_final_state else 0,
+                  use_seg, float(scale))  # fmt: skip
 
-    index = _tensor_index(kn)
-    main = torch.cuda.current_stream(index)
-    side = _side_stream(index, main)
-    fork = torch.cuda.Event()
-    fork.record(main)
+    main, side = ex.fork(_tensor_index(kn))
     try:
-        with torch.cuda.stream(side):
-            side.wait_event(fork)
+        with ex.on(side):
             wy_tc(0, ca)
-            wy_a = torch.cuda.Event()
-            wy_a.record(side)
+            wy_a = ex.signal(side)
             fwd_ho(0, na)
-        main.wait_event(wy_a)
+        ex.wait(main, wy_a)
         wy_tc(ca, meta.num_chunks)
         fwd_ho(na, n)
     finally:
-        main.wait_stream(side)  # the join
+        ex.join(main, side)  # the join
     return h, v_new, final_state, o
 
 
@@ -3422,9 +3540,9 @@ def _forward_tape() -> bool:
 
 
 def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
-               tape) -> dict[str, Any]:  # fmt: skip
+               tape, ex) -> dict[str, Any]:  # fmt: skip
     """The forward of :func:`fwd_a_route`'s calls: ``wy_a`` then ``fwd_ho_a``; the tape of
-    :func:`cake_gdn_nondet_train_forward`."""
+    :func:`cake_gdn_nondet_train_forward`.  ``ex``: the forward's executor (:func:`_train_forward`)."""
     num_heads, num_v_heads = q.shape[-2], v.shape[-2]
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
     device = q.device
@@ -3433,7 +3551,7 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     # wy_a's tensor maps take q / k at their strides: the head views of a packed row are read in place; any other
     # layout is copied into contiguous rows (:func:`_tma_rows`)
     if not (_tma_rows(q) and _tma_rows(k)):
-        q, k = _dense(q), _dense(k)
+        q, k = ex.rows(_dense, q), ex.rows(_dense, k)
     # fwd_ho_a's tensor map reads v in place where the stages that read v by rows do (:func:`_v_rows`), else a copy
     copy_v = _v_rows(v) is None
     pieces = [(q.shape, bf16), (k.shape, bf16), ((total_tokens, num_heads), f32), ((total_tokens, num_heads), f32),
@@ -3446,17 +3564,17 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     # the rest of the state stands as placeholders (u is never formed in memory)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     on_tape = [name in kept for name in cake_plan.STATE_NAMES]
-    views = _carve(
+    views = ex.carve(
         device, pieces + [s for s, on in zip(state, on_tape, strict=True) if on]
     )
     qn, kn, rstd_q, rstd_k, g_cs, A = views[:6]
     v_dense = views[6] if copy_v else None
     kept_views = iter(views[len(pieces) :])
     w, u, h, v_new = (
-        next(kept_views) if on else cake_plan.placeholder(shape, dtype, device)
+        next(kept_views) if on else ex.placeholder(shape, dtype, device)
         for (shape, dtype), on in zip(state, on_tape, strict=True)
     )
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
+    o = ex.empty(v.shape, v.dtype, device)
     workspaces = _workspaces(options, index)
     table = workspaces.table(index)
     # fwd_ho_a binds every tape tensor it does not write to a one-row stand-in (its tensor map encodes, nothing stores)
@@ -3472,26 +3590,26 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     v_new_t = v_new if "v_new" in kept else rows
     w_t = w if "w" in kept else rows
     if output_final_state:
-        final_state = torch.empty(
-            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device
+        final_state = ex.empty(
+            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
         )
     else:
         final_state = workspaces.take(
             table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
         )
-    initial_rows = _table_rows(initial_state, meta)
+    initial_rows = ex.rows(_table_rows, initial_state, meta)
     if initial_rows is not None:
-        h0 = initial_rows.contiguous()
+        h0 = ex.rows(torch.Tensor.contiguous, initial_rows)
         if h0.dtype != f32:
-            h0 = h0.float()
+            h0 = ex.call(torch.Tensor.float, h0)
         use_init = 1
     else:
         h0, use_init = final_state, 0
     segs = meta.fwd_segments
-    walk = _walk(device, segs, options)
+    walk = _walk(device, segs, options, ex)
     sm_count = _device_props(index)[0]
     launches = [
-        _prepared(
+        ex.prepared(
             "wy_a",
             min(sm_count, meta.num_chunks * num_heads),
             1,
@@ -3501,19 +3619,19 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
             q,
             g32,
             beta32,
-            A.view(torch.uint32),
+            ex.view(A, torch.uint32),
             rstd_k,
             rstd_q,
             g_cs,
-            qn.view(torch.uint32),
-            kn.view(torch.uint32),
+            ex.view(qn, torch.uint32),
+            ex.view(kn, torch.uint32),
             meta.chunk_start,
             meta.chunk_len,
             meta.num_chunks,
             num_heads,
             num_v_heads,
         ),  # fmt: skip
-        _prepared(
+        ex.prepared(
             "fwd_ho_a",
             segs.num_segments * num_v_heads,
             1,
@@ -3551,11 +3669,11 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
         ),  # fmt: skip
     ]
     if copy_v:
-        _dense(v, v_dense)
+        ex.call(_dense, v, v_dense)
     for launch in launches:
-        _fire(launch)
+        ex.fire(launch)
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.rows(_caller_rows, final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3570,7 +3688,8 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
 # --------------------------------------------------------------------------- #
 # On an architecture of ``FWD_SPLIT_ARCHS`` a call on a host-built table whose forward segment table splits a sequence
 # runs the one-wave split of the forward scan on the host plan's piece table (:func:`cake_plan.pieces`, the table the
-# adjoint split reads) instead of the pre-scan, the stitch and ``fwd_ho``: the front ``wy_a`` (A, rstd_q / rstd_k /
+# adjoint split reads, except where it takes the longer pieces of :func:`bwd_one_wave_table`) instead of the
+# pre-scan, the stitch and ``fwd_ho``: the front ``wy_a`` (A, rstd_q / rstd_k /
 # g_cs / qn / kn) and ``wy_tc2`` with ``recompute = 1`` on that A (w and u), then wave 1, the first piece of every split
 # sequence from its initial state (``fwd_fused``, its end state into the B half of the stitch's segment state by
 # ``split_out``, its flag 0) beside the affine maps ``[B | M]`` of the middle pieces (``fwd_summary``, side stream,
@@ -3803,21 +3922,21 @@ def _fwd_split_a(arch: str, length: int) -> bool:
 
 
 def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
-                   tape) -> dict[str, Any]:  # fmt: skip
+                   tape, ex) -> dict[str, Any]:  # fmt: skip
     """The forward of :func:`fwd_split_route`'s calls (:data:`FWD_SPLIT_ARCHS`); the tape of
-    :func:`cake_gdn_nondet_train_forward`."""
+    :func:`cake_gdn_nondet_train_forward`.  ``ex``: the forward's executor (:func:`_train_forward`)."""
     split = cast("ForwardSplit", meta.fwd_split)
     if _fwd_split_a(arch, split.length):
         return _forward_split_a(q, k, v, g32, beta32, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                                 output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
-                                tape=tape)  # fmt: skip
+                                tape=tape, ex=ex)  # fmt: skip
     num_heads, num_v_heads = q.shape[-2], v.shape[-2]
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
     device = q.device
     index = _tensor_index(q)
     f32, bf16 = torch.float32, q.dtype
     if not (_tma_rows(q) and _tma_rows(k)):
-        q, k = _dense(q), _dense(k)
+        q, k = ex.rows(_dense, q), ex.rows(_dense, k)
     # wy_tc2 reads v by rows at its token pitch (:func:`_v_rows`); any other layout, a contiguous v whose base is not
     # 16-byte aligned among them, is copied into contiguous rows
     v_rows = _v_rows(v)
@@ -3835,7 +3954,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     # v_new off the tape stand as placeholders (fwd_fused stores neither)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     on_tape = [name in kept for name in cake_plan.STATE_NAMES]
-    views = _carve(
+    views = ex.carve(
         device, pieces + [s for s, on in zip(state, on_tape, strict=True) if on]
     )
     qn, kn, rstd_q, rstd_k, g_cs, A = views[:6]
@@ -3848,11 +3967,11 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         if on:
             named[name] = next(kept_views)
         elif name in ("w", "u"):
-            named[name] = torch.empty(shape, dtype=dtype, device=device)
+            named[name] = ex.empty(shape, dtype, device)
         else:
-            named[name] = cake_plan.placeholder(shape, dtype, device)
+            named[name] = ex.placeholder(shape, dtype, device)
     w, u, h, v_new = (named[name] for name in cake_plan.STATE_NAMES)
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
+    o = ex.empty(v.shape, v.dtype, device)
     workspaces = _workspaces(options, index)
     table = workspaces.table(index)
     word = sum(FWD_FUSED_TAPE[name] for name in kept if name in FWD_FUSED_TAPE)
@@ -3866,18 +3985,18 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     )
     v_new_t = v_new if "v_new" in kept else rows
     if output_final_state:
-        final_state = torch.empty(
-            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device
+        final_state = ex.empty(
+            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
         )
     else:
         final_state = workspaces.take(
             table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
         )
-    initial_rows = _table_rows(initial_state, meta)
+    initial_rows = ex.rows(_table_rows, initial_state, meta)
     if initial_rows is not None:
-        h0 = initial_rows.contiguous()
+        h0 = ex.rows(torch.Tensor.contiguous, initial_rows)
         if h0.dtype != f32:
-            h0 = h0.float()
+            h0 = ex.call(torch.Tensor.float, h0)
         use_init = 1
     else:
         h0, use_init = final_state, 0
@@ -3886,9 +4005,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     # (``"m_share"``): the backward's first wave reads the middle pieces' M halves the summary stores in it
     m_share = tape and meta.m_share
     seg_state = (
-        torch.empty(
-            (split.num_segments, hv, HEAD_DIM, 2 * HEAD_DIM), dtype=f32, device=device
-        )
+        ex.empty((split.num_segments, hv, HEAD_DIM, 2 * HEAD_DIM), f32, device)
         if m_share
         else workspaces.take(
             table,
@@ -3908,13 +4025,13 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     v_in = v_dense if copy_v else v
 
     def fused(walk, count, ends, use_seg, store_final, split_out):
-        return _prepared("fwd_fused", count * hv, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h_t, v_new_t, v_new_t, o, o,
-                         final_state, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq, ends,
-                         walk, num_heads, hv, use_init, store_final, use_seg, float(scale), word, seg_state, seg_flag,
-                         split_out)  # fmt: skip
+        return ex.prepared("fwd_fused", count * hv, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h_t, v_new_t, v_new_t, o,
+                           o, final_state, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq,
+                           ends, walk, num_heads, hv, use_init, store_final, use_seg, float(scale), word, seg_state,
+                           seg_flag, split_out)  # fmt: skip
 
     front = [
-        _prepared(
+        ex.prepared(
             "wy_a",
             min(sm_count, meta.num_chunks * num_heads),
             1,
@@ -3924,19 +4041,19 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
             q,
             g32,
             beta32,
-            A.view(torch.uint32),
+            ex.view(A, torch.uint32),
             rstd_k,
             rstd_q,
             g_cs,
-            qn.view(torch.uint32),
-            kn.view(torch.uint32),
+            ex.view(qn, torch.uint32),
+            ex.view(kn, torch.uint32),
             meta.chunk_start,
             meta.chunk_len,
             meta.num_chunks,
             num_heads,
             hv,
         ),  # fmt: skip
-        _prepared(
+        ex.prepared(
             "wy_tc2",
             meta.num_chunks,
             hv,
@@ -3962,7 +4079,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         else None
     )
     summary = (
-        _prepared(
+        ex.prepared(
             "fwd_summary",
             split.num_middle * hv,
             1,
@@ -3986,8 +4103,8 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         if split.num_middle
         else None
     )
-    stitch = _prepared("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start,
-                       seg_flag, hv, use_init, 0)  # fmt: skip
+    stitch = ex.prepared("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start,
+                         seg_flag, hv, use_init, 0)  # fmt: skip
     wave2 = fused(
         split.rest,
         split.num_rest,
@@ -3997,29 +4114,25 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         0,
     )
     if copy_v:
-        _dense(v, v_dense)
+        ex.call(_dense, v, v_dense)
     for launch in front:
-        _fire(launch)
+        ex.fire(launch)
     if summary is None or wave1 is None or split.one_stream:
         for launch in (summary, wave1):
             if launch is not None:
-                _fire(launch)
+                ex.fire(launch)
     else:
-        main = torch.cuda.current_stream(index)
-        side = _side_stream(index, main)
-        fork = torch.cuda.Event()
-        fork.record(main)
+        main, side = ex.fork(index)
         try:
-            with torch.cuda.stream(side):
-                side.wait_event(fork)
-                _fire(summary)
-            _fire(wave1)
+            with ex.on(side):
+                ex.fire(summary)
+            ex.fire(wave1)
         finally:
-            main.wait_stream(side)  # the join
-    _fire(stitch)
-    _fire(wave2)
+            ex.join(main, side)  # the join
+    ex.fire(stitch)
+    ex.fire(wave2)
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.rows(_caller_rows, final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -4032,11 +4145,12 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
 
 
 def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk,
-                     options, tape) -> dict[str, Any]:  # fmt: skip
+                     options, tape, ex) -> dict[str, Any]:  # fmt: skip
     """The split forward on wy_a's A (:data:`FWD_SPLIT_A_ARCHS`): ``wy_a``, then wave 1 (``fwd_ho_a`` on the first
     pieces, their end states as the final states) beside the middle pieces' maps (``fwd_summary_a``, side stream), the
     copy of those end states into the segment state, the stitch and wave 2 (``fwd_ho_a`` on every other piece from its
-    stitched start state); the tape of :func:`cake_gdn_nondet_train_forward`, as the serial route's (u a placeholder)."""
+    stitched start state); the tape of :func:`cake_gdn_nondet_train_forward`, as the serial route's (u a placeholder).
+    ``ex``: the forward's executor (:func:`_train_forward`)."""
     split = cast("ForwardSplit", meta.fwd_split)
     num_heads, num_v_heads = q.shape[-2], v.shape[-2]
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
@@ -4044,7 +4158,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     index = _tensor_index(q)
     f32, bf16 = torch.float32, q.dtype
     if not (_tma_rows(q) and _tma_rows(k)):
-        q, k = _dense(q), _dense(k)
+        q, k = ex.rows(_dense, q), ex.rows(_dense, k)
     # fwd_ho_a's and fwd_summary_a's tensor maps read v in place where the stages that read v by rows do, else a copy
     copy_v = _v_rows(v) is None
     pieces = [(q.shape, bf16), (k.shape, bf16), ((total_tokens, num_heads), f32), ((total_tokens, num_heads), f32),
@@ -4057,17 +4171,17 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     # placeholders, as on the serial route
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     on_tape = [name in kept for name in cake_plan.STATE_NAMES]
-    views = _carve(
+    views = ex.carve(
         device, pieces + [s for s, on in zip(state, on_tape, strict=True) if on]
     )
     qn, kn, rstd_q, rstd_k, g_cs, A = views[:6]
     v_dense = views[6] if copy_v else None
     kept_views = iter(views[len(pieces) :])
     w, u, h, v_new = (
-        next(kept_views) if on else cake_plan.placeholder(shape, dtype, device)
+        next(kept_views) if on else ex.placeholder(shape, dtype, device)
         for (shape, dtype), on in zip(state, on_tape, strict=True)
     )
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
+    o = ex.empty(v.shape, v.dtype, device)
     workspaces = _workspaces(options, index)
     table = workspaces.table(index)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
@@ -4084,7 +4198,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     hv = num_v_heads
     state_shape = (meta.num_seqs, hv, HEAD_DIM, HEAD_DIM)
     if output_final_state:
-        final_state = torch.empty(state_shape, dtype=f32, device=device)
+        final_state = ex.empty(state_shape, f32, device)
         first_final = final_state
     else:
         final_state = workspaces.take(
@@ -4092,11 +4206,11 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         )
         # wave 1 stores the first pieces' end states as final states: a buffer of every sequence's rows
         first_final = workspaces.take(table, "f_first_final", state_shape, f32, device)
-    initial_rows = _table_rows(initial_state, meta)
+    initial_rows = ex.rows(_table_rows, initial_state, meta)
     if initial_rows is not None:
-        h0 = initial_rows.contiguous()
+        h0 = ex.rows(torch.Tensor.contiguous, initial_rows)
         if h0.dtype != f32:
-            h0 = h0.float()
+            h0 = ex.call(torch.Tensor.float, h0)
         use_init = 1
     else:
         h0, use_init = final_state, 0
@@ -4104,7 +4218,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     m_share = tape and meta.m_share
     seg_shape = (split.num_segments, hv, HEAD_DIM, 2 * HEAD_DIM)
     seg_state = (
-        torch.empty(seg_shape, dtype=f32, device=device)
+        ex.empty(seg_shape, f32, device)
         if m_share
         else workspaces.take(table, "f_seg_state", seg_shape, f32, device)
     )
@@ -4118,21 +4232,22 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     v_in = v_dense if copy_v else v
 
     def wave(walk, count, ends, init, use_seg, store_final, final):
-        return _prepared("fwd_ho_a", count * hv, 1, 1, qn, kn, v_in, A, g_cs, beta32, h0, seg_start, h_t, h_t,
-                         v_new_t, v_new_t, o, o, final, w_t, w_t, meta.chunk_start, meta.chunk_len,
-                         split.seg_chunk_start, split.seg_seq, ends, walk, num_heads, hv, init, store_final, use_seg,
-                         float(scale), word)  # fmt: skip
+        return ex.prepared("fwd_ho_a", count * hv, 1, 1, qn, kn, v_in, A, g_cs, beta32, h0, seg_start, h_t, h_t,
+                           v_new_t, v_new_t, o, o, final, w_t, w_t, meta.chunk_start, meta.chunk_len,
+                           split.seg_chunk_start, split.seg_seq, ends, walk, num_heads, hv, init, store_final, use_seg,
+                           float(scale), word)  # fmt: skip
 
-    front = _prepared("wy_a", min(sm_count, meta.num_chunks * num_heads), 1, 1, k, k, q, g32, beta32,
-                      A.view(torch.uint32), rstd_k, rstd_q, g_cs, qn.view(torch.uint32), kn.view(torch.uint32),
-                      meta.chunk_start, meta.chunk_len, meta.num_chunks, num_heads, hv)  # fmt: skip
+    front = ex.prepared("wy_a", min(sm_count, meta.num_chunks * num_heads), 1, 1, k, k, q, g32, beta32,
+                        ex.view(A, torch.uint32), rstd_k, rstd_q, g_cs, ex.view(qn, torch.uint32),
+                        ex.view(kn, torch.uint32), meta.chunk_start, meta.chunk_len, meta.num_chunks, num_heads,
+                        hv)  # fmt: skip
     wave1 = (
         wave(split.first, split.num_first, split.first_end, use_init, 0, 1, first_final)
         if split.num_first
         else None
     )
     summary = (
-        _prepared(
+        ex.prepared(
             "fwd_summary_a",
             split.num_middle * hv,
             1,
@@ -4157,8 +4272,8 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         if split.num_middle
         else None
     )
-    stitch = _prepared("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start,
-                       seg_flag, hv, use_init, 0)  # fmt: skip
+    stitch = ex.prepared("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start,
+                         seg_flag, hv, use_init, 0)  # fmt: skip
     wave2 = wave(
         split.rest,
         split.num_rest,
@@ -4169,38 +4284,36 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         final_state,
     )
     if copy_v:
-        _dense(v, v_dense)
-    _fire(front)
+        ex.call(_dense, v, v_dense)
+    ex.fire(front)
     if split.num_first:
         # the first pieces' segments hold their end states (flag 0: a state, not a map) for the stitch
-        seg_flag.index_fill_(0, split.first_index, 0)
+        ex.call(torch.Tensor.index_fill_, seg_flag, 0, split.first_index, 0)
     if summary is None or wave1 is None or split.one_stream:
         for launch in (summary, wave1):
             if launch is not None:
-                _fire(launch)
+                ex.fire(launch)
     else:
-        main = torch.cuda.current_stream(index)
-        side = _side_stream(index, main)
-        fork = torch.cuda.Event()
-        fork.record(main)
+        main, side = ex.fork(index)
         try:
-            with torch.cuda.stream(side):
-                side.wait_event(fork)
-                _fire(summary)
-            _fire(wave1)
+            with ex.on(side):
+                ex.fire(summary)
+            ex.fire(wave1)
         finally:
-            main.wait_stream(side)  # the join
+            ex.join(main, side)  # the join
     if split.num_first:
         ends = (
             first_final
             if split.first_seq is None
-            else first_final.index_select(0, split.first_seq)
+            else ex.call(torch.Tensor.index_select, first_final, 0, split.first_seq)
         )
-        seg_state[:, :, :, :HEAD_DIM].index_copy_(0, split.first_index, ends)
-    _fire(stitch)
-    _fire(wave2)
+        # the B halves of the segment state (seg_state[:, :, :, :HEAD_DIM])
+        b_half = ex.call(torch.Tensor.narrow, seg_state, 3, 0, HEAD_DIM)
+        ex.call(torch.Tensor.index_copy_, b_half, 0, split.first_index, ends)
+    ex.fire(stitch)
+    ex.fire(wave2)
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.rows(_caller_rows, final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -4221,6 +4334,16 @@ def cake_gdn_nondet_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, i
     (``False``: a call that records no backward) lets the forward of :func:`fwd_a_route` skip the state of the tape
     (placeholders stand for it).  The forward runs fixed-order programs only today: it raises no determinism alert
     under PyTorch's deterministic algorithms."""
+    return _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                          output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
+                          tape=tape, ex=_DIRECT)  # fmt: skip
+
+
+def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
+                   tape, ex) -> dict[str, Any]:  # fmt: skip
+    """:func:`cake_gdn_nondet_train_forward` with its allocations, views, eager copies, launches, stream switches and
+    cached-table uses through the executor ``ex`` (:data:`_DIRECT`, or a :class:`_FwdRecorder` that also records
+    them as a :class:`_ForwardPlan`)."""
     options = options or ChainOptions()
     if not q.is_cuda:
         # a host q reaches the first launch's operand checks, which refuse it; the buffers taken before them would
@@ -4236,21 +4359,20 @@ def cake_gdn_nondet_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, i
     if scale is None:
         scale = 1.0 / math.sqrt(key_dim)
     device = q.device
-    # g and beta as contiguous rows at a 16-byte aligned base (a copy otherwise): the stages read them in words
-    g32 = _aligned_rows(g)
-    if g32.dtype != torch.float32:
-        g32 = g32.float()
-    beta = _aligned_rows(beta)
+    # g as float32 and beta as contiguous rows at a 16-byte aligned base (a copy otherwise): the stages read them in
+    # words
+    g32 = ex.rows(_float_rows, g)
+    beta = ex.rows(_aligned_rows, beta)
     if fwd_split_route(meta, arch, q, k, v, beta, normalize_qk, options):
         return _forward_split(q, k, v, g32, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                               output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
-                              tape=tape)  # fmt: skip
+                              tape=tape, ex=ex)  # fmt: skip
     if fwd_a_route(meta, arch, q, k, v, beta, normalize_qk, options):
         return _forward_a(q, k, v, g32, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                           output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
-                          tape=tape)  # fmt: skip
+                          tape=tape, ex=ex)  # fmt: skip
     # q / k stay views where prep_tma reads them in place (the head views of a packed row)
-    q, k, prep = _prep_inputs(q, k, meta.num_chunks, num_heads, arch, options)
+    q, k, prep = _prep_inputs(q, k, meta.num_chunks, num_heads, arch, options, ex)
     beta_bf16 = beta.dtype == torch.bfloat16
     # every tensor of the forward is made before its first launch, so the launches follow one another without host
     # work between them: the tape's tensors (and the state its tape level keeps under save_state,
@@ -4278,12 +4400,10 @@ def cake_gdn_nondet_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, i
     on_tape = [name in kept for name in cake_plan.STATE_NAMES]
     kept_state = [s for s, on in zip(state, on_tape, strict=True) if on]
     off_state = [s for s, on in zip(state, on_tape, strict=True) if not on]
-    views = _carve(device, pieces + kept_state)
+    views = ex.carve(device, pieces + kept_state)
     kept_views = iter(views[len(pieces) :])
     # the state off the tape (u under T_full): one torch.empty each (no carve's view), freed when the forward returns
-    off_views = iter(
-        [torch.empty(shape, dtype=dtype, device=device) for shape, dtype in off_state]
-    )
+    off_views = iter([ex.empty(shape, dtype, device) for shape, dtype in off_state])
     views = views[: len(pieces)]
     views += [next(kept_views) if on else next(off_views) for on in on_tape]
     qn, kn, rstd_q, rstd_k, g_cs, A = views[:6]
@@ -4292,41 +4412,44 @@ def cake_gdn_nondet_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, i
     if beta_bf16:
         beta32 = rest.pop(0)
     else:
-        beta32 = beta if beta.dtype == torch.float32 else beta.float()
+        beta32 = (
+            beta if beta.dtype == torch.float32 else ex.call(torch.Tensor.float, beta)
+        )
     w, u, h, v_new = rest
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
+    o = ex.empty(v.shape, v.dtype, device)
     # a v the stages do not read in place is copied once byte for byte: the copy (into v_dense) is the first launch,
     # the launches below read v_dense
     v_in, v = v, (v_dense if copy_v else v)
     # every launch is resolved before the first one (the fused scan's workspaces, start states and walk among them),
     # so on a slow host the launches go back to back while the GPU runs the short kernels of a small row
-    launches = [_prepared(prep + ("_bf16beta" if beta_bf16 else ""), meta.num_chunks,
-                          num_heads if prep == "prep_tma" else num_v_heads, 1, q, k, g32, beta, beta32, qn, kn,
-                          rstd_q, rstd_k, g_cs, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads,
-                          1 if normalize_qk else 0)]  # fmt: skip
+    launches = [ex.prepared(prep + ("_bf16beta" if beta_bf16 else ""), meta.num_chunks,
+                            num_heads if prep == "prep_tma" else num_v_heads, 1, q, k, g32, beta, beta32, qn, kn,
+                            rstd_q, rstd_k, g_cs, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads,
+                            1 if normalize_qk else 0)]  # fmt: skip
     index = _tensor_index(kn)
     workspaces = _workspaces(options, index)
     table = workspaces.table(index)
     fwd_ho = {"store_final_state": output_final_state, "table": table, "workspaces": workspaces, "options": options,
               "scale": scale, "out": (h, v_new, o)}  # fmt: skip
-    initial_rows = _table_rows(initial_state, meta)
+    initial_rows = ex.rows(_table_rows, initial_state, meta)
     if meta.fwd_groups is None:
         _launch_wy(arch, kn, v, g_cs, beta32, A, meta, num_heads, num_v_heads, total_tokens, recompute=False,
-                   v_rows=v_rows, out=(w, u), deferred=launches)  # fmt: skip
+                   v_rows=v_rows, out=(w, u), deferred=launches, ex=ex)  # fmt: skip
         h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_rows, meta, num_heads,
-                                                  num_v_heads, deferred=launches, **fwd_ho)  # fmt: skip
+                                                  num_v_heads, deferred=launches, ex=ex, **fwd_ho)  # fmt: skip
         if copy_v:
-            _dense(v_in, v_dense)
+            ex.call(_dense, v_in, v_dense)
         for launch in launches:
-            _fire(launch)
+            ex.fire(launch)
     else:  # wy_tc runs with fwd_ho as two sequence groups
         if copy_v:
-            _dense(v_in, v_dense)
-        _fire(launches[0])
+            ex.call(_dense, v_in, v_dense)
+        ex.fire(launches[0])
         h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_rows, meta, num_heads,
-                                                  num_v_heads, wy=(v, beta32, A, v_rows), **fwd_ho)  # fmt: skip
+                                                  num_v_heads, wy=(v, beta32, A, v_rows), ex=ex,
+                                                  **fwd_ho)  # fmt: skip
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.rows(_caller_rows, final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -4337,7 +4460,7 @@ def cake_gdn_nondet_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, i
 
 
 # --------------------------------------------------------------------------- #
-# backward executors and the recorded backward plan
+# executors and the recorded forward and backward plans
 # --------------------------------------------------------------------------- #
 # The backward's host work up to its first launch (the tape's checks, the plan's selections, the workspaces, every
 # launch's arguments in its record's parameter order) is the same for every call of one layout on one stream.  The
@@ -4350,23 +4473,59 @@ BWD_PLAN = True
 # plan key (:func:`_function_forward`) -> :class:`_BackwardPlan`; the oldest entry leaves first
 _BWD_PLANS: dict = {}
 _BWD_PLANS_LIMIT = 256
-# the steps of a plan: a launch, a gradient allocation, a dim-0 range of a slot, the caller's gradient views, the fork
-# of the side stream, a stream switch, the join
+# The forward's host work (the route's checks, the carve of its tensors, every launch's arguments in its record's
+# parameter order) is the same for every call of one class: one layout on one stream, one tape mode (a checkpoint's
+# first pass and its recompute are two), one set of arguments, and inputs of one shape, strides, dtype and 16-byte
+# base alignment each, the same ones being one object.  The autograd functions record it once per class, as the
+# straight step sequence of a :class:`_ForwardPlan` (the general path run through a :class:`_FwdRecorder`), and replay
+# that sequence afterwards (:func:`_replay_forward`): the inputs and the tensors the call allocates, views and computes
+# eagerly fill its slots, every other operand is a constant of the plan (a per-stream workspace of the pool, a chunk
+# table of the layout's ``ChunkMeta``, the cached walk, a scalar).  A replay makes the general path's allocations,
+# eager calls, launches and event records and waits in its order on its streams; the plan holds no tensor of a call.
+# ``FWD_PLAN = False`` keeps every forward on the general path.
+FWD_PLAN = True
+# plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first
+_FWD_PLANS: dict = {}
+_FWD_PLANS_LIMIT = 256
+# the insert and eviction of both plan caches (threads that record at once)
+_PLANS_LOCK = threading.Lock()
+# the steps of a plan: a launch, an allocation, a dim-0 range of a slot, the caller's gradient views, the fork of the
+# side stream, a stream switch, the join; and the forward's: a view of a slot (a dtype view, a piece of the carve), an
+# eager call, an event recorded on one stream of the fork and a wait for it, the use of a cached table outside ``meta``
 _OP_LAUNCH, _OP_EMPTY, _OP_NARROW, _OP_QKV, _OP_FORK, _OP_STREAM, _OP_JOIN = range(7)
+_OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE = range(7, 12)
 # the backward functions whose module globals decide a plan's steps (:func:`_plan_globals`), and the ones a plan never
 # reaches (the state rebuild of a tape without the state)
 _PLAN_ROOTS = ("_backward_chain", "_adjoint_split_walk")
 _PLAN_SKIP = frozenset({"_launch_wy", "_launch_fwd_h", "_table_rows"})
 _PLAN_GLOBALS: Any = None  # their getter, made at the first call
+# the forward functions a forward plan stands for (the direct executor's steps reach some of them only through
+# ``_DIRECT``): a plan replays only while they and the module globals they read are the recorded objects
+# (:func:`_fwd_plan_globals`)
+_FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_launch_fwd_ho",
+                   "_walk", "_prep_inputs", "_prepared", "_fire", "_carve", "_side_stream", "_use_table")  # fmt: skip
+_FWD_PLAN_GLOBALS: Any = None  # their getter, made at the first call
+# the entries of the forward's result that :func:`_function_forward` reads, the ones a forward plan returns
+_FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w", "u", "h", "v_new", "output",
+                "final_state", "m_share", "m_share_shape", "mode")  # fmt: skip
 
 
 class _DirectExecutor:
-    """The backward's launches, gradient allocations and stream switches as the chain reaches them."""
+    """The chain's launches, allocations, views, eager calls, stream switches and uses of cached tables as the chain
+    reaches them (the forward of :func:`_train_forward`, the backward of :func:`_backward_chain`)."""
 
     __slots__ = ()
 
     def launch(self, stage, gx, gy, gz, *values):
         _fire(_prepared(stage, gx, gy, gz, *values))
+
+    def prepared(self, stage, gx, gy, gz, *values):
+        """The launch of :func:`_prepared`, resolved now and run by :meth:`fire` (the forward resolves its launches
+        before the first one runs)."""
+        return _prepared(stage, gx, gy, gz, *values)
+
+    def fire(self, launch) -> None:
+        _fire(launch)
 
     def bind(self, stage, gx, gy, gz, *values):
         """:meth:`launch` with its device, argument order and grid resolved now: the returned call only launches (on
@@ -4377,6 +4536,28 @@ class _DirectExecutor:
 
     def empty(self, shape, dtype, device):
         return torch.empty(shape, dtype=dtype, device=device)
+
+    def carve(self, device, pieces) -> list[torch.Tensor]:
+        """The forward's tensors as views of one allocation (:func:`_carve`)."""
+        return _carve(device, pieces)
+
+    def view(self, t, dtype):
+        """``t`` viewed as ``dtype`` (the 32-bit words a kernel reads)."""
+        return t.view(dtype)
+
+    def call(self, fn, *args):
+        """``fn(*args)``: an eager step of the forward (a copy, an index fill / select / copy, a cast, a view)."""
+        return fn(*args)
+
+    def rows(self, fn, t, *args):
+        """``fn(t, *args)`` for a function that returns ``t`` itself where ``t`` already has the layout it makes
+        (:func:`_aligned_rows`, :func:`_float_rows`, :func:`_dense`, :func:`_table_rows`, :func:`_caller_rows`,
+        ``Tensor.contiguous``), else a new tensor."""
+        return fn(t, *args)
+
+    def placeholder(self, shape, dtype, device):
+        """An entry of the state that the call does not keep (:func:`cake_plan.placeholder`)."""
+        return cake_plan.placeholder(shape, dtype, device)
 
     def qkv(self, grad_qkv):
         return grad_qkv() if callable(grad_qkv) else grad_qkv
@@ -4395,6 +4576,25 @@ class _DirectExecutor:
 
     def join(self, main, side):
         main.wait_stream(side)
+
+    def signal(self, stream):
+        """An event recorded on ``stream`` now, for a :meth:`wait` of the other stream of the fork."""
+        event = torch.cuda.Event()
+        event.record(stream)
+        return event
+
+    def wait(self, stream, event) -> None:
+        stream.wait_event(event)
+
+    def use(self, key, entry) -> None:
+        """Make the cached walk ``entry`` (``_WALKS[key]``: the walk and its write) safe to read by the current
+        stream's next launches (:func:`_use_table`)."""
+        _use_table(entry[1], key[0], entry[0])
+
+    def fill(self):
+        """The context of a cached table's build (its write and the event after it), which a later call does not
+        repeat."""
+        return nullcontext()
 
     def grads(self, meta, dq, dk, dv, dg, dbeta, dh0):
         return {"dq": dq, "dk": dk, "dv": dv, "dg": dg, "dbeta": dbeta,
@@ -4419,36 +4619,74 @@ def _storages(obj, out: set, depth: int = 0) -> None:
             _storages(getattr(obj, f.name), out, depth + 1)
 
 
+def _reached_globals(roots, skip=frozenset()) -> set[str]:
+    """The module globals that the functions ``roots`` read, themselves or through this module's functions they reach
+    (found from their code; not through the functions of ``skip``)."""
+    g = globals()
+    names, seen = set(), set()
+    todo = [g[name].__code__ for name in roots]
+    while todo:
+        code = todo.pop()
+        if code in seen:
+            continue
+        seen.add(code)
+        todo.extend(c for c in code.co_consts if isinstance(c, CodeType))
+        for name in code.co_names:
+            if name not in g:
+                continue
+            names.add(name)
+            fn = getattr(g[name], "__wrapped__", g[name])
+            if (
+                name not in skip
+                and isinstance(fn, FunctionType)
+                and fn.__globals__ is g
+            ):
+                todo.append(fn.__code__)
+    return names
+
+
 def _plan_globals() -> tuple:
     """The module globals the backward chain reads (through this module's functions, found once from their code) and
     ``cake_backend.device_arch``: a plan replays only while they are the ones it was recorded with."""
     global _PLAN_GLOBALS
-    g = globals()
     if _PLAN_GLOBALS is None:
-        names, seen = set(), set()
-        todo = [g[name].__code__ for name in _PLAN_ROOTS]
-        while todo:
-            code = todo.pop()
-            if code in seen:
-                continue
-            seen.add(code)
-            todo.extend(c for c in code.co_consts if isinstance(c, CodeType))
-            for name in code.co_names:
-                if name not in g:
-                    continue
-                names.add(name)
-                fn = getattr(g[name], "__wrapped__", g[name])
-                if (
-                    name not in _PLAN_SKIP
-                    and isinstance(fn, FunctionType)
-                    and fn.__globals__ is g
-                ):
-                    todo.append(fn.__code__)
-        _PLAN_GLOBALS = itemgetter(*sorted(names))
+        _PLAN_GLOBALS = itemgetter(*sorted(_reached_globals(_PLAN_ROOTS, _PLAN_SKIP)))
     try:
-        return cake_backend.device_arch, _PLAN_GLOBALS(g)
+        return cake_backend.device_arch, _PLAN_GLOBALS(globals())
     except KeyError:  # a global of the chain was deleted: no recorded plan applies
         return (None,)
+
+
+def _fwd_plan_globals() -> tuple:
+    """``cake_backend.device_arch``, the forward's functions (:data:`_FWD_PLAN_ROOTS`) and the module globals they read
+    (through this module's functions, found once from their code), one flat tuple: a forward plan replays only while
+    each is the object it was recorded with.  The plan compares them by identity: some are table caches (``_WALKS``: a
+    dict of tensors, which ``==`` would read)."""
+    global _FWD_PLAN_GLOBALS
+    if _FWD_PLAN_GLOBALS is None:
+        names = {*_FWD_PLAN_ROOTS, *_reached_globals(_FWD_PLAN_ROOTS)}
+        _FWD_PLAN_GLOBALS = itemgetter(*sorted(names))
+    try:
+        return (cake_backend.device_arch, *_FWD_PLAN_GLOBALS(globals()))
+    except KeyError:  # a global of the forward was deleted: a new object, which no plan holds (none replays)
+        return (object(),)
+
+
+def _keep_plan(plans: dict, limit: int, key, plan) -> None:
+    """``plans[key] = plan`` (``_BWD_PLANS`` or ``_FWD_PLANS``), the oldest entry leaving first at ``limit`` entries;
+    under one lock, since threads that record at once would evict one entry twice."""
+    with _PLANS_LOCK:
+        plans.pop(key, None)
+        if len(plans) >= limit:
+            del plans[next(iter(plans))]
+        plans[key] = plan
+
+
+def _clear_plans() -> None:
+    """Drop every recorded plan, under :func:`_keep_plan`'s lock: a pool let go of a buffer that one may read."""
+    with _PLANS_LOCK:
+        _BWD_PLANS.clear()
+        _FWD_PLANS.clear()
 
 
 class _BackwardPlan:
@@ -4506,14 +4744,13 @@ def _slot_layout(slots) -> tuple:
     )
 
 
-class _Recorder(_DirectExecutor):
-    """The general path that also records its steps (:meth:`plan`).  ``slots``: the saved list and ``do``.  Every
-    tensor a launch reads is a slot (a saved tensor, ``do``, a gradient made by :meth:`empty` / :meth:`qkv`), a dim-0
-    range of a slot, or a view of a pooled workspace of the stream or of a chunk table of ``meta`` (a constant);
-    anything else, or a :meth:`refuse`, leaves the call without a plan."""
+class _SlotRecorder(_DirectExecutor):
+    """A general path that also records its steps.  ``slots``: the call's tensors the plan starts from.  Every tensor
+    a recorded step reads is a slot (one of those, or one a recorded step made), a dim-0 range of a slot, or a view of
+    a constant of the plan (:meth:`_constants`: a pooled workspace of the stream, a chunk table of ``meta``); anything
+    else, or a :meth:`refuse`, leaves the call without a plan."""
 
     __slots__ = (
-        "layout",
         "slots",
         "slot_of",
         "ops",
@@ -4521,12 +4758,10 @@ class _Recorder(_DirectExecutor):
         "stream",
         "meta",
         "streams",
-        "grads_of",
         "ranges",
     )
 
     def __init__(self, slots, index: int, meta: ChunkMeta):
-        self.layout = _slot_layout(slots)
         self.slots = list(slots)
         self.slot_of = {id(t): i for i, t in enumerate(self.slots) if t is not None}
         self.ops: list = []
@@ -4534,7 +4769,6 @@ class _Recorder(_DirectExecutor):
         self.stream = _stream_key(index)
         self.meta = meta
         self.streams = None
-        self.grads_of = None
         self.ranges: dict = {}
 
     def refuse(self, reason: str) -> None:
@@ -4577,11 +4811,16 @@ class _Recorder(_DirectExecutor):
                     self.ops.append((_OP_NARROW, j, i, start, t.shape[0]))
                 return j
         constants: set = set()
-        for buffers in (self._tables() or {}).values():
-            _storages(list(buffers.values()), constants)
-        _storages(list((self._zeroed() or {}).values()), constants)
-        _storages(self.meta, constants)
+        self._constants(constants)
         return None if ptr in constants else -1
+
+    def _constants(self, out: set) -> None:
+        """Add the storage addresses of the plan's constants: the pooled workspaces of the stream and the tables of
+        ``meta``."""
+        for buffers in (self._tables() or {}).values():
+            _storages(list(buffers.values()), out)
+        _storages(list((self._zeroed() or {}).values()), out)
+        _storages(self.meta, out)
 
     def _tables(self):
         return _POOLED.tables.get(self.stream)
@@ -4590,7 +4829,7 @@ class _Recorder(_DirectExecutor):
         return _POOLED.zeroed.get(self.stream)
 
     def launch(self, stage, gx, gy, gz, *values):
-        self.bind(stage, gx, gy, gz, *values)()
+        self.fire(_prepared(stage, gx, gy, gz, *values))
 
     def bind(self, stage, gx, gy, gz, *values):
         """The bound launch of :meth:`_DirectExecutor.bind` that also records itself when it runs (the plan keeps the
@@ -4598,10 +4837,14 @@ class _Recorder(_DirectExecutor):
         launch = _prepared(stage, gx, gy, gz, *values)
 
         def fire():
-            _fire(launch)
-            self._record(launch)
+            self.fire(launch)
 
         return fire
+
+    def fire(self, launch) -> None:
+        """Run a launch of :func:`_prepared` and record it (in the order the launches run)."""
+        _fire(launch)
+        self._record(launch)
 
     def _record(self, launch) -> None:
         if self.why is not None:
@@ -4628,17 +4871,6 @@ class _Recorder(_DirectExecutor):
         self.ops.append((_OP_EMPTY, self._add(t), tuple(shape), dtype, device))
         return t
 
-    def qkv(self, grad_qkv):
-        if not callable(grad_qkv):
-            self.refuse("the caller's gradient tensors")
-            return grad_qkv
-        made = grad_qkv()
-        first = len(self.slots)
-        for t in made[:3]:
-            self._add(t)
-        self.ops.append((_OP_QKV, first))
-        return made
-
     def fork(self, index):
         main, side = super().fork(index)
         if self.streams is not None and self.streams != (main, side):
@@ -4657,6 +4889,29 @@ class _Recorder(_DirectExecutor):
     def join(self, main, side):
         super().join(main, side)
         self.ops.append((_OP_JOIN,))
+
+
+class _Recorder(_SlotRecorder):
+    """The backward's general path that also records its steps (:meth:`plan`).  ``slots``: the saved list and ``do``;
+    the gradients made by :meth:`empty` / :meth:`qkv` are slots too."""
+
+    __slots__ = ("layout", "grads_of")
+
+    def __init__(self, slots, index: int, meta: ChunkMeta):
+        super().__init__(slots, index, meta)
+        self.layout = _slot_layout(slots)
+        self.grads_of = None
+
+    def qkv(self, grad_qkv):
+        if not callable(grad_qkv):
+            self.refuse("the caller's gradient tensors")
+            return grad_qkv
+        made = grad_qkv()
+        first = len(self.slots)
+        for t in made[:3]:
+            self._add(t)
+        self.ops.append((_OP_QKV, first))
+        return made
 
     def grads(self, meta, dq, dk, dv, dg, dbeta, dh0):
         slots = [
@@ -4718,6 +4973,356 @@ def _replay(plan: _BackwardPlan, saved, do, grad_qkv):
     dq, dk, dv, dg, dbeta, dh0 = plan.grads
     return (slots[dq], slots[dk], slots[dv], slots[dg], slots[dbeta],
             None if dh0 is None else _caller_rows(slots[dh0], plan.meta))  # fmt: skip
+
+
+# A forward's recording watches the stream and event operations of :data:`_WATCHED` (:func:`_watched`): one that the
+# recording thread makes outside the recorder's own steps and cache fills would be missing from the plan, so it leaves
+# the call without one.  The first recording in flight installs the hooks and the last one removes them; a call of
+# another thread, or of this one outside a recording, passes through.
+_WATCHED = ((torch.cuda, "set_stream"), (torch.cuda.Event, "record"), (torch.cuda.Event, "wait"),
+            (torch.cuda.Stream, "wait_event"))  # fmt: skip
+# the recorder of the recording in flight on this thread
+_WATCHING: ContextVar[Any] = ContextVar("cake_gdn_nondet_watching", default=None)
+_WATCH_LOCK = threading.Lock()
+# the recordings in flight, and (owner, name, original, whether the owner itself held it) of every hooked attribute
+_WATCH_STATE: dict[str, Any] = {"count": 0, "saved": ()}
+_NO_WATCH = nullcontext()
+
+
+def _watch_hook(name: str, original):
+    def hook(*args, **kwargs):
+        recorder = _WATCHING.get()
+        if recorder is not None and not recorder.trusted:
+            recorder.refuse(f"{name} outside the forward's executor")
+        return original(*args, **kwargs)
+
+    return hook
+
+
+@contextmanager
+def _watched(recorder):
+    """Run a forward's recording by ``recorder`` with the operations of :data:`_WATCHED` hooked."""
+    with _WATCH_LOCK:
+        if not _WATCH_STATE["count"]:
+            saved = []
+            for owner, name in _WATCHED:
+                original = getattr(owner, name)
+                saved.append((owner, name, original, name in vars(owner)))
+                setattr(owner, name, _watch_hook(name, original))
+            _WATCH_STATE["saved"] = tuple(saved)
+        _WATCH_STATE["count"] += 1
+    token = _WATCHING.set(recorder)
+    try:
+        yield
+    finally:
+        _WATCHING.reset(token)
+        with _WATCH_LOCK:
+            _WATCH_STATE["count"] -= 1
+            if not _WATCH_STATE["count"]:
+                for owner, name, original, own in _WATCH_STATE["saved"]:
+                    if own:
+                        setattr(owner, name, original)
+                    else:
+                        delattr(owner, name)
+                _WATCH_STATE["saved"] = ()
+
+
+class _ForwardPlan:
+    """One recorded forward (:class:`_FwdRecorder`): its steps, the number of its slots, the stream it runs on (the
+    caller's, ``main``, and its side stream), the layout's ``ChunkMeta``, the module globals, pool tables and cached
+    walks it was recorded with, the entries of its result (:data:`_FWD_OUTPUTS`, each ``(name, 0, slot)``, ``(name, 1,
+    (shape, dtype, device))`` for a placeholder made again per call, or ``(name, 2, value)``) and the backward's plan
+    key of its calls (``None`` without a kept tape; :func:`_function_forward` decides per call whether it applies).
+    ``ops`` is ``None`` for a key whose forward cannot be planned: its calls run the general path without
+    recording."""
+
+    __slots__ = ("ops", "size", "stream", "main", "side", "meta", "names", "tables", "walks", "outputs",
+                 "backward_key", "fork_event", "join_event", "events")  # fmt: skip
+
+    def __init__(self, ops, size, stream, main, side, meta, names, tables, walks, signals, outputs,
+                 backward_key):  # fmt: skip
+        self.ops = ops
+        self.size = size
+        self.stream = stream
+        self.main = main
+        self.side = side
+        self.meta = meta
+        self.names = names
+        self.tables = tables
+        self.walks = walks
+        self.outputs = outputs
+        self.backward_key = backward_key
+        # the fork and the join of a plan with a side stream (recorded right before each wait), and the events one
+        # stream records for the other (:meth:`_DirectExecutor.signal`)
+        self.fork_event = torch.cuda.Event() if main is not None else None
+        self.join_event = torch.cuda.Event() if main is not None else None
+        self.events = tuple(torch.cuda.Event() for _ in range(signals))
+
+    def ready(self, meta: ChunkMeta, stream) -> bool:
+        """Whether this call (of the plan's key) may replay the plan: the layout's ``ChunkMeta``, the pool's tables of
+        the stream, its side stream and the cached walks it uses are the ones of the recording (a cleared cache makes
+        new ones), and so is every module global the forward reads (:func:`_fwd_plan_globals`, by identity)."""
+        if self.meta is not meta or _POOLED.tables.get(stream) is not self.tables:
+            return False
+        if self.side is not None and _SIDE_STREAMS.get(stream) is not self.side:
+            return False
+        if not all(_WALKS.get(key) is entry for key, entry in self.walks):
+            return False
+        names = _fwd_plan_globals()
+        return len(names) == len(self.names) and all(map(is_, names, self.names))
+
+
+class _FwdRecorder(_SlotRecorder):
+    """The forward's general path that also records its steps (:meth:`plan`).  ``slots``: the call's ``q``, ``k``,
+    ``v``, ``g``, ``beta`` and ``initial_state``; the carve, the views, the allocations and the eager results of the
+    call are slots too, the cached walks it uses (:meth:`use`) constants.  A cache it fills (:meth:`fill`: the walk's
+    build and the event after it) is not recorded, since a later general-path call does not repeat it; a refusal of
+    such a call is not kept (``filled``).  ``trusted``: inside one of the recorder's own stream or event steps or a
+    fill, which :func:`_watched` lets pass."""
+
+    __slots__ = ("uses", "events", "placeholders", "trusted", "filled")
+
+    def __init__(self, inputs, index: int, meta: ChunkMeta):
+        super().__init__(inputs, index, meta)
+        self.uses: list = []
+        self.events: list = []
+        self.placeholders: dict = {}
+        self.trusted = 0
+        self.filled = False
+
+    @contextmanager
+    def _trust(self):
+        self.trusted += 1
+        try:
+            yield
+        finally:
+            self.trusted -= 1
+
+    def _constants(self, out: set) -> None:
+        super()._constants(out)
+        for _key, entry in self.uses:
+            out.add(entry[0].untyped_storage().data_ptr())
+
+    def carve(self, device, pieces):
+        views = _carve(device, pieces)
+        # the pieces view one allocation of bytes through a view of it per dtype; a dtype view of another item size is
+        # no view of the bytes in autograd's sense (the pieces of each dtype take that view as their ``_base``), so the
+        # check is the storage the pieces share
+        storage = views[0].untyped_storage()
+        if any(t.untyped_storage().data_ptr() != storage.data_ptr() for t in views):
+            self.refuse("a carve whose pieces are not views of one allocation")
+            return views
+        # the allocation: a slot of the replay only
+        self.slots.append(None)
+        whole = len(self.slots) - 1
+        self.ops.append((_OP_EMPTY, whole, (storage.nbytes(),), torch.uint8, device))
+        typed: dict = {}
+        for t in views:
+            base = typed.get(t.dtype)
+            if base is None:
+                # the allocation viewed as the piece's dtype: a slot of the replay only
+                self.slots.append(None)
+                base = typed[t.dtype] = len(self.slots) - 1
+                self.ops.append((_OP_VIEW, base, whole, t.dtype, None, None, None))
+            self.ops.append((_OP_VIEW, self._add(t), base, None, tuple(t.shape), t.stride(), t.storage_offset()))  # fmt: skip
+        return views
+
+    def view(self, t, dtype):
+        out = t.view(dtype)
+        i = self._slot(t)
+        if i is not None:  # a view of a constant is a constant
+            self.ops.append((_OP_VIEW, self._add(out), i, dtype, None, None, None))
+        return out
+
+    def call(self, fn, *args):
+        out = fn(*args)
+        self._call(fn, args, out)
+        return out
+
+    def rows(self, fn, t, *args):
+        out = fn(t, *args)
+        if out is not t:  # ``t`` itself: the layout in the key fixes that, no step
+            self._call(fn, (t, *args), out)
+        return out
+
+    def _call(self, fn, args, out) -> None:
+        if self.why is not None:
+            return
+        template, refs = list(args), []
+        for pos, value in enumerate(args):
+            if isinstance(value, torch.Tensor):
+                i = self._ref(value)
+                if i == -1:
+                    self.refuse(
+                        f"{getattr(fn, '__name__', fn)} reads a tensor that is neither a slot nor a constant"
+                    )
+                    return
+                if i is not None:
+                    template[pos] = None
+                    refs.append((pos, i))
+        # a new tensor is a slot; an in-place call returns one of its operands
+        slot = None
+        if isinstance(out, torch.Tensor) and not any(out is value for value in args):
+            slot = self._add(out)
+        self.ops.append((_OP_CALL, fn, tuple(template), tuple(refs), slot))
+
+    def placeholder(self, shape, dtype, device):
+        t = cake_plan.placeholder(shape, dtype, device)
+        self.placeholders[id(t)] = (t, (tuple(shape), dtype, device))
+        return t
+
+    def fork(self, index):
+        with self._trust():
+            return super().fork(index)
+
+    @contextmanager
+    def on(self, side):
+        self.ops.append((_OP_STREAM, 1))
+        context = torch.cuda.stream(side)
+        with self._trust():
+            context.__enter__()
+        try:
+            yield
+        finally:
+            with self._trust():
+                context.__exit__(None, None, None)
+        self.ops.append((_OP_STREAM, 0))
+
+    def join(self, main, side):
+        with self._trust():
+            super().join(main, side)
+
+    def _role(self, stream) -> int | None:
+        """0 for the caller's stream of the fork, 1 for its side stream, ``None`` for another or before the fork."""
+        for role, s in enumerate(self.streams or ()):
+            if stream is s:
+                return role
+        return None
+
+    def signal(self, stream):
+        with self._trust():
+            event = super().signal(stream)
+        role = self._role(stream)
+        if role is None:
+            self.refuse("an event recorded outside the fork")
+        else:
+            self.ops.append((_OP_SIGNAL, len(self.events), role))
+        self.events.append(event)
+        return event
+
+    def wait(self, stream, event) -> None:
+        with self._trust():
+            super().wait(stream, event)
+        role = self._role(stream)
+        k = next((k for k, e in enumerate(self.events) if e is event), None)
+        if role is None or k is None:
+            self.refuse("an event wait outside the fork")
+        else:
+            self.ops.append((_OP_WAIT, k, role))
+
+    def use(self, key, entry) -> None:
+        with self._trust():
+            super().use(key, entry)
+        self.uses.append((key, entry))
+        self.ops.append((_OP_USE, entry, key[0]))
+
+    @contextmanager
+    def fill(self):
+        self.filled = True
+        with self._trust():
+            yield
+
+    def plan(self, fwd: dict, backward_key) -> _ForwardPlan | None:
+        """The recorded plan of a call whose general path returned ``fwd``, ``None`` when the call refused one."""
+        if self.why is not None:
+            return None
+        outputs = []
+        for name in _FWD_OUTPUTS:
+            value = fwd.get(name)
+            if not isinstance(value, torch.Tensor):
+                outputs.append((name, 2, value))
+                continue
+            i = self._slot(value)
+            if i is not None:
+                outputs.append((name, 0, i))
+                continue
+            found = self.placeholders.get(id(value))
+            if found is None or found[0] is not value:
+                return None  # an entry that is neither a slot nor a placeholder of the call
+            outputs.append((name, 1, found[1]))
+        main, side = self.streams or (None, None)
+        return _ForwardPlan(tuple(self.ops), len(self.slots), self.stream, main, side, self.meta, _fwd_plan_globals(),
+                            self._tables(), tuple(self.uses), len(self.events), tuple(outputs),
+                            backward_key)  # fmt: skip
+
+
+def _replay_forward(plan: _ForwardPlan, inputs) -> dict[str, Any]:
+    """Run ``plan`` on the call's ``q``, ``k``, ``v``, ``g``, ``beta`` and ``initial_state`` (``inputs``); returns the
+    entries of the forward's result that :func:`_function_forward` reads (:data:`_FWD_OUTPUTS`).  A stream switch
+    makes the stream's device current, which the general path's stream context restores on its exit: a plan with a
+    side stream makes the caller's current device current again when it returns or raises."""
+    slots = [*inputs]
+    slots += [None] * (plan.size - len(slots))
+    launch_stage = cake_backend.launch_stage
+    main, side = plan.main, plan.side
+    caller = None if main is None else torch.cuda.current_device()
+    forked = False
+    try:
+        for op in plan.ops:
+            code = op[0]
+            if code == _OP_LAUNCH:
+                values = list(op[4])
+                for pos, i in op[5]:
+                    values[pos] = slots[i]
+                launch_stage(op[1], op[2], tuple(values), device_index=op[3])
+            elif code == _OP_VIEW:
+                t = slots[op[2]]
+                if op[3] is not None:
+                    t = t.view(op[3])
+                slots[op[1]] = t if op[4] is None else t.as_strided(op[4], op[5], op[6])
+            elif code == _OP_CALL:
+                args = list(op[2])
+                for pos, i in op[3]:
+                    args[pos] = slots[i]
+                out = op[1](*args)
+                if op[4] is not None:
+                    slots[op[4]] = out
+            elif code == _OP_EMPTY:
+                slots[op[1]] = torch.empty(op[2], dtype=op[3], device=op[4])
+            elif code == _OP_USE:
+                _use_table(op[1][1], op[2], op[1][0])
+            elif code == _OP_FORK:
+                plan.fork_event.record(main)
+                side.wait_event(plan.fork_event)
+                forked = True
+            elif code == _OP_STREAM:
+                torch.cuda.set_stream(side if op[1] else main)
+            elif code == _OP_SIGNAL:
+                plan.events[op[1]].record(side if op[2] else main)
+            elif code == _OP_WAIT:
+                (side if op[2] else main).wait_event(plan.events[op[1]])
+            elif code == _OP_JOIN:
+                plan.join_event.record(side)
+                main.wait_event(plan.join_event)
+                forked = False
+            else:  # a dim-0 range of a slot
+                slots[op[1]] = slots[op[2]].narrow(0, op[3], op[4])
+    except BaseException:
+        if forked:  # back on the caller's stream, after the side stream's work (as the general path's join)
+            torch.cuda.set_stream(main)
+            main.wait_stream(side)
+        raise
+    finally:
+        if caller is not None and caller != plan.stream[0]:
+            torch.cuda.set_device(caller)
+    result: dict[str, Any] = {}
+    for name, kind, value in plan.outputs:
+        if kind == 0:
+            value = slots[value]
+        elif kind == 1:
+            value = cake_plan.placeholder(*value)
+        result[name] = value
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -5455,8 +6060,9 @@ def _host_plans(
         and (options.dhu_scan is None)
         and _adjoint_form(index, int(num_v_heads), group, options) is None
     ):
-        # the one-wave split of the adjoint walk or the serial table, priced at their full cost: never a pre-scan's
-        # split table, whose cost follows the gates (a form of cake_plan.ADJOINT_FORMS keeps the planner's tables)
+        # the one-wave split of the adjoint walk (at the length of _adjoint_split_length) or the serial table, priced
+        # at their full cost: never a pre-scan's split table, whose cost follows the gates (a form of
+        # cake_plan.ADJOINT_FORMS keeps the planner's tables)
         length = _adjoint_split_length(seq_lens, int(num_v_heads), index, options)
         bwd = plans[1]
         if length is not None:
@@ -5528,6 +6134,7 @@ def _chunk_meta(
         cake_plan.M_SHARE_MIN_SAVING,
         M_SHARE_ONE_LAUNCH,
         tuple(sorted(ONE_ROUND_TAIL_DEVICES.items())),
+        ONE_WAVE_TABLE_DEVICES,
     )
     if options.host_cache:
         meta = _META_FRONT.get(key)
@@ -5608,21 +6215,57 @@ def _chunk_meta(
 def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu,
                       use_qk_l2norm_in_kernel, options):  # fmt: skip
     """The forward of :class:`CakeGDNNondetFunction` and :class:`CakeGDNNondetPackedFunction` over q / k / v (the
-    inputs, or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields."""
+    inputs, or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields.  A call with the
+    forward's plan of its key replays it (:func:`_replay_forward`); any other runs the general path, which records the
+    plan of the key when the call has one (a layout of the host table cache with ``host_cache``, outside a CUDA graph
+    capture: a plan's launches read the pooled workspaces of its stream, and a capture takes its own)."""
     batch, seq_len, num_heads, key_dim = q.shape
     num_v_heads = v.shape[2]
     index = _tensor_index(q)
     arch = cake_backend.device_arch(index)
     meta = _chunk_meta(cu_seqlens, cu_seqlens_cpu, batch, seq_len, index, num_v_heads, options,
                        num_v_heads // num_heads)  # fmt: skip
-    fwd = cake_gdn_nondet_train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale,
-                                        initial_state=initial_state, output_final_state=output_final_state,
-                                        normalize_qk=use_qk_l2norm_in_kernel, options=options,
-                                        tape=_forward_tape())  # fmt: skip
+    tape = _forward_tape()
+    kept = cake_plan.tape_state(arch, options.save_state)
+    # a layout of the host table cache (host-built or equal-length) with host_cache: the forward and the backward plan
+    host = options.host_cache and (cu_seqlens is None or cu_seqlens_cpu is not None)
+    pins = None if options is _DEFAULT_OPTIONS else options
+    # CakeGDNNondetPackedFunction's forward sets row_shape
+    packed = getattr(ctx, "row_shape", None) is not None
+    plan = recorder = None
+    # _capturing(index) inline; a host q runs the general path, which pools nothing and refuses it at the first launch
+    # (the key's layouts do not name the device: such a call must not replay a plan of device inputs)
+    if (
+        FWD_PLAN
+        and host
+        and q.is_cuda
+        and not (_raw_stream(index) and torch.cuda.is_current_stream_capturing())
+    ):
+        # the forward's plan (:class:`_ForwardPlan`): besides meta's tables and the module globals (ready()), the key
+        # holds what the general path's steps follow: the stream, the tape mode (a checkpoint's first pass and its
+        # recompute differ), the arguments, the inputs' layouts and which inputs are one object (a call with
+        # ``k is q`` records q's slot for both, so a plan of another pattern would read k for q)
+        inputs = (q, k, v, g, beta, initial_state)
+        alias = (None if len({id(t) for t in inputs}) == len(inputs)
+                 else tuple(next(j for j, s in enumerate(inputs) if s is t) for t in inputs))  # fmt: skip
+        stream = _stream_key(index)
+        fkey = (id(meta), stream, arch, pins, tape, packed, num_heads, num_v_heads, float(scale),
+                bool(use_qk_l2norm_in_kernel), bool(output_final_state), _slot_layout(inputs), alias, kept)  # fmt: skip
+        plan = _FWD_PLANS.get(fkey)
+        if plan is None or (plan.ops is not None and not plan.ready(meta, stream)):
+            plan, recorder = None, _FwdRecorder(inputs, index, meta)
+        elif plan.ops is None:  # the key's calls keep the general path
+            plan = None
+    if plan is not None:
+        fwd = _replay_forward(plan, inputs)
+    else:
+        with _NO_WATCH if recorder is None else _watched(recorder):
+            fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                                 output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                                 options=options, tape=tape, ex=_DIRECT if recorder is None else recorder)  # fmt: skip
     # the saved list keeps its arity whatever the tape level keeps (a metadata-equal placeholder stands for the rest
     # of the state, :func:`cake_plan.placeholder`); the backward reads the kept names from the plan, never a
     # placeholder
-    kept = cake_plan.tape_state(arch, options.save_state)
     state_tensors = tuple(
         fwd[name]
         if name in kept
@@ -5651,27 +6294,37 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     # the forward tape's tag; the backward reads only a tape of its own
     ctx.mode = fwd["mode"]
     # the backward's plan (:class:`_BackwardPlan`) for a layout of the host table cache with a kept tape: its key,
-    # and the plan when one was recorded (the backward checks that it still applies before replaying it)
+    # and the plan when one was recorded (the backward checks that it still applies before replaying it).  A forward
+    # plan holds the key of its calls (every field of it follows the forward plan's key); whether a call takes the
+    # backward's plan stays a decision per call (``BWD_PLAN``)
     ctx.plan = ctx.plan_key = None
+    key = None if plan is None else plan.backward_key
     if (
-        BWD_PLAN
-        and options.host_cache
+        key is None
+        and host
         and options.save_state
-        and (cu_seqlens is None or cu_seqlens_cpu is not None)
+        and (BWD_PLAN or recorder is not None)
     ):
-        pins = None if options is _DEFAULT_OPTIONS else options
-        # CakeGDNNondetPackedFunction's forward sets row_shape
-        packed = getattr(ctx, "row_shape", None) is not None
         # the head counts too: one ChunkMeta serves every value-head group whose host tables agree (G = 2 and G = 4 of
         # a layout at HV = 4), and a plan's launches and gradients are those of the H it was recorded with
         key = (id(meta), _stream_key(index), arch, pins, num_heads, num_v_heads, ctx.scale, ctx.normalize_qk,
                ctx.grad_shapes, ctx.dtypes, fwd["v"].stride(), initial_state is not None, kept, packed,
                ctx.m_share)  # fmt: skip
-        plan = _BWD_PLANS.get(key)
-        if plan is None or plan.meta is not meta:
+    if recorder is not None:
+        recorded = recorder.plan(fwd, key)
+        # the call's tensors that are not in its result go now, as the general path's go when it returns
+        recorder.slots.clear()
+        # a refusal of a call that filled a table cache is not kept: the key's next call records again
+        if recorded is not None or not recorder.filled:
+            if recorded is None:  # the key's calls keep the general path
+                recorded = _ForwardPlan(None, 0, recorder.stream, None, None, meta, (), None, (), 0, (), None)  # fmt: skip
+            _keep_plan(_FWD_PLANS, _FWD_PLANS_LIMIT, fkey, recorded)
+    if BWD_PLAN and key is not None:
+        found = _BWD_PLANS.get(key)
+        if found is None or found.meta is not meta:
             ctx.plan_key = key
-        elif plan.ops is not None:
-            ctx.plan_key, ctx.plan = key, plan
+        elif found.ops is not None:
+            ctx.plan_key, ctx.plan = key, found
     if cu_seqlens is not None and cu_seqlens_cpu is None and _saved_hooks_active():
         # the device route's tables are one int32 tensor of this call (the ``meta``
         # kernel's output).  Under saved-tensor hooks (non-reentrant checkpointing,
@@ -5781,10 +6434,7 @@ def _general_backward(ctx, saved, do, dht, grad_qkv, key):
         plan = recorder.plan(grad_qkv is not None)
         if plan is None:  # the key's calls keep the general path
             plan = _BackwardPlan(None, 0, recorder.stream, None, None, ctx.meta, False, (), None, None, (), None)  # fmt: skip
-        _BWD_PLANS.pop(key, None)
-        if len(_BWD_PLANS) >= _BWD_PLANS_LIMIT:
-            del _BWD_PLANS[next(iter(_BWD_PLANS))]
-        _BWD_PLANS[key] = plan
+        _keep_plan(_BWD_PLANS, _BWD_PLANS_LIMIT, key, plan)
     return (
         grads["dq"],
         grads["dk"],
