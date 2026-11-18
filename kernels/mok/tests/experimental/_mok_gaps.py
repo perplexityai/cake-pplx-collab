@@ -23,11 +23,12 @@ that expects only the tier miss (an ``AssertionError``); on the others it is jud
 tier.  A known gap has caps per architecture, one for each norm the owner accepts the output's miss in: the largest
 ratio of its median and of its largest error over the naive tier's (kernel error / naive error against the float64
 oracle, over the draws the verdict counts in that norm) over every recorded run on every GPU model, rounded up to 4
-decimals and at least the near tie.  A known-gap output that misses a norm without a cap, misses beyond a cap, fails the
-zero rule, or misses where it has no caps fails its item (:class:`GapCapError`, not the expected miss).  When the fix
-lands the item meets the tier, the strict marker turns that into a failure, and the marker and its caps go with the
-fix.  Every output, a known gap or not, is judged by the same rule (:class:`tests.cake_naive.TierJudge`, its two-stage
-max-norm rule included): an output that meets the tier on an architecture is no known gap there.
+decimals and at least the near tie; an entry whose comment gives caps per architecture (owner-approved) takes each
+architecture's caps from that architecture's runs.  A known-gap output that misses a norm without a cap, misses beyond a
+cap, fails the zero rule, or misses where it has no caps fails its item (:class:`GapCapError`, not the expected miss).
+When the fix lands the item meets the tier, the strict marker turns that into a failure, and the marker and its caps go
+with the fix.  Every output, a known gap or not, is judged by the same rule (:class:`tests.cake_naive.TierJudge`, its
+two-stage max-norm rule included): an output that meets the tier on an architecture is no known gap there.
 """
 
 from __future__ import annotations
@@ -50,8 +51,9 @@ TARGETS = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 
 #: The caps of the known gaps: per known-gap item (``<test function>[<id>]``) and architecture, ``{norm: cap}`` for each
 #: norm the owner accepts the output's miss in there, the largest ratio of its median and of its largest error over the
-#: tier's over every recorded run on every GPU model, rounded up to 4 decimals (a float, at least the near tie).  An
-#: item is marked on exactly the architectures it lists.
+#: tier's over every recorded run on every GPU model, rounded up to 4 decimals (a float, at least the near tie), except
+#: where the entry's comment gives caps per architecture (owner-approved) from that architecture's runs.  An item is
+#: marked on exactly the architectures it lists.
 CAPS: dict[str, dict[str, dict[str, float]]] = {
     "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_down]": {
         "sm_100a": {"max": 1.1186},

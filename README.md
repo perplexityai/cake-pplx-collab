@@ -24,8 +24,8 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
 | clamped_swiglu | `cake-pplx-clamped-swiglu` | `cake_clamped_swiglu_det_train` | Routed-expert clamped SwiGLU, FP32 route weight before the one BF16 rounding (I = 2304) | [API](docs/API.md#clamped_swiglu) |
 | engram_lookup | `cake-pplx-engram-lookup` | `cake_engram_lookup_det_train` | Engram row lookup: FP8 E4M3 rows with E8M0 scales to BF16 (forward only) | [API](docs/API.md#engram_lookup) |
-| lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 | mok | `cake-pplx-mok` | `cake_mok_det_train` | Expert-parallel MoE layer training (BF16 or MXFP8 routed experts) | [API](docs/API.md#mok) |
+| lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 
 Each family's source is in `kernels/<family>/`. Distribution names use hyphens, and the subdirectory names use underscores. pip treats `-` and `_` in distribution names as the same character.
 

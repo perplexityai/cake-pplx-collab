@@ -45,7 +45,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 .github/workflows/
 ```
 
-Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks.
+Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks. mok has no `benchmarks/` directory.
 
 The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row.
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 18 families and 35 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 18 families and 35 backend packages, about 271 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -202,7 +202,7 @@ Build paths:
 
 ## Running tests
 
-Run the tests of a family against the installed distribution, not the source tree. Copy `tests/`, `benchmarks/` (some tests read it) and `pyproject.toml` to a directory outside `kernels/<family>/`, then run pytest there.
+Run the tests of a family against the installed distribution, not the source tree. Copy `tests/`, `benchmarks/` (some tests read it; mok has none) and `pyproject.toml` to a directory outside `kernels/<family>/`, then run pytest there.
 
 ```bash
 pip install "./kernels/kda[test]"

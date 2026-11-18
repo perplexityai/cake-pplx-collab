@@ -11,7 +11,7 @@ This page covers the public modules of all 18 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`), and mok has no autograd entry: its entries are `prepare_mok_bf16` (an adapter with forward, recompute and backward methods), `create_mok_bf16_workspace` and `quantize_mok_mxfp8_weights`, and its backend package is `cake_mok_bf16`. Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -1659,6 +1659,8 @@ Other public names: `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOL
 
 **Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
 
+**Options and environment.** The options are the keywords of `prepare_mok_bf16` and `create_mok_bf16_workspace` above. The facade reads no family-specific environment variable; the JIT variables in the README apply.
+
 **Cross-family.** None.
 
 **Example.**
@@ -1677,6 +1679,14 @@ schedule = backend.build_schedule(workspace, config, ids, num_local_experts=16)
 y, context = backend.forward(config, workspace, schedule, x, scores, *weights)
 grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *weights)
 ```
+
+**Caveats.**
+
+- This is the MoE layer only. Optimizer steps, router-network backpropagation and the all-reduce of shared-expert gradients are outside the adapter; shared-expert weight gradients stay local to each source rank.
+- All ranks must make matching collective calls. Keep workspaces and peer mappings alive while the adapter or a captured graph can use them, and use a separate workspace and adapter for concurrent executions.
+- Prepare and warm up before CUDA Graph capture. Pass the matching context and schedule to `backward`.
+- The MXFP8 forward always saves its context and rejects `save_context=False`.
+- Schedule capacity must hold every padded route; an overflow traps.
 
 ---
 
