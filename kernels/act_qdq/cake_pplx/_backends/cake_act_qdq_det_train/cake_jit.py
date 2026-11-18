@@ -64,7 +64,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "fp4_e4m3_g16",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 16,
-        "kernel_symbol": "kernel_cake_act_qdq_ee13ad4b293791d230ee",
+        "kernel_symbol": "kernel_cake_act_qdq_6c386eb171b622b07aa6",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -72,7 +72,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_ee13ad4b293791d230ee",
+        "library": "cake_act_qdq_6c386eb171b622b07aa6",
         "scale_out": False,
     },
     "fp4_e4m3_g16_scales": {
@@ -82,7 +82,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "fp4_e4m3_g16",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 16,
-        "kernel_symbol": "kernel_cake_act_qdq_41166eb1ccc2803f6f81",
+        "kernel_symbol": "kernel_cake_act_qdq_3c9b6d6bcbaf8c45c904",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -90,7 +90,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_41166eb1ccc2803f6f81",
+        "library": "cake_act_qdq_3c9b6d6bcbaf8c45c904",
         "scale_out": True,
     },
     # MXFP4: E2M1 values, one E8M0 (power-of-two) scale per 32 elements.
@@ -101,7 +101,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "mxfp4_e8m0_g32",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_5aa5c09cb63dbfff6d2d",
+        "kernel_symbol": "kernel_cake_act_qdq_d3568612f1c725cff309",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -109,7 +109,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_5aa5c09cb63dbfff6d2d",
+        "library": "cake_act_qdq_d3568612f1c725cff309",
         "scale_out": False,
     },
     "mxfp4_e8m0_g32_scales": {
@@ -119,7 +119,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "mxfp4_e8m0_g32",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_2ec141c83a1f2fd62960",
+        "kernel_symbol": "kernel_cake_act_qdq_79d268b9599a2036c54d",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -127,7 +127,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_2ec141c83a1f2fd62960",
+        "library": "cake_act_qdq_79d268b9599a2036c54d",
         "scale_out": True,
     },
     # MXFP8: E4M3 values, one E8M0 (power-of-two) scale per 32 elements.
@@ -138,7 +138,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "mxfp8_e8m0_g32",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_f905b77b1e2b4f8e1d70",
+        "kernel_symbol": "kernel_cake_act_qdq_21b6556b9b84f1fd0731",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -146,7 +146,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_f905b77b1e2b4f8e1d70",
+        "library": "cake_act_qdq_21b6556b9b84f1fd0731",
         "scale_out": False,
     },
     "mxfp8_e8m0_g32_scales": {
@@ -156,7 +156,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "format": "mxfp8_e8m0_g32",
         "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_f7e3618bac6d9b7076d1",
+        "kernel_symbol": "kernel_cake_act_qdq_e51efb4c536c4e1ed3a3",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -164,7 +164,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_f7e3618bac6d9b7076d1",
+        "library": "cake_act_qdq_e51efb4c536c4e1ed3a3",
         "scale_out": True,
     },
 }
