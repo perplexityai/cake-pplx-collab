@@ -6891,6 +6891,53 @@ def test_template_only_runner_never_launches():
             launch()
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeypatch):
+    """A binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot against the host
+    values the runner was prepared with (``runner.values``: :func:`stage_values` of its tensors, which its launches
+    bind) and forms none of them again; a runner value that is not the slot's view still fails the check.  The
+    template is a reference runner of a compacted plan marked ``cake``: it binds no launch, so a stand-in launch of
+    chunk 0's row gradient joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37)
+    runner = mod.prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        objective="ce",
+        loss_div=inp.loss_div,
+        chunk_size=16,
+        backend="reference",
+        compact_rows=True,
+    )
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    grad = ("row_grad", 0)
+    assert gathers and grad in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        grad: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "d", "rlab"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+    real = mod.stage_values
+
+    def counted(stage, t, plan, index, **kw):
+        formed.append((stage, index))
+        return real(stage, t, plan, index, **kw)
+
+    monkeypatch.setattr(mod, "stage_values", counted)
+    mod._Binding.from_runner(runner)
+    assert not [key for key in formed if key == grad or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (grad, "rlab")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._Binding.from_runner(runner)
+        runner.values[key] = kept
+
+
 _ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),

@@ -1526,6 +1526,52 @@ def _assert_fold_operands(v, t, plan, row0, rows_c) -> None:
     assert v["row_vecs"] == plan.problem.hidden // plan.geometry.cast_vec
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeypatch):
+    """A binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot against the host
+    values the runner was prepared with (``runner.values``: :func:`stage_values` of its tensors, which its launches
+    bind) and forms none of them again; a runner value that is not the slot's view still fails the check.  The
+    template is a reference runner of a compacted plan marked ``cake``: it binds no launch, so a stand-in launch of
+    chunk 0's row gradient joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37)
+    runner = mod.prepare_lm_head_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        loss_div=1.0,
+        chunk_size=16,
+        backend="reference",
+        compact_rows=True,
+    )
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    grad = ("row_grad", 0)
+    assert gathers and grad in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        grad: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "d", "rlab"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+    real = mod.stage_values
+
+    def counted(stage, t, plan, index, **kw):
+        formed.append((stage, index))
+        return real(stage, t, plan, index, **kw)
+
+    monkeypatch.setattr(mod, "stage_values", counted)
+    mod._Binding.from_runner(runner)
+    assert not [key for key in formed if key == grad or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (grad, "rlab")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._Binding.from_runner(runner)
+        runner.values[key] = kept
+
+
 def test_reference_slab_sum_folds_the_label_residual():
     """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
     each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a
