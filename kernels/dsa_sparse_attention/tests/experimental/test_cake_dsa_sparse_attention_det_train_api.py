@@ -148,15 +148,19 @@ def test_nope_entries_refuse_a_sink(name, monkeypatch):
 
     monkeypatch.setattr(public_api, "_backend", refuse)
     entry = getattr(public_api, name)
-    positional = len(
-        [
-            p
-            for p in inspect.signature(entry).parameters.values()
-            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        ]
-    )
+    parameters = inspect.signature(entry).parameters.values()
+    positional = [
+        p for p in parameters if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+    # the required keyword-only arguments (the packed backward's ``topk_length``) stand as ``None`` as well
+    required = {
+        p.name: None
+        for p in parameters
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+        and p.default is inspect.Parameter.empty
+    }
     with pytest.raises(NotImplementedError, match="sink"):
-        entry(*([None] * positional), sink=torch.zeros(64))
+        entry(*([None] * len(positional)), **required, sink=torch.zeros(64))
     assert inspect.signature(entry).parameters["sink"].default is None
 
 

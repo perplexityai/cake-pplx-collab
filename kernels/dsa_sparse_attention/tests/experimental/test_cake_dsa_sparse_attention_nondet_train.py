@@ -4443,7 +4443,9 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
     """Without the natural stage the one permuted accumulator feeds the main stage and the cast: the cast writes
     the fresh ``dkv`` densely (``out_f32``) or adds into ``dkv_acc`` (``dst_packed`` / ``dst_map``), its rope
     operands are zero-size placeholders of the declared dtypes; a direct plan binds the FP32 buffer itself as the
-    main stage's ``dkv_f32`` and no cast operands; the single-pass placeholders are the same as the rope plan's."""
+    main stage's ``dkv_f32`` and no cast operands; the single-pass placeholders are the same as the rope plan's; a
+    sink plan adds the sink-gradient stage's partials and its completion counter (an unsigned 32-bit view of the
+    int32 ticket region)."""
     S = 8
     base = dict(
         indices=torch.zeros(2, 4, dtype=torch.int32),
@@ -4462,6 +4464,7 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
         dkv_direct=False,
         fresh_dkv=True,
         key_passes=1,
+        sink=False,
     )
     t = dict(base, dkv_latent_acc=acc_perm, dkv=dkv)
     values = cake_backend._bound_values_nope(plan, t)
@@ -4499,6 +4502,7 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
         dkv_direct=True,
         fresh_dkv=False,
         key_passes=1,
+        sink=False,
     )
     values = cake_backend._bound_values_nope(
         plan, dict(base, dkv_acc=acc, dkv_dst_map=dst_map)
@@ -4509,6 +4513,17 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
     plan.constants = dict(dkv_stride=D_LATENT, dkv_has_map=0)
     values = cake_backend._bound_values_nope(plan, dict(base, dkv=dkv))
     assert values["dkv_f32"] is dkv and values["dkv_dst_map"] is base["topk_length"]
+    assert "partials" not in values and "counter" not in values
+    # a sink plan binds the sink-gradient stage's partials and its counter as an unsigned view of the ticket
+    partial = torch.zeros(1, NUM_HEADS)
+    ticket = torch.zeros(1, dtype=torch.int32)
+    plan.sink = True
+    values = cake_backend._bound_values_nope(
+        plan, dict(base, dkv=dkv, dsink_partial=partial, dsink_ticket=ticket)
+    )
+    assert values["partials"] is partial and values["counter"].dtype == torch.uint32
+    assert tuple(values["counter"].shape) == (1,)
+    assert values["counter"].data_ptr() == ticket.data_ptr()
     # a forward plan binds no backward operands
     plan = SimpleNamespace(constants={}, backward=False)
     values = cake_backend._bound_values_nope(plan, dict(base))
