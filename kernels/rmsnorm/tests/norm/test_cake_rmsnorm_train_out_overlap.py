@@ -103,7 +103,7 @@ def test_the_overlap_decision_without_a_device(mode: str) -> None:
     buf = torch.zeros(3 * size, dtype=torch.bfloat16)
     x = buf[:size].view(rows, hidden)
     w = buf[2 * size : 2 * size + hidden]
-    reads = pkg._read_ranges(x, None, w)
+    reads = pkg._read_ranges(x, None, w, rows=rows, hidden=hidden)
     assert len(reads) == 2
     one_row_on = buf[hidden : hidden + size].view(rows, hidden)
     over_w = buf[2 * size - hidden : 3 * size - hidden].view(rows, hidden)

@@ -297,31 +297,40 @@ def _route_error(
     )
 
 
-def _byte_range(tensor: torch.Tensor) -> tuple[int, int]:
-    """``(first, end)``: the address of the first byte the elements of the
-    non-empty ``tensor`` cover and the address one past its last byte."""
+def _read_ranges(
+    x: torch.Tensor,
+    residual: Optional[torch.Tensor],
+    w: torch.Tensor,
+    *,
+    rows: int,
+    hidden: int,
+) -> tuple[tuple[int, int], ...]:
+    """The byte ranges ``(first, end)`` a forward launch reads, ``end`` one past
+    the last byte: ``x`` and ``residual`` as :func:`_kernel_input` returns them
+    (``[rows, hidden]``, feature dimension contiguous, rows one ``stride(0)``
+    apart) and the contiguous ``w``.  Plain integer arithmetic on the pointers
+    and strides, so the check adds little host time to a call."""
 
-    span = 1 + sum(
-        (size - 1) * step for size, step in zip(tensor.shape, tensor.stride())
-    )
-    first = tensor.data_ptr()
-    return first, first + span * tensor.element_size()
+    if not hidden:
+        return ()
+    w_first = w.data_ptr()
+    ranges = [(w_first, w_first + hidden * w.element_size())]
+    if rows:
+        for tensor in (x, residual):
+            if tensor is not None:
+                first = tensor.data_ptr()
+                span = (rows - 1) * tensor.stride(0) + hidden
+                ranges.append((first, first + span * tensor.element_size()))
+    return tuple(ranges)
 
 
-def _read_ranges(*tensors: Optional[torch.Tensor]) -> tuple[tuple[int, int], ...]:
-    """The byte ranges (:func:`_byte_range`) of the non-empty tensors among
-    ``tensors``: the inputs a launch reads."""
+def _meets(first: int, end: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether the bytes ``[first, end)`` meet one of ``ranges``."""
 
-    return tuple(_byte_range(t) for t in tensors if t is not None and t.numel())
-
-
-def _overlaps(tensor: torch.Tensor, ranges: tuple[tuple[int, int], ...]) -> bool:
-    """Whether the bytes of the non-empty ``tensor`` meet one of ``ranges``."""
-
-    first, end = _byte_range(tensor)
-    return any(
-        first < other_end and other_first < end for other_first, other_end in ranges
-    )
+    for other_first, other_end in ranges:
+        if first < other_end and other_first < end:
+            return True
+    return False
 
 
 def _output_buffer(
@@ -351,12 +360,15 @@ def _output_buffer(
         kernel = torch.empty(shape, dtype=dtype, device=device)
         return kernel, (kernel if lead is None else kernel.view(user_shape)), None
     _validate_tensor(tensor, name, shape=user_shape, device=device, dtype=dtype)
-    if tensor.numel() == 0 or (
-        tensor.is_contiguous()
-        and tensor.data_ptr() % alignment == 0
-        and not (reads and _overlaps(tensor, reads))
-    ):
+    numel = tensor.numel()
+    if numel == 0:
         return (tensor if lead is None else tensor.reshape(shape)), tensor, None
+    if tensor.is_contiguous():
+        first = tensor.data_ptr()
+        if first % alignment == 0 and not _meets(
+            first, first + numel * tensor.element_size(), reads
+        ):
+            return (tensor if lead is None else tensor.reshape(shape)), tensor, None
     return torch.empty(shape, dtype=dtype, device=device), tensor, tensor
 
 
@@ -650,7 +662,9 @@ def cake_rmsnorm_det_train_forward(
     # temporary: a forward program may read an input again after it stores an
     # output, and every kernel takes its pointers as not aliased.
     caller_buffers = out is not None or rstd is not None or residual_out is not None
-    reads = _read_ranges(x, residual, w) if caller_buffers else ()
+    reads = (
+        _read_ranges(x, residual, w, rows=rows, hidden=hidden) if caller_buffers else ()
+    )
     out, y_result, out_user = _output_buffer(
         out,
         "out",
