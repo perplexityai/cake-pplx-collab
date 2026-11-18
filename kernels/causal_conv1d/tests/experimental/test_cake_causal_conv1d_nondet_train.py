@@ -44,7 +44,10 @@ both routes that plan by it) launches the row's
 tiles, on a caller-owned workspace of the public size and on the package's, with every output judged against the
 naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
-the side-stream one-SM trim of a three-tile narrow row's grid.
+the side-stream one-SM trim of a three-tile narrow row's grid.  The forward's narrow rows (``FORWARD_NARROW_CASES``:
+C 576 to 768 at the row's token floors on the device's architecture, ``forward_narrow_min_s`` and
+``FORWARD_WIDTH_FLOORS``) launch their 32-vector or width tiles on a caller-owned forward workspace of the public
+size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
@@ -134,20 +137,51 @@ OVERRIDE_CASES = {
     "sm_103a": (("bwd", 62585, 1536),),
     "sm_107a": (("bwd_dt_bf16_taps", 62585, 768), ("bwd_dt", 62585, 768)),
 }
+# The token counts a ``NARROW_TILES`` key over every S (one token to ``INT32_MAX``) launches its rows at, in the perf
+# packing: the largest S of ``CASES`` and a longer stream.
+EVERY_S_TOKENS = (4097, 31292)
+
+
+def _key_tokens(s_min: int, s_max: int) -> tuple[int, ...]:
+    """The token counts a ``NARROW_TILES`` key's rows launch at: its smallest token count and one token above it
+    (inside its range), or :data:`EVERY_S_TOKENS` for a key over every S."""
+
+    if (s_min, s_max) == (1, loader.INT32_MAX):
+        return EVERY_S_TOKENS
+    return tuple(sorted({s_min, min(s_min + 1, s_max)}))
+
+
 # The rows of ``NARROW_TILES`` (rendered with the table; empty for an architecture without rows) the narrow-tile
 # test launches, per architecture (route, S, C): each key's lowest, an inner and its highest channel count at the
-# key's smallest token count and one token above it (inside the delivered range; ``CASES`` stop at S = 4097), on the
-# key's route and on every route that plans by its rows (``TILE_ROUTE``).
+# token counts of :func:`_key_tokens` (inside the delivered range; ``CASES`` stop at S = 4097), on the key's route and
+# on every route that plans by its rows (``TILE_ROUTE``).
 NARROW_CASES = {
     arch: tuple(
         (route, S, C)
         for (base, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
         for route in (base, *sorted(t for t, b in loader.TILE_ROUTE.items() if b == base))
         for C in sorted({int(c_lo), (int(c_lo) + int(c_hi)) // 16 * 8, int(c_hi)})
-        for S in sorted({int(s_min), min(int(s_min) + 1, int(s_max))})
+        for S in _key_tokens(int(s_min), int(s_max))
     )
     for arch, rows in loader.NARROW_TILES.items()
 }
+# The forward's narrow rows (C 576 to 768) in each region of the device's architecture where the forward plan is not
+# the single tile of C / 8 vectors, (route, C, tiles): ``"narrow"`` at the row's ``forward_narrow_min_s`` floor (the
+# 32-vector tiles), ``"wide"`` at the row's ``FORWARD_WIDTH_FLOORS`` floor (its ``FORWARD_NARROW_WIDTHS`` tiles: C 576
+# as (18, 7, 4), C 640 as (40, 3, 2)); the token counts come from the package's tables at run time
+# (:func:`_forward_narrow_tokens`).  Every row on the default route ``fwd``, and one row on each other forward route.
+FORWARD_NARROW_CASES = (
+    ("fwd", 576, "narrow"),
+    ("fwd", 576, "wide"),
+    ("fwd", 640, "narrow"),
+    ("fwd", 640, "wide"),
+    ("fwd", 704, "narrow"),
+    ("fwd", 768, "narrow"),
+    ("fwd_dt", 704, "narrow"),
+    ("fwd_bias", 576, "wide"),
+)
+# The taps' and the bias's dtypes (``None``: no bias) of a call of each forward route.
+FORWARD_SETTINGS = {"fwd": (F32, None), "fwd_dt": (BF16, None), "fwd_bias": (F32, F32)}
 # Wide channel counts on every route: C = 4096 (four documents, one empty) and C = 10240 (a packed q / k / v
 # projection width), at small S.
 WIDE_CASES = ((4097, 4096, (1000, 0, 3, 3094)), (2048, 10240, "perf"))
@@ -509,6 +543,34 @@ def _stream_workspace(device: torch.device) -> torch.Tensor | None:
 
     key = (device.index, int(torch.cuda.current_stream(device).cuda_stream))
     return pkg._BACKWARD_WORKSPACES.get(key)
+
+
+def _forward_stream_workspace(device: torch.device) -> torch.Tensor | None:
+    """The package's forward workspace of the device's current stream (``None`` before its first call)."""
+
+    key = (device.index, int(torch.cuda.current_stream(device).cuda_stream))
+    return pkg._FORWARD_WORKSPACES.get(key)
+
+
+def _forward_narrow_tokens(arch: str, channel_vectors: int, tiles: str) -> int:
+    """The token count at which the forward row of ``channel_vectors`` vectors runs ``tiles`` on ``arch``, from the
+    package's tables: the row's ``forward_narrow_min_s`` floor (``FORWARD_NARROW_MIN_S`` or
+    ``FORWARD_NARROW_ROW_MIN_S``: on sm_103a C 768 from 20480, C 704 from 12288) for ``"narrow"`` (below the row's
+    width floor), the row's ``FORWARD_WIDTH_FLOORS`` floor (at least the former) for ``"wide"``.  A table that leaves
+    the region empty on ``arch`` fails the test."""
+
+    S_min = loader.forward_narrow_min_s(arch, channel_vectors)
+    assert S_min is not None, f"{arch} has no forward token floor in FORWARD_NARROW_MIN_S"
+    floor = loader.FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
+    if tiles == "wide":
+        assert channel_vectors in loader.FORWARD_NARROW_WIDTHS and floor is not None, (
+            f"{arch}: the forward row of {channel_vectors} vectors has no width floor"
+        )
+        return max(int(floor), int(S_min))
+    assert floor is None or int(S_min) < int(floor), (
+        f"{arch}: the forward row of {channel_vectors} vectors runs no 32-vector tiles below its width floor"
+    )
+    return int(S_min)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -919,6 +981,67 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
     assert checked, (
         f"{arch}: no three-tile NARROW_TILES row on an occupancy single-wave record"
     )
+
+
+@pytest.mark.parametrize(
+    "kind, C, tiles",
+    FORWARD_NARROW_CASES,
+    ids=[f"{kind}-C{C}-{tiles}" for kind, C, tiles in FORWARD_NARROW_CASES],
+)
+def test_forward_narrow_row(kind, C, tiles, monkeypatch, record_property) -> None:
+    """Every ``FORWARD_NARROW_CASES`` row at the token count of :func:`_forward_narrow_tokens` on the device's
+    architecture: the public forward launches the route's one program with the region's channel tiles -- the
+    32-vector tiles (``32``, ``threads // 32`` sub-tiles, ``ceil(C / vec / 32)`` tiles) at the row's
+    ``forward_narrow_min_s`` floor, the row's ``FORWARD_NARROW_WIDTHS`` tiles at its width floor -- instead of one
+    tile of ``C / vec`` vectors, once on a caller-owned forward workspace of the public size and once on the
+    package's, each holding the launch's counters and zero after the call; ``y`` of both launches judged against the
+    naive tier."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    weight_dtype, bias_dtype = FORWARD_SETTINGS[kind]
+    assert loader.forward_route(bias=bias_dtype is not None, bf16_taps=weight_dtype == BF16) == kind
+    # The forward programs run 8 channels per thread (checked below on the selected program's geometry).
+    S = _forward_narrow_tokens(arch, C // 8, tiles)
+    (name,) = loader.selected_modules(arch, kind, C=C, S=S)
+    record = loader.MODULES[name]
+    geometry = record["grid_rule"]["geometry"]
+    threads, vec = int(geometry["threads"]), int(geometry["vec"])
+    assert (threads, vec) == (loader.FORWARD_NARROW_THREADS, 8), f"{name}: geometry {geometry}"
+    ct_vec = loader.FORWARD_NARROW_WIDTHS[C // vec] if tiles == "wide" else 32
+    wanted = {"ct_vec": ct_vec, "n_sub": threads // ct_vec, "n_ch_tiles": -(-(C // vec) // ct_vec)}
+    split_keys = tuple(wanted)
+    assert tuple(wanted.values()) != loader.channel_split(C, geometry=geometry, role="fwd"), (
+        f"{arch} {kind} C={C}: the row must differ from the single tile"
+    )
+    words = loader.counter_words(record, wanted["n_ch_tiles"])
+    label = f"{arch} {kind} S={S} C={C} {tiles} split={tuple(wanted.values())}"
+    workspace = pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)
+    seen = []
+    launch = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        seen.append((name, {key: int(values[key]) for key in split_keys}, values.get("work")))
+        return launch(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+
+    def call(x, w, cu, dy, b, policy):
+        ys = []
+        for own in (True, False):
+            seen.clear()
+            y = _forward(x, w, cu, bias=b, workspace=workspace if own else None)
+            assert [(launched, split) for launched, split, _ in seen] == [(name, wanted)], (
+                f"{label} own={own}: launched {seen}"
+            )
+            held = workspace if own else _forward_stream_workspace(device)
+            assert held is not None and seen[0][2] is held and held.numel() >= words, f"{label} own={own}"
+            assert int(torch.count_nonzero(held)) == 0, f"{label} own={own}: the workspace is not zero"
+            ys.append(y)
+        return {"y": ys}
+
+    _judge(S, C, "perf", call, weight_dtype=weight_dtype, bias_dtype=bias_dtype, key=47, label=label)
+    record_property("forward_split", tuple(wanted.values()))
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
