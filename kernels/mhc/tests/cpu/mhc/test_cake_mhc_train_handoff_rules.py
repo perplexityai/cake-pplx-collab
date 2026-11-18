@@ -374,7 +374,8 @@ def test_the_nondet_handoff_records_are_the_det_records_renamed() -> None:
             s in n for s in ("__pi_pn__", "collapse_fwd__", "collapse_bwd__", "_ho__")
         )
     }
-    assert len(new) == 7, sorted(new)
+    # the fused collapse, the standalone collapse pair and one twin per token-owner form
+    assert len(new) == 3 + len(TOKEN_FORMS), sorted(new)
     for name in new:
         assert ND.MODULES[renamed(name)] == renamed(DET.MODULES[name]), name
     for arch in HANDOFF_ARCHES:
