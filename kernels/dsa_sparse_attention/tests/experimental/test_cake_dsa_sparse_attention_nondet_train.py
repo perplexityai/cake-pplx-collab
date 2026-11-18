@@ -502,7 +502,7 @@ _DKV_DIRECT_ROWS = {
     # K_eff rounds the mean segment up: ceil(S / num_segments) reaches the bound where S // num_segments does not
     "ceil(S / 3) = 1681 above the bound": ((960, 5041, 4096, 3), (False, False)),
     "ceil(S / 3) = 1618 at the bound": ((984, 4853, 2048, 3), (False, False)),
-    "ceil(S / 2) = 2427 at the bound": ((656, 4853, 2176, 2), (False, False)),
+    "ceil(S / 2) = 2427 at the bound": ((656, 4853, 4096, 2), (False, False)),
     "floor: T K above 112 S (NoPE)": ((1024, 1024, 128, 1), (False, True)),
     "floor: T K above 112 S (RoPE)": ((1024, 4096, 512, 1), (True, True)),
     "p8949": ((16384, 65536, 2048, 1), (False, False)),
