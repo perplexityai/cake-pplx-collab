@@ -75,9 +75,12 @@ replays of one graph must not overlap.  Only eager calls without
 ``workspace=`` zero these buffers, the forward's and the backward's
 separately, sized to the largest need of such a call so far.  When none is
 ready (no such eager call of the kind before the capture, all taken by
-earlier captures, or too small) each captured call zeroes a buffer of its
-own (one fill node per call), as every captured call does with capture id 0
-(also when ``cuda.bindings`` is not importable).  The forward workspace
+earlier captures, too small, or their zero fills not complete yet: a
+``CUDAGraph.capture_begin`` right after such an eager call with no
+synchronization; ``torch.cuda.graph`` synchronizes first) each captured call
+zeroes a buffer of its own (one fill node per call), as every captured call
+does with capture id 0 (also when ``cuda.bindings`` is not importable).  The
+forward workspace
 (zeroed int32 token-chunk counters) has the deterministic package's size and
 rules; inside a capture the forward's omitted workspace follows the
 backward's rules with buffers of its own.  Memory these buffers free stays
