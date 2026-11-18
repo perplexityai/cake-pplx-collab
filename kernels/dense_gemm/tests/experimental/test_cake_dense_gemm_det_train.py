@@ -18,6 +18,7 @@ import ast
 import contextlib
 import dataclasses
 import gc
+import inspect
 import re
 import threading
 import warnings
@@ -9959,6 +9960,10 @@ def test_gpu_promoted_twin_forms(case):
         )
     knobs = cake_backend._template_knobs(twin)
     assert knobs.pop("kser", 0) == 0 and knobs["promote"] is True, twin
+    # the symbol's knobs the prepare call takes; the rest (``sk_first``, ``lw``, ``mg``, ``sw``) are off in every twin
+    takes = inspect.signature(cake_dense_gemm_det_train_projection_prepare).parameters
+    assert not any(v for k, v in knobs.items() if k not in takes), (twin, knobs)
+    knobs = {k: v for k, v in knobs.items() if k in takes}
     G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
     A, B, transposed = wgrad_views(G, X, arch=arch)
     out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
