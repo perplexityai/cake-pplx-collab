@@ -9,8 +9,8 @@ autograd entry) on `sm_100a`, `sm_103a` and `sm_107a`. Public modules:
 The autograd entries and the explicit forward take `dot_sum`, the forward's sum of the gate's dot product. The
 default, `"compensated"`, is a compensated FP32 dot product. `"fp32"` (opt-in) sums in one FP32 word: a faster
 forward that rounds more output elements away from the correctly rounded result where the products nearly cancel. The
-backward is the same for both. Both choices meet every accuracy bound of the tests, as measured on GB300; the numbers
-are in [`docs/API.md`](../../docs/API.md#engram_gate).
+backward is the same for both. Both choices meet every accuracy bound of the tests, as measured on B200, GB200, GB300
+and VR200; the GB300 numbers are in [`docs/API.md`](../../docs/API.md#engram_gate).
 
 Install this family alone, pinned to a commit:
 

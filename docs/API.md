@@ -883,7 +883,7 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
-**Accuracy.** The acceptance tests compare each output with an FP64 reference. The median and the largest relative L2 error over 25 or more draws must be at most twice those of an FP32 evaluation of the same formula. The draws are random, or built so that the dot products nearly cancel (`|dot|` from 2e-6 to 2e-5). Both `dot_sum` choices meet every bound. Measured on GB300 (`T = 16`, 25 draws of each kind), relative L2 error, median / largest:
+**Accuracy.** The acceptance tests compare each output with an FP64 reference. The median and the largest relative L2 error over 25 or more draws must be at most twice those of an FP32 evaluation of the same formula. The draws are random, or built so that the dot products nearly cancel (`|dot|` from 2e-6 to 2e-5). Both `dot_sum` choices meet every bound on B200, GB200, GB300 and VR200. Measured on GB300 (`T = 16`, 25 draws of each kind), relative L2 error, median / largest:
 
 | Output, draws | Error | Bound |
 |---|---|---|

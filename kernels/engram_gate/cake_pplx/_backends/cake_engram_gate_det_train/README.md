@@ -97,8 +97,8 @@ checkpoint's recomputed forward uses the forward's `dot_sum`.
 The acceptance tests compare each output with an FP64 reference: the median and the largest relative L2 error over
 25 or more draws must be at most twice those of an FP32 evaluation of the same formula. The draws are random, or
 built so that the dot products nearly cancel (`|dot|` from 2e-6 to 2e-5); on those rows the gate's derivative
-`1 / (2 sqrt|dot|)` magnifies any error of `P`. Both `dot_sum` choices meet every bound, measured on GB300 (`T = 16`,
-25 draws of each kind); relative L2 error, median / largest:
+`1 / (2 sqrt|dot|)` magnifies any error of `P`. Both `dot_sum` choices meet every bound on B200, GB200, GB300 and
+VR200. Measured on GB300 (`T = 16`, 25 draws of each kind); relative L2 error, median / largest:
 
 | Output, draws | Error | Bound |
 | --- | --- | --- |

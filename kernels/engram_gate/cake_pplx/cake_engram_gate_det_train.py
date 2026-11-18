@@ -42,13 +42,13 @@ cancel, rounds more output elements away from the correctly rounded result
 against 117; an FP32 evaluation of the formula: 21917).  The backward is the
 same for both: it recomputes ``P`` as a compensated dot product, so the
 gradients do not depend on ``dot_sum`` (the explicit backward does not take
-it).  As measured on GB300, both choices meet every accuracy bound of the
-acceptance tests: the median and the largest relative L2 error against an
-FP64 reference, over random draws and over draws whose dot products nearly
-cancel (``|dot|`` from 2e-6 to 2e-5), at most twice those of an FP32
-evaluation of the formula.  The ``out`` errors of the two forwards agree to
-four digits (near-cancelling: 1.661e-3 median and 1.669e-3 largest, against
-bounds of 3.321e-3 and 3.338e-3).
+it).  As measured on B200, GB200, GB300 and VR200, both choices meet every
+accuracy bound of the acceptance tests: the median and the largest relative
+L2 error against an FP64 reference, over random draws and over draws whose
+dot products nearly cancel (``|dot|`` from 2e-6 to 2e-5), at most twice
+those of an FP32 evaluation of the formula.  The ``out`` errors of the two
+forwards agree to four digits (GB300, near-cancelling: 1.661e-3 median and
+1.669e-3 largest, against bounds of 3.321e-3 and 3.338e-3).
 
 Entries: :func:`cake_engram_gate_det` (with autograd; ``key`` and ``value``
 contiguous or views into one packed ``[T, 25600]``),
@@ -188,8 +188,8 @@ def cake_engram_gate_det(
     dot_sum : {"compensated", "fp32"}
         How the forward sums ``P = sum_d w_d h_d k_d``: ``"compensated"`` (default), a compensated FP32 dot product;
         ``"fp32"`` (opt-in), one FP32 word, faster, with more output elements rounded away from the correctly
-        rounded result where the products nearly cancel.  Both meet the accuracy bounds as measured on GB300 (see
-        the module notes); the backward is the same for both.
+        rounded result where the products nearly cancel.  Both meet the accuracy bounds as measured on B200, GB200,
+        GB300 and VR200 (see the module notes); the backward is the same for both.
 
     Returns
     -------
