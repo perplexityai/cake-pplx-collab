@@ -96,6 +96,29 @@ All operands must be contiguous.
 | SM103 | B300 / GB300 | `sm_103a` |
 | SM107 | Rubin R200 | `sm_107a` |
 
+### Pre handoff (hidden 5120, SM100 / SM103)
+
+A DeepSeek-V4.1-Flash sublayer collapses its streams with the `pre` of the previous sublayer and hands its own `pre` on. The entry points of both packages (`det` shown; `nondet` has the same names under its prefix):
+
+```python
+# pre_in: FP32 [T, 4], the previous sublayer's pre_next (one-hot [1, 0, 0, 0] for the first sublayer)
+U, pre_next, handle = cake_mhc_det_train_handoff_prepare(X, pre_in, fn, scale, base, rms_eps=1e-20)
+Y = cake_mhc_det_train_finish(X, branch(U), handle)   # the backward takes dU and dpre_next, returns dX and dpre_in
+head_input = cake_mhc_det_train_collapse(Y_last, pre_last)                 # the standalone final collapse
+
+# Low level
+U, pre_next, stats = cake_mhc_det_train_handoff_forward_prepare(X, pre_in, fn, scale, base)
+dX, dpre_in, dfn, dscale, dbase = cake_mhc_det_train_handoff_backward_finish(
+    X, dY, dU, pre_in, dpre_next, B, fn, scale, base, stats, grad_stats)
+U = cake_mhc_det_train_collapse_forward(X, pre_in)
+dX, dpre_in = cake_mhc_det_train_collapse_backward(X, pre_in, dU)
+```
+
+- `U = BF16(sum_i pre_in_i X_i)`; `pre_next` is the FP32 `pre` of the coefficient pass (the `pre` columns of `stats`, bit for bit).
+- The coefficient VJP takes `dpre_next`; `dpre_in_i = sum_d dU_d X_id`; `dX` is rounded once.
+- Routes (`cake_jit.HANDOFF_KINDS`): the standard forward with the collapse `fwd_collapse__pi_pn`, the standard backward with the token-owner forms `bwd_token__<form>_ho`, and the standalone `collapse_fwd` / `collapse_bwd` records (no workspace). The workspaces and the retained state are the standard ones; `pre_next` (16 bytes per token) lives until its consumer's backward.
+- The det outputs repeat bit for bit as in [Determinism](#determinism); `is_cake_mhc_det_train_handoff_supported(device, hidden=None)` reports the coverage.
+
 ## Determinism
 
 Each output below repeats bit for bit when two calls meet all three conditions:
