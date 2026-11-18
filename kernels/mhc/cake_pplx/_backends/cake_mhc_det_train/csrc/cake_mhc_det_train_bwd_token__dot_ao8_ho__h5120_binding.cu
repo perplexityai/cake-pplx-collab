@@ -114,7 +114,7 @@ void Run(TensorView a_X, TensorView a_dU, TensorView a_stats, TensorView a_gstat
     static thread_local uint64_t prepared_devices = 0;
     const uint64_t device_bit = dev.device_id < 64 ? uint64_t{1} << dev.device_id : uint64_t{0};
     if (device_bit == 0 || (prepared_devices & device_bit) == 0) {
-      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_mhc_det_train_bwd_token__dot_ao8_ho__h5120), cudaFuncAttributeMaxDynamicSharedMemorySize, 113664), "cudaFuncSetAttribute");
+      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_mhc_det_train_bwd_token__dot_ao8_ho__h5120), cudaFuncAttributeMaxDynamicSharedMemorySize, 111616), "cudaFuncSetAttribute");
       prepared_devices |= device_bit;
     }
   }
@@ -138,7 +138,7 @@ void Run(TensorView a_X, TensorView a_dU, TensorView a_stats, TensorView a_gstat
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(256, 1, 1);
-  config.dynamicSmemBytes = 113664;
+  config.dynamicSmemBytes = 111616;
   config.stream = stream;
   cudaLaunchAttribute attrs[1] = {};
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;

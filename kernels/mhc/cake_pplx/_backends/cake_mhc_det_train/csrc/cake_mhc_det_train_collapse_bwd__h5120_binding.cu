@@ -69,6 +69,15 @@ void Run(TensorView a_x, TensorView a_pre_in, TensorView a_du, TensorView a_dx, 
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") exceeds CUDA's limits";
   cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(dev.device_type, dev.device_id));
+  {
+    // Once per thread per device: the kernel's function attributes hold per device.
+    static thread_local uint64_t prepared_devices = 0;
+    const uint64_t device_bit = dev.device_id < 64 ? uint64_t{1} << dev.device_id : uint64_t{0};
+    if (device_bit == 0 || (prepared_devices & device_bit) == 0) {
+      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_mhc_det_train_collapse_bwd__h5120), cudaFuncAttributeMaxDynamicSharedMemorySize, 51456), "cudaFuncSetAttribute");
+      prepared_devices |= device_bit;
+    }
+  }
   void* v_x = DataPtr(a_x);
   void* v_pre_in = DataPtr(a_pre_in);
   void* v_du = DataPtr(a_du);
@@ -79,7 +88,7 @@ void Run(TensorView a_x, TensorView a_pre_in, TensorView a_du, TensorView a_dx, 
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(256, 1, 1);
-  config.dynamicSmemBytes = 512;
+  config.dynamicSmemBytes = 51456;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_mhc_det_train_collapse_bwd__h5120), kernel_args),
             "cudaLaunchKernelExC");
