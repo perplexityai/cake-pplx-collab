@@ -283,7 +283,7 @@ call takes the cast's accumulate path.
 | record | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
 | RoPE (`dkv_acc` only) | `S >= 4 T` | `S >= 4 T` | `S >= 4 T` and `T * K_eff < 112 S + 2^20` |
-| NoPE (fresh `dkv` and `dkv_acc`) | `S >= T` | `S >= T` | `S >= T` and (`T * K_eff < 112 S + 2^20` or `S > 163,840`) |
+| NoPE (fresh `dkv` and `dkv_acc`) | `S >= T` | `S >= T` | `S >= T` and (`T * K_eff < 112 S + 2^20` or `S > 131,072`) |
 
 `K_eff = min(K_slots, ceil(S / num_segments))`; a row outside the condition
 takes the permuted accumulator and the cast.
@@ -307,7 +307,7 @@ both records keeps the base test and also takes the cast path where
 
     T * K_eff >= cast_slots_per_key * S + cast_min_slots    (112 and 2^20)
 
-(on the NoPE record only while `S <= 163,840`, see below) and the natural
+(on the NoPE record only while `S <= 131,072`, see below) and the natural
 drain otherwise; equality takes the cast path.  Small rows,
 small top-k and short-document packs have little main-stage work and keep
 the natural drain whatever their `S / T`.  Backward medians of the two paths
@@ -340,32 +340,42 @@ segment), and `chunk_3943x268757` 2.1 % (RoPE with `dkv_acc`, 8 segments).
 At `K_slots` 2176 and one segment the work test takes the cast path up to
 `S / T` 10.3 at `T = 1024`, 14.9 at 2048, 17.1 at 4096, 18.3 at 8192 and
 18.9 at 16,384, and the natural drain above; the NoPE key cap below lowers
-the bound to `S / T` 10 at `T = 16,384` (163,840 keys).
+the bound to `S / T` 16 at `T = 8192` and 8 at `T = 16,384` (131,072 keys).
 
-The NoPE rule also carries a key cap, `cast_max_keys` 163,840: a NoPE row
+The NoPE rule also carries a key cap, `cast_max_keys` 131,072: a NoPE row
 with more keys (and at least one key per query) takes the natural drain
 whatever its work.  On long single-segment rows the cast path's advantage
-shrinks as `S` grows: at `T = 16,384` it is at parity at 196,608 and
-229,376 keys and a loss from 262,144 keys on.  The backward times below are
-what was measured; the stages behind them were not timed separately.
-Backward medians of the two paths on single-segment NoPE rows at
-`T = 16,384` and `K_slots` 2176, every one on the cast side of the work test
-(VR200, 8 fresh processes per path, 20 steps each, cold L2, eager):
+shrinks as `S` grows and turns into a loss: at `T = 32,768` the cast path
+is faster up to 131,072 keys and slower at 163,840 keys; at `T = 16,384` it
+is faster at 163,840 keys, at parity at 196,608 and 229,376 keys and slower
+from 262,144 keys on.  The backward times below are what was measured; the
+stages behind them were not timed separately.  Backward medians of the two
+paths on single-segment NoPE rows at `K_slots` 2176, every one on the cast
+side of the work test (VR200, 8 fresh processes per path, 20 steps each,
+cold L2, eager):
 
-| `S` | `S / T` | natural drain | permuted + cast | natural / cast |
-|---:|---:|---:|---:|---:|
-| 65,536 | 4 | 9.133 ms | 8.675 ms | 1.053 |
-| 131,072 | 8 | 9.520 ms | 9.272 ms | 1.027 |
-| 196,608 | 12 | 10.272 ms | 10.282 ms | 0.999 |
-| 229,376 | 14 | 10.731 ms | 10.766 ms | 0.997 |
-| 262,144 | 16 | 10.781 ms | 11.209 ms | 0.962 |
-| 278,528 | 17 | 11.177 ms | 11.376 ms | 0.983 |
-| 294,912 | 18 | 11.158 ms | 11.369 ms | 0.981 |
-| 303,104 | 18.5 | 11.259 ms | 11.542 ms | 0.975 |
+| `T` | `S` | `S / T` | natural drain | permuted + cast | natural / cast |
+|---:|---:|---:|---:|---:|---:|
+| 32,768 | 65,536 | 2 | 18.340 ms | 17.499 ms | 1.048 |
+| 32,768 | 98,304 | 3 | 18.712 ms | 17.795 ms | 1.052 |
+| 32,768 | 131,072 | 4 | 19.660 ms | 19.156 ms | 1.026 |
+| 32,768 | 163,840 | 5 | 19.520 ms | 19.910 ms | 0.980 |
+| 16,384 | 65,536 | 4 | 9.133 ms | 8.675 ms | 1.053 |
+| 16,384 | 131,072 | 8 | 9.520 ms | 9.272 ms | 1.027 |
+| 16,384 | 163,840 | 10 | 9.940 ms | 9.791 ms | 1.015 |
+| 16,384 | 196,608 | 12 | 10.272 ms | 10.281 ms | 0.999 |
+| 16,384 | 229,376 | 14 | 10.731 ms | 10.766 ms | 0.997 |
+| 16,384 | 262,144 | 16 | 10.781 ms | 11.209 ms | 0.962 |
+| 16,384 | 278,528 | 17 | 11.177 ms | 11.376 ms | 0.983 |
+| 16,384 | 294,912 | 18 | 11.158 ms | 11.369 ms | 0.981 |
+| 16,384 | 303,104 | 18.5 | 11.259 ms | 11.542 ms | 0.975 |
 
-A second run of the 303,104-key row measured 11.192 ms and 11.520 ms
-(0.972).  The cap lies between the last of these rows where the cast path
-won (131,072 keys) and the first at parity (196,608).  It reads the total
+The `T = 32,768` rows and the 163,840-key row at `T = 16,384` come from
+later runs than the other rows, with the same protocol.  Another run of the
+`T = 32,768`, 163,840-key row measured 19.600 ms and 19.916 ms (0.984), and
+a second run of the 303,104-key row 11.192 ms and 11.520 ms (0.972).  The
+cap is the largest key count of these rows where the cast path measured
+faster at both `T` (32,768 and 16,384 query tokens).  It reads the total
 `S`, not `S / num_segments`: the planners do not know the longest segment,
 and a packed row (a rank of a zigzag split, say) can hold one long segment
 next to short ones, which the mean underestimates.  Packed NoPE rows of
@@ -375,7 +385,14 @@ paths with the same protocol; 8 segments, 247,211 to 270,336 keys):
 `nope_glm53_a` 1.3 % (1.1 % in the table above), `nope_glm53_b` 1.1 %,
 `nope_glm53_a_fixedtail` 1.2 %, `nope_glm53_a_fixedtail_compact` 1.3 %,
 `nope_glm53_a_iid` 1.3 %, `nope_pack4_262k_rank0_fixedtail` 1.0 % and
-`nope_pack4_262k_rank0_fixedtail_compact` 0.4 % (within the spread).  The
+`nope_pack4_262k_rank0_fixedtail_compact` 0.4 % (within the spread).  It
+also gives up the cast path's gains on the measured NoPE rows of 131,073 to
+163,840 keys (natural / cast backward time - 1): `T = 16,384`,
+`S = 163,840`, one segment, 1.5 % (9.940 ms, 9.791 ms; the table above);
+the same `T` and `S` in two segments (8192 query tokens over 8192 keys and
+8192 over 155,648), 2.7 % (8.696 ms, 8.467 ms); and `T = 8192`,
+`S = 147,456`, one segment, 1.6 % (4.813 ms, 4.736 ms; 1.9 % in a later
+run, 4.763 ms and 4.675 ms).  The
 RoPE rule has no key cap: its single-segment `dkv_acc` row at `T = 16,384`,
 `S = 278,528`, `K_slots` 2048 measured at parity (12.368 ms natural,
 12.320 ms permuted + cast), and its packed rows above the cap keep the cast
@@ -622,7 +639,7 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   architecture selects it (`dkv_direct`: `min_keys_per_query` 1 on `sm_100a` /
   `sm_103a`, so whenever the row has at least one key per query -- every packed
   causal problem; measured faster than the permuted drain on every row there;
-  on `sm_107a` only while `T * K_eff < 112 S + 2^20` or above 163,840 keys,
+  on `sm_107a` only while `T * K_eff < 112 S + 2^20` or above 131,072 keys,
   see "Direct accumulation on `sm_107a`"), else -- a row outside the rule, or
   `dkv_direct=False` -- by
   the cast stage writing the

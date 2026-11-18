@@ -415,7 +415,7 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # S / num_segments: the planners do not know the longest segment, and a packed
 # row can hold one long segment next to short ones.  The registered records
 # carry one rule, for ``sm_107a`` (their base ``min_keys_per_query``, 112 slots
-# per key, a 2^20-slot floor, and on the NoPE record a 163,840-key cap; see the
+# per key, a 2^20-slot floor, and on the NoPE record a 131,072-key cap; see the
 # README).
 # The planners pass the device's architecture (``arch_for``), the row's top-k
 # width and its segment count.  Without the natural stages every ``dkv_acc``
@@ -450,7 +450,7 @@ class DkvDirectPolicy:
     # the base: direct iff num_kv >= min_keys_per_query * num_queries (4 RoPE, 1 NoPE)
     min_keys_per_query: int
     # the per-target rules: ((arch, (min_keys_per_query, cast_slots_per_key, cast_min_slots[, cast_max_keys])),
-    # ...), the key cap last when the rule carries it (sm_107a: (4, 112, 2^20) RoPE, (1, 112, 2^20, 163840) NoPE)
+    # ...), the key cap last when the rule carries it (sm_107a: (4, 112, 2^20) RoPE, (1, 112, 2^20, 131072) NoPE)
     rules: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
     @classmethod
@@ -1330,11 +1330,12 @@ def _plan_nope_direct(
     least one key per query (every packed causal problem; measured faster than the permuted accumulator plus cast
     on every row there).  Its ``sm_107a`` rule (see :class:`DkvDirectPolicy`) takes the permuted accumulator and
     the cast also where the main stage's work is large against the key count, ``T * K_eff >= 112 * S + 2^20``
-    with ``K_eff = min(K_slots, ceil(S / num_segments))``, on rows of at most 163,840 keys (``cast_max_keys``):
+    with ``K_eff = min(K_slots, ceil(S / num_segments))``, on rows of at most 131,072 keys (``cast_max_keys``):
     there the natural drain, slower on that target, costs more than the cast path's zero fill and cast; above
     the cap the natural drain serves every row with at least one key per query (on long single-segment rows the
-    cast path's advantage shrinks as S grows: parity, then a measured loss; see the README).
-    A row with fewer keys than query tokens, an ``sm_107a`` row of at most 163,840 keys on the cast side of the
+    cast path's advantage shrinks as S grows and turns into a loss: at ``T`` 32,768 it measured faster at 131,072
+    keys and slower at 163,840; see the README).
+    A row with fewer keys than query tokens, an ``sm_107a`` row of at most 131,072 keys on the cast side of the
     work test, or ``dkv_direct=False`` uses the permuted accumulator and the cast.
     Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.
     """
