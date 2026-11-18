@@ -5234,12 +5234,17 @@ class _FwdRecorder(_SlotRecorder):
 
     def carve(self, device, pieces):
         views = _carve(device, pieces)
-        arena = views[0]._base
-        if arena is None or any(t._base is not arena for t in views):
+        # the pieces view one allocation of bytes through a view of it per dtype; a dtype view of another item size is
+        # no view of the bytes in autograd's sense (the pieces of each dtype take that view as their ``_base``), so the
+        # check is the storage the pieces share
+        storage = views[0].untyped_storage()
+        if any(t.untyped_storage().data_ptr() != storage.data_ptr() for t in views):
             self.refuse("a carve whose pieces are not views of one allocation")
             return views
-        whole = self._add(arena)
-        self.ops.append((_OP_EMPTY, whole, tuple(arena.shape), arena.dtype, device))
+        # the allocation: a slot of the replay only
+        self.slots.append(None)
+        whole = len(self.slots) - 1
+        self.ops.append((_OP_EMPTY, whole, (storage.nbytes(),), torch.uint8, device))
         typed: dict = {}
         for t in views:
             base = typed.get(t.dtype)
