@@ -7978,15 +7978,15 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
-    "cake_mhc_train_fwd_collapse__pi__h5120": {
+    "cake_mhc_train_fwd_collapse__pi_pn__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
         ],
         "arg_plan": [
             ["buffer", "x"],
-            ["buffer", "stats"],
             ["buffer", "pre_in"],
+            ["buffer", "stats"],
             ["buffer", "u"],
             ["buffer", "pre_next"],
             ["parameter", "T"],
@@ -8004,8 +8004,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "rows_per_cta": 2,
         },
         "hidden": 5120,
-        "kernel": "cake_mhc_train_fwd_collapse__pi__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_fwd_collapse__pi__h5120",
+        "kernel": "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_collapse__pi_pn__h5120",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -8014,7 +8014,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "persistent_ctas_per_sm": 1,
             "use_pdl": "runtime",
         },
-        "library": "cake_mhc_train_fwd_collapse__pi__h5120",
+        "library": "cake_mhc_train_fwd_collapse__pi_pn__h5120",
         "logical": {
             "T": "rows",
             "pre_in": "pre_in",
@@ -8628,7 +8628,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__lp2_w8_adj__h5120",
             "cake_mhc_train_fwd_coef__st8_lp2_as_el_qd__h5120",
             "cake_mhc_train_fwd_coef__rt64__h5120",
-            "cake_mhc_train_fwd_collapse__pi__h5120",
+            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
         ],
     },
     "sm_103a": {
@@ -8804,7 +8804,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__qe_mb10_pu4__h5120",
             "cake_mhc_train_fwd_coef__lp2_w8_adj__h5120",
             "cake_mhc_train_fwd_coef__rt64__h5120",
-            "cake_mhc_train_fwd_collapse__pi__h5120",
+            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
         ],
     },
     "sm_107a": {

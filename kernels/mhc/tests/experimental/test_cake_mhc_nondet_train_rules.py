@@ -444,6 +444,12 @@ DET_ROUTES = {
             for hidden in ND_HIDDEN_SIZES.get(arch, ())
             for kind in det.KINDS
         }
+        | {
+            det.route_key(hidden, kind)
+            for hidden in det.handoff_hidden_sizes(arch)
+            if hidden in ND_HIDDEN_SIZES.get(arch, ())
+            for kind in det.HANDOFF_KINDS
+        }
     }
     for arch, routes in det.ROUTES.items()
 }
@@ -985,12 +991,14 @@ def test_records_speak_the_vocabulary() -> None:
 @pytest.mark.cpu_only
 def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
     """``ROUTES``: the deterministic architectures and route keys of every hidden size (4096, 5120 and 7168 on every
-    architecture); every route the renamed deterministic route except ``bwd_finish``, which is the deterministic
-    token-owner records (renamed, in route order: the group-row forms ``_trows_dyn`` where the deterministic route
-    holds them), the atomic fn split of the architecture and size and the column slab's forms of the size (``dynr``,
-    ``lpt``, ``dynr_os``, ``lpt_os``; on sm_103a at 5120 and 7168 ``dynr`` and ``dynr_os``).  Every record is routed,
-    on exactly its architectures, but the two-word programs of ``accumulation="fp32x2"``, which the two-word table
-    (``ACC_WORDS_PROGRAMS``) names on exactly theirs."""
+    architecture), and the deterministic pre-handoff route keys (``HANDOFF_KINDS``) at the deterministic package's
+    handoff sizes; every route the renamed deterministic route except ``bwd_finish`` and ``bwd_finish_handoff``, which
+    are the deterministic token-owner records (renamed, in route order: the group-row forms ``_trows_dyn`` where the
+    deterministic route holds them; the handoff forms ``_ho`` on the handoff route), the atomic fn split of the
+    architecture and size and the column slab's forms of the size (``dynr``, ``lpt``, ``dynr_os``, ``lpt_os``; on
+    sm_103a at 5120 and 7168 ``dynr`` and ``dynr_os``).  Every record is routed, on exactly its architectures, but the
+    two-word programs of ``accumulation="fp32x2"``, which the two-word table (``ACC_WORDS_PROGRAMS``) names on exactly
+    theirs."""
     assert set(nd.ROUTES) == set(det.ROUTES) == set(det.ARCHES)
     routed: dict[str, set] = {}
     for arch in det.ARCHES:
@@ -998,7 +1006,12 @@ def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
         assert sizes == (HIDDEN_SIZES if arch in NEW_HIDDEN_ARCHES else (HIDDEN,)), arch
         assert set(DET_ROUTES[arch]) == {
             det.route_key(hidden, kind) for hidden in sizes for kind in det.KINDS
+        } | {
+            det.route_key(hidden, kind)
+            for hidden in det.handoff_hidden_sizes(arch)
+            for kind in det.HANDOFF_KINDS
         }
+        assert nd.handoff_hidden_sizes(arch) == det.handoff_hidden_sizes(arch), arch
         for key, det_route in DET_ROUTES[arch].items():
             assert {det.MODULES[n]["hidden"] for n in det_route} == {
                 _route_hidden(key)
@@ -1008,7 +1021,7 @@ def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
             route = nd.ROUTES[arch][key]
             for name in route:
                 routed.setdefault(name, set()).add(arch)
-            if not key.startswith("bwd_finish_h"):
+            if not key.startswith(("bwd_finish_h", "bwd_finish_handoff_h")):
                 assert route == _renamed(det_route), (arch, key)
                 continue
             hidden = _route_hidden(key)
