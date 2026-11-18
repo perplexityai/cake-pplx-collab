@@ -2212,15 +2212,18 @@ def _tree_op():
     return _TREE_OPS["op"]
 
 
-def test_cudagraph_tree_warm_up_and_replays(fresh_pool) -> None:
+def test_cudagraph_tree_warm_up_and_replays(fresh_pool, monkeypatch) -> None:
     """``torch.compile(backend="cudagraphs")`` (a CUDA Graph tree) of a forward and a backward without a caller
-    workspace: the tree's warm-up runs the eager calls, whose per-stream workspaces and pre-zeroed buffers come from
-    the package's own memory pool, so the tree finds no tensor of its private pool other than its outputs; the
-    recording takes pre-zeroed buffers (no fallback); every call (warm-up, recording, replays) is judged against
-    the naive tier."""
+    workspace, with no per-stream workspace made yet (as in a fresh process): the tree's warm-up runs the eager
+    calls, which make the per-stream workspaces and the pre-zeroed buffers in the package's own memory pool, so the
+    tree finds no tensor of its private pool other than its outputs (a per-stream workspace of the caching allocator
+    would be one: the tree refuses it, and its replays would reuse that memory); the recording takes pre-zeroed
+    buffers (no fallback); every call (warm-up, recording, replays) is judged against the naive tier."""
 
     import torch._dynamo
 
+    monkeypatch.setattr(pkg, "_FORWARD_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_BACKWARD_WORKSPACES", {})
     op = _tree_op()
     _TREE_OPS["capturing"].clear()
     kind, (S, C, docs), device = "bwd", GRAPH_CASES[2], _device()

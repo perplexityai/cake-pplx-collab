@@ -206,10 +206,11 @@ package uses a buffer it zeroed before the capture, one per capture and stream (
 is destroyed; when the package has none ready, the capture zeroes one, a fill node). When CUDA's capture
 id is not available, each captured call gets its own buffer. The package allocates these pre-zeroed buffers and its
 per-stream workspaces from a memory pool of its own (`torch.cuda.MemPool`, one per device), so a CUDA Graph tree's
-warm-up does not take them into the tree's private pool. That memory is not shared with the caching allocator's other
-pools: per device and kind (forward counters, backward accumulators) at most `_POOL_DEPTH` idle buffers of the largest
-eager need, plus the buffers live graphs hold. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers
-and every captured call zeroes its own.
+warm-up does not take them into the tree's private pool. That memory is not returned to the caching allocator's other
+pools (a replaced per-stream buffer's memory stays cached in the package's pool): per device and kind (forward
+counters, backward accumulators) at most `_POOL_DEPTH` idle buffers of the largest eager need, plus the buffers live
+graphs hold, besides the per-stream buffers. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
+every captured call zeroes its own.
 
 ### Rank agreement
 

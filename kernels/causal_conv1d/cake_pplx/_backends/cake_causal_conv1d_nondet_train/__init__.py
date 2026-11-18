@@ -98,9 +98,11 @@ Host design (the knobs are keywords; no environment variable):
   inside a capture.  The package allocates the per-stream buffers and the
   pre-zeroed ones from a memory pool of its own per device
   (``torch.cuda.MemPool``; without it the package keeps no pre-zeroed
-  buffers), not shared with the caching allocator's other pools: per device
-  and kind at most ``_POOL_DEPTH`` idle buffers of the largest eager need,
-  plus those live graphs hold.
+  buffers), so a CUDA Graph tree's warm-up does not take them into the tree's
+  private pool.  That memory is not returned to the caching allocator's other
+  pools (a replaced per-stream buffer's memory stays cached in it): per
+  device and kind at most ``_POOL_DEPTH`` idle buffers of the largest eager
+  need, plus those live graphs hold, besides the per-stream buffers.
   Its size depends on ``C`` (and the route), not on ``S``.  Two backward
   launches that may run at once (two streams, two graphs replayed
   concurrently) need two buffers: never share one between them.
