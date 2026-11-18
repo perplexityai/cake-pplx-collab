@@ -259,7 +259,9 @@ def _limit(limit: Any) -> float:
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f"limit must be finite and positive, got {value!r}")
     try:
-        rounded = struct.unpack("f", struct.pack("f", value))[0]
+        # The standard "<f" format refuses a value past FP32 (OverflowError); the native "f" format would make it
+        # infinite without an error.
+        rounded = struct.unpack("<f", struct.pack("<f", value))[0]
     except OverflowError:
         raise ValueError(f"limit {value!r} is past the FP32 range") from None
     if rounded <= 0.0:
