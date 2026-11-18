@@ -55,7 +55,10 @@ the other CTAs' FP32 partials of their columns and finish them in a fixed
 order, with no workspace: the short backward of a BF16 weight gradient
 (256-thread CTAs of 16-row blocks, 6144 bytes of dynamic
 shared memory each) and the exact tiny backward (512-thread CTAs of 4 teams
-of 8-row blocks, 19584 bytes each).  The chunked backwards cut the rows into
+of 8-row blocks, 19584 bytes each).  The chunked backwards (the static
+backward of an FP32 weight gradient on SM100 and SM103, past 64 and up to
+128 rows per SM; the static and the claimed backward of a BF16 weight
+gradient, which no band runs) cut the rows into
 blocks of 8 rows and the blocks into ``C = ceil(blocks / B)`` chunks of
 ``B = max(1, ceil(blocks / 8192))`` consecutive blocks, and launch
 ``G = min(C, 8 * SMs)`` CTAs of 128 threads, at most one wave (8 CTAs per
@@ -94,11 +97,19 @@ the fused backward's grid and block
 schedule, and adds each thread's FP32 runs of rows of a claimed chunk into
 plain FP32 words and each CTA's FP32 column words exactly into fixed-point
 digits of the workspace, so its ``dw`` depends on the rows and
-the SM count only.  Packed rows of its last band from
-``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (2560 on SM100 and SM103, 1536
-on SM107) run its long role (``bwd_bf16_rep_long``: the deterministic
-package's look-ahead program of the same build, the same grid, block
-schedule and bits).
+the SM count only.  The repeatable backward of an FP32 weight gradient
+(``bwd_f32_rep``, past its small-row band on every architecture: from 513
+rows, but on SM100 and SM103 past 64 and up to 128 rows per SM, where the
+static backward runs; the deterministic package's FP32 backward program)
+has the same grid,
+block schedule and workspace, adding each thread's FP32 runs of at most 16
+rows into plain FP32 words of its chunk and each CTA's FP32 column words
+exactly into fixed-point digits, so its ``dw`` too depends on the rows and
+the SM count only.  Packed rows of the last repeatable band of either
+weight gradient from ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (2560 on
+SM100 and SM103, 1536 on SM107) run its long role (``bwd_bf16_rep_long`` or
+``bwd_f32_rep_long``: the deterministic package's look-ahead program of the
+same build, the same grid, block schedule and bits).
 Beside a long-resident
 one-thread kernel on another stream each call must keep its speed: per token
 count, the median of seven event-timed calls with the side kernel resident is
@@ -113,7 +124,8 @@ fold buffer, 8192 bytes, the 7 64-bit windows of each of the 128 columns,
 7168 bytes, and the run cell, the arrival flag and the 8-entry claim table,
 160 bytes, 15520 bytes rounded up), each CTA of the row-claims backwards
 12544 bytes, each CTA of the fused backward 12544 bytes and each CTA of the
-repeatable backward and of its long role 18176 bytes, so a side kernel
+repeatable backwards and of their long roles (of either weight gradient)
+18176 bytes, so a side kernel
 holding every SM with a
 small carveout can
 delay its start until the side kernel exits (no test here asserts that delay;
@@ -154,14 +166,18 @@ band (a static backward's band that holds rows with more chunks than its
 grid has CTAs) of either weight-gradient dtype, at its first such whole
 tokens and at the most tokens whose rows give each CTA the band end's whole
 row blocks a CTA (the band's last whole tokens where that is not past the
-first; a weight-gradient dtype with no such band skips); in each row-claims
+first; a weight-gradient dtype with no such band skips: a BF16 one, whose
+static backward no band runs, and an FP32 one on SM107); in each row-claims
 band (where a band runs a row-claims backward), in the fused band and in each
-repeatable band (every architecture, two on sm_107a; their CTAs claim 16-row
-blocks at run time where the rows have more blocks than the grid has CTAs), at its first
+repeatable band (of a BF16 weight gradient on every architecture, two on
+sm_107a, and of an FP32 one, two on sm_100a and sm_103a; their CTAs claim
+16-row blocks at run time where the rows have more blocks than the grid has
+CTAs), at its first
 and its last whole tokens, or, in a band without an end, at its first whole
 tokens and the first whole tokens whose rows have more blocks than one wave
 of its grid has CTAs, where the band's first tokens are below them (the last
-repeatable band's are not: its "last" edge skips).  The
+repeatable band's are not, so its "last" edge skips, but for that of an
+FP32 weight gradient on sm_107a, from 513 rows).  The
 persistent forwards beside the same side kernels: busy / alone is at most
 ``N / (N - k)``, plus the share of one CTA's blocks in the call (a CTA whose
 slot the side kernel
@@ -208,7 +224,7 @@ their speed beside the one-thread kernel and, beside the short forward's side
 kernels, end no later than the backward they replace (the module of the
 role's first band past its small-row bands, at the same rows: for a BF16
 weight gradient the fused backward (on sm_107a the repeatable backward), for
-an FP32 one the static backward) by
+an FP32 one the repeatable backward) by
 the short
 forward's bound and measurement rule: there a measurement
 counts only when the small-row backward's and the replaced backward's alone
@@ -222,7 +238,8 @@ the first call alone of the same entry point and module, and so is ``dw`` of
 every module but the fused and the row-claims backwards (a chunk's partial
 does not depend on the grid or on the CTA that claimed it, the sum of the
 partials is exact, and a small-row backward sums in a fixed order: the
-repeatable backward's ``dw`` among them); every
+repeatable backwards' ``dw`` among them, the same bits for the same rows and
+SM count); every
 ``dw`` holds its contract against a float64 oracle (finite where the oracle
 is), the fused and the row-claims backwards' ``dw`` (the order of its FP32
 atomic adds follows the blocks each CTA claimed, so it is not compared bit for
@@ -750,12 +767,18 @@ def _dw_repeats(name: str) -> bool:
 
 
 def _rep(name: str) -> bool:
-    """Whether the backward module ``name`` is the repeatable backward
-    (``bwd_bf16_rep``) or its long role (``bwd_bf16_rep_long``, packed rows
-    from ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on): the deterministic
-    package's BF16 backward program or its look-ahead program of the same
-    bits."""
-    return loader.MODULES[name]["role"] in ("bwd_bf16_rep", "bwd_bf16_rep_long")
+    """Whether the backward module ``name`` is a repeatable backward
+    (``bwd_bf16_rep``, ``bwd_f32_rep``) or its long role
+    (``bwd_bf16_rep_long``, ``bwd_f32_rep_long``, packed rows from
+    ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on): the deterministic
+    package's BF16 or FP32 backward program or its look-ahead program of the
+    same bits."""
+    return loader.MODULES[name]["role"] in (
+        "bwd_bf16_rep",
+        "bwd_bf16_rep_long",
+        "bwd_f32_rep",
+        "bwd_f32_rep_long",
+    )
 
 
 def _fused(name: str) -> bool:
@@ -901,10 +924,10 @@ def _band_kind(name: str) -> str:
     ``"fused"`` (``bwd_bf16_fused``, of grid kind ``row_claims`` too: the
     deterministic package's row arithmetic and block schedule, whose CTAs
     claim runs of 16-row blocks where the rows have more blocks than the grid
-    has CTAs) or ``"repeatable"`` (``bwd_bf16_rep`` and its long role
-    ``bwd_bf16_rep_long``, grid kind ``claimed_row_blocks``: the
-    deterministic package's program and its look-ahead program, the same
-    schedule)."""
+    has CTAs) or ``"repeatable"`` (``bwd_bf16_rep`` and ``bwd_f32_rep`` and
+    their long roles ``bwd_bf16_rep_long`` and ``bwd_f32_rep_long``, grid
+    kind ``claimed_row_blocks``: the deterministic package's programs and
+    their look-ahead programs, the same schedule)."""
     record = loader.MODULES[name]
     kind = record["grid_rule"]["kind"]
     if _fused(name):
@@ -1047,12 +1070,17 @@ def test_backward_slows_in_proportion_to_the_sms_held(
 # give each CTA of that grid the band end's whole row blocks a CTA
 # (``floor(band end / (wave * rows_per_block))``), or the band's last whole
 # tokens where those are not past "first" (a band that ends below 2 whole row
-# blocks a CTA).  A row-claims band, the fused band and the repeatable band
-# (whose CTAs claim 16-row blocks at run time where the rows have more blocks
-# than its grid has CTAs): "first" and "last" are its first and its last whole
-# tokens; in a band without an end (the last repeatable band) "last" is the first
-# whole tokens whose rows have more blocks than one wave of its grid has
-# CTAs, where the band's first tokens are below them.  Every size comes from
+# blocks a CTA).  The one static multi-chunk band is the static band of an
+# FP32 weight gradient on sm_100a and sm_103a, past 64 and up to 128 rows per
+# SM (one wave of one-block chunks is 64 rows per SM, so its CTAs end at 2 row
+# blocks each); a BF16 weight gradient has none, nor an FP32 one on sm_107a,
+# and their probes skip.  A row-claims band, the fused band and a repeatable
+# band of either weight gradient (whose CTAs claim 16-row blocks at run time
+# where the rows have more blocks than its grid has CTAs): "first" and "last"
+# are its first and its last whole tokens; in a band without an end (the last
+# repeatable band of either weight gradient) "last" is the first whole tokens
+# whose rows have more blocks than one wave of its grid has CTAs, where the
+# band's first tokens are below them.  Every size comes from
 # BACKWARD_BANDS and the device's SM count; the ``nth`` such band of the
 # weight gradient's role, where the architecture has one.
 BACKWARD_EDGES = ("first", "last")
@@ -1231,32 +1259,38 @@ def test_repeatable_backward_band_edges_slow_in_proportion_to_the_sms_held(
     )
 
 
-# The repeatable backward's long role (``bwd_bf16_rep_long``) beside the item 1
-# side kernels, by the same bound: packed rows one row block past its first
-# rows (``LONG_BACKWARD_ROWS_PER_SM * SMs``), as whole tokens of H heads; its
-# CTAs claim 16-row blocks at run time, many a CTA of its one-wave grid.
+# The repeatable backward's long role of a BF16 and of an FP32 weight gradient
+# (``bwd_bf16_rep_long``, ``bwd_f32_rep_long``) beside the item 1 side
+# kernels, by the same bound: packed rows one row block past its first rows
+# (``LONG_BACKWARD_ROWS_PER_SM * SMs``), as whole tokens of H heads; its CTAs
+# claim 16-row blocks at run time, many a CTA of its one-wave grid.
 @pytest.mark.parametrize(
     "ctas,threads", PROPORTIONAL_SIDES, ids=["1x128", "16x640", "32x640"]
 )
+@pytest.mark.parametrize(
+    "dw_dtype", [torch.bfloat16, torch.float32], ids=["bf16", "f32"]
+)
 def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
-    ctas: int, threads: int
+    dw_dtype: torch.dtype, ctas: int, threads: int
 ) -> None:
     arch, sms = _device()
-    name = loader.ROUTES[arch]["bwd_bf16_rep_long"]
-    start = loader.LONG_BACKWARD_ROWS_PER_SM[arch]["bwd_bf16_rep"] * sms
+    role = _backward_role(dw_dtype)
+    name = loader.ROUTES[arch][role + "_rep_long"]
+    start = loader.LONG_BACKWARD_ROWS_PER_SM[arch][role + "_rep"] * sms
     tokens = -(-(start + _rows_per_block(name)) // H)
     rows = tokens * H
-    assert loader.module_for_rows(arch, "bwd_bf16", rows, sms) == name, rows
+    assert loader.module_for_rows(arch, role, rows, sms) == name, rows
     wave = loader.backward_ctas(name, rows, sms)
     assert wave == loader.backward_ctas(name, loader.INT32_MAX, sms), (rows, wave)
     assert _work_units(name, rows) > wave, (arch, rows, name, wave)
     _backward_slows_in_proportion(
-        "repeatable_long",
+        "repeatable_long" + ("_f32" if dw_dtype == torch.float32 else ""),
         tokens,
         name,
         _block_share(name, rows, sms),
         ctas,
         threads,
+        dw_dtype,
     )
 
 
@@ -1742,7 +1776,7 @@ def test_first_band_forward_ends_no_later_than_the_forward_beside_held_sms(
 # BACKWARD_BANDS: 6 tokens past 256 rows, 11 tokens past 512), where the
 # module of the role's next band takes over from the small-row backward (for
 # a BF16 weight gradient the fused backward, on SM107 the repeatable backward,
-# for an FP32 one the static backward); it runs in the keeps-speed and the
+# for an FP32 one the repeatable backward); it runs in the keeps-speed and the
 # max-shared start tests only.
 SHORT_BACKWARD_PROBES = ("1x48", "5x48", "second_band", "past")
 SHORT_BACKWARD_DW_DTYPES = pytest.mark.parametrize(
@@ -1921,8 +1955,8 @@ def test_short_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carve
 # kernel exits (observed on R200): there it
 # must end at most MAX_ALL_SM_EXTRA_MS after the backward it replaces (the
 # module of the role's first band past its small-row bands, on SM107 the
-# repeatable backward, 18176 bytes a CTA, for a BF16 weight gradient and
-# the static backward, 15616 bytes a CTA, for an FP32 one) beside it.
+# repeatable backward, 18176 bytes a CTA, for a BF16 and for an FP32 weight
+# gradient) beside it.
 SHORT_BACKWARD_WAITS_FOR_SMALL_CARVEOUT = ("sm_107a",)
 
 
