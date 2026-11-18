@@ -571,7 +571,11 @@ def _expected_layout(arch: str, role: str) -> tuple:
     for a row-claims backward, ``FUSED_LAYOUT`` for a fused backward,
     ``REP_LAYOUT`` for the repeatable backward, the layout of its slots
     (``BACKWARD_SLOTS``, ``WORKSPACE_LAYOUTS``) for a static or a claimed
-    backward, none for a small-row backward (one cluster)."""
+    backward, none for a small-row backward (one cluster); a program without
+    the weight gradient (``NODW_TWINS``) its twin's layout, a strided one
+    none."""
+    if role in NODW_TWINS:
+        return () if role.endswith("_strided") else _expected_layout(arch, NODW_TWINS[role])
     if role in ROW_CLAIMS_GRID_RULES:
         return ROW_CLAIMS_LAYOUT
     if role in FUSED_ROLES[arch]:
@@ -1437,6 +1441,9 @@ def test_workspace_reused_across_shapes_without_reset(record_property):
         module_bytes = loader.workspace_bytes(name)
         if role in loader.BAND_ROLES:
             assert layout == () and module_bytes == 0, role
+        elif role in NODW_TWINS:
+            twin = loader.ROUTES[arch][NODW_TWINS[role]]
+            assert module_bytes == (loader.workspace_bytes(twin) if layout else 0), role
         elif role in ROW_CLAIMS_GRID_RULES:
             assert module_bytes == ROW_CLAIMS_WORKSPACE_BYTES, role
         elif role in FUSED_ROLES[arch]:
@@ -2883,6 +2890,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         for routes in loader.ROUTES.values()
         for name in routes.values()
         if loader.MODULES[name]["grid_rule"]["kind"] == "cluster"
+        and loader.MODULES[name]["role"] not in loader.NODW_ROLES
     }
     assert set(loader.BAND_ROLES) == clustered, (loader.BAND_ROLES, clustered)
     assert loader.ROWS == "rows"
