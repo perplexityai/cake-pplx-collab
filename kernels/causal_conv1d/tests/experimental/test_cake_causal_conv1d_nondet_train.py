@@ -32,10 +32,13 @@ CUDA Graph capture / replay with and without a caller-owned workspace (each repl
 one pre-zeroed package buffer per capture and stream shared by the capture's backward calls; two streams with two
 workspaces at once; the backward is ONE ordinary launch (no reduce program) and keeps its speed beside a kernel
 resident on another stream.  The pre-zeroed capture buffers: captures record no fill node (with the pool forced empty,
-one fill per forward call and per capture's backward calls, as ``_CAPTURE_FILL_FALLBACKS`` counts), two graphs
-replayed at once, eager calls interleaved with replays, buffers returned after graph deletion (also with a replay in
-flight and after an aborted capture), a capture without synchronization, no ``cuda.bindings``, no
-``torch.cuda.MemPool``, and a CUDA Graph tree (``torch.compile``, backend ``"cudagraphs"``).  Programmatic dependent
+one fill per captured call, as ``_CAPTURE_FILL_FALLBACKS`` counts, and the package keeps no reference to those
+buffers), two graphs replayed at once, eager calls interleaved with replays, buffers returned after graph deletion
+(also with a replay in flight and after an aborted capture), a capture without synchronization, more captures than the
+pool holds, a capture larger than the pool, pool growth, no ``cuda.bindings``, no ``torch.cuda.MemPool`` (eager calls
+judged too), and CUDA Graph trees (``torch.compile``, backend ``"cudagraphs"``; one with more recorded backward nodes
+than the pool holds).  The default backward route's ``FALLBACK_ROWS`` programs under CUDA Graph replay (``bwd_grid_mult``
+1 to 4), programmatic dependent launch, repeated launches and two streams.  Programmatic dependent
 launch: ``enable_pdl`` follows ``PDL_EAGER`` / ``PDL_GRAPH``; with the policy forced on, and with the shipped graph
 policy, a launch reads what the kernel before it wrote and does not overwrite what that kernel reads, and back-to-back
 launches share the package's workspaces; both packages in one process.  Autograd, non-reentrant activation checkpointing (2 x forward +
@@ -413,6 +416,82 @@ def _fallback_program(arch: str, kind: str) -> str | None:
         name for name in loader.route_modules(arch, kind) if loader.select_rule(loader.MODULES[name]) is None
     ] if kind in loader.ROUTES.get(arch, {}) else []
     return names[0] if len(names) == 1 else None
+
+
+# The default backward route's channel counts at its ``FALLBACK_ROWS`` keys that the graph, PDL, grid-multiple,
+# repeated-launch and two-stream tests add (C 768: the 768 key; C 1016: the top of the 776-1016 key), with the
+# document layout of their S 4097 rows.
+FALLBACK_ROW_CHANNELS = (768, 1016)
+FALLBACK_ROW_DOCS = (1000, 0, 3, 3094)
+# The architectures that ship ``FALLBACK_ROWS`` keys at those channel counts (asserted by the tests that use them).
+FALLBACK_ROW_ARCHES = ("sm_100a", "sm_103a")
+
+
+def _fallback_row_bounds(C: int) -> tuple[int, int]:
+    """The token range of the default backward route's ``FALLBACK_ROWS`` key covering ``C`` on this architecture, or
+    on an architecture without one (sm_107a, which runs the same rows on its own plan) sm_100a's."""
+
+    arch = _arch()
+    bounds = loader.fallback_row_range(arch, "bwd", C)
+    if arch in FALLBACK_ROW_ARCHES:
+        assert bounds is not None, f"{arch} has no FALLBACK_ROWS key at C={C}"
+    return bounds or loader.fallback_row_range("sm_100a", "bwd", C)
+
+
+def _fallback_row_cases() -> tuple:
+    """``(S, C, docs)``: C 768 and C 1016 at S 4097 (inside their keys' token ranges: the route's fallback program on
+    sm_100a / sm_103a) and C 1016 one token above its key's range (the rules' program)."""
+
+    above = _fallback_row_bounds(1016)[1] + 1
+    return (
+        *((4097, C, FALLBACK_ROW_DOCS) for C in FALLBACK_ROW_CHANNELS),
+        (above, 1016, "perf"),
+    )
+
+
+def _fallback_row_large_cases() -> tuple:
+    """``(S, C, "perf")``: C 768 and C 1016 with many CTAs per channel tile, at the smaller of S 65536 and the key's
+    last token count (inside the key's range)."""
+
+    return tuple((min(65536, _fallback_row_bounds(C)[1]), C, "perf") for C in FALLBACK_ROW_CHANNELS)
+
+
+def _expected_backward_program(S: int, C: int) -> str:
+    """The program the default backward route launches at ``(S, C)`` here: at a ``FALLBACK_ROWS`` key the route's
+    fallback program inside the key's token range and the rules' program outside it (asserted against
+    ``selected_modules``)."""
+
+    arch = _arch()
+    (selected,) = loader.selected_modules(arch, "bwd", C=C, S=S)
+    bounds = loader.fallback_row_range(arch, "bwd", C)
+    if bounds is not None:
+        with pytest.MonkeyPatch.context() as rules_only:
+            rules_only.setitem(loader.FALLBACK_ROWS, arch, {})
+            (by_rules,) = loader.selected_modules(arch, "bwd", C=C, S=S)
+        expected = _fallback_program(arch, "bwd") if bounds[0] <= S <= bounds[1] else by_rules
+        assert selected == expected, (S, C, selected, expected)
+    return selected
+
+
+def _record_programs(monkeypatch) -> list:
+    """From now on, the module name of every launch of the package is appended to the returned list."""
+
+    seen = []
+    launch = pkg.run_module
+
+    def record(name, values, *, device_index, grid=None):
+        seen.append(name)
+        return launch(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record)
+    return seen
+
+
+def _backward_programs(seen: list) -> set:
+    """The default backward route's programs among the launched module names ``seen``."""
+
+    route = set(loader.route_modules(_arch(), "bwd"))
+    return {name for name in seen if name in route}
 
 
 def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
@@ -813,6 +892,26 @@ def test_repeated_launches_worst_case(case, kind, record_property) -> None:
     ``dbias`` judged against the naive tier (the worst launch of a draw counts), the workspace zero after every
     launch; the number of distinct ``dweight`` bit patterns of the first draw is recorded (the order of the
     cross-CTA sums may vary; no bound is placed on that count)."""
+
+    _repeated_launches(case, kind, record_property)
+
+
+def test_fallback_row_repeated_launches(monkeypatch, record_property) -> None:
+    """The repeated-launch rows at the default backward route's ``FALLBACK_ROWS`` channel counts (C 768, C 1016 at
+    many CTAs per channel tile, inside the keys' token ranges): each row launches the expected program (the route's
+    fallback program on sm_100a / sm_103a, the architecture's own plan elsewhere), every launch judged against the
+    naive tier and the workspace zero after each."""
+
+    _require_route("bwd")
+    seen = _record_programs(monkeypatch)
+    for case in _fallback_row_large_cases():
+        seen.clear()
+        _repeated_launches(case, "bwd", record_property)
+        assert _backward_programs(seen) == {_expected_backward_program(case[0], case[1])}, (case, set(seen))
+
+
+def _repeated_launches(case, kind: str, record_property) -> None:
+    """The body of :func:`test_repeated_launches_worst_case` at ``case`` ``(S, C, docs)``."""
 
     _require_route(kind)
     S, C, docs = case
@@ -1510,6 +1609,30 @@ def test_cuda_graph_replays_with_bwd_grid_mult(kind, bwd_grid_mult) -> None:
         assert replays == DRAWS * len(cases)
 
 
+@pytest.mark.parametrize("bwd_grid_mult", (1, 2, 3, 4))
+def test_fallback_row_graph_replays(bwd_grid_mult, fresh_pool, monkeypatch) -> None:
+    """CUDA Graph capture / replay of forward + backward at the default backward route's ``FALLBACK_ROWS`` rows
+    (:func:`_fallback_row_cases`: inside the keys' token ranges and above one) at ``bwd_grid_mult`` 1 to 4, with a
+    caller-owned workspace and with the package's pre-zeroed buffers (no capture zeroes a buffer of its own): each row
+    launches the expected program, every replay judged against the naive tier, the workspaces zero after every
+    replay."""
+
+    _require_route("bwd")
+    device = _device()
+    cases = _fallback_row_cases()
+    seen = _record_programs(monkeypatch)
+    for own_workspace in (True, False):
+        seen.clear()
+        before = _fallbacks(device)
+        replays = _capture_and_replay(
+            cases, "bwd", key=191, own_workspace=own_workspace, bwd_grid_mult=bwd_grid_mult
+        )
+        assert replays == DRAWS * len(cases)
+        assert _fallbacks(device) == before, (own_workspace, before, _fallbacks(device))
+        expected = {_expected_backward_program(S, C) for S, C, _ in cases}
+        assert _backward_programs(seen) == expected, (own_workspace, set(seen), expected)
+
+
 def test_capture_takes_one_prezeroed_backward_workspace_per_capture_and_stream(
     fresh_pool, monkeypatch
 ) -> None:
@@ -1591,8 +1714,25 @@ def test_two_streams_with_two_workspaces() -> None:
     package's per-stream buffers): both judged against the naive tier on every draw, and every workspace is zero
     afterwards."""
 
+    _two_streams(65536, 1280, "perf")
+
+
+def test_fallback_row_two_streams(monkeypatch) -> None:
+    """The two-stream test at the default backward route's ``FALLBACK_ROWS`` channel counts (C 768, C 1016, inside
+    the keys' token ranges): the expected program on both streams, both calls judged against the naive tier on every
+    draw, every workspace zero afterwards."""
+
+    seen = _record_programs(monkeypatch)
+    for S, C, docs in _fallback_row_large_cases():
+        seen.clear()
+        _two_streams(S, C, docs)
+        assert _backward_programs(seen) == {_expected_backward_program(S, C)}, (S, C, set(seen))
+
+
+def _two_streams(S: int, C: int, docs) -> None:
+    """The body of :func:`test_two_streams_with_two_workspaces` at ``(S, C, docs)``."""
+
     device = _device()
-    S, C, docs = 65536, 1280, "perf"
     keys = (21, 22)
     streams = [torch.cuda.Stream(device=device) for _ in keys]
     for own in (True, False):
@@ -1840,27 +1980,67 @@ def _posted(sem: int) -> bool:
     return value.value > 0
 
 
+def _record_capture_workspaces(monkeypatch) -> list:
+    """From now on, the workspace views (``acc`` / ``work``) of every launch the package makes inside a CUDA Graph
+    capture are appended to the returned list (the test's references keep their memory for the checks)."""
+
+    found = []
+    launch = pkg.run_module
+
+    def record(name, values, *, device_index, grid=None):
+        if torch.cuda.is_current_stream_capturing():
+            found.extend(t for t in (values.get("acc"), values.get("work")) if t is not None)
+        return launch(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record)
+    return found
+
+
+def _table_storages() -> set:
+    """The storage addresses of the tensors of the package's capture-buffer tables."""
+
+    return {
+        t.untyped_storage().data_ptr()
+        for table in (pkg._CAPTURE_WORKSPACES, pkg._CAPTURE_FORWARD_WORKSPACES)
+        for _, t in table.values()
+    }
+
+
+def _assert_tables_hold_only_pool_buffers() -> None:
+    """Every tensor of the package's capture-buffer tables is one of its pre-zeroed buffers (idle, held by a graph
+    or released by one), never memory a capture allocated."""
+
+    uo = pkg._USER_OBJECTS
+    pool = [buf.tensor for p in pkg._ZEROED_POOL.values() for buf in p] + [buf.tensor for buf in pkg._GRAPH_HELD]
+    pool += [buf.tensor for buf in uo.released] if uo else []
+    for table in (pkg._CAPTURE_WORKSPACES, pkg._CAPTURE_FORWARD_WORKSPACES):
+        for key, (_, t) in table.items():
+            assert any(t is p for p in pool), f"capture-table entry {key} holds a tensor that is no pre-zeroed buffer"
+
+
 @pytest.mark.parametrize("pool", ("prezeroed", "empty"))
 def test_capture_records_no_fill_node(pool, fresh_pool, monkeypatch) -> None:
     """A forward, a backward, two backwards, a step (forward + backward) and a checkpointed step (two forwards and a
     backward) captured after one eager warm-up without a caller workspace: the captured calls take the package's
     pre-zeroed buffers (one per kind, the later calls of the capture share it), so the graph's kernel nodes are only
     the package's programs and it has no fill node, and the package counts no fallback.  With the pool forced empty
-    (``_POOL_DEPTH`` 0) every captured forward call zeroes a counter buffer of its own and the backward calls of the
-    capture one accumulator buffer (fill nodes 1 / 1 / 1 / 2 / 3), each counted once in ``_CAPTURE_FILL_FALLBACKS``.
-    Every replay is judged against the naive tier and the package's capture buffers read back zero after it."""
+    (``_POOL_DEPTH`` 0) every captured call zeroes a buffer of its own (fill nodes 1 / 1 / 2 / 2 / 3), each counted in
+    ``_CAPTURE_FILL_FALLBACKS``, and the package's tables keep none of them.  Every replay is judged against the naive
+    tier and the capture's buffers (the package's, or those the captured calls zeroed) read back zero after it."""
 
     if pool == "empty":
         monkeypatch.setattr(pkg, "_POOL_DEPTH", 0)
+    captured = _record_capture_workspaces(monkeypatch)
     kind, case, device = "bwd", CAPTURE_CASE, _device()
     for phase, (n_fwd, n_bwd) in CAPTURE_PHASES.items():
         inputs = _draw_inputs(*case, kind, key=51)
         outs = _phase_outs(phase, inputs[0], inputs[1], inputs[4], kind)
+        captured.clear()
         cap = _capture(lambda inputs=inputs, outs=outs, phase=phase: _phase_step(phase, inputs, outs, kind),
                        torch.cuda.Stream(device=device))  # fmt: skip
         nodes = _graph_nodes(cap["graph"])
         label = f"{phase} pool={pool}"
-        expected = {"fwd": 0, "bwd": 0} if pool == "prezeroed" else {"fwd": n_fwd, "bwd": min(n_bwd, 1)}
+        expected = {"fwd": 0, "bwd": 0} if pool == "prezeroed" else {"fwd": n_fwd, "bwd": n_bwd}
         assert cap["fallbacks"] == expected, (label, cap["fallbacks"])
         assert nodes["fill"] == sum(expected.values()), (label, nodes)
         programs = [k for k in nodes["kernels"] if "cake_causal_conv1d" in k]
@@ -1869,9 +2049,14 @@ def test_capture_records_no_fill_node(pool, fresh_pool, monkeypatch) -> None:
         if pool == "prezeroed":
             assert len(cap["taken"]) == (n_fwd > 0) + (n_bwd > 0), (label, len(cap["taken"]))
             assert {id(t) for t in cap["taken"]} == {id(t) for t in cap["buffers"].values()}, label
+            buffers = list(cap["buffers"].values())
         else:
-            assert not cap["taken"] and set(cap["buffers"]) == ({"bwd"} if n_bwd else set()), label
-        _judge_replays(cap["graph"], inputs, outs, case, kind, key=51, label=label, buffers=cap["buffers"].values())
+            assert not cap["taken"] and not cap["buffers"], label
+            own = {t.untyped_storage().data_ptr() for t in captured}
+            assert len(own) == n_fwd + n_bwd, (label, len(own))  # one buffer per captured call
+            assert not own & _table_storages(), f"{label}: the package keeps a buffer a captured call zeroed"
+            buffers = list(captured)
+        _judge_replays(cap["graph"], inputs, outs, case, kind, key=51, label=label, buffers=buffers)
         del cap
 
 
@@ -2164,9 +2349,10 @@ def test_capture_without_cuda_bindings(fresh_pool, monkeypatch) -> None:
 @pytest.mark.parametrize("failure", ("missing", "raising"))
 def test_capture_without_mem_pool(failure, fresh_pool, monkeypatch) -> None:
     """Without ``torch.cuda.MemPool`` (``missing``), or with ``torch.cuda.use_mem_pool`` raising, the package keeps
-    no pre-zeroed buffers (the pool of each kind is off) and no memory pool: the eager calls still work on new
-    per-stream workspaces of the caching allocator and every captured step zeroes its two buffers itself (two fill
-    nodes, one fallback per kind); replays are judged against the naive tier."""
+    no pre-zeroed buffers (the pool of each kind is off) and no memory pool: the eager steps run on new per-stream
+    workspaces of the caching allocator (each draw's outputs judged against the naive tier, both workspaces zero after
+    every step) and every captured step zeroes its two buffers itself (two fill nodes, one fallback per kind, no
+    table entry); replays are judged against the naive tier, with those buffers zero after each."""
 
     monkeypatch.setattr(pkg, "_MEM_POOLS", {})
     monkeypatch.setattr(pkg, "_FORWARD_WORKSPACES", {})
@@ -2183,14 +2369,32 @@ def test_capture_without_mem_pool(failure, fresh_pool, monkeypatch) -> None:
     inputs = _draw_inputs(*case, kind, key=131)
     outs = _phase_outs("step", inputs[0], inputs[1], inputs[4], kind)
     stream = torch.cuda.Stream(device=device)
+    captured = _record_capture_workspaces(monkeypatch)
+
+    def eager(_draw: int, seed: int):
+        fresh = _draw_inputs(*case, kind, key=131, seed=seed)
+        _load(inputs, fresh, outs)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            _phase_step("step", inputs, outs, kind)
+        torch.cuda.synchronize(device)
+        with torch.cuda.stream(stream):
+            held = (_stream_workspace(device), _forward_stream_workspace(device))
+        assert all(t is not None and int(torch.count_nonzero(t)) == 0 for t in held), "an eager workspace is not zero"
+        x, w, cu, dy, b = fresh
+        return _outputs(outs), problem(x, w, cu, b, dy)
+
+    assert_judged(eager, seed=SEED, label=f"no MemPool ({failure}) eager")
+    assert pkg._MEM_POOLS.get(device.index) is None
     cap = _capture(lambda: _phase_step("step", inputs, outs, kind), stream)
     assert not pkg._ZEROED_POOL.get((device.index, "bwd")) and not pkg._ZEROED_POOL.get((device.index, "fwd"))
     assert all(pkg._POOL_READY[k].get(device.index) == sys.maxsize for k in ("fwd", "bwd")), pkg._POOL_READY
     assert pkg._MEM_POOLS.get(device.index) is None
-    assert cap["fallbacks"] == {"fwd": 1, "bwd": 1} and not cap["taken"], cap["fallbacks"]
+    assert cap["fallbacks"] == {"fwd": 1, "bwd": 1} and not cap["taken"] and not cap["buffers"], cap["fallbacks"]
     assert _graph_nodes(cap["graph"])["fill"] == 2
+    assert len({t.untyped_storage().data_ptr() for t in captured}) == 2, len(captured)
     _judge_replays(cap["graph"], inputs, outs, case, kind, key=131, label=f"no MemPool ({failure})",
-                   buffers=cap["buffers"].values())  # fmt: skip
+                   buffers=list(captured))  # fmt: skip
 
 
 def test_out_of_memory_keeps_the_package_pool(fresh_pool) -> None:
@@ -2230,6 +2434,193 @@ def test_out_of_memory_keeps_the_package_pool(fresh_pool) -> None:
     assert _graph_nodes(cap["graph"])["fill"] == 0
     _judge_replays(cap["graph"], inputs, outs, case, kind, key=135, label="capture after an out-of-memory error",
                    buffers=cap["taken"])  # fmt: skip
+
+
+def test_more_captures_than_the_pool_keep_no_capture_memory(fresh_pool, monkeypatch) -> None:
+    """``_POOL_DEPTH`` + 2 step graphs (forward + backward, no caller workspace) captured back to back by
+    ``torch.cuda.graph`` after one eager step, with no eager call between the captures: the first ``_POOL_DEPTH`` take
+    one pre-zeroed buffer per kind, each call of the later ones zeroes a buffer of its own (a fill node and a fallback
+    per kind and capture).  After the captures the package's tables hold only pre-zeroed buffers and none of the
+    buffers the captured calls zeroed; every graph's replays are judged against the naive tier, with its buffers zero
+    after each."""
+
+    kind, case, device = "bwd", GRAPH_CASES[2], _device()
+    stream = torch.cuda.Stream(device=device)
+    inputs = _draw_inputs(*case, kind, key=137)
+    captured = _record_capture_workspaces(monkeypatch)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        _phase_step("step", inputs, _phase_outs("step", inputs[0], inputs[1], inputs[4], kind), kind)
+    torch.cuda.synchronize(device)
+    depth = pkg._POOL_DEPTH
+    graphs = []
+    for index in range(depth + 2):
+        outs = _phase_outs("step", inputs[0], inputs[1], inputs[4], kind)
+        before, held = _fallbacks(device), len(pkg._GRAPH_HELD)
+        captured.clear()
+        graph = torch.cuda.CUDAGraph()
+        graph.enable_debug_mode()
+        with torch.cuda.graph(graph, stream=stream):
+            _phase_step("step", inputs, outs, kind)
+        torch.cuda.synchronize(device)
+        after = _fallbacks(device)
+        taken = [buf.tensor for buf in pkg._GRAPH_HELD[held:]]
+        expected = {"fwd": 0, "bwd": 0} if index < depth else {"fwd": 1, "bwd": 1}
+        assert {k: after[k] - before[k] for k in after} == expected, (index, before, after)
+        assert len(taken) == (2 if index < depth else 0), (index, len(taken))
+        assert _graph_nodes(graph)["fill"] == sum(expected.values()), index
+        own = [] if index < depth else list(captured)
+        assert len({t.untyped_storage().data_ptr() for t in own}) == sum(expected.values()), index
+        graphs.append((graph, outs, taken + own))
+    _assert_tables_hold_only_pool_buffers()
+    own = {t.untyped_storage().data_ptr() for _, _, buffers in graphs[depth:] for t in buffers}
+    assert own and not own & _table_storages(), "the package keeps a buffer a captured call zeroed"
+    for index, (graph, outs, buffers) in enumerate(graphs):
+        _judge_replays(graph, inputs, outs, case, kind, key=137, label=f"capture {index} of {depth + 2}",
+                       buffers=buffers)  # fmt: skip
+
+
+def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypatch) -> None:
+    """The pre-zeroed backward buffers hold the largest need of the eager calls that omitted ``workspace=``: an eager
+    backward at C 1280 with a caller-owned workspace fills no pool, one at C 512 without one fills it at C 512's
+    size.  A backward captured at C 1280 needs more: it takes no buffer (the idle ones stay as they were), zeroes one
+    of its own (one fill node, one fallback) and the package keeps no reference to it; the replays are judged against
+    the naive tier, with that buffer zero after each."""
+
+    kind, device = "bwd", _device()
+    d = device.index
+    small, large = GRAPH_CASES[2], CAPTURE_CASE
+    stream = torch.cuda.Stream(device=device)
+    big = _draw_inputs(*large, kind, key=139)
+    little = _draw_inputs(*small, kind, key=139)
+    outs = _phase_outs("bwd", big[0], big[1], big[4], kind)
+    workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(large[0], large[1], device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        x, w, cu, dy, b = big
+        _backward(x, w, cu, dy, b, ROUTE_SETTINGS[kind]["policy"], kind=kind, workspace=workspace)
+    torch.cuda.synchronize(device)
+    assert not pkg._ZEROED_POOL.get((d, "bwd")), "an eager call with a caller-owned workspace filled the pool"
+    with torch.cuda.stream(stream):
+        _phase_step("bwd", little, _phase_outs("bwd", little[0], little[1], little[4], kind), kind)
+    torch.cuda.synchronize(device)
+    idle = list(pkg._ZEROED_POOL[(d, "bwd")])
+    assert len(idle) == pkg._POOL_DEPTH, len(idle)
+    captured = _record_capture_workspaces(monkeypatch)
+    before, held = _fallbacks(device), len(pkg._GRAPH_HELD)
+    graph = torch.cuda.CUDAGraph()
+    graph.enable_debug_mode()
+    with torch.cuda.graph(graph, stream=stream):
+        _phase_step("bwd", big, outs, kind)
+    torch.cuda.synchronize(device)
+    after = _fallbacks(device)
+    assert {k: after[k] - before[k] for k in after} == {"fwd": 0, "bwd": 1}, (before, after)
+    assert len(pkg._GRAPH_HELD) == held and [id(b) for b in pkg._ZEROED_POOL[(d, "bwd")]] == [id(b) for b in idle]
+    assert _graph_nodes(graph)["fill"] == 1
+    need = max(t.untyped_storage().nbytes() for t in captured)
+    assert all(buf.tensor.numel() < need for buf in idle), (need, [buf.tensor.numel() for buf in idle])
+    assert not {t.untyped_storage().data_ptr() for t in captured} & _table_storages()
+    _judge_replays(graph, big, outs, large, kind, key=139, label="capture larger than the pool",
+                   buffers=list(captured))  # fmt: skip
+
+
+def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
+    """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
+    C 1280 and then C 2560 on another stream, queued behind a ``torch.cuda._sleep`` (their zero fills and readiness
+    copies wait), each raise the pool size: the idle buffers below the new size leave the pool and ``_POOL_DEPTH``
+    buffers of the new size replace them, a released buffer whose readiness copy has not run gives its flag back as
+    pending, and no semaphore or flag serves two buffers.  After the copies complete, a capture at C 2560 (G2) takes
+    new buffers (no fallback) and the next eager step gives back the released semaphores (posted) and the pending
+    flags.  On every draw G1 and G2 replay at once on two streams: both judged against the naive tier, their buffers
+    zero after the replays and held by one graph each."""
+
+    kind, device = "bwd", _device()
+    d = device.index
+    kinds = ("fwd", "bwd")
+    cases = (GRAPH_CASES[2], CAPTURE_CASE, GRAPH_CASES[4])
+    stream_a, stream_b = (torch.cuda.Stream(device=device) for _ in range(2))
+    inputs = [_draw_inputs(*case, kind, key=145 + i) for i, case in enumerate(cases)]
+    outs = [_phase_outs("step", x, w, b, kind) for x, w, _, _, b in inputs]
+    first = _capture(lambda: _phase_step("step", inputs[0], outs[0], kind), stream_a, debug=False)
+    assert first["fallbacks"] == {"fwd": 0, "bwd": 0} and len(first["taken"]) == 2, first["fallbacks"]
+    uo = pkg._USER_OBJECTS
+
+    def state() -> tuple[dict, dict]:
+        return (
+            {k: list(pkg._ZEROED_POOL.get((d, k), ())) for k in kinds},
+            {k: pkg._POOL_SIZE[(d, k)] for k in kinds},
+        )
+
+    def check_unique(label: str) -> None:
+        live = [buf for p in pkg._ZEROED_POOL.values() for buf in p] + list(pkg._GRAPH_HELD)
+        sems = [buf.sem for buf in live]
+        assert len(set(sems)) == len(sems), f"{label}: two buffers share a semaphore"
+        assert not set(sems) & (set(uo.retired) | set(uo.free_sems)), f"{label}: a buffer's semaphore is free"
+        flags = [buf.flag[2] for buf in live if buf.flag]
+        assert len(set(flags)) == len(flags), f"{label}: two buffers share a readiness flag"
+        spare = {f[2] for f in uo.free_flags} | {f[2] for f in uo.pending_flags}
+        assert not set(flags) & spare, f"{label}: a buffer's flag is free"
+
+    stages = [state()]
+    stream_b.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream_b):
+        torch.cuda._sleep(BUSY_CYCLES)
+        for i in (1, 2):
+            _phase_step("step", inputs[i], outs[i], kind)
+            stages.append(state())
+    in_flight = not stream_b.query()
+    pending = {f[2] for f in uo.pending_flags}
+    free = {f[2] for f in uo.free_flags}
+    assert in_flight, "the eager steps completed before the checks (BUSY_CYCLES too short for this host)"
+    check_unique("after the growth")
+    released = []
+    for (old, old_size), (new, new_size) in zip(stages, stages[1:]):
+        assert new_size["bwd"] > old_size["bwd"], (old_size, new_size)
+        for k in kinds:
+            assert len(new[k]) == pkg._POOL_DEPTH and all(b.tensor.numel() >= new_size[k] for b in new[k]), k
+            if new_size[k] > old_size[k]:
+                assert not {id(b) for b in old[k]} & {id(b) for b in new[k]}, f"{k}: a smaller buffer stayed idle"
+                released += old[k]
+    for k in kinds:
+        assert pkg._POOL_READY[k][d] == stages[-1][1][k], (k, pkg._POOL_READY[k][d])
+    # the second growth released the first growth's buffers before their readiness copies ran
+    for buf in stages[1][0]["bwd"]:
+        assert buf.flag[2] in pending and buf.flag[2] not in free, "a flag whose copy had not run was freed"
+    torch.cuda.synchronize(device)
+    deadline = time.monotonic() + 10.0
+    while not all(_posted(buf.sem) for buf in released if buf.sem in uo.retired):
+        assert time.monotonic() < deadline, "CUDA did not release the released buffers' user objects"
+        time.sleep(0.001)
+    second = _capture(lambda: _phase_step("step", inputs[2], outs[2], kind), stream_b, debug=False)
+    assert second["fallbacks"] == {"fwd": 0, "bwd": 0} and len(second["taken"]) == 2, second["fallbacks"]
+    with torch.cuda.stream(stream_b):
+        _phase_step("step", inputs[2], _phase_outs("step", inputs[2][0], inputs[2][1], inputs[2][4], kind), kind)
+    torch.cuda.synchronize(device)
+    assert not {buf.sem for buf in released} & set(uo.retired), "a posted semaphore stayed retired"
+    assert not uo.pending_flags, "a flag whose copy completed stayed pending"
+    check_unique("after the refill")
+    taken = first["taken"] + second["taken"]
+    assert len({t.data_ptr() for t in taken}) == 4, "two graphs hold one buffer"
+    idle = [buf.tensor for p in pkg._ZEROED_POOL.values() for buf in p]
+    assert not any(t is h for t in idle for h in taken), "a buffer a graph holds is idle"
+    graphs = ((first, inputs[0], outs[0], cases[0], 0), (second, inputs[2], outs[2], cases[2], 2))
+
+    def launch(_draw: int, seed: int):
+        fresh = [_draw_inputs(*case, kind, key=145 + i, seed=seed) for _, _, _, case, i in graphs]
+        for (_, held, out, _, _), values in zip(graphs, fresh, strict=True):
+            _load(held, values, out)
+        for (cap, *_), stream in zip(graphs, (stream_a, stream_b), strict=True):
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                cap["graph"].replay()
+        torch.cuda.synchronize(device)
+        assert all(int(torch.count_nonzero(t)) == 0 for t in taken), "a capture buffer is not zero"
+        return [
+            (_outputs(out, j), problem(x, w, cu, b, dy))
+            for j, ((_, _, out, _, _), (x, w, cu, dy, b)) in enumerate(zip(graphs, fresh, strict=True))
+        ]
+
+    assert_judged(launch, seed=SEED, label="graphs before and after the pool growth at once")
 
 
 _TREE_OPS: dict = {}
@@ -2291,6 +2682,70 @@ def test_cudagraph_tree_warm_up_and_replays(fresh_pool, monkeypatch) -> None:
     assert True in _TREE_OPS["capturing"] and False in _TREE_OPS["capturing"], _TREE_OPS["capturing"]
     assert _fallbacks(device) == before
     assert len(pkg._GRAPH_HELD) > held
+
+
+# The graph partitions of the tree test below: more than the pool holds (``_POOL_DEPTH`` + 2, asserted there).
+TREE_NODES = 6
+
+
+def _tree_nodes(op):
+    """A function of :data:`TREE_NODES` calls of ``op``, each its own graph partition (a graph break after each)."""
+
+    def nodes(x, w, cu, dy) -> tuple:
+        r0 = op(x, w, cu, dy)
+        torch._dynamo.graph_break()
+        r1 = op(x, w, cu, dy)
+        torch._dynamo.graph_break()
+        r2 = op(x, w, cu, dy)
+        torch._dynamo.graph_break()
+        r3 = op(x, w, cu, dy)
+        torch._dynamo.graph_break()
+        r4 = op(x, w, cu, dy)
+        torch._dynamo.graph_break()
+        r5 = op(x, w, cu, dy)
+        return r0, r1, r2, r3, r4, r5
+
+    return nodes
+
+
+def test_cudagraph_tree_with_more_backward_nodes_than_the_pool(fresh_pool, monkeypatch) -> None:
+    """A CUDA Graph tree (``torch.compile``, backend ``"cudagraphs"``) of :data:`TREE_NODES` graph partitions, each a
+    forward and a backward of the package without a caller workspace, more than the pool holds: the tree records the
+    partitions back to back with no eager call between them, so the later ones find no pre-zeroed buffer and zero
+    their own (fallbacks of both kinds).  The package keeps no reference to those, so the tree's pool holds only the
+    tensors it tracks and every later recording and replay goes through; every partition's outputs on every draw are
+    judged against the naive tier, and afterwards the package's tables hold only pre-zeroed buffers."""
+
+    import torch._dynamo
+
+    assert TREE_NODES >= pkg._POOL_DEPTH + 2, (TREE_NODES, pkg._POOL_DEPTH)
+    monkeypatch.setattr(pkg, "_FORWARD_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_BACKWARD_WORKSPACES", {})
+    op = _tree_op()
+    _TREE_OPS["capturing"].clear()
+    kind, (S, C, docs), device = "bwd", GRAPH_CASES[2], _device()
+    torch._dynamo.reset()
+    compiled = torch.compile(_tree_nodes(op), backend="cudagraphs")
+    before = _fallbacks(device)
+
+    def launch(_draw: int, seed: int):
+        x, w, cu, dy, b = _draw_inputs(S, C, docs, kind, key=143, seed=seed)
+        results = compiled(x, w, cu, dy)
+        torch.cuda.synchronize(device)
+        assert len(results) == TREE_NODES, len(results)
+        found = {
+            name: [r[i].clone() for r in results] for i, name in enumerate(("y", "dx", "dweight"))
+        }
+        return found, problem(x, w, cu, b, dy)
+
+    try:
+        assert_judged(launch, seed=SEED, label="cudagraph tree with more backward nodes than the pool")
+    finally:
+        torch._dynamo.reset()
+    after = _fallbacks(device)
+    assert True in _TREE_OPS["capturing"], _TREE_OPS["capturing"]
+    assert after["fwd"] > before["fwd"] and after["bwd"] > before["bwd"], (before, after)
+    _assert_tables_hold_only_pool_buffers()
 
 
 # The shape of the PDL tests (each route's forward and backward take package workspaces there).
@@ -2420,10 +2875,16 @@ def test_pdl_launch_reads_what_the_producer_wrote(kind, mode, monkeypatch, recor
     on the same stream, each producer the launch's immediate predecessor on some draw: the outputs judged against
     the naive tier on the draw's problem, eagerly and replayed (policy forced on, and the shipped graph policy)."""
 
+    _pdl_producer(kind, mode, PDL_CASE, monkeypatch, record_property)
+
+
+def _pdl_producer(kind: str, mode: str, case, monkeypatch, record_property) -> None:
+    """The body of :func:`test_pdl_launch_reads_what_the_producer_wrote` at ``case`` ``(S, C, docs)``."""
+
     _require_route(kind)
     _pdl_mode(mode, monkeypatch)
     seen = _record_pdl(monkeypatch)
-    S, C, docs = PDL_CASE
+    S, C, docs = case
     src = list(_draw_inputs(S, C, docs, kind, key=161))
     names = ["x", "w", "cu", "dy", "b"]
     present = [n for n, t in zip(names, src, strict=True) if t is not None]
@@ -2470,7 +2931,7 @@ def test_pdl_launch_reads_what_the_producer_wrote(kind, mode, monkeypatch, recor
         load,
         lambda: _outputs(outs),
         lambda: None,
-        PDL_CASE,
+        case,
         kind,
         key=161,
         seen=seen,
@@ -2488,10 +2949,16 @@ def test_pdl_launch_does_not_overwrite_what_the_producer_reads(kind, mode, monke
     outputs are judged against the naive tier, eagerly and replayed (policy forced on, and the shipped graph
     policy)."""
 
+    _pdl_reader(kind, mode, PDL_CASE, monkeypatch, record_property)
+
+
+def _pdl_reader(kind: str, mode: str, case, monkeypatch, record_property) -> None:
+    """The body of :func:`test_pdl_launch_does_not_overwrite_what_the_producer_reads` at ``case``."""
+
     _require_route(kind)
     _pdl_mode(mode, monkeypatch)
     seen = _record_pdl(monkeypatch)
-    S, C, docs = PDL_CASE
+    S, C, docs = case
     src = list(_draw_inputs(S, C, docs, kind, key=171))
     outs = _phase_outs("step", src[0], src[1], src[4], kind)
     grads = [n for n in ("dx", "dweight", "dbias") if outs[n]]
@@ -2526,7 +2993,7 @@ def test_pdl_launch_does_not_overwrite_what_the_producer_reads(kind, mode, monke
         load,
         lambda: _outputs(outs),
         check,
-        PDL_CASE,
+        case,
         kind,
         key=171,
         seen=seen,
@@ -2543,11 +3010,17 @@ def test_pdl_back_to_back_launches_share_the_stream_workspace(kind, mode, monkey
     judged against the naive tier, and the package's workspaces (per-stream when eager, the capture's buffers when
     replayed) read back zero after the chain (policy forced on, and the shipped graph policy)."""
 
+    _pdl_chain(kind, mode, PDL_CASE, monkeypatch)
+
+
+def _pdl_chain(kind: str, mode: str, case, monkeypatch) -> None:
+    """The body of :func:`test_pdl_back_to_back_launches_share_the_stream_workspace` at ``case``."""
+
     _require_route(kind)
     _pdl_mode(mode, monkeypatch)
     seen = _record_pdl(monkeypatch)
     device = _device()
-    S, C, docs = PDL_CASE
+    S, C, docs = case
     src = tuple(_draw_inputs(S, C, docs, kind, key=181))
     x, w, b = src[0], src[1], src[4]
     chains = [_phase_outs("fwd", x, w, b, kind) for _ in range(PDL_CHAIN)]
@@ -2578,7 +3051,32 @@ def test_pdl_back_to_back_launches_share_the_stream_workspace(kind, mode, monkey
             for held in (_stream_workspace(device), _forward_stream_workspace(device)):
                 assert held is not None and int(torch.count_nonzero(held)) == 0, f"{kind}: a workspace is not zero"
 
-    _pdl_run(mode, [body], load, outputs, check, PDL_CASE, kind, key=181, seen=seen, label=f"pdl chain {kind} {mode}")
+    _pdl_run(mode, [body], load, outputs, check, case, kind, key=181, seen=seen, label=f"pdl chain {kind} {mode}")
+
+
+# The PDL tests' row at a ``FALLBACK_ROWS`` key of the default backward route (inside its token range).
+PDL_FALLBACK_CASE = (4097, 768, FALLBACK_ROW_DOCS)
+
+
+@pytest.mark.parametrize("mode", PDL_MODES)
+@pytest.mark.parametrize("check", ("producer", "reader", "chain"))
+def test_fallback_row_pdl(check, mode, monkeypatch, record_property) -> None:
+    """The three PDL tests above (``producer``: a launch reads what the kernel before it wrote; ``reader``: it does
+    not overwrite what that kernel reads; ``chain``: back-to-back launches share the package's workspaces) on the
+    default backward route at :data:`PDL_FALLBACK_CASE`, inside its ``FALLBACK_ROWS`` key: the backward launches the
+    expected program (the route's fallback program on sm_100a / sm_103a), eagerly and inside captures with the policy
+    forced on and with the shipped graph policy, every output judged against the naive tier."""
+
+    S, C, _ = PDL_FALLBACK_CASE
+    _fallback_row_bounds(C)
+    seen = _record_programs(monkeypatch)
+    if check == "producer":
+        _pdl_producer("bwd", mode, PDL_FALLBACK_CASE, monkeypatch, record_property)
+    elif check == "reader":
+        _pdl_reader("bwd", mode, PDL_FALLBACK_CASE, monkeypatch, record_property)
+    else:
+        _pdl_chain("bwd", mode, PDL_FALLBACK_CASE, monkeypatch)
+    assert _backward_programs(seen) == {_expected_backward_program(S, C)}, set(seen)
 
 
 def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
