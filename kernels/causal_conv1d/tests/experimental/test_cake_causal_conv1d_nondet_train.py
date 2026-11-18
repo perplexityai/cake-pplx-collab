@@ -2757,14 +2757,16 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
     buffers below the new size leave the pool and ``_POOL_DEPTH`` buffers of the new size replace them, a released
     buffer whose readiness copy has not run gives its flag back as pending, and no semaphore or flag serves two buffers.
     CUDA gets the first growth's released user objects only after the checks, so their semaphores are not posted at
-    the second growth's drains: they stay retired and no new buffer takes one.  The second growth's releases run the
-    package's own release: each semaphore is retired (or free, or in a new buffer, once a drain took its post), and
-    after the hold CUDA posts every released semaphore.  A capture at C 2560 (G2) then takes new buffers (no fallback)
-    and the next eager step's drain gives the posted semaphores back (free, or taken by a new buffer; none retired) and
-    the pending flags.  On every draw G1 and G2 replay at once on two streams: both judged against the naive tier,
-    their buffers zero after the replays and held by one graph each.  Then G1 is deleted: after a capture at C 2560
-    (G3), an eager step's drain drops each of G1's released buffers that is smaller than the grown size (the package
-    keeps no reference to it) and gives its semaphore back."""
+    the second growth's drains: they stay retired and no new buffer takes one.  The second growth drops each idle
+    buffer through the package's own release, watched: the call puts the semaphore in ``uo.retired`` at once, and the
+    backward refill's semaphores are still there when the hold ends (no drain runs after that refill).  After the hold
+    each released semaphore is posted by CUDA, or a drain in the hold took its post and moved it from ``uo.retired``
+    to ``uo.free_sems``.  A capture at C 2560 (G2) then takes new buffers (no fallback) and the next eager step's drain
+    gives the posted semaphores back (free, or taken by a new buffer; none retired) and the pending flags.  On every
+    draw G1 and G2 replay at once on two streams: both judged against the naive tier, their buffers zero after the
+    replays and held by one graph each.  Then G1 is deleted: after a capture at C 2560 (G3), an eager step's drain
+    drops each of G1's released buffers that is smaller than the grown size (the package keeps no reference to it) and
+    gives its semaphore back."""
 
     kind, device = "bwd", _device()
     d = device.index
@@ -2804,8 +2806,24 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
         deferred.append((obj, sem))
         uo.retired.append(sem)
 
+    calls: list = []  # (semaphore, whether it was in uo.retired right after the call): the SECOND growth's releases
+    drained: set = set()  # the semaphores a drain moved from uo.retired to uo.free_sems (it took their post)
+
+    def release_watched(obj, sem: int, release=uo.release) -> None:
+        release(obj, sem)  # the package's own release
+        # recorded here and asserted after the step: the refill's ``except Exception`` would catch an assert here
+        calls.append((sem, sem in uo.retired))
+
+    def drain_watched(objects, device_index: int, drain=pkg._pool_drain):
+        before = list(objects.retired)
+        mine = drain(objects, device_index)
+        kept, free = set(objects.retired), set(objects.free_sems)
+        drained.update(sem for sem in before if sem not in kept and sem in free)
+        return mine
+
     with pytest.MonkeyPatch.context() as watch:
         seen = _record_programs(watch)
+        watch.setattr(pkg, "_pool_drain", drain_watched)
         # The eager steps' programs launched once first, on this thread and device and on caller-owned workspaces (no
         # pool refill): a program's first launch in the process may synchronize the device (CUDA's lazy module loading,
         # a binding's first call per thread and device), which would wait for the held stream.  The steps in the hold
@@ -2829,7 +2847,9 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
                         patch.setattr(uo, "release", release_later)  # the first growth's releases: deferred
                         _phase_step("step", inputs[1], outs[1], kind)
                     stages.append(state())
-                    _phase_step("step", inputs[2], outs[2], kind)  # the second growth's: the package's release
+                    with pytest.MonkeyPatch.context() as patch:
+                        patch.setattr(uo, "release", release_watched)  # the second growth's: the package's release
+                        _phase_step("step", inputs[2], outs[2], kind)
                     stages.append(state())
                 assert not waited.is_set(), "the host waited for the held stream (a call that synchronizes the device)"
                 assert not stream_b.query(), "the held stream ran"
@@ -2857,20 +2877,25 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
                 assert deferred_sems == {buf.sem for buf in released[0]}, "a first-growth release was not deferred"
                 assert deferred_sems <= set(uo.retired), "a drain recycled a semaphore that was not posted"
                 assert not deferred_sems & live_sems(), "a new buffer took a semaphore that was not posted"
-                # the second growth ran the package's release: each semaphore is retired, or free or in a new buffer
-                # once its post was taken
+                # the second growth dropped each idle buffer through the package's release; each call put the
+                # semaphore in uo.retired at once, and no drain ran after the backward refill's releases
                 real_sems = {buf.sem for buf in released[1]}
                 assert real_sems and not real_sems & deferred_sems, (real_sems, deferred_sems)
+                assert sorted(sem for sem, _ in calls) == sorted(real_sems), "an idle buffer left without a release"
                 accounted = set(uo.retired) | set(uo.free_sems) | live_sems()
                 assert real_sems <= accounted, "a released idle buffer's semaphore was lost (no release)"
+                assert all(retired for _, retired in calls), "a release did not retire its semaphore"
+                bwd_sems = {buf.sem for buf in released[1] if buf.kind == "bwd"}
+                assert bwd_sems and bwd_sems <= set(uo.retired), "a backward release's semaphore left uo.retired"
         finally:
             for obj, _ in deferred:
                 uo.cudart.cudaUserObjectRelease(obj, 1)
     torch.cuda.synchronize(device)
     released_sems = deferred_sems | real_sems
     deadline = time.monotonic() + 10.0
-    # CUDA ran the destructor of every released idle object: its semaphore is posted, or a drain already took the post
-    while not all(_posted(sem) or sem not in uo.retired for sem in released_sems):
+    # CUDA ran the destructor of every released idle object: its semaphore is posted, or a drain in the hold took the
+    # post (it moved the semaphore from uo.retired to uo.free_sems)
+    while not all(_posted(sem) or sem in drained for sem in released_sems):
         assert time.monotonic() < deadline, "CUDA did not release the released buffers' user objects"
         time.sleep(0.001)
     second = _capture(lambda: _phase_step("step", inputs[2], outs[2], kind), stream_b, debug=False)
