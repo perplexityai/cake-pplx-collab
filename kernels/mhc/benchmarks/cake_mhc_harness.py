@@ -30,8 +30,10 @@ Operations (``--ops``):
 * ``ckpt``: the checkpointed step: Cake ``forward_prepare`` + ``forward_finish``, the statistics replay
   ``forward_stats`` and the backward; a non-Cake arm's forward without the graph, its forward with the graph and the
   backward;
-* ``bwd_acc`` (not in the default ``--ops``): ``bwd`` with ``accumulate=True`` (the parameter gradients added into
-  the caller's buffers); a non-Cake arm's backward into its existing ``.grad`` tensors.
+* ``bwd_acc`` (not in the default ``--ops``): ``bwd`` with ``accumulate=True`` (the parameter gradients ``dfn``,
+  ``dscale`` and ``dbase`` added into the caller's buffers; ``dX`` and ``dB`` written); a non-Cake arm's backward
+  adding into its parameters' existing ``.grad`` tensors, the ``.grad`` of ``X`` and ``B`` cleared before each call
+  (``dX`` and ``dB`` written fresh, as in the Cake arm).
 
 ``--sinkhorn-iters`` sets the Sinkhorn count of every arm and of the references (default 20; the packages run any
 other count on their run-time-count programs).

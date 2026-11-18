@@ -64,7 +64,10 @@ Every arm computes the whole function from the same inputs: the forward gives ``
 gradients.  The PyTorch, compiled and Liger arms record the autograd graph in the forward; ``bwd`` is the backward of a
 recorded forward; ``ckpt`` is a forward without the graph, the forward again with it and the backward (the
 recomputation of ``torch.utils.checkpoint``); ``bwd_acc`` is ``bwd`` adding into the existing parameter gradients
-(the Cake ``accumulate=True``; autograd's accumulation into an existing ``.grad``).
+only, like the Cake ``accumulate=True`` (``dfn``, ``dscale`` and ``dbase`` added into, ``dX`` and ``dB`` written):
+autograd accumulates into the existing ``.grad`` of the parameters (``fn``, ``scale``, ``base``; Liger's ``phi``,
+``base`` and three scales), and the ``.grad`` of ``X`` and ``B`` is cleared before each call, so that ``dX`` and ``dB``
+are written fresh.
 
 The comparisons (:data:`COMPARISONS`) are fixed: each one names a single non-Cake arm, the same arm on every
 architecture, and never the fastest arm of a cell.  The forward has two, ``fwd-A`` (``tk_cublas``, every
@@ -463,6 +466,12 @@ class AutogradArm(Arm):
             i["B"].detach().requires_grad_(True),
         ]
 
+    def activation_leaves(self, leaves: list) -> list:
+        """The leaves that are activations, ``X`` and ``B`` (first and last in every arm's layout); the others are the
+        parameters.  ``bwd_acc`` clears the activations' ``.grad`` before each call, so their gradients are written
+        fresh, as the Cake arm writes ``dX`` and ``dB``; only the parameter gradients accumulate."""
+        return [leaves[0], leaves[-1]]
+
     def forward(self, leaves: list, iters: int):
         raise NotImplementedError
 
@@ -501,8 +510,14 @@ class AutogradArm(Arm):
                     torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
 
             else:
-                # The gradients accumulate into the existing ``.grad`` tensors (the first, warm-up call creates them).
+                # The parameter gradients accumulate into the existing ``.grad`` tensors (the first, warm-up call
+                # creates them); the activation gradients ``dX`` and ``dB`` are cleared first and written fresh, as in
+                # the Cake arm's ``accumulate=True``.
+                activations = self.activation_leaves(leaves)
+
                 def call() -> None:
+                    for t in activations:
+                        t.grad = None
                     torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
 
         elif op == "ckpt":
