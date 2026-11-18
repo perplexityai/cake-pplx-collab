@@ -287,8 +287,9 @@ def test_the_backend_is_imported_on_first_use() -> None:
 def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() -> None:
     """The records are the libraries of :data:`RECORDS` (role, architectures, hidden size, a ``vectors`` grid rule
     whose thread count is the CTA's, ``kernel`` / ``library`` the record name, ``kernel_symbol``
-    ``kernel_<library>``).  ``ROUTES[arch][role]`` maps every hidden size the architecture serves to the record of
-    the role delivered for the architecture and built for that hidden size, or built for any where none is;
+    ``kernel_<library>``).  ``ROUTES[arch][role]`` maps every hidden size the architecture serves (all three on
+    every architecture) to the record of the role delivered for the architecture and built for that hidden size, or
+    built for any where none is (sm_107a at 5120 and 7168);
     ``SMALL_ROUTES`` sends a call of at most ``small_elements(arch, role)`` values per stream (``SMALL_ELEMENTS``,
     T 7168 at hidden 4096 for the sm_107a forward) to the unsuffixed library of its role (the writing backward on
     sm_100a and sm_103a, every role on sm_107a); :func:`route_module` follows both and refuses any other call, and a
@@ -322,7 +323,7 @@ def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() 
     assert loader.HIDDEN_SIZES == {
         "sm_100a": (4096, 5120, 7168),
         "sm_103a": (4096, 5120, 7168),
-        "sm_107a": (4096,),
+        "sm_107a": (4096, 5120, 7168),
     }
     routes, small_routes = loader.ROUTES, loader.SMALL_ROUTES
     assert routes == {
@@ -368,7 +369,7 @@ def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() 
         ("sm_90a", "head_fwd", 4096),
         ("sm_100a", "head_mean", 4096),
         ("sm_100a", "head_fwd", 8192),
-        ("sm_107a", "head_bwd", 5120),
+        ("sm_107a", "head_bwd", 8192),
     ):
         with pytest.raises(ValueError, match="no exported"):
             loader.route_module(arch, role, hidden, 16384)

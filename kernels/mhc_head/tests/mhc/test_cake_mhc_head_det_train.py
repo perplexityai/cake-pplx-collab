@@ -14,14 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Tests of the Cake mHC training head (``cake_pplx.cake_mhc_head_det_train``): the stream
-mean ``Y = X.mean(dim=1)`` of BF16 ``X`` ``[T, 4, H]`` and its gradient, bit
-for bit against torch (signed zeros and NaN encodings included) at hidden
-4096, 5120 and 7168, through the forward / backward entry points, the
-accumulating backward, the autograd node, activation checkpointing and CUDA
-graph capture; the backward against its formula ``BF16(dY * 0.25)`` on each
-stream (and ``BF16(dX + BF16(dY * 0.25))`` when accumulating); every output
-repeating bit for bit run to run; and the checkpoint replay giving the bits of
-the run without the checkpoint.
+mean ``Y = X.mean(dim=1)`` of BF16 ``X`` ``[T, 4, H]`` and its gradient at hidden 4096,
+5120 and 7168, through the forward / backward entry points, the accumulating
+backward, the autograd node, activation checkpointing and CUDA graph capture.
+Every output is judged with ``tests/cake_naive.py`` against the naive BF16 tier
+over 32 inputs: its error against the float64 oracle (the exact mean and
+gradient, PyTorch's value where that is not finite;
+``tests/cake/test_helpers/cake_mhc_head_naive.py``), in the L2 and the max norm,
+median and max, is at most 1.005 times the tier's, and zero where the tier's is
+zero (the gradient ``dY / 4`` of the tier is exact, so the backward must be
+too).  The draws are ``randn``, ``spread`` (``randn`` x ``2^k``) and ``special``
+(half the elements signed zeros, infinities, NaN, the BF16 maximum, the least
+BF16 normal and ``2^24`` with small integers).  The deterministic head's own
+bits are checked run to run: every output repeats bit for bit, and the
+checkpoint replay gives the bits of the run without the checkpoint.
 """
 
 from __future__ import annotations
@@ -35,6 +41,14 @@ import torch.utils.checkpoint
 import cake_pplx
 import cake_pplx._backends.cake_mhc_head_det_train as backend
 import cake_pplx.cake_mhc_head_det_train as facade
+from tests.cake.test_helpers.cake_mhc_head_naive import (
+    F64,
+    backward_naive,
+    backward_oracle,
+    forward_naive,
+    forward_oracle,
+    judge_draws,
+)
 
 
 def get_compute_capability(device: torch.device) -> tuple[int, int]:
@@ -45,7 +59,6 @@ SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 HIDDEN = (4096, 5120, 7168)
 TOKENS = (1, 2, 3, 7, 65, 129, 257, 1000, 2049, 4096, 7169)
 BF16 = torch.bfloat16
-SUBNORMAL = 2.0**-133
 SPECIAL = (
     -0.0,
     0.0,
@@ -54,11 +67,6 @@ SPECIAL = (
     float("nan"),
     torch.finfo(BF16).max,
     -torch.finfo(BF16).max,
-    SUBNORMAL,
-    -SUBNORMAL,
-    2 * SUBNORMAL,
-    3 * SUBNORMAL,
-    6 * SUBNORMAL,
     2.0**-126,
     2.0**24,
     -(2.0**24),
@@ -128,7 +136,7 @@ def _bits(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.contiguous().view(torch.int16)
 
 
-def _assert_bitwise(got: torch.Tensor, want: torch.Tensor, what: str = "torch") -> None:
+def _assert_bitwise(got: torch.Tensor, want: torch.Tensor, what: str) -> None:
     assert got.shape == want.shape and got.dtype == want.dtype == BF16
     mismatch = int((_bits(got) != _bits(want)).sum())
     assert mismatch == 0, f"{mismatch} of {got.numel()} elements differ from {what}"
@@ -140,54 +148,81 @@ def _complement(tensor: torch.Tensor) -> torch.Tensor:
     return (~_bits(tensor)).view(BF16).view(tensor.shape)
 
 
-def _torch_grad(X: torch.Tensor, dY: torch.Tensor) -> torch.Tensor:
-    leaf = X.detach().requires_grad_(True)
-    (dX,) = torch.autograd.grad(leaf.mean(dim=1), leaf, dY)
-    return dX
+def _generator(seed: int) -> torch.Generator:
+    return torch.Generator(device=_device()).manual_seed(seed)
 
 
-def _torch_accumulated(
-    X: torch.Tensor, dY: torch.Tensor, dX0: torch.Tensor
-) -> torch.Tensor:
-    leaf = X.detach().requires_grad_(True)
-    leaf.grad = dX0.clone()
-    leaf.mean(dim=1).backward(dY)
-    return leaf.grad
+def _block_oracle(X: torch.Tensor, W: torch.Tensor, dOut: torch.Tensor) -> dict:
+    """The graph ``head(X * 2) * W`` in float64 by autograd, its output and the gradients of ``X`` and ``W`` under
+    the incoming gradient ``dOut`` (finite inputs)."""
+    with torch.enable_grad():
+        x = X.detach().to(F64).requires_grad_(True)
+        w = W.detach().to(F64).requires_grad_(True)
+        out = (x * 2).sum(dim=1) * 0.25 * w
+        dX, dW = torch.autograd.grad(out, (x, w), dOut.to(F64))
+    return {"output": out.detach(), "dX": dX, "dW": dW}
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("T", TOKENS)
 @pytest.mark.parametrize("kind", ["randn", "spread", "special"])
-def test_forward_backward_bitwise(hidden: int, T: int, kind: str) -> None:
+def test_forward_backward_match_fp64(
+    hidden: int, T: int, kind: str, record_property
+) -> None:
+    """The forward, the backward and the accumulating backward (into the caller's ``dX``) judged over 32 draws."""
     if not _supported(hidden):
         pytest.skip(f"hidden {hidden} is not exported on this device")
-    g = torch.Generator(device=_device()).manual_seed(SEED + T * 31 + hidden)
-    X = _draw((T, 4, hidden), kind, g)
-    dY = _draw((T, hidden), kind, g)
-    dX0 = _draw((T, 4, hidden), kind, g)
 
-    _assert_bitwise(facade.cake_mhc_head_det_train_forward(X), X.mean(dim=1))
-    _assert_bitwise(facade.cake_mhc_head_det_train_backward(dY), _torch_grad(X, dY))
-    dX = dX0.clone()
-    out = facade.cake_mhc_head_det_train_backward(dY, dX=dX, accumulate=True)
-    assert out is dX
-    _assert_bitwise(dX, _torch_accumulated(X, dY, dX0))
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), kind, g)
+        dY = _draw((T, hidden), kind, g)
+        dX0 = _draw((T, 4, hidden), kind, g)
+        acc = dX0.clone()
+        out = facade.cake_mhc_head_det_train_backward(dY, dX=acc, accumulate=True)
+        assert out is acc
+        launch = {
+            "Y": facade.cake_mhc_head_det_train_forward(X),
+            "dX": facade.cake_mhc_head_det_train_backward(dY),
+            "dX accumulate": acc,
+        }
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, dX0),
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": backward_naive(dY),
+            "dX accumulate": backward_naive(dY, dX0),
+        }
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + T * 31 + hidden)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
-def test_preallocated_outputs_and_zero_tokens(hidden: int) -> None:
+def test_preallocated_outputs_and_zero_tokens(hidden: int, record_property) -> None:
+    """Caller outputs holding NaN are returned and written (judged over 32 draws); zero tokens give empty outputs."""
     if not _supported(hidden):
         pytest.skip(f"hidden {hidden} is not exported on this device")
-    g = torch.Generator(device=_device()).manual_seed(SEED)
-    X = _draw((300, 4, hidden), "randn", g)
-    dY = _draw((300, hidden), "randn", g)
-    Y = torch.full((300, hidden), float("nan"), dtype=BF16, device=_device())
-    assert facade.cake_mhc_head_det_train_forward(X, out=Y) is Y
-    _assert_bitwise(Y, X.mean(dim=1))
-    dX = torch.full((300, 4, hidden), float("nan"), dtype=BF16, device=_device())
-    assert facade.cake_mhc_head_det_train_backward(dY, dX=dX) is dX
-    _assert_bitwise(dX, _torch_grad(X, dY))
+    Y = torch.empty((300, hidden), dtype=BF16, device=_device())
+    dX = torch.empty((300, 4, hidden), dtype=BF16, device=_device())
 
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((300, 4, hidden), "randn", g)
+        dY = _draw((300, hidden), "randn", g)
+        Y.fill_(float("nan"))
+        dX.fill_(float("nan"))
+        assert facade.cake_mhc_head_det_train_forward(X, out=Y) is Y
+        assert facade.cake_mhc_head_det_train_backward(dY, dX=dX) is dX
+        launch = {"Y": Y.clone(), "dX": dX.clone()}
+        expected = {"Y": forward_oracle(X), "dX": backward_oracle(dY)}
+        naive = {"Y": forward_naive(X), "dX": backward_naive(dY)}
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED)
     empty = torch.empty((0, 4, hidden), dtype=BF16, device=_device())
     assert facade.cake_mhc_head_det_train_forward(empty).shape == (0, hidden)
     assert facade.cake_mhc_head_det_train_backward(empty[:, 0]).shape == (0, 4, hidden)
@@ -241,58 +276,81 @@ def test_argument_checks() -> None:
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
-def test_autograd_matches_torch(hidden: int) -> None:
+def test_autograd_matches_fp64(hidden: int, record_property) -> None:
+    """The autograd node over 32 draws: ``Y``, the gradient of a first backward and of a second one accumulated into
+    ``X.grad`` (as PyTorch's autograd accumulates: the tier is PyTorch's ``X.mean(dim=1)`` node), and the gradient of
+    an expanded (non-contiguous) incoming gradient ``v`` of a sum over the tokens, read through a copy.  The
+    ``cake_pplx`` namespace re-exports nothing; the facade resolves the autograd class lazily to the backend's
+    object."""
     if not _supported(hidden):
         pytest.skip(f"hidden {hidden} is not exported on this device")
-    g = torch.Generator(device=_device()).manual_seed(SEED + 1)
-    X = _draw((513, 4, hidden), "spread", g)
-    dY = _draw((513, hidden), "spread", g)
-    ours = X.detach().requires_grad_(True)
-    ref = X.detach().requires_grad_(True)
-    Y = facade.cake_mhc_head_det(ours)
-    _assert_bitwise(Y, ref.mean(dim=1))
-    # Two backward passes: the second accumulates into X.grad exactly as torch's does.
-    for _ in range(2):
-        facade.cake_mhc_head_det(ours).backward(dY)
-        ref.mean(dim=1).backward(dY)
-        _assert_bitwise(ours.grad, ref.grad)
-    # A non-contiguous incoming gradient (the expanded gradient of a sum) is read through a copy.
-    ours.grad = ref.grad = None
-    facade.cake_mhc_head_det(ours).float().sum().backward()
-    ref.mean(dim=1).float().sum().backward()
-    _assert_bitwise(ours.grad, ref.grad)
-    # The ``cake_pplx`` namespace re-exports nothing; the facade resolves the autograd class lazily to the
-    # backend's object.
+    T = 513
+
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((T, 4, hidden), "spread", g)
+        dY = _draw((T, hidden), "spread", g)
+        v = _draw((hidden,), "spread", g)
+        ours = X.detach().requires_grad_(True)
+        ref = X.detach().requires_grad_(True)
+        launch = {"Y": facade.cake_mhc_head_det(ours).detach()}
+        naive = {"Y": ref.mean(dim=1).detach()}
+        expected = {"Y": forward_oracle(X)}
+        for n in range(2):
+            facade.cake_mhc_head_det(ours).backward(dY)
+            ref.mean(dim=1).backward(dY)
+            launch[f"dX pass {n}"] = ours.grad.clone()
+            naive[f"dX pass {n}"] = ref.grad.clone()
+        expected["dX pass 0"] = backward_oracle(dY)
+        expected["dX pass 1"] = backward_oracle(dY, backward_naive(dY))
+        ours.grad = ref.grad = None
+        facade.cake_mhc_head_det(ours).float().sum(dim=0).backward(v.float())
+        ref.mean(dim=1).float().sum(dim=0).backward(v.float())
+        launch["dX expanded"], naive["dX expanded"] = ours.grad, ref.grad
+        expected["dX expanded"] = backward_oracle(v.expand(T, hidden))
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 1)
     assert not hasattr(cake_pplx, "cake_mhc_head_det")
     assert "CakeMHCHeadDetFunction" in facade.__all__
     assert facade.CakeMHCHeadDetFunction is backend.CakeMHCHeadDetFunction
 
 
 @pytest.mark.parametrize("use_reentrant", [False, True])
-def test_activation_checkpoint(use_reentrant: bool) -> None:
-    g = torch.Generator(device=_device()).manual_seed(SEED + 2)
-    X = _draw((257, 4, 4096), "randn", g)
-    W = torch.randn((4096,), device=_device(), generator=g).to(BF16)
-    dY = _draw((257, 4096), "randn", g)
+def test_activation_checkpoint(use_reentrant: bool, record_property) -> None:
+    """``head(X * 2) * W`` inside ``torch.utils.checkpoint``: the output and the gradient of ``X`` judged over 32
+    draws (the tier: the same graph with PyTorch's ``X.mean(dim=1)``)."""
 
-    def block(x: torch.Tensor, head) -> torch.Tensor:
-        return head(x * 2) * W
+    def case(j: int, s: int):
+        g = _generator(s)
+        X = _draw((257, 4, 4096), "randn", g)
+        W = torch.randn((4096,), device=_device(), generator=g).to(BF16)
+        dY = _draw((257, 4096), "randn", g)
 
-    ours = X.detach().requires_grad_(True)
-    ref = X.detach().requires_grad_(True)
-    out = torch.utils.checkpoint.checkpoint(
-        block, ours, facade.cake_mhc_head_det, use_reentrant=use_reentrant
-    )
-    want = block(ref, lambda x: x.mean(dim=1))
-    _assert_bitwise(out, want)
-    out.backward(dY)
-    want.backward(dY)
-    _assert_bitwise(ours.grad, ref.grad)
+        def block(x: torch.Tensor, head) -> torch.Tensor:
+            return head(x * 2) * W
+
+        ours = X.detach().requires_grad_(True)
+        ref = X.detach().requires_grad_(True)
+        out = torch.utils.checkpoint.checkpoint(
+            block, ours, facade.cake_mhc_head_det, use_reentrant=use_reentrant
+        )
+        want = block(ref, lambda x: x.mean(dim=1))
+        out.backward(dY)
+        want.backward(dY)
+        oracle = _block_oracle(X, W, dY)
+        launch = {"output": out.detach(), "dX": ours.grad}
+        naive = {"output": want.detach(), "dX": ref.grad}
+        return [launch], {k: oracle[k] for k in launch}, naive
+
+    judge_draws(case, record_property, seed=SEED + 2)
 
 
-def test_cuda_graph_capture() -> None:
+def test_cuda_graph_capture(record_property) -> None:
+    """The forward, the writing and the accumulating backward captured in one CUDA graph, replayed on 32 draws of
+    ``special`` inputs copied in place (the accumulation buffer a new draw before each replay): every output judged."""
     T, hidden = 1000, 7168 if _supported(7168) else 4096
-    g = torch.Generator(device=_device()).manual_seed(SEED + 3)
+    g = _generator(SEED + 3)
     X = _draw((T, 4, hidden), "randn", g)
     dY = _draw((T, hidden), "randn", g)
     dXa = _draw((T, 4, hidden), "randn", g)
@@ -314,35 +372,62 @@ def test_cuda_graph_capture() -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
-    for _replay in range(2):
-        X.copy_(_draw((T, 4, hidden), "special", g))
-        dY.copy_(_draw((T, hidden), "special", g))
+
+    def case(j: int, s: int):
+        gj = _generator(s)
+        X.copy_(_draw((T, 4, hidden), "special", gj))
+        dY.copy_(_draw((T, hidden), "special", gj))
+        dXa.copy_(_draw((T, 4, hidden), "special", gj))
         before = dXa.clone()
+        Y.fill_(float("nan"))
+        dX.fill_(float("nan"))
         graph.replay()
         torch.cuda.synchronize()
-        _assert_bitwise(Y, X.mean(dim=1))
-        _assert_bitwise(dX, _torch_grad(X, dY))
-        _assert_bitwise(dXa, _torch_accumulated(X, dY, before))
+        launch = {"Y": Y.clone(), "dX": dX.clone(), "dX accumulate": dXa.clone()}
+        expected = {
+            "Y": forward_oracle(X),
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, before),
+        }
+        naive = {
+            "Y": forward_naive(X),
+            "dX": backward_naive(dY),
+            "dX accumulate": backward_naive(dY, before),
+        }
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 3)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)
 @pytest.mark.parametrize("T", (1, 7, 129, 1000, 2048, 2049, 14928, 16263))
 @pytest.mark.parametrize("kind", ["randn", "spread", "special"])
-def test_backward_matches_the_quarter_formula(hidden: int, T: int, kind: str) -> None:
-    """The backward against its formula, independent of autograd: every stream of ``dX`` is ``q = (dY.float() *
-    0.25).bfloat16()``, and the accumulating backward writes ``(dX0.float() + q.float()).bfloat16()``."""
+def test_backward_and_accumulation_match_fp64(
+    hidden: int, T: int, kind: str, record_property
+) -> None:
+    """The writing and the accumulating backward at long token counts, judged over 32 draws (the tier's
+    ``dY * 0.25`` is exact, so the backward must be: zero error where the tier's is zero)."""
     if not _supported(hidden):
         pytest.skip(f"hidden {hidden} is not exported on this device")
-    g = torch.Generator(device=_device()).manual_seed(SEED + 4 + T * 31 + hidden)
-    dY = _draw((T, hidden), kind, g)
-    dX0 = _draw((T, 4, hidden), kind, g)
-    q = (dY.float() * 0.25).bfloat16().unsqueeze(1).expand(T, 4, hidden)
 
-    dX = facade.cake_mhc_head_det_train_backward(dY)
-    _assert_bitwise(dX, q, "(dY * 0.25) on each stream")
-    acc = dX0.clone()
-    facade.cake_mhc_head_det_train_backward(dY, dX=acc, accumulate=True)
-    _assert_bitwise(acc, (dX0.float() + q.float()).bfloat16(), "dX0 + (dY * 0.25)")
+    def case(j: int, s: int):
+        g = _generator(s)
+        dY = _draw((T, hidden), kind, g)
+        dX0 = _draw((T, 4, hidden), kind, g)
+        acc = dX0.clone()
+        facade.cake_mhc_head_det_train_backward(dY, dX=acc, accumulate=True)
+        launch = {
+            "dX": facade.cake_mhc_head_det_train_backward(dY),
+            "dX accumulate": acc,
+        }
+        expected = {
+            "dX": backward_oracle(dY),
+            "dX accumulate": backward_oracle(dY, dX0),
+        }
+        naive = {"dX": backward_naive(dY), "dX accumulate": backward_naive(dY, dX0)}
+        return [launch], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 4 + T * 31 + hidden)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN)

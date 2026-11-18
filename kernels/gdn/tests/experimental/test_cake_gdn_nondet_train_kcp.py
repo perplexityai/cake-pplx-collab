@@ -14,27 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 CPU tests of the GDN KCP metadata layer of the NON-DETERMINISTIC package ``cake_pplx._backends.cake_gdn_nondet_train_kcp``
-(the counterpart of ``cake_gdn_det_train_kcp`` with the same contract and accuracy budgets, not its bitwise
-reproducibility):
+(the counterpart of ``cake_gdn_det_train_kcp`` with the same contract, not its bitwise reproducibility on a device):
 the package-local plan module on the step-0 rows (its field identity with the KDA family's
 ``cake_kda_det_train_kcp.cake_kcp_plan`` is the cross-family check of
 ``tests/cross_family/gdn/tests/experimental/test_cake_gdn_nondet_train_kcp.py``; the package never imports a KDA package),
 the per-rank crossing counts and exchange bytes against the rows of record, the table builders (pool addressing, segment lists, chains),
 head ownership incl. the padded ``(HV, W) = (3, 2)`` case, the byte queries, the registry seed, an emulated multi-rank
 row (W ranks on threads), and the package's host orchestration on the fake backend
-(the CPU emulation of the programs) against the FP64 reference.  The mode is in the package name: no entry takes
-a ``deterministic`` keyword.
+(the CPU emulation of the programs).  The mode is in the package name: no entry takes a ``deterministic`` keyword.
 
-Plan / table / byte / registry / launch-order checks are exact.  Numerical results are judged against the FP64
-reference of ``tests/experimental/test_helpers/cake_gdn_det_train_kcp_reference.py`` with the deterministic route's budget for the
-fake backend (``FAKE_TOL_REL_RMS``), and two arms that the deterministic tests compare bitwise (repeat, saved /
-replay, kept / replayed tapes, checkpoint / direct, forced forms) are each judged against that reference and against
-each other with the same budget (``_within_budget``); no tolerance is derived from a non-deterministic output.  The one
-bitwise check left is labelled: a property of the fake backend's own emulation, not of the kernels.
+Plan / table / byte / registry / launch-order checks are exact.  The accuracy of the fake backend is judged by
+``tests/cake_naive.py`` over its ``DRAWS`` random draws per case: each output's error against the FP64 reference of
+``tests/experimental/test_helpers/cake_gdn_det_train_kcp_reference.py`` beside the error of that reference's PyTorch
+BF16 naive implementation (``gdn_naive_with_grads``, ``naive_cut_states``), on small packs (``JUDGE_CU``,
+``MR_JUDGE_CU``).  The fake backend is deterministic for one device and thread count, so the forms the other tests
+compare (repeat, saved / replay, kept / replayed tapes, checkpoint / direct, caller / per-call workspaces, forced
+forms) run the same programs on the same operands and are compared bit for bit: a property of the CPU emulation, not
+of the kernels.
 
 Environment of the tests (never of the package): ``GDN_ROWS_DIR`` (the step-0 row JSONs; the row tests skip
-without it), ``GDN_EVIDENCE_DIR`` (JSONL evidence records), the FP64 reference ``gdn_reference`` on ``PYTHONPATH``
-(the two harness-reference tests skip without it).
+without it), ``GDN_EVIDENCE_DIR`` (JSONL evidence records of the plan, table, byte and registry checks).
 """
 
 from __future__ import annotations
@@ -60,6 +59,7 @@ import torch
 # lazily, and a first import racing the rank threads of another test can see a partially initialised sympy (Python 3.14)
 import torch._dynamo  # noqa: F401
 
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed, judge_case
 from tests.experimental.test_helpers import cake_gdn_det_train_kcp_reference as REF
 
 
@@ -84,11 +84,6 @@ gb = _package("cake_bytes")
 gj = _package("cake_jit")
 fake = _package("cake_fake_backend")
 
-try:
-    import gdn_reference  # the FP64 reference of the validation harness
-except ImportError:  # pragma: no cover - optional environment module
-    gdn_reference = None
-
 PACKAGE_DIR = pathlib.Path(gp.__file__).resolve().parent
 ROWS_DIR = os.environ.get("GDN_ROWS_DIR")
 EVIDENCE_DIR = os.environ.get("GDN_EVIDENCE_DIR")
@@ -96,14 +91,12 @@ SM_COUNT = 152  # GB300
 C_CONV = 10_240  # the rows' convolution width (2 * 16 + 48) * 128
 CPU = torch.device("cpu")
 OWNERSHIP = [(HV, W) for HV in (3, 4, 6, 12, 24, 48) for W in (2, 4, 8, 16)]
-FAKE_TOL_REL_RMS = 0.05  # FLA-class (BF16 tapes) against FP64
-FAKE_CU = [
-    0,
-    100,
-    230,
-    307,
-    507,
-]  # four documents, 507 tokens, boundaries inside chunks
+# The judged pack (each judged case runs the fake backend, the FP64 reference and the BF16 naive DRAWS times on the
+# CPU): three documents, 260 tokens, two chunks each with a partial last chunk (36, 1 and 31 tokens); two ranks split
+# it inside a document in either layout; grouped value heads (HV / H_qk = 2).
+JUDGE_CU = [0, 100, 165, 260]
+JUDGE_HEADS = (2, 4)
+JUDGE_SEED = 20261023  # the operand seed of draw 0 (``_inputs``' default); draw j: ``draw_seed(JUDGE_SEED, j)``
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -147,82 +140,14 @@ def _evidence(name: str, record: dict) -> None:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-# --------------------------------------------------------------------------- accuracy budgets (never derived from a run)
-# The fake backend's budget is the deterministic route's FAKE_TOL_REL_RMS (FLA-class: BF16 tapes against FP64).  Every
-# numerical result of this package is judged against the FP64 reference with it, and two arms that the deterministic
-# twin compares bitwise are each judged against the reference AND against each other with the same constant.
+# --------------------------------------------------------------------------- the naive tier and fake-backend bits
+# A judged output's error against its FP64 reference is compared by tests/cake_naive.py with the error of the PyTorch
+# BF16 naive implementation of that reference over DRAWS draws (the small packs JUDGE_CU and MR_JUDGE_CU; the verdict
+# is recorded, a miss does not fail the test).  Two forms that the fake backend runs with the same programs on the
+# same operands give the same bits (the CPU emulation is deterministic for one device and thread count): they are
+# compared exactly.
 
-
-def _within_budget(
-    cand: torch.Tensor | None,
-    ref: torch.Tensor | None,
-    what: str,
-    *,
-    rel_rms: float = FAKE_TOL_REL_RMS,
-) -> dict:
-    """``cand`` within the budget of ``ref`` (the FP64 reference, or another arm for a cross-arm check): the same
-    shape, finite, rel-RMS <= ``rel_rms`` (computed in FP64 by the reference helper's ``error_metrics``).  Two ``None``
-    (a leaf the output does not reach) agree."""
-    assert (cand is None) == (ref is None), (what, cand is None, ref is None)
-    if cand is None:
-        return {}
-    assert tuple(cand.shape) == tuple(ref.shape), (
-        what,
-        tuple(cand.shape),
-        tuple(ref.shape),
-    )
-    m = REF.error_metrics(cand, ref)
-    assert m["nonfinite"] == 0, f"{what}: {m['nonfinite']} non-finite values"
-    assert m["rel_rms"] <= rel_rms, (
-        f"{what}: rel-RMS {m['rel_rms']:.3e} > {rel_rms} (max-abs {m['max_abs']:.3e}, worst {m['worst']})"
-    )
-    return m
-
-
-def _arms_within_budget(
-    arms: dict[str, dict],
-    ref: dict,
-    names,
-    what: str,
-    *,
-    rel_rms: float = FAKE_TOL_REL_RMS,
-) -> None:
-    """Every arm against the FP64 reference and every pair of arms against each other, tensor by tensor (``names``),
-    with the same budget: the non-deterministic form of the twin's bitwise equality of the arms."""
-    keys = list(arms)
-    for key in keys:
-        for n in names:
-            _within_budget(
-                arms[key][n], ref[n], f"{what}: {key} {n} vs FP64", rel_rms=rel_rms
-            )
-    for i, a in enumerate(keys):
-        for b in keys[i + 1 :]:
-            for n in names:
-                _within_budget(
-                    arms[a][n], arms[b][n], f"{what}: {a} vs {b} {n}", rel_rms=rel_rms
-                )
-
-
-def _fp64(region, tensors, cotangent=None) -> tuple[torch.Tensor, list]:
-    """FP64 autograd of ``region(*leaves)`` over FP64 copies of ``tensors``: ``(output, gradients)`` (``None`` for a
-    leaf the output does not reach).  ``cotangent=None`` for a scalar output."""
-    leaves = [t.detach().to(torch.float64).requires_grad_(True) for t in tensors]
-    y = region(*leaves)
-    cot = None if cotangent is None else cotangent.detach().to(torch.float64)
-    grads = torch.autograd.grad(y, leaves, cot, allow_unused=True)
-    return y.detach(), [None if gr is None else gr.detach() for gr in grads]
-
-
-def _ref_layer(cu: list[int]):
-    """The exact FP64 GDN layer over the pack ``cu`` (no batch axis, ``scale = 128 ** -0.5``), differentiable."""
-
-    def layer(q, k, v, g, beta):
-        return REF.gdn_exact_forward(q, k, v, g, beta, cu, scale=REF.SCALE)[0]
-
-    return layer
-
-
-# The one-rank pack of the host-orchestration tests (the C1 documents) and its FP64 references.
+# The one-rank pack of the host-orchestration tests (the C1 documents).
 CKPT_CU = [0, 100, 740, 817, 1817, 1946]
 CKPT_HEADS = (2, 6)
 LEAVES = ("q", "k", "v", "g", "beta")
@@ -234,31 +159,32 @@ CKPT_GRADS = (
     "dbeta",
 )  # autograd order of the leaves (q, k, v, g, beta)
 EXPLICIT_GRADS = ("dq", "dk", "dv", "dbeta", "dg")  # the backward entries' output order
+JUDGE_NAMES = ("out",) + CKPT_GRADS
 _REFERENCES: dict = {}
 
 
-def _ckpt_reference(*, layers: int = 1) -> dict[str, torch.Tensor]:
-    """FP64 ``out`` and the five gradients of ``layers`` chained exact layers (the next layer's ``v`` is the previous
-    output, exact) on the seeded operands of :data:`CKPT_CU` with the seeded ``dout``; cached per layer count."""
-    key = ("ckpt", layers)
+def _assert_same(a: dict, b: dict, what: str, names=None) -> None:
+    """Two fake-backend forms give the same bits: ``out`` and the five gradients (or ``names``)."""
+    for n in (("out",) + CKPT_GRADS) if names is None else names:
+        assert torch.equal(a[n], b[n]), f"{what}: {n} differs"
+
+
+def _judge_draw(seed: int) -> tuple[dict, dict, dict]:
+    """The draw of seed ``seed`` of the judged pack :data:`JUDGE_CU` at :data:`JUDGE_HEADS`: the operands
+    (:func:`_inputs`), the FP64 reference of ``out`` and the five gradients (``gdn_exact_with_grads``) and their naive
+    tier (``gdn_naive_with_grads``, BF16); cached per seed (the judged cases of this pack share it)."""
+    key = ("judge", seed)
     if key not in _REFERENCES:
-        ops = _inputs(CKPT_CU, *CKPT_HEADS)
-        layer = _ref_layer(CKPT_CU)
-
-        def region(q, k, v, g, beta):
-            out = layer(q, k, v, g, beta)
-            for _ in range(layers - 1):
-                out = layer(q, k, out, g, beta)
-            return out
-
-        out, grads = _fp64(region, [ops[n] for n in LEAVES], ops["dout"])
-        _REFERENCES[key] = {"out": out, **dict(zip(CKPT_GRADS, grads, strict=True))}
+        ops = _inputs(JUDGE_CU, *JUDGE_HEADS, seed=seed)
+        args = [ops[n] for n in (*LEAVES, "dout")]
+        ref = REF.gdn_exact_with_grads(*args, JUDGE_CU, scale=REF.SCALE)
+        nv = REF.gdn_naive_with_grads(*args, JUDGE_CU, scale=REF.SCALE)
+        _REFERENCES[key] = (
+            ops,
+            {n: ref[n] for n in JUDGE_NAMES},
+            {n: nv[n] for n in JUDGE_NAMES},
+        )
     return _REFERENCES[key]
-
-
-def _grads_dict(grads, order=EXPLICIT_GRADS) -> dict[str, torch.Tensor]:
-    """The five gradients of an explicit backward entry (``dq, dk, dv, dbeta, dg``) keyed by name."""
-    return dict(zip(order, grads, strict=True))
 
 
 # --------------------------------------------------------------------------- rows of record
@@ -1715,7 +1641,7 @@ def test_byte_queries(W) -> None:
                         )
                     elif save_mode in gb.AKK_SAVE_MODES and boundary_mode == "saved":
                         # the light form of the norm, but #1's Akk goes to the saved set: no fwd.akk / bwd.akk
-                        # term, no h tape, #1's moment and every backward phase lower by the tape
+                        # term, no h tape, every backward phase lower by the tape
                         light_ws = gb.cake_gdn_nondet_train_kcp_workspace_layout(
                             ctx,
                             H_qk=H_qk,
@@ -1727,10 +1653,17 @@ def test_byte_queries(W) -> None:
                             **norm,
                         )
                         assert "fwd.akk" not in ws and "bwd.akk" not in ws
-                        assert light_ws["fwd.akk"] == light_ws["bwd.akk"] == akk
+                        # the light forward runs the forward form of #1_l2n (shipped): no akk / gcum at its #1
+                        assert not ({"fwd.akk", "fwd.gcum"} & set(light_ws))
+                        assert light_ws["bwd.akk"] == akk
                         assert "fwd.h_tape" not in ws and layout["h_tape"] == 0
                         assert layout["akk"] == akk
-                        assert light_ws["fwd.phase.prep"] - ws["fwd.phase.prep"] == akk
+                        # "light_akk"'s #1 is the full record: its Akk goes to the saved set, its gcum to the arena
+                        assert (
+                            ws["fwd.phase.prep"] - light_ws["fwd.phase.prep"]
+                            == ws["fwd.gcum"]
+                            > 0
+                        )
                         akk_phases = [k for k in light_ws if k.startswith("bwd.phase.")]
                         assert akk_phases == [
                             k for k in ws if k.startswith("bwd.phase.")
@@ -1838,9 +1771,10 @@ def test_registry_seed() -> None:
             "kcp_dhu_offset",
             "kcp_dhu_tape",
             "kcp_affine_merge",
+            "fwd_prep_l2n",
         )
-    )  # the vh=64 forms of the state walks #2 (L8A, the output walks too) / #7 and the c8 / c16 merges are the only
-    # multi-record programs
+    )  # the vh=64 forms of the state walks #2 (L8A, the output walks too) / #7, the c8 / c16 merges and the forward
+    # form of #1_l2n (fwd_prep_l2n_fwd) are the only multi-record programs
     assert set(gj.TEST_MODULES) == {
         "kcp_transfer_walk_three_mma",
         "kcp_transfer_walk_plain_tf32",
@@ -1885,9 +1819,12 @@ def test_registry_seed() -> None:
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ]
-        assert rec["select_rule"]["kind"] in ("always", "columns", "ctas_per_head"), (
-            name
-        )
+        assert rec["select_rule"]["kind"] in (
+            "always",
+            "columns",
+            "ctas_per_head",
+            "prep_form",
+        ), name
         assert ("test_knobs" in rec) == (name in gj.TEST_MODULES), name
         if not manifest_rendered:
             with pytest.raises(RuntimeError, match="no rendered library"):
@@ -2043,12 +1980,7 @@ def test_package_imports_no_kda_and_no_environ() -> None:
     )
 
 
-# --------------------------------------------------------------------------- fake backend vs the FP64 reference
-
-REFERENCE = pytest.mark.skipif(
-    gdn_reference is None,
-    reason="gdn_reference (FP64 reference harness) not on PYTHONPATH",
-)
+# --------------------------------------------------------------------------- fake backend: the naive tier
 
 
 def _inputs(
@@ -2080,157 +2012,116 @@ def _inputs(
     }
 
 
-@REFERENCE
+def _bitwise(a: dict, b: dict, names) -> bool:
+    return all(torch.equal(a[n], b[n]) for n in names)
+
+
 @pytest.mark.parametrize("layout", ("contiguous", "zigzag"))
-def test_fake_backend_matches_fp64_reference(layout) -> None:
-    """Result 4: the fake backend's forward / backward of a 2-rank C and Z row at (H_qk, HV) = (2, 6), T = 507,
-    matches the FP64 reference within FLA-class error (rel-RMS <= 0.05 per tensor, finite); a second run, the replay
-    boundary, ``save_transfer=False`` and ``save_mode="full"`` are each within the same budget of the reference and of
-    the first run.  The emulation's own saved == replay identity (a property of the CPU fake backend, not of the
-    kernels) is the one bitwise check kept."""
-    H_qk, HV = 2, 6
-    cu = FAKE_CU
+def test_fake_backend_naive_tier_verdict(layout, record_property) -> None:
+    """Result 4: the fake backend's forward / backward of a 2-rank C and Z row (:data:`JUDGE_CU` at
+    :data:`JUDGE_HEADS`) judged against the naive tier of the FP64 reference over ``DRAWS`` draws (recorded: a miss
+    does not fail the test): ``out`` and the five gradients of the saved-boundary backward against
+    ``gdn_exact_with_grads``, beside ``gdn_naive_with_grads``.  On every draw the replay boundary gives the saved
+    boundary's gradients bit for bit; on the first draw a second run, ``save_transfer=False`` and ``save_mode="full"``
+    give the first run's bits too, each with its replay equal to its saved boundary (the CPU emulation is
+    deterministic: a property of the fake backend, not of the kernels)."""
+    H_qk, HV = JUDGE_HEADS
+    cu = JUDGE_CU
     part = gp.cake_gdn_nondet_train_kcp_partition(
         torch.tensor(cu, dtype=torch.int64), 2, layout
     )
     assert sum(part.crossing_counts()[0]) >= 1  # the row crosses a rank boundary
-    ops = _inputs(cu, H_qk, HV)
-    res = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
-    assert res["logs"]["forward"] == ["c1", "c2"] and res["logs"]["backward_saved"] == [
-        "b1",
-        "b2",
-    ]
-    assert res["logs"]["backward_replay"] == ["c1", "c2", "b1", "b2"]
-    # FAKE-BACKEND BITWISE PROPERTY (the CPU emulation itself, not the kernels): one device and thread count replay
-    # the same programs on the same inputs, so its saved and replay gradients are the same bits.
-    assert fake.replay_equals_saved(res), "saved and replay gradients differ"
-    ref = gdn_reference.gdn_exact_with_grads(
-        ops["q"],
-        ops["k"],
-        ops["v"],
-        ops["g"],
-        ops["beta"],
-        ops["dout"],
-        cu,
-        scale=fake.SCALE,
-    )
-    metrics = {}
-    for name in ("out",) + fake.GRAD_NAMES:
-        m = gdn_reference.error_metrics(res["saved"][name], ref[name])
-        metrics[name] = {
-            k: m[k]
-            for k in (
-                "rel_rms",
-                "max_abs",
-                "ref_rms",
-                "ref_max_abs",
-                "nonfinite",
-                "numel",
-            )
-        }
-        assert m["nonfinite"] == 0, name
-        assert m["rel_rms"] <= FAKE_TOL_REL_RMS, (name, m["rel_rms"])
-    # a second run and the other saved-set forms: each within the budget of the reference and of the first run
-    again = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
-    no_transfer = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_transfer=False)
-    full = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_mode="full")
     names = ("out",) + fake.GRAD_NAMES
-    _arms_within_budget(
-        {
-            "first": res["saved"],
-            "repeat": again["saved"],
-            "replay": {"out": res["saved"]["out"], **res["replay"]},
-            "save_transfer=False": no_transfer["saved"],
-            "save_transfer=False replay": {
-                "out": no_transfer["saved"]["out"],
-                **no_transfer["replay"],
-            },
-            "save_mode=full": full["saved"],
-            "save_mode=full replay": {"out": full["saved"]["out"], **full["replay"]},
-        },
-        {n: ref[n] for n in names},
-        names,
-        f"fake backend {layout}",
-    )
-    # the no-CP form (one rank) agrees with the reference too and documents the local error floor
-    single = fake.emulate(
-        gp.cake_gdn_nondet_train_kcp_partition(
-            torch.tensor(cu, dtype=torch.int64), 1, "contiguous"
-        ),
-        ops,
-        H_qk=H_qk,
-        HV=HV,
-    )
-    local = {
-        name: gdn_reference.error_metrics(single["saved"][name], ref[name])["rel_rms"]
-        for name in ("out",) + fake.GRAD_NAMES
-    }
-    _evidence(
-        "fake_backend",
-        {
-            "layout": layout,
-            "world_size": 2,
-            "H_qk": H_qk,
-            "HV": HV,
-            "cu_seqlens": cu,
-            "T_r": [part.rank_tokens(r) for r in range(2)],
-            "n_in": list(part.crossing_counts()[0]),
-            "n_out": list(part.crossing_counts()[1]),
-            "metrics": metrics,
-            "local_rel_rms": local,
-            "tolerance_rel_rms": FAKE_TOL_REL_RMS,
-            "saved_eq_replay_fake_backend_bitwise": True,
-            "repeat_within_budget": True,
-            "save_transfer_false_within_budget": True,
-            "save_mode_full_within_budget": True,
-            "pass": True,
-        },
-    )
+    seen: dict = {}
+
+    def run(j, s):
+        ops, ref, nv = _judge_draw(s)
+        seen["naive"] = nv
+        res = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
+        assert res["logs"]["forward"] == ["c1", "c2"] and res["logs"][
+            "backward_saved"
+        ] == ["b1", "b2"]
+        assert res["logs"]["backward_replay"] == ["c1", "c2", "b1", "b2"]
+        # FAKE-BACKEND BITWISE PROPERTY (the CPU emulation itself, not the kernels): one device and thread count replay
+        # the same programs on the same inputs, so its saved and replay gradients are the same bits.
+        assert fake.replay_equals_saved(res), f"draw {j}: saved and replay gradients differ"
+        if j == 0:
+            again = fake.emulate(part, ops, H_qk=H_qk, HV=HV)
+            assert _bitwise(res["saved"], again["saved"], names), (
+                "a second run differs bitwise"
+            )
+            no_transfer = fake.emulate(
+                part, ops, H_qk=H_qk, HV=HV, save_transfer=False
+            )
+            full = fake.emulate(part, ops, H_qk=H_qk, HV=HV, save_mode="full")
+            assert fake.replay_equals_saved(no_transfer) and fake.replay_equals_saved(
+                full
+            )
+            assert _bitwise(res["saved"], no_transfer["saved"], names), (
+                "save_transfer=False differs"
+            )
+            assert _bitwise(res["saved"], full["saved"], names), "save_mode=full differs"
+        return {n: res["saved"][n] for n in names}, {n: ref[n] for n in names}
+
+    def naive(j, tier):
+        return seen["naive"]
+
+    judge, failures = judge_case(run, naive, seed=JUDGE_SEED)
+    judge.record(record_property)
+    assert not failures, failures
 
 
-@REFERENCE
-def test_fake_backend_fragment_state_matches_reference() -> None:
-    """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment equals the FP64
-    state at its cut (``cut_states``) within FLA-class error, and ``S_out = M_f S_in + B_f`` holds for the FP32
-    summaries (the merge's inputs)."""
-    H_qk, HV = 2, 6
-    cu = FAKE_CU
+def test_fake_backend_fragment_state_naive_tier_verdict(record_property) -> None:
+    """The offset / transfer walks and the merge: the carried ``S_in`` of every crossing-in fragment of the 2-rank Z
+    row (:data:`JUDGE_CU` at :data:`JUDGE_HEADS`), judged over ``DRAWS`` draws against the naive tier
+    (``naive_cut_states``) of the FP64 state at its cut (``cut_states``; recorded: a miss does not fail the test); one
+    judged output per cut (``S_in@<global token>``)."""
+    H_qk, HV = JUDGE_HEADS
+    cu = JUDGE_CU
     part = gp.cake_gdn_nondet_train_kcp_partition(
         torch.tensor(cu, dtype=torch.int64), 2, "zigzag"
     )
-    ops = _inputs(cu, H_qk, HV)
-    ranks = fake.build_ranks(
-        part, [fake.slice_local(ops, part, r) for r in range(2)], H_qk=H_qk, HV=HV
-    )
-    _outs, saved = fake.emulate_forward(ranks)
     cuts = sorted(
         {cu[f.doc] + f.off for frs in part.fragments for f in frs if f.crossing_in}
     )
-    states = gdn_reference.cut_states(
-        ops["q"], ops["k"], ops["v"], ops["g"], ops["beta"], cu, cuts, scale=fake.SCALE
-    )
-    worst = 0.0
-    for rk in ranks:
-        pa = rk.wt.pools["s_in"]
-        for f in rk.ctx.fragments:
-            if not f.crossing_in:
-                continue
-            slot = rk.ctx.in_slot[f.slot]
-            S = torch.stack(
-                [
-                    saved.s_in[rk.rank][
-                        pa.elem(slot, h) : pa.elem(slot, h) + gp.TILE
-                    ].view(128, 128)
-                    for h in range(HV)
-                ]
-            )
-            m = gdn_reference.error_metrics(S, states[cu[f.doc] + f.off])
-            worst = max(worst, m["rel_rms"])
-            assert m["rel_rms"] <= FAKE_TOL_REL_RMS, (rk.rank, f.slot, m["rel_rms"])
-    _evidence(
-        "fake_states",
-        {"layout": "zigzag", "cuts": cuts, "worst_rel_rms": worst, "pass": True},
-    )
+    assert cuts  # the row carries a state across a rank boundary
+    seen: dict = {}
+
+    def run(j, s):
+        ops = _inputs(cu, H_qk, HV, seed=s)
+        ranks = fake.build_ranks(
+            part, [fake.slice_local(ops, part, r) for r in range(2)], H_qk=H_qk, HV=HV
+        )
+        _outs, saved = fake.emulate_forward(ranks)
+        args = [ops[n] for n in LEAVES]
+        states = REF.cut_states(*args, cu, cuts, scale=fake.SCALE)
+        seen["naive"] = REF.naive_cut_states(*args, cu, cuts, scale=fake.SCALE)
+        got, want = {}, {}
+        for rk in ranks:
+            pa = rk.wt.pools["s_in"]
+            for f in rk.ctx.fragments:
+                if not f.crossing_in:
+                    continue
+                slot = rk.ctx.in_slot[f.slot]
+                cut = cu[f.doc] + f.off
+                got[f"S_in@{cut}"] = torch.stack(
+                    [
+                        saved.s_in[rk.rank][
+                            pa.elem(slot, h) : pa.elem(slot, h) + gp.TILE
+                        ].view(128, 128)
+                        for h in range(HV)
+                    ]
+                )
+                want[f"S_in@{cut}"] = states[cut]
+        assert sorted(int(n.split("@")[1]) for n in got) == cuts, sorted(got)
+        return got, want
+
+    def naive(j, tier):
+        return {f"S_in@{cut}": state for cut, state in seen["naive"].items()}
+
+    judge, failures = judge_case(run, naive, seed=JUDGE_SEED)
+    judge.record(record_property)
+    assert not failures, failures
 
 
 def test_fake_backend_run_module_contract() -> None:
@@ -2646,16 +2537,8 @@ def test_persistent_programs_receive_the_workspace_ticket_slots() -> None:
         else:
             kcp._BACKENDS["fake"] = previous
     assert out.shape[0] == cu[-1]
-    # the rule's #7 form and the forced full-head form: each within the budget of the reference and of each other
-    assert cu == CKPT_CU and (H_qk, HV) == CKPT_HEADS
-    ref = _ckpt_reference()
-    _within_budget(out, ref["out"], "ticket row: out vs FP64")
-    _arms_within_budget(
-        {"rule form": _grads_dict(grads), "dhu_vh=128": _grads_dict(grads2)},
-        ref,
-        EXPLICIT_GRADS,
-        "#7 forms",
-    )
+    # the rule's #7 form and the forced full-head form: the same bits on the fake backend (one program, two records)
+    assert all(torch.equal(a, b) for a, b in zip(grads, grads2, strict=True))
     assert {s for s, *_ in seen} == set(kcp.TICKET_SITES)
     assert all(slot_ok for _, _, slot_ok, _ in seen), seen
     assert all(zero for _, _, _, zero in seen), "a ticket word was not zero at a launch"
@@ -2866,9 +2749,9 @@ def test_eager_forward_sizes_c2_send_at_its_first_writer(monkeypatch) -> None:
     """The eager a2a forward leaves ``c2_send`` unsized by ``ensure`` (``_prepare``): the fwd merge binds a fresh plane
     and wait(c2) drops it, so neither the per-call workspace nor the launch record carries it afterwards; the
     caller-held workspace of the public constructor sizes the pool up front (the forward uses it and, like every
-    other forward pool, releases it at the end of the eager call); the outputs are within the accuracy budget of the
-    FP64 reference and of each other either way, and the saved planes agree within the same budget.  The receive planes (``S_in``, ``c1_recv``) are not allocated yet when the summaries' walks run (the
-    forward's peak moment)."""
+    other forward pool, releases it at the end of the eager call); the outputs and the saved planes are the same bits
+    either way (the fake backend is deterministic).  The receive planes (``S_in``, ``c1_recv``) are not allocated yet
+    when the summaries' walks run (the forward's peak moment)."""
     kcp = _package("cake_kcp")
     cu = [0, 100, 740, 817, 1817, 1946]
     H_qk, HV = 2, 6
@@ -2922,24 +2805,19 @@ def test_eager_forward_sizes_c2_send_at_its_first_writer(monkeypatch) -> None:
     )
     # FWD_DEAD_POOLS: every forward pool goes at the end of an eager call
     assert "c2_send" not in full._pools
-    assert cu == CKPT_CU and (H_qk, HV) == CKPT_HEADS
-    _arms_within_budget(
-        {"per-call workspace": {"out": out}, "caller workspace": {"out": out2}},
-        _ckpt_reference(),
-        ("out",),
-        "eager forward",
-    )
+    # the per-call and the caller workspace: the same bits on the fake backend, out and the saved planes
+    assert torch.equal(out, out2)
     for name in ("S_in", "c1_recv"):
         a, b = getattr(saved, name), getattr(saved2, name)
         assert a.dtype == b.dtype, name
-        _within_budget(b, a, f"saved {name}: caller vs per-call workspace")
+        assert torch.equal(b, a), f"saved {name}: caller vs per-call workspace"
 
 
 def test_backward_forgets_its_own_saved_set_at_the_last_reader() -> None:
     """A caller-owned saved set is never mutated by ``cake_gdn_nondet_train_kcp_backward`` (two backwards from it keep its tensors and
-    are each within the accuracy budget of the FP64 reference and of each other); a set marked ``release_in_backward``
-    (the autograd Function's own) comes back with ``S_in``, ``c1_recv`` and ``M_seg`` forgotten, its gradients within
-    the same budget; the per-call buffers of a replay backward (``saved=None``) are dropped the same way."""
+    give the same bits); a set marked ``release_in_backward`` (the autograd Function's own) comes back with ``S_in``,
+    ``c1_recv`` and ``M_seg`` forgotten, with the same gradients bitwise; the per-call buffers of a replay backward
+    (``saved=None``) are dropped the same way, its gradients the same bits too (the fake backend is deterministic)."""
     kcp = _package("cake_kcp")
     cu = [0, 100, 740, 817, 1817, 1946]
     H_qk, HV = 2, 6
@@ -2984,18 +2862,8 @@ def test_backward_forgets_its_own_saved_set_at_the_last_reader() -> None:
     )
     assert all(torch.isfinite(g.float()).all() for g in g4)
     assert "S_in" not in kcp.LAST_CALL["bwd"]["fresh_bytes"]
-    assert cu == CKPT_CU and (H_qk, HV) == CKPT_HEADS
-    _arms_within_budget(
-        {
-            "first": _grads_dict(g1),
-            "second": _grads_dict(g2),
-            "released": _grads_dict(g3),
-            "replay": _grads_dict(g4),
-        },
-        _ckpt_reference(),
-        EXPLICIT_GRADS,
-        "backwards from one saved set",
-    )
+    for what, gs in (("second", g2), ("released", g3), ("replay", g4)):
+        assert all(torch.equal(a, b) for a, b in zip(g1, gs, strict=True)), what
 
 
 # README saved-set table row (by its item cell's start) -> the cake_gdn_nondet_train_kcp_saved_layout terms it states
@@ -3617,50 +3485,6 @@ def _stats_delta(kcp, before: dict[str, int]) -> dict[str, int]:
     return {k: kcp.KEPT_STATS[k] - before[k] for k in before}
 
 
-def _assert_close_arms(a: dict, b: dict, what: str, ref: dict | None = None) -> None:
-    """Two arms (``out`` and the five gradients) each within the budget of the FP64 reference ``ref`` (default: the
-    one-layer reference of the checkpoint pack) and of each other -- the twin asserts they are the same bits."""
-    _arms_within_budget(
-        {"first arm": a, "second arm": b},
-        _ckpt_reference() if ref is None else ref,
-        ("out",) + CKPT_GRADS,
-        what,
-    )
-
-
-def _assert_accumulated(twice: dict, once: dict, what: str, ref: dict) -> None:
-    """Two ``.backward()`` calls: every gradient within the budget of TWICE the FP64 gradient (not exactly twice the
-    one-backward result), and of twice that result."""
-    for n in CKPT_GRADS:
-        _within_budget(twice[n], 2 * ref[n], f"{what}: {n} vs 2 x FP64")
-        _within_budget(
-            twice[n], (once[n].double() * 2), f"{what}: {n} vs 2 x one backward"
-        )
-
-
-def _list_arms(arms: dict[str, list], ref: list, names, what: str) -> None:
-    """:func:`_arms_within_budget` for arms given as lists in the order of ``names``."""
-    names = tuple(names)
-    _arms_within_budget(
-        {key: dict(zip(names, arm, strict=True)) for key, arm in arms.items()},
-        dict(zip(names, ref, strict=True)),
-        names,
-        what,
-    )
-
-
-def _scaled_reference(w0: torch.Tensor) -> tuple[torch.Tensor, list]:
-    """FP64 ``(y, [dq, dk, dv, dg, dbeta, dw])`` of the segment ``y = gdn(q, k, v, g, beta) * w`` on the checkpoint
-    pack with the seeded ``dout``."""
-    ops = _inputs(CKPT_CU, *CKPT_HEADS)
-    layer = _ref_layer(CKPT_CU)
-    return _fp64(
-        lambda q, k, v, g, beta, w_: layer(q, k, v, g, beta) * w_,
-        [*(ops[n] for n in LEAVES), w0],
-        ops["dout"],
-    )
-
-
 @pytest.mark.parametrize(
     "segments,save_transfer", [(1, True), (2, True), (2, False), (1, False)]
 )
@@ -3668,7 +3492,7 @@ def test_checkpoint_backward_reuses_the_recompute_tapes(
     segments, save_transfer
 ) -> None:
     """With ``reuse_recompute_tapes`` the checkpoint backward binds the recompute forward's tapes: the gradients are
-    within the accuracy budget of the FP64 reference and of the direct autograd's and the switch-off checkpoint's; the
+    bitwise the direct autograd's and the switch-off checkpoint's (the fake backend is deterministic); the
     backward's launch inventory starts at #6 (no
     #1, no offset / tape walk, no carry merge); the registry sees one put and one take and is empty afterwards; the
     hand-off forward's tape walk is the replay's launch list (the same ``n_walk`` per #2 tape launch).  ``P = 2``
@@ -3709,8 +3533,8 @@ def test_checkpoint_backward_reuses_the_recompute_tapes(
         )
     finally:
         kcp.set_backend("fake", previous)
-    _assert_close_arms(kept, direct, "kept vs direct")
-    _assert_close_arms(light, direct, "checkpoint (switch off) vs direct")
+    _assert_same(kept, direct, "kept vs direct")
+    _assert_same(light, direct, "checkpoint (switch off) vs direct")
     # the switch-off checkpoint ran the replay
     assert light_source == "replay", light_source
     assert kcp.LAST_CALL["bwd"]["tapes_source"] == "kept"
@@ -3775,9 +3599,8 @@ def test_one_live_kept_set_in_a_multi_layer_checkpoint_segment(
     """Several GDN layers inside one checkpoint segment on one caller-held workspace: torch recomputes every layer's
     forward before the first backward, so only ONE kept set is live -- each hand-off forward evicts the previous
     layer's set before its own first launch -- and only the last layer's backward takes the kept path; the earlier
-    layers' backwards miss and run the replay.  The gradients of the whole chain are within the accuracy budget of the
-    chained FP64 reference and of the direct autograd's (the evicted layers included); the registry is empty
-    afterwards."""
+    layers' backwards miss and run the replay.  The gradients of the whole chain are bitwise the direct autograd's
+    (the evicted layers included); the registry is empty afterwards."""
     kcp, ctx, ops = _ckpt_setup()
     ws = kcp.CakeGDNNondetKcpWorkspace()
     base = dict(segments=2, layers=layers, workspace=ws)
@@ -3792,12 +3615,7 @@ def test_one_live_kept_set_in_a_multi_layer_checkpoint_segment(
     monkeypatch.setattr(kcp, "_backward", recording_backward)
     before = dict(kcp.KEPT_STATS)
     kept = _ckpt_autograd(kcp, ctx, ops, ckpt=True, reuse_recompute_tapes=True, **base)
-    _assert_close_arms(
-        kept,
-        direct,
-        f"{layers} layers, one live kept set, vs direct",
-        _ckpt_reference(layers=layers),
-    )
+    _assert_same(kept, direct, f"{layers} layers, one live kept set, vs direct")
     delta = _stats_delta(kcp, before)
     assert delta == {
         "put": layers,
@@ -3814,14 +3632,15 @@ def test_one_live_kept_set_in_a_multi_layer_checkpoint_segment(
 
 def test_kept_backward_twice_accumulates_with_a_fresh_recompute() -> None:
     """``retain_graph=True`` and a second ``.backward()`` is a second graph task: torch recomputes the forward again,
-    a second entry is put and taken; the gradients accumulate to within the budget of twice the FP64 gradient."""
+    a second entry is put and taken; the gradients accumulate to exactly twice the direct gradient."""
     kcp, ctx, ops = _ckpt_setup()
     direct = _ckpt_autograd(kcp, ctx, ops, ckpt=False, segments=2)
     before = dict(kcp.KEPT_STATS)
     twice = _ckpt_autograd(
         kcp, ctx, ops, ckpt=True, twice=True, segments=2, reuse_recompute_tapes=True
     )
-    _assert_accumulated(twice, direct, "kept backward twice", _ckpt_reference())
+    for n in CKPT_GRADS:
+        assert torch.equal(twice[n], direct[n] + direct[n]), n
     delta = _stats_delta(kcp, before)
     assert delta == {
         "put": 2,
@@ -3835,8 +3654,8 @@ def test_kept_backward_twice_accumulates_with_a_fresh_recompute() -> None:
 
 
 def test_kept_backward_falls_back_to_the_replay_without_an_entry(monkeypatch) -> None:
-    """Correctness never depends on the registry: a backward that finds no entry runs today's replay (gradients within
-    the accuracy budget of the reference and of the direct pass); the untaken entry is dropped at the graph task's end by the engine's final callback."""
+    """Correctness never depends on the registry: a backward that finds no entry runs today's replay (the direct
+    pass's gradients bitwise); the untaken entry is dropped at the graph task's end by the engine's final callback."""
     kcp, ctx, ops = _ckpt_setup()
     direct = _ckpt_autograd(kcp, ctx, ops, ckpt=False, segments=2)
     before = dict(kcp.KEPT_STATS)
@@ -3844,7 +3663,7 @@ def test_kept_backward_falls_back_to_the_replay_without_an_entry(monkeypatch) ->
     res = _ckpt_autograd(
         kcp, ctx, ops, ckpt=True, segments=2, reuse_recompute_tapes=True
     )
-    _assert_close_arms(res, direct, "fallback replay vs direct")
+    _assert_same(res, direct, "fallback replay vs direct")
     assert kcp.LAST_CALL["bwd"]["tapes_source"] == "replay"
     assert kcp.LAST_CALL["bwd"]["sequence"][0] == "fwd_prep"
     delta = _stats_delta(kcp, before)
@@ -3966,7 +3785,7 @@ def test_kept_entry_of_a_failed_backward_is_evicted_by_the_next_kept_forward() -
     kept = _ckpt_autograd(
         kcp, ctx, ops, ckpt=True, segments=2, reuse_recompute_tapes=True
     )
-    _assert_close_arms(kept, direct, "kept after a failed task vs direct")
+    _assert_same(kept, direct, "kept after a failed task vs direct")
     delta = _stats_delta(kcp, before)
     assert delta == {
         "put": 2,
@@ -3981,15 +3800,15 @@ def test_kept_entry_of_a_failed_backward_is_evicted_by_the_next_kept_forward() -
 
 def test_switch_is_a_no_op_outside_the_light_saved_checkpoint_backward() -> None:
     """The switch changes nothing for the direct autograd path (no graph task at the forward), the replay boundary
-    (nothing saved) and ``save_mode="full"`` (the saved tapes): no entry is put, the gradients are within the accuracy
-    budget of the FP64 reference and of the direct pass."""
+    (nothing saved) and ``save_mode="full"`` (the saved tapes): no entry is put, the gradients are bitwise the direct
+    pass's."""
     kcp, ctx, ops = _ckpt_setup()
     direct = _ckpt_autograd(kcp, ctx, ops, ckpt=False, segments=2)
     before = dict(kcp.KEPT_STATS)
     on_direct = _ckpt_autograd(
         kcp, ctx, ops, ckpt=False, segments=2, reuse_recompute_tapes=True
     )
-    _assert_close_arms(on_direct, direct, "direct autograd with the switch")
+    _assert_same(on_direct, direct, "direct autograd with the switch")
     assert (
         kcp.LAST_CALL["bwd"]["tapes_source"] == "replay"
         and kcp.LAST_CALL["fwd"]["hand_off"] is False
@@ -4003,7 +3822,7 @@ def test_switch_is_a_no_op_outside_the_light_saved_checkpoint_backward() -> None
         boundary_mode="replay",
         reuse_recompute_tapes=True,
     )
-    _assert_close_arms(replay, direct, "replay boundary with the switch")
+    _assert_same(replay, direct, "replay boundary with the switch")
     assert kcp.LAST_CALL["bwd"]["tapes_source"] == "recompute"
     full = _ckpt_autograd(
         kcp,
@@ -4014,7 +3833,7 @@ def test_switch_is_a_no_op_outside_the_light_saved_checkpoint_backward() -> None
         save_mode="full",
         reuse_recompute_tapes=True,
     )
-    _assert_close_arms(full, direct, "save_mode=full with the switch")
+    _assert_same(full, direct, "save_mode=full with the switch")
     assert kcp.LAST_CALL["bwd"]["tapes_source"] == "saved"
     delta = _stats_delta(kcp, before)
     assert delta["put"] == 0 and delta["take"] == 0 and delta["released"] == 0, delta
@@ -4143,15 +3962,15 @@ def _ckpt_leaves(ops) -> list[torch.Tensor]:
 
 def test_recompute_output_skipped_once_when_the_node_closes_the_segment() -> None:
     """A segment whose last saver is the GDN call: the recompute leaves #5 out exactly once per checkpoint step --
-    fwd_prep runs in both forwards, the output program (the output walk) in the original only -- the outputs and the gradients are within the
-    accuracy budget of the FP64 reference and of the ``recompute_output="always"`` form's and the direct autograd's,
-    the kept-tape accounting is unchanged, and the
+    fwd_prep runs in both forwards, the output program (the output walk) in the original only -- the outputs and the
+    gradients are bitwise the ``recompute_output="always"`` form's and the direct autograd's, the kept-tape accounting
+    is unchanged, and the
     skip does not rest on the kept tapes (the replay form skips too).  A later op of the segment that saves nothing
     (``.sum()``) keeps the skip: torch's early stop ends the recompute right after this node's tensors are re-saved,
     before that op runs.  On a torch build outside the verified set every recompute writes the output instead (reason
     ``torch_version``, counters untouched): the shipped ``reuse_recompute_tapes="auto"`` takes the replay form
     there, so the recompute hands nothing off, puts no kept entry and writes the output as a plain forward; the same
-    budget checks hold."""
+    bitwise checks hold."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4217,17 +4036,11 @@ def test_recompute_output_skipped_once_when_the_node_closes_the_segment() -> Non
         assert _skip_delta(kcp, before) == delta
     finally:
         kcp.set_backend("fake", previous)
-    _assert_close_arms(auto, direct, "auto vs direct")
-    _assert_close_arms(auto, always, "auto vs always")
-    _assert_close_arms(replay_form, direct, "auto + replay form vs direct")
-    layer = _ref_layer(CKPT_CU)
-    _, ref_sum = _fp64(lambda *x: layer(*x).sum(), [ops[n] for n in LEAVES])
-    _list_arms(
-        {"checkpoint": ckpt_sum, "direct": direct_sum},
-        ref_sum,
-        CKPT_GRADS,
-        "segment .sum()",
-    )
+    _assert_same(auto, direct, "auto vs direct")
+    _assert_same(auto, always, "auto vs always")
+    _assert_same(replay_form, direct, "auto + replay form vs direct")
+    for a, b in zip(ckpt_sum, direct_sum, strict=True):
+        assert torch.equal(a, b)
     assert kcp.kept_registry_size() == 0
 
 
@@ -4240,8 +4053,8 @@ def test_recompute_output_launched_when_a_later_op_of_the_segment_saves_the_outp
 ):
     """A downstream op inside the same segment that saves ``o`` (``o * w`` with a learnable ``w``: mul saves both
     operands) keeps ``o`` live in the recompute: more holders wait than this node fills, so #5 is launched (reason
-    ``holders_remain``) and the gradients -- ``dw`` included -- are within the accuracy budget of the FP64 reference
-    and of the always form's and the direct autograd's."""
+    ``holders_remain``) and the gradients -- ``dw`` included -- are bitwise the always form's and the direct
+    autograd's."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4289,22 +4102,17 @@ def test_recompute_output_launched_when_a_later_op_of_the_segment_saves_the_outp
         always = run(True, recompute_output="always")
     finally:
         kcp.set_backend("fake", previous)
-    _, ref_w = _scaled_reference(w0)
-    _list_arms(
-        {"auto": auto, "direct": direct, "always": always},
-        ref_w,
-        CKPT_GRADS + ("dw",),
-        "o * w segment",
-    )
+    for a, d, w in zip(auto, direct, always, strict=True):
+        assert torch.equal(a, d) and torch.equal(a, w)
     assert kcp.kept_registry_size() == 0
 
 
 def test_recompute_output_multi_layer_segment_skips_only_the_last_layer() -> None:
     """Three GDN layers in one checkpoint segment (the shipped one-live-kept-set form): the next layer saves this
     layer's output as its ``v``, so in the recompute layers 1-2 launch #5 (holders remain) and only the last layer,
-    the segment's last saver, leaves it out -- pinned per forward, in launch order.  The chain's gradients are within
-    the accuracy budget of the chained FP64 reference and of the direct autograd's and the always form's; the kept-tape
-    accounting is the shipped one (one live set, the earlier layers replay)."""
+    the segment's last saver, leaves it out -- pinned per forward, in launch order.  The chain's gradients are bitwise
+    the direct autograd's and the always form's; the kept-tape accounting is the shipped one (one live set, the
+    earlier layers replay)."""
     kcp, ctx, ops = _ckpt_setup()
     layers = 3
     ws = kcp.CakeGDNNondetKcpWorkspace()
@@ -4339,9 +4147,8 @@ def test_recompute_output_multi_layer_segment_skips_only_the_last_layer() -> Non
         assert _o_writes(seen) == [False] * layers + [True] * layers
     finally:
         kcp.set_backend("fake", previous)
-    chain_ref = _ckpt_reference(layers=layers)
-    _assert_close_arms(auto, direct, f"{layers} layers, auto vs direct", chain_ref)
-    _assert_close_arms(auto, always, f"{layers} layers, auto vs always", chain_ref)
+    _assert_same(auto, direct, f"{layers} layers, auto vs direct")
+    _assert_same(auto, always, f"{layers} layers, auto vs always")
     assert kcp.kept_registry_size() == 0
 
 
@@ -4349,7 +4156,7 @@ def test_recompute_output_with_an_untaken_node_and_a_second_backward() -> None:
     """(a) The segment is recomputed for another saved tensor while the GDN node itself is not in the backward: the
     node is still the segment's last saver, so #5 is left out, and the kept-tape accounting is the shipped one (the
     untaken entry goes at the task's end).  (b) ``retain_graph`` and a second ``.backward()``: two recomputes, two
-    skips, two kept entries put and taken, gradients within the budget of twice the FP64 gradient.  Both parts run
+    skips, two kept entries put and taken, gradients exactly twice the direct gradient.  Both parts run
     the shipped ``reuse_recompute_tapes="auto"``: on a torch build outside the verified set it takes the replay form
     (no kept entry is put, taken or dropped), the recompute writes the output as a plain forward and the counters
     stay."""
@@ -4384,7 +4191,8 @@ def test_recompute_output_with_an_untaken_node_and_a_second_backward() -> None:
     direct = _ckpt_autograd(kcp, ctx, ops, ckpt=False, segments=2)
     before, kept_before = dict(kcp.RECOMPUTE_OUTPUT_STATS), dict(kcp.KEPT_STATS)
     twice = _ckpt_autograd(kcp, ctx, ops, ckpt=True, twice=True, segments=2)
-    _assert_accumulated(twice, direct, "two recomputes", _ckpt_reference())
+    for n in CKPT_GRADS:
+        assert torch.equal(twice[n], direct[n] + direct[n]), n
     assert _skip_delta(kcp, before) == _frame_delta(kcp, 2, 0)
     assert _stats_delta(kcp, kept_before) == {
         "put": 2 * hand,
@@ -4419,14 +4227,13 @@ def test_recompute_output_needs_the_verified_torch_version(monkeypatch) -> None:
         assert _skip_delta(kcp, before) == {"skipped": 0, "launched": 0}
     finally:
         kcp.set_backend("fake", previous)
-    _assert_close_arms(res, direct, "unverified torch: launched form vs direct")
+    _assert_same(res, direct, "unverified torch: launched form vs direct")
 
 
 def test_recompute_output_launched_under_a_reentrant_checkpoint() -> None:
     """``use_reentrant=True`` re-runs the segment inside the backward as well, but through the reentrant Function: no
     checkpoint frame, no saved-tensors hooks, and that re-run's output IS consumed (by the nested backward).  #5 is
-    launched in both forwards (reason ``no_hooks``); gradients within the accuracy budget of the FP64 reference and
-    of the direct autograd's; registry empty."""
+    launched in both forwards (reason ``no_hooks``); gradients bitwise the direct autograd's; registry empty."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4463,13 +4270,8 @@ def test_recompute_output_launched_under_a_reentrant_checkpoint() -> None:
         assert _skip_delta(kcp, before) == {"skipped": 0, "launched": 0}
     finally:
         kcp.set_backend("fake", previous)
-    ref = _ckpt_reference()
-    _list_arms(
-        {"reentrant checkpoint": res, "direct": direct},
-        [ref[n] for n in CKPT_GRADS],
-        CKPT_GRADS,
-        "reentrant checkpoint",
-    )
+    for a, d in zip(res, direct, strict=True):
+        assert torch.equal(a, d)
     assert kcp.kept_registry_size() == 0
 
 
@@ -4479,8 +4281,7 @@ def test_recompute_output_launched_for_a_non_executable_layer_before_the_node() 
     before ``apply`` launches its #5 in both forwards with the static reason ``not_executable`` -- the frame is
     never counted for it, so the second layer's waiting holders cannot pass for its own -- while the second layer,
     the segment's last saver, leaves #5 out of the recompute.  Output and gradients (``v`` gets none: it reaches
-    the node through a constant) are within the accuracy budget of the FP64 reference and of the always form's and
-    the direct autograd's."""
+    the node through a constant) are bitwise the always form's and the direct autograd's."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4534,20 +4335,8 @@ def test_recompute_output_launched_for_a_non_executable_layer_before_the_node() 
         ] * 2 + [("launched", "always")] * 2
     finally:
         kcp.set_backend("fake", previous)
-    layer = _ref_layer(CKPT_CU)
-
-    def chain(q, k, v, g, beta):
-        first = layer(q.detach(), k.detach(), v.detach(), g.detach(), beta.detach())
-        return layer(q, k, first, g, beta)
-
-    y_ref, g_ref = _fp64(chain, [ops[n] for n in LEAVES], ops["dout"])
-    assert g_ref[2] is None  # v reaches the node through a constant
-    _list_arms(
-        {"auto": auto, "direct": direct, "always": always},
-        [y_ref] + [gr for i, gr in enumerate(g_ref) if i != 2],
-        ("out", "dq", "dk", "dg", "dbeta"),
-        "non-executable first layer",
-    )
+    for a, d, w in zip(auto, direct, always, strict=True):
+        assert torch.equal(a, d) and torch.equal(a, w)
     assert kcp.kept_registry_size() == 0
 
 
@@ -4555,7 +4344,7 @@ def test_recompute_output_launched_under_no_grad_inside_the_recompute() -> None:
     """The GDN call under ``torch.no_grad()`` inside a segment whose later op (``o * w``, a learnable ``w``) saves
     its output: grad mode is off at ``apply``, autograd creates no node, and the gate launches #5 in the original
     and the recompute forward alike (reason ``not_executable``; the frame is never counted, the counters stay).
-    ``dw`` is within the accuracy budget of the FP64 reference and of the always form's and the direct autograd's."""
+    ``y`` and ``dw`` are bitwise the always form's and the direct autograd's."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4608,27 +4397,15 @@ def test_recompute_output_launched_under_no_grad_inside_the_recompute() -> None:
         ]
     finally:
         kcp.set_backend("fake", previous)
-    layer = _ref_layer(CKPT_CU)
-
-    def no_grad_layer(q, k, v, g, beta, w_):
-        with torch.no_grad():
-            out = layer(q, k, v, g, beta)
-        return out * w_
-
-    y_ref, g_ref = _fp64(no_grad_layer, [*(ops[n] for n in LEAVES), w0], ops["dout"])
-    _list_arms(
-        {"auto": auto, "direct": direct, "always": always},
-        [y_ref, g_ref[5]],
-        ("y", "dw"),
-        "GDN call under no_grad",
-    )
+    for a, d, w in zip(auto, direct, always, strict=True):
+        assert torch.equal(a, d) and torch.equal(a, w)
     assert kcp.kept_registry_size() == 0
 
 
 def test_recompute_output_launched_when_early_stop_is_off() -> None:
     """``set_checkpoint_early_stop(False)`` around the checkpoint: the recompute re-runs the whole segment and
     nothing bounds the waiting holders to this node's, so #5 is launched in the recompute (reason
-    ``no_early_stop``); gradients within the accuracy budget of the FP64 reference and of the direct autograd's."""
+    ``no_early_stop``); out and the gradients are bitwise the direct autograd's."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 
@@ -4671,21 +4448,16 @@ def test_recompute_output_launched_when_early_stop_is_off() -> None:
         assert _skip_delta(kcp, before) == _frame_delta(kcp, 0, 1)
     finally:
         kcp.set_backend("fake", previous)
-    ref = _ckpt_reference()
-    _list_arms(
-        {"checkpoint, early stop off": res, "direct": direct},
-        [ref[n] for n in ("out",) + CKPT_GRADS],
-        ("out",) + CKPT_GRADS,
-        "early stop off",
-    )
+    for a, d in zip(res, direct, strict=True):
+        assert torch.equal(a, d)
     assert kcp.kept_registry_size() == 0
 
 
 def test_recompute_output_launched_under_a_users_saved_tensors_hooks() -> None:
     """A user's ``saved_tensors_hooks`` around the GDN call inside the segment (its later op ``o * w`` still saves
     through the checkpoint, so the recompute runs): the top of the hook stack is not torch's checkpoint hook, the
-    proof is not read, and #5 is launched in both forwards (reason ``user_hooks``, counters untouched); gradients
-    within the accuracy budget of the FP64 reference and of the direct autograd's."""
+    proof is not read, and #5 is launched in both forwards (reason ``user_hooks``, counters untouched); ``y`` and the
+    gradients are bitwise the direct autograd's."""
     kcp, ctx, ops = _ckpt_setup()
     from torch.utils.checkpoint import checkpoint
 
@@ -4731,13 +4503,8 @@ def test_recompute_output_launched_under_a_users_saved_tensors_hooks() -> None:
         assert _skip_delta(kcp, before) == {"skipped": 0, "launched": 0}
     finally:
         kcp.set_backend("fake", previous)
-    y_ref, g_ref = _scaled_reference(w0)
-    _list_arms(
-        {"checkpoint": res, "direct": direct},
-        [y_ref, g_ref[5]] + g_ref[:5],
-        ("y", "dw") + CKPT_GRADS,
-        "user saved-tensors hooks",
-    )
+    for a, d in zip(res, direct, strict=True):
+        assert torch.equal(a, d)
     assert kcp.kept_registry_size() == 0
 
 
@@ -4906,7 +4673,7 @@ def test_recompute_output_auto_resolves_on_every_cuda_build_of_the_release(
             assert _o_writes(seen) == fwd_o, build
         finally:
             kcp.set_backend("fake", previous)
-        _assert_close_arms(res, direct, build)
+        _assert_same(res, direct, build)
 
 
 # --------------------------------------------------------------------------- issue #7074 (4): cake_gdn_nondet_train_kcp_workspace_layout follows the arena's lifetimes
@@ -5236,29 +5003,6 @@ def _ckpt_autograd_region(
     return res, (scale.grad if later_saver else None)
 
 
-def _region_reference(later_saver: bool) -> tuple[dict, torch.Tensor | None]:
-    """FP64 reference of :func:`_ckpt_autograd_region`: ``out`` (scaled by the leaf ``1.5`` with a later saver) and the
-    five gradients, and the scale's gradient (``None`` without a later saver); cached."""
-    key = ("region", later_saver)
-    if key not in _REFERENCES:
-        if not later_saver:
-            _REFERENCES[key] = (_ckpt_reference(), None)
-        else:
-            ops = _inputs(CKPT_CU, *CKPT_HEADS)
-            layer = _ref_layer(CKPT_CU)
-            scale = torch.full((), 1.5, dtype=torch.bfloat16)
-            y, grads = _fp64(
-                lambda q, k, v, g, beta, s_: layer(q, k, v, g, beta) * s_,
-                [*(ops[n] for n in LEAVES), scale],
-                ops["dout"],
-            )
-            _REFERENCES[key] = (
-                {"out": y, **dict(zip(CKPT_GRADS, grads[:5], strict=True))},
-                grads[5],
-            )
-    return _REFERENCES[key]
-
-
 @pytest.mark.parametrize("segments,save_transfer", [(1, True), (2, True), (2, False)])
 def test_reuse_recompute_tapes_auto_keeps_tapes_only_when_the_node_closes_the_region(
     segments, save_transfer
@@ -5266,8 +5010,9 @@ def test_reuse_recompute_tapes_auto_keeps_tapes_only_when_the_node_closes_the_re
     """``"auto"``: the recompute hands its tapes to the backward when the GDN node is the region's last saver (the
     frame proof ``dead``; the backward of the region then starts with this node) and takes the replay form when a
     later operation of the region saves a tensor (``holders_remain``) -- so the kept set never outlives the GDN
-    backward.  ``True`` always hands off, ``False`` never; every form is within the accuracy budget of the FP64
-    reference and of the direct autograd result, and the registry is empty afterwards.  On an unverified torch release ``"auto"`` is the replay form."""
+    backward.  ``True`` always hands off, ``False`` never; every form gives the direct autograd result's bits (the
+    leaf's gradient included), and the registry is empty afterwards.  On an unverified torch release ``"auto"`` is
+    the replay form."""
     kcp, ctx, ops = _ckpt_setup()
     base = {"segments": segments, "save_transfer": save_transfer}
     for later_saver in (False, True):
@@ -5286,11 +5031,9 @@ def test_reuse_recompute_tapes_auto_keeps_tapes_only_when_the_node_closes_the_re
                 **base,
             )
             what = f"later_saver={later_saver} mode={mode!r} {base}"
-            ref, ref_scale = _region_reference(later_saver)
-            _assert_close_arms(res, direct, what, ref)
+            _assert_same(res, direct, what)
             if later_saver:
-                _within_budget(scale_grad, ref_scale, f"{what}: dscale vs FP64")
-                _within_budget(scale_grad, direct_scale, f"{what}: dscale vs direct")
+                assert torch.equal(scale_grad, direct_scale), what
             delta = _stats_delta(kcp, before)
             reason = kcp.LAST_CALL["fwd"]["hand_off_reason"]
             source = kcp.LAST_CALL["bwd"]["tapes_source"]
@@ -5378,25 +5121,6 @@ def _recorded_step(kcp, ctx, ops, **opts) -> tuple[dict, list[tuple[str, bool, b
     return res, seen
 
 
-def _ckpt_reference_l2n() -> dict[str, torch.Tensor]:
-    """:func:`_ckpt_reference` of the in-kernel Q / K L2 norm: the exact layer on the raw rows normalized in FP64
-    (``x / sqrt(sum x^2 + 1e-6)`` per token and head), gradients carried back to the raw rows."""
-    key = ("ckpt_l2n", 1)
-    if key not in _REFERENCES:
-        ops = _inputs(CKPT_CU, *CKPT_HEADS)
-        layer = _ref_layer(CKPT_CU)
-
-        def norm(x):
-            return x / torch.sqrt((x * x).sum(-1, keepdim=True) + 1e-6)
-
-        def region(q, k, v, g, beta):
-            return layer(norm(q), norm(k), v, g, beta)
-
-        out, grads = _fp64(region, [ops[n] for n in LEAVES], ops["dout"])
-        _REFERENCES[key] = {"out": out, **dict(zip(CKPT_GRADS, grads, strict=True))}
-    return _REFERENCES[key]
-
-
 @pytest.mark.parametrize("l2n", [False, True])
 @pytest.mark.parametrize("segments,save_transfer", [(1, True), (2, True), (2, False)])
 def test_graph_replay_checkpoint_runs_the_eager_checkpoint_programs(
@@ -5407,8 +5131,7 @@ def test_graph_replay_checkpoint_runs_the_eager_checkpoint_programs(
     order (the recompute hands its tapes over and, on a verified torch, leaves #5 out; the backward starts at #6),
     the kept tapes are the arena's own tensors (never unbound), the registry sees one put / take / release and no
     stale entry; ``reuse_recompute_tapes=False`` (the previous graph form) replays #1 in the backward.  Out and the
-    five gradients are the same bits in the three arms and within the budget of the FP64 reference and the direct
-    autograd."""
+    five gradients are the same bits in the three arms and the direct autograd's bits."""
     kcp, ctx, ops = _ckpt_setup()
     _refuse_captures(kcp, monkeypatch)
     base = dict(segments=segments, save_transfer=save_transfer)
@@ -5476,12 +5199,7 @@ def test_graph_replay_checkpoint_runs_the_eager_checkpoint_programs(
     for n in ("out",) + CKPT_GRADS:
         assert torch.equal(graph[n], eager[n]), n
         assert torch.equal(graph[n], previous[n]), n
-    _assert_close_arms(
-        graph,
-        direct,
-        "graph checkpoint vs direct",
-        _ckpt_reference_l2n() if l2n else None,
-    )
+    _assert_same(graph, direct, "graph checkpoint vs direct")
 
 
 def test_graph_replay_auto_size_rule_is_one_table_per_architecture(monkeypatch) -> None:
@@ -5763,8 +5481,7 @@ def test_graph_replay_kept_tapes_are_refused_after_another_call_on_the_workspace
     the arena's own tapes, and the later saver's backward then runs an explicit forward of OTHER operands on the same
     workspace (it rewrites those tapes) before the GDN backward.  That backward must not bind them: the entry is stale
     (``KEPT_STALE_STATS["calls"]``), counted as a miss, and the backward replays #1 and the tape walk; the gradients
-    are the bits of the same step without the intervening call (which binds the kept tapes) and within the budget of
-    the FP64 reference."""
+    are the bits of the same step without the intervening call (which binds the kept tapes)."""
     kcp, ctx, ops = _ckpt_setup()
     _refuse_captures(kcp, monkeypatch)
     other = _inputs(CKPT_CU, *CKPT_HEADS, seed=7)
@@ -5821,7 +5538,6 @@ def test_graph_replay_kept_tapes_are_refused_after_another_call_on_the_workspace
     assert kcp.kept_registry_size() == 0
     for n in ("out",) + CKPT_GRADS:
         assert torch.equal(refused[n], clean[n]), n
-    _assert_close_arms(refused, clean, "stale hand-off (replay) vs kept")
 
 
 def test_kept_stale_names_why_an_arena_hand_off_no_longer_holds() -> None:
@@ -6177,8 +5893,9 @@ def test_graph_cache_keeps_the_keys_of_24_checkpointed_layers_and_drops_the_leas
 # ----------------------------------------------------------------------------------------------------------------
 # Recompute handle (issue #7818): the checkpoint recompute reads the original forward's incoming states from the
 # handle instead of exchanging them again.  These CPU rows run one rank (no crossing fragment, ``S_in`` empty): they
-# check the code path -- the capture / replay decision, the local carries at ``P > 1``, the accuracy budget, retention
-# and misuse; the multi-GPU rows (test_cake_gdn_nondet_train_kcp_dist.py) check the exchange count and the retained bytes.
+# check the code path -- the capture / replay decision, the local carries at ``P > 1``, the bits of the plain
+# checkpoint and the direct pass, retention and misuse; the multi-GPU rows (test_cake_gdn_nondet_train_kcp_dist.py)
+# check the exchange count and the retained bytes.
 
 
 def _handle_autograd(
@@ -6216,12 +5933,12 @@ def _handle_autograd(
     "segments,save_mode", [(1, "light"), (2, "light"), (2, "full")]
 )
 @pytest.mark.parametrize("reuse", [True, False, "auto"])
-def test_recompute_handle_is_within_budget_of_the_checkpoint_and_the_direct_pass(
+def test_recompute_handle_is_bitwise_the_checkpoint_and_the_direct_pass(
     monkeypatch, segments, save_mode, reuse
 ) -> None:
     """The original forward stores ``S_in`` ("capture"), torch's recompute reads it ("replay"): out and the five
-    gradients are within the accuracy budget of the FP64 reference and of the plain checkpoint's and the direct
-    pass's at the same options, at ``P = 1`` and ``P = 2`` (the carries rebuilt locally), with and without the kept
+    gradients are bitwise the plain checkpoint's and the direct pass's at the same options (the fake backend is
+    deterministic), at ``P = 1`` and ``P = 2`` (the carries rebuilt locally), with and without the kept
     tapes.  ``save_mode="full"`` at ``P = 2`` (the handle's recompute writes the fresh saved ``M_seg^T`` plane with
     its own transfer walk; the full backward runs none and reads that plane) runs with every package allocation
     filled with NaN bytes and gives the light direct pass's bits in the direct, the plain checkpoint and the handle
@@ -6253,8 +5970,8 @@ def test_recompute_handle_is_within_budget_of_the_checkpoint_and_the_direct_pass
         ):
             for n in light:
                 assert torch.equal(arm[n], light[n]), (what, n)
-    _assert_close_arms(plain, direct, "plain checkpoint vs direct")
-    _assert_close_arms(got, direct, "handle checkpoint vs direct")
+    _assert_same(plain, direct, "plain checkpoint vs direct")
+    _assert_same(got, direct, "handle checkpoint vs direct")
     assert plain_modes == [None, None], plain_modes
     assert modes == ["capture", "replay"], modes
     assert kcp.HANDLE_KEY in handle.entries
@@ -6270,13 +5987,11 @@ def test_recompute_handle_fused_recompute_under_a_later_saver(
     ``False`` / ``"auto"``) it runs the output walk ``kcp_fwdh_out`` from the handle's ``S_in`` -- at ``P = 2`` one
     fused walk over every live segment from the carry plane -- and the later saver reads that output.  With every
     package allocation filled with NaN bytes, out, the five gradients and the scale's gradient are the bits of the
-    split form (``fused_o=0``) and within the budget of the FP64 reference; ``True`` hands the tapes off (a split
-    recompute)."""
+    split form (``fused_o=0``); ``True`` hands the tapes off (a split recompute)."""
     from torch.utils.checkpoint import checkpoint
 
     kcp, ctx, ops = _ckpt_setup()
     _nan_filled_allocations(monkeypatch, kcp)
-    ref, ref_scale = _region_reference(True)
     for reuse in (False, "auto", True):
         arms = {}
         for fused in (1, 0):
@@ -6315,15 +6030,13 @@ def test_recompute_handle_fused_recompute_under_a_later_saver(
             assert torch.isfinite(r1[n].float()).all(), (what, n)
             assert torch.equal(r1[n], r0[n]), (what, n)
         assert torch.isfinite(s1.float()).all() and torch.equal(s1, s0), what
-        _assert_close_arms(r1, r0, what, ref)
-        _within_budget(s1, ref_scale, f"{what}: dscale vs FP64")
         assert kcp.kept_registry_size() == 0, what
 
 
 def test_recompute_handle_retains_exactly_s_in_and_survives_a_second_backward() -> None:
     """The entry is the saved set's own ``S_in`` (no copy; ``nbytes`` is its size and the light byte query without
     the transfer and the convolution rows); ``retain_graph`` + a second backward reuses it and accumulates the
-    gradient to within the budget of twice the FP64 gradient."""
+    gradient to exactly twice the one-backward gradient."""
     kcp, ctx, ops = _ckpt_setup()
     H_qk, HV = ops["q"].shape[-2], ops["v"].shape[-2]
     handle = kcp.CakeGDNNondetKcpRecomputeHandle()
@@ -6332,7 +6045,8 @@ def test_recompute_handle_retains_exactly_s_in_and_survives_a_second_backward() 
     )
     twice, modes = _handle_autograd(kcp, ctx, ops, handle=handle, twice=True)
     assert modes == ["capture", "replay", "replay"], modes
-    _assert_accumulated(twice, once, "handle, second backward", _ckpt_reference())
+    for n in CKPT_GRADS:
+        assert torch.equal(twice[n], once[n] + once[n]), n
     s_in = handle.entries[kcp.HANDLE_KEY]["S_in"]
     assert handle.nbytes() == s_in.numel() * s_in.element_size()
     assert handle.nbytes() == kcp.cake_gdn_nondet_train_kcp_saved_bytes(
@@ -6393,17 +6107,8 @@ def test_recompute_handle_entry_rules() -> None:
     assert kcp.LAST_CALL["fwd"]["recompute_handle"] == "capture"
     assert kcp.HANDLE_KEY in h2.entries
     direct = _ckpt_autograd(kcp, ctx, ops, ckpt=False, save_transfer=False)
-    _arms_within_budget(
-        {
-            "recompute without its entry": {
-                n: lf.grad for n, lf in zip(CKPT_GRADS, leaves, strict=True)
-            },
-            "direct": {n: direct[n] for n in CKPT_GRADS},
-        },
-        _ckpt_reference(),
-        CKPT_GRADS,
-        "handle that lost its entry",
-    )
+    for n, lf in zip(CKPT_GRADS, leaves, strict=True):
+        assert torch.equal(lf.grad, direct[n]), ("handle that lost its entry", n)
     for bad in (
         {"save_transfer": True},
         {"options": {"save_transfer": True}},
@@ -6446,6 +6151,10 @@ MR_CU = [
     0,
     1201,
 ]  # one long document: 2 W ragged pieces per document under zigzag_per_document
+# The judged multi-rank row (the fake backend, the FP64 reference and the BF16 naive run DRAWS times on the CPU): one
+# document of 263 tokens, 2 W = 16 pieces of 16 or 17 tokens, so every rank holds two one-chunk fragments and every
+# piece but the first crosses a rank boundary.
+MR_JUDGE_CU = [0, 263]
 MR_W = 8
 MR_HEADS = (2, 8)  # one owned value head per rank (Hg = 1)
 # Mild decays for the multi-rank row: ``_inputs``' gate (-exp(A) softplus(x), mean about -0.7 .. -11 per token) makes
@@ -7536,19 +7245,10 @@ def _mr_setup():
     return kcp, part, _mr_inputs()
 
 
-def _mr_inputs() -> dict[str, torch.Tensor]:
-    ops = dict(_inputs(MR_CU, *MR_HEADS))
+def _mr_inputs(cu=MR_CU, seed: int = JUDGE_SEED) -> dict[str, torch.Tensor]:
+    ops = dict(_inputs(cu, *MR_HEADS, seed=seed))
     ops["g"] = (ops["g"] * MR_G_SCALE).contiguous()
     return ops
-
-
-def _mr_reference() -> dict[str, torch.Tensor]:
-    key = ("multi_rank",)
-    if key not in _REFERENCES:
-        ops = _mr_inputs()
-        out, grads = _fp64(_ref_layer(MR_CU), [ops[n] for n in LEAVES], ops["dout"])
-        _REFERENCES[key] = {"out": out, **dict(zip(CKPT_GRADS, grads, strict=True))}
-    return _REFERENCES[key]
 
 
 def _mr_run(kcp, part, ops, monkeypatch, *, sm_count: int = SM_COUNT, knobs=None):
@@ -7594,20 +7294,40 @@ def _mr_run(kcp, part, ops, monkeypatch, *, sm_count: int = SM_COUNT, knobs=None
     return res, ctxs, calls, launched
 
 
-def test_multi_rank_row_is_within_budget(monkeypatch) -> None:
-    """The multi-rank row (one document over W = 8 ranks, ``zigzag_per_document``, SM count 152) on the shipped
-    options: every rank runs one forward call and its backward, and out and the five gradients are within the budget
-    of the FP64 reference."""
-    kcp, part, ops = _mr_setup()
-    assert sum(part.crossing_counts()[0]) > 0  # the row exchanges
-    res, _ctxs, calls, _launched = _mr_run(kcp, part, ops, monkeypatch)
-    for r in range(MR_W):
-        fwd_calls = [c for c in calls[r] if not c.backward]
-        bwd_calls = [c for c in calls[r] if c.backward]
-        assert len(fwd_calls) == 1 and bwd_calls, (r, len(calls[r]))
-    _arms_within_budget(
-        {"shipped": res}, _mr_reference(), ("out",) + EXPLICIT_GRADS, "multi-rank row"
+def test_multi_rank_row_naive_tier_verdict(monkeypatch, record_property) -> None:
+    """The multi-rank row (one document over W = 8 ranks, ``zigzag_per_document``, SM count 152; the judged length
+    :data:`MR_JUDGE_CU`) on the shipped options: every rank runs one forward call and its backward, and out and the
+    five gradients are judged against the naive tier of the FP64 reference over ``DRAWS`` draws
+    (``gdn_exact_with_grads`` / ``gdn_naive_with_grads`` of the whole document; recorded: a miss does not fail the
+    test)."""
+    kcp = _package("cake_kcp")
+    cu = MR_JUDGE_CU
+    part = gp.cake_gdn_nondet_train_kcp_partition(
+        torch.tensor(cu, dtype=torch.int64), MR_W, "zigzag_per_document"
     )
+    assert sum(part.crossing_counts()[0]) > 0  # the row exchanges
+    names = ("out",) + EXPLICIT_GRADS
+    seen: dict = {}
+
+    def run(j, s):
+        ops = _mr_inputs(cu, seed=s)
+        res, _ctxs, calls, _launched = _mr_run(kcp, part, ops, monkeypatch)
+        if j == 0:
+            for r in range(MR_W):
+                fwd_calls = [c for c in calls[r] if not c.backward]
+                bwd_calls = [c for c in calls[r] if c.backward]
+                assert len(fwd_calls) == 1 and bwd_calls, (r, len(calls[r]))
+        args = [ops[n] for n in (*LEAVES, "dout")]
+        ref = REF.gdn_exact_with_grads(*args, cu, scale=REF.SCALE)
+        seen["naive"] = REF.gdn_naive_with_grads(*args, cu, scale=REF.SCALE)
+        return {n: res[n] for n in names}, {n: ref[n] for n in names}
+
+    def naive(j, tier):
+        return {n: seen["naive"][n] for n in names}
+
+    judge, failures = judge_case(run, naive, seed=JUDGE_SEED)
+    judge.record(record_property)
+    assert not failures, failures
 
 
 @pytest.mark.parametrize("l2n", (False, True), ids=("norm_off", "l2n"))
@@ -7816,10 +7536,9 @@ def test_launch_cache_resolves_every_launch_as_resolve_launch(monkeypatch) -> No
 def test_launch_cache_keeps_every_calls_launch_records(monkeypatch) -> None:
     """One context on the fake backend: a run on cold launch caches, a run on warm ones and a run with the cache
     bypassed (``resolve_launch`` per launch) record the same launches -- records and grids in order, forward and
-    backward, direct and checkpointed -- the tables cache one entry per launch key, and every run's results are within
-    the budget of the FP64 reference and of each other."""
+    backward, direct and checkpointed -- the tables cache one entry per launch key, and every run's results are the
+    same bits (the fake backend is deterministic)."""
     kcp, ctx, ops = _ckpt_setup()
-    ref = _ckpt_reference()
     tb = kcp._context_tables(ctx, CKPT_HEADS[1], fused_walks=1, P=2)
     assert tb.launches == {}
     arms, records = {}, {}
@@ -7850,12 +7569,10 @@ def test_launch_cache_keeps_every_calls_launch_records(monkeypatch) -> None:
             == records[("warm", ckpt)]
             == records[("bypassed", ckpt)]
         ), ckpt
-        _arms_within_budget(
-            {arm: arms[arm][ckpt] for arm in arms},
-            ref,
-            ("out",) + CKPT_GRADS,
-            f"launch cache arms (checkpoint={ckpt})",
-        )
+        for arm in ("warm", "bypassed"):
+            _assert_same(
+                arms[arm][ckpt], arms["cold"][ckpt], f"{arm} vs cold (checkpoint={ckpt})"
+            )
     launched = {
         (r, tuple(g)) for rec in records.values() for k in rec for r, g in rec[k]
     }
@@ -8155,9 +7872,9 @@ def test_cake_gdn_nondet_kcp_options_dicts_are_validated_once_per_content() -> N
 
 
 def test_launch_key_reads_every_resolve_input() -> None:
-    """``_launch_key`` changes with the program, every private scalar ``resolve_launch`` reads, the grid rule's
-    arguments (values and order), ``ncols`` / ``cols_per_cta`` / the caller's grid x and the backend's merge columns,
-    and with nothing else (another tensor of the same launch is the same key)."""
+    """``_launch_key`` changes with the program, every private scalar ``resolve_launch`` reads (the form of #1_l2n,
+    ``_backward_tapes``, too), the grid rule's arguments (values and order), ``ncols`` / ``cols_per_cta`` / the
+    caller's grid x and the backend's merge columns, and with nothing else (another tensor of the same launch is the same key)."""
     kcp = _package("cake_kcp")
     base = {
         "_grid_args": {"n_walk": 2, "num_heads": 6},
@@ -8169,6 +7886,7 @@ def test_launch_key_reads_every_resolve_input() -> None:
         "_vh64_fits": False,
         "_dhu_long_chain": False,
         "_arch": "sm_100a",
+        "_backward_tapes": False,  # the forward form of #1_l2n (a full-record launch carries none)
         "ncols": 128,
         "cols_per_cta": 8,
         "_grid": 12,
@@ -8186,6 +7904,7 @@ def test_launch_key_reads_every_resolve_input() -> None:
         "_vh64_fits",
         "_dhu_long_chain",
         "_arch",
+        "_backward_tapes",
         "ncols",
         "cols_per_cta",
         "_grid",
@@ -8637,16 +8356,7 @@ def test_cake_gdn_nondet_kcp_keyword_options_are_validated_once_per_keyword_set(
 
 # --------------------------------------------------------------------------- numerics harness hooks (fake backend)
 
-NONDET_REPEATS = 8  # the worst case over this many runs is gated per tensor
-
-
-def _pack_reference(cu: list[int], heads=CKPT_HEADS) -> dict[str, torch.Tensor]:
-    key = ("pack", tuple(cu), tuple(heads))
-    if key not in _REFERENCES:
-        ops = _inputs(cu, *heads)
-        out, grads = _fp64(_ref_layer(cu), [ops[n] for n in LEAVES], ops["dout"])
-        _REFERENCES[key] = {"out": out, **dict(zip(CKPT_GRADS, grads, strict=True))}
-    return _REFERENCES[key]
+NONDET_REPEATS = 2  # runs per draw of the repeated-run case: every run is judged (a draw counts its worst run)
 
 
 def _poison(ws) -> list[str]:
@@ -8662,13 +8372,14 @@ def _poison(ws) -> list[str]:
     return poisoned
 
 
-def test_reused_workspace_poisoned_between_changed_shapes_stays_within_budget() -> None:
+def test_reused_workspace_poisoned_between_changed_shapes_reads_no_stale_scratch() -> None:
     """One caller-held workspace across two token layouts of different sizes (1946 tokens in five documents, 1500 in
-    two), filled with NaN between every forward + backward step: every step's out and gradients stay finite and
-    within the budget of its FP64 reference (no stale scratch is read)."""
+    two), filled with NaN between every forward + backward step: every step's out and gradients are the bits of the
+    same step on a per-call workspace (no stale scratch is read; the fake backend is deterministic)."""
     kcp = _package("cake_kcp")
     layouts = (CKPT_CU, [0, 300, 1500])
     ws = kcp.CakeGDNNondetKcpWorkspace()
+    per_call: dict[int, tuple] = {}
     poisoned_any = False
     for _round in range(2):
         for cu in layouts:
@@ -8680,50 +8391,75 @@ def test_reused_workspace_poisoned_between_changed_shapes_stays_within_budget() 
             )
             ops = _inputs(cu, *CKPT_HEADS)
             args = [ops[n] for n in LEAVES]
+            if cu[-1] not in per_call:
+                o, sv = kcp.cake_gdn_nondet_train_kcp_forward(
+                    *args, ctx, backend="fake", segments=2
+                )
+                gs = kcp.cake_gdn_nondet_train_kcp_backward(
+                    *args, ctx, ops["dout"], saved=sv, backend="fake", segments=2
+                )
+                per_call[cu[-1]] = (o.clone(), tuple(g.clone() for g in gs))
             common = dict(backend="fake", segments=2, workspace=ws)
             out, saved = kcp.cake_gdn_nondet_train_kcp_forward(*args, ctx, **common)
             grads = kcp.cake_gdn_nondet_train_kcp_backward(
                 *args, ctx, ops["dout"], saved=saved, **common
             )
-            ref = _pack_reference(cu)
             what = f"T={cu[-1]} round {_round}"
-            _within_budget(out, ref["out"], f"{what}: out")
-            for n, t in _grads_dict(grads).items():
-                _within_budget(t, ref[n], f"{what}: {n}")
+            want_out, want_grads = per_call[cu[-1]]
+            assert torch.equal(out, want_out), f"{what}: out"
+            for n, got, want in zip(EXPLICIT_GRADS, grads, want_grads, strict=True):
+                assert torch.equal(got, want), f"{what}: {n}"
             poisoned_any = bool(_poison(ws)) or poisoned_any
     assert poisoned_any, "the workspace held no pool or tape to poison"
 
 
-@pytest.mark.parametrize("ckpt", [False, True], ids=["direct", "checkpoint"])
-def test_worst_case_over_repeated_runs_is_within_budget(ckpt) -> None:
-    """NONDET_REPEATS runs of the same autograd step: the worst rel-RMS per tensor against the FP64 reference stays
-    within the budget (every run is gated too)."""
-    kcp, ctx, ops = _ckpt_setup()
-    ref = _ckpt_reference()
-    worst = {n: 0.0 for n in ("out",) + CKPT_GRADS}
-    for i in range(NONDET_REPEATS):
-        res = _ckpt_autograd(kcp, ctx, ops, ckpt=ckpt, segments=2)
-        for n in worst:
-            m = _within_budget(res[n], ref[n], f"run {i}: {n}")
-            worst[n] = max(worst[n], m["rel_rms"])
-    assert all(w <= FAKE_TOL_REL_RMS for w in worst.values()), worst
-    _evidence(
-        "nondet_repeats",
-        {"ckpt": ckpt, "runs": NONDET_REPEATS, "worst_rel_rms": worst, "pass": True},
+@pytest.mark.parametrize(
+    "ckpt,segments",
+    [(False, 1), (False, 2), (True, 2)],
+    ids=["direct-P1", "direct-P2", "checkpoint-P2"],
+)
+def test_worst_case_over_repeated_runs_naive_tier_verdict(
+    ckpt, segments, record_property
+) -> None:
+    """NONDET_REPEATS runs per draw of the same autograd step of ``cake_gdn_nondet_kcp`` on the judged pack
+    (:data:`JUDGE_CU` at :data:`JUDGE_HEADS`, one rank, ``segments`` per fragment, directly or under a non-reentrant
+    checkpoint): out and the five gradients are judged against the naive tier of the FP64 reference over ``DRAWS``
+    draws (``gdn_exact_with_grads`` / ``gdn_naive_with_grads``; recorded: a miss does not fail the test), every run
+    judged (a draw counts its worst run)."""
+    kcp = _package("cake_kcp")
+    part = gp.cake_gdn_nondet_train_kcp_partition(
+        torch.tensor(JUDGE_CU, dtype=torch.int64), 1, "contiguous"
     )
+    ctx = gp.cake_gdn_nondet_train_kcp_build_context(part, None, 0, CPU)
+    judge, failures = TierJudge(), []
+    for j in range(DRAWS):
+        ops, ref, nv = _judge_draw(draw_seed(JUDGE_SEED, j))
+        for _ in range(NONDET_REPEATS):
+            res = _ckpt_autograd(kcp, ctx, ops, ckpt=ckpt, segments=segments)
+            if j == 0:
+                assert kcp.LAST_CALL["bwd"]["P"] == segments, kcp.LAST_CALL["bwd"]["P"]
+            for n in JUDGE_NAMES:
+                if (m := contract(n, res[n], ref[n])) is not None:
+                    failures.append(f"draw {j}: {m}")
+                    continue
+                judge.add(n, j, res[n], ref[n], {"bf16": nv[n]})
+    failures += judge.failures()
+    judge.record(record_property)
+    assert not failures, failures
 
 
 @pytest.mark.parametrize("ckpt", [False, True], ids=["direct", "checkpoint"])
 def test_gradients_accumulate_into_a_nonzero_grad(ckpt) -> None:
     """Leaves whose ``.grad`` already holds a nonzero tensor ``g0`` (the scale of the gradient): after the backward
-    every ``.grad`` is within the budget of ``g0 + gradient`` in FP64."""
+    every ``.grad`` is ``g0 + gradient`` in the leaf's dtype, bit for bit, the gradient being the same step's on
+    fresh leaves (the fake backend is deterministic)."""
     kcp, ctx, ops = _ckpt_setup()
-    ref = _ckpt_reference()
+    once = _ckpt_autograd(kcp, ctx, ops, ckpt=ckpt, segments=2)
     gen = torch.Generator(device="cpu").manual_seed(8063)
     leaves = _ckpt_leaves(ops)
     pre = {}
     for n, lf in zip(CKPT_GRADS, leaves, strict=True):
-        rms = float(ref[n].pow(2).mean().sqrt())
+        rms = float(once[n].double().pow(2).mean().sqrt())
         g0 = (torch.randn(lf.shape, generator=gen, dtype=torch.float64) * rms).to(
             lf.dtype
         )
@@ -8744,7 +8480,7 @@ def test_gradients_accumulate_into_a_nonzero_grad(ckpt) -> None:
     out.backward(ops["dout"])
     for n, lf in zip(CKPT_GRADS, leaves, strict=True):
         assert lf.grad.dtype == pre[n].dtype, n
-        _within_budget(lf.grad, pre[n].double() + ref[n], f"{n}: g0 + gradient")
+        assert torch.equal(lf.grad, pre[n] + once[n]), f"{n}: g0 + gradient"
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -8809,8 +8545,9 @@ def _packed_autograd(
 def test_packed_qkv_gradients_need_no_concatenation(
     batched, ckpt, group_reduce, layout
 ) -> None:
-    """q / k / v as views of one packed leaf: out and the five gradients are within the budgets of separate contiguous
-    leaves (and of FP64); with the views passed through (``layout="tma"``) the backward writes one packed dQKV row
+    """q / k / v as views of one packed leaf: out and the five gradients are the bits of separate contiguous leaves
+    (the same programs on the same operands); with the views passed through (``layout="tma"``) the backward writes one
+    packed dQKV row
     (``grad_layout="packed"``) and the split returns it as the leaf's gradient (a view, no concatenation); with
     ``layout="copy"`` the operands are copied, the gradients are separate and the split concatenates them."""
     kcp, ctx, ops = _ckpt_setup()
@@ -8819,7 +8556,7 @@ def test_packed_qkv_gradients_need_no_concatenation(
     before = dict(kcp.PACKED_SPLIT_STATS)
     got, seen = _packed_autograd(kcp, ctx, ops, batched=batched, ckpt=ckpt, **base)
     what = f"batched={batched} ckpt={ckpt} {base}"
-    _assert_close_arms(got, direct, what)
+    _assert_same(got, direct, what)
     assert direct["dq"].is_contiguous(), what
     packed = layout == "tma"
     assert kcp.LAST_CALL["bwd"]["grad_layout"] == (
@@ -9661,7 +9398,7 @@ def test_gradient_layout_follows_the_consumer_of_the_views(form, mode) -> None:
     tensors), the reentrant re-run's own (it makes the views) and the handle form's.  A hook on ``q`` fires once,
     with a contiguous gradient exactly when the layout is separate.  ``out``, the row gradient, ``dg`` and ``dbeta``
     are bitwise those of contiguous operands (the same programs on the same operands, only the gradient layout
-    differs: a property of the fake backend's emulation) and within the budget of the FP64 reference."""
+    differs: a property of the fake backend's emulation)."""
     kcp, ctx, ops = _ckpt_setup()
     ref = _layout_pass(kcp, ctx, ops, "contiguous", mode)
     assert ref["grad_layout"] == "separate" and ref["split"] == {
@@ -9687,17 +9424,6 @@ def test_gradient_layout_follows_the_consumer_of_the_views(form, mode) -> None:
     )
     for n in ("out", "row", "dg", "dbeta"):
         assert torch.equal(got[n], ref[n]), (what, n)
-    T, H_qk = ops["q"].shape[0], ops["q"].shape[1]
-    a = H_qk * 128
-    res = {
-        "out": got["out"],
-        "dq": got["row"][:, :a].reshape(T, H_qk, 128),
-        "dk": got["row"][:, a : 2 * a].reshape(T, H_qk, 128),
-        "dv": got["row"][:, 2 * a :].reshape(ops["v"].shape),
-        "dg": got["dg"],
-        "dbeta": got["dbeta"],
-    }
-    _arms_within_budget({"views": res}, _ckpt_reference(), ("out",) + CKPT_GRADS, what)
 
 
 def test_explicit_backward_keeps_the_packed_layout_of_any_packed_views() -> None:

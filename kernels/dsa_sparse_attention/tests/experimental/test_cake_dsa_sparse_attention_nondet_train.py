@@ -393,27 +393,41 @@ def test_plan_dkv_direct_rule_and_env():
     plan = cake_backend.plan_dkv_direct
     assert cake_backend.record_direct_stages(record, _DIRECT_STAGES)
     assert not cake_backend.record_direct_stages(record, _ALL_STAGES)
-    assert plan(record, _DIRECT_STAGES, 1000, 4000, accumulate=True)
-    assert not plan(record, _DIRECT_STAGES, 1000, 3999, accumulate=True)
-    assert not plan(record, _DIRECT_STAGES, 1000, 4000, accumulate=False)
-    assert not plan(record, _ALL_STAGES, 1000, 4000, accumulate=True)
+    assert plan(record, _DIRECT_STAGES, 1000, 4000, 2048, accumulate=True)
+    assert not plan(record, _DIRECT_STAGES, 1000, 3999, 2048, accumulate=True)
+    assert not plan(record, _DIRECT_STAGES, 1000, 4000, 2048, accumulate=False)
+    assert not plan(record, _ALL_STAGES, 1000, 4000, 2048, accumulate=True)
     # dkv_direct=None is the rule
-    assert plan(record, _DIRECT_STAGES, 1000, 4000, accumulate=True, dkv_direct=None)
+    assert plan(
+        record, _DIRECT_STAGES, 1000, 4000, 2048, accumulate=True, dkv_direct=None
+    )
     assert not plan(
-        record, _DIRECT_STAGES, 1000, 3999, accumulate=True, dkv_direct=None
+        record, _DIRECT_STAGES, 1000, 3999, 2048, accumulate=True, dkv_direct=None
     )
     # dkv_direct=False: never the direct path
     assert not plan(
-        record, _DIRECT_STAGES, 1000, 4000, accumulate=True, dkv_direct=False
+        record, _DIRECT_STAGES, 1000, 4000, 2048, accumulate=True, dkv_direct=False
     )
     # dkv_direct=True: the direct path whenever the stages are registered and dkv_acc is given
-    assert plan(record, _DIRECT_STAGES, 1000, 1, accumulate=True, dkv_direct=True)
-    assert not plan(record, _ALL_STAGES, 1000, 1, accumulate=True, dkv_direct=True)
-    assert not plan(record, _DIRECT_STAGES, 1000, 1, accumulate=False, dkv_direct=True)
+    assert plan(record, _DIRECT_STAGES, 1000, 1, 2048, accumulate=True, dkv_direct=True)
+    assert not plan(
+        record, _ALL_STAGES, 1000, 1, 2048, accumulate=True, dkv_direct=True
+    )
+    assert not plan(
+        record, _DIRECT_STAGES, 1000, 1, 2048, accumulate=False, dkv_direct=True
+    )
     # anything but None / True / False is rejected (the former environment strings included)
     for bad in ("auto", "0", "1", 0, 1):
         with pytest.raises(ValueError, match="dkv_direct must be None, True or False"):
-            plan(record, _DIRECT_STAGES, 1000, 4000, accumulate=True, dkv_direct=bad)
+            plan(
+                record,
+                _DIRECT_STAGES,
+                1000,
+                4000,
+                2048,
+                accumulate=True,
+                dkv_direct=bad,
+            )
     # malformed records fail closed
     with pytest.raises(ValueError, match="bwd_main stage"):
         cake_backend.record_direct_stages(
@@ -446,6 +460,646 @@ def test_plan_dkv_direct_rule_and_env():
             {"dkv_direct": {"min_keys_per_query": 0}}
         )
     assert cake_backend.DkvDirectPolicy.from_record({}) is None
+
+
+# The registered direct-accumulation rule per program, written out apart from the parser: the base
+# ``min_keys_per_query`` (4 RoPE, 1 NoPE) everywhere; on sm_107a, whose natural-layout drain the rule models as
+# costing extra in proportion to the main stage's query x selected-slot work, the record's ``rules["sm_107a"]`` adds
+# the work test -- the cast path when T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) --
+# and, on the NoPE record only, the key cap: above S = 131,072 keys (the total, whatever the segment count) the
+# natural drain.
+_DKV_DIRECT_BASE = {cake_jit.PROGRAM: 4, cake_jit.NOPE_PROGRAM: 1}
+_DKV_DIRECT_SM107A = dict(cast_slots_per_key=112, cast_min_slots=1 << 20)
+_DKV_DIRECT_SM107A_CAP = {cake_jit.PROGRAM: None, cake_jit.NOPE_PROGRAM: 131072}
+
+
+def _dkv_direct_expected(program, arch, T, S, K, segments=1):
+    """The registered rule's decision from the constants above (``True`` = the natural direct drain)."""
+    if S < _DKV_DIRECT_BASE[program] * T:
+        return False
+    if arch != "sm_107a":
+        return True
+    cap = _DKV_DIRECT_SM107A_CAP[program]
+    if cap is not None and S > cap:
+        return True
+    k_eff = min(K, -(-S // segments))
+    bound = (
+        _DKV_DIRECT_SM107A["cast_slots_per_key"] * S
+        + _DKV_DIRECT_SM107A["cast_min_slots"]
+    )
+    return T * k_eff < bound
+
+
+# Decision-table rows: (T, S, K_slots, num_segments) -> the sm_107a decision of (RoPE, NoPE).  The rows at T = 960,
+# K_slots = 2048 sit on the work bound: T * K_slots = 1,966,080 = 112 * 8192 + 2^20.  The named rows are measured
+# rows of both programs' benchmark (sm_107a: the cast path where it measured faster, the natural drain on small
+# rows, small top-k and short-document packs, and NoPE rows above the 131,072-key cap).  Every key-cap row is on the
+# cast side of the work test (K_slots 2176: up to S = 149,796 at T = 8192, 308,955 at T = 16,384 and 627,273 at
+# T = 32,768), so the NoPE decision there is the cap's alone; RoPE carries no cap.
+_DKV_DIRECT_ROWS = {
+    "S < T": ((960, 959, 2048, 1), (False, False)),
+    "S = T (K_eff = S < K_slots)": ((960, 960, 2048, 1), (False, True)),
+    "S = 4 T - 1": ((960, 3839, 2048, 1), (False, False)),
+    "S = 4 T": ((960, 3840, 2048, 1), (False, False)),
+    "work above the bound": ((960, 8191, 2048, 1), (False, False)),
+    "work at the bound": ((960, 8192, 2048, 1), (False, False)),
+    "work below the bound": ((960, 8193, 2048, 1), (True, True)),
+    "8 segments bound K_eff to 1024": ((960, 8192, 2048, 8), (True, True)),
+    "5 segments bound K_eff to 1639": ((960, 8192, 2048, 5), (True, True)),
+    "4 segments leave K_eff at K_slots": ((960, 8192, 2048, 4), (False, False)),
+    # K_eff rounds the mean segment up: ceil(S / num_segments) reaches the bound where S // num_segments does not
+    "ceil(S / 3) = 1681 above the bound": ((960, 5041, 4096, 3), (False, False)),
+    "ceil(S / 3) = 1618 at the bound": ((984, 4853, 2048, 3), (False, False)),
+    "ceil(S / 2) = 2427 at the bound": ((656, 4853, 4096, 2), (False, False)),
+    "floor: T K above 112 S (NoPE)": ((1024, 1024, 128, 1), (False, True)),
+    "floor: T K above 112 S (RoPE)": ((1024, 4096, 512, 1), (True, True)),
+    "p8949": ((16384, 65536, 2048, 1), (False, False)),
+    "glm53_a, 8 segments": ((16263, 269564, 2176, 8), (False, True)),
+    "glm53_a_p256, 8 segments": ((16263, 269564, 1152, 8), (True, True)),
+    "docs264x992, 528 segments": ((16368, 270072, 2176, 528), (True, True)),
+    "tail_1024x16384_k512": ((1024, 16384, 512, 1), (True, True)),
+    "tail_2048x32768": ((2048, 32768, 2176, 1), (True, True)),
+    "tail_4096x65536": ((4096, 65536, 2176, 1), (False, False)),
+    "short_4096_k512": ((4096, 4096, 512, 1), (False, False)),
+    "short_2048_k256": ((2048, 2048, 256, 1), (False, True)),
+    # the NoPE key cap (131,072 keys, the total S): at the cap the work test decides, one key above it the natural
+    # drain, for one segment and for packed rows alike
+    "key cap: S = 131,072": ((16384, 131072, 2176, 1), (False, False)),
+    "key cap: S = 131,073": ((16384, 131073, 2176, 1), (False, True)),
+    "key cap: 2 segments, S = 131,072": ((16384, 131072, 2176, 2), (False, False)),
+    "key cap: 2 segments, S = 131,073": ((16384, 131073, 2176, 2), (False, True)),
+    "key cap: 32768x131072": ((32768, 131072, 2176, 1), (False, False)),
+    "key cap: 32768x163840": ((32768, 163840, 2176, 1), (False, True)),
+    "key cap: 8192x147456": ((8192, 147456, 2176, 1), (False, True)),
+    "key cap: 16384x163840": ((16384, 163840, 2176, 1), (False, True)),
+    "key cap: 2 segments, 16384x163840": ((16384, 163840, 2176, 2), (False, True)),
+    "key cap: 16384x172032": ((16384, 172032, 2176, 1), (False, True)),
+    "key cap: 16384x262144": ((16384, 262144, 2176, 1), (False, True)),
+    "key cap: 16384x303104": ((16384, 303104, 2176, 1), (False, True)),
+    "key cap: pack4_262k, 8 segments": ((16384, 270336, 2176, 8), (False, True)),
+    "key cap: rope_acc 16384x278528": ((16384, 278528, 2048, 1), (False, True)),
+    "key cap: packed_glm_a, 8 segments": ((16231, 268757, 2048, 8), (False, True)),
+}
+# The rows a floor-based K_eff (S // num_segments) would send to the natural drain on sm_107a.
+_DKV_DIRECT_CEIL_ROWS = tuple(
+    name for name in _DKV_DIRECT_ROWS if name.startswith("ceil(")
+)
+# The rows on the cast side of the work test where the NoPE key cap alone decides.
+_DKV_DIRECT_CAP_ROWS = tuple(
+    name for name in _DKV_DIRECT_ROWS if name.startswith("key cap")
+)
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a", None])
+@pytest.mark.parametrize("program", cake_jit.PROGRAMS)
+def test_dkv_direct_rule_by_architecture(program, arch):
+    """The registered records' direct-accumulation decision per architecture (host side, no launch).  The base,
+    on sm_100a, sm_103a and without a device: direct iff S >= min_keys_per_query * T (4 RoPE, 1 NoPE), whatever
+    the top-k width and the segment count.  The sm_107a rule of both programs: the same base test, and the cast path
+    also where T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) -- both sides of the bound
+    and its equality (the cast path), the 2^20 floor, K_eff bounded by S and by the mean segment rounded up (rows
+    that S // num_segments would send to the natural drain), measured rows; on the NoPE record only, the key cap
+    ``cast_max_keys`` 131,072 -- the work test at S = 131,072, the natural drain from S = 131,073 on, one segment or
+    packed (the total S) -- while the RoPE rule has no cap and keeps the cast path above it.
+    ``dkv_direct=True`` / ``False`` override the rule on every architecture; without ``dkv_acc`` a RoPE binding
+    never accumulates directly; a NoPE plan applies the same rule to the fresh ``dkv`` and ``dkv_acc``."""
+    record = cake_jit.record(program)
+    stages = cake_jit.registered_stages(program)
+    assert cake_backend.record_direct_stages(record, stages, program)
+    assert set(record["arches"]) == {"sm_100a", "sm_103a", "sm_107a"}
+    policy = cake_backend.DkvDirectPolicy.from_record(record)
+    base = _DKV_DIRECT_BASE[program]
+    assert policy.min_keys_per_query == base
+    # the sm_107a rule keeps its program's base count
+    assert policy.min_keys_for(arch) == base
+    cap = _DKV_DIRECT_SM107A_CAP[program]
+    if arch == "sm_107a":
+        assert policy.rule_for(arch) == dict(
+            min_keys_per_query=base,
+            **_DKV_DIRECT_SM107A,
+            **({} if cap is None else dict(cast_max_keys=cap)),
+        )
+        # the RoPE rule carries no key cap; the NoPE rule's is 131,072 keys
+        assert policy.rule_for(arch).get("cast_max_keys") == cap
+        assert cap == (None if program == cake_jit.PROGRAM else 131072)
+    else:
+        assert policy.rule_for(arch) is None
+    rope = program == cake_jit.PROGRAM
+
+    def plan(T, S, K, segments, **kw):
+        planned = cake_backend.plan_dkv_direct(
+            record,
+            stages,
+            T,
+            S,
+            K,
+            accumulate=True,
+            program=program,
+            arch=arch,
+            num_segments=segments,
+            **kw,
+        )
+        if not rope:
+            # every NoPE backward accumulates into a natural FP32 buffer (fresh dkv or dkv_acc)
+            nope = cake_backend._plan_nope_direct(
+                record,
+                stages,
+                T,
+                S,
+                K,
+                kw.get("dkv_direct"),
+                num_segments=segments,
+                arch=arch,
+            )
+            assert nope is planned
+        return planned
+
+    for name, ((T, S, K, segments), sm107a) in _DKV_DIRECT_ROWS.items():
+        want = _dkv_direct_expected(program, arch, T, S, K, segments)
+        # the table's own column agrees with the formula
+        assert want is (
+            sm107a[0 if rope else 1] if arch == "sm_107a" else S >= base * T
+        ), name
+        if arch == "sm_107a" and name in _DKV_DIRECT_CEIL_ROWS:
+            # the row tells ceil from floor: the cast path, while S // num_segments keeps the work below the bound
+            bound = (
+                _DKV_DIRECT_SM107A["cast_slots_per_key"] * S
+                + _DKV_DIRECT_SM107A["cast_min_slots"]
+            )
+            assert not want and T * min(K, S // segments) < bound, name
+        if arch == "sm_107a" and name in _DKV_DIRECT_CAP_ROWS:
+            # the row is on the cast side of the work test: the NoPE key cap alone decides (natural above it)
+            k_eff = min(K, -(-S // segments))
+            bound = (
+                _DKV_DIRECT_SM107A["cast_slots_per_key"] * S
+                + _DKV_DIRECT_SM107A["cast_min_slots"]
+            )
+            assert T * k_eff >= bound and S >= base * T, name
+            assert want is (cap is not None and S > cap), name
+        assert policy.wants(T, S, K, num_segments=segments, arch=arch) is want, name
+        assert plan(T, S, K, segments) is want, name
+        assert plan(T, S, K, segments, dkv_direct=None) is want, name
+        assert plan(T, S, K, segments, dkv_direct=True) is True, name
+        assert plan(T, S, K, segments, dkv_direct=False) is False, name
+        if rope:
+            for mode in (None, True):
+                assert not cake_backend.plan_dkv_direct(
+                    record,
+                    stages,
+                    T,
+                    S,
+                    K,
+                    accumulate=False,
+                    dkv_direct=mode,
+                    arch=arch,
+                    num_segments=segments,
+                ), name
+    if arch == "sm_107a":
+        # the rule reads the segment count: a count below one is refused, not read as one segment
+        with pytest.raises(ValueError, match="num_segments must be >= 1"):
+            policy.wants(960, 8192, 2048, num_segments=0, arch=arch)
+    else:
+        # the base reads neither the top-k width nor the segment count
+        for T, S in ((960, base * 960 - 1), (960, base * 960), (16384, 65536)):
+            decisions = {
+                policy.wants(T, S, K, num_segments=n, arch=arch)
+                for K in (1, 2048, 1 << 20)
+                for n in (1, 8, 528)
+            }
+            assert decisions == {S >= base * T}
+
+
+def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
+    """``dkv_direct.rules`` maps an architecture to exactly the three rule fields -- ``min_keys_per_query`` and
+    ``cast_slots_per_key`` positive integers, ``cast_min_slots`` a non-negative integer -- and optionally the key cap
+    ``cast_max_keys``, a positive integer; the base keeps exactly ``min_keys_per_query`` (and the optional ``rules``).
+    An architecture without a rule, or ``None``, takes the base; a rule replaces it with its own count and the work
+    test ``T * K_eff < cast_slots_per_key * S + cast_min_slots``, and a rule with the key cap takes the natural drain
+    on every row of more than ``cast_max_keys`` keys (the total S) that passes its count; a rule without the field
+    has no cap.  Anything else in the record is refused loudly (``ValueError``) instead of falling back to the
+    base."""
+    parse = cake_backend.DkvDirectPolicy.from_record
+    arches = ("sm_100a", "sm_103a", "sm_107a", None)
+    assert cake_backend.DKV_DIRECT_RULE_OPTIONAL_FIELDS == ("cast_max_keys",)
+    rule = dict(min_keys_per_query=20, cast_slots_per_key=100, cast_min_slots=1000)
+    policy = parse(
+        {"dkv_direct": {"min_keys_per_query": 4, "rules": {"sm_107a": rule}}}
+    )
+    assert policy.min_keys_per_query == 4
+    assert policy.rules == (("sm_107a", (20, 100, 1000)),)
+    assert [policy.min_keys_for(a) for a in arches] == [4, 4, 20, 4]
+    assert [policy.rule_for(a) for a in arches] == [None, None, rule, None]
+    # no arch (or one without a rule): the base alone, whatever the top-k width and the segment count
+    assert policy.wants(1000, 4000, 1 << 20)
+    assert policy.wants(1000, 4000, 1, arch="sm_103a")
+    assert not policy.wants(1000, 3999, 1, num_segments=8, arch="sm_100a")
+    # the rule at T = 200: its own count first (S >= 20 T), then T * K_eff < 100 S + 1000 (S = 4000: 401,000)
+    assert not policy.wants(200, 3999, 1, arch="sm_107a")
+    assert policy.wants(200, 4000, 2004, arch="sm_107a")  # 400,800
+    # 401,000: equality is the cast path
+    assert not policy.wants(200, 4000, 2005, arch="sm_107a")
+    # 400,000 = 100 S: the floor keeps the natural drain
+    assert policy.wants(200, 4000, 2000, arch="sm_107a")
+    # two segments bound K_eff to 2000; K_slots beyond S leave K_eff = S = 4000
+    assert policy.wants(200, 4000, 2005, num_segments=2, arch="sm_107a")
+    assert not policy.wants(200, 4000, 1 << 20, arch="sm_107a")
+    with pytest.raises(ValueError, match="num_segments must be >= 1"):
+        policy.wants(200, 4000, 2005, num_segments=0, arch="sm_107a")
+    # a rule may also lower the base on its target; a zero floor is allowed (T * K_eff = q S is then the cast path)
+    lower = parse(
+        {
+            "dkv_direct": {
+                "min_keys_per_query": 4,
+                "rules": {
+                    "sm_100a": dict(
+                        min_keys_per_query=1, cast_slots_per_key=1000, cast_min_slots=0
+                    )
+                },
+            }
+        }
+    )
+    assert lower.rules == (("sm_100a", (1, 1000, 0)),)
+    assert lower.wants(1000, 1000, 999, arch="sm_100a")  # 999,000 < 1,000,000
+    assert not lower.wants(1000, 1000, 1000, arch="sm_100a")  # equality
+    # K_eff = ceil(2001 / 2) = 1001: 2,002,000 >= 2,001,000 (S // 2 = 1000 would give 2,000,000, the natural drain)
+    assert not lower.wants(2000, 2001, 2048, num_segments=2, arch="sm_100a")
+    assert not lower.wants(1000, 1000, 1, arch="sm_107a")  # the base: S < 4 T
+    # the optional key cap: the work test up to S = cast_max_keys, the natural drain above it whatever the work
+    capped_rule = dict(rule, cast_max_keys=5000)
+    capped = parse(
+        {"dkv_direct": {"min_keys_per_query": 4, "rules": {"sm_107a": capped_rule}}}
+    )
+    assert capped.rules == (("sm_107a", (20, 100, 1000, 5000)),)
+    assert [capped.min_keys_for(a) for a in arches] == [4, 4, 20, 4]
+    assert [capped.rule_for(a) for a in arches] == [None, None, capped_rule, None]
+    # the rule without the field has no cap
+    assert "cast_max_keys" not in policy.rule_for("sm_107a")
+    # T = 200, K_slots 2^20, one segment (K_eff = S): 200 S >= 100 S + 1000, the work test's cast path on every row
+    for S in (4000, 4999, 5000):
+        assert not capped.wants(200, S, 1 << 20, arch="sm_107a"), S
+        assert not policy.wants(200, S, 1 << 20, arch="sm_107a"), S
+    for S in (5001, 6000, 1 << 20):
+        assert capped.wants(200, S, 1 << 20, arch="sm_107a"), S
+        assert not policy.wants(200, S, 1 << 20, arch="sm_107a"), S
+    # the cap reads the total S: 8 segments of a mean 2500 keys (below the cap) at T = 1000, where the work test
+    # takes the cast path (T * K_eff = 2,500,000 >= 100 S + 1000 = 2,001,000), still take the natural drain
+    assert capped.wants(1000, 20000, 1 << 20, num_segments=8, arch="sm_107a")
+    assert not policy.wants(1000, 20000, 1 << 20, num_segments=8, arch="sm_107a")
+    # the rule's own count comes first: S < 20 T stays the cast path above the cap
+    assert not capped.wants(1000, 19999, 1 << 20, arch="sm_107a")
+    # a segment count below one is refused above the cap as well
+    with pytest.raises(ValueError, match="num_segments must be >= 1"):
+        capped.wants(200, 6000, 1 << 20, num_segments=0, arch="sm_107a")
+    # an architecture without the rule: the base alone
+    assert capped.wants(1000, 6000, 1 << 20, arch="sm_100a")
+    assert not capped.wants(1000, 3999, 1 << 20, arch="sm_103a")
+    # no rules (absent, None or empty): the base everywhere
+    for rules in ({}, {"rules": None}, {"rules": {}}):
+        flat = parse({"dkv_direct": {"min_keys_per_query": 4, **rules}})
+        assert flat.rules == ()
+        assert {flat.min_keys_for(a) for a in arches} == {4}
+        assert {flat.rule_for(a) for a in arches} == {None}
+    # a record without rules plans the base on every architecture (the planner's arch reaches it unchanged)
+    record = {"dkv_direct": dict(_DIRECT_POLICY), "key_pass_policy": dict(_POLICY)}
+    for arch in arches:
+        for K, segments in ((2048, 1), (1 << 20, 1), (2048, 528)):
+            assert cake_backend.plan_dkv_direct(
+                record,
+                _DIRECT_STAGES,
+                1000,
+                4000,
+                K,
+                accumulate=True,
+                arch=arch,
+                num_segments=segments,
+            )
+            assert not cake_backend.plan_dkv_direct(
+                record,
+                _DIRECT_STAGES,
+                1000,
+                3999,
+                K,
+                accumulate=True,
+                arch=arch,
+                num_segments=segments,
+            )
+    good = dict(min_keys_per_query=20, cast_slots_per_key=112, cast_min_slots=1 << 20)
+    bad_records = [
+        # (dkv_direct value, message)
+        ([("min_keys_per_query", 4)], "dkv_direct must be a dict"),
+        ({"rules": {}}, "lacks"),
+        ({"min_keys_per_query": 4, "rule": {}}, "unknown fields"),
+        # the work terms belong to an architecture rule, not to the base
+        ({"min_keys_per_query": 4, "cast_slots_per_key": 112}, "unknown fields"),
+        ({"min_keys_per_query": 4, "cast_min_slots": 0}, "unknown fields"),
+        # the key cap too
+        ({"min_keys_per_query": 4, "cast_max_keys": 131072}, "unknown fields"),
+        (
+            {"min_keys_per_query": 4, "rules": [("sm_107a", good)]},
+            "must map architectures",
+        ),
+        ({"min_keys_per_query": 4, "rules": {"sm_107a": 20}}, "must map exactly"),
+        ({"min_keys_per_query": 4, "rules": {"sm_107a": {}}}, "must map exactly"),
+        # the one-field rule form is not a rule of this release
+        (
+            {"min_keys_per_query": 4, "rules": {"sm_107a": {"min_keys_per_query": 20}}},
+            "must map exactly",
+        ),
+        (
+            {"min_keys_per_query": 4, "rules": {"sm_107a": dict(good, extra=1)}},
+            "must map exactly",
+        ),
+        # the key cap is the one optional field: never alone, never with an unknown one
+        (
+            {"min_keys_per_query": 4, "rules": {"sm_107a": {"cast_max_keys": 131072}}},
+            "must map exactly",
+        ),
+        (
+            {
+                "min_keys_per_query": 4,
+                "rules": {"sm_107a": dict(good, cast_max_keys=131072, extra=1)},
+            },
+            "must map exactly",
+        ),
+        ({"min_keys_per_query": 4, "rules": {"sm_107": dict(good)}}, "names 'sm_107'"),
+        ({"min_keys_per_query": 4, "rules": {None: dict(good)}}, "names None"),
+    ]
+    for name in good:
+        partial = {k: v for k, v in good.items() if k != name}
+        bad_records.append(
+            (
+                {"min_keys_per_query": 4, "rules": {"sm_107a": partial}},
+                "must map exactly",
+            )
+        )
+        # the key cap does not stand in for a missing field
+        bad_records.append(
+            (
+                {
+                    "min_keys_per_query": 4,
+                    "rules": {"sm_107a": dict(partial, cast_max_keys=131072)},
+                },
+                "must map exactly",
+            )
+        )
+    for value in (0, -20, True, False, 2.5, 20.0, "20", None):
+        for name in ("min_keys_per_query", "cast_slots_per_key"):
+            bad_records.append(
+                (
+                    {
+                        "min_keys_per_query": 4,
+                        "rules": {"sm_107a": dict(good, **{name: value})},
+                    },
+                    "positive integer",
+                )
+            )
+        bad_records.append(({"min_keys_per_query": value}, "positive integer"))
+    for value in (-1, True, False, 2.5, 1024.0, "1024", None):
+        bad_records.append(
+            (
+                {
+                    "min_keys_per_query": 4,
+                    "rules": {"sm_107a": dict(good, cast_min_slots=value)},
+                },
+                "non-negative integer",
+            )
+        )
+    # a present key cap is a positive integer (``None`` is not "no cap": leave the field out)
+    for value in (0, -1, True, False, 2.5, 131072.0, "131072", None):
+        bad_records.append(
+            (
+                {
+                    "min_keys_per_query": 4,
+                    "rules": {"sm_107a": dict(good, cast_max_keys=value)},
+                },
+                "positive integer",
+            )
+        )
+    for raw, match in bad_records:
+        with pytest.raises(ValueError, match=match):
+            parse({"dkv_direct": raw})
+    # the planner refuses a malformed record the same way (no silent base), on any architecture
+    for field, value, match in (
+        ("cast_slots_per_key", 0, "positive integer"),
+        ("cast_min_slots", -1, "non-negative integer"),
+        ("cast_max_keys", 0, "positive integer"),
+    ):
+        broken = {
+            "dkv_direct": {
+                "min_keys_per_query": 4,
+                "rules": {"sm_107a": dict(good, **{field: value})},
+            },
+            "key_pass_policy": dict(_POLICY),
+        }
+        with pytest.raises(ValueError, match=match):
+            cake_backend.plan_dkv_direct(
+                broken,
+                _DIRECT_STAGES,
+                1000,
+                4000,
+                2048,
+                accumulate=True,
+                arch="sm_100a",
+            )
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_workspace_helpers_plan_the_direct_rule_of_the_architecture(monkeypatch, arch):
+    """Host only (no device, no launch; ``arch_for`` stood in per target): both workspace helpers size the drain the
+    registered rule of the architecture selects for the row's (T, S, K_slots, num_segments) -- the RoPE helper with
+    ``dkv_acc`` (without it no binding accumulates directly), the NoPE helper always -- equal to the forced
+    ``dkv_direct`` of that decision and apart from the other path by the FP32 accumulator rows, on every row of the
+    decision table: the architecture, the top-k width and the segment count reach the planners."""
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    nope = dsa_nope_train_workspace_size
+    for name, ((T, S, K, segments), _sm107a) in _DKV_DIRECT_ROWS.items():
+        for program, helper, kw in (
+            (cake_jit.PROGRAM, dsa_train_workspace_size, dict(dkv_acc=True)),
+            (cake_jit.NOPE_PROGRAM, nope, {}),
+        ):
+            want = _dkv_direct_expected(program, arch, T, S, K, segments)
+            sizes = {
+                mode: helper(T, S, K, num_segments=segments, dkv_direct=mode, **kw)
+                for mode in (None, True, False)
+            }
+            assert sizes[None] == sizes[want], (program, name)
+            # the cast path's FP32 accumulators: S x (512 + 64) x 4 B (RoPE), S x 512 x 4 B (NoPE)
+            row = D_QK if program == cake_jit.PROGRAM else D_LATENT
+            assert sizes[False] - sizes[True] >= S * row * 4, (program, name)
+        # without dkv_acc a RoPE binding takes the cast path on every architecture
+        plain = dsa_train_workspace_size(T, S, K, num_segments=segments)
+        for mode in (None, True, False):
+            assert (
+                dsa_train_workspace_size(
+                    T, S, K, num_segments=segments, dkv_direct=mode
+                )
+                == plain
+            ), name
+        assert plain == dsa_train_workspace_size(
+            T, S, K, num_segments=segments, dkv_acc=True, dkv_direct=False
+        ), name
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_backward_binding_keys_hold_the_direct_decision_of_a_packed_row(
+    monkeypatch, arch
+):
+    """Host only (``arch_for`` stood in per target): both backward binding keys hold a multi-segment count as its
+    class and, on an architecture whose rule reads the count (sm_107a), the rule's decision -- two counts share a key
+    exactly when their drains agree (T = 960, S = 8192, K_slots = 2048: 8 and 16 segments natural, 2 and 4 the cast
+    path on sm_107a; one key for every count on sm_100a / sm_103a); one segment keeps its own key."""
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    T, S, K = 960, 8192, 2048
+    q = torch.empty(T, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    q_rope = torch.empty(T, NUM_HEADS, D_ROPE, dtype=torch.bfloat16)
+    kv = torch.empty(S, D_LATENT, dtype=torch.bfloat16)
+    k_rope = torch.empty(S, D_ROPE, dtype=torch.bfloat16)
+    idx = torch.empty(T, K, dtype=torch.int32)
+    lse = torch.empty(T, NUM_HEADS)
+    scale = default_softmax_scale()
+    counts = (2, 4, 8, 16)
+    for program in cake_jit.PROGRAMS:
+
+        def key(n, program=program):
+            if program == cake_jit.PROGRAM:
+                return backward_binding_key(
+                    q,
+                    q_rope,
+                    kv,
+                    k_rope,
+                    idx,
+                    q,
+                    q,
+                    lse,
+                    q,
+                    None,
+                    scale,
+                    False,
+                    None,
+                    n,
+                )
+            return backward_binding_key_nope(
+                q, kv, idx, q, q, lse, q, None, scale, None, n
+            )
+
+        natural = {n for n in counts if _dkv_direct_expected(program, arch, T, S, K, n)}
+        assert natural == ({8, 16} if arch == "sm_107a" else set(counts))
+        keys = {n: key(n) for n in (1,) + counts}
+        for a in counts:
+            assert keys[a] != keys[1], (program, a)
+            for b in counts:
+                assert (keys[a] == keys[b]) is ((a in natural) == (b in natural))
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_backward_binding_keys_follow_the_nope_key_cap(monkeypatch, arch):
+    """Host only (``arch_for`` stood in per target; one-element stand-ins broadcast over the long operands, since a
+    key reads shapes, strides and dtypes only): the multi-segment backward keys of packed rows at T = 16,384,
+    K_slots 2176 -- every one on the cast side of the work test -- hold on sm_107a the NoPE key cap's decision: the
+    cast path at S = 131,072, the natural drain at S = 131,073 and 270,336 for 2, 4, 8 and 16 segments
+    (the cap reads the total S, not the mean segment), while the RoPE keys, without a cap, hold the cast path on
+    every row.  sm_100a / sm_103a keep the class alone."""
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    T, K = 16384, 2176
+    scale = default_softmax_scale()
+
+    def wide(*shape, dtype=torch.bfloat16):
+        return torch.empty((1,) * len(shape), dtype=dtype).expand(*shape)
+
+    q, q_rope = wide(T, NUM_HEADS, D_LATENT), wide(T, NUM_HEADS, D_ROPE)
+    idx = wide(T, K, dtype=torch.int32)
+    lse = wide(T, NUM_HEADS, dtype=torch.float32)
+    for S in (131072, 131073, 270336):
+        kv, k_rope = wide(S, D_LATENT), wide(S, D_ROPE)
+        for n in (2, 4, 8, 16):
+            rope = backward_binding_key(
+                q, q_rope, kv, k_rope, idx, q, q, lse, q, None, scale, False, None, n
+            )[14]
+            nope = backward_binding_key_nope(
+                q, kv, idx, q, q, lse, q, None, scale, None, n
+            )[11]
+            if arch != "sm_107a":
+                assert rope == nope == 2, (S, n)
+                continue
+            for program, key in ((cake_jit.PROGRAM, rope), (NOPE_PROGRAM, nope)):
+                want = _dkv_direct_expected(program, arch, T, S, K, n)
+                assert key == (2, want), (program, S, n)
+            assert rope == (2, False), (S, n)
+            assert nope == (2, S > 131072), (S, n)
+
+
+def test_backward_binding_keys_resolve_the_direct_rule_once_per_record_and_device(
+    monkeypatch,
+):
+    """Host only (``arch_for`` stood in): a multi-segment backward key parses its program's ``dkv_direct`` policy and
+    queries the device's architecture once per program and device; the later keys of that pair do neither, on an
+    architecture without a rule (sm_100a) as on sm_107a.  One segment never does.  Another ``arch_for`` or a record
+    swapped into ``cake_jit.MODULES`` resolves anew, and the keys follow the new rule."""
+    T, S, K = 960, 8192, 2048
+    q = torch.empty(T, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    q_rope = torch.empty(T, NUM_HEADS, D_ROPE, dtype=torch.bfloat16)
+    kv = torch.empty(S, D_LATENT, dtype=torch.bfloat16)
+    k_rope = torch.empty(S, D_ROPE, dtype=torch.bfloat16)
+    idx = torch.empty(T, K, dtype=torch.int32)
+    lse = torch.empty(T, NUM_HEADS)
+    scale = default_softmax_scale()
+
+    def key(program, n):
+        if program == cake_jit.PROGRAM:
+            full = backward_binding_key(
+                q, q_rope, kv, k_rope, idx, q, q, lse, q, None, scale, False, None, n
+            )
+            return full[14]
+        return backward_binding_key_nope(
+            q, kv, idx, q, q, lse, q, None, scale, None, n
+        )[11]
+
+    parses, queries = [], []
+    parse = cake_backend.DkvDirectPolicy.from_record
+
+    def counted_parse(record):
+        parses.append(record)
+        return parse(record)
+
+    monkeypatch.setattr(
+        cake_backend.DkvDirectPolicy, "from_record", staticmethod(counted_parse)
+    )
+    monkeypatch.setattr(cake_backend, "_SEGMENT_RULES", {})
+
+    def stand_in(arch):
+        def arch_for(device=None):
+            queries.append(arch)
+            return arch
+
+        monkeypatch.setattr(cake_backend, "arch_for", arch_for)
+
+    counts = (2, 3, 4, 8, 16)
+    for arch in ("sm_100a", "sm_107a"):
+        stand_in(arch)
+        for program in cake_jit.PROGRAMS:
+            del parses[:], queries[:]
+            assert key(program, 1) == 1 and (parses, queries) == ([], [])
+            first = {n: key(program, n) for n in counts}
+            assert (len(parses), queries) == (1, [arch]), (program, arch)
+            del parses[:], queries[:]
+            assert {n: key(program, n) for n in counts * 3} == first
+            assert (parses, queries) == ([], []), (program, arch)
+            for n in counts:
+                if arch == "sm_107a":
+                    want = _dkv_direct_expected(program, arch, T, S, K, n)
+                    assert first[n] == (2, want), (program, n)
+                else:
+                    assert first[n] == 2, (program, n)
+    # a record without rules swapped in: resolved anew, the class alone on sm_107a
+    swapped = dict(cake_jit.record(NOPE_PROGRAM))
+    swapped["dkv_direct"] = {"min_keys_per_query": 1}
+    monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, swapped)
+    del parses[:], queries[:]
+    assert [key(NOPE_PROGRAM, n) for n in counts] == [2] * len(counts)
+    assert (parses, queries) == ([swapped], ["sm_107a"])
+    # the rope program's entry is untouched by the swap
+    del parses[:], queries[:]
+    assert key(cake_jit.PROGRAM, 4) == (2, False) and (parses, queries) == ([], [])
 
 
 def test_main_accumulator_constants_and_direct_bound_values():
@@ -569,8 +1223,17 @@ def test_registry_record_is_well_formed():
         # the natural-layout variants are the same kernel ABI as the regular main stage, with the size rule
         direct = cake_backend.DkvDirectPolicy.from_record(record)
         assert direct is not None
-        assert direct.wants(1, direct.min_keys_per_query)
-        assert not direct.wants(1, direct.min_keys_per_query - 1)
+        assert direct.wants(1, direct.min_keys_per_query, 2048)
+        assert not direct.wants(1, direct.min_keys_per_query - 1, 2048)
+        # every architecture's rule (the base where the record has none) has its base threshold at its own count
+        # (one query: far below any work bound), and a rule carries exactly the rule fields (the RoPE rule has no
+        # optional key cap)
+        for arch in list(record["arches"]) + [None]:
+            m = direct.min_keys_for(arch)
+            assert direct.wants(1, m, 2048, arch=arch)
+            assert not direct.wants(1, m - 1, 2048, arch=arch)
+            rule = direct.rule_for(arch)
+            assert rule is None or tuple(rule) == cake_backend.DKV_DIRECT_RULE_FIELDS
         assert (
             cake_launch.STAGE_ARGS["bwd_main_natural"]
             == cake_launch.STAGE_ARGS["bwd_main"]
@@ -2194,20 +2857,28 @@ def _require_direct_program():
 
 
 def test_backward_dkv_acc_direct_and_cast_paths(record_property):
-    """With dkv_acc and S >= 4 T the natural-layout main stage adds into the caller's rows itself (no accumulators, no
-    cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients through the cast
-    stage; ``dkv_direct=None`` (the default) takes the rule.  Each mode adds through a duplicating destination map
+    """With dkv_acc the natural-layout main stage (``dkv_direct=True``) adds into the caller's rows itself (no
+    accumulators, no cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients
+    through the cast stage; ``dkv_direct=None`` (the default) takes the rule of the device's architecture (at
+    S / T = 8 and top-k 128 the direct path on every architecture: on sm_107a T * K_eff = 32,768 stays below the
+    rule's work bound 112 S + 2^20).  Both paths run on every architecture.  Each mode adds through a duplicating
+    destination map
     into a [S_dst, 704] buffer, on the prepared runner and on the eager entry: every call's outputs and buffer
     increment are judged (the contract holds unmapped rows and the columns from 576 on to their bits), and the
     in-range map passes the opt-in value check."""
     record, stages = _require_direct_program()
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    policy = cake_backend.DkvDirectPolicy.from_record(record)
 
     def case(s, j):
-        inp = make_inputs(
-            [256], [2048], seed=s, topk=128
-        )  # S / T = 8: the size rule picks direct
+        inp = make_inputs([256], [2048], seed=s, topk=128)  # S / T = 8
         args, explicit = _forward_and_natural_dkv(inp)
         S, S_dst = inp.total_k, 400
+        rule = policy.wants(inp.total_q, S, inp.topk, arch=arch)
+        assert rule is _dkv_direct_expected(
+            cake_jit.PROGRAM, arch, inp.total_q, S, inp.topk
+        )
+        assert rule is True
         gen = torch.Generator(device="cuda").manual_seed(s + 3)
         dst_map = torch.randint(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
@@ -2225,7 +2896,7 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
                 dkv_direct=mode,
                 check_dst_map=True,
             )
-            assert runner.dkv_direct == (mode is not False)
+            assert runner.dkv_direct == (rule if mode is None else mode)
             if runner.dkv_direct:
                 assert (
                     "bwd_main_natural" in runner.launches
@@ -2257,7 +2928,9 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
             # the workspace of a direct binding has no FP32 accumulators; dkv_direct sizes it the same way
             T, device = inp.total_q, torch.device("cuda")
             plain = dsa_train_workspace_size(T, S, 128, device)
-            direct_size = dsa_train_workspace_size(T, S, 128, device, dkv_acc=True)
+            direct_size = dsa_train_workspace_size(
+                T, S, 128, device, dkv_acc=True, dkv_direct=True
+            )
             assert plain - direct_size >= S * D_QK * 4
             assert (
                 dsa_train_workspace_size(
@@ -2265,16 +2938,26 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
                 )
                 == plain
             )
-            assert (
-                dsa_train_workspace_size(
-                    T, S, 128, device, dkv_acc=True, dkv_direct=True
-                )
-                == direct_size
+            # the default (the rule of this device's architecture) sizes the path it selects
+            assert dsa_train_workspace_size(T, S, 128, device, dkv_acc=True) == (
+                direct_size if rule else plain
             )
-            # S < 4 T keeps the cast path by the rule
+            # S < 4 T keeps the cast path by the rule; the device's rule switches at its own thresholds (on sm_107a
+            # also at the work bound, T * K_slots = 112 * 8192 + 2^20 at T = 960, K_slots = 2048)
             assert not cake_backend.plan_dkv_direct(
-                record, stages, 1000, 3999, accumulate=True
+                record, stages, 1000, 3999, 2048, accumulate=True
             )
+            m = policy.min_keys_for(arch)
+            assert not cake_backend.plan_dkv_direct(
+                record, stages, 1000, m * 1000 - 1, 128, accumulate=True, arch=arch
+            )
+            assert cake_backend.plan_dkv_direct(
+                record, stages, 1000, m * 1000, 128, accumulate=True, arch=arch
+            )
+            for S_row in (8192, 8193):
+                assert cake_backend.plan_dkv_direct(
+                    record, stages, 960, S_row, 2048, accumulate=True, arch=arch
+                ) is _dkv_direct_expected(cake_jit.PROGRAM, arch, 960, S_row, 2048)
         return nv.judged(nv.rope_problem(inp), runs)
 
     nv.judge_draws(record_property, case, seed=SEED + 24)
@@ -2759,7 +3442,9 @@ def test_registry_programs_are_well_formed(program):
     """Both records: declared stages in the program's order with physical entries, every library named in
     ``build.json`` for every arch, five launch leaves per stage, launchers and grids for every stage; the NoPE
     record carries its own policies (2048 B per key, one pass by default, natural accumulation from one key per
-    query) and may be partial until its libraries are exported (a registered forward stage comes first)."""
+    query; on sm_107a only below the work bound 112 S + 2^20 of T * K_eff or above the 131,072-key cap) and may be
+    partial until its libraries are exported (a registered forward stage comes first); the RoPE record accumulates
+    directly from 4 keys per query, on sm_107a only below the same work bound (no key cap)."""
     assert cake_jit.PROGRAMS == (cake_jit.PROGRAM, NOPE_PROGRAM)
     record = cake_jit.record(program)
     order = cake_jit.STAGES_OF[program]
@@ -2780,9 +3465,26 @@ def test_registry_programs_are_well_formed(program):
     direct = cake_backend.DkvDirectPolicy.from_record(record)
     assert direct is not None
     if program == NOPE_PROGRAM:
-        # natural accumulation whenever the row has at least one key per query (measured faster than the
-        # permuted drain on every row) and one pass by default (measured fastest on every row): no per-arch rules
+        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured faster
+        # than the permuted drain on every row there); on sm_107a (the rule models its natural-layout drain as
+        # costing extra in proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 131,072
+        # keys (the key cap: on long single-segment rows the cast path's backward median was slower at 163,840 keys
+        # with T = 32,768 in both runs); and one pass by default (measured fastest on every row): no per-arch key-pass
+        # rules
         assert direct.min_keys_per_query == 1
+        assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
+            "sm_100a": 1,
+            "sm_103a": 1,
+            "sm_107a": 1,
+        }
+        assert direct.min_keys_for(None) == 1
+        assert direct.rules == (("sm_107a", (1, 112, 1 << 20, 131072)),)
+        assert direct.rule_for("sm_107a") == dict(
+            min_keys_per_query=1,
+            cast_slots_per_key=112,
+            cast_min_slots=1 << 20,
+            cast_max_keys=131072,
+        )
         assert policy.key_bytes == 2048
         assert policy.dq_partial_bytes_per_token == NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
         assert policy.max_passes == 1
@@ -2796,6 +3498,15 @@ def test_registry_programs_are_well_formed(program):
         assert policy.token_chunk_multiple == rope.token_chunk_multiple
     else:
         assert direct.min_keys_per_query == 4
+        assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
+            "sm_100a": 4,
+            "sm_103a": 4,
+            "sm_107a": 4,
+        }
+        assert direct.min_keys_for(None) == 4
+        assert direct.rules == (("sm_107a", (4, 112, 1 << 20)),)
+        # no key cap on the RoPE rule
+        assert "cast_max_keys" not in direct.rule_for("sm_107a")
     pending = []
     for stage in stages:
         physical = record[stage]
@@ -3870,8 +4581,12 @@ _NOPE_STAND_IN_LAUNCH = {
 
 
 def _completed_nope_record() -> dict:
-    """The registered NoPE record completed with stand-in entries for the stages it does not register yet."""
+    """The registered NoPE record completed with stand-in entries for the stages it does not register yet.  Its
+    direct-accumulation rule is pinned to the architecture-independent one key per query: the launch tests over it
+    (S = 8 T) expect the natural-layout main stage by the rule on every device;
+    :func:`test_nope_plan_direct_rule_follows_the_device_architecture` plans the registered per-architecture rule."""
     record = dict(cake_jit.record(NOPE_PROGRAM))
+    record["dkv_direct"] = {"min_keys_per_query": 1}
     for stage in cake_jit.NOPE_STAGES:
         if stage not in record:
             library = f"{NOPE_PROGRAM}_stand_in_{stage}"
@@ -5542,11 +6257,11 @@ def test_nope_plan_multi_pass_backward_launch_order(monkeypatch):
                 token_chunk=token_chunk,
             )["total"]
         )
-    assert cake_backend._plan_nope_direct(record, stages, T, S, None)
+    assert cake_backend._plan_nope_direct(record, stages, T, S, K, None)
     # one key per query suffices for the natural path; fewer keys than query rows do not
-    assert cake_backend._plan_nope_direct(record, stages, T, T, None)
-    assert not cake_backend._plan_nope_direct(record, stages, 2 * S, S, None)
-    assert not cake_backend._plan_nope_direct(record, stages, T, S, False)
+    assert cake_backend._plan_nope_direct(record, stages, T, T, K, None)
+    assert not cake_backend._plan_nope_direct(record, stages, 2 * S, S, K, None)
+    assert not cake_backend._plan_nope_direct(record, stages, T, S, K, False)
     runner = prepare_dsa_nope_train(
         q, kv, idx, dout=dout, key_passes=2, dkv_direct=False
     )
@@ -5803,6 +6518,76 @@ def test_nope_eager_backward_reads_a_strided_dout_in_place(monkeypatch):
     assert len(cake_backend.BINDING_CACHE) == 3  # three layouts, three plans
 
 
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_nope_plan_direct_rule_follows_the_device_architecture(monkeypatch, arch):
+    """The registered NoPE rule reaches every planner with the device's architecture (``arch_for``, stood in per
+    target over the recording launch entries), the row's top-k width and its segment count.  The natural-layout
+    main stage from one key per query on sm_100a / sm_103a; on sm_107a only while T * K_eff < 112 S + 2^20, K_eff =
+    min(K_slots, ceil(S / num_segments)) -- at T = 960, K_slots = 2048: S = T natural (K_eff = S), S = 2048 ..
+    8192 the permuted accumulator and the cast (8192: the bound itself), S = 8193 natural; at S = 8192 eight and
+    sixteen segments bound K_eff below K_slots (natural), four and two leave it at K_slots (the cast), and the eager
+    calls of one geometry with another count find the binding of the same drain in the cache.  The eager backward
+    fresh and with ``dkv_acc``, the prepared runner, its layout and ``dsa_nope_train_workspace_size`` alike;
+    ``dkv_direct=True`` / ``False`` override the rule on every target, the forced key passes included."""
+    registered = dict(cake_jit.record(NOPE_PROGRAM)["dkv_direct"])
+    calls = []
+    record = _stand_in_nope_program(monkeypatch, calls)
+    # the registered per-architecture rule, not the stand-in's pinned one
+    record["dkv_direct"] = registered
+    monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
+    assert cake_backend.DkvDirectPolicy.from_record(record).min_keys_for(arch) == 1
+    T, K = 960, 2048
+    device = torch.device("cuda")
+    out, lse, o_lo = _saved_outputs(T)
+    natural = ["nope_bwd_delta", "nope_bwd_main_natural"]
+    cast = ["nope_bwd_delta", "nope_bwd_main", "nope_bwd_cast"]
+    stages = cake_jit.registered_stages(NOPE_PROGRAM)
+
+    def launched():
+        seq = [c[0] for c in calls]
+        calls.clear()
+        return seq
+
+    rows = [(S, 1) for S in (T - 1, T, 2048, 8191, 8192, 8193)]
+    rows += [(8192, n) for n in (8, 4, 16, 2)]
+    for S, n in rows:
+        want = _dkv_direct_expected(NOPE_PROGRAM, arch, T, S, K, n)
+        if arch == "sm_107a":
+            assert want is (S in (T, 8193) or n in (8, 16)), (S, n)
+        else:
+            assert want is (S >= T), (S, n)
+        q, kv, idx, dout = _nope_device_inputs(T, S, K, seed=S + n)
+        args = (q, kv, idx, out, o_lo, lse, dout)
+        calls.clear()
+        backward_nope(*args, num_segments=n)
+        assert launched() == (natural if want else cast), (S, n)
+        acc = torch.zeros(S, D_LATENT, device="cuda")
+        backward_nope(*args, dkv_acc=acc, num_segments=n)
+        assert launched() == (natural if want else cast), (S, n)
+        backward_nope(*args, dkv_direct=True, num_segments=n)
+        assert launched() == natural, (S, n)
+        backward_nope(*args, dkv_direct=False, num_segments=n)
+        assert launched() == cast, (S, n)
+        if n == 1:
+            backward_nope(*args, key_passes=2)
+            pass_main = "nope_bwd_main_pass_natural" if want else "nope_bwd_main_pass"
+            mains = [c for c in launched() if c.startswith("nope_bwd_main")]
+            assert mains == [pass_main] * 2, S
+        runner = prepare_dsa_nope_train(q, kv, idx, dout=dout, num_segments=n)
+        assert runner.dkv_direct is want, (S, n)
+        size = dsa_nope_train_workspace_size(T, S, K, device, num_segments=n)
+        assert runner.layout["total"] == size, (S, n)
+        assert size == dsa_nope_train_workspace_size(
+            T, S, K, device, num_segments=n, dkv_direct=want
+        )
+        assert ("dkv_latent_acc" in runner.layout) is not want, (S, n)
+        planned = cake_backend._plan_nope_direct(
+            record, stages, T, S, K, None, num_segments=n, arch=arch
+        )
+        assert planned is want, (S, n)
+        del runner
+
+
 def test_nope_registered_record_without_kernels_fails_loudly():
     """Before the NoPE libraries exist the entries refuse loudly instead of launching: a record without the stages
     raises ``NotImplementedError`` naming them, a complete record whose libraries ``build.json`` does not carry yet
@@ -5832,7 +6617,9 @@ def test_nope_registered_record_without_kernels_fails_loudly():
     program, record = record_for(torch.device("cuda"), NOPE_PROGRAM)
     assert program == NOPE_PROGRAM
     stages = cake_jit.registered_stages(NOPE_PROGRAM)
-    direct = cake_backend._plan_nope_direct(record, stages, T, S, None)
+    direct = cake_backend._plan_nope_direct(
+        record, stages, T, S, K, None, arch=cake_backend.arch_for()
+    )
     assert (
         dsa_nope_train_workspace_size(T, S, K, torch.device("cuda"))
         == (
@@ -6230,9 +7017,10 @@ def test_nope_backward_repeat_calls(record_property):
 def test_nope_backward_destination_map_with_duplicates_matches_index_add(
     record_property,
 ):
-    """A random destination map with repeated rows into a wider FP32 buffer, on the record's route and forced
-    through the cast: each accumulation is judged against the oracle's key gradients added through the map
-    (``index_add``), its columns past 512 untouched; a map value out of range raises with ``check_dst_map``."""
+    """A random destination map with repeated rows into a wider FP32 buffer, on the record's route, forced through
+    the natural-layout main stage and forced through the cast: each accumulation is judged against the oracle's key
+    gradients added through the map (``index_add``), its columns past 512 untouched; a map value out of range
+    raises with ``check_dst_map``."""
     _require_nope_program(backward=True)
 
     def case(s, j):
@@ -6246,7 +7034,8 @@ def test_nope_backward_destination_map_with_duplicates_matches_index_add(
             0, S_dst, (S,), device="cuda", generator=gen, dtype=torch.int32
         )
         runs = {"fresh": dict(out=out, lse=lse, o_lo=o_lo, dq=dq, dkv=dkv)}
-        for label, direct in (("map", None), ("map cast", False)):
+        # the record's route (the rule of the device's architecture), then both paths forced on every architecture
+        for label, direct in (("map", None), ("map direct", True), ("map cast", False)):
             acc = torch.zeros(S_dst, 704, device="cuda")
             dq_m, none = backward_nope(
                 *args, dkv_acc=acc, dkv_dst_map=dst_map, dkv_direct=direct
@@ -6271,44 +7060,63 @@ def test_nope_backward_destination_map_with_duplicates_matches_index_add(
 
 
 def test_nope_backward_direct_and_cast_paths(record_property):
-    """With S >= 4 T the natural-layout main stage adds into the FP32 buffer itself (no accumulator, no cast),
-    for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path.  Prepared runners
-    and eager calls on both paths: every call is judged."""
-    _require_nope_direct_program()
+    """The natural-layout main stage (``dkv_direct=True``) adds into the FP32 buffer itself (no accumulator, no
+    cast), for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path; both run on
+    every architecture.  ``dkv_direct=None`` takes the rule of the device's architecture (S = 8 T, top-k 128: the
+    natural stage on every architecture -- on sm_107a T * K_eff = 32,768 stays below the work bound 112 S + 2^20).
+    Prepared runners and eager calls on both paths and by the rule: every call is judged."""
+    record, _stages = _require_nope_direct_program()
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    rule = cake_backend.DkvDirectPolicy.from_record(record).wants(
+        256, 2048, 128, arch=arch
+    )
+    assert rule is _dkv_direct_expected(NOPE_PROGRAM, arch, 256, 2048, 128) is True
 
     def case(s, j):
         inp = _nope_inputs(256, 2048, seed=s, topk=128)
         out, lse, o_lo = forward_nope(inp.q, inp.kv, inp.idx_global)
         args = (inp.q, inp.kv, inp.idx_global, out, o_lo, lse, inp.dout)
-        direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
+        direct = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=True)
         cast = prepare_dsa_nope_train(*args[:3], dout=inp.dout, dkv_direct=False)
+        by_rule = prepare_dsa_nope_train(*args[:3], dout=inp.dout)
         assert direct.dkv_direct and "nope_bwd_cast" not in direct.launches
         assert not cast.dkv_direct and "nope_bwd_cast" in cast.launches
+        assert by_rule.dkv_direct is rule
+        assert ("nope_bwd_cast" in by_rule.launches) is not rule
         assert (
             "dkv_latent_acc" not in direct.tensors and "dkv_latent_acc" in cast.tensors
         )
         dq_d, dkv_d = direct.step()
         dq_c, dkv_c = cast.step()
-        dq_e, dkv_e = backward_nope(*args)
+        dq_r, dkv_r = by_rule.step()
+        dq_e, dkv_e = backward_nope(*args, dkv_direct=True)
         dq_f, dkv_f = backward_nope(*args, dkv_direct=False)
+        dq_er, dkv_er = backward_nope(*args)
         torch.cuda.synchronize()
         acc_d = torch.zeros(inp.total_k, D_LATENT, device="cuda")
         acc_c = torch.zeros_like(acc_d)
-        dq_ad, _ = backward_nope(*args, dkv_acc=acc_d)
+        acc_r = torch.zeros_like(acc_d)
+        dq_ad, _ = backward_nope(*args, dkv_acc=acc_d, dkv_direct=True)
         dq_ac, _ = backward_nope(*args, dkv_acc=acc_c, dkv_direct=False)
+        dq_ar, _ = backward_nope(*args, dkv_acc=acc_r)
         torch.cuda.synchronize()
         zeros = torch.zeros_like(acc_d)
         runs = {
             "eager": dict(out=out, lse=lse, o_lo=o_lo, dq=dq_e, dkv=dkv_e),
             "eager cast": dict(dq=dq_f, dkv=dkv_f),
+            "eager rule": dict(dq=dq_er, dkv=dkv_er),
             "runner": dict(
                 out=direct.out, lse=direct.lse, o_lo=direct.o_lo, dq=dq_d, dkv=dkv_d
             ),
             "runner cast": dict(
                 out=cast.out, lse=cast.lse, o_lo=cast.o_lo, dq=dq_c, dkv=dkv_c
             ),
+            "runner rule": dict(
+                out=by_rule.out, lse=by_rule.lse, o_lo=by_rule.o_lo, dq=dq_r, dkv=dkv_r
+            ),
             "acc": dict(dq=dq_ad, dkv_acc=nv.Acc(before=zeros, after=acc_d)),
             "acc cast": dict(dq=dq_ac, dkv_acc=nv.Acc(before=zeros, after=acc_c)),
+            "acc rule": dict(dq=dq_ar, dkv_acc=nv.Acc(before=zeros, after=acc_r)),
         }
         return nv.judged(nv.nope_problem(inp), runs)
 
@@ -6316,7 +7124,10 @@ def test_nope_backward_direct_and_cast_paths(record_property):
 
 
 def test_nope_backward_forced_key_passes(record_property):
-    """Three forced key passes (two eager calls and a prepared runner) beside the single pass: every call is
+    """Three forced key passes (two eager calls and a prepared runner) beside the single pass, on the record's route,
+    plus three passes forced through the natural-layout pass stage (``dkv_direct=True``) and through the permuted
+    pass stage and the cast (``dkv_direct=False``), so both pass forms run on every architecture (S = 16 T, top-k
+    200: the rule takes the natural form on every architecture, on sm_107a below its work bound): every call is
     judged."""
     _require_nope_pass_program()
 
@@ -6327,6 +7138,8 @@ def test_nope_backward_forced_key_passes(record_property):
         single = backward_nope(*args, key_passes=1)
         passes = backward_nope(*args, key_passes=3)
         again = backward_nope(*args, key_passes=3)
+        natural = backward_nope(*args, key_passes=3, dkv_direct=True)
+        permuted = backward_nope(*args, key_passes=3, dkv_direct=False)
         runner = prepare_dsa_nope_train(*args[:3], dout=inp.dout, key_passes=3)
         assert runner.key_passes == 3
         dq_r, dkv_r = runner.step()
@@ -6335,6 +7148,8 @@ def test_nope_backward_forced_key_passes(record_property):
             "single": dict(out=out, lse=lse, o_lo=o_lo, dq=single[0], dkv=single[1]),
             "passes": dict(dq=passes[0], dkv=passes[1]),
             "again": dict(dq=again[0], dkv=again[1]),
+            "passes natural": dict(dq=natural[0], dkv=natural[1]),
+            "passes permuted": dict(dq=permuted[0], dkv=permuted[1]),
             "runner": dict(
                 out=runner.out, lse=runner.lse, o_lo=runner.o_lo, dq=dq_r, dkv=dkv_r
             ),
@@ -6346,8 +7161,10 @@ def test_nope_backward_forced_key_passes(record_property):
 
 def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
     """Two forced passes over a row longer than one token chunk (4736 at K_slots 2176, plus 128): the launches run
-    chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward and the
-    single pass, every output judged."""
+    chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward on the
+    record's route, the single pass, and the two-pass backward forced through the natural-layout pass stage
+    (``dkv_direct=True``) and through the permuted pass stage and the cast (``dkv_direct=False``), so both pass
+    forms run on every architecture: every output judged."""
     record, _stages = _require_nope_pass_program()
     device = torch.device("cuda")
     chunk = KeyPassPolicy.from_record(record).token_chunk(2176)
@@ -6388,11 +7205,15 @@ def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
         a = backward_nope(*args, key_passes=2)
         b = backward_nope(*args, key_passes=2)
         single = backward_nope(*args, key_passes=1)
+        natural = backward_nope(*args, key_passes=2, dkv_direct=True)
+        permuted = backward_nope(*args, key_passes=2, dkv_direct=False)
         torch.cuda.synchronize()
         runs = {
             "two passes": dict(out=out, lse=lse, o_lo=o_lo, dq=a[0], dkv=a[1]),
             "again": dict(dq=b[0], dkv=b[1]),
             "single": dict(dq=single[0], dkv=single[1]),
+            "two passes natural": dict(dq=natural[0], dkv=natural[1]),
+            "two passes permuted": dict(dq=permuted[0], dkv=permuted[1]),
         }
         return nv.judged(nv.nope_problem(inp), runs)
 
