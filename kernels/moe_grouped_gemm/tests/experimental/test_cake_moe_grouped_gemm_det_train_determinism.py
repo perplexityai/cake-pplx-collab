@@ -23,7 +23,9 @@ limitations under the License.
 # ``FILL_BYTE`` before each of the next ``REPEATS``: no route accumulates into
 # ``out`` (each one overwrites it), so the bits must not depend on its prior
 # contents either.  Every launch's raw bits (an integer view) must equal the
-# first launch's.
+# first launch's.  A spot block of each case's output is judged against the naive
+# BF16 tier over ``cake_naive.DRAWS`` inputs (``_judge_spot``), so the suite cannot pass
+# on a wrong result that merely repeats.
 #
 # Arms: ``planned`` launches the prepared launch as planned (for a data
 # gradient whose plan probes the queue split, after its probe has completed, so
@@ -47,6 +49,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_moe_judge import bounds as _bounds
+from tests.cake.test_helpers.cake_moe_judge import judge_draws
 from tests.cake.test_helpers.cake_package import cake_package
 
 PACKAGE = "cake_moe_grouped_gemm_det_train"
@@ -228,10 +232,16 @@ def _require_program(case, device):
         )
 
 
-def _inputs(case, device):
-    """Fixed inputs of ``case``: seeded from its label, so every process builds the same bits."""
+def _seed(case):
+    """The seed of ``case``'s own inputs: from its label, so every process builds the same
+    bits (draw 0 of its judge)."""
+    return zlib.crc32(case.label.encode())
+
+
+def _operands(case, device, seed):
+    """The operands ``(a, b)`` of ``case`` drawn from ``seed``."""
     gen = torch.Generator(device=device)
-    gen.manual_seed(zlib.crc32(case.label.encode()))
+    gen.manual_seed(seed)
     sum_m, num_groups = sum(case.sizes), len(case.sizes)
     scale = 1.0 / math.sqrt(case.k)
 
@@ -239,20 +249,26 @@ def _inputs(case, device):
         t = torch.randn(*shape, generator=gen, device=device, dtype=torch.float32)
         return t.mul_(scale).to(torch.bfloat16)
 
+    if case.op == "fwd":
+        return randn(sum_m, case.k, scale=scale), randn(num_groups, case.n, case.k, scale=scale)
+    if case.op == "dgrad":
+        return randn(sum_m, case.n), randn(num_groups, case.n, case.k, scale=scale)
+    return randn(sum_m, case.n), randn(sum_m, case.k, scale=scale)
+
+
+def _inputs(case, device):
+    """Fixed inputs of ``case``: seeded from its label (``_seed``), so every process builds
+    the same bits."""
+    sum_m, num_groups = sum(case.sizes), len(case.sizes)
     offs = torch.tensor(case.sizes, dtype=torch.int32, device=device).cumsum(
         0, dtype=torch.int32
     )
+    a, b = _operands(case, device, _seed(case))
     if case.op == "fwd":
-        a = randn(sum_m, case.k, scale=scale)
-        b = randn(num_groups, case.n, case.k, scale=scale)
         out = torch.empty(sum_m, case.n, dtype=torch.bfloat16, device=device)
     elif case.op == "dgrad":
-        a = randn(sum_m, case.n)
-        b = randn(num_groups, case.n, case.k, scale=scale)
         out = torch.empty(sum_m, case.k, dtype=torch.bfloat16, device=device)
     else:
-        a = randn(sum_m, case.n)
-        b = randn(sum_m, case.k, scale=scale)
         out = torch.empty(
             num_groups, case.n, case.k, dtype=case.out_dtype, device=device
         )
@@ -335,33 +351,55 @@ def _run_repeats(launch, out, repeats):
     return ref, launches, mismatches, worst
 
 
-def _spot_check(case, a, b, out):
-    """Guard against a vacuous pass: the last non-empty group's first block matches an fp64
-    reference, and an empty group's weight gradient is exact zeros."""
-    ends = [sum(case.sizes[: i + 1]) for i in range(len(case.sizes))]
-    bounds = list(zip([0] + ends[:-1], ends, strict=True))
+def _spot(case, a, b, out):
+    """The spot block of ``case`` (None when no group has rows): on the last group with
+    rows, its first ``SPOT_ROWS`` rows by the first ``SPOT_COLS`` columns (forward, data
+    gradient) or its ``SPOT_COLS // 2`` x ``SPOT_COLS // 2`` corner (weight gradient):
+    ``(output block, a block, b block, sizes)``, whose per-group product
+    (``cake_moe_judge.product``) is the block."""
+    bounds = _bounds(case.sizes)
     nonempty = [e for e, (s, t) in enumerate(bounds) if t > s]
     if not nonempty:
-        return
+        return None
     e = nonempty[-1]
     s, t = bounds[e]
     if case.op == "fwd":
         r, c = min(t, s + SPOT_ROWS), min(case.n, SPOT_COLS)
-        ref = a[s:r].double() @ b[e, :c].double().T
-        got = out[s:r, :c]
-    elif case.op == "dgrad":
+        return out[s:r, :c], a[s:r], b[e : e + 1, :c], [r - s]
+    if case.op == "dgrad":
         r, c = min(t, s + SPOT_ROWS), min(case.k, SPOT_COLS)
-        ref = a[s:r].double() @ b[e][:, :c].double()
-        got = out[s:r, :c]
-    else:
-        rn, ck = min(case.n, SPOT_COLS // 2), min(case.k, SPOT_COLS // 2)
-        ref = a[s:t, :rn].double().T @ b[s:t, :ck].double()
-        got = out[e, :rn, :ck]
-        for empty in (i for i, (s0, t0) in enumerate(bounds) if t0 == s0):
-            assert int(_bits(out[empty]).count_nonzero()) == 0, (
-                f"group {empty} is empty but its weight gradient is not exact zeros"
-            )
-    torch.testing.assert_close(got.double(), ref, atol=3e-2, rtol=2e-2)
+        return out[s:r, :c], a[s:r], b[e : e + 1, :, :c], [r - s]
+    rn, ck = min(case.n, SPOT_COLS // 2), min(case.k, SPOT_COLS // 2)
+    return out[e : e + 1, :rn, :ck], a[s:t, :rn], b[s:t, :ck], [t - s]
+
+
+def _judge_spot(record_property, case, launch, a, b, out, device):
+    """Guard against a vacuous pass: the spot block (``_spot``) of ``launch``'s output,
+    judged against the naive BF16 tier over ``cake_naive.DRAWS`` inputs
+    (``tests/cake/test_helpers/cake_moe_judge.py``; draw ``j`` writes the operands of
+    ``draw_seed(_seed(case), j)`` into ``a`` and ``b``, draw 0, the last, is the case's
+    own), and an empty group's weight gradient is exact zeros (every bit) on every draw."""
+    if _spot(case, a, b, out) is None:
+        return
+    name = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}[case.op] + "[spot]"
+    empty = [i for i, size in enumerate(case.sizes) if not size]
+
+    def draw(d):
+        na, nb = _operands(case, device, d.seed)
+        a.copy_(na)
+        b.copy_(nb)
+        del na, nb
+        launch.launch()
+        got, sa, sb, sizes = _spot(case, a, b, out)
+        d.op(name, got, case.op, sa, sb, sizes)
+        if case.op == "wgrad":
+            for group in empty:
+                assert int(_bits(out[group]).count_nonzero()) == 0, (
+                    f"draw {d.index}: group {group} is empty but its weight gradient "
+                    "is not exact zeros"
+                )
+
+    judge_draws(record_property, draw, seed=_seed(case))
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +464,7 @@ def test_repeat_launches_give_identical_bits(label, arm, record_property):
         )
     elif arm == "even":
         assert torch.equal(ref, planned_bits)
-    _spot_check(case, a, b, out)
+    _judge_spot(record_property, case, launch, a, b, out, device)
 
 
 # ---------------------------------------------------------------------------

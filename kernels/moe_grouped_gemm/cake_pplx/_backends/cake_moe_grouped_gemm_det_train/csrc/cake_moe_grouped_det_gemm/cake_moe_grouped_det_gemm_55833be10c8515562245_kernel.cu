@@ -445,7 +445,11 @@ kernel_cake_moe_grouped_det_gemm_55833be10c8515562245(const __grid_constant__ CU
                             g_end = offs[0];
                             g_rows = (unsigned int)((g_end + CLUSTER_M - 1) / CLUSTER_M);
                         }
-                        while (row >= g_row0 + g_rows) {
+                        #pragma unroll 1
+                        for (unsigned int _gs = 0; _gs < (unsigned int)num_groups; _gs++) {
+                            if (row < g_row0 + g_rows) {
+                                break;
+                            }
                             g_row0 = g_row0 + g_rows;
                             g_start = g_end;
                             g_cur = g_cur + 1;
@@ -459,7 +463,7 @@ kernel_cake_moe_grouped_det_gemm_55833be10c8515562245(const __grid_constant__ CU
                             mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
                             tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, (&A), 0, off_m, iter_k, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             tma_4d_gmem2smem_cta2(smem_b_addr + load_stage * 49152, (&B), 0, off_n, iter_k, (int)g_cur, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                            tma_4d_gmem2smem_cta2(smem_b_addr + load_stage * 49152 + 16384, (&B), 0, off_n + 256, iter_k, (int)g_cur, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                            tma_4d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152, (&B), 0, off_n + 256, iter_k, (int)g_cur, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                             asm volatile(
                                 "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
                                 :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
@@ -1273,7 +1277,11 @@ kernel_cake_moe_grouped_det_gemm_55833be10c8515562245(const __grid_constant__ CU
                         g_end_e = offs[0];
                         g_rows_e = (unsigned int)((g_end_e + CLUSTER_M - 1) / CLUSTER_M);
                     }
-                    while (row_2 >= g_row0_e + g_rows_e) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_1 = 0; _gs_1 < (unsigned int)num_groups; _gs_1++) {
+                        if (row_2 < g_row0_e + g_rows_e) {
+                            break;
+                        }
                         g_row0_e = g_row0_e + g_rows_e;
                         g_start_e = g_end_e;
                         g_cur_e = g_cur_e + 1;

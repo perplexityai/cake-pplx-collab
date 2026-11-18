@@ -504,6 +504,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         }
                     }
                 }
+                #pragma unroll
+                for (int _ = 0; _ < 7; _++) {
+                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    load_stage += 1;
+                    if (load_stage == 7) { load_stage = 0; _phase_mma_done ^= 1; }
+                }
                 if (wave_mode > 0) {
                     __threadfence();
                     unsigned int ws_retired = atomicAdd(&wave_sync[1], 1);

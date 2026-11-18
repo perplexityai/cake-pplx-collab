@@ -458,7 +458,11 @@ kernel_cake_moe_grouped_det_gemm_9df3c426f0afac83124c(const __grid_constant__ CU
                             g_end = offs[0];
                             g_rows = (unsigned int)((g_end + CLUSTER_M - 1) / CLUSTER_M);
                         }
-                        while (row >= g_row0 + g_rows) {
+                        #pragma unroll 1
+                        for (unsigned int _gs = 0; _gs < (unsigned int)num_groups; _gs++) {
+                            if (row < g_row0 + g_rows) {
+                                break;
+                            }
                             g_row0 = g_row0 + g_rows;
                             g_start = g_end;
                             g_cur = g_cur + 1;
@@ -683,7 +687,11 @@ kernel_cake_moe_grouped_det_gemm_9df3c426f0afac83124c(const __grid_constant__ CU
                         g_end_e = offs[0];
                         g_rows_e = (unsigned int)((g_end_e + CLUSTER_M - 1) / CLUSTER_M);
                     }
-                    while (row_2 >= g_row0_e + g_rows_e) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_1 = 0; _gs_1 < (unsigned int)num_groups; _gs_1++) {
+                        if (row_2 < g_row0_e + g_rows_e) {
+                            break;
+                        }
                         g_row0_e = g_row0_e + g_rows_e;
                         g_start_e = g_end_e;
                         g_cur_e = g_cur_e + 1;
