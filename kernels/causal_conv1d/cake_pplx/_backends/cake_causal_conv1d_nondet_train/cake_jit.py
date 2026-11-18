@@ -4717,22 +4717,28 @@ SPLIT_ROLES = ("fwd", "bwd")
 # ``NARROW_TILE_THREADS``, ``NARROW_TILE_WIDTHS["fwd"]`` and
 # ``NARROW_WIDTH_FLOORS["fwd"]``, measured there on the forward programs both
 # packages run) and are kept in sync with them and with the forward kernel
-# generator; :data:`FORWARD_NARROW_MIN_S` is this package's own table: on
-# each architecture the largest token count at which a measured narrow row
-# was still slower than its single tile lies below it.  A row's floor is
+# generator; :data:`FORWARD_NARROW_MIN_S` and :data:`FORWARD_NARROW_ROW_MIN_S`
+# are this package's own tables.  A row's floor is
 # :func:`forward_narrow_min_s`: the architecture's floor, or the floor of
 # :data:`FORWARD_NARROW_ROW_MIN_S` for the rows from a channel-vector count
-# upward.  On sm_103a the rows of 89 to 96 vectors (C = 712 to 768) take
+# upward; on each architecture the largest token count at which a measured
+# narrow row was still slower than its single tile lies below that row's
+# floor.  On sm_103a the rows of 89 to 96 vectors (C = 712 to 768) take
 # 20480: on a GB300 at 16384 x 768 the 32-vector tiles of the forward under
 # CUDA Graph replay were slower than the single tile in two measurements
 # each (FP32 taps, BF16 bias: 17.14 us single tile, 17.41 / 17.38 us
-# narrow; FP32 taps, FP32 bias: 17.12 vs 17.36 / 17.41 us), and near
-# parity in the other timed cells from 12288 to 16384; C = 768 runs faster
-# from 20480 on the default route and on every timed route at 31292.
-# C = 704 (88 vectors) was not slower at any measured token count from 8192
-# to 31292 and keeps 12288.  C = 712 to 760 are not measured and take the
-# higher floor.  The backward plans its narrower rows by
-# :data:`TILE_OVERRIDES` and :data:`NARROW_TILES` instead.
+# narrow; FP32 taps, FP32 bias: 17.12 vs 17.36 / 17.41 us).  The floor
+# gives up the 32-vector tiles' gain on the other forward routes there:
+# under CUDA Graph replay the default route ran 1.025 / 1.028 times as fast
+# at 12288 x 768 (14.90 us single tile, 14.48 / 14.50 us narrow) and the
+# BF16-taps routes 1.003 to 1.032 times as fast at 16384 x 768.  C = 768
+# runs faster from 20480 on the default route and on every timed route at
+# 31292.  C = 704 (88 vectors) keeps 12288: on the default route, the one
+# route timed at C = 704, its 32-vector tiles were not slower than the single
+# tile in either measurement at any timed token count from 12288 to 250340.
+# C = 712 to 760 are not measured and take the higher floor.  The backward
+# plans its narrower rows by :data:`TILE_OVERRIDES` and :data:`NARROW_TILES`
+# instead.
 FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
 FORWARD_NARROW_THREADS = 128
 FORWARD_NARROW_WIDTHS: dict[int, int] = {72: 18, 80: 40}
