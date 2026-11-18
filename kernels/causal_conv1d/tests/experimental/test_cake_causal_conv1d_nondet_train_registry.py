@@ -974,17 +974,21 @@ def test_backward_workspace_covers_every_narrow_row(narrow_table) -> None:
 
 # ----------------------------------------------------------------------------------------------------------------
 # The forward plan: the deterministic package's forward rule (route, ``S`` and architecture) over the same programs
-# from the token floor of ``FORWARD_NARROW_MIN_S``; below it the single tile of the package's 0.2.0 release.
+# from the row's token floor (``forward_narrow_min_s``: ``FORWARD_NARROW_MIN_S`` or ``FORWARD_NARROW_ROW_MIN_S``);
+# below it the single tile of the package's 0.2.0 release.
 
 # The forward's narrow rows at 128 threads x 8 channels: C -> (ct_vec, n_sub, n_ch_tiles) on every forward route
-# below the token floor of ``FWD_MIN_S`` (in a plan without ``S`` or the architecture, and on an architecture without
-# that floor), from that floor up to the width floor of ``FWD_FLOORS``, and from both floors on the call's
-# architecture; a call without a route and the legacy rule keep one tile of C / 8 vectors at every ``S``.
-FWD_ONE_TILE_SPLITS = {576: (72, 1, 1), 640: (80, 1, 1), 704: (88, 1, 1), 768: (96, 1, 1)}
-FWD_NARROW_SPLITS = {576: (32, 4, 3), 640: (32, 4, 3), 704: (32, 4, 3), 768: (32, 4, 3)}
-FWD_WIDE_SPLITS = {576: (18, 7, 4), 640: (40, 3, 2), 704: (32, 4, 3), 768: (32, 4, 3)}
+# below the row's token floor (:func:`_fwd_row_floor`; in a plan without ``S`` or the architecture, and on an
+# architecture without that floor), from that floor up to the width floor of ``FWD_FLOORS``, and from both floors on
+# the call's architecture; a call without a route and the legacy rule keep one tile of C / 8 vectors at every ``S``.
+FWD_ONE_TILE_SPLITS = {576: (72, 1, 1), 640: (80, 1, 1), 704: (88, 1, 1), 712: (89, 1, 1), 768: (96, 1, 1)}
+FWD_NARROW_SPLITS = {576: (32, 4, 3), 640: (32, 4, 3), 704: (32, 4, 3), 712: (32, 4, 3), 768: (32, 4, 3)}
+FWD_WIDE_SPLITS = {576: (18, 7, 4), 640: (40, 3, 2), 704: (32, 4, 3), 712: (32, 4, 3), 768: (32, 4, 3)}
 # The token count from which the narrow rows run narrower tiles than one tile, per architecture.
 FWD_MIN_S = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
+# The rows that take another token floor: arch -> ((C / 8 from which, S), ...).  On sm_103a the rows of 89 to 96
+# vectors (C 712 to 768) take 20480; C 704 (88 vectors) keeps the architecture's 12288.
+FWD_ROW_MIN_S = {"sm_103a": ((89, 20480),)}
 # The token count from which each width row runs its width, per architecture: arch -> {C / 8: S}.
 FWD_FLOORS = {
     "sm_100a": {72: 32768, 80: 24576},
@@ -993,7 +997,20 @@ FWD_FLOORS = {
 }
 # The forward workspace's channel tiles of the narrow rows: the largest tile count of the three plans (C 576: 1, 3,
 # then 4), whatever the token floors.
-FWD_NARROW_WORKSPACE_TILES = {576: 4, 640: 3, 704: 3, 768: 3}
+FWD_NARROW_WORKSPACE_TILES = {576: 4, 640: 3, 704: 3, 712: 3, 768: 3}
+
+
+def _fwd_row_floor(arch: str, channel_vectors: int) -> int | None:
+    """The token floor of the forward row of ``channel_vectors`` vectors on ``arch`` from the literal tables: the last
+    ``FWD_ROW_MIN_S`` entry the row reaches, else ``FWD_MIN_S``; ``None`` on an architecture without a floor."""
+
+    floor = FWD_MIN_S.get(arch)
+    if floor is None:
+        return None
+    for cv, S in FWD_ROW_MIN_S.get(arch, ()):
+        if channel_vectors >= cv:
+            floor = S
+    return floor
 
 
 def _forward_tokens() -> tuple[int, ...]:
@@ -1007,6 +1024,9 @@ def _forward_tokens() -> tuple[int, ...]:
                 tokens |= {S - 1, S, S + 1}
     for S in cake_jit.FORWARD_NARROW_MIN_S.values():
         tokens |= {S - 1, S, S + 1}
+    for rows in cake_jit.FORWARD_NARROW_ROW_MIN_S.values():
+        for _, S in rows:
+            tokens |= {S - 1, S, S + 1}
     for registry in (cake_jit, det_jit):
         for record in registry.MODULES.values():
             if record["role"] != "fwd":
@@ -1032,19 +1052,38 @@ def test_forward_narrow_rows_are_the_deterministic_forward_rows() -> None:
 
 @pytest.mark.cpu_only
 def test_forward_narrow_token_floors() -> None:
-    """``FORWARD_NARROW_MIN_S`` is the literal table: one positive token floor per exported architecture, below which
-    the narrow rows keep one tile and from which they plan as the deterministic forward; ``channel_split`` reads
-    only the floor of the call's architecture, and an architecture the table does not list keeps the single tile at
-    every ``S``."""
+    """``FORWARD_NARROW_MIN_S`` and ``FORWARD_NARROW_ROW_MIN_S`` are the literal tables: one positive token floor per
+    architecture of ``ARCHES``, and the rows of sm_103a from 89 vectors (C 712 to 768) at 20480;
+    ``forward_narrow_min_s`` gives every row its floor (:func:`_fwd_row_floor`), below which the narrow rows keep one
+    tile and from which they plan as the deterministic forward; ``channel_split`` reads only the row's floor on the
+    call's architecture, and an architecture ``FORWARD_NARROW_MIN_S`` does not list keeps the single tile at every
+    ``S``."""
 
     assert cake_jit.FORWARD_NARROW_MIN_S == FWD_MIN_S
     for arch, S in cake_jit.FORWARD_NARROW_MIN_S.items():
         assert arch in ARCHES and type(S) is int and S > 0, (arch, S)
+    assert cake_jit.FORWARD_NARROW_ROW_MIN_S == FWD_ROW_MIN_S
+    for arch, rows in cake_jit.FORWARD_NARROW_ROW_MIN_S.items():
+        assert arch in cake_jit.FORWARD_NARROW_MIN_S and type(rows) is tuple and rows, (arch, rows)
+        assert [cv for cv, _ in rows] == sorted({cv for cv, _ in rows}), (arch, rows)
+        for cv, S in rows:
+            assert type(cv) is int and 72 <= cv <= 96 and type(S) is int and S > 0, (arch, cv, S)
+    for arch in ARCHES:
+        for cv in range(1, 1025):
+            assert cake_jit.forward_narrow_min_s(arch, cv) == _fwd_row_floor(arch, cv), (arch, cv)
+    assert cake_jit.forward_narrow_min_s(None, 96) is None
+    assert cake_jit.forward_narrow_min_s("sm_90a", 96) is None
+    # The literal floors of the rows the plans below cross: sm_103a C 704 at 12288, C 712 and 768 at 20480.
+    assert [cake_jit.forward_narrow_min_s("sm_103a", C // 8) for C in (576, 640, 704, 712, 768)] == [
+        12288, 12288, 12288, 20480, 20480
+    ]
+    for arch in ("sm_100a", "sm_107a"):
+        assert {cake_jit.forward_narrow_min_s(arch, cv) for cv in range(72, 97)} == {FWD_MIN_S[arch]}, arch
     geometry = {"threads": 128, "vec": 8}
     for arch in ARCHES:
-        S_min = FWD_MIN_S.get(arch)
         for C, one_tile in FWD_ONE_TILE_SPLITS.items():
-            for S in (0, 1, 4096, 8192, 12287, 12288, 20479, 20480, 1 << 20):
+            S_min = _fwd_row_floor(arch, C // 8)
+            for S in (0, 1, 4096, 8192, 12287, 12288, 16384, 20479, 20480, 1 << 20):
                 got = cake_jit.channel_split(C, geometry=geometry, role="fwd", route="fwd", S=S, arch=arch)
                 if S_min is None or S < S_min:
                     assert got == one_tile, (arch, C, S)
@@ -1060,15 +1099,22 @@ def test_forward_narrow_token_floors() -> None:
                 for S in (1, 1 << 20):
                     got = cake_jit.channel_split(C, geometry=geometry, role="fwd", route="fwd", S=S, arch=arch)
                     assert got == one_tile, (arch, C, S)
+    # Without the row table every row takes its architecture's floor: sm_103a's C 712 and 768 from 12288.
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(cake_jit, "FORWARD_NARROW_ROW_MIN_S", {})
+        for C in (712, 768):
+            for S, want in ((12287, FWD_ONE_TILE_SPLITS[C]), (12288, FWD_NARROW_SPLITS[C])):
+                got = cake_jit.channel_split(C, geometry=geometry, role="fwd", route="fwd", S=S, arch="sm_103a")
+                assert got == want, (C, S)
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
-    """Every forward record plans what the deterministic record it copies plans from the ``FORWARD_NARROW_MIN_S``
-    floor of ``arch``, and below it (and on an architecture without one) the route-less plan of the 0.2.0 release,
-    for every multiple of 8 up to 8192 channels and every token count of :func:`_forward_tokens`: ``plan`` given the
-    record's architecture and route (as ``_launch`` and the KCP forward's single-rank main program call it),
+    """Every forward record plans what the deterministic record it copies plans from the row's floor on ``arch``
+    (``forward_narrow_min_s``), and below it (and on an architecture without one) the route-less plan of the 0.2.0
+    release, for every multiple of 8 up to 8192 channels and every token count of :func:`_forward_tokens`: ``plan``
+    given the record's architecture and route (as ``_launch`` and the KCP forward's single-rank main program call it),
     ``channel_split`` with and without the route, ``S`` and the architecture, and the legacy rule.  At 128 x 8 the
     narrow rows run one tile of C / 8 vectors below the floor, the 32-vector tiles from it and their width from the
     width floor of ``arch`` (the literal tables); without a route, without ``S`` or the architecture and under
@@ -1076,7 +1122,6 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
     architecture."""
 
     tokens = _forward_tokens()
-    S_min = cake_jit.FORWARD_NARROW_MIN_S.get(arch)
     literal = 0
     for pair_arch, kind, name, det_name in _pairs("fwd"):
         if pair_arch != arch:
@@ -1087,6 +1132,7 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
         assert route == kind == det_jit.record_route(det, arch), (name, det_name)
         for C in range(8, 8193, 8):
             label = (kind, name, C)
+            S_min = cake_jit.forward_narrow_min_s(arch, C // int(geometry["vec"]))
             # The route-less plan, the 0.2.0 plan of every row: that of each call below the floor.
             route_less = det_jit.channel_split(C, geometry=det_geometry, role="fwd")
             for kwargs in (
@@ -1132,12 +1178,19 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
             assert cake_jit.channel_split(C, geometry=geometry, legacy=True) == one_tile
             assert cake_jit.channel_split(C, geometry=geometry, role="fwd", route=route) == one_tile
             floor = FWD_FLOORS[arch].get(C // 8)
-            S_lo = FWD_MIN_S[arch]
+            S_lo = _fwd_row_floor(arch, C // 8)
             steps = [(1, one_tile), (S_lo - 1, one_tile), (1 << 20, FWD_WIDE_SPLITS[C])]
             steps += [(S_lo, narrow if floor is None or S_lo < floor else FWD_WIDE_SPLITS[C])]
             if floor is not None:
                 steps += [(floor - 1, narrow if floor - 1 >= S_lo else one_tile)]
                 steps += [(floor, FWD_WIDE_SPLITS[C])]
+            # Both sides of the architecture's floor and of every row floor (sm_103a: C 704 from 12288, C 712 and
+            # 768 from 20480, the single tile at 12288 to 20479).
+            for S in sorted({FWD_MIN_S[arch] - 1, FWD_MIN_S[arch], 16384, 20479, 20480}):
+                if S < S_lo:
+                    steps += [(S, one_tile)]
+                elif floor is None or S < floor:
+                    steps += [(S, narrow)]
             for S, want in steps:
                 got = cake_jit.plan(S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route)
                 assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, (kind, C, S)
@@ -1192,10 +1245,12 @@ def test_forward_workspace_is_the_deterministic_forward_workspace(arch) -> None:
         assert cake_jit.forward_workspace_words(arch, C) == 2 * tiles, C
     # The size does not read the token floors: none, or every narrow row's from one token, sizes the same buffer.
     for table in ({}, {arch: 1}):
-        with pytest.MonkeyPatch.context() as m:
-            m.setattr(cake_jit, "FORWARD_NARROW_MIN_S", table)
-            for C, tiles in FWD_NARROW_WORKSPACE_TILES.items():
-                assert cake_jit.forward_workspace_words(arch, C) == 2 * tiles, (table, C)
+        for rows in ({}, {arch: ((72, 1 << 20),)}):
+            with pytest.MonkeyPatch.context() as m:
+                m.setattr(cake_jit, "FORWARD_NARROW_MIN_S", table)
+                m.setattr(cake_jit, "FORWARD_NARROW_ROW_MIN_S", rows)
+                for C, tiles in FWD_NARROW_WORKSPACE_TILES.items():
+                    assert cake_jit.forward_workspace_words(arch, C) == 2 * tiles, (table, rows, C)
 
 
 @pytest.mark.cpu_only
@@ -1203,14 +1258,14 @@ def test_forward_workspace_is_the_deterministic_forward_workspace(arch) -> None:
 def test_kcp_forward_main_program_plans_the_single_rank_forward(arch, fake_device) -> None:
     """The KCP two-launch forward's single-rank main program (``kcp._sr_main``) runs the single-rank ``fwd`` route
     record ``selected_modules`` picks with that record's forward plan (its role, route and architecture: the narrow
-    rows' single tile below the ``FORWARD_NARROW_MIN_S`` floor, their 32-vector tiles from it, the width from the
-    width floor) and its counter words, which the forward workspace rule covers; the KCP forward program keeps the
+    rows' single tile below the row's ``forward_narrow_min_s`` floor, their 32-vector tiles from it, the width from
+    the width floor) and its counter words, which the forward workspace rule covers; the KCP forward program keeps the
     legacy plan, one tile of C / 8 vectors at C 576 to 768."""
 
     kcp = cake_package(KEY, "kcp")
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    S_min = FWD_MIN_S.get(arch)
-    for C in (512, 568, 576, 640, 704, 768, 776, 1024):
+    for C in (512, 568, 576, 640, 704, 712, 768, 776, 1024):
+        S_min = _fwd_row_floor(arch, C // 8)
         for S in _forward_tokens():
             name, scalars, grid, words = kcp._sr_main(
                 arch, S=S, C=C, n_frag=3, device_index=FAKE_DEVICE
@@ -1262,8 +1317,8 @@ FULL_PLAN_SWEEP = os.environ.get("CAKE_CONV1D_FULL_PLAN_SWEEP") == "1"
 def _plan_sweep_channels() -> tuple[int, ...]:
     """``CHANNELS``, rows off the 32-channel grid, and every selection threshold and ``TILE_OVERRIDES`` channel count
     of the registry with the multiple of 8 below it, both ends of every ``NARROW_TILES`` key with their neighbours
-    outside it, and the forward's narrow rows (C 576 to 768, two of them off the 64-channel grid) with their
-    neighbours."""
+    outside it, and the forward's narrow rows (C 576 to 768, two of them off the 64-channel grid, and C 712, the
+    first row of sm_103a's ``FORWARD_NARROW_ROW_MIN_S`` floor) with their neighbours."""
 
     channels = {*CHANNELS, 16, 24, 248, 520, 640, 1048, 1152, 3072}
     channels |= {568, 600, *FWD_NARROW_SPLITS, 776}
@@ -1282,8 +1337,8 @@ def _plan_sweep_channels() -> tuple[int, ...]:
 
 def _plan_sweep_tokens() -> tuple[int, ...]:
     """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES`` and
-    ``NARROW_TILES`` ranges, the forward's ``FORWARD_NARROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim
-    minimums and the selection rules' token floors, plus a few others."""
+    ``NARROW_TILES`` ranges, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and
+    ``FORWARD_WIDTH_FLOORS``, the grid-trim minimums and the selection rules' token floors, plus a few others."""
 
     tokens = {1, 2, 63, 64, 1000, 250340, 1 << 20}
     for floors in cake_jit.FORWARD_WIDTH_FLOORS.values():
@@ -1291,6 +1346,9 @@ def _plan_sweep_tokens() -> tuple[int, ...]:
             tokens |= {S - 1, S}
     for S in cake_jit.FORWARD_NARROW_MIN_S.values():
         tokens |= {S - 1, S}
+    for rows in cake_jit.FORWARD_NARROW_ROW_MIN_S.values():
+        for _, S in rows:
+            tokens |= {S - 1, S}
     for table in (cake_jit.TILE_OVERRIDES, cake_jit.NARROW_TILES):
         for rows in table.values():
             for value in rows.values():
@@ -1511,58 +1569,70 @@ def test_row_plans_follow_a_replaced_narrow_table(
 # Forward token floors the replaced-floor test plans with on every architecture: one token, below, at and between the
 # width floors of ``FWD_FLOORS`` and above all of them.
 SYNTHETIC_FORWARD_MIN_S = (1, 8192, 24576, 32768, 36864, 65536)
+# A row table the replaced-floor test plans with besides the architecture's own: the rows from 89 vectors (C 712 to
+# 768) from a floor between the width floors.
+SYNTHETIC_FORWARD_ROW_MIN_S = ((89, 28672),)
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatch) -> None:
-    """A forward row planned before ``FORWARD_NARROW_MIN_S`` changes keeps its plan until
-    :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache (a row whose program selection reads
-    ``S`` holds no plan and plans every call); after it, with each floor of :data:`SYNTHETIC_FORWARD_MIN_S` on
-    ``arch``, every forward route's calls of the narrow rows and their neighbours on both sides of the floor and of
-    the width floors plan as a per-call plan does: the deterministic forward's tiles from the floor, the route-less
-    single tile below it."""
+    """A forward row planned before ``FORWARD_NARROW_MIN_S`` or ``FORWARD_NARROW_ROW_MIN_S`` changes keeps its plan
+    until :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache (a row whose program selection
+    reads ``S`` holds no plan and plans every call); after it, with each floor of :data:`SYNTHETIC_FORWARD_MIN_S` on
+    ``arch`` and either ``arch``'s row table or :data:`SYNTHETIC_FORWARD_ROW_MIN_S`, every forward route's calls of
+    the narrow rows and their neighbours on both sides of the row's floor (``forward_narrow_min_s``: the floor, or
+    the row table's) and of the width floors plan as a per-call plan does: the deterministic forward's tiles from
+    the row's floor, the route-less single tile below it."""
 
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    channels = (568, 576, 600, 640, 704, 768, 776)
+    channels = (568, 576, 600, 640, 704, 712, 768, 776)
     checked = 0
     for S_min in SYNTHETIC_FORWARD_MIN_S:
-        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
-        before = {
-            (kind, C): _row_planned(arch, kind, S_min, C, 3, 1, None)
-            for kind in cake_jit.forward_kinds(arch)
-            for C in channels
-        }
-        with monkeypatch.context() as m:
-            m.setitem(cake_jit.FORWARD_NARROW_MIN_S, arch, S_min)
-            for (kind, C), plan_before in before.items():
-                hit = pkg._ROW_PLANS.get((arch, kind, C, FAKE_DEVICE, 1))
-                if hit is None:  # the call raised before planning a row
-                    assert isinstance(plan_before[1], str), (kind, C, plan_before)
-                    continue
-                if hit[0] is None:  # the selection reads ``S``: every call is planned
-                    assert cake_jit.tokens_select(arch, kind, C), (kind, C)
-                    continue
-                assert _row_planned(arch, kind, S_min, C, 3, 1, None) == plan_before, (kind, C)
-            assert pkg.cake_causal_conv1d_nondet_train_plan_cache_clear() >= 1
-            bounds = {S_min, *FWD_FLOORS[arch].values()}
-            tokens = sorted({1, 1 << 20, *(S + d for S in bounds for d in (-1, 0, 1))} - {0})
-            for kind in cake_jit.forward_kinds(arch):
-                for C in channels:
-                    for S in tokens:
-                        want = _per_call(arch, kind, S, C, 3, 1, None)
-                        got = _row_planned(arch, kind, S, C, 3, 1, None)
-                        assert got == want, (S_min, kind, C, S)
-                        assert isinstance(got[1], dict), (S_min, kind, C, S, got)
-                        geometry = cake_jit.MODULES[got[0][0]]["grid_rule"]["geometry"]
-                        if S >= S_min:
-                            split = det_jit.channel_split(
-                                C, geometry=geometry, role="fwd", route=kind, S=S, arch=arch
-                            )
-                        else:
-                            split = det_jit.channel_split(C, geometry=geometry, role="fwd")
-                        assert _split3(got[1]) == split, (S_min, kind, C, S)
-                        checked += 1
+        for rows in (cake_jit.FORWARD_NARROW_ROW_MIN_S.get(arch, ()), SYNTHETIC_FORWARD_ROW_MIN_S):
+            pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+            before = {
+                (kind, C): _row_planned(arch, kind, S_min, C, 3, 1, None)
+                for kind in cake_jit.forward_kinds(arch)
+                for C in channels
+            }
+            with monkeypatch.context() as m:
+                m.setitem(cake_jit.FORWARD_NARROW_MIN_S, arch, S_min)
+                m.setitem(cake_jit.FORWARD_NARROW_ROW_MIN_S, arch, rows)
+                for (kind, C), plan_before in before.items():
+                    hit = pkg._ROW_PLANS.get((arch, kind, C, FAKE_DEVICE, 1))
+                    if hit is None:  # the call raised before planning a row
+                        assert isinstance(plan_before[1], str), (kind, C, plan_before)
+                        continue
+                    if hit[0] is None:  # the selection reads ``S``: every call is planned
+                        assert cake_jit.tokens_select(arch, kind, C), (kind, C)
+                        continue
+                    assert _row_planned(arch, kind, S_min, C, 3, 1, None) == plan_before, (kind, C)
+                assert pkg.cake_causal_conv1d_nondet_train_plan_cache_clear() >= 1
+                bounds = {S_min, *FWD_FLOORS[arch].values(), *(S for _, S in rows)}
+                tokens = sorted({1, 1 << 20, *(S + d for S in bounds for d in (-1, 0, 1))} - {0})
+                for kind in cake_jit.forward_kinds(arch):
+                    for C in channels:
+                        for S in tokens:
+                            want = _per_call(arch, kind, S, C, 3, 1, None)
+                            got = _row_planned(arch, kind, S, C, 3, 1, None)
+                            assert got == want, (S_min, rows, kind, C, S)
+                            assert isinstance(got[1], dict), (S_min, rows, kind, C, S, got)
+                            geometry = cake_jit.MODULES[got[0][0]]["grid_rule"]["geometry"]
+                            cv = C // int(geometry["vec"])
+                            row_floor = S_min
+                            for cv_from, S_row in rows:
+                                if cv >= cv_from:
+                                    row_floor = S_row
+                            assert cake_jit.forward_narrow_min_s(arch, cv) == row_floor, (S_min, rows, C)
+                            if S >= row_floor:
+                                split = det_jit.channel_split(
+                                    C, geometry=geometry, role="fwd", route=kind, S=S, arch=arch
+                                )
+                            else:
+                                split = det_jit.channel_split(C, geometry=geometry, role="fwd")
+                            assert _split3(got[1]) == split, (S_min, rows, kind, C, S)
+                            checked += 1
     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
     assert checked
 

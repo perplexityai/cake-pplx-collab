@@ -4696,8 +4696,8 @@ SPLIT_ROLES = ("fwd", "bwd")
 # The forward's narrow rows: the deterministic package's forward rule over the
 # same forward programs, from a token floor of the call's architecture.  On a
 # route of :data:`FORWARD_NARROW_ROUTES` the single-tile rows at 72 <= cv <=
-# 96 (C = 576 to 768) run, from the token floor of the call's architecture in
-# :data:`FORWARD_NARROW_MIN_S` (``{arch: S}``), 32-vector tiles
+# 96 (C = 576 to 768) run, from the row's token floor on the call's
+# architecture (:func:`forward_narrow_min_s`), 32-vector tiles
 # (``ct_vec`` 32, four token sub-tiles, the last tile partial) at
 # :data:`FORWARD_NARROW_THREADS` threads, or, from the width floor of
 # :data:`FORWARD_WIDTH_FLOORS` on the call's architecture, the whole tiles of
@@ -4705,10 +4705,11 @@ SPLIT_ROLES = ("fwd", "bwd")
 # 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  One tile of cv vectors leaves
 # 128 - cv lanes of every CTA idle over the whole token axis, which costs
 # more than the narrower tiles' extra channel tiles only on longer token
-# streams: below the :data:`FORWARD_NARROW_MIN_S` floor, in a plan made
-# without ``S`` or without the architecture, and on an architecture that
-# table does not list, the row keeps its single tile of cv vectors (the plan
-# of the package's 0.2.0 release); a call without a route keeps it too.
+# streams: below the row's floor, in a plan made without ``S`` or without
+# the architecture, and on an architecture :data:`FORWARD_NARROW_MIN_S`
+# (``{arch: S}``) does not list, the row keeps its single tile of cv
+# vectors (the plan of the package's 0.2.0 release); a call without a route
+# keeps it too.
 # From the floor the plan is the deterministic forward's (which runs the
 # 32-vector tiles below its width floor at every ``S``).  The programs are
 # unchanged and ``y`` keeps its bits in every plan.  The narrow tables are the
@@ -4718,9 +4719,20 @@ SPLIT_ROLES = ("fwd", "bwd")
 # packages run) and are kept in sync with them and with the forward kernel
 # generator; :data:`FORWARD_NARROW_MIN_S` is this package's own table: on
 # each architecture the largest token count at which a measured narrow row
-# was still slower than its single tile lies below it.  The backward
-# plans its narrower rows by :data:`TILE_OVERRIDES` and :data:`NARROW_TILES`
-# instead.
+# was still slower than its single tile lies below it.  A row's floor is
+# :func:`forward_narrow_min_s`: the architecture's floor, or the floor of
+# :data:`FORWARD_NARROW_ROW_MIN_S` for the rows from a channel-vector count
+# upward.  On sm_103a the rows of 89 to 96 vectors (C = 712 to 768) take
+# 20480: on a GB300 at 16384 x 768 the 32-vector tiles of the forward under
+# CUDA Graph replay were slower than the single tile in two measurements
+# each (FP32 taps, BF16 bias: 17.14 us single tile, 17.41 / 17.38 us
+# narrow; FP32 taps, FP32 bias: 17.12 vs 17.36 / 17.41 us), and near
+# parity in the other timed cells from 12288 to 16384; C = 768 runs faster
+# from 20480 on the default route and on every timed route at 31292.
+# C = 704 (88 vectors) was not slower at any measured token count from 8192
+# to 31292 and keeps 12288.  C = 712 to 760 are not measured and take the
+# higher floor.  The backward plans its narrower rows by
+# :data:`TILE_OVERRIDES` and :data:`NARROW_TILES` instead.
 FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
 FORWARD_NARROW_THREADS = 128
 FORWARD_NARROW_WIDTHS: dict[int, int] = {72: 18, 80: 40}
@@ -4730,6 +4742,30 @@ FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
     "sm_107a": {72: 40960, 80: 36864},
 }
 FORWARD_NARROW_MIN_S: dict[str, int] = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
+# ``{arch: ((cv, S), ...)}``, ``cv`` ascending: the narrow rows of at least
+# ``cv`` channel vectors take the token floor ``S`` on ``arch`` instead of
+# the architecture's :data:`FORWARD_NARROW_MIN_S` floor (the last entry they
+# reach wins); read through :func:`forward_narrow_min_s`.
+FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int], ...]] = {"sm_103a": ((89, 20480),)}
+
+
+def forward_narrow_min_s(arch: str | None, channel_vectors: int) -> int | None:
+    """The token floor from which the forward row of ``channel_vectors``
+    vectors on ``arch`` plans as the deterministic forward: the
+    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the last entry of ``arch``
+    whose channel-vector count the row reaches, else the architecture's
+    :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the single tile at every
+    ``S``) on an architecture :data:`FORWARD_NARROW_MIN_S` does not list.
+    The per-call plan (:func:`_forward_tiles`), the row plan
+    (:func:`plan_row`) and the tests read the floor here."""
+
+    floor = FORWARD_NARROW_MIN_S.get(arch)
+    if floor is None:
+        return None
+    for cv, S in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
+        if int(channel_vectors) >= int(cv):
+            floor = S
+    return int(floor)
 
 
 def channel_split(
@@ -4779,19 +4815,20 @@ def channel_split(
     768 run 32-vector tiles, ``(32, threads // 32, ceil(cv / 32))``, when the
     call names its token count ``S`` and its architecture ``arch`` (one of
     :data:`ARCHES`, a ``ValueError`` otherwise) and ``S`` is at least the
-    floor of ``arch`` in :data:`FORWARD_NARROW_MIN_S`: C = 576, 640 and 768
+    row's floor on ``arch`` (:func:`forward_narrow_min_s`: the
+    architecture's :data:`FORWARD_NARROW_MIN_S` floor, or a
+    :data:`FORWARD_NARROW_ROW_MIN_S` floor): C = 576, 640 and 768
     as (32, 4, 3) instead of one tile of 72, 80 and 96 vectors.  A row of
     :data:`FORWARD_NARROW_WIDTHS` runs whole tiles of its width instead from
-    its floor on ``arch`` in :data:`FORWARD_WIDTH_FLOORS` (and the
-    :data:`FORWARD_NARROW_MIN_S` floor): C = 576 as (18, 7, 4) and C = 640 as
-    (40, 3, 2).  Without ``S`` or ``arch``, below the
-    :data:`FORWARD_NARROW_MIN_S` floor of ``arch`` and on an architecture
-    that table does not list, the single tile stays (the 0.2.0 plan); ``y`` keeps
-    its bits in every plan.  Without a route, under ``legacy`` and for the
-    backward role the split above stays (the backward's narrower rows are
-    :func:`plan`'s :data:`TILE_OVERRIDES` and :data:`NARROW_TILES`).  From
-    the :data:`FORWARD_NARROW_MIN_S` floor of ``arch`` (and on every other
-    row) this is the deterministic package's ``channel_split`` for the
+    its floor on ``arch`` in :data:`FORWARD_WIDTH_FLOORS` (and the row's
+    floor): C = 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  Without ``S``
+    or ``arch``, below the row's floor on ``arch`` and on an architecture
+    :data:`FORWARD_NARROW_MIN_S` does not list, the single tile stays (the
+    0.2.0 plan); ``y`` keeps its bits in every plan.  Without a route, under
+    ``legacy`` and for the backward role the split above stays (the
+    backward's narrower rows are :func:`plan`'s :data:`TILE_OVERRIDES` and
+    :data:`NARROW_TILES`).  From the row's floor on ``arch`` (and on every
+    other row) this is the deterministic package's ``channel_split`` for the
     forward role.
     """
 
@@ -4824,8 +4861,8 @@ def _forward_tiles(
 ) -> str:
     """Which tiles of :data:`FORWARD_TILES` a narrow forward row runs: for a
     forward call on a route of :data:`FORWARD_NARROW_ROUTES` that names ``S``
-    and ``arch``, with ``S`` at least the floor of ``arch`` in
-    :data:`FORWARD_NARROW_MIN_S`, ``"wide"`` when the row has a width in
+    and ``arch``, with ``S`` at least the row's floor on ``arch``
+    (:func:`forward_narrow_min_s`), ``"wide"`` when the row has a width in
     :data:`FORWARD_NARROW_WIDTHS` and ``S`` is at least its floor on ``arch``
     in :data:`FORWARD_WIDTH_FLOORS`, else ``"narrow"``; ``"one"`` otherwise.
     Only the rows :func:`_forward_narrow_tile` names read it.  The memoized
@@ -4836,7 +4873,7 @@ def _forward_tiles(
         return "one"
     if route not in FORWARD_NARROW_ROUTES:
         return "one"
-    min_s = FORWARD_NARROW_MIN_S.get(arch)
+    min_s = forward_narrow_min_s(arch, channel_vectors)
     if min_s is None or int(S) < min_s:
         return "one"
     floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
@@ -5210,11 +5247,11 @@ def plan(
     / vec / 32))``; without them and under ``legacy`` the split is
     :func:`channel_split`'s.  For the forward role ``route``, ``S`` and
     ``arch`` are passed on to :func:`channel_split` (not under ``legacy``):
-    from the :data:`FORWARD_NARROW_MIN_S` floor of ``arch`` the forward
-    record's route runs the 32-vector tiles of its narrow rows, and a row of
-    :data:`FORWARD_NARROW_WIDTHS` its width from its token floor on ``arch``,
-    as the deterministic package's forward plans them; below that floor the
-    row keeps its single tile.
+    from the row's floor on ``arch`` (:func:`forward_narrow_min_s`) the
+    forward record's route runs the 32-vector tiles of its narrow rows, and
+    a row of :data:`FORWARD_NARROW_WIDTHS` its width from its token floor on
+    ``arch``, as the deterministic package's forward plans them; below that
+    floor the row keeps its single tile.
     """
 
     S, C, num_docs = int(S), int(C), int(num_docs)
@@ -5241,7 +5278,7 @@ def _plan_split(
     :data:`TILE_OVERRIDES` row's split, else the :data:`NARROW_TILES` row's,
     else :func:`channel_split`'s; for a forward call (not ``legacy``),
     :func:`channel_split`'s of its route, ``S`` and ``arch`` (the
-    :data:`FORWARD_NARROW_MIN_S` and :data:`FORWARD_WIDTH_FLOORS` floors)."""
+    :func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS` floors)."""
 
     if role == "bwd" and not legacy and arch is not None and route is not None:
         override = tile_override(arch, route, C, S)
@@ -5546,7 +5583,7 @@ class RowPlan(NamedTuple):
     split: tuple[int, int, int]
     # Disjoint ``(S_min, S_max, split)`` token ranges, each with its split: the backward record's
     # :data:`TILE_OVERRIDES` row, else its :data:`NARROW_TILES` row (the two tables share no ``(route, C)``; at most
-    # one range), or the forward record's narrow row: its 32-vector tiles from the :data:`FORWARD_NARROW_MIN_S` floor
+    # one range), or the forward record's narrow row: its 32-vector tiles from its :func:`forward_narrow_min_s` floor
     # up to its :data:`FORWARD_WIDTH_FLOORS` floor, and from the later of the two floors the width of a
     # :data:`FORWARD_NARROW_WIDTHS` row with no ceiling (the last range's ``S_max`` is ``sys.maxsize``: the forward
     # rule has none, so the row's plan is the per-call plan for every ``S``); empty without one.
@@ -5565,7 +5602,7 @@ def plan_row(
     ``S`` enters a call's host plan only through a token floor of the
     route's selection rules, the ``[S_min, S_max]`` range of the record's
     :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors
-    of a narrow forward row (:data:`FORWARD_NARROW_MIN_S` and
+    of a narrow forward row (:func:`forward_narrow_min_s` and
     :data:`FORWARD_WIDTH_FLOORS`) and the trim of :func:`launch_grid` (an
     ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs``
     only through :func:`search_steps`; so with this row :func:`row_launch`
@@ -5592,7 +5629,7 @@ def plan_row(
         floors = sorted(
             {
                 int(S)
-                for S in (FORWARD_NARROW_MIN_S.get(arch), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
+                for S in (forward_narrow_min_s(arch, cv), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
                 if S is not None
             }
         )
@@ -5783,7 +5820,7 @@ def forward_workspace_words(arch: str, C: int) -> int:
     forward route of the architecture (each planned with its own geometry and
     role on its route), so one buffer serves every forward route.  A narrow
     row takes up to three plans over ``S`` (C = 576: one tile below the
-    :data:`FORWARD_NARROW_MIN_S` floor, 3 tiles from it, 4 from its width
+    row's :func:`forward_narrow_min_s` floor, 3 tiles from it, 4 from its width
     floor), so each program is planned with each of the row's tiles of
     :data:`FORWARD_TILES` whatever the floors on the architecture, and the
     buffer serves every ``S``: it depends on ``C`` only (never on ``S``, the

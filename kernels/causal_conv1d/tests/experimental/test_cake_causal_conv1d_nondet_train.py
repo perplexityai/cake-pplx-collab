@@ -45,7 +45,7 @@ tiles, on a caller-owned workspace of the public size and on the package's, with
 naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
 the side-stream one-SM trim of a three-tile narrow row's grid.  The forward's narrow rows (``FORWARD_NARROW_CASES``:
-C 576 to 768 at the token floors of the device's architecture in ``FORWARD_NARROW_MIN_S`` and
+C 576 to 768 at the row's token floors on the device's architecture, ``forward_narrow_min_s`` and
 ``FORWARD_WIDTH_FLOORS``) launch their 32-vector or width tiles on a caller-owned forward workspace of the public
 size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.
 
@@ -166,7 +166,7 @@ NARROW_CASES = {
     for arch, rows in loader.NARROW_TILES.items()
 }
 # The forward's narrow rows (C 576 to 768) in each region of the device's architecture where the forward plan is not
-# the single tile of C / 8 vectors, (route, C, tiles): ``"narrow"`` at the ``FORWARD_NARROW_MIN_S`` floor (the
+# the single tile of C / 8 vectors, (route, C, tiles): ``"narrow"`` at the row's ``forward_narrow_min_s`` floor (the
 # 32-vector tiles), ``"wide"`` at the row's ``FORWARD_WIDTH_FLOORS`` floor (its ``FORWARD_NARROW_WIDTHS`` tiles: C 576
 # as (18, 7, 4), C 640 as (40, 3, 2)); the token counts come from the package's tables at run time
 # (:func:`_forward_narrow_tokens`).  Every row on the default route ``fwd``, and one row on each other forward route.
@@ -554,11 +554,12 @@ def _forward_stream_workspace(device: torch.device) -> torch.Tensor | None:
 
 def _forward_narrow_tokens(arch: str, channel_vectors: int, tiles: str) -> int:
     """The token count at which the forward row of ``channel_vectors`` vectors runs ``tiles`` on ``arch``, from the
-    package's tables: the ``FORWARD_NARROW_MIN_S`` floor for ``"narrow"`` (below the row's width floor), the row's
-    ``FORWARD_WIDTH_FLOORS`` floor (at least the former) for ``"wide"``.  A table that leaves the region empty on
-    ``arch`` fails the test."""
+    package's tables: the row's ``forward_narrow_min_s`` floor (``FORWARD_NARROW_MIN_S`` or
+    ``FORWARD_NARROW_ROW_MIN_S``: on sm_103a C 768 from 20480, C 704 from 12288) for ``"narrow"`` (below the row's
+    width floor), the row's ``FORWARD_WIDTH_FLOORS`` floor (at least the former) for ``"wide"``.  A table that leaves
+    the region empty on ``arch`` fails the test."""
 
-    S_min = loader.FORWARD_NARROW_MIN_S.get(arch)
+    S_min = loader.forward_narrow_min_s(arch, channel_vectors)
     assert S_min is not None, f"{arch} has no forward token floor in FORWARD_NARROW_MIN_S"
     floor = loader.FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
     if tiles == "wide":
@@ -990,8 +991,8 @@ def test_narrow_tile_row_gives_up_one_sm_at_three_tiles(monkeypatch) -> None:
 def test_forward_narrow_row(kind, C, tiles, monkeypatch, record_property) -> None:
     """Every ``FORWARD_NARROW_CASES`` row at the token count of :func:`_forward_narrow_tokens` on the device's
     architecture: the public forward launches the route's one program with the region's channel tiles -- the
-    32-vector tiles (``32``, ``threads // 32`` sub-tiles, ``ceil(C / vec / 32)`` tiles) at the
-    ``FORWARD_NARROW_MIN_S`` floor, the row's ``FORWARD_NARROW_WIDTHS`` tiles at its width floor -- instead of one
+    32-vector tiles (``32``, ``threads // 32`` sub-tiles, ``ceil(C / vec / 32)`` tiles) at the row's
+    ``forward_narrow_min_s`` floor, the row's ``FORWARD_NARROW_WIDTHS`` tiles at its width floor -- instead of one
     tile of ``C / vec`` vectors, once on a caller-owned forward workspace of the public size and once on the
     package's, each holding the launch's counters and zero after the call; ``y`` of both launches judged against the
     naive tier."""
