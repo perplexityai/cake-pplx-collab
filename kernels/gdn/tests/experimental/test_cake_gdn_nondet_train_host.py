@@ -45,6 +45,7 @@ import math
 import random
 import statistics
 import time
+import types
 import warnings
 
 import pytest
@@ -57,6 +58,7 @@ from tests.experimental.test_helpers.cake_gdn_naive import token_recurrence
 
 cake_backend = cake_package("cake_gdn_nondet_train", "cake_backend")
 cake_chain = cake_package("cake_gdn_nondet_train", "cake_chain")
+cake_plan = cake_package("cake_gdn_nondet_train", "cake_plan")
 cake_gdn_nondet = cake_package("cake_gdn_nondet_train").cake_gdn_nondet
 
 HEAD_DIM = 128
@@ -71,11 +73,16 @@ HEADS = (2, 6)  # the value-head group of three of the source issue (#7074)
 HOST_CALL_MAX_US = 1000.0
 HOST_LAYOUT = (131071, 87531, 43385)
 HOST_SAMPLES = 9
-# The rows of the reuse test, (lengths, heads): two layouts of the judge's size, groups of three and two.
+# The rows of the reuse test, (lengths, heads), all of the judge's size: two layouts, groups of three and two, that the
+# one-wave split of the adjoint walk never takes on an exported architecture's SM count (the serial walk), and the
+# split layout of the main suite's split tests, which takes the split on a REUSE_SPLIT_SMS-SM view of the device whose
+# pricing selects it (:func:`_price_the_adjoint_split`).
 REUSE_LAYOUTS = {
     "g3": ((1000, 300, 77), (2, 6)),
     "g2": ((640, 100, 257), (2, 4)),
+    "split": ((700, 1500, 230), (2, 4)),
 }
+REUSE_SPLIT_SMS = 40
 _ALERT = "does not have a deterministic implementation"
 
 
@@ -381,14 +388,55 @@ def _reuse_call(
     return problem.results(leaves, o, final), problem
 
 
+def _price_the_adjoint_split(monkeypatch, device) -> None:
+    """As the main suite's split tests: a REUSE_SPLIT_SMS-SM view of the device (fresh layout caches), its architecture
+    in ADJOINT_SPLIT_ARCHS with costs that select the split of the adjoint walk, no adjoint form, the two-stream route;
+    skips where the split's stages or a chain stage are not delivered."""
+    index = cake_chain._device_index(device)
+    arch = cake_backend.device_arch(index)
+    if (
+        not all(
+            cake_chain._available(stage, arch)
+            for stage in cake_chain.ADJOINT_SPLIT_STAGES
+        )
+        or cake_chain._adjoint_chain_stage(arch) is None
+    ):
+        pytest.skip(f"the split of the adjoint walk is not delivered for {arch}")
+    _sm, smem, major = cake_chain._device_props(index)
+    monkeypatch.setattr(
+        cake_chain, "_device_props", lambda _index: (REUSE_SPLIT_SMS, smem, major)
+    )
+    for cache in ("_META_FRONT", "_DHU_AUTO", "_SDT_AUTO", "_BWD_PLANS"):
+        monkeypatch.setattr(cake_chain, cache, {})
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_ARCHS", frozenset({arch}))
+    costs = {"walk": 1.0, "summary": 1.0, "serial_low": 1.0, "serial_full": 1.0, "stitch": 0.0, "stitch_piece": 0.0,
+             "fixed": 0.0}  # fmt: skip
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_COSTS", {arch: costs})
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_DEVICE_COSTS", {})
+    monkeypatch.setattr(cake_plan, "ADJOINT_FORMS", types.MappingProxyType({}))
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_SPLIT_ARCHS", frozenset())
+
+
 @pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
 @pytest.mark.parametrize("layout", sorted(REUSE_LAYOUTS))
 def test_reused_plans_on_recycled_scratch_naive_tier_verdict(
-    layout, checkpointed, device, record_property
+    layout, checkpointed, device, monkeypatch, record_property
 ) -> None:
     # a layout's call with new inputs, after a call of the same layout (its plans and tables cached) and a call of
     # another layout in between (the workspaces taken and released at other shapes): outputs, final state and every
-    # gradient of the last call are judged
+    # gradient of the last call are judged.  The "split" row runs all three calls on the split pricing; each row first
+    # checks the adjoint route it exists for
+    if layout == "split":
+        _price_the_adjoint_split(monkeypatch, device)
+    seq_lens, (h, hv) = REUSE_LAYOUTS[layout]
+    split = cake_chain._adjoint_split_length(
+        seq_lens,
+        hv,
+        cake_chain._device_index(device),
+        cake_chain.make_options(),
+        hv // h,
+    )
+    assert (split is not None) is (layout == "split"), (layout, split)
     other = next(name for name in REUSE_LAYOUTS if name != layout)
 
     def draw(j, s):

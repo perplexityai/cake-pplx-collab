@@ -1256,8 +1256,8 @@ def test_empty_sequences_carry_their_state(route, device, record_property) -> No
 # --------------------------------------------------------------------------- long layouts and the pre-scan capacity
 
 # Layouts whose device-route bound layout (one sequence of ``T // 64 + 1`` chunks beside ``N - 1`` one-chunk
-# sequences) prices a split longer than one pre-scan CTA covers (128 chunks) unless the search rejects it: planned
-# only (their oracle is too large for the judge).
+# sequences) prices a split longer than one pre-scan CTA covers (128 chunks) unless the search rejects it: planned, and
+# run on both table routes to finite outputs (their oracle is too large for the judge).
 LONG_LAYOUTS = (
     ("16x4096-h8", (4096,) * 16, (8, 16)),
     ("15-real-h8", _REAL_15, (8, 16)),
@@ -1372,6 +1372,19 @@ def test_the_production_route_naive_tier_verdict(
         )
 
     _judge(record_property, 17, draw)
+
+
+@pytest.mark.parametrize("layout", LONG_LAYOUTS, ids=[c[0] for c in LONG_LAYOUTS])
+def test_long_layouts_run_on_both_table_routes(layout, device) -> None:
+    # a contract check (the package makes no run-to-run promise, and the judge cannot hold these layouts' oracle):
+    # the device route, whose bound layout runs the most pre-scan segments, and the host route run to finite outputs
+    # and gradients
+    _id, seq_lens, heads = layout
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=13)
+    for route in ("device", "host"):
+        results = _run(inputs, seq_lens, route=route)
+        for name in OUTPUT_NAMES:
+            assert bool(torch.isfinite(results[name]).all()), (route, name)
 
 
 def test_segments_beyond_the_prescan_capacity_raise(device) -> None:
