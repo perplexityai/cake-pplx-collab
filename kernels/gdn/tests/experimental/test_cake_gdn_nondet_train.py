@@ -790,6 +790,219 @@ def test_dhu_tc_rule_on_the_campaign_rows(arch, monkeypatch) -> None:
             assert abs(rec["T_tc"] - r01_tc) < 0.1, rec
 
 
+# The device classes of the host rules below, (architecture, SM count): B200 and B300 (x86 hosts), GB200 and GB300
+# (152-SM Grace-host boards) and R200 at 212 and 216 SMs.
+DEVICE_CLASSES = {
+    "B200": ("sm_100a", 148),
+    "GB200": ("sm_100a", 152),
+    "B300": ("sm_103a", 148),
+    "GB300": ("sm_103a", 152),
+    "R200-212": ("sm_107a", 212),
+    "R200-216": ("sm_107a", 216),
+}
+
+
+def _device_class(monkeypatch, name: str) -> tuple[str, int]:
+    """Let the host rules see the device class ``name`` of :data:`DEVICE_CLASSES` on device 0, with fresh layout
+    caches; its (architecture, SM count)."""
+    arch, sm_count = DEVICE_CLASSES[name]
+    monkeypatch.setattr(
+        cake_chain, "_device_props", lambda _index: (sm_count, 232448, 10)
+    )
+    monkeypatch.setattr(cake_backend, "device_arch", lambda _index: arch)
+    monkeypatch.setattr(cake_chain, "_META_FRONT", {})
+    monkeypatch.setattr(cake_chain, "_DHU_AUTO", {})
+    return arch, sm_count
+
+
+# The low-residency layouts the host-table rule of the serial scan was fitted on, "HxHV:tokens" -> (H, HV, tokens per
+# sequence): one to twelve resident (sequence, value head) pairs.  On each device class the one-wave split takes the
+# rows of HOST_SPLIT_ROWS (GB200 keeps the planner's split tables of a group of three, its form of
+# cake_plan.ADJOINT_FORMS); every other row runs a serial table, at (32, 2), on sm_107a at (64, 1) but for 2x2:300_77.
+HOST_SERIAL_ROWS = {
+    "1x1:1000_3000": (1, 1, (1000, 3000)),
+    "1x1:1024": (1, 1, (1024,)),
+    "1x1:2048": (1, 1, (2048,)),
+    "1x1:4096": (1, 1, (4096,)),
+    "1x1:8192": (1, 1, (8192,)),
+    "1x1:16384": (1, 1, (16384,)),
+    "1x2:1500_63_900": (1, 2, (1500, 63, 900)),
+    "1x2:4096": (1, 2, (4096,)),
+    "1x2:8192": (1, 2, (8192,)),
+    "1x3:777_1_2048_130": (1, 3, (777, 1, 2048, 130)),
+    "1x3:4096": (1, 3, (4096,)),
+    "2x2:300_77": (2, 2, (300, 77)),
+    "2x2:4096": (2, 2, (4096,)),
+    "2x2:8192": (2, 2, (8192,)),
+    "2x4:1500_63_900": (2, 4, (1500, 63, 900)),
+    "4x4:1024": (4, 4, (1024,)),
+    "4x4:2048": (4, 4, (2048,)),
+    "4x4:4096": (4, 4, (4096,)),
+    "4x4:8192": (4, 4, (8192,)),
+    "4x4:16384": (4, 4, (16384,)),
+}
+_HOST_SPLIT_148_152 = frozenset(
+    {"1x1:16384", "1x2:8192", "1x3:4096", "2x2:8192", "4x4:4096", "4x4:8192", "4x4:16384"}
+)  # fmt: skip
+HOST_SPLIT_ROWS = {
+    "B200": _HOST_SPLIT_148_152,
+    "GB200": _HOST_SPLIT_148_152 | {"1x3:777_1_2048_130"},
+    "B300": _HOST_SPLIT_148_152,
+    "GB300": _HOST_SPLIT_148_152,
+    "R200-212": frozenset({"4x4:8192", "4x4:16384"}),
+    "R200-216": frozenset({"4x4:8192", "4x4:16384"}),
+}
+# The delivered host-table entries (reg_fixed in us; reg_scale scales the register step t_unit): B200's serves sm_100a,
+# GB200 and GB300 have their own; B300 and R200 have none.  The serial rows on which they select dhu_tc2 (the register
+# path on the other serial rows, where the rule at the call takes the register path on every row).
+HOST_SERIAL_COSTS = {
+    "B200": {"reg_fixed": 28.97, "reg_scale": 0.8878},
+    "GB200": {"reg_fixed": 39.38, "reg_scale": 0.8925},
+    "GB300": {"reg_fixed": 39.14, "reg_scale": 0.8799},
+}
+_HOST_SERIAL_TC_152 = frozenset(
+    {"1x1:1024", "1x1:2048", "1x2:1500_63_900", "2x2:300_77", "2x4:1500_63_900", "4x4:1024", "4x4:2048"}
+)  # fmt: skip
+HOST_SERIAL_TC = {
+    "B200": frozenset(
+        {"1x1:1024", "1x2:1500_63_900", "1x3:777_1_2048_130", "2x2:300_77", "2x4:1500_63_900", "4x4:1024"}
+    ),
+    "GB200": _HOST_SERIAL_TC_152,
+    "GB300": _HOST_SERIAL_TC_152 | {"1x3:777_1_2048_130"},
+}  # fmt: skip
+# T_tc / T_reg (us) of one serial row per entry at (32, 2); B200's 4x4:2048 keeps the register path by 0.08 us
+# (T_tc 75.84 against 0.95 x 79.753)
+HOST_SERIAL_PRICED = {
+    "B200": ("4x4:2048", 75.84, 79.7529),
+    "GB200": ("1x1:1000_3000", 111.39, 112.619),
+    "GB300": ("2x2:300_77", 11.02, 46.3452),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_dhu_tc_host_rule_on_the_low_residency_layouts(name, monkeypatch) -> None:
+    # a serial host-built table of at most DHU_TC_HOST_MAX_RESIDENT resident pairs: the host-table rule prices the
+    # register path at the configuration the backward launches (the table's), with the device's entry, and keeps its
+    # answer for the plan (_serial_scan_choice); a device class without an entry leaves every row to the rule at the
+    # call (None), which takes the register path on all of them; more resident pairs or a configuration without a step
+    # factor are outside the rule
+    arch, sm_count = _device_class(monkeypatch, name)
+    entry = cake_chain.dhu_tc_host_costs(arch, sm_count)
+    assert (None if entry is None else dict(entry)) == HOST_SERIAL_COSTS.get(name), entry  # fmt: skip
+    options = cake_chain.make_options()
+    plain = types.SimpleNamespace(bwd_split=None)
+    split_rows, tc_rows = set(), set()
+    for row, (num_heads, num_v_heads, seq_lens) in HOST_SERIAL_ROWS.items():
+        group = num_v_heads // num_heads
+        chunks = cake_plan.chunk_counts(seq_lens)
+        (_fwd, bwd), bwd_tc, _kept = cake_chain._host_plans(
+            seq_lens, num_v_heads, 0, options, group=group
+        )
+        if bwd.segment_len > 0 and max(chunks) > bwd.segment_len:
+            split_rows.add(row)
+            continue
+        want_config = (64, 1) if arch == "sm_107a" and row != "2x2:300_77" else (32, 2)
+        assert not bwd_tc and tuple(bwd.config) == want_config, (row, bwd, bwd_tc)
+        rec = cake_chain.dhu_tc_host_pricing(chunks, num_v_heads, 0, bwd.config)
+        assert rec["reg_config"] == list(bwd.config), (row, rec)
+        assert rec["resident"] == len(chunks) * num_v_heads <= 12, (row, rec)
+        if entry is None:
+            assert rec["select"] is None, (row, rec)
+        else:
+            gain = cake_chain.DHU_TC_GAIN
+            assert rec["select"] is (rec["T_tc"] <= gain * rec["T_reg"]), (row, rec)
+            if rec["select"]:
+                tc_rows.add(row)
+        # the plan keeps the answer (ChunkMeta.bwd_serial_tc); the rule at the call keeps the register path
+        got = cake_chain._serial_scan_choice(plain, bwd, bwd_tc, seq_lens, num_v_heads, 0, options, group)  # fmt: skip
+        assert got is rec["select"], (row, got)
+        assert cake_chain.dhu_tc_pricing(chunks, num_v_heads, 0)["select"] is False, row
+    assert split_rows == HOST_SPLIT_ROWS[name], sorted(split_rows)
+    assert tc_rows == HOST_SERIAL_TC.get(name, frozenset()), sorted(tc_rows)
+    for chunks, num_v_heads, config, inside in (
+        ((16,) * 12, 1, (32, 2), True),
+        ((16, 16), 6, (32, 2), True),
+        ((16,) * 13, 1, (32, 2), False),
+        ((16, 16), 6, (16, 4), False),
+    ):
+        rec = cake_chain.dhu_tc_host_pricing(chunks, num_v_heads, 0, config)
+        want = True if inside and entry is not None else None
+        assert rec["select"] is want, (len(chunks), num_v_heads, config, rec)
+    if entry is not None:
+        row, t_tc, t_reg = HOST_SERIAL_PRICED[name]
+        _h, num_v_heads, seq_lens = HOST_SERIAL_ROWS[row]
+        chunks = cake_plan.chunk_counts(seq_lens)
+        rec = cake_chain.dhu_tc_host_pricing(chunks, num_v_heads, 0, (32, 2))
+        assert abs(rec["T_tc"] - t_tc) < 1e-3 and abs(rec["T_reg"] - t_reg) < 1e-3, rec
+
+
+def test_serial_scan_choice_domain(monkeypatch) -> None:
+    # the plan keeps the host-table rule's answer for a serial table (ChunkMeta.bwd_serial_tc) on the rule's domain
+    # only: on GB300 2x2:300_77 (4 resident pairs) takes dhu_tc2 and 1x1:8192 the register path; a table priced for
+    # dhu_tc2, the one-wave split, a split table, a plan or dhu_scan pin, more than DHU_TC_HOST_MAX_RESIDENT resident
+    # pairs, an architecture outside ADJOINT_SPLIT_ARCHS or without the tcgen05 scan, a device without an entry and
+    # GB200's form of cake_plan.ADJOINT_FORMS leave the scan to the rule at the call (None).  The tables are immutable
+    # (the meta's key holds their ids): an edit in place raises
+    assert cake_chain.DHU_TC_HOST_MAX_RESIDENT == 12
+    with pytest.raises(TypeError):
+        cake_chain.DHU_TC_HOST_COSTS["sm_103a"] = cake_chain.DHU_TC_HOST_COSTS["sm_100a"]  # fmt: skip
+    with pytest.raises(TypeError):
+        cake_chain.DHU_TC_HOST_DEVICE_COSTS[("sm_103a", 152)]["reg_fixed"] = 0.0
+    # B200's entry serves the other sm_100a boards; sm_103a has device entries only
+    assert (
+        cake_chain.dhu_tc_host_costs("sm_100a", 132)
+        is cake_chain.DHU_TC_HOST_COSTS["sm_100a"]
+    )
+    assert cake_chain.dhu_tc_host_costs("sm_103a", 132) is None
+    _device_class(monkeypatch, "GB300")
+    # the register path priced at the configuration the backward launches: 2x2:300_77's (5, 2) chunks at (64, 1) take
+    # SCAN_STEP_FACTOR 1.27 (8 CTAs, one round): T_reg 48.2446 us against 46.3452 at (32, 2) (HOST_SERIAL_PRICED)
+    rec = cake_chain.dhu_tc_host_pricing((5, 2), 2, 0, (64, 1))
+    assert rec["reg_config"] == [64, 1], rec
+    assert abs(rec["reg_cost_units"] - 1.27 * 5) < 1e-9, rec
+    assert abs(rec["T_reg"] - 48.2446) < 1e-3 and abs(rec["T_tc"] - 11.02) < 1e-3, rec
+    assert rec["select"] is True, rec
+    plain = types.SimpleNamespace(bwd_split=None)
+    options = cake_chain.make_options()
+
+    def choice(seq_lens=(300, 77), num_v_heads=2, *, meta=plain, bwd=(32, 2, 0), bwd_tc=False, opts=options,
+               group=1):  # fmt: skip
+        plan = cake_chain.ScanPlan(bwd[:2], bwd[2])
+        return cake_chain._serial_scan_choice(meta, plan, bwd_tc, seq_lens, num_v_heads, 0, opts, group)  # fmt: skip
+
+    assert choice() is True
+    assert choice((8192,), 1) is False
+    assert choice((1024,) * 12, 1) is True and choice((1024, 1024), 6) is True
+    # pieces of 5 chunks: one per sequence, a serial table
+    assert choice(bwd=(64, 1, 5)) is True
+    assert choice((1024,) * 13, 1) is None
+    assert choice(bwd_tc=True) is None
+    assert choice(meta=types.SimpleNamespace(bwd_split=object())) is None
+    assert choice(bwd=(64, 1, 2)) is None  # 5 chunks in pieces of 2
+    for pins in (
+        {"segment_chunks": 0},
+        {"scan_config": (32, 2)},
+        {"dhu_scan": "tc"},
+        {"dhu_scan": "reg"},
+    ):
+        assert choice(opts=cake_chain.make_options(**pins)) is None, pins
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "ADJOINT_SPLIT_ARCHS", frozenset())
+        assert choice() is None
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "dhu_tc2_stage", lambda _arch: "dhu_tc2_undelivered")
+        assert choice() is None
+    with monkeypatch.context() as m:
+        _device_class(m, "B300")
+        assert choice() is None
+    with monkeypatch.context() as m:
+        _device_class(m, "GB200")
+        assert choice() is True
+        # H 1 / HV 3: the form of the group of three, the rule's answer without the group
+        assert choice((777, 1, 2048, 130), 3, group=3) is None
+        assert choice((777, 1, 2048, 130), 3, group=None) is True
+
+
 # The split (64, 1) adjoint plans of the campaign rows and the #7074 packs on each device, and the ones whose pass 2
 # the split rule runs on dhu_tc2 (measured faster there; the other split plans keep the register pass 2).
 _REAL_3 = (5406, 3448, 3896)
@@ -4934,6 +5147,235 @@ def test_adjoint_split_one_stream_rule(monkeypatch) -> None:
     ), rec
 
 
+def test_bwd_one_wave_table_rule() -> None:
+    # the smallest L at which the table segment_bounds builds (an empty sequence one piece) puts every piece of every
+    # value head in one wave; None where no L splits a sequence.  Never shorter than the piece table's L
+    gen = torch.Generator().manual_seed(7019)
+    with_empty = 0
+    for _ in range(400):
+        num = int(torch.randint(1, 9, (), generator=gen))
+        chunks = torch.randint(0, 400, (num,), generator=gen)
+        # about a quarter of the sequences empty
+        chunks = chunks * (torch.randint(0, 4, (num,), generator=gen) > 0)
+        chunks = tuple(int(x) for x in chunks)
+        num_v_heads = int(torch.randint(1, 13, (), generator=gen))
+        sm_count = int(torch.randint(8, 200, (), generator=gen))
+        length = cake_chain.bwd_one_wave_table(chunks, num_v_heads, sm_count)
+
+        def ctas(n_len: int, chunks=chunks, num_v_heads=num_v_heads) -> int:
+            return sum(_pieces(chunks, n_len)) * num_v_heads
+
+        if len(chunks) * num_v_heads > sm_count or max(chunks) < 2:
+            assert length is None, (chunks, num_v_heads, sm_count, length)
+            continue
+        smallest = next(n for n in range(1, max(chunks) + 1) if ctas(n) <= sm_count)
+        assert length == (smallest if max(chunks) > smallest else None), (
+            chunks,
+            num_v_heads,
+            sm_count,
+        )
+        if length is None:
+            continue
+        with_empty += 0 in chunks
+        piece = cake_chain.bwd_piece_table(chunks, num_v_heads, sm_count)
+        assert piece is None or piece <= length, (chunks, num_v_heads, sm_count)
+    assert with_empty >= 20, with_empty
+    # the pair layout (172, 188 and 153 chunks) on 152 SMs; with two empty sequences 24 (25 pieces x 6 = 150 CTAs):
+    # counting only the pieces of the non-empty sequences would give 22, whose built table has 26 x 6 = 156 CTAs
+    assert cake_chain.bwd_one_wave_table((172, 188, 153), 6, 152) == 22
+    assert cake_chain.bwd_one_wave_table((172, 188, 153), 3, 152) == 11
+    assert cake_chain.bwd_one_wave_table((172, 188, 153, 0, 0), 6, 152) == 24
+    assert sum(_pieces((172, 188, 153, 0, 0), 22)) * 6 == 156
+    assert cake_chain.bwd_one_wave_table((11, 24, 4), 4, 36) == 5
+    assert cake_chain.bwd_one_wave_table((), 4, 148) is None
+    assert cake_chain.bwd_one_wave_table((2048,), 200, 148) is None
+    assert cake_chain.bwd_one_wave_table((1, 1, 0), 4, 148) is None
+
+
+# The pricing's one-wave table (one_wave_len) on the bench rows of PIECE_ROWS, by device class: where wave 1 runs on
+# the caller's stream (the group-of-three pair rows of HV 3 and 6 on the sm_103a classes and on GB200) and the pieces of
+# bwd_piece_table do not fit one wave, (that table's L, the one-wave table's L, wave 1 in series on one stream (us), the
+# one-wave route (us)); 0 on every other row (B300's h1 pieces of 11 chunks fit one wave, 144 CTAs on 148 SMs)
+ONE_WAVE_TABLE_ROWS = {
+    "GB200": {"h2": (20, 22, 198.03, 162.84), "h1": (10, 11, 155.6, 133.87)},
+    "B300": {"h2": (20, 22, 189.22, 155.96)},
+    "GB300": {"h2": (20, 22, 189.22, 155.96), "h1": (10, 11, 150.8, 130.18)},
+}
+ONE_STREAM_CLASSES = frozenset({"GB200", "B300", "GB300"})
+# The pricing's keys of the piece table on the bench rows of PIECE_ROWS by device class, as before the one-wave table:
+# (select, segment_len, split_us, serial_us); the one-wave table changes none of them
+PIECE_ROW_PRICES = {
+    "B200": {
+        "issue": (True, 158, 924.18, 4797.02), "P3": (True, 158, 924.18, 4761.32),
+        "P1": (True, 132, 788.22, 4736.51), "h8": (True, 63, 375.48, 469.85), "h4": (True, 38, 244.98, 450.18),
+        "h2": (True, 20, 157.41, 440.35), "h1": (True, 11, 136.56, 435.44), "A16": (False, 94, 534.22, 509.18),
+    },
+    "GB200": {
+        "issue": (True, 152, 850.44, 4522.85), "P3": (True, 155, 860.78, 4503.44),
+        "P1": (True, 132, 750.14, 4424.47), "h8": (True, 63, 356.21, 431.21), "h4": (True, 38, 233.16, 420.53),
+        "h2": (True, 20, 150.43, 415.18), "h1": (True, 10, 131.8, 412.51), "A16": (False, 94, 474.84, 452.59),
+    },
+    "B300": {
+        "issue": (True, 158, 832.04, 4377.18), "P3": (True, 158, 832.04, 4372.2), "P1": (True, 132, 711.36, 4242.01),
+        "h8": (True, 63, 337.44, 405.93), "h4": (True, 38, 221.64, 403.18), "h2": (True, 20, 144.42, 401.81),
+        "h1": (True, 11, 130.18, 401.13), "A16": (False, 94, 448.02, 411.42),
+    },
+    "GB300": {
+        "issue": (True, 152, 805.86, 4376.79), "P3": (True, 155, 815.62, 4371.94),
+        "P1": (True, 132, 711.36, 4241.25), "h8": (True, 63, 337.44, 405.78), "h4": (True, 38, 221.64, 403.11),
+        "h2": (True, 20, 144.42, 401.78), "h1": (True, 10, 128.4, 401.11), "A16": (False, 94, 448.02, 411.13),
+    },
+    "R200-212": {
+        "issue": (True, 113, 546.47, 3425.38), "P3": (True, 112, 542.38, 3423.64), "P1": (True, 99, 492.61, 3313.34),
+        "h8": (True, 51, 241.89, 315.88), "h4": (True, 27, 153.93, 314.92), "h2": (True, 14, 124.56, 314.44),
+        "h1": (True, 8, 134.02, 314.2), "A16": (False, 86, 373.9, 317.79),
+    },
+    "R200-216": {
+        "issue": (True, 108, 526.02, 3425.28), "P3": (True, 108, 526.02, 3423.57), "P1": (True, 95, 479.65, 3313.15),
+        "h8": (True, 47, 225.53, 315.84), "h4": (True, 26, 153.24, 314.9), "h2": (True, 14, 124.56, 314.43),
+        "h1": (True, 7, 140.13, 314.19), "A16": (False, 86, 373.9, 317.72),
+    },
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_one_wave_table_on_one_stream_rows(name) -> None:
+    # the pricing prices the one-wave table where wave 1 runs on one stream over pieces that do not fit one wave, and
+    # keeps it where it prices no higher than the series (one_wave_len, ungated by the device); its other keys keep
+    # their values before the one-wave table (PIECE_ROW_PRICES)
+    arch, sm_count = DEVICE_CLASSES[name]
+    want = ONE_WAVE_TABLE_ROWS.get(name, {})
+    for row, ((seq_lens, num_v_heads), _) in PIECE_ROWS.items():
+        chunks = cake_plan.chunk_counts(seq_lens)
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        one_stream = name in ONE_STREAM_CLASSES and row in ("h1", "h2")
+        assert rec["one_stream"] is one_stream, (row, rec)
+        select, segment_len, split_us, serial_us = PIECE_ROW_PRICES[name][row]
+        assert (rec["select"], rec["segment_len"]) == (select, segment_len), (row, rec)
+        assert abs(rec["split_us"] - split_us) < 0.01, (row, rec)
+        assert abs(rec["serial_us"] - serial_us) < 0.01, (row, rec)
+        if row not in want:
+            assert (rec["one_wave_len"], rec["one_wave_us"], rec["one_stream_us"]) == (0, None, None), (row, rec)  # fmt: skip
+            continue
+        length, length1, series, wave = want[row]
+        assert rec["select"] and rec["segment_len"] == length, (row, rec)
+        assert (
+            sum(_pieces(chunks, length)) * num_v_heads
+            > sm_count
+            >= sum(_pieces(chunks, length1)) * num_v_heads
+        ), row
+        assert rec["one_wave_len"] == length1, (row, rec)
+        assert length1 == cake_chain.bwd_one_wave_table(chunks, num_v_heads, sm_count)
+        assert abs(rec["one_stream_us"] - series) < 0.01, (row, rec)
+        assert abs(rec["one_wave_us"] - wave) < 0.01, (row, rec)
+
+
+def test_one_wave_table_kept_only_where_it_prices_no_higher(monkeypatch) -> None:
+    # GB300's h2 row with a summary step of 10 us per chunk and a walk step of 0.1 us: the one-wave route (summaries of
+    # 22 chunks) prices above wave 1 in series (summaries of 19 chunks), so the pricing keeps the piece table and so
+    # does the host layout
+    _device_class(monkeypatch, "GB300")
+    chunks = cake_plan.chunk_counts(_PAIR_LAYOUT)
+    costs = {**cake_chain.ADJOINT_SPLIT_COSTS["sm_103a"], "walk": 0.1, "summary": 10.0, "serial_low": 10.0,
+             "serial_full": 10.0}  # fmt: skip
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_COSTS", {"sm_103a": costs})
+    rec = cake_chain.adjoint_split_pricing(chunks, 6, 152, "sm_103a")
+    assert rec["select"] and rec["one_stream"] and rec["segment_len"] == 20, rec
+    assert abs(rec["one_stream_us"] - 245.6) < 0.01, rec
+    assert abs(rec["one_wave_us"] - 270.8) < 0.01, rec
+    assert rec["one_wave_len"] == 0, rec
+    options = cake_chain.make_options()
+    assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 20
+
+
+# _adjoint_split_length of the pair rows h2 / h1 by device class: the one-wave table on the devices of
+# ONE_WAVE_TABLE_DEVICES (GB200 and GB300), the piece table elsewhere (on B300's h2 too: its device is not in the set)
+PAIR_SPLIT_LENGTHS = {
+    "B200": {"h2": 20, "h1": 11},
+    "GB200": {"h2": 22, "h1": 11},
+    "B300": {"h2": 20, "h1": 11},
+    "GB300": {"h2": 22, "h1": 11},
+    "R200-212": {"h2": 14, "h1": 8},
+    "R200-216": {"h2": 14, "h1": 7},
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_adjoint_split_length_takes_the_one_wave_table_on_its_devices(
+    name, monkeypatch
+) -> None:
+    # the host layout's split length: the one-wave table where the pricing keeps it, on a device of
+    # ONE_WAVE_TABLE_DEVICES, its architecture's one-wave route and the stitch, and where the table built at that length
+    # fits one wave; else the pricing's piece table.  host_plans takes that table; GB200's h1 with its value-head group
+    # of three keeps its form of cake_plan.ADJOINT_FORMS (no split)
+    arch, sm_count = _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    for row, ((seq_lens, num_v_heads), _) in PIECE_ROWS.items():
+        chunks = cake_plan.chunk_counts(seq_lens)
+        got = cake_chain._adjoint_split_length(seq_lens, num_v_heads, 0, options)
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        if row in PAIR_SPLIT_LENGTHS[name]:
+            assert got == PAIR_SPLIT_LENGTHS[name][row], (row, got, rec)
+        else:
+            assert rec["one_wave_len"] == 0, (row, rec)
+            assert got == (rec["segment_len"] if rec["select"] else None), (row, got)
+        if got is not None and got != rec["segment_len"]:
+            assert sum(_pieces(chunks, got)) * num_v_heads <= sm_count, (row, got)
+        (_fwd, bwd), bwd_tc = cake_chain.host_plans(seq_lens, num_v_heads, 0, options)
+        if got is not None:
+            assert bwd == cake_chain.ScanPlan(cake_chain.SDT_CONFIG, got) and not bwd_tc, (row, bwd)  # fmt: skip
+    form = cake_chain._adjoint_split_length(_PAIR_LAYOUT, 3, 0, options, 3)
+    assert form == (None if name == "GB200" else PAIR_SPLIT_LENGTHS[name]["h1"]), form
+
+
+def test_one_wave_table_needs_its_device_and_the_one_wave_route(monkeypatch) -> None:
+    # GB300's h2 row takes the one-wave table (22 chunks) only with its device in ONE_WAVE_TABLE_DEVICES (an entry of
+    # another SM count does not serve it), its architecture in ONE_WAVE_SPLIT_ARCHS and the stitch as the composer;
+    # B300 (148 SMs) takes it once its device is listed.  With two empty sequences the one-wave table is 24 chunks, and
+    # the table host_plans builds there fits one wave (25 pieces x 6 value heads on 152 SMs); a table that would not
+    # fit one wave (a rule that counts no piece for an empty sequence) keeps the piece table
+    _device_class(monkeypatch, "GB300")
+    options = cake_chain.make_options()
+    assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 22
+    for setting, value in (
+        ("ONE_WAVE_TABLE_DEVICES", frozenset()),
+        ("ONE_WAVE_TABLE_DEVICES", frozenset({("sm_103a", 148)})),
+        ("ONE_WAVE_SPLIT_ARCHS", frozenset()),
+        ("ADJOINT_CHAIN_STAGES", ("piece_chain",)),
+    ):
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, setting, value)
+            got = cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options)
+            assert got == 20, (setting, value, got)
+    with monkeypatch.context() as m:
+        _device_class(m, "B300")
+        assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 20
+        m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset({("sm_103a", 148)}))
+        assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 22
+    seq_lens = _PAIR_LAYOUT + (0, 0)
+    rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 6, 152, "sm_103a")  # fmt: skip
+    assert (rec["segment_len"], rec["one_stream"], rec["one_wave_len"]) == (21, True, 24), rec  # fmt: skip
+    assert abs(rec["one_stream_us"] - 198.12) < 0.01, rec
+    assert abs(rec["one_wave_us"] - 162.62) < 0.01, rec
+    assert cake_chain._adjoint_split_length(seq_lens, 6, 0, options) == 24
+    plans, bwd_tc = cake_chain.host_plans(seq_lens, 6, 0, options)
+    assert plans[1] == cake_chain.ScanPlan(cake_chain.SDT_CONFIG, 24) and not bwd_tc
+    meta = cake_chain.build_chunk_meta(seq_lens, "cpu", scan_plans=plans, lpt=True)
+    assert meta.bwd_segments.num_segments == 25, meta.bwd_segments
+    # the built-table check: a table rule that counts an empty sequence as no piece (ceil alone) gives 22 chunks on
+    # that layout, and the pricing keeps it (one-wave 155.96 us against 198.12 in series), but the table host_plans
+    # builds at 22 has 26 pieces x 6 value heads = 156 CTAs on 152 SMs (not one wave), so the host layout keeps the
+    # piece table (21 chunks)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "bwd_one_wave_table", lambda c, hv, sms: next(
+            length for length in range(1, max(c) + 1) if sum(-(-n // length) for n in c) * hv <= sms))  # fmt: skip
+        rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 6, 152, "sm_103a")  # fmt: skip
+        assert (rec["segment_len"], rec["one_wave_len"]) == (21, 22), rec
+        assert abs(rec["one_wave_us"] - 155.96) < 0.01, rec
+        assert abs(rec["one_stream_us"] - 198.12) < 0.01, rec
+        assert cake_chain._adjoint_split_length(seq_lens, 6, 0, options) == 21
+
+
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
 def test_host_plans_take_the_split_or_the_serial_table(arch, monkeypatch) -> None:
     # on an architecture of ADJOINT_SPLIT_ARCHS a host layout's adjoint table is the one-wave split or a serial table,
@@ -4958,6 +5400,120 @@ def test_host_plans_take_the_split_or_the_serial_table(arch, monkeypatch) -> Non
         m.setattr(cake_chain, "ADJOINT_SPLIT_ARCHS", frozenset())
         want = cake_chain.host_plans((131071, 87531, 43385), 6, 0, pinned)
     assert cake_chain.host_plans((131071, 87531, 43385), 6, 0, pinned) == want
+
+
+# The rows of the README's speed table, (H, HV) and tokens per sequence
+SPEED_ROWS = {
+    "issue": ((2, 6), (131071, 87531, 43385)),
+    "P3": ((2, 6), (128147, 131027)),
+    "P1": ((2, 6), (126565, 32714, 33696, 15081, 22979, 10782)),
+    "64x4096": ((2, 6), (4096,) * 64),
+    "A16_32768x3": ((16, 48), (32768,) * 3),
+    "pair_h16": ((16, 48), _PAIR_LAYOUT),
+    "pair_h8": ((8, 24), _PAIR_LAYOUT),
+    "pair_h4": ((4, 12), _PAIR_LAYOUT),
+    "pair_h2": ((2, 6), _PAIR_LAYOUT),
+    "pair_h1": ((1, 3), _PAIR_LAYOUT),
+}
+# Their adjoint routes with the delivered tables (_adjoint_route): the split on two streams ("split_two_streams"; B200's
+# long rows under M-share, not told apart here) or the serial scan on dhu_tc2 for 64x4096 and the (16, 48) rows on every
+# device class, but for the pair rows of HV 6 and 3 (PAIR_ROUTES): "split_one_stream" wave 1 on the caller's stream,
+# "split_one_wave" the one-wave route, "prescan_tc" the planner's split table with its pass 2 on dhu_tc2 (GB200's form
+# of cake_plan.ADJOINT_FORMS)
+SPEED_ROUTES = {
+    "issue": "split_two_streams",
+    "P3": "split_two_streams",
+    "P1": "split_two_streams",
+    "64x4096": "serial_tc",
+    "A16_32768x3": "serial_tc",
+    "pair_h16": "serial_tc",
+    "pair_h8": "split_two_streams",
+    "pair_h4": "split_two_streams",
+}
+PAIR_ROUTES = {
+    "B200": {"pair_h2": "split_two_streams", "pair_h1": "split_one_wave"},
+    "GB200": {"pair_h2": "split_one_wave", "pair_h1": "prescan_tc"},
+    "B300": {"pair_h2": "split_one_stream", "pair_h1": "split_one_wave"},
+    "GB300": {"pair_h2": "split_one_wave", "pair_h1": "split_one_wave"},
+    "R200-212": {"pair_h2": "split_two_streams", "pair_h1": "split_one_wave"},
+    "R200-216": {"pair_h2": "split_two_streams", "pair_h1": "split_two_streams"},
+}
+# The rows the one-wave table moves: (device class, row) -> (L of the piece table, L of the one-wave table); wave 1 on
+# the caller's stream at the first, the one-wave route at the second
+ONE_WAVE_TABLE_CHANGES = {
+    ("GB200", "pair_h2"): (20, 22),
+    ("GB300", "pair_h2"): (20, 22),
+    ("GB300", "pair_h1"): (10, 11),
+}
+
+
+def _adjoint_route(seq_lens, heads, options) -> tuple:
+    """The adjoint route of a host layout on device 0 as the plan (:func:`cake_chain._chunk_meta`) and the backward
+    decide it (host work only): ``("split_two_streams" | "split_one_stream" | "split_one_wave", L)`` for the
+    one-wave split (two streams, wave 1 on the caller's stream, the one-wave route), ``("serial_tc" | "serial_reg",
+    config)`` for a serial table (the plan's answer, else the rule at the call) or ``("prescan" | "prescan_tc", config,
+    L)`` for a pre-scan's split table."""
+    num_heads, num_v_heads = heads
+    group = num_v_heads // num_heads
+    arch = cake_backend.device_arch(0)
+    sm_count = cake_chain._device_props(0)[0]
+    chunks = cake_plan.chunk_counts(seq_lens)
+    (_fwd, bwd), bwd_tc, _kept = cake_chain._host_plans(seq_lens, num_v_heads, 0, options, group=group)  # fmt: skip
+    length = cake_chain._adjoint_split_length(seq_lens, num_v_heads, 0, options, group)
+    if length is not None and bwd.segment_len == length:
+        if (
+            arch in cake_chain.ONE_WAVE_SPLIT_ARCHS
+            and cake_chain._adjoint_chain_stage(arch) == "stitch"
+            and sum(_pieces(chunks, length)) * num_v_heads <= sm_count
+        ):
+            return "split_one_wave", length
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        one_stream = rec["one_stream"]
+        return ("split_one_stream" if one_stream else "split_two_streams"), length
+    config = tuple(bwd.config)
+    if bwd.segment_len > 0 and max(chunks) > bwd.segment_len:
+        return ("prescan_tc" if bwd_tc else "prescan"), config, bwd.segment_len
+    plain = types.SimpleNamespace(bwd_split=None)
+    tc = cake_chain._serial_scan_choice(plain, bwd, bwd_tc, seq_lens, num_v_heads, 0, options, group)  # fmt: skip
+    if tc is None:
+        tc = cake_chain.dhu_tc_pricing(chunks, num_v_heads, 0)["select"]
+    return ("serial_tc" if bwd_tc or tc else "serial_reg"), config
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_speed_rows_keep_their_routes(name, monkeypatch) -> None:
+    # the speed-table rows with the delivered one-wave and host-table entries against the same rows with both emptied:
+    # only the rows of ONE_WAVE_TABLE_CHANGES move (wave 1 on one stream over the piece table -> the one-wave route
+    # over the one-wave table); B200, B300 and R200 keep every route and no row moves between dhu_tc2 and the register
+    # path (the host-table rule serves at most 12 resident pairs; these rows' serial tables have 144 or more)
+    _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    shipped = {
+        row: _adjoint_route(seq_lens, heads, options)
+        for row, (heads, seq_lens) in SPEED_ROWS.items()
+    }
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+        m.setattr(cake_chain, "DHU_TC_HOST_COSTS", types.MappingProxyType({}))
+        m.setattr(cake_chain, "DHU_TC_HOST_DEVICE_COSTS", types.MappingProxyType({}))
+        emptied = {
+            row: _adjoint_route(seq_lens, heads, options)
+            for row, (heads, seq_lens) in SPEED_ROWS.items()
+        }
+    routes = {**SPEED_ROUTES, **PAIR_ROUTES[name]}
+    assert {row: got[0] for row, got in shipped.items()} == routes, shipped
+    for row in ("64x4096", "A16_32768x3", "pair_h16"):
+        assert shipped[row] == ("serial_tc", (64, 1)), (row, shipped[row])
+    moved = {row for row in SPEED_ROWS if shipped[row] != emptied[row]}
+    assert moved == {row for device, row in ONE_WAVE_TABLE_CHANGES if device == name}, (
+        moved,
+        shipped,
+        emptied,
+    )
+    for row in moved:
+        length, length1 = ONE_WAVE_TABLE_CHANGES[(name, row)]
+        assert emptied[row] == ("split_one_stream", length), (row, emptied[row])
+        assert shipped[row] == ("split_one_wave", length1), (row, shipped[row])
 
 
 # A layout the split cuts on a device of SPLIT_SMS SMs with HV 4: sequences of 11, 24 and 4 chunks take pieces of 4

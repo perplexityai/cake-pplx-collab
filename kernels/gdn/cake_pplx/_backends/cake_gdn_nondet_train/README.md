@@ -108,6 +108,14 @@ and two of the `(2, 6)` packs (2 to 15 pieces per sequence) under the
 log-spaced decays, `logsigmoid(N(0, 1))` and no decay, from a nonzero initial
 state (forward only, one seed per case), the split forward's rel-L2 error is
 1.000 x that of the serial A form on `o` and 0.998-1.003 x on the final state.
+On B200, GB200 and GB300 this version runs some of the 66 cases on other
+routes than the build measured here, with other bits: the backward of the
+`(2, 6)` pair on GB200 and GB300 and of the `(1, 3)` pair on GB300 on the
+longer pieces of `bwd_one_wave_table`, and the serial adjoint scan of the
+small layouts of at most 12 (sequence, value head) pairs on `dhu_tc2_dvl32`
+where `dhu_tc_host_pricing` selects it (see Chain).  The largest-ratio columns
+and the ratio figures below were measured on the earlier routes; the pack
+columns keep their routes.
 
 On B200 every ratio is at most 1.069.  On GB300, GB200 and R200 every ratio is
 at most 1.1 but one: the ratio of the worst `dg` element on the small `(1, 3)`
@@ -255,7 +263,8 @@ call that neither of the two takes runs the third, the prep forward (below).
   (`cake_plan.FORWARD_SPLIT_MIN_PIECE`).  The piece table (`cake_plan.pieces`)
   cuts every long sequence into pieces of at most `L` chunks, the smallest `L`
   whose first wave fits one CTA per SM; the one-wave split of the adjoint walk
-  (below) reads the same table.  Wave 1 runs the first piece of every split
+  (below) reads the same table, except where it takes the longer pieces of
+  `bwd_one_wave_table`.  Wave 1 runs the first piece of every split
   sequence from its initial state beside the affine maps `[B | M]` of the
   middle pieces (on a side stream; `streams=1` keeps one stream), the stitch
   gives every piece its start state, and wave 2 runs every other piece.  On
@@ -305,7 +314,21 @@ head, each the scan and output of one half of the value columns (the same
 bits).  The backward runs the adjoint scan, either `dv_local` plus a register
 scan or, on a serial plan, the tcgen05 scan with `dv_local` fused (`dhu_tc2`),
 which a host-side cost rule selects on the host-table route; a host-built
-table can instead take the one-wave split of the adjoint walk (below).  On
+table can instead take the one-wave split of the adjoint walk (below).  That
+rule (`dhu_tc_pricing`) takes `dhu_tc2` where its price is at most 0.95 of
+the register path's (`DHU_TC_GAIN`), which it prices at the configuration of
+the bound layout's plan.  On a serial host-built table of at most 12
+(sequence, value head) CTAs (`DHU_TC_HOST_MAX_RESIDENT`), without plan or
+`dhu_scan` pins or a form of `cake_plan.ADJOINT_FORMS`, a device with an entry
+(`dhu_tc_host_costs`) prices the register path at the configuration the
+backward launches instead, with a scale on its step cost and a fixed cost,
+both fitted on the backward of such tables (`dhu_tc_host_pricing`).  The
+fixed cost is mostly the host's gap before the register path's extra
+`dv_local` launch, so it follows the board: the 152-SM Grace-host boards
+GB200 and GB300 have entries of their own (`DHU_TC_HOST_DEVICE_COSTS`), the
+other `sm_100a` boards take that of B200 (`DHU_TC_HOST_COSTS`), and B300 (not
+measured) and `sm_107a` (on R200 the fitted rule moved tables on which
+`dhu_tc2` was not shown faster) have none and keep the first rule.  On
 `sm_100a`, `sm_103a` and `sm_107a` (`DVL32_ARCHS`) the tcgen05 scan runs as
 `dhu_tc2_dvl32`: it adds the FP32 `dv_local` values to `dv2`, so `dv2` rounds
 to BF16 once, where `dhu_tc2` rounds `dv_local` first (B200: 0.990-0.995 x
@@ -489,7 +512,10 @@ The one-wave split of the adjoint walk runs on `sm_100a`, `sm_103a` and
 `dhu_scan` pins:
 
 * Its pieces are those of the split forward's piece table
-  (`cake_plan.pieces`).  It runs where `adjoint_split_pricing` prices it below
+  (`cake_plan.pieces`), except where wave 1 runs on the caller's stream on a
+  device of `ONE_WAVE_TABLE_DEVICES`: there the backward may take the longer
+  pieces of `bwd_one_wave_table`, at which every piece fits one wave (the
+  streams below).  It runs where `adjoint_split_pricing` prices it below
   the serial table, both at their full cost with the cost entry of the device
   (`adjoint_split_costs`: the entry of `ADJOINT_SPLIT_DEVICE_COSTS` for the
   architecture and SM count, else that of `ADJOINT_SPLIT_COSTS`); the price
@@ -524,6 +550,17 @@ The one-wave split of the adjoint walk runs on `sm_100a`, `sm_103a` and
   every piece fits one wave beside the others (pieces x `HV` at most the SMs,
   `ONE_WAVE_SPLIT_ARCHS`), the maps, the stitch and one walk of every piece
   run on the caller's stream.  The three stream forms give the same bits.
+  Where the `fork` rule puts wave 1 on the caller's stream (`streams=1` does
+  not enter this rule) and the pieces do not fit one wave, the maps, the last
+  pieces' walks, the stitch and the other walks run in series, two walks of
+  about a piece each.  There a device of `ONE_WAVE_TABLE_DEVICES` (`sm_100a`
+  and `sm_103a` with 152 SMs: GB200 and GB300, where it was measured)
+  lengthens the pieces to the smallest length at which every piece of every
+  value head fits one wave (`bwd_one_wave_table`, an empty sequence counting
+  one piece) and runs the one-wave form on them, where `adjoint_split_pricing`
+  prices it no higher than the series (`one_wave_len`).  The longer pieces
+  change the bits (other piece bounds).  B300 (`sm_103a` with 148 SMs, not
+  measured) keeps the piece table.
 
 ## Speed against the deterministic package
 
@@ -542,7 +579,10 @@ processes in ABBA order (on R200 the four processes ran at once, one on each of
 four GPUs of one node), PyTorch 2.14.1 on its CUDA 13.0 runtime inside a CUDA
 13.4 development container, every arm on the same GPU (on GB200 every process
 bound to the GPU-local Grace socket).  B200, GB200 and GB300 ran a build with
-this version's kernels, routes and bits; R200 ran an earlier build whose
+this version's kernels, routes and bits, except the backward of the `(2, 6)`
+pair on GB200 and GB300 and of the `(1, 3)` pair on GB300, which this version
+runs on the longer pieces of `bwd_one_wave_table` (see Chain), with other
+bits; R200 ran an earlier build whose
 routes and plans on these rows, and bits under two of the three gate regimes,
 are this version's.  The deterministic
 package is that of revision `18c327b4` (on R200 `c8a4d8a2`, with the
