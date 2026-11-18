@@ -81,8 +81,8 @@ For each group of `G` elements, with `amax` the largest magnitude in the group:
 
 Then `u = clamp(x / s, -Q, Q)` with the exact quotient, `q` is the element format's round-to-nearest-even value of
 `u` with the sign of zero kept, and `y = bf16_rne(q * s)`.  The E4M3 scale saturates at 448.  The outputs equal this
-rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64; every step below is exact
-in FP32:
+rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64, and the FP32 steps below
+give the rule's outputs:
 
 - **E8M0 scale.**  Write `amax = m * 2^e` with `m` in [1, 2), and `Q = mq * 2^c` (`6 = 1.5 * 2^2`,
   `448 = 1.75 * 2^8`).  Then `ceil(log2(amax / Q)) = e - c + [m > mq]`, read from the IEEE fields of `amax`.
@@ -94,14 +94,15 @@ in FP32:
   rounds to nearest even and saturates at 448.  `amax` has 8 significant bits, so `amax / 3` is either exact or a
   repeating binary fraction far from every 5-bit value: the FP32 quotient is an E4M3 rounding midpoint only when the
   exact quotient is one.
-- **E4M3-scaled quotient.**  `u` is the round-to-nearest FP32 quotient `x / s`, not the plain product
-  `x * RN(1 / s)`.  The kernel forms `inv = 1 / s` (an IEEE division) and `u0 = x * inv`, then corrects `u0` with
-  one FMA residual step: `r = fma(u0, s, -x)` is exact, and `u = fma(-r, inv, u0)` is within a small fraction of an
-  FP32 ulp of `x / s`.  The exact quotient of an 8-bit `x` by a 4-bit `s` is never an FP32 rounding midpoint, and it
-  is at least `1/30` of an FP32 ulp away from one, so `u` rounds the same way as the division.  For `|x|` below
-  `2^-100` the residual may round and `u` may differ from the division in its last bits; such a quotient is below
-  `2^-91`, so it becomes a signed zero either way.  The exact quotient is at least `2^-9` (relative) away from every
-  E2M1 midpoint that it does not equal, so rounding it to FP32 first never moves it across a midpoint.
+- **E4M3-scaled quotient.**  For `|x|` of at least `2^-100`, `u` is the round-to-nearest FP32 quotient `x / s`, not
+  the plain product `x * RN(1 / s)`.  The kernel forms `inv = 1 / s` (an IEEE division) and `u0 = x * inv`, then
+  corrects `u0` with one FMA residual step: `r = fma(u0, s, -x)` is exact, and the exact value `u0 - r * inv`, which
+  `u = fma(-r, inv, u0)` rounds, is within a small fraction of an FP32 ulp of `x / s`.  The exact quotient of an
+  8-bit `x` by a 4-bit `s` is never an FP32 rounding midpoint, and it is at least `1/30` of an FP32 ulp away from
+  one, so `u` rounds the same way as the division.  For `|x|` below `2^-100` the residual may round and `u` may
+  differ from the division in its last bits; such a quotient is below `2^-91`, so it becomes a signed zero either
+  way.  The exact quotient is at least `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so
+  rounding it to FP32 first never moves it across a midpoint.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
 - **Dequantize.**  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits and `s` at most 4, so `q * s` in FP32 and
   its BF16 rounding are exact, down to the MXFP4 subnormal `2^-127`.  Above the BF16 range the product is `±inf`, as

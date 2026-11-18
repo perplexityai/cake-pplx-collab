@@ -1856,7 +1856,7 @@ logp2.sum().backward()
 | `"mxfp4_e8m0_g32"` | E2M1 | 32 | `2^ceil(log2(max(amax, 6*2^-126) / 6))` | `6*2^-126` | 6 |
 | `"mxfp8_e8m0_g32"` | E4M3 | 32 | `2^ceil(log2(max(amax, fp32(1e-4)) / 448))` | `fp32(1e-4)` | 448 |
 
-- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The quotient is the correctly rounded quotient of a true division, not the plain product with a rounded reciprocal. The kernels use no FP64; the backend README gives the argument that the FP32 steps are exact.
+- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 steps give the rule's outputs.
 - The optional second output is the FP32 scale of each group, `[..., D/G]`.
 - One kernel per call reads `x` once and writes `y` (and the scales) once, on the current stream. The input may be any rank; the groups run along the flat buffer.
 
