@@ -34,11 +34,13 @@ What to compile (sources, digests, nvcc flags) is recorded once in
 and otherwise through the package's JIT shim from the same sources and flags.
 
 A program sees the input as ``n_vecs = numel / 8`` vectors of eight BF16
-values.  One CTA of 256 threads takes 256 vectors per trip of a CTA-uniform
-grid-stride loop, so any grid of at least one CTA is correct.  The host
-launches ``min(ceil(n_vecs / 256), ctas_per_sm * SM count)`` CTAs
-(:func:`launch_grid`).  ``n_vecs`` is a run-time scalar, so a new shape never
-recompiles.  Build every library of the architecture (:func:`specs_for_arch`)
+values.  One CTA of 64 threads takes a tile of 128 vectors (256 on SM107) per
+trip of a CTA-uniform grid-stride loop, each thread loading its two (four)
+vectors before it computes any, so any grid of at least one CTA is correct.
+The host launches one CTA per tile once the tiles pass 2.5 waves of the CTAs
+the SMs hold (32 per SM, 16 on SM107), else that many CTAs, at most one per
+tile (:func:`launch_grid`).  ``n_vecs`` is a run-time scalar, so a new shape
+never recompiles.  Build every library of the architecture (:func:`specs_for_arch`)
 before a CUDA graph capture, to keep the JIT out of the capture.
 """
 
@@ -62,7 +64,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "fp4_e4m3_g16",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_6c386eb171b622b07aa6",
         "launch": {
@@ -80,7 +88,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "fp4_e4m3_g16",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_3c9b6d6bcbaf8c45c904",
         "launch": {
@@ -99,7 +113,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "mxfp4_e8m0_g32",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_d3568612f1c725cff309",
         "launch": {
@@ -117,7 +137,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "mxfp4_e8m0_g32",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_79d268b9599a2036c54d",
         "launch": {
@@ -136,7 +162,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "mxfp8_e8m0_g32",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_21b6556b9b84f1fd0731",
         "launch": {
@@ -154,7 +186,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "format": "mxfp8_e8m0_g32",
-        "grid_rule": {"cta_vectors": 256, "ctas_per_sm": 8, "kind": "grid_stride", "vector_elements": 8},
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+            "vector_elements": 8,
+        },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_e51efb4c536c4e1ed3a3",
         "launch": {
@@ -218,10 +256,12 @@ GROUP_SIZES: dict[str, int] = {
 # The routes (``ROUTES[arch]`` keys): a format, and ``_scales`` when the
 # program also stores the FP32 scales.
 KINDS = tuple(f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))
-# The grid-rule vocabulary (``record["grid_rule"]["kind"]``): ``grid_stride``
-# launches ``min(ceil(n_vecs / cta_vectors), ctas_per_sm * SM count)`` CTAs,
-# where ``n_vecs = numel / vector_elements``.
-GRID_KINDS = ("grid_stride",)
+# The grid-rule vocabulary (``record["grid_rule"]["kind"]``): ``tiles`` takes
+# ``tiles = ceil(n_vecs / tile_vectors[arch])`` and ``resident =
+# ctas_per_sm[arch] * SM count``, and launches ``tiles`` CTAs once ``tiles >
+# persist_waves * resident``, else ``min(tiles, resident)``, where ``n_vecs =
+# numel / vector_elements``.
+GRID_KINDS = ("tiles",)
 # The grid arguments of an argument plan, in order.
 GRID_AXES = ("grid_x", "grid_y", "grid_z")
 # BF16 elements per vector (16 bytes): a thread's load and store.
@@ -230,7 +270,8 @@ VECTOR = 8
 ALIGNMENT_BYTES = 16
 INT32_MAX = 2**31 - 1
 # ``n_vecs`` is a signed 32-bit kernel argument, and the kernel forms
-# ``n_vecs + 255`` (its chunk count) in signed 32 bits.
+# ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
+# its vector indices below that in signed 32 bits.
 MAX_VECTORS = INT32_MAX - 255
 
 
@@ -319,18 +360,23 @@ def sm_count(device_index: int) -> int:
     return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
 
 
-def launch_grid(record: dict[str, Any], *, n_vecs: int, sm_count: int) -> tuple[int, int, int]:
-    """The grid of one record for ``n_vecs`` vectors on a device of ``sm_count`` SMs."""
+def launch_grid(record: dict[str, Any], *, n_vecs: int, sm_count: int, arch: str) -> tuple[int, int, int]:
+    """The grid of one record for ``n_vecs`` vectors on a device of
+    architecture ``arch`` with ``sm_count`` SMs."""
 
     rule = record["grid_rule"]
-    if rule["kind"] != "grid_stride" or rule["vector_elements"] != VECTOR:
+    if rule["kind"] not in GRID_KINDS or rule["vector_elements"] != VECTOR:
         raise ValueError(
             f"unknown Cake activation QDQ grid rule: {rule!r} (known kinds: {GRID_KINDS}, "
             f"{VECTOR}-element vectors)"
         )
-    per_cta = int(rule["cta_vectors"])
-    chunks = -(-int(n_vecs) // per_cta)
-    return (min(chunks, int(rule["ctas_per_sm"]) * int(sm_count)), 1, 1)
+    if arch not in rule["tile_vectors"]:
+        raise ValueError(f"the Cake activation QDQ grid rule has no tile for {arch}: {rule!r}")
+    tiles = -(-int(n_vecs) // int(rule["tile_vectors"][arch]))
+    resident = int(rule["ctas_per_sm"][arch]) * int(sm_count)
+    if tiles > float(rule["persist_waves"]) * resident:
+        return (tiles, 1, 1)
+    return (min(tiles, resident), 1, 1)
 
 
 def library_name(name: str, arch: str) -> str:
@@ -381,7 +427,9 @@ def run_module(
 
     record = MODULES[name]
     if grid is None:
-        grid = launch_grid(record, n_vecs=values["n_vecs"], sm_count=sm_count(device_index))
+        grid = launch_grid(
+            record, n_vecs=values["n_vecs"], sm_count=sm_count(device_index), arch=device_arch(device_index)
+        )
     args = []
     for kind, key in record["arg_plan"]:
         if kind == "grid":
