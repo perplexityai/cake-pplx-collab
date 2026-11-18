@@ -86,11 +86,15 @@ No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call copies an input or allocates an
 output, so a call refused for its arguments copies, allocates and launches
-nothing.  Before capturing a CUDA graph, run one eager call (or build the
-libraries) so that no JIT build happens during capture.  A JIT build needs a
-CUDA toolkit of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5
-for ``sm_107a``.  This module imports its backend package on first use and
-reads no environment variable.
+nothing.  Each stage has a small-``R`` and a large-``R`` program, chosen by
+``R`` and the device's SM count; a program's library loads (and, without a
+prebuilt one, JIT-builds) at its first launch.  Before capturing a CUDA
+graph, run an eager call at each row count the graph captures (or build
+every library of the architecture with the backend's ``specs_for_arch``) so
+that no JIT build happens during capture.  A JIT build needs a CUDA toolkit
+of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for
+``sm_107a``.  This module imports its backend package on first use and reads
+no environment variable.
 
 Usage::
 

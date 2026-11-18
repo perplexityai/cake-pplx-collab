@@ -67,16 +67,34 @@ required keyword everywhere.
 
 ## Programs
 
-Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by program name; `cake_jit.PROGRAM_OF` maps
-a stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and compiled with the exact `-gencode`
-flag of each (`build.json`).  Each is one kernel: 32 lanes own a row, each lane 9 loads of 8 BF16 values of the gate
-and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a warp is
-contiguous.  The forward's CTA of 256 threads owns 8 consecutive rows, and the backward's CTA of 128 threads owns 4;
-the grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`).  A row past
-`R` loads the last row and stores nothing.  The backward splits a lane's 9 loads into 3 runs of 3, so it holds fewer
-registers and more warps fit on an SM.  No program uses shared
-memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the limit, the weight flag
-and the strides are launch arguments, so one library per program and architecture serves every call.
+Each stage has two programs (`cake_jit.MODULES`, keyed by program name): a small-R program (role `fwd` or `bwd`) and
+a large-R program (role `fwd_large` or `bwd_large`).  `cake_jit.PROGRAM_OF` maps a role and an architecture to its
+program.  A program is compiled with the exact `-gencode` flag of each architecture it is delivered for (`build.json`).
+A call runs the large-R program when `R` is at least the record's `min_rows_per_sm` of the device's architecture times
+the device's SM count, and the small-R program otherwise (`cake_jit.route`).  The package reads the architecture once
+per device and the SM count once per stage and device.  An architecture without a large-R program of a stage runs the
+small-R one at every `R`.
+
+Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
+of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
+warp is contiguous.  The programs differ in their schedule:
+
+| stage | program | architectures | CTA | a lane's 9 loads |
+|---|---|---|---|---|
+| `fwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
+| `fwd` | large-R | `sm_100a`, `sm_103a` | 256 threads, 8 rows | one run |
+| `fwd` | large-R | `sm_107a` | 128 threads, 4 rows | one run; the values of each load are stored as soon as they are computed |
+| `bwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
+| `bwd` | large-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3, one run at a time |
+
+More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`,
+from the launch block and `cake_jit.BUILD_OF`).  A row past `R` loads the last row and stores nothing.  The programs of
+a stage compute each element with the same FP32 operations (the exact sigmoid gives the bits of the fast one wherever
+the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's
+columns in load order with the same lanes.  So both programs store the same bits for every input: the route changes no
+output bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The
+row count, the limit, the weight flag and the strides are launch arguments, so one library per program and
+architecture serves every call.
 
 ## Numerics
 
@@ -124,5 +142,6 @@ reaches a result.
 - The intermediate width is 2304 only (a compile-time width of the kernels).
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
   under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
-- The library builds on first use; before capturing a CUDA graph, run one eager call (or build the libraries with
-  `specs_for_arch`, which leaves out a library whose `min_cuda` the local toolkit is below).
+- A program's library builds at its first launch, and the row count picks the program (see Programs).  Before
+  capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the
+  architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).

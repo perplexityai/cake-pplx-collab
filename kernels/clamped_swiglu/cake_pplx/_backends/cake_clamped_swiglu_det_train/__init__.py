@@ -59,18 +59,25 @@ JIT variables):
   ``[R]`` contiguous for the weight gradient): it is refused with a
   ``ValueError`` otherwise, never copied.  An output must not overlap any
   input or another output (not checked).
-- Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
-  stage through ``cake_jit.PROGRAM_OF``), CTAs of ``threads / lanes`` rows
-  (32 lanes a row; 256 threads and 8 rows in the forward, 128 threads and
-  4 rows in the backward), one CTA per block of rows on the
-  grid's x axis (``cake_jit.grid``).  ``R == 0`` launches nothing and loads no
-  library.  Every launch is a plain stream-ordered launch on the current torch
-  stream of the operands' device (a tvm-ffi call whose arguments include
-  PyTorch CUDA tensors runs on that stream, a CUDA graph's capture stream
-  during capture; the binding makes the device current): nothing cooperative,
-  no PDL, no dynamic shared memory.  Nothing here reads device memory, reads
-  an environment variable, synchronizes or keeps state between calls; the
-  checks read dtypes, shapes, strides, devices and data pointers only.
+- Launches.  One kernel per call.  Each stage has two programs
+  (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
+  when ``R`` is at least its record's ``min_rows_per_sm`` of the device's
+  architecture times the device's SM count (``cake_jit.route``; the
+  architecture is read once per device and the SM count once per stage and
+  device, and an architecture without a large-R program runs the small-R one
+  at every ``R``).  Both programs of a stage give the same bits for every
+  input, so the route changes no output bit.  CTAs of ``threads / lanes``
+  rows (32 lanes a row; 128 threads and 4 rows, but 256 threads and 8 rows in
+  the large-R forward on SM100 and SM103), one CTA per block of rows on the
+  grid's x axis (``cake_jit.grid``).  ``R == 0`` launches nothing and loads
+  no library; a program's library loads at its first launch.  Every launch
+  is a plain stream-ordered launch on the current torch stream of the
+  operands' device (a tvm-ffi call whose arguments include PyTorch CUDA
+  tensors runs on that stream, a CUDA graph's capture stream during capture;
+  the binding makes the device current): nothing cooperative, no PDL, no
+  dynamic shared memory.  Nothing here reads device memory, reads an
+  environment variable, synchronizes or keeps state between calls; the checks
+  read dtypes, shapes, strides, devices and data pointers only.
   Under ``torch.use_deterministic_algorithms(True)`` with
   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
   PyTorch fills every tensor it allocates here with NaN before the kernel
@@ -115,11 +122,12 @@ JIT variables):
   them (``create_graph=True``), differentiating them raises ``RuntimeError``.
 - Mode: the mode is part of the name (``det``).  Every output is elementwise
   or a sum within one row in one fixed order, so every launch gives the same
-  bits for the same inputs on the same architecture, whatever the row count,
-  the layout, the stream or a CUDA graph; ``torch.use_deterministic_algorithms``
-  changes no bit of any output (it adds only PyTorch's fills above), and no
-  entry point takes a ``deterministic`` keyword (passing one is a
-  ``TypeError``).  The family has no non-deterministic module.
+  bits for the same inputs on the same architecture, whatever the row count
+  (and so the program it selects), the layout, the stream or a CUDA graph;
+  ``torch.use_deterministic_algorithms`` changes no bit of any output (it
+  adds only PyTorch's fills above), and no entry point takes a
+  ``deterministic`` keyword (passing one is a ``TypeError``).  The family
+  has no non-deterministic module.
 """
 
 from __future__ import annotations
@@ -252,19 +260,35 @@ def _entry(name: str, arch: str) -> Any:
 def _plan(name: str) -> tuple[Callable[[dict[str, Any]], tuple[Any, ...]], int]:
     """``(arguments, rows_per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple of
     its kernel parameters in ``run`` order (:func:`parameters`), and one CTA owns ``rows_per_cta`` rows
-    (``cake_jit.rows_per_cta`` of the record's stage)."""
-    return operator.itemgetter(*parameters(name)), cake_jit.rows_per_cta(cake_jit.MODULES[name]["stage"])
+    (``cake_jit.rows_per_cta``)."""
+    return operator.itemgetter(*parameters(name)), cake_jit.rows_per_cta(name)
+
+
+# A program a launch may run: ``(name, arguments, rows_per_cta)`` (:func:`_plan`).
+_Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
+
+
+@functools.cache
+def _route(stage: str, device_index: int) -> tuple[int, _Plan, _Plan]:
+    """``(cut_rows, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
+    device's architecture and SM count (``cake_jit.route``): a launch of fewer than ``cut_rows`` rows runs the plan
+    ``small``, any other the plan ``large``.  No library is loaded here: a program's library loads at its first
+    launch."""
+    sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
+    cut_rows, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
+    return cut_rows, (small, *_plan(small)), (large, *_plan(large))
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch the record of ``stage`` (``cake_jit.PROGRAM_OF``) with its kernel parameters named in ``values`` on the
-    grid of ``rows`` rows, on the current torch stream of device ``device_index``.
+    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the small-R program below the cut, the
+    large-R one from it) with its kernel parameters named in ``values``, on the current torch stream of device
+    ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
-    ``cake_jit.grid(stage, rows)``."""
-    name = cake_jit.PROGRAM_OF[stage]
-    arguments, per_cta = _plan(name)
+    ``cake_jit.grid(name, rows)`` of the program ``name`` that runs."""
+    cut_rows, small, large = _route(stage, device_index)
+    name, arguments, per_cta = small if rows < cut_rows else large
     try:
         args = arguments(values)
     except KeyError:
@@ -273,7 +297,7 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
                 raise ValueError(f"record {name} needs argument {key!r}") from None
         raise
     if rows < 1:
-        cake_jit.grid(stage, rows)  # raises: a launch needs at least one row
+        cake_jit.grid(name, rows)  # raises: a launch needs at least one row
     _entry(name, device_arch(device_index))(*args, -(-rows // per_cta), 1, 1)
 
 
