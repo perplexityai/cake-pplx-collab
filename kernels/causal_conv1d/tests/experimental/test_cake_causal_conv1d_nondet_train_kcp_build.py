@@ -111,6 +111,7 @@ def test_routes_mirror_the_deterministic_kcp_registry() -> None:
     assert (
         *kcp_jit.KINDS,
         "kcp_bwd_dyn",
+        "kcp_bwd_dyn_pair",
         "kcp_bwd_halo",
         "kcp_fwd_halo",
     ) == kcp_jit.ROUTE_KINDS

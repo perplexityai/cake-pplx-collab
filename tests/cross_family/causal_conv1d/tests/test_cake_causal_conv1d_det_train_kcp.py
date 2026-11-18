@@ -17,24 +17,22 @@ Single-GPU tests of ``cake_causal_conv1d_det_kcp``: one process, world size 1, n
 group.  The rank holds every fragment of a partitioned problem (the halo exchange of one rank is the identity), so
 the history rows, the backward's head rows and the tail fold all run through the host flow.  Criteria:
 
-(a) ``y``, ``dx`` and ``dweight`` against an FP64 oracle of the KCP semantics (the SiLU derivative taken on the FP32
-    preactivation, "policy B") within the conv package's contract tolerances: BF16 ``y`` / ``dx`` within
-    ``atol 1e-3 + rtol 2^-7`` (one BF16 ulp) with no element outside, FP32 ``dweight`` within ``atol 5e-2 + rtol 1e-4``.
-(b) against the shipped zero-history kernels on the unpartitioned documents: ``y`` bitwise equal (the forward runs the
-    same instructions), and ``dx`` elementwise within ``1e-2 + 1e-2 |dx_noCP|`` with no mismatch.  The shipped backward
-    differentiates the BF16-rounded preactivation ("policy A"), so its ``dx`` is not the KCP ``dx`` bit for bit: the
-    two differ by the derivative's sensitivity to that rounding plus one BF16 output rounding (a few elements per
-    million sit beyond ``2e-3 + 2^-6 |dx|``, none beyond the clause above; the measured difference is reported as a
-    test property).
+(a) ``y``, ``dx`` and ``dweight`` have no tolerance: each is judged against the naive BF16 tier
+    (``tests.cake.test_helpers.cake_naive``; PyTorch in BF16 over the unpartitioned documents) over 32 independent
+    random inputs, by its error against the float64 oracle of the unpartitioned problem (SiLU' at the unrounded
+    preactivation), in the L2 and the max norm: the median and the largest of its errors over the draws at most
+    1.005 times the tier's, and 0 wherever the tier's is 0 (``tests.cake.test_helpers.cake_causal_conv1d_oracle``).
+(b) ``y`` is bitwise the shipped zero-history forward's on the unpartitioned documents (the forward runs the same
+    instructions), on every draw.
 (c) bitwise: two autograd calls on the same inputs agree on ``y`` / ``dx`` / ``dweight``, the autograd function equals
     the direct forward / backward calls, and the fold of the received ``dpre`` rows reproduces the unpartitioned
-    launch's ``dx`` through the same host flow.
+    launch's ``dx`` through the same host flow (on every draw).
 (d) every output repeats bit for bit over ``REPEATS`` calls per launch form (``y``, ``hist``, ``dx``, ``dweight`` and
     the halo rows of both exchanges); a steady round issues no host-to-device copy, no synchronizing operation and no
     device allocation.
 (e) the KCP backend reads no environment variable, and a copy of the package imports standalone.
 
-(a) and (b) also run on the two production layers (``ROWS_8365``: one rank's 32768 tokens at
+(a) and (b) also run on the two production layers (``PRODUCTION_ROWS``: one rank's 32768 tokens at
 C = 10240 and 16384 tokens at C = 8192).  A ``CakeKDADetKcpContext`` is built with
 ``cake_kda_det_train_kcp_build_context`` of the KDA KCP plan module.
 """
@@ -47,7 +45,6 @@ import pytest
 import torch
 
 from cake_pplx.cake_causal_conv1d_det_train import (
-    cake_causal_conv1d_det_train_backward,
     cake_causal_conv1d_det_train_forward,
     is_cake_causal_conv1d_det_train_supported,
 )
@@ -56,15 +53,10 @@ from cake_pplx._backends.cake_causal_conv1d_det_train.kcp import (
     cake_causal_conv1d_det_train_kcp_backward,
     cake_causal_conv1d_det_train_kcp_forward,
 )
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import assert_judged, problem
 
 WIDTH = 4
 HALO = WIDTH - 1
-# The conv package's contract tolerances: y / dx within one BF16 ulp of the oracle (no element outside), dweight
-# within atol 5e-2 + rtol 1e-4 of the FP64 one.
-Y_ATOL, Y_RTOL = 1e-3, 2**-7
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
-# The elementwise clause for a context-parallel result against the no-CP kernel of the same package.
-NOCP_ATOL, NOCP_RTOL = 1e-2, 1e-2
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
@@ -87,15 +79,15 @@ ROWS = [
 # One rank's tokens of the two production layers: 32768 tokens at C = 10240 (documents
 # 12000 / 9000 / 6000 / 3768 / 2000) and 16384 tokens at C = 8192 (9000 / 5000 / 2384), cut into fragments whose
 # boundaries are off multiples of 64 and inside documents, so the first document spans three fragments.  Kept out of
-# ``ROWS`` (other suites parametrize over it); the FP64 oracle of a row holds several 2.7 GB tensors.
-ROWS_8365 = [
+# ``ROWS`` (other suites parametrize over it); the float64 oracle of a row holds several 2.7 GB tensors.
+PRODUCTION_ROWS = [
     (
-        "8365-c10240",
+        "production-c10240",
         (12000, 9000, 6000, 3768, 2000),
         (4097, 4095, 4101, 4091, 4096, 4096, 4093, 4099),
         10240,
     ),
-    ("8365-c8192", (9000, 5000, 2384), (4095, 4097, 4099, 4093), 8192),
+    ("production-c8192", (9000, 5000, 2384), (4095, 4097, 4099, 4093), 8192),
 ]
 # Repeats of the determinism rows: every output, per row and launch form.
 REPEATS = 5
@@ -175,79 +167,18 @@ def _problem(lens, cuts, C, device, seed=0):
     )
 
 
-def _reference(x, w, cu, dy):
-    """FP64 oracle of the unpartitioned problem with the KCP semantics (policy B: the SiLU derivative on the
-    unrounded preactivation): BF16 ``y`` and ``dx`` (one rounding each), FP64 ``dweight``."""
-    S, C = x.shape
-    xf = x.double()
-    wd = w.double()
-    cu_l = cu.tolist()
-    doc = torch.zeros(S, dtype=torch.int64, device=x.device)
-    for i in range(len(cu_l) - 1):
-        doc[cu_l[i] : cu_l[i + 1]] = i
+def judge_kcp(lens, cuts, C, run, *, label: str, seed: int = 0) -> None:
+    """``run(p)`` on each draw's :func:`_problem` (its inputs drawn from the draw's seed), its outputs by name (``y`` /
+    ``dx`` in the rank's local order, ``dweight``; a value or a list of several launches' values) judged against the
+    naive tier of the unpartitioned problem."""
 
-    def shifted(t, k):  # t[i - k] of the same document, else 0
-        out = torch.zeros_like(t)
-        if k < S:
-            same = (
-                doc[k:] == doc[:-k]
-                if k
-                else torch.ones(S, dtype=torch.bool, device=x.device)
-            )
-            out[k:] = torch.where(
-                same[:, None], t[: S - k], torch.zeros_like(t[: S - k])
-            )
-        return out
+    device = torch.device("cuda")
 
-    pre = sum(wd[:, k][None, :] * shifted(xf, HALO - k) for k in range(WIDTH))
-    s = torch.sigmoid(pre)
-    y = (pre * s).to(torch.bfloat16)
-    dpre = dy.double() * s * (1 + pre * (1 - s))
+    def launch(_draw: int, draw_seed: int):
+        p = _problem(lens, cuts, C, device, seed=draw_seed)
+        return run(p), problem(p.x, p.w, p.cu, None, p.dy, rows=p.l2g)
 
-    def shifted_up(t, k):  # t[i + k] of the same document, else 0
-        out = torch.zeros_like(t)
-        if k < S:
-            same = (
-                doc[k:] == doc[:-k]
-                if k
-                else torch.ones(S, dtype=torch.bool, device=x.device)
-            )
-            out[: S - k] = torch.where(same[:, None], t[k:], torch.zeros_like(t[k:]))
-        return out
-
-    dx = sum(wd[:, k][None, :] * shifted_up(dpre, HALO - k) for k in range(WIDTH)).to(
-        torch.bfloat16
-    )
-    dw = torch.stack(
-        [(dpre * shifted(xf, HALO - k)).sum(0) for k in range(WIDTH)],
-        dim=1,
-    )
-    return y, dx, dw
-
-
-def _assert_within(actual, expected, *, atol, rtol, label):
-    """No element of ``actual`` outside ``atol + rtol |expected|`` (an exact mismatch count of zero); returns the
-    comparison's statistics for the test record."""
-    assert tuple(actual.shape) == tuple(expected.shape), label
-    a = actual.detach().reshape(-1).double()
-    b = expected.detach().reshape(-1).double()
-    assert torch.isfinite(a).all(), f"{label} has non-finite values"
-    diff = (a - b).abs()
-    bound = atol + rtol * b.abs()
-    outside = diff > bound
-    count = int(outside.sum().item())
-    stats = {
-        "count_outside": count,
-        "max_abs_diff": float(diff.max().item()),
-        "max_ratio_to_bound": float((diff / bound).max().item()),
-    }
-    if count:
-        index = int(outside.nonzero()[0].item())
-        raise AssertionError(
-            f"{label}: {count} of {a.numel()} elements outside atol={atol} rtol={rtol}; first at flat index "
-            f"{index}: got {a[index].item()!r}, expected {b[index].item()!r}"
-        )
-    return stats
+    assert_judged(launch, seed=seed, label=label)
 
 
 def _bits(t):
@@ -255,79 +186,61 @@ def _bits(t):
 
 
 @pytest.mark.parametrize(
-    "name,lens,cuts,C", ROWS + ROWS_8365, ids=[r[0] for r in ROWS + ROWS_8365]
+    "name,lens,cuts,C", ROWS + PRODUCTION_ROWS, ids=[r[0] for r in ROWS + PRODUCTION_ROWS]
 )
 def test_forward_matches_unpartitioned_bitwise(name, lens, cuts, C):
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    y_local, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
-    y_global = cake_causal_conv1d_det_train_forward(p.x, p.w, p.cu)
-    torch.cuda.synchronize()
-    assert hist.shape[0] == max(1, p.ctx.halo.n_hist_rows)
-    assert not y_local.isnan().any()
-    # (b) the forward runs the zero-history forward's instructions with history rows: bitwise equal.
-    assert torch.equal(_bits(y_local), _bits(y_global[p.l2g])), (
-        "y differs from the zero-history kernel"
-    )
-    # (a) y against the FP64 oracle.
-    y_ref, _, _ = _reference(p.x, p.w, p.cu, p.dy)
-    _assert_within(
-        y_local, y_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="y vs FP64 oracle"
-    )
+    def run(p):
+        y_local, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+        y_global = cake_causal_conv1d_det_train_forward(p.x, p.w, p.cu)
+        torch.cuda.synchronize()
+        assert hist.shape[0] == max(1, p.ctx.halo.n_hist_rows)
+        # (b) the forward runs the zero-history forward's instructions with history rows: bitwise equal.
+        assert torch.equal(_bits(y_local), _bits(y_global[p.l2g])), (
+            "y differs from the zero-history kernel"
+        )
+        # (a) y against the naive tier.
+        return {"y": y_local}
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} y")
 
 
 @pytest.mark.parametrize(
-    "name,lens,cuts,C", ROWS + ROWS_8365, ids=[r[0] for r in ROWS + ROWS_8365]
+    "name,lens,cuts,C", ROWS + PRODUCTION_ROWS, ids=[r[0] for r in ROWS + PRODUCTION_ROWS]
 )
-def test_backward_matches_reference_and_folds_tails_bitwise(
-    name, lens, cuts, C, record_property
-):
+def test_backward_matches_reference_and_folds_tails_bitwise(name, lens, cuts, C):
     device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
-    dx_local, dw_local = cake_causal_conv1d_det_train_kcp_backward(
-        p.x_local, p.w, p.ctx, p.dy_local, hist
-    )
-    torch.cuda.synchronize()
-    assert not dx_local.isnan().any() and not dw_local.isnan().any()
-    # (a) dx and dweight against the FP64 oracle of the KCP semantics.
-    _, dx_ref, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
-    _assert_within(
-        dx_local, dx_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="dx vs FP64 oracle"
-    )
-    _assert_within(
-        dw_local, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label="dw vs FP64 oracle"
-    )
-    # (b) dx against the shipped zero-history backward (policy A) on the unpartitioned documents: the elementwise
-    # clause for a context-parallel result against the no-CP kernel; the measured difference is recorded.
-    dx_nocp, _ = cake_causal_conv1d_det_train_backward(p.x, p.w, p.cu, p.dy)
-    stats = _assert_within(
-        dx_local,
-        dx_nocp[p.l2g],
-        atol=NOCP_ATOL,
-        rtol=NOCP_RTOL,
-        label="dx vs no-CP kernel",
-    )
-    for key, value in stats.items():
-        record_property(f"dx_vs_nocp_{key}", value)
-    # (c) The unpartitioned problem through the same host flow (one fragment per document, no halo rows): the fold
-    # of the received dpre rows reproduces its dx bit for bit.
-    whole = _problem(lens, tuple(lens), C, device)
-    _, hist_w = cake_causal_conv1d_det_train_kcp_forward(
-        whole.x_local, whole.w, whole.ctx
-    )
-    dx_whole, _ = cake_causal_conv1d_det_train_kcp_backward(
-        whole.x_local, whole.w, whole.ctx, whole.dy_local, hist_w
-    )
-    torch.cuda.synchronize()
-    assert whole.ctx.halo.n_hist_rows == 0 and whole.ctx.halo.n_tail_rows == 0
-    assert torch.equal(_bits(dx_local), _bits(dx_whole[whole.l2g.argsort()][p.l2g])), (
-        "dx differs from the unpartitioned launch"
-    )
+
+    def run(p):
+        _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+        dx_local, dw_local = cake_causal_conv1d_det_train_kcp_backward(
+            p.x_local, p.w, p.ctx, p.dy_local, hist
+        )
+        torch.cuda.synchronize()
+        # (c) The unpartitioned problem through the same host flow (one fragment per document, no halo rows): the
+        # fold of the received dpre rows reproduces its dx bit for bit.
+        whole = _problem(lens, tuple(lens), C, device)
+        whole.x_local.copy_(p.x[whole.l2g])
+        whole.dy_local.copy_(p.dy[whole.l2g])
+        whole.w.copy_(p.w)
+        _, hist_w = cake_causal_conv1d_det_train_kcp_forward(
+            whole.x_local, whole.w, whole.ctx
+        )
+        dx_whole, _ = cake_causal_conv1d_det_train_kcp_backward(
+            whole.x_local, whole.w, whole.ctx, whole.dy_local, hist_w
+        )
+        torch.cuda.synchronize()
+        assert whole.ctx.halo.n_hist_rows == 0 and whole.ctx.halo.n_tail_rows == 0
+        assert torch.equal(_bits(dx_local), _bits(dx_whole[whole.l2g.argsort()][p.l2g])), (
+            "dx differs from the unpartitioned launch"
+        )
+        # (a) dx and dweight against the naive tier.
+        return {"dx": dx_local, "dweight": dw_local}
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} backward")
 
 
 @pytest.mark.parametrize("name,lens,cuts,C", ROWS[:3], ids=[r[0] for r in ROWS[:3]])
-def test_autograd_function_and_repeat_are_bitwise(name, lens, cuts, C, record_property):
+def test_autograd_function_and_repeat_are_bitwise(name, lens, cuts, C):
     device = torch.device("cuda")
     p = _problem(lens, cuts, C, device)
     runs = []
@@ -352,21 +265,16 @@ def test_autograd_function_and_repeat_are_bitwise(name, lens, cuts, C, record_pr
     assert torch.equal(_bits(dw1), _bits(dw_direct)), (
         "autograd dweight differs from the direct backward"
     )
-    # (a) the autograd outputs against the FP64 oracle of the KCP semantics.
-    y_ref, dx_ref, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
-    _assert_within(y1, y_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="y vs FP64 oracle")
-    _assert_within(
-        dx1, dx_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="dx vs FP64 oracle"
-    )
-    _assert_within(dw1, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label="dw vs FP64 oracle")
-    # (b) dx against the shipped zero-history backward (policy A) on the unpartitioned documents under the no-CP
-    # clause; the two policies' difference is recorded for the report (it is not a bitwise relation).
-    dx_nocp, _ = cake_causal_conv1d_det_train_backward(p.x, p.w, p.cu, p.dy)
-    stats = _assert_within(
-        dx1, dx_nocp[p.l2g], atol=NOCP_ATOL, rtol=NOCP_RTOL, label="dx vs no-CP kernel"
-    )
-    for key, value in stats.items():
-        record_property(f"dx_vs_nocp_{key}", value)
+
+    # (a) the autograd outputs against the naive tier.
+    def run(q):
+        x = q.x_local.clone().requires_grad_(True)
+        w = q.w.clone().requires_grad_(True)
+        y = cake_causal_conv1d_det_kcp(x, w, q.ctx)
+        y.backward(q.dy_local)
+        return {"y": y.detach(), "dx": x.grad, "dweight": w.grad}
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} autograd")
 
 
 def test_empty_rank_returns_empty_outputs():
@@ -393,7 +301,7 @@ def test_rejects_mismatched_context():
 
 
 def test_kcp_keeps_fp32_taps_and_no_bias():
-    """The KCP path keeps the package's pre-round-6 contract: BF16 taps are refused with the FP32 error text
+    """The KCP path keeps FP32 taps and no bias: BF16 taps are refused with the FP32 error text
     (the training routes accept them), and there is no bias keyword."""
 
     device = torch.device("cuda")
@@ -966,8 +874,8 @@ def test_recompute_handle_both_host_paths(monkeypatch, host_trim) -> None:
 # ----------------------------------------------------------------------------------------------------------------
 # The backward's launch forms: ``cooperative=True`` runs the cooperative ``kcp_bwd`` record,
 # ``cooperative=False`` the ``kcp_bwd_split`` record (an ordinary launch one SM short of co-resident) and its fixed-order
-# reduce program.  ``dx`` is bitwise the same in both forms; ``dweight`` is reproducible in each form and within the
-# FP64-oracle bound, its bits differ between the forms (each sums its own partial rows).
+# reduce program.  ``dx`` is bitwise the same in both forms; ``dweight`` is reproducible in each form and judged
+# against the naive tier, its bits differ between the forms (each sums its own partial rows).
 
 
 class _RouteRecorder:
@@ -1024,7 +932,6 @@ def test_backward_launch_forms(monkeypatch, name, lens, cuts, C, host_trim) -> N
     if host_trim == 1:  # the trimmed path selects once per cache key
         expected = ["kcp_bwd", "kcp_bwd_split"]
     assert routes.kinds == expected, routes.kinds
-    _, dx_ref, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
     dx_coop, dw_coop = out[True][0]
     for coop, runs in out.items():
         dx0, dw0 = runs[0]
@@ -1035,21 +942,30 @@ def test_backward_launch_forms(monkeypatch, name, lens, cuts, C, host_trim) -> N
         assert torch.equal(_bits(dx0), _bits(dx_coop)), (
             f"cooperative={coop}: dx differs from the cooperative form"
         )
-        _assert_within(
-            dw0, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label=f"dw (cooperative={coop})"
-        )
-        _assert_within(
-            dx0,
-            dx_ref[p.l2g],
-            atol=Y_ATOL,
-            rtol=Y_RTOL,
-            label=f"dx (cooperative={coop})",
-        )
     dx_d, dw_d = default
     dx_e, dw_e = out[conv_kcp.COOPERATIVE_DEFAULT][0]
     assert torch.equal(_bits(dx_d), _bits(dx_e)) and torch.equal(
         _bits(dw_d), _bits(dw_e)
     ), "cooperative=None is not the package default"
+
+    # dx and dweight of both forms against the naive tier.
+    def run(q):
+        conv_kcp._set_test_knobs({"host_trim": host_trim})
+        try:
+            _, hist_q = cake_causal_conv1d_det_train_kcp_forward(q.x_local, q.w, q.ctx)
+            found = {"dx": [], "dweight": []}
+            for coop in (True, False):
+                dx, dw = cake_causal_conv1d_det_train_kcp_backward(
+                    q.x_local, q.w, q.ctx, q.dy_local, hist_q, cooperative=coop
+                )
+                found["dx"].append(dx)
+                found["dweight"].append(dw)
+            torch.cuda.synchronize()
+        finally:
+            conv_kcp._set_test_knobs(None)
+        return found
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} launch forms host_trim={host_trim}")
 
 
 def test_backward_launch_form_autograd_graph_and_refusal(monkeypatch) -> None:
@@ -1129,7 +1045,7 @@ class _HaloRecorder:
 
 
 @pytest.mark.parametrize(
-    "name,lens,cuts,C", ROWS + ROWS_8365, ids=[r[0] for r in ROWS + ROWS_8365]
+    "name,lens,cuts,C", ROWS + PRODUCTION_ROWS, ids=[r[0] for r in ROWS + PRODUCTION_ROWS]
 )
 def test_every_output_repeats_bitwise_per_launch_form(
     monkeypatch, name, lens, cuts, C

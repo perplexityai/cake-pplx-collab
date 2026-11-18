@@ -16,8 +16,10 @@ The stable entry points live in `cake_pplx/cake_causal_conv1d_det_train.py`; tha
 y = cake_causal_conv1d_det_train_forward(x, weight, cu_seqlens, bias=None, out=None, workspace=None)
 dx, dweight = cake_causal_conv1d_det_train_backward(x, weight, cu_seqlens, dy)                 # no bias
 dx, dweight, dbias = cake_causal_conv1d_det_train_backward(x, weight, cu_seqlens, dy, bias=bias)
+dx, dweight = cake_causal_conv1d_det_train_backward(x, weight, cu_seqlens, dy,                 # opt-in pair sums
+                                                    silu_grad_preactivation="fp32", dweight_sum="fp32_pair")
 y = cake_causal_conv1d_det(x, weight, cu_seqlens, bias,                                        # autograd
-                           silu_grad_preactivation="bf16", bwd_grid_mult=1)
+                           silu_grad_preactivation="bf16", bwd_grid_mult=1, dweight_sum="fp32")
 fws = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
 ws = cake_causal_conv1d_det_train_backward_workspace(S, C, device, bwd_grid_mult=1)
 is_cake_causal_conv1d_det_train_supported(device)
@@ -33,17 +35,17 @@ is_cake_causal_conv1d_det_train_supported(device)
 
 ### Determinism, per output
 
-Below, "same call" means the same inputs, device architecture, package version and keyword settings. The keyword settings are the taps, bias and output dtypes, `silu_grad_preactivation`, and `bwd_grid_mult`. Every output was bitwise identical over 5 repeated runs on every measured shape on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
+Below, "same call" means the same inputs, device (architecture and SM count), package version and keyword settings. The keyword settings are the taps, bias and output dtypes, `silu_grad_preactivation`, `bwd_grid_mult` and `dweight_sum`. The package's GPU tests repeat calls and compare the bits on B200 (sm_100a), GB300 (sm_103a) and R200 (sm_107a).
 
 | Output | Repeats bit for bit when | What changes its bits | Accuracy vs exact FP64 |
 | --- | --- | --- | --- |
-| `y` | same call, whichever CTA computes a chunk | Not `bwd_grid_mult`. May change between package versions (unchanged in this version) | one BF16 rounding of the FP32 result |
-| `dx` | same call | Not `bwd_grid_mult` or the backward tile plan. May change between package versions (unchanged in this version) | within one BF16 ulp under both `silu_grad_preactivation` policies |
-| `dweight` | same call, including `bwd_grid_mult` | Summation order follows the backward tile plan and `bwd_grid_mult`, so different settings differ in the last bits. Package version | FP32 output: about 3e-5 rel-L2 with `"bf16"`, about 2e-7 with `"fp32"` (measured worst 1.39e-7). BF16 output: limited by BF16 storage (measured 1.6e-3 to 1.8e-3) |
-| `dbias` | same as `dweight` | same as `dweight` | FP32 output with `"fp32"`: measured worst 1.49e-7 rel-L2 |
+| `y` | same call, whichever CTA computes a chunk | Not `bwd_grid_mult`. May change between package versions | one BF16 rounding of the FP32 result |
+| `dx` | same call | Not `bwd_grid_mult` or the backward tile plan. May change between package versions | within one BF16 ulp under both `silu_grad_preactivation` policies |
+| `dweight` | same call, including `bwd_grid_mult` and `dweight_sum` | Summation order follows the backward tile plan, the device's SM count and `bwd_grid_mult`, so different settings or SM counts differ in the last bits. `dweight_sum="fp32_pair"` changes the last bits. Package version | FP32 output: about 3e-5 rel-L2 with `"bf16"`; with `"fp32"` the rounded preactivation no longer contributes. By default (`dweight_sum="fp32"`) every sum is one plain FP32 word; `"fp32_pair"` makes it an FP32 (hi, lo) pair. BF16 output: limited by BF16 storage |
+| `dbias` | same as `dweight` | same as `dweight` | same as `dweight` |
 
-- With `silu_grad_preactivation="bf16"` (the default), SiLU' is evaluated at the BF16-rounded preactivation, the same boundary flash-linear-attention uses. With `"fp32"`, it is evaluated at the unrounded FP32 preactivation and the final reduction runs in FP64. The `"fp32"` program is slower.
-- Single-tile rows run narrower channel tiles. Every backward route runs 32-channel-vector tiles at C 224 and C 520-1016, except that from a per-architecture token floor (S 65536 on sm_100a, 24576 on sm_103a, 32768 on sm_107a) the default backward runs C 520-615 (C 520-687 on sm_107a) on its SM-wide program, one whole channel tile per CTA; below the floor these rows keep the 32-vector tiles. Every forward route runs 32-vector tiles at C 576-768. From a per-architecture token floor, C 576 runs whole 18-vector tiles and C 640 runs whole 40-vector tiles; below the floor these rows keep the 32-vector tiles. The backward tile plan sets the `dweight` and `dbias` summation order. The forward tile plan never changes `y` bits. At those backward widths, `dweight` and `dbias` bits differ from versions before the 32-vector backward tiles, and in the SM-wide band from the floor `dweight` bits differ from versions before this one. `y` and `dx` keep their bits, and the accuracy bounds are unchanged.
+- With `silu_grad_preactivation="bf16"` (the default), SiLU' is evaluated at the BF16-rounded preactivation when `weight` is FP32, the same boundary flash-linear-attention uses, and at the unrounded FP32 preactivation when `weight` is BF16. With `"fp32"`, it is evaluated at the unrounded FP32 preactivation. The `"fp32"` program is slower. By default (`dweight_sum="fp32"`), every `dweight` and `dbias` sum is one plain FP32 word under both policies: each thread sums its tokens in FP32, the `"fp32"` programs fold those sums into shared memory every few token stages, and the reduce program adds the FP32 partial rows in a fixed order. The default has no compensated (two-word) sums. In version 0.2.0 this changes the `"fp32"` routes' `dweight` and `dbias` bits from 0.1.0. The opt-in `dweight_sum="fp32_pair"` (with `"fp32"` only) runs the pair programs: the fold is Kahan-compensated, the reduce program adds the partial rows as FP32 (hi, lo) pairs in the same fixed order, and the result is rounded once. The pair programs keep `dx`, change the last bits of `dweight` and `dbias`, and repeat bit for bit for the same call. No program uses FP64.
+- Single-tile rows run narrower channel tiles. Every backward route runs 32-channel-vector tiles at C 224 and C 520-1016, except that from a per-architecture token floor (S 65536 on sm_100a, 24576 on sm_103a, 32768 on sm_107a) the default backward runs C 520-615 (C 520-687 on sm_107a) on its SM-wide program, one whole channel tile per CTA; below the floor these rows keep the 32-vector tiles. Every forward route runs 32-vector tiles at C 576-768. From a per-architecture token floor, C 576 runs whole 18-vector tiles and C 640 runs whole 40-vector tiles; below the floor these rows keep the 32-vector tiles. The backward tile plan sets the `dweight` and `dbias` summation order. The forward tile plan never changes `y` bits. At those backward widths, `dweight` and `dbias` bits differ from versions before the 32-vector backward tiles, and in the SM-wide band from the floor `dweight` bits differ from versions before 0.1.0. `y` and `dx` keep their bits, and the accuracy bounds are unchanged.
 - Because the backward recomputes the preactivation, a checkpointed (recomputed) forward gives the same `y` bits. The backward from it gives the same gradient bits.
 
 ### Keyword controls
@@ -54,6 +56,7 @@ There are no environment variables. Every setting is a keyword argument.
 | --- | --- | --- | --- |
 | `silu_grad_preactivation` | `"bf16"`, `"fp32"` | `"bf16"` | Sets where the backward evaluates SiLU'. `"fp32"` is more accurate and slower. |
 | `bwd_grid_mult` | `1` to `4` | `1` | Splits the backward work more finely. Changes the last bits of `dweight` / `dbias`, never `y` / `dx`. Size the backward workspace with the same or a larger value. |
+| `dweight_sum` | `"fp32"`, `"fp32_pair"` | `"fp32"` | The sum form of `dweight` / `dbias`. `"fp32"` sums in plain FP32 words. `"fp32_pair"` is an opt-in: it runs the FP32 (hi, lo) pair programs. They keep `dx` and the workspace and change the last bits of `dweight` / `dbias`. It needs `silu_grad_preactivation="fp32"`, else `ValueError`. Another string raises `ValueError`; a non-string raises `TypeError`. |
 | `bias` | `None`, or `[C]` FP32 / BF16 | `None` | Adds the bias. The backward then also returns `dbias`. |
 | `out` | BF16 tensor | `None` | Preallocated forward output `y`. |
 | `dx`, `dweight`, `dbias` | tensors | `None` | Preallocated backward outputs. `dweight` / `dbias` can be FP32 or BF16. |
@@ -111,7 +114,9 @@ also holds the explicit calls: `cake_causal_conv1d_det_train_kcp_forward`
 keyword `graph="replay"` (keyed CUDA-graph capture and replay, bitwise the
 eager result; call `cake_causal_conv1d_det_train_kcp_graph_cache_clear()`
 before `torch.distributed.destroy_process_group()`).  Every switch is a keyword
-argument; the backend reads no environment variable.
+argument; the backend reads no environment variable.  The KCP route has no
+`dweight_sum` keyword: it offers no FP32 (hi, lo) pair opt-in, and its
+`dweight` is summed in plain FP32 words.
 
 ### Launch forms (`cooperative`)
 
@@ -228,9 +233,13 @@ rank.  Bits across CP layouts or SM counts are not guaranteed.
 | `y` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; this revision's `y` is also bitwise the single-rank `y` of the same documents (the forward runs the single-rank forward's instructions with history rows), a property of this revision, not a guarantee |
 | `hist` (history pool, the saved set's tensor) | yes | bitwise equal | copies of `x_local` rows of other fragments |
 | halo adjoints (`dpre` rows sent, `dpre_tail` received) | yes | bitwise equal | written by the head program, which is the same in both forms |
-| `dx` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; not bitwise the single-rank `dx`, which differentiates the BF16-rounded preactivation (within `1e-2 + 1e-2 abs(dx_single)` of it) |
-| `dweight` (rank-local FP32 partial) | yes, within one form | bits differ | a fixed-order sum of the rank's partial rows; the two forms sum different partial rows.  The sum of the ranks' partials is within `5e-2 + 1e-4 abs(dw)` of an FP64 oracle |
+| `dx` | yes | bitwise equal | within one BF16 ulp of an FP64 oracle; not bitwise the single-rank `dx`, which differentiates the BF16-rounded preactivation |
+| `dweight` (rank-local FP32 partial) | yes, within one form | bits differ | a fixed-order sum of the rank's partial rows in plain FP32 words; the two forms sum different partial rows |
 | checkpoint replay | yes | | with a recompute handle `y` and the saved set `(x_local, weight, hist)` are bitwise those of the exchanging recompute, and the gradients bitwise those of the saved-set path (no checkpoint) |
+
+The package tests judge the L2 and max error of `y`, `dx` and `dweight` against
+an FP64 oracle of the unpartitioned documents, relative to a PyTorch BF16
+implementation of the same operation, over 32 random draws.
 
 The package issues no reduction collective for `dweight`: each rank returns
 its partial, and the sum over the ranks is the framework's (for example the
