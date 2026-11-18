@@ -469,17 +469,25 @@ ENTRIES = (
     "cake_mhc_nondet_train_backward_workspace_bytes",
     "cake_mhc_nondet_train_forward_workspace",
     "cake_mhc_nondet_train_backward_workspace",
+    # the pre handoff and the standalone collapse (hidden 5120)
+    "cake_mhc_nondet_train_handoff_forward_prepare",
+    "cake_mhc_nondet_train_handoff_backward_finish",
+    "cake_mhc_nondet_train_handoff_prepare",
+    "cake_mhc_nondet_train_collapse_forward",
+    "cake_mhc_nondet_train_collapse_backward",
+    "cake_mhc_nondet_train_collapse",
 )
 # The other public functions.
 HELPERS = (
     "is_cake_mhc_nondet_train_supported",
+    "is_cake_mhc_nondet_train_handoff_supported",
     "cake_mhc_nondet_train_reset_workspace",
     "cake_mhc_nondet_train_route_key",
     "cake_mhc_nondet_train_route_modules",
 )
 # The top-level module of the mode (read as source: the suite imports nothing but its package) and its entry points.
 FACADE = "cake_pplx/cake_mhc_nondet_train.py"
-FACADE_ENTRIES = ("is_cake_mhc_nondet_train_supported", *ENTRIES)
+FACADE_ENTRIES = ("is_cake_mhc_nondet_train_supported", "is_cake_mhc_nondet_train_handoff_supported", *ENTRIES)
 # The prefixes of the public entry points of the two modes (the same verbs follow).
 NONDET_API, DET_API = "cake_mhc_nondet_train", "cake_mhc_det_train"
 # PyTorch's wording of the alert of a non-deterministic operation (no call of this package raises it).
@@ -3623,6 +3631,7 @@ def _cpu_calls(**keywords) -> dict:
         torch.zeros(T, 4096, dtype=torch.bfloat16),
     )
     stats, gstats = torch.zeros(T, 64), torch.zeros(T, 32)
+    pre = torch.zeros(T, 4)
     return {
         "cake_mhc_nondet_train_forward_prepare": lambda: pkg.cake_mhc_nondet_train_forward_prepare(X, fn, scale, base, **keywords),
         "cake_mhc_nondet_train_forward_stats": lambda: pkg.cake_mhc_nondet_train_forward_stats(X, fn, scale, base, **keywords),
@@ -3637,6 +3646,20 @@ def _cpu_calls(**keywords) -> dict:
         "cake_mhc_nondet_train_backward_workspace_bytes": lambda: pkg.cake_mhc_nondet_train_backward_workspace_bytes(T, cpu, **keywords),
         "cake_mhc_nondet_train_forward_workspace": lambda: pkg.cake_mhc_nondet_train_forward_workspace(T, cpu, **keywords),
         "cake_mhc_nondet_train_backward_workspace": lambda: pkg.cake_mhc_nondet_train_backward_workspace(T, cpu, **keywords),
+        "cake_mhc_nondet_train_handoff_forward_prepare": lambda: pkg.cake_mhc_nondet_train_handoff_forward_prepare(
+            X, pre, fn, scale, base, **keywords
+        ),
+        "cake_mhc_nondet_train_handoff_backward_finish": lambda: pkg.cake_mhc_nondet_train_handoff_backward_finish(
+            X, X, dU, pre, pre, B, fn, scale, base, stats, gstats, **keywords
+        ),
+        "cake_mhc_nondet_train_handoff_prepare": lambda: pkg.cake_mhc_nondet_train_handoff_prepare(
+            X, pre, fn, scale, base, **keywords
+        ),
+        "cake_mhc_nondet_train_collapse_forward": lambda: pkg.cake_mhc_nondet_train_collapse_forward(X, pre, **keywords),
+        "cake_mhc_nondet_train_collapse_backward": lambda: pkg.cake_mhc_nondet_train_collapse_backward(
+            X, pre, dU, **keywords
+        ),
+        "cake_mhc_nondet_train_collapse": lambda: pkg.cake_mhc_nondet_train_collapse(X, pre, **keywords),
     }  # fmt: skip
 
 
@@ -3653,6 +3676,9 @@ def test_entry_points_refuse_a_deterministic_keyword_first(value) -> None:
             pkg.is_cake_mhc_nondet_train_supported(
                 torch.device("cpu"), deterministic=value
             )
+        ),
+        is_cake_mhc_nondet_train_handoff_supported=lambda: (
+            pkg.is_cake_mhc_nondet_train_handoff_supported(torch.device("cpu"), deterministic=value)
         ),
         cake_mhc_nondet_train_reset_workspace=lambda: (
             pkg.cake_mhc_nondet_train_reset_workspace(None, deterministic=value)

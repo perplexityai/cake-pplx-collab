@@ -115,9 +115,7 @@ def _issue_reference(i: dict) -> dict:
         C = C / (C.sum(-2, keepdim=True) + HC_EPS)
     U = (pre_in.unsqueeze(-1) * X).sum(1)
     Y = post.unsqueeze(-1) * B.unsqueeze(1) + torch.einsum("tij,tid->tjd", C, X)
-    grads = torch.autograd.grad(
-        (U, Y, pre), leaves, (i["dU"].double(), i["dY"].double(), i["dpre_next"].double())
-    )
+    grads = torch.autograd.grad((U, Y, pre), leaves, (i["dU"].double(), i["dY"].double(), i["dpre_next"].double()))
     out = dict(zip(("dX", "dpre_in", "dfn", "dscale", "dbase", "dB"), grads, strict=True))
     out.update(U=U.detach(), Y=Y.detach(), pre_next=pre.detach(), post=post.detach(), C=C.detach())
     return out
@@ -136,8 +134,17 @@ def test_default_oracle_is_the_standard_op_sequence(dtype, T: int, H: int, block
     bt = T if not block_tokens else block_tokens
     blocks = [
         _standard_block(
-            i["X"][lo : lo + bt], i["fn"], i["scale"], i["base"], i["B"][lo : lo + bt], i["dY"][lo : lo + bt],
-            i["dU"][lo : lo + bt], dtype=dtype, rms_eps=RMS_EPS, hc_eps=HC_EPS, iters=ITERS,
+            i["X"][lo : lo + bt],
+            i["fn"],
+            i["scale"],
+            i["base"],
+            i["B"][lo : lo + bt],
+            i["dY"][lo : lo + bt],
+            i["dU"][lo : lo + bt],
+            dtype=dtype,
+            rms_eps=RMS_EPS,
+            hc_eps=HC_EPS,
+            iters=ITERS,
         )  # fmt: skip
         for lo in range(0, T, bt)
     ]
