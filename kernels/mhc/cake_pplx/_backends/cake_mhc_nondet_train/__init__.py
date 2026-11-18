@@ -59,7 +59,7 @@ and nothing falls back to the deterministic package
 ``torch.use_deterministic_algorithms(True)`` without an alert: no launch adds
 in a run-dependent order.
 
-Pre handoff (hidden 5120 on SM100 / SM103; ``cake_jit.HANDOFF_KINDS``): the
+Pre handoff (hidden 5120 on SM100 / SM103 / SM107; ``cake_jit.HANDOFF_KINDS``): the
 routes ``fwd_prepare_handoff`` (the standard forward with the collapse
 ``fwd_collapse__pi_pn``: ``U`` from ``pre_in``, ``pre_next`` written beside
 it) and ``bwd_finish_handoff`` (the standard backward with the token-owner

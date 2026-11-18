@@ -111,7 +111,7 @@ Usage::
 The model's head, the stream mean ``Y = mean_i X[:, i, :]`` of the last
 layer's four streams, is the module :mod:`cake_pplx.cake_mhc_head_det_train`.
 
-Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103,
+Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103 / SM107,
 ``is_cake_mhc_det_train_handoff_supported``): a sublayer collapses its streams
 with the incoming FP32 ``pre_in [T, 4]`` and hands its own ``pre`` on as
 ``pre_next``; its backward takes ``dpre_next`` (the gradient of ``pre_next``)
@@ -649,8 +649,8 @@ def cake_mhc_det_train_finish(X: torch.Tensor, B: torch.Tensor, handle) -> torch
 
 
 # ----------------------------------------------------------------------------
-# Pre handoff and standalone collapse (hidden 5120 on SM100 / SM103; support query:
-# ``is_cake_mhc_det_train_handoff_supported``)
+# Pre handoff and standalone collapse (hidden 5120 on SM100 / SM103 / SM107;
+# support query: ``is_cake_mhc_det_train_handoff_supported``)
 
 
 @cake_api

@@ -21,7 +21,7 @@ generated CUDA sources under ``csrc/``).  The stable, ``@cake_api``-decorated
 entry points and the full user-facing documentation live in
 :mod:`cake_pplx.cake_mhc_det_train`; import that module.
 
-Pre handoff (hidden 5120 on SM100 / SM103; ``cake_jit.HANDOFF_KINDS``): the
+Pre handoff (hidden 5120 on SM100 / SM103 / SM107; ``cake_jit.HANDOFF_KINDS``): the
 routes ``fwd_prepare_handoff`` (the standard forward with the collapse
 ``fwd_collapse__pi_pn``: ``U`` from ``pre_in``, ``pre_next`` written beside
 it) and ``bwd_finish_handoff`` (the standard backward with the token-owner

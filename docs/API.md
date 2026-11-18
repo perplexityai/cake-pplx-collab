@@ -738,7 +738,7 @@ A sublayer of [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-
 - Forward: `(pre_next, post, C)` are the coefficients of `X`, as above. `U = BF16(sum_i pre_in_i X_i)` uses the incoming FP32 `pre_in [T, 4]`, not `pre_next`. `pre_next` is the FP32 `pre` of the coefficient pass, bit for bit the `pre` columns of `stats`. `Y` is computed by `forward_finish` as before.
 - Backward: `dpre_next [T, 4]` FP32 is the gradient of `pre_next` from its consumer. The coefficient VJP takes `dpre_next`, not a gradient derived from `dU`. `dpre_in_i = sum_d dU_d X_id` (one FP32 sum per token and stream). `dX = BF16(dX_mix + pre_in_i dU + dX_coef)` is rounded once.
 - The first sublayer passes a one-hot `pre_in = [1, 0, 0, 0]`; its `U` is stream 0 bit for bit. The final collapse before the model head is the standalone collapse `(X, pre_in) -> U` with the VJP `(X, pre_in, dU) -> (dX, dpre_in)`.
-- Coverage: hidden 5120 on `sm_100a` and `sm_103a` (`is_cake_mhc_<mode>_train_handoff_supported(device, hidden=None)`). Other sizes and architectures raise `ValueError`. The standard entry points are unchanged.
+- Coverage: hidden 5120 on `sm_100a`, `sm_103a` and `sm_107a` (`is_cake_mhc_<mode>_train_handoff_supported(device, hidden=None)`). Other sizes and architectures raise `ValueError`. The standard entry points are unchanged.
 
 | Name | Signature | Returns / notes |
 |---|---|---|

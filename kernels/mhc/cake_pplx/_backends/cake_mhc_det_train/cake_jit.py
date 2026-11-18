@@ -121,13 +121,13 @@ still runs.  The bands were measured at hidden 4096 and apply at every hidden
 size.
 
 Pre handoff (``HANDOFF_KINDS``, :func:`handoff_hidden_sizes`: hidden 5120 on
-sm_100a / sm_103a): ``fwd_prepare_handoff_h5120`` is ``fwd_prepare_h5120``
+sm_100a / sm_103a / sm_107a): ``fwd_prepare_handoff_h5120`` is ``fwd_prepare_h5120``
 with ``fwd_collapse__h5120`` replaced by ``fwd_collapse__pi_pn__h5120`` (it
 reads ``pre_in`` in place of the coefficient pass's ``pre`` and writes
 ``pre_next``); ``bwd_finish_handoff_h5120`` is ``bwd_finish_h5120`` with each
 ``bwd_token__<form>__h5120`` replaced by ``bwd_token__<form>_ho__h5120`` (the
 base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
-record; same grid, launch facts and selection); ``collapse_forward_h5120`` /
+record; same grid, block and selection); ``collapse_forward_h5120`` /
 ``collapse_backward_h5120`` are one record each (``collapse_fwd__h5120``,
 ``collapse_bwd__h5120``: own library stems, no workspace; the forward takes the per-call
 PDL attribute on its own edge ``K4->C``, no band).
@@ -10421,6 +10421,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -10470,6 +10471,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -10515,6 +10517,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -10563,6 +10566,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -10787,6 +10791,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -10851,6 +10856,79 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "run_time_iters",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_det_train_bwd_token__dot_ao8_l2l_ho__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_det_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_det_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 113664,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_det_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_l2l",
+            "rule": "bwd_token_program",
         },
         "workspace_rule": {
             "kind": "regions",
@@ -11417,6 +11495,36 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_det_train_fwd_coef__st8_lp2_tree_asel_qd__h7168",
             "cake_mhc_det_train_fwd_coef__lp2_w8_adj_qe__h7168",
             "cake_mhc_det_train_fwd_coef__rt64__h7168",
+        ],
+        "bwd_finish_handoff_h5120": [
+            "cake_mhc_det_train_fn_split__tv128_t128__h5120__t",
+            "cake_mhc_det_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+            "cake_mhc_det_train_bwd_token__dot_ao8_l2l_ho__h5120",
+            "cake_mhc_det_train_bwd_token__rt64_ho__h5120",
+            "cake_mhc_det_train_bwd_slab__dynl__h5120",
+            "cake_mhc_det_train_bwd_reduce__s27_wcvt_spred__h5120",
+            "cake_mhc_det_train_bwd_reduce__wpu4__h5120",
+            "cake_mhc_det_train_bwd_reduce__wpu4_fadd__h5120",
+        ],
+        "collapse_backward_h5120": [
+            "cake_mhc_det_train_collapse_bwd__h5120",
+        ],
+        "collapse_forward_h5120": [
+            "cake_mhc_det_train_collapse_fwd__h5120",
+        ],
+        "fwd_prepare_handoff_h5120": [
+            "cake_mhc_det_train_fn_split__h5120",
+            "cake_mhc_det_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_det_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_det_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_det_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_det_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_det_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_det_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_det_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_det_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_det_train_fwd_coef__rt64__h5120",
+            "cake_mhc_det_train_fwd_collapse__pi_pn__h5120",
         ],
     },
 }

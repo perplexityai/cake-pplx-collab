@@ -28,8 +28,9 @@ programs a standard call launches, with the same grids, PDL arguments and worksp
   library stems and no workspace; the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on),
   the VJP none; the VJP's dynamic shared memory holds its partial sums and their compensations.
 
-The routes exist at hidden 5120 on sm_100a and sm_103a; the nondeterministic records are the deterministic ones under
-the nondeterministic prefix.
+The routes exist at hidden 5120 on sm_100a, sm_103a and sm_107a (each token-owner twin on the architectures of its
+base form: sm_107a's backward runs the ``dot_ao8_l2l`` form where the others run ``dot_ao8`` and its group-row form);
+the nondeterministic records are the deterministic ones under the nondeterministic prefix.
 """
 
 from __future__ import annotations
@@ -51,9 +52,15 @@ HANDOFF_KINDS = (
     "collapse_forward",
     "collapse_backward",
 )
-HANDOFF_ARCHES = ("sm_100a", "sm_103a")
-BOARDS = (("sm_100a", 148), ("sm_103a", 152))
-TOKEN_FORMS = ("ao22_rae7_pd1_ntr", "dot_ao8", "dot_ao8_trows_dyn", "rt64")
+HANDOFF_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+BOARDS = (("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 216))
+TOKEN_FORMS = (
+    "ao22_rae7_pd1_ntr",
+    "dot_ao8",
+    "dot_ao8_trows_dyn",
+    "rt64",
+    "dot_ao8_l2l",
+)
 # The bytes the FP32 compensated dpre_in reduction adds to each token-owner form's dynamic shared memory, and the
 # standalone VJP's dynamic shared memory (partial sums and compensations).
 TOKEN_COMP_SMEM = {
@@ -61,6 +68,7 @@ TOKEN_COMP_SMEM = {
     "dot_ao8": 2048,
     "dot_ao8_trows_dyn": 2048,
     "rt64": 1024,
+    "dot_ao8_l2l": 2048,
 }
 VJP_SMEM = 512
 HANDOFF_OPERANDS = (
@@ -138,8 +146,6 @@ def test_handoff_kinds_keys_and_sizes(mode: str) -> None:
     for arch in HANDOFF_ARCHES:
         assert tuple(reg.handoff_hidden_sizes(arch)) == (HIDDEN,)
         assert HIDDEN in reg.supported_hidden_sizes(arch)
-    # sm_107a is the second phase: no handoff route yet (never substituted by another architecture's programs)
-    assert tuple(reg.handoff_hidden_sizes("sm_107a")) == ()
     for routes in reg.ROUTES.values():
         for key in routes:
             kind, hidden = key.rsplit("_h", 1)
@@ -268,8 +274,11 @@ def test_handoff_routes_are_the_standard_routes_with_the_swaps(
     assert [
         n for n in fwd if REGISTRIES[mode].MODULES[n]["role"] == "fwd_collapse"
     ] == [f"{p}fwd_collapse__h{HIDDEN}"]
-    assert {n for n in bwd if REGISTRIES[mode].MODULES[n]["role"] == "bwd_token"} == {
-        f"{p}bwd_token__{f}__h{HIDDEN}" for f in TOKEN_FORMS
+    tokens = {n for n in bwd if REGISTRIES[mode].MODULES[n]["role"] == "bwd_token"}
+    assert tokens and tokens == {
+        f"{p}bwd_token__{f}__h{HIDDEN}"
+        for f in TOKEN_FORMS
+        if arch in REGISTRIES[mode].MODULES[f"{p}bwd_token__{f}__h{HIDDEN}"]["arches"]
     }
     assert routes[f"collapse_forward_h{HIDDEN}"] == [f"{p}collapse_fwd__h{HIDDEN}"]
     assert routes[f"collapse_backward_h{HIDDEN}"] == [f"{p}collapse_bwd__h{HIDDEN}"]

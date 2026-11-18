@@ -125,7 +125,7 @@ Usage::
     dX, dfn, dscale, dbase = cake_mhc_nondet_train_backward_finish(
         X, dY, dU, B, fn, scale, base, stats, grad_stats, workspace=ws_b)
 
-Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103,
+Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103 / SM107,
 :func:`is_cake_mhc_nondet_train_handoff_supported`): a sublayer collapses its
 streams with the incoming FP32 ``pre_in [T, 4]`` and hands its own ``pre`` on
 as ``pre_next``; its backward takes ``dpre_next`` (the gradient of
@@ -718,7 +718,7 @@ def cake_mhc_nondet_train_finish(
 
 
 # ----------------------------------------------------------------------------
-# Pre handoff and standalone collapse (hidden 5120 on SM100 / SM103)
+# Pre handoff and standalone collapse (hidden 5120 on SM100 / SM103 / SM107)
 
 
 @cake_api

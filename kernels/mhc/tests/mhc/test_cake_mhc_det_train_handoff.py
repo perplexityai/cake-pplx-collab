@@ -90,7 +90,7 @@ def _supported() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _supported(),
-    reason="the pre handoff of cake_mhc_det_train needs an SM100 / SM103 device (hidden 5120)",
+    reason="the pre handoff of cake_mhc_det_train needs an SM100 / SM103 / SM107 device (hidden 5120)",
 )
 
 

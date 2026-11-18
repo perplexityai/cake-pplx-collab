@@ -96,7 +96,7 @@ All operands must be contiguous.
 | SM103 | B300 / GB300 | `sm_103a` |
 | SM107 | Rubin R200 | `sm_107a` |
 
-### Pre handoff (hidden 5120, SM100 / SM103)
+### Pre handoff (hidden 5120, SM100 / SM103 / SM107)
 
 A DeepSeek-V4.1-Flash sublayer collapses its streams with the `pre` of the previous sublayer and hands its own `pre` on. The entry points of both packages (`det` shown; `nondet` has the same names under its prefix):
 
