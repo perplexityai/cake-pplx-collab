@@ -122,10 +122,10 @@ allocator first releases its cached blocks with ``cudaFree``, which waits for
 all work on the device, a collective resident on another stream included: the
 call then starts only after that work ends (measured on GB200, GB300 and R200
 beside all-gathers of 37 to 47 ms).  A call given contiguous aligned ``out``,
-``rstd`` and ``residual_out`` (forward) or ``dx``, ``dw`` and ``workspace``
-(backward), with inputs it reads in place, allocates nothing and does not wait
-this way.  :func:`cake_rmsnorm_det` allocates its outputs and its backward
-workspace on every call.
+``rstd`` and ``residual_out`` that share no memory with its inputs (forward) or
+``dx``, ``dw`` and ``workspace`` (backward), with inputs it reads in place,
+allocates nothing and does not wait this way.  :func:`cake_rmsnorm_det` allocates its
+outputs and its backward workspace on every call.
 
 Usage::
 
@@ -211,7 +211,9 @@ def cake_rmsnorm_det_train_forward(
         Preallocated outputs: BF16 ``y`` of ``x``'s shape, FP32 reciprocal RMS of
         its leading shape (``[T]``) and (residual only) BF16 ``h_new`` of ``x``'s
         shape.  Contiguous aligned buffers are written directly; any other layout
-        receives a copy after the launch.
+        receives a copy after the launch.  A buffer that shares memory with ``x``,
+        ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
+        kernels write a temporary, which is copied into it after the launch.
 
     Returns
     -------

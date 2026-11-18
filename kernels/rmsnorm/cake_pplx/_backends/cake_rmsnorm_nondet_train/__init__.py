@@ -370,6 +370,33 @@ def _route_error(
     )
 
 
+def _byte_range(tensor: torch.Tensor) -> tuple[int, int]:
+    """``(first, end)``: the address of the first byte the elements of the
+    non-empty ``tensor`` cover and the address one past its last byte."""
+
+    span = 1 + sum(
+        (size - 1) * step for size, step in zip(tensor.shape, tensor.stride())
+    )
+    first = tensor.data_ptr()
+    return first, first + span * tensor.element_size()
+
+
+def _read_ranges(*tensors: Optional[torch.Tensor]) -> tuple[tuple[int, int], ...]:
+    """The byte ranges (:func:`_byte_range`) of the non-empty tensors among
+    ``tensors``: the inputs a launch reads."""
+
+    return tuple(_byte_range(t) for t in tensors if t is not None and t.numel())
+
+
+def _overlaps(tensor: torch.Tensor, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether the bytes of the non-empty ``tensor`` meet one of ``ranges``."""
+
+    first, end = _byte_range(tensor)
+    return any(
+        first < other_end and other_first < end for other_first, other_end in ranges
+    )
+
+
 def _output_buffer(
     tensor: Optional[torch.Tensor],
     name: str,
@@ -379,14 +406,17 @@ def _output_buffer(
     dtype: torch.dtype,
     alignment: int,
     lead: Optional[tuple[int, ...]] = None,
+    reads: tuple[tuple[int, int], ...] = (),
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """``(kernel buffer, the tensor returned to the caller, user buffer to copy back into or None)``.
 
     A caller-provided output of any layout is honoured: the kernel writes a
-    contiguous aligned buffer directly when the caller's tensor is one, otherwise
-    into a temporary that is copied back into the caller's view after the launch.
-    ``lead`` (an N-D call) is the leading shape the caller's buffer and the
-    returned tensor have in place of the ``shape[0]`` rows of the kernel buffer.
+    contiguous aligned buffer directly when the caller's tensor is one and its
+    bytes meet none of ``reads`` (:func:`_read_ranges` of the inputs the launch
+    reads), otherwise into a temporary that is copied back into the caller's
+    view after the launch.  ``lead`` (an N-D call) is the leading shape the
+    caller's buffer and the returned tensor have in place of the ``shape[0]``
+    rows of the kernel buffer.
     """
 
     user_shape = shape if lead is None else (*lead, *shape[1:])
@@ -395,7 +425,9 @@ def _output_buffer(
         return kernel, (kernel if lead is None else kernel.view(user_shape)), None
     _validate_tensor(tensor, name, shape=user_shape, device=device, dtype=dtype)
     if tensor.numel() == 0 or (
-        tensor.is_contiguous() and tensor.data_ptr() % alignment == 0
+        tensor.is_contiguous()
+        and tensor.data_ptr() % alignment == 0
+        and not (reads and _overlaps(tensor, reads))
     ):
         return (tensor if lead is None else tensor.reshape(shape)), tensor, None
     return torch.empty(shape, dtype=dtype, device=device), tensor, tensor
@@ -739,6 +771,11 @@ def _forward(
         w_dtype=w_dtype,
     ):
         raise _route_error("fwd", hidden, has_residual, w, arch)
+    # A caller's output that shares memory with an input is written through a
+    # temporary: a forward program may read an input again after it stores an
+    # output, and every kernel takes its pointers as not aliased.
+    caller_buffers = out is not None or rstd is not None or residual_out is not None
+    reads = _read_ranges(x, residual, w) if caller_buffers else ()
     out, y_result, out_user = _output_buffer(
         out,
         "out",
@@ -747,6 +784,7 @@ def _forward(
         dtype=torch.bfloat16,
         alignment=align,
         lead=nd,
+        reads=reads,
     )
     rstd, rstd_result, rstd_user = _output_buffer(
         rstd,
@@ -756,6 +794,7 @@ def _forward(
         dtype=torch.float32,
         alignment=BACKWARD_ALIGNMENT_BYTES,
         lead=nd,
+        reads=reads,
     )
     residual_out_user = None
     results: tuple[torch.Tensor, ...] = (y_result, rstd_result)
@@ -768,6 +807,7 @@ def _forward(
             dtype=torch.bfloat16,
             alignment=align,
             lead=nd,
+            reads=reads,
         )
         results = (y_result, rstd_result, h_new_result)
     copy_backs = [(out, out_user), (rstd, rstd_user), (residual_out, residual_out_user)]
@@ -845,7 +885,9 @@ def cake_rmsnorm_nondet_train_forward(
         Preallocated outputs: BF16 ``y`` of ``x``'s shape, FP32 reciprocal RMS of
         its leading shape (``[T]``) and (residual only) BF16 ``h_new`` of ``x``'s
         shape.  Contiguous aligned buffers are written directly; any other layout
-        receives a copy after the launch.
+        receives a copy after the launch.  A buffer that shares memory with ``x``,
+        ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
+        kernels write a temporary, which is copied into it after the launch.
 
     Returns
     -------
