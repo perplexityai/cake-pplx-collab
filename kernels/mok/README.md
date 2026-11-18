@@ -105,7 +105,9 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
 Known gaps are judged in test items of their own. On an architecture where a gap's miss is accepted, the item
 carries a strict expected-failure marker with caps (`tests/experimental/_mok_gaps.py`), one for each norm the miss is
 accepted in there: the largest ratio of the kernel's median and largest error over the naive implementation's, over
-every recorded run on every GPU model, rounded up to 4 decimals (at least 1.005). A ratio above a cap fails the item,
+every recorded run on every GPU model, rounded up to 4 decimals (at least 1.005). One item has caps per architecture
+instead, each from that architecture's runs: the EP4 unequal-sources routed gate weight gradient, whose largest max-norm
+ratio on `sm_107a` (1.89) is above the other architectures' (1.31). A ratio above a cap fails the item,
 and so does a miss in a norm without a cap. A fix makes the item pass, and the strict marker then fails the item
 until the marker is removed. On an architecture without caps the item is judged like any output, and a miss fails it.
 Every other output of the same case stays judged in the case's main item. The outputs that miss the rule, with their
