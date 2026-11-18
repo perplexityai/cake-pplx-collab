@@ -572,8 +572,10 @@ def cake_dsa_sparse_attention_nondet_nope(
         the main stage's work, only while ``T * K_eff < 112 * S + 2**20`` with
         ``K_eff = min(K_slots, ceil(S / num_segments))`` (the permuted
         accumulator plus cast was faster on the measured rows with more
-        work); any other row takes the cast --, ``1`` forces
-        the direct path whenever the stages are registered, ``0`` always
+        work) or ``S > 163840`` (``cast_max_keys``: beyond it the cast path
+        measured slower on long single-segment rows); any other row takes
+        the cast --, ``1`` forces the direct path whenever the stages are
+        registered, ``0`` always
         takes the accumulate-and-cast path; any
         other value raises ``ValueError``.  ``True`` / ``False`` select the path explicitly and
         ignore the variable.  Both paths add the same FP32 contributions into

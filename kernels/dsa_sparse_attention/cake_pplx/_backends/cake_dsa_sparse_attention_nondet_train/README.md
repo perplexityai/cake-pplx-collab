@@ -263,9 +263,10 @@ the host takes the direct path by the size rule the record carries
 (`dkv_direct`: `min_keys_per_query`, 4 -- direct iff `S >= 4 T`) whenever
 `dkv_acc` is given.  Like `key_pass_policy`, the rule may differ per
 architecture: a rule `dkv_direct.rules[arch]` maps exactly
-`min_keys_per_query`, `cast_slots_per_key` and `cast_min_slots`, replaces
-the base count on that target and adds a work test (see "Direct accumulation
-on `sm_107a`" below); an architecture without a rule takes the base, and the
+`min_keys_per_query`, `cast_slots_per_key` and `cast_min_slots`, and
+optionally the key cap `cast_max_keys` (a positive integer; no cap without
+it), replaces the base count on that target and adds a work test (see
+"Direct accumulation on `sm_107a`" below); an architecture without a rule takes the base, and the
 planners apply the rule of the device's architecture to the row's top-k width
 and segment count.  Both records carry one rule, for `sm_107a`.  The keyword
 `dkv_direct` of the entry points (default
@@ -282,7 +283,7 @@ call takes the cast's accumulate path.
 | record | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
 | RoPE (`dkv_acc` only) | `S >= 4 T` | `S >= 4 T` | `S >= 4 T` and `T * K_eff < 112 S + 2^20` |
-| NoPE (fresh `dkv` and `dkv_acc`) | `S >= T` | `S >= T` | `S >= T` and `T * K_eff < 112 S + 2^20` |
+| NoPE (fresh `dkv` and `dkv_acc`) | `S >= T` | `S >= T` | `S >= T` and (`T * K_eff < 112 S + 2^20` or `S > 163,840`) |
 
 `K_eff = min(K_slots, ceil(S / num_segments))`; a row outside the condition
 takes the permuted accumulator and the cast.
@@ -306,7 +307,8 @@ both records keeps the base test and also takes the cast path where
 
     T * K_eff >= cast_slots_per_key * S + cast_min_slots    (112 and 2^20)
 
-and the natural drain otherwise; equality takes the cast path.  Small rows,
+and the natural drain otherwise (the NoPE rule only up to its key cap, see
+below); equality takes the cast path.  Small rows,
 small top-k and short-document packs have little main-stage work and keep
 the natural drain whatever their `S / T`.  Backward medians of the two paths
 on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
@@ -315,7 +317,7 @@ on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | `p8949_nope` | NoPE | 16,384 | 65,536 | 2048 | 1 | 8.957 ms | 8.505 ms | cast |
 | `nope_doc_65536` | NoPE | 65,536 | 65,536 | 2176 | 1 | 35.273 ms | 33.342 ms | cast |
-| `nope_glm53_a` | NoPE | 16,263 | 269,564 | 2176 | 8 | 6.770 ms | 6.697 ms | cast |
+| `nope_glm53_a` | NoPE | 16,263 | 269,564 | 2176 | 8 | 6.770 ms | 6.697 ms | natural (key cap) |
 | `nope_tail_4096x65536` | NoPE | 4,096 | 65,536 | 2176 | 1 | 2.249 ms | 2.176 ms | cast |
 | `p8949_rope_acc` | RoPE | 16,384 | 65,536 | 2048 | 1 | 10.277 ms | 10.015 ms | cast |
 | `packed_glm_a_dstmap` | RoPE | 16,231 | 268,757 | 2048 | 8 | 8.654 ms | 8.171 ms | cast |
@@ -326,18 +328,57 @@ on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
 | `nope_doc_16384_k128` | NoPE | 16,384 | 16,384 | 128 | 1 | 1.083 ms | 1.053 ms | natural |
 | `nope_tail_2048x32768` | NoPE | 2,048 | 32,768 | 2176 | 1 | 1.141 ms | 1.138 ms | natural |
 
-The constants are a fit over the rows measured with both paths (both
-programs, 1 to 528 segments, top-k 128 to 2176): the rule takes the cast path
-on none of them where it was slower.  On seven of them it keeps the natural
-drain, the base test's choice, although the cast path measured faster beyond
-the spread (natural / cast backward time - 1): `nope_doc_16384_k128` 2.8 %,
-`nope_short_4096_k256` 1.3 %, `nope_short_2048_k256` 0.5 %,
-`nope_tail_2048x32768` 0.3 %, `nope_tail_4096x81920` 2.6 % and
-`nope_tail_4096x98304` 1.1 % (NoPE, one segment), and `chunk_3943x268757`
-2.1 % (RoPE with `dkv_acc`, 8 segments).  At `K_slots` 2176 and one segment
-the rule takes the cast path up to `S / T` 10.3 at `T = 1024`, 14.9 at 2048,
-17.1 at 4096, 18.3 at 8192 and 18.9 at 16,384, and the natural drain above.
-`sm_100a` and `sm_103a` keep their base rules.
+The constants of the work test are a fit over the rows measured with both
+paths (both programs, 1 to 528 segments, top-k 128 to 2176): the rule takes
+the cast path on none of them where it was slower.  On seven of them the work
+test keeps the natural drain, the base test's choice, although the cast path measured
+faster beyond the spread (natural / cast backward time - 1):
+`nope_doc_16384_k128` 2.8 %, `nope_short_4096_k256` 1.3 %,
+`nope_short_2048_k256` 0.5 %, `nope_tail_2048x32768` 0.3 %,
+`nope_tail_4096x81920` 2.6 % and `nope_tail_4096x98304` 1.1 % (NoPE, one
+segment), and `chunk_3943x268757` 2.1 % (RoPE with `dkv_acc`, 8 segments).
+At `K_slots` 2176 and one segment the work test takes the cast path up to
+`S / T` 10.3 at `T = 1024`, 14.9 at 2048, 17.1 at 4096, 18.3 at 8192 and
+18.9 at 16,384, and the natural drain above; the NoPE key cap below lowers
+the bound to `S / T` 10 at `T = 16,384` (163,840 keys).
+
+The NoPE rule also carries a key cap, `cast_max_keys` 163,840: a NoPE row
+with more keys takes the natural drain whatever its work.  Once a segment's
+FP32 dK / dV rows no longer stay in L2, the cast path's main stage grows
+faster with the key count than the natural one: the natural drain's extra
+cost hides behind the memory traffic, while the cast path's fill and cast
+remain.  Backward medians of the two paths on single-segment NoPE rows at
+`T = 16,384` and `K_slots` 2176, every one on the cast side of the work test
+(VR200, 8 fresh processes per path, 20 steps each, cold L2, eager):
+
+| `S` | `S / T` | natural drain | permuted + cast | natural / cast |
+|---:|---:|---:|---:|---:|
+| 65,536 | 4 | 9.133 ms | 8.675 ms | 1.053 |
+| 131,072 | 8 | 9.520 ms | 9.272 ms | 1.027 |
+| 196,608 | 12 | 10.272 ms | 10.282 ms | 0.999 |
+| 229,376 | 14 | 10.731 ms | 10.766 ms | 0.997 |
+| 262,144 | 16 | 10.781 ms | 11.209 ms | 0.962 |
+| 278,528 | 17 | 11.177 ms | 11.376 ms | 0.983 |
+| 294,912 | 18 | 11.158 ms | 11.369 ms | 0.981 |
+| 303,104 | 18.5 | 11.259 ms | 11.542 ms | 0.975 |
+
+A second run of the 303,104-key row measured 11.192 ms and 11.520 ms
+(0.972).  The cap lies between the last of these rows where the cast path
+won (131,072 keys) and the first at parity (196,608).  It reads the total
+`S`, not `S / num_segments`: the planners do not know the longest segment,
+and a packed row (a rank of a zigzag split, say) can hold one long segment
+next to short ones, which the mean underestimates.  Packed NoPE rows of
+short segments above the cap measured faster on the cast path, and the cap
+gives up these gains (natural / cast backward time - 1, a later run of both
+paths with the same protocol; 8 segments, 247,211 to 270,336 keys):
+`nope_glm53_a` 1.3 % (1.1 % in the table above), `nope_glm53_b` 1.1 %,
+`nope_glm53_a_fixedtail` 1.2 %, `nope_glm53_a_fixedtail_compact` 1.3 %,
+`nope_glm53_a_iid` 1.3 %, `nope_pack4_262k_rank0_fixedtail` 1.0 % and
+`nope_pack4_262k_rank0_fixedtail_compact` 0.4 % (within the spread).  The
+RoPE rule has no key cap: its single-segment `dkv_acc` row at `T = 16,384`,
+`S = 278,528`, `K_slots` 2048 measured at parity (12.368 ms natural,
+12.320 ms permuted + cast), and its packed rows above the cap keep the cast
+path's gains.  `sm_100a` and `sm_103a` keep their base rules.
 
 ### Explicit entry points, prepared runner and binding cache
 
@@ -580,8 +621,9 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   architecture selects it (`dkv_direct`: `min_keys_per_query` 1 on `sm_100a` /
   `sm_103a`, so whenever the row has at least one key per query -- every packed
   causal problem; measured faster than the permuted drain on every row there;
-  on `sm_107a` only while `T * K_eff < 112 S + 2^20`, see "Direct accumulation
-  on `sm_107a`"), else -- a row outside the rule, or `dkv_direct=False` -- by
+  on `sm_107a` only while `T * K_eff < 112 S + 2^20` or above 163,840 keys,
+  see "Direct accumulation on `sm_107a`"), else -- a row outside the rule, or
+  `dkv_direct=False` -- by
   the cast stage writing the
   permuted accumulator out densely (`out_f32`).  Accumulate
   (`dkv_acc` FP32 `[S_dst, >= 512]`, optional `dkv_dst_map`): `+=` into columns

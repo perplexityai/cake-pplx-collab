@@ -43,8 +43,8 @@ limitations under the License.
 #   straight into the caller's packed rows when the record's size rule of the
 #   device's architecture selects it (``plan_dkv_direct``; on ``sm_107a`` the
 #   rule also weighs the row's main-stage work, T x min(K_slots, ceil(S /
-#   num_segments)), against its key count S): no FP32 accumulators, no zero
-#   fill, no cast launch.
+#   num_segments)), against its key count S, up to the NoPE record's key cap):
+#   no FP32 accumulators, no zero fill, no cast launch.
 # * Every launch goes through ``cake_launch`` (generated next to the registry:
 #   one positional launcher per stage over the kernel's own argument names)
 #   with a grid computed in Python; the bindings encode the tensor maps by
@@ -393,7 +393,8 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # ``dkv_direct`` keyword of the entry points forces (``True``) or disables
 # (``False``) it (``None``, the default, = the rule).  Like ``key_pass_policy``
 # the rule may differ per architecture: ``dkv_direct.rules[arch]`` (exactly
-# ``DKV_DIRECT_RULE_FIELDS``) replaces the base on that target, and an
+# ``DKV_DIRECT_RULE_FIELDS``, and optionally ``DKV_DIRECT_RULE_OPTIONAL_FIELDS``)
+# replaces the base on that target, and an
 # architecture without a rule (or ``None``, no CUDA device) takes the base.  An
 # architecture rule weighs what each path adds to the backward.  The cast path
 # adds a zero fill and a cast over the S accumulator rows plus two launches, a
@@ -406,9 +407,16 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # cast path where S < min_keys_per_query * T (the base test) or
 # T * K_eff >= cast_slots_per_key * S + cast_min_slots, and takes the natural
 # drain otherwise: small rows, small top-k and short-document packs have little
-# main-stage work and keep the natural drain whatever their S / T.  The
-# registered records carry one rule, for ``sm_107a`` (their base
-# ``min_keys_per_query``, 112 slots per key, a 2^20-slot floor; see the README).
+# main-stage work and keep the natural drain whatever their S / T.  A rule's
+# optional key cap ``cast_max_keys`` limits the work test to S <= cast_max_keys
+# (natural drain above it; no cap without the field): once a segment's FP32
+# dK/dV rows no longer stay in L2 the cast path's main stage grows faster with
+# the key count than the natural one.  The cap reads the total S, not
+# S / num_segments: the planners do not know the longest segment, and a packed
+# row can hold one long segment next to short ones.  The registered records
+# carry one rule, for ``sm_107a`` (their base ``min_keys_per_query``, 112 slots
+# per key, a 2^20-slot floor, and on the NoPE record a 163,840-key cap; see the
+# README).
 # The planners pass the device's architecture (``arch_for``), the row's top-k
 # width and its segment count.  Without the natural stages every ``dkv_acc``
 # call takes the cast's accumulate path.  Both paths add the same FP32
@@ -416,12 +424,14 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 DKV_DIRECT_POLICY_FIELDS = ("min_keys_per_query",)
 DKV_DIRECT_RECORD_FIELDS = DKV_DIRECT_POLICY_FIELDS + ("rules",)
 # The fields of ``dkv_direct["rules"][arch]``: the base test's count on that target and the two terms of the
-# work test (``cast_min_slots`` may be 0).
+# work test (``cast_min_slots`` may be 0), every rule has them; and the optional key cap of the work test
+# (``cast_max_keys``: a positive integer when present, no cap when absent).
 DKV_DIRECT_RULE_FIELDS = (
     "min_keys_per_query",
     "cast_slots_per_key",
     "cast_min_slots",
 )
+DKV_DIRECT_RULE_OPTIONAL_FIELDS = ("cast_max_keys",)
 
 
 def _dkv_direct_count(value: Any, where: str, *, minimum: int = 1) -> int:
@@ -439,9 +449,9 @@ class DkvDirectPolicy:
 
     # the base: direct iff num_kv >= min_keys_per_query * num_queries (4 RoPE, 1 NoPE)
     min_keys_per_query: int
-    # the per-target rules: ((arch, (min_keys_per_query, cast_slots_per_key, cast_min_slots)), ...)
-    # (sm_107a: (4 RoPE / 1 NoPE, 112, 2^20))
-    rules: tuple[tuple[str, tuple[int, int, int]], ...] = ()
+    # the per-target rules: ((arch, (min_keys_per_query, cast_slots_per_key, cast_min_slots[, cast_max_keys])),
+    # ...), the key cap last when the rule carries it (sm_107a: (4, 112, 2^20) RoPE, (1, 112, 2^20, 163840) NoPE)
+    rules: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Optional["DkvDirectPolicy"]:
@@ -477,10 +487,15 @@ class DkvDirectPolicy:
                 raise ValueError(
                     f"registry record: dkv_direct.rules names {arch!r}, not one of {sorted(known_arches)}"
                 )
-            if not isinstance(rule, dict) or set(rule) != set(DKV_DIRECT_RULE_FIELDS):
+            if not isinstance(rule, dict) or not (
+                set(DKV_DIRECT_RULE_FIELDS)
+                <= set(rule)
+                <= set(DKV_DIRECT_RULE_FIELDS + DKV_DIRECT_RULE_OPTIONAL_FIELDS)
+            ):
                 raise ValueError(
                     f"registry record: dkv_direct.rules[{arch!r}] must map exactly "
-                    f"{DKV_DIRECT_RULE_FIELDS}, got {rule!r}"
+                    f"{DKV_DIRECT_RULE_FIELDS} (and optionally {DKV_DIRECT_RULE_OPTIONAL_FIELDS}), "
+                    f"got {rule!r}"
                 )
             rules.append(
                 (
@@ -492,17 +507,20 @@ class DkvDirectPolicy:
                             minimum=0 if name == "cast_min_slots" else 1,
                         )
                         for name in DKV_DIRECT_RULE_FIELDS
+                        + DKV_DIRECT_RULE_OPTIONAL_FIELDS
+                        if name in rule
                     ),
                 )
             )
         return cls(**values, rules=tuple(rules))
 
     def rule_for(self, arch: Optional[str]) -> Optional[dict[str, int]]:
-        """The rule of ``arch`` (``DKV_DIRECT_RULE_FIELDS``), ``None`` for an architecture without one (or ``None``):
-        the base alone."""
+        """The rule of ``arch`` (``DKV_DIRECT_RULE_FIELDS`` and ``cast_max_keys`` when the rule carries it),
+        ``None`` for an architecture without one (or ``None``): the base alone."""
+        names = DKV_DIRECT_RULE_FIELDS + DKV_DIRECT_RULE_OPTIONAL_FIELDS
         for name, fields in self.rules:
             if name == arch:
-                return dict(zip(DKV_DIRECT_RULE_FIELDS, fields, strict=True))
+                return dict(zip(names[: len(fields)], fields, strict=True))
         return None
 
     def min_keys_for(self, arch: Optional[str]) -> int:
@@ -521,9 +539,10 @@ class DkvDirectPolicy:
     ) -> bool:
         """Direct accumulation for ``num_queries`` (T) query tokens over ``num_kv`` (S) keys with ``topk`` (K_slots)
         index slots per query and ``num_segments`` packed segments on ``arch``: ``S >= min_keys_for(arch) * T``,
-        and, under a rule of ``arch``, ``T * K_eff < cast_slots_per_key * S + cast_min_slots`` with
-        ``K_eff = min(K_slots, ceil(S / num_segments))`` as well (equality takes the cast path).  The base reads
-        neither ``topk`` nor ``num_segments``; a rule refuses ``num_segments < 1`` (``ValueError``)."""
+        and, under a rule of ``arch``, also ``T * K_eff < cast_slots_per_key * S + cast_min_slots`` with
+        ``K_eff = min(K_slots, ceil(S / num_segments))`` (equality takes the cast path) or ``S > cast_max_keys``
+        (only when the rule carries that key cap).  The base reads neither ``topk`` nor ``num_segments``; a rule
+        refuses ``num_segments < 1`` (``ValueError``)."""
         T, S = int(num_queries), int(num_kv)
         rule = self.rule_for(arch)
         if rule is None:
@@ -533,6 +552,10 @@ class DkvDirectPolicy:
         segments = int(num_segments)
         if segments < 1:
             raise ValueError(f"num_segments must be >= 1, got {num_segments}")
+        cap = rule.get("cast_max_keys")
+        if cap is not None and S > cap:
+            # above the key cap the natural drain, whatever the work (the total S: see the comment above)
+            return True
         k_eff = min(int(topk), -(-S // segments))
         return T * k_eff < rule["cast_slots_per_key"] * S + rule["cast_min_slots"]
 
@@ -1307,10 +1330,12 @@ def _plan_nope_direct(
     least one key per query (every packed causal problem; measured faster than the permuted accumulator plus cast
     on every row there).  Its ``sm_107a`` rule (see :class:`DkvDirectPolicy`) takes the permuted accumulator and
     the cast also where the main stage's work is large against the key count, ``T * K_eff >= 112 * S + 2^20``
-    with ``K_eff = min(K_slots, ceil(S / num_segments))``: there the natural drain, slower on that target, costs
-    more than the cast path's zero fill and cast.  A problem below either threshold, or ``dkv_direct=False``,
-    uses the permuted accumulator and the cast.  Without the natural-layout stages the kernels' permuted
-    accumulator and the cast serve both forms.
+    with ``K_eff = min(K_slots, ceil(S / num_segments))``, on rows of at most 163,840 keys (``cast_max_keys``):
+    there the natural drain, slower on that target, costs more than the cast path's zero fill and cast; above
+    the cap the cast path's main stage grows faster with the key count, and the natural drain serves every row
+    with at least one key per query.
+    A problem below either threshold, or ``dkv_direct=False``, uses the permuted accumulator and the cast.
+    Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.
     """
     return plan_dkv_direct(
         record,
@@ -4796,8 +4821,8 @@ def backward_nope(
     ``key_passes`` forces the pass form); ``dkv_direct`` (default ``None`` = the record's rule of the device's
     architecture, the natural-layout main stage adding straight into the FP32 buffer -- fresh or ``dkv_acc`` alike
     -- whenever the row has at least one key per query and, on ``sm_107a``, a main-stage work below the rule's bound
-    (see :func:`_plan_nope_direct`); ``True`` / ``False`` = force / disable it) and ``check_dst_map`` as in
-    :func:`prepare_dsa_nope_train`.
+    or more keys than its cap (see :func:`_plan_nope_direct`); ``True`` / ``False`` = force / disable it) and
+    ``check_dst_map`` as in :func:`prepare_dsa_nope_train`.
     A call without query rows returns an empty ``dq`` and a zero ``dkv`` (``None`` with ``dkv_acc``) without
     launching.
     """

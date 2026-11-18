@@ -34,7 +34,8 @@ from . import cake_build
 # ``min_keys_per_query``, ``cast_slots_per_key`` and ``cast_min_slots``, which
 # weigh the cast path's extra cost, proportional to the key count, against
 # the natural drain's, proportional to the main stage's query x selected-slot
-# work), and one physical entry per stage: the
+# work -- and an optional key cap ``cast_max_keys``, above which the rule
+# keeps the natural drain whatever the work), and one physical entry per stage: the
 # ``library`` stem of its ``build.json`` entries (``<library>_<arch>``, see
 # ``cake_build``), the FFI entry and the launch
 # geometry the binding bakes in (block, cluster, cooperative launch, dynamic
@@ -100,8 +101,9 @@ MODULES: dict[str, dict[str, Any]] = {
         # query x selected-slot work, the cast path a zero fill and a cast over
         # the S accumulator rows plus two launches: the cast path also serves
         # rows with T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots,
-        # ceil(S / num_segments)) (see cake_backend.DkvDirectPolicy and the
-        # backend README)
+        # ceil(S / num_segments)), without a key cap: the single-segment
+        # T = 16,384, S = 278,528 row measured at parity on VR200 (see
+        # cake_backend.DkvDirectPolicy and the backend README)
         "dkv_direct": {
             "min_keys_per_query": 4,
             "rules": {
@@ -229,10 +231,16 @@ MODULES: dict[str, dict[str, Any]] = {
     # selected-slot pairs, K_eff = min(K_slots, ceil(S / num_segments))), the
     # cast path a zero fill and a cast proportional to S plus two launches, so
     # the ``sm_107a`` rule takes the permuted accumulator plus cast where
-    # T * K_eff >= 112 * S + 2^20 and the natural stage otherwise.  On VR200
-    # the rule picks the cast path on no measured row where it was slower, and
-    # keeps the natural stage on small rows, small top-k and short-document
-    # packs, where the cast path measured up to 8 % slower in backward.  The
+    # T * K_eff >= 112 * S + 2^20 and S <= 163,840 (``cast_max_keys``), and the
+    # natural stage otherwise.  Once a segment's FP32 dK / dV rows no longer
+    # stay in L2 the cast path's main stage grows faster with the key count
+    # than the natural one (one segment, T = 16,384, K_slots 2176: natural /
+    # cast backward 9.520 / 9.272 ms at S = 131,072, 10.781 / 11.209 ms at
+    # 262,144); the cap counts the total S, since the planners do not know the
+    # longest segment of a packed row.  On VR200 the rule picks the cast path
+    # on no measured row where it was slower, and keeps the natural stage on
+    # small rows, small top-k and short-document packs, where the cast path
+    # measured up to 8 % slower in backward, and on rows above the cap.  The
     # compaction and cast stages are rope-independent kernels shared with the
     # RoPE program (same libraries, same launch geometry; the cast runs over the
     # one 512-wide accumulator, 16 groups per key); the delta stage is the strided delta
@@ -275,6 +283,7 @@ MODULES: dict[str, dict[str, Any]] = {
                     "min_keys_per_query": 1,
                     "cast_slots_per_key": 112,
                     "cast_min_slots": 1048576,
+                    "cast_max_keys": 163840,
                 },
             },
         },
