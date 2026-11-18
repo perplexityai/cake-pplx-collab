@@ -20,7 +20,7 @@ and its workspace bound, the argument checks and the refusal of an architecture 
 SM100 / SM103 device the exact sets against the FP64 oracle
 (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs with source-layer and
 synthetic candidate rows, the unrestricted sets from the source layer's own candidates and from every visible block,
-keys outside the pool that never count, the Gaussian rule, the repetition of the sets and the alert under torch's deterministic algorithms, the caller-owned workspace and outputs, and the
+keys outside the pool that never count, row-strided keys read in place, the Gaussian rule, the repetition of the sets and the alert under torch's deterministic algorithms, the caller-owned workspace and outputs, and the
 absence of host synchronization.
 """
 
@@ -352,6 +352,35 @@ def test_plan_arguments_are_checked():
     assert CAND_MAX_TOP_K == CAND_WIDTH_MAX == 2048
 
 
+@pytest.mark.cpu_only
+def test_k_takes_the_family_rule_on_the_host():
+    """``k`` follows the family's rule, checked on host tensors before the device rule: a unit inner stride and a
+    row stride of at least 128 elements that is a multiple of 8 -- a row-strided view such as ``packed[:, :128]`` of
+    a ``[Tkv, 704]`` tensor passes and reaches the device rule -- and any other stride is refused with the family's
+    message, by the eager call and by ``prepare``."""
+    T, Tkv = 4, 64
+    q = torch.zeros((T, 32, 128), dtype=torch.bfloat16)
+    w = torch.zeros((T, 32), dtype=torch.float32)
+    cq = torch.tensor([0, T], dtype=torch.int32)
+    ck = torch.tensor([0, Tkv], dtype=torch.int32)
+    cand = torch.full((T, 8), -1, dtype=torch.int32)
+    for stride in (128, 136, 704):
+        k = torch.zeros((Tkv, stride), dtype=torch.bfloat16)[:, :128]
+        assert k.stride() == (stride, 1)
+        for fn in (in_candidates, prepare_in_candidates):
+            with pytest.raises(ValueError, match="CUDA"):
+                fn(q, k, w, cq, ck, cand, top_k=TOP_K)
+    # a row stride of 132 (not a multiple of 8), an inner stride of 2, column-major rows
+    for bad in (
+        torch.zeros((Tkv, 132), dtype=torch.bfloat16)[:, :128],
+        torch.zeros((Tkv, 256), dtype=torch.bfloat16)[:, ::2],
+        torch.zeros((128, Tkv), dtype=torch.bfloat16).t(),
+    ):
+        for fn in (in_candidates, prepare_in_candidates):
+            with pytest.raises(ValueError, match="row stride"):
+                fn(q, bad, w, cq, ck, cand, top_k=TOP_K)
+
+
 # ---------------------------------------------------------------------------
 # Device: exact sets, unrestricted equivalence, Gaussian rule, sets, workspace and outputs
 # ---------------------------------------------------------------------------
@@ -465,6 +494,57 @@ def test_keys_outside_the_pool_never_count():
     failures = _structure_failures(*got, cand, ns)
     failures += _exact_failures(q, k, w, cq, ck, off, cand, got)
     assert not failures, "\n".join(failures[:20])
+
+
+@pytest.mark.parametrize("stride", (136, 704))
+def test_strided_k_rows_are_read_in_place(stride):
+    """A row-strided ``k`` (rows of 128 elements at a row stride of ``stride`` elements; 704 is the trainer's packed
+    rows) is read in place, by the whole blocks' tensor map and by the copy of a partial newest block alike, and its
+    other columns (NaN here) are never read: on exact inputs every row's set equals the FP64 oracle's, and the call
+    returns the contiguous ``k``'s outputs as sets, for synthetic rows of every kind and the source layer's own
+    candidate rows."""
+    _require_cand_program()
+    seg_q, seg_k, offsets = LAYOUTS["explicit_offsets"]
+    q, k, w, cq, ck = cb.exact_inputs(
+        "MXFP4-grid", seg_q, seg_k, seed=7965, device="cuda"
+    )
+    off = _offsets_tensor(offsets, q.device)
+    ns = _visible_counts(cq, ck, off)
+    packed = torch.full(
+        (k.shape[0], stride), float("nan"), dtype=k.dtype, device=k.device
+    )
+    packed[:, :128] = k
+    ks = packed[:, :128]
+    assert ks.stride() == (stride, 1) and not ks.is_contiguous()
+    rows = [
+        (kind, cb.synthetic_rows(ns, CAND_WIDTH_MAX, kind, seed=7966, device=q.device))
+        for kind in KINDS
+    ]
+    source = topk_with_candidates(
+        q, k, w, cq, ck, top_k=TOP_K, softmax_scale=cb.EXACT_SCALE, q_causal_offsets=off
+    )[2].clone()
+    rows.append(("source", source))
+    failures = []
+    for kind, cand in rows:
+        want = _call(q, k, w, cq, ck, cand, offsets=off)
+        got = _call(q, ks, w, cq, ck, cand, offsets=off)
+        failures += [f"{kind}: {f}" for f in _structure_failures(*got, cand, ns)]
+        failures += [
+            f"{kind}: {f}" for f in _exact_failures(q, k, w, cq, ck, off, cand, got)
+        ]
+        if ORDERED:
+            same = torch.equal(got[0], want[0]) and torch.equal(
+                got[1].view(torch.int32), want[1].view(torch.int32)
+            )
+        else:
+            same = torch.equal(
+                cb.ascending(got[0].long()), cb.ascending(want[0].long())
+            )
+        if not same:
+            failures.append(
+                f"{kind}: the strided k's outputs differ from the contiguous k's"
+            )
+    assert not failures, f"stride {stride}:\n" + "\n".join(failures[:20])
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
@@ -663,8 +743,8 @@ def test_caller_owned_workspace_and_outputs():
 
 def test_arguments_are_checked():
     """``candidate_blocks`` must be an int32 ``[T, W]`` contiguous tensor on the device of ``q`` with ``W <= 2048``;
-    ``k`` contiguous ``[Tkv, 128]`` rows; ``top_k`` in ``[1, 2048]``, ``ratio == 1`` and the BF16 form; all refused
-    before any launch."""
+    ``k`` the family's rows (a row stride that is a multiple of 8 elements); ``top_k`` in ``[1, 2048]``, ``ratio ==
+    1`` and the BF16 form; all refused before any launch."""
     _require_cand_program()
     inputs = ref.make_random_inputs([32], [3000], top_k=TOP_K, seed=7990, device="cuda")
     T, device = inputs.num_queries, inputs.device
@@ -693,10 +773,10 @@ def test_arguments_are_checked():
         for fn in (in_candidates, prepare_in_candidates):
             with pytest.raises(ValueError, match=match):
                 fn(*args, bad, **inputs.kwargs())
-    packed = torch.zeros((inputs.num_keys, 704), dtype=inputs.k.dtype, device=device)
-    packed[:, :128] = inputs.k
-    with pytest.raises(ValueError, match="contiguous"):
-        in_candidates(inputs.q, packed[:, :128], *args[2:], good, **inputs.kwargs())
+    odd = torch.zeros((inputs.num_keys, 132), dtype=inputs.k.dtype, device=device)
+    for fn in (in_candidates, prepare_in_candidates):
+        with pytest.raises(ValueError, match="row stride"):
+            fn(inputs.q, odd[:, :128], *args[2:], good, **inputs.kwargs())
     kwargs = inputs.kwargs()
     for change in ({"top_k": 0}, {"top_k": CAND_MAX_TOP_K + 1}, {"ratio": 2}):
         with pytest.raises(ValueError):

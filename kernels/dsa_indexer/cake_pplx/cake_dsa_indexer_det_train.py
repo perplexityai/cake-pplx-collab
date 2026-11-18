@@ -448,7 +448,7 @@ def cake_dsa_indexer_det_train_topk_in_candidates(
     ----------
     q, k, w, cu_seqlens_q, cu_seqlens_k, softmax_scale, q_causal_offsets, max_seqlen_q, max_seqlen_k
         As :func:`cake_dsa_indexer_det_train_topk` (BF16 ``q`` and ``k``;
-        ``k`` as contiguous ``[Tkv, 128]`` rows).
+        a row-strided ``k`` is read in place, as there).
     candidate_blocks : torch.Tensor
         int32 ``[T, W]`` contiguous segment-local block ids on the device of
         ``q``, ``W <= 2048`` (the ``candidate_blocks`` output of

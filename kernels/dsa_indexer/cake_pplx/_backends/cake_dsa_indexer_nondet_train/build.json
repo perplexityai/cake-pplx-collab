@@ -2427,7 +2427,7 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "557675c92645343e85dac9fb13f1cd0f50889c3078abb2cd18bb2f956033f2f0",
+      "closure_sha256": "444169998432325cda3eb9b6c592aef6ecc14e1b1e7f900b71e5d324aefc2b10",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
@@ -2436,8 +2436,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_100a.so",
       "sha256": {
-        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "d4fa4c10bfba9ee06b40a36d453982296826170743326a185ac7549d780d3bf1",
-        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "84870adcddc74d14c1d96a6aba4f0042ca3eb4b3bd8e38ae1fafbc8b7fbd426e"
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "149f04ceec1f9a469e11d7c3711b937c7b3df53b0c9affe04d7a21452317af40",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "9611e70b6b46f8e379557286855b792f0e8e47c203f1f2291a45bb761f769e4b"
       },
       "sources": [
         "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu",
@@ -2446,7 +2446,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "eca2308afc6ea0e45385c1e93d0abf2c15047e88e49e9613d0671b03f8ef8dd8",
+      "closure_sha256": "81b5228951734054e31584e8ac4ff3aa955f0173da28a02bafbb34a2cd1436f5",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -2455,8 +2455,8 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_103a.so",
       "sha256": {
-        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "d4fa4c10bfba9ee06b40a36d453982296826170743326a185ac7549d780d3bf1",
-        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "84870adcddc74d14c1d96a6aba4f0042ca3eb4b3bd8e38ae1fafbc8b7fbd426e"
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "149f04ceec1f9a469e11d7c3711b937c7b3df53b0c9affe04d7a21452317af40",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "9611e70b6b46f8e379557286855b792f0e8e47c203f1f2291a45bb761f769e4b"
       },
       "sources": [
         "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu",

@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CUtensorMap Q, __nv_bfloat16* __restrict__ Kraw, float* __restrict__ W, int* __restrict__ cu_seqlens_q, int* __restrict__ cu_seqlens_k, long long* __restrict__ q_offsets, int* __restrict__ CandBlocks, int* __restrict__ Indices, float* __restrict__ Scores, int* __restrict__ Lists, long long* __restrict__ Cand, unsigned int* __restrict__ TicketWord, int num_segments, int top_k, int has_offsets, int cand_width, int cand_cap, int check_period, int grid_ctas, float softmax_scale, const __grid_constant__ CUtensorMap K8);
+extern "C" __global__ void kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CUtensorMap Q, __nv_bfloat16* __restrict__ Kraw, float* __restrict__ W, int* __restrict__ cu_seqlens_q, int* __restrict__ cu_seqlens_k, long long* __restrict__ q_offsets, int* __restrict__ CandBlocks, int* __restrict__ Indices, float* __restrict__ Scores, int* __restrict__ Lists, long long* __restrict__ Cand, unsigned int* __restrict__ TicketWord, int num_segments, int top_k, int has_offsets, int cand_width, int cand_cap, int check_period, int grid_ctas, float softmax_scale, const __grid_constant__ CUtensorMap K8, long long Kraw_stride_m2);
 
 namespace cake_binding_kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a {
 
@@ -49,6 +49,11 @@ void CheckCu(CUresult result, const char* what) {
 }
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
+
+void CheckRank(const TensorView& t, const char* name, int rank) {
+  TVM_FFI_CHECK(t.ndim() >= rank, ValueError)
+      << KERNEL_NAME << ": '" << name << "' needs at least " << rank << " dims, got " << t.ndim();
+}
 
 void CheckUnitInnerStride(const TensorView& t, const char* name) {
   TVM_FFI_CHECK(t.stride(-1) == 1, ValueError)
@@ -217,7 +222,8 @@ void Run(TensorView a_Q, TensorView a_Kraw, TensorView a_W, TensorView a_cu_seql
   TVM_FFI_CHECK(a_grid_ctas >= -2147483648LL && a_grid_ctas <= 2147483647LL, ValueError)
       << KERNEL_NAME << ": 'grid_ctas' = " << a_grid_ctas
       << " is outside the i32 range [-2147483648, 2147483647]";
-  check_contiguous(a_Kraw, "Kraw");
+  CheckRank(a_Kraw, "Kraw", 2);
+  CheckUnitInnerStride(a_Kraw, "Kraw");
   check_same_device(a_Kraw, a_Q, "Kraw", "Q");
   check_contiguous(a_W, "W");
   check_same_device(a_W, a_Q, "W", "Q");
@@ -289,7 +295,8 @@ void Run(TensorView a_Q, TensorView a_Kraw, TensorView a_W, TensorView a_cu_seql
   int32_t v_grid_ctas = static_cast<int32_t>(a_grid_ctas);
   float v_softmax_scale = static_cast<float>(a_softmax_scale);
   CUtensorMap v_K8 = EncodeTma_K8(a_Kraw);
-  void* kernel_args[] = {&v_Q, &v_Kraw, &v_W, &v_cu_seqlens_q, &v_cu_seqlens_k, &v_q_offsets, &v_CandBlocks, &v_Indices, &v_Scores, &v_Lists, &v_Cand, &v_TicketWord, &v_num_segments, &v_top_k, &v_has_offsets, &v_cand_width, &v_cand_cap, &v_check_period, &v_grid_ctas, &v_softmax_scale, &v_K8};
+  int64_t v_Kraw_stride_m2 = a_Kraw.stride(-2);
+  void* kernel_args[] = {&v_Q, &v_Kraw, &v_W, &v_cu_seqlens_q, &v_cu_seqlens_k, &v_q_offsets, &v_CandBlocks, &v_Indices, &v_Scores, &v_Lists, &v_Cand, &v_TicketWord, &v_num_segments, &v_top_k, &v_has_offsets, &v_cand_width, &v_cand_cap, &v_check_period, &v_grid_ctas, &v_softmax_scale, &v_K8, &v_Kraw_stride_m2};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(512, 1, 1);

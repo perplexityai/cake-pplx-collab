@@ -223,7 +223,8 @@ CONTRACT_TENSORS = (
     "CandBlk",  # scan_blocks: the block entries behind the workspace's ticket tail (int64), or a never-read placeholder
     "CandBlocks",  # scan_blocks: the candidate-block rows [T, 2048] int32 (the caller's candidate_blocks); cand: the
     # caller's candidate_blocks [T, W] int32 (W <= 2048)
-    "Kraw",  # cand: k [Tkv, 128] as its plain rows (the binding encodes the program's block tensor map from them)
+    "Kraw",  # cand: k [Tkv, 128] as its plain rows, any row stride that is a multiple of 16 bytes (the binding encodes
+    # the program's block tensor map from them; the newest partial block's copy reads the row stride)
     "Lists",  # cand: the per-CTA block lists in the workspace (int32)
 )
 SCAN_SCALARS = (
@@ -1928,18 +1929,14 @@ def _check_cand_form(top_k: int, ratio: int, q: torch.Tensor) -> None:
 
 
 def _check_cand_call(
-    k: torch.Tensor,
     candidate_blocks: Optional[torch.Tensor],
     num_queries: int,
     device: torch.device,
 ) -> int:
-    """The candidate-restricted call's rules after the family's: key rows of 128 contiguous elements and
+    """The candidate-restricted call's rules after the family's (which hold ``k`` to the family's rule: a unit inner
+    stride and a row stride of at least 128 elements that is a multiple of 8, read in place):
     ``candidate_blocks`` an int32 ``[T, W]`` contiguous tensor on ``device`` with ``W <= CAND_WIDTH_MAX``; returns
     ``W``."""
-    if k.shape[0] > 0 and (k.stride(1) != 1 or k.stride(0) != HEAD_DIM):
-        raise ValueError(
-            "the candidate-restricted top-k reads k as contiguous [Tkv, 128] rows (row stride 128 elements)"
-        )
     if not isinstance(candidate_blocks, torch.Tensor):
         raise ValueError("candidate_blocks must be an int32 [T, W] tensor")
     if (
@@ -2152,7 +2149,7 @@ def _prepare_cand_runner(
         None,
     )
     device = q.device
-    width = _check_cand_call(k, candidate_blocks, num_queries, device)
+    width = _check_cand_call(candidate_blocks, num_queries, device)
     for name, tensor in (
         ("workspace_buffer", workspace_buffer),
         ("indices", indices),
@@ -2307,8 +2304,8 @@ def prepare_dsa_indexer_det_topk_in_candidates(
     """Prepare a candidate-restricted top-k: per query row ``t`` the top ``min(top_k, |P_t|)`` of the pool ``P_t``
     of visible keys ``j`` with ``j // 8`` in ``candidate_blocks[t]`` (int32 ``[T, W]``, ``W <= 2048``, contiguous;
     any order, ``-1`` and ids at or past the visible blocks name no key; non-negative ids of a row distinct), ranked
-    as the family ranks keys.  BF16 only, ``ratio == 1``, ``1 <= top_k <= 2048`` (default 512), ``k`` as contiguous
-    ``[Tkv, 128]`` rows.  ``cand_cap`` / ``check_period`` are partition knobs that never change the selected set.
+    as the family ranks keys.  BF16 only, ``ratio == 1``, ``1 <= top_k <= 2048`` (default 512), ``k`` under the family's
+    rule (row stride a multiple of 8 elements, read in place).  ``cand_cap`` / ``check_period`` are partition knobs that never change the selected set.
     Rows are written in ascending id order with a ``-1`` / ``-inf`` tail, and identical inputs give identical
     bits."""
     return _prepare_cand_runner(

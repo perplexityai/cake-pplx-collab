@@ -349,8 +349,10 @@ word; for each unit query the CTA lists its valid blocks, scores only the keys
 of those blocks (8 keys per block through a block tensor map over the raw key
 rows) and keeps a candidate buffer of `cand_cap` entries per query that it
 settles every `check_period` steps.  The work of a row is bounded by its
-candidate keys (at most `8 W`), never by its visible prefix.  `k` must be
-contiguous `[Tkv, 128]` rows.  The workspace is `grid x 4 x cand_cap x 8`
+candidate keys (at most `8 W`), never by its visible prefix.  `k` keeps the
+family's rule: a row-strided view (row stride a multiple of 8 elements) is
+read in place, by the block tensor map and by the copy of the newest partial
+block alike.  The workspace is `grid x 4 x cand_cap x 8`
 bytes of candidate buffers (`cand_cap = max(4096, 4 top_k)`), `grid x 64 KiB`
 of block lists and the ticket word;
 `cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size` reports it,
