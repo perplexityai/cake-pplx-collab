@@ -1066,7 +1066,7 @@ def test_fallback_rows_are_the_literal_rows() -> None:
             spans.setdefault(route, []).append((c_lo, c_hi))
         for route, ranges in spans.items():
             ranges.sort()
-            for (_, hi), (lo, _) in zip(ranges, ranges[1:], strict=False):
+            for (_, hi), (lo, _) in itertools.pairwise(ranges):
                 assert hi < lo, (arch, route, ranges)
 
 
@@ -1107,7 +1107,10 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                 inside_calls += inside
             if C % 8:
                 continue
-            row = lambda side: cake_jit.plan_row(arch, kind, C, device_index=FAKE_DEVICE, inside=side)  # noqa: E731
+
+            def row(side, kind=kind, C=C):
+                return cake_jit.plan_row(arch, kind, C, device_index=FAKE_DEVICE, inside=side)
+
             if bounds is None:
                 assert row(None) == row(True) == row(False), (kind, C)
                 continue
