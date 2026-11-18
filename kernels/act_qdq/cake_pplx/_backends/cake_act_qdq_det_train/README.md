@@ -9,7 +9,9 @@ The facade `cake_pplx.cake_act_qdq_det_train` is a stable API.  This backend pac
 internal names may change.  The facade imports the backend on first use.  The supported architectures are SM100
 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200); another device raises `RuntimeError`.  The package loads
 its libraries prebuilt from `aot/` when a builder compiled them; otherwise it JIT-builds them from the sources and
-flags that `build.json` records.  The package reads no environment variable.
+flags that `build.json` records.  Only the JIT shim (`_cake_pplx_jit.py`) reads environment variables, and only to
+build or find a library: `CUDA_HOME` / `CUDA_PATH` (else `nvcc` on `PATH`), `CAKE_PPLX_NVCC`, `CXX`,
+`CAKE_PPLX_CACHE_DIR`, `CAKE_PPLX_DISABLE_JIT` and `CAKE_PPLX_JIT_WORKERS`.  The rest of the package reads none.
 
 ## Usage
 
@@ -62,8 +64,10 @@ vector, and the `G / 8` adjacent threads of one group combine their maxima with 
 threads and takes 256 vectors per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its
 whole warp and any grid of at least one CTA is correct.  The host launches `min(ceil(n_vecs / 256), 8 * SM count)`
 CTAs; the SM count is read once per device.  Neither the last dimension, nor the rank, nor the row count enters the
-kernel, so a new shape never rebuilds a library.  Build the libraries of the architecture before a CUDA graph
-capture (one eager call does it).
+kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own format and
+scale output, so build every library of the architecture before a CUDA graph capture: call `build_and_load()` on each
+spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format and scale output that the capture
+uses.
 
 ## Numerics
 
@@ -90,9 +94,14 @@ in FP32:
   rounds to nearest even and saturates at 448.  `amax` has 8 significant bits, so `amax / 3` is either exact or a
   repeating binary fraction far from every 5-bit value: the FP32 quotient is an E4M3 rounding midpoint only when the
   exact quotient is one.
-- **E4M3-scaled quotient.**  Each `x / s` is an IEEE round-to-nearest division (not a multiply by a reciprocal).  The
-  exact quotient of an 8-bit `x` by a 4-bit `s` is at least `2^-9` (relative) away from every E2M1 midpoint that it
-  does not equal, so rounding it to FP32 first never moves it across a midpoint.
+- **E4M3-scaled quotient.**  `u` is the round-to-nearest FP32 quotient `x / s`, not the plain product
+  `x * RN(1 / s)`.  The kernel forms `inv = 1 / s` (an IEEE division) and `u0 = x * inv`, then corrects `u0` with
+  one FMA residual step: `r = fma(u0, s, -x)` is exact, and `u = fma(-r, inv, u0)` is within a small fraction of an
+  FP32 ulp of `x / s`.  The exact quotient of an 8-bit `x` by a 4-bit `s` is never an FP32 rounding midpoint, and it
+  is at least `1/30` of an FP32 ulp away from one, so `u` rounds the same way as the division.  For `|x|` below
+  `2^-100` the residual may round and `u` may differ from the division in its last bits; such a quotient is below
+  `2^-91`, so it becomes a signed zero either way.  The exact quotient is at least `2^-9` (relative) away from every
+  E2M1 midpoint that it does not equal, so rounding it to FP32 first never moves it across a midpoint.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
 - **Dequantize.**  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits and `s` at most 4, so `q * s` in FP32 and
   its BF16 rounding are exact, down to the MXFP4 subnormal `2^-127`.  Above the BF16 range the product is `±inf`, as
