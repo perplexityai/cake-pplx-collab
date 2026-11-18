@@ -31,6 +31,8 @@ import pytest
 import torch
 from cake_pplx.cake_dsa_indexer_det_train import (
     cake_dsa_indexer_det_train_topk,
+    cake_dsa_indexer_det_train_topk_with_candidates,
+    cake_dsa_indexer_det_train_topk_with_candidates_workspace_size,
     cake_dsa_indexer_det_train_topk_workspace_size,
 )
 from cake_pplx._backends.cake_dsa_indexer_det_train import cake_backend
@@ -227,3 +229,76 @@ def test_public_entry_point_fp8_matches_backend():
         )
     ]
     assert sizes[0] == sizes[1]
+
+
+# ---------------------------------------------------------------------------
+# The candidate-block call (``*_topk_with_candidates``, sm_100a / sm_103a)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        cake_dsa_indexer_det_train_topk_with_candidates,
+        cake_dsa_indexer_det_train_topk_with_candidates_workspace_size,
+    ],
+)
+def test_candidate_block_facades_are_stable(fn):
+    """The candidate-block facades are stable APIs (no experimental marker)."""
+    assert not getattr(fn, "is_experimental", False)
+
+
+def test_candidate_block_facade_matches_backend_and_owns_no_policy():
+    """The public candidate-block call returns the backend call's ``(indices, scores, candidate_blocks)`` without a
+    warning (bit for bit), ``None`` in place of the scores with ``return_scores=False`` (``scores`` given then is a
+    ``ValueError``), the caller's output tensors when given, and the backend's workspace bound."""
+    _require_program()
+    if cake_backend.arch_for(torch.device("cuda")) not in ("sm_100a", "sm_103a"):
+        pytest.skip(
+            "the candidate-block programs are registered for sm_100a and sm_103a only"
+        )
+    inputs = ref.make_random_inputs(
+        [48, 16], [17000, 900], top_k=512, seed=7810, device="cuda"
+    )
+    args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+    kwargs = inputs.kwargs()
+    expected = tuple(
+        t.clone()
+        for t in cake_backend.cake_dsa_indexer_det_train_topk_with_candidates(
+            *args, **kwargs
+        )
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = tuple(
+            t.clone()
+            for t in cake_dsa_indexer_det_train_topk_with_candidates(*args, **kwargs)
+        )
+    assert all(torch.equal(a, b) for a, b in zip(got, expected))
+    ids, none, blocks = cake_dsa_indexer_det_train_topk_with_candidates(
+        *args, **kwargs, return_scores=False
+    )
+    assert (
+        none is None
+        and ids.shape == (inputs.num_queries, 512)
+        and blocks.shape == (inputs.num_queries, 2048)
+    )
+    with pytest.raises(ValueError, match="return_scores=False"):
+        cake_dsa_indexer_det_train_topk_with_candidates(
+            *args, **kwargs, return_scores=False, scores=torch.empty_like(expected[1])
+        )
+    owned = (
+        torch.empty_like(expected[0]),
+        torch.empty_like(expected[1]),
+        torch.empty_like(expected[2]),
+    )
+    out = cake_dsa_indexer_det_train_topk_with_candidates(
+        *args, **kwargs, indices=owned[0], scores=owned[1], candidate_blocks=owned[2]
+    )
+    assert [t.data_ptr() for t in out] == [t.data_ptr() for t in owned]
+    T, Tkv, S = inputs.num_queries, inputs.num_keys, inputs.num_segments
+    assert cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
+        T, Tkv, S, top_k=512
+    ) == cake_backend.cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
+        T, Tkv, S, top_k=512, device=torch.device("cuda")
+    )

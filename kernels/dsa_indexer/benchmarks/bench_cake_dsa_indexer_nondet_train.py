@@ -40,6 +40,14 @@ over 73728), ``s2_4x2k_packed`` (four segments of 2048 queries over 18432,
 43008, 67584 and 100352 keys) and ``s3_cold16k`` (16384 over 16384), top-k
 2048, causal.
 
+The candidate-block rows (``--rows candidates``: the request's shapes at
+top-k 512) add the arms ``nondet_cb`` / ``nondet_cb_aa`` (this package's
+``prepare_dsa_indexer_nondet_topk_with_candidates``: the same top-k plus the
+``[T, 2048]`` candidate blocks) and ``det_cb`` (the deterministic package's),
+timed next to ``nondet`` / ``det``, the plain call of the same ``top_k``;
+``candidate_blocks`` records each candidate-block arm's block structure
+(counts, newest block, containment).
+
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
 A/A band) and ``det_nosample`` / ``nondet_nosample`` run with the sampled
@@ -165,11 +173,15 @@ class NondetArm(det_bench.Arm):
     name = "nondet"
     package = "nondet"
 
-    def __init__(self, inputs, *, knobs=None, name=None):
+    def __init__(self, inputs, *, knobs=None, name=None, with_candidates=False):
         super().__init__(inputs)
         self.knobs = dict(knobs or {})
         if name is not None:
             self.name = name
+        self.blocks = None
+        if with_candidates:
+            self._prepare_with_candidates(inputs)
+            return
         dev = inputs.device
         self.workspace_bytes = (
             nondet_backend.cake_dsa_indexer_nondet_train_topk_workspace_size(
@@ -206,6 +218,72 @@ class NondetArm(det_bench.Arm):
             scores=self.scores,
         )
 
+    def _prepare_with_candidates(self, inputs):
+        dev = inputs.device
+        extra = det_bench.row_extra(inputs)
+        self.workspace_bytes = nondet_backend.cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            max_seqlen_k=extra.get("max_seqlen_k"),
+            device=dev,
+        )
+        self.workspace = torch.empty(
+            self.workspace_bytes, dtype=torch.uint8, device=dev
+        )
+        self.indices = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.int32, device=dev
+        )
+        self.scores = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.float32, device=dev
+        )
+        self.blocks = torch.empty(
+            (inputs.num_queries, 2048), dtype=torch.int32, device=dev
+        )
+        plan = nondet_backend.plan_dsa_indexer_nondet_topk_with_candidates(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            device=dev,
+            **extra,
+            **self.knobs,
+        )
+        c = plan.choice
+        self.plan = dict(
+            scan_key=c.scan_key,
+            merge_key=c.merge_key,
+            kind=c.kind,
+            block_q=int(c.block_q),
+            n_split=int(c.n_split),
+            grid_ctas=int(c.grid_ctas),
+            cand_cap=int(c.cand_cap),
+            check_period=int(c.check_period),
+            sample_tiles_max=int(c.sample_tiles_max),
+            sample_shift_permille=int(c.sample_shift_permille),
+            far_sample=int(c.far_sample),
+            sample_fit=bool(c.sample_fit),
+            blk_cap=int(plan.blk_cap),
+            blk_bytes=int(plan.blk_bytes),
+        )
+        self.runner = nondet_backend.prepare_dsa_indexer_nondet_topk_with_candidates(
+            inputs.q,
+            inputs.k,
+            inputs.w,
+            inputs.cu_seqlens_q,
+            inputs.cu_seqlens_k,
+            **inputs.kwargs(),
+            **extra,
+            **self.knobs,
+            workspace_buffer=self.workspace,
+            indices=self.indices,
+            scores=self.scores,
+            candidate_blocks=self.blocks,
+        )
+
     def __call__(self):
         return self.runner()
 
@@ -214,18 +292,22 @@ class NondetArm(det_bench.Arm):
         return ()
 
 
-def _det(name, knobs=None):
+def _det(name, knobs=None, with_candidates=False):
     def make(inputs):
-        arm = det_bench.CakeArm(inputs, knobs=knobs, name=name)
+        arm = det_bench.CakeArm(
+            inputs, knobs=knobs, name=name, with_candidates=with_candidates
+        )
         arm.package = "det"
         return arm
 
     return make
 
 
-def _nondet(name, knobs=None):
+def _nondet(name, knobs=None, with_candidates=False):
     def make(inputs):
-        return NondetArm(inputs, knobs=knobs, name=name)
+        return NondetArm(
+            inputs, knobs=knobs, name=name, with_candidates=with_candidates
+        )
 
     return make
 
@@ -239,6 +321,10 @@ ARMS = {
     "nondet_aa": _nondet("nondet_aa"),
     "det_nosample": _det("det_nosample", knobs=det_bench.NOSAMPLE),
     "nondet_nosample": _nondet("nondet_nosample", knobs=det_bench.NOSAMPLE),
+    # the candidate-block call of the same top_k (``--rows candidates``)
+    "det_cb": _det("det_cb", with_candidates=True),
+    "nondet_cb": _nondet("nondet_cb", with_candidates=True),
+    "nondet_cb_aa": _nondet("nondet_cb_aa", with_candidates=True),
 }
 DEFAULT_ARMS = "det,nondet"
 TIMING_BOUNDARY = (
@@ -315,6 +401,13 @@ def measure_row(name, inputs, arms, args):
             )[:3],
         )
         record["gpu_ms"]["all"] = statistics.median(every)
+        if getattr(arm, "blocks", None) is not None:
+            cb = det_bench.candidate_block_record(
+                inputs, outputs[arm_name][0], arm.blocks
+            )
+            record["candidate_blocks"] = cb
+            if cb["bad_counts"] or cb["missing_newest"] or cb["ids_outside_blocks"]:
+                record["structure_failures"].append(f"candidate_blocks {cb}")
         result["arms"][arm_name] = record
     if args.verify:
         reference = ref.select_reference(inputs)
@@ -335,6 +428,15 @@ def measure_row(name, inputs, arms, args):
         if rec.get("verdict_passed") is False:
             failures.append(f"{arm_name}: {rec['verdict']}")
     result["failures"] = failures
+    # the candidate-block call over the plain call of the same package and top_k (above 1: the candidate blocks cost)
+    for cb_arm, plain in (("nondet_cb", "nondet"), ("det_cb", "det")):
+        if cb_arm in prepared and plain in prepared:
+            result[f"{cb_arm}_over_{plain}"] = (
+                None
+                if failures
+                else result["arms"][cb_arm]["gpu_ms"]["all"]
+                / result["arms"][plain]["gpu_ms"]["all"]
+            )
     if "det" in prepared and "nondet" in prepared:
         det_ms = result["arms"]["det"]["gpu_ms"]["all"]
         nondet_ms = result["arms"]["nondet"]["gpu_ms"]["all"]
