@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 18 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 19 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,7 +11,7 @@ This page covers the public modules of all 18 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -40,6 +40,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
 | engram_lookup | Has no nondet module | — |
+| act_qdq | Has no nondet module | — |
 
 ---
 
@@ -1842,3 +1843,62 @@ logp2.sum().backward()
 - Nondet: the deterministic-algorithms alert is part of the contract. Its zero-weight loss sum and its `sm_107a` zero-`dlogp` floor differ from det's, so loss and `dW` bits can differ from det; both modules are judged against the BF16 naive tier.
 - The binding-cache environment variables are read once at import, so a malformed capacity fails at import.
 - Each backend package's README (`cake_pplx/_backends/<pkg>/README.md`) holds the memory-margin and toolchain notes that the docstrings refer to.
+
+---
+
+## act_qdq
+
+**Computes.** A block-scaled quantize-dequantize (QDQ) of BF16 activations back to BF16, forward only. Each group of `G` consecutive elements of the last dimension gets one scale `s`, then `y = bf16(q * s)`, where `q` is the element format's round-to-nearest-even value of `clamp(x / s, -Q, Q)`, with the sign of zero kept. `amax` is the group's largest magnitude.
+
+| `format` | Elements | `G` | Scale `s` | `amax` floor | `Q` |
+|---|---|---|---|---|---|
+| `"fp4_e4m3_g16"` | E2M1 | 16 | E4M3 of `max(amax, 6*2^-9) / 6`, round to nearest even, saturating at 448 | `6*2^-9` | 6 |
+| `"mxfp4_e8m0_g32"` | E2M1 | 32 | `2^ceil(log2(max(amax, 6*2^-126) / 6))` | `6*2^-126` | 6 |
+| `"mxfp8_e8m0_g32"` | E4M3 | 32 | `2^ceil(log2(max(amax, fp32(1e-4)) / 448))` | `fp32(1e-4)` | 448 |
+
+- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 steps give the rule's outputs.
+- The optional second output is the FP32 scale of each group, `[..., D/G]`.
+- One kernel per call reads `x` once and writes `y` (and the scales) once, on the current stream. The input may be any rank; the groups run along the flat buffer.
+
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError("activation QDQ requires SM100, SM103 or SM107")`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a` and `sm_103a` (the kernels use the three-input `max` of PTX ISA 8.8) and 13.5 for `sm_107a`. Validated on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+
+### `cake_pplx.cake_act_qdq_det_train`
+
+This family has a det module only, with no nondet or KCP module. Each group is quantized by its own threads, its maximum is exact in any order, and nothing is summed, so a nondet module would have no non-deterministic step; the op works on each token alone, so there is nothing to split across ranks. No call alerts under `torch.use_deterministic_algorithms(True)`. There is no autograd Function. Source: [`kernels/act_qdq/cake_pplx/cake_act_qdq_det_train.py`](../kernels/act_qdq/cake_pplx/cake_act_qdq_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_act_qdq_det_train_forward` | `(x, *, format, out=None, scales=None, return_scales=False)` | `x` contiguous BF16 CUDA `[..., D]`, 16-byte aligned, `D` a multiple of `G`, at most `8*(2^31-256)` elements. `out`: `x` itself (in place) or a contiguous, 16-byte aligned BF16 tensor of `x`'s shape that does not overlap `x`. `scales`: a contiguous FP32 `[..., D/G]` buffer that overlaps neither. | Returns `y` (BF16, `x`'s shape; `out` when given, so `out=x` returns `x`), or `(y, scales)` when `return_scales=True` or `scales` is given. Not autograd. Any number of rows: a tensor with no elements returns empty outputs without a launch. A wrong dtype raises `TypeError`, any other bad argument `ValueError`, before any launch. |
+| `cake_act_qdq_det_train_forward_workspace_bytes` | `(shape, *, format)` | The input shape and format | Returns 0: no workspace. A call keeps no state between calls either. Raises `ValueError` for a shape or format the forward refuses. |
+
+Other public names:
+
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES = ((10, 0), (10, 3), (10, 7))`.
+- `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
+- `is_cake_act_qdq_det_train_supported(device)`.
+
+**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output; the grid is `min(ceil(numel/2048), 8 * SM count)` CTAs, so a new shape or row count never recompiles. The facade reads no environment variable.
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+import torch
+from cake_pplx.cake_act_qdq_det_train import cake_act_qdq_det_train_forward
+
+kv = torch.randn(16384, 512, device="cuda", dtype=torch.bfloat16)
+q = torch.randn(16384, 32, 128, device="cuda", dtype=torch.bfloat16)
+o = torch.randn(16384, 8, 4096, device="cuda", dtype=torch.bfloat16)
+
+kv_qdq, kv_scales = cake_act_qdq_det_train_forward(kv, format="fp4_e4m3_g16", return_scales=True)
+cake_act_qdq_det_train_forward(q, format="mxfp4_e8m0_g32", out=q)  # in place
+o_qdq = cake_act_qdq_det_train_forward(o, format="mxfp8_e8m0_g32")
+```
+
+**Caveats.**
+
+- Forward only: there is no backward and no autograd entry. For training through the rounding, wrap the call in your own `torch.autograd.Function` (for example a straight-through estimator). Outputs carry no autograd history; a buffer the call writes (`out`, `x` in place, `scales`) must not require grad while grad mode is on, and the call advances its version counter as a PyTorch in-place op does.
+- Non-finite inputs (NaN, ±Inf) are outside the rule; their outputs are unspecified.
+- Finite inputs can give `±inf`: with MXFP8 an element with `|x| >= 248*2^120`, with MXFP4 one with `|x| >= 224*2^120` (the rule's own BF16 rounding of `q * s`).
+- Only the dequantized BF16 values and the FP32 scales are returned, not the packed FP4/FP8 codes.
