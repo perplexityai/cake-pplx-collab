@@ -338,11 +338,16 @@ def test_workspace_and_retained_state_are_reported_separately(pack, record_prope
     device = _device_or_skip()
     x = make_inputs(pack, seed=139, device=device, layout="halves")
     report = api.cake_gated_kv_compression_det_train_memory_bytes(x.T, x.S)
-    out_bytes = _rounded(x.G * WIDTH * 2)
     _explicit(x, "halves")
     torch.cuda.synchronize(device)
-    # No cached block: the caching allocator hands a large request a cached block up to 1 MiB larger, unsplit, which
-    # would count as workspace.
+    # The output's block as the caching allocator sizes it, from a fresh segment: a large request keeps the rest of
+    # its segment when that rest is at most 1 MiB, which is not workspace.
+    torch.cuda.empty_cache()
+    base = torch.cuda.memory_allocated(device)
+    probe = torch.empty(x.G, WIDTH, dtype=torch.bfloat16, device=device)
+    out_bytes = torch.cuda.memory_allocated(device) - base
+    del probe
+    assert out_bytes >= _rounded(x.G * WIDTH * 2)
     torch.cuda.empty_cache()
     base = torch.cuda.memory_allocated(device)
     torch.cuda.reset_peak_memory_stats(device)
