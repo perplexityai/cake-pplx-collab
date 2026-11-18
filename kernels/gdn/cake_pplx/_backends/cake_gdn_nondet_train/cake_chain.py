@@ -3688,7 +3688,8 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
 # --------------------------------------------------------------------------- #
 # On an architecture of ``FWD_SPLIT_ARCHS`` a call on a host-built table whose forward segment table splits a sequence
 # runs the one-wave split of the forward scan on the host plan's piece table (:func:`cake_plan.pieces`, the table the
-# adjoint split reads) instead of the pre-scan, the stitch and ``fwd_ho``: the front ``wy_a`` (A, rstd_q / rstd_k /
+# adjoint split reads, except where it takes the longer pieces of :func:`bwd_one_wave_table`) instead of the
+# pre-scan, the stitch and ``fwd_ho``: the front ``wy_a`` (A, rstd_q / rstd_k /
 # g_cs / qn / kn) and ``wy_tc2`` with ``recompute = 1`` on that A (w and u), then wave 1, the first piece of every split
 # sequence from its initial state (``fwd_fused``, its end state into the B half of the stitch's segment state by
 # ``split_out``, its flag 0) beside the affine maps ``[B | M]`` of the middle pieces (``fwd_summary``, side stream,
