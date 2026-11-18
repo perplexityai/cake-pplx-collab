@@ -26,9 +26,10 @@ may differ from the deterministic module's by the rounding of that sum
 run-to-run bit-equality promise for any output; the deterministic module makes
 it.  Both modules leave zero-weight policy rows out of the gradient path and
 skip the GEMM work of log-probability rows with a zero ``dlogp``.  The
-deterministic module splits off those rows only when its memory rule allows
-it, and it does not skip in its opt-in forms or in a default call whose
-automatic form is a budget form (this module has no automatic form).  This
+deterministic module splits off its zero-weight rows only when its memory
+rule allows it, and it does not skip zero-``dlogp`` rows in its opt-in forms
+or in a default call whose automatic form is a budget form (this module has
+no automatic form).  This
 module adds no loss term for a zero-weight row (the deterministic module's
 default ``"exact"`` loss mode keeps the loss bits of the call without the
 split), and its zero-``dlogp`` skip starts at 1946 valid rows on ``sm_107a``
