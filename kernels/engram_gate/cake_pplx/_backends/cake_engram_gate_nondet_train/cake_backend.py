@@ -46,13 +46,22 @@ writes ``dq_weight = dw * k_weight`` and ``dk_weight = dw * q_weight`` in FP32.
 exactly, zero ``dkey[t]`` and ``dvalue[t]``, and adds nothing to the weight
 gradients.
 
-``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters sized from the
-token count and the SM count; any grid is correct, so the token count is a
-run-time value (no recompilation, no shape list).  Every launch is a plain
-stream-ordered launch on the current torch stream of the operands' device:
-nothing cooperative.  Nothing here reads an environment variable, reads
-device memory or synchronizes; grids and buffer sizes come from tensor
-shapes and the SM count.
+``dot_sum`` selects how ``fwd`` and ``bwd`` sum ``P``.  ``"compensated"`` (the
+default) launches the ``<stage>_dot2`` records: a compensated FP32 dot product
+(each product split with an FMA, each running sum with an error-free two-sum,
+the error words added once at the end).  ``"fp32"`` (opt-in) launches the
+``<stage>_f32`` records: one FP32 word, which loses most digits of ``P`` where
+the products nearly cancel.  The autograd Functions run the backward with the
+forward's choice.
+
+``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
+token count and as the device holds at once (:func:`.cake_jit.clusters`, from
+a table per architecture, SM count and record); any grid is correct, so the
+token count is a run-time value (no recompilation, no shape list).  Every
+launch is a plain stream-ordered launch on the current torch stream of the
+operands' device: nothing cooperative.  Nothing here reads an environment
+variable, reads device memory or synchronizes; grids and buffer sizes come
+from tensor shapes, the architecture and the SM count.
 
 This is the non-deterministic package of its family: ``bwd`` adds each
 cluster's weight-gradient partial sums into one FP32 accumulator with float
@@ -115,10 +124,10 @@ HIDDEN: int = cake_jit.HIDDEN
 # Columns of the packed projection output ``kv``: the four keys, then the value.
 KV_WIDTH: int = (STREAMS + 1) * HIDDEN
 
-# How the forward and the backward sum the dot product ``P = sum_d w_d h_d k_d``:
-# the record suffix of :data:`.cake_jit.ACC_MODES` they launch.  ``"dot2"`` sums
-# it as a compensated FP32 dot product, ``"f32"`` in one FP32 word.
-_DOT_ACC = "dot2"
+# The sums of the dot product ``P = sum_d w_d h_d k_d`` a caller selects with ``dot_sum``, each with the record
+# suffix of :data:`.cake_jit.ACC_MODES` it launches: ``"compensated"`` (the default) a compensated FP32 dot product,
+# ``"fp32"`` one FP32 word.
+_DOT_SUMS: dict[str, str] = {"compensated": "dot2", "fp32": "f32"}
 
 # Token strides of the strided operands are multiples of 8 elements and every
 # BF16 operand starts on a 16-byte boundary: the kernels move 16 bytes per access.
@@ -370,7 +379,7 @@ def launch_dw_reduce(
     ``[4, 5120]``, from the ``NP`` partial rows ``dw`` (FP32 ``[NP, 4, 5120]``) summed in one fixed order; ``qw`` and
     ``kw`` are the FP32 weights (contiguous)."""
     values = {"dw_part": dw, "qw": qw, "kw": kw, "dq": dq, "dk": dk, "NP": int(dw.shape[0])}
-    _launch(name, "dw_reduce", values, cake_jit.grid(name, 1, 1), dw.device)
+    _launch(name, "dw_reduce", values, cake_jit.dw_reduce_grid(), dw.device)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -483,6 +492,17 @@ def _value_layout(name: str, t: torch.Tensor, T: int, *, output: bool) -> None:
     _aligned(name, t)
 
 
+def _dot_acc(dot_sum: Any) -> str:
+    """The record suffix of the ``dot_sum`` choice: ``TypeError`` for a non-``str``, ``ValueError`` for another
+    ``str``; both name the choices."""
+    if not isinstance(dot_sum, str):
+        raise TypeError(f"dot_sum must be a str, one of {list(_DOT_SUMS)}, got {type(dot_sum).__name__}")
+    acc = _DOT_SUMS.get(dot_sum)
+    if acc is None:
+        raise ValueError(f"dot_sum must be one of {list(_DOT_SUMS)}, got {dot_sum!r}")
+    return acc
+
+
 def _check_scalars(eps: Any, clamp_value: Any) -> tuple[float, float]:
     try:
         eps_f, clamp_f = float(eps), float(clamp_value)
@@ -577,13 +597,16 @@ def _param_grad(grad: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
     return grad if param.dtype == torch.float32 else grad.to(param.dtype)
 
 
-def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.device, int, str, None] = None) -> int:
+def cake_engram_gate_nondet_train_workspace_bytes(
+    T: int, device: Union[torch.device, int, str, None] = None, *, dot_sum: str = "compensated"
+) -> int:
     """Bytes of device memory one backward call over ``T`` tokens on ``device`` (None: the current CUDA device)
-    allocates beside its operands and outputs, with BF16 weights: the FP32 weight product, the two FP32 weight
-    copies (none for contiguous FP32 weights) and the
-    ``[4, 5120]`` FP32 weight-gradient accumulator,
+    with the dot product summed as ``dot_sum`` allocates beside its operands and outputs, with BF16 weights: the FP32
+    weight product, the two FP32 weight copies (none for contiguous FP32 weights) and the
+    ``[4, 5120]`` FP32 weight-gradient accumulator (the same for both sums),
     80 KiB each row (0 for ``T == 0``).  A forward call allocates the weight product (and an FP32 copy of a BF16
     ``q_weight``) only; the state kept for the backward is the inputs alone."""
+    _dot_acc(dot_sum)  # checked only: one accumulator row for either sum
     T = int(T)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
@@ -606,8 +629,10 @@ def _forward(
     token_mask: Optional[torch.Tensor],
     eps: float,
     clamp_value: float,
+    dot_sum: str,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    acc = _dot_acc(dot_sum)
     T, eps_f, clamp_f = _check_operands(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
     device = x.device
     if out is None:
@@ -617,11 +642,12 @@ def _forward(
     if T == 0:
         return out
     index = device.index
-    device_arch(index)  # RuntimeError on a device outside ARCHES
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    name = cake_jit.record("fwd", acc)
     # FP32(q_weight) * FP32(k_weight): a BF16 k_weight is widened exactly by type promotion.
     w = (_fp32(q_weight) * k_weight.detach()).contiguous()
     launch_fwd(
-        cake_jit.record("fwd", _DOT_ACC),
+        name,
         x=x,
         key=key,
         value=value,
@@ -630,7 +656,7 @@ def _forward(
         out=out,
         eps=eps_f,
         clamp_value=clamp_f,
-        clusters=cake_jit.clusters("fwd", T, sm_count(index)),
+        clusters=cake_jit.clusters(name, T, arch, sm_count(index)),
     )
     return out
 
@@ -645,11 +671,13 @@ def _backward(
     token_mask: Optional[torch.Tensor],
     eps: float,
     clamp_value: float,
+    dot_sum: str,
     dx: Optional[torch.Tensor],
     dkey: Optional[torch.Tensor],
     dvalue: Optional[torch.Tensor],
     api: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    acc = _dot_acc(dot_sum)
     T, eps_f, clamp_f = _check_operands(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
     device = x.device
     dout = _tensor("dout", dout)
@@ -670,7 +698,7 @@ def _backward(
             torch.zeros_like(dq),
         )
     index = device.index
-    device_arch(index)  # RuntimeError on a device outside ARCHES, before the alert
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES, before the alert
     _alert_nondeterministic(api, api.replace("nondet", "det"))
     if dx is None:
         dx = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
@@ -680,11 +708,12 @@ def _backward(
         dvalue = torch.empty((T, HIDDEN), dtype=torch.bfloat16, device=device)
     qw32, kw32 = _fp32(q_weight), _fp32(k_weight)
     w = qw32 * kw32
-    clusters = cake_jit.clusters("bwd", T, sm_count(index))
+    name = cake_jit.record("bwd", acc)
+    clusters = cake_jit.clusters(name, T, arch, sm_count(index))
     # The accumulator the clusters add into.
     dw = torch.zeros((1, STREAMS, HIDDEN), dtype=torch.float32, device=device)
     launch_bwd(
-        cake_jit.record("bwd", _DOT_ACC),
+        name,
         dout=dout,
         x=x,
         key=key,
@@ -701,7 +730,7 @@ def _backward(
     )
     dq = torch.empty((STREAMS, HIDDEN), dtype=torch.float32, device=device)
     dk = torch.empty((STREAMS, HIDDEN), dtype=torch.float32, device=device)
-    launch_dw_reduce(cake_jit.record("dw_reduce", _DOT_ACC), dw=dw, qw=qw32, kw=kw32, dq=dq, dk=dk)
+    launch_dw_reduce(cake_jit.record("dw_reduce", acc), dw=dw, qw=qw32, kw=kw32, dq=dq, dk=dk)
     return dx, dkey, dvalue, dq, dk
 
 
@@ -715,6 +744,7 @@ def cake_engram_gate_nondet_train_forward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """The forward without autograd: ``out`` BF16 ``[T, 4, 5120]`` (``out`` given: written in place and returned).
@@ -722,9 +752,10 @@ def cake_engram_gate_nondet_train_forward(
     ``x`` BF16 ``[T, 4, 5120]`` contiguous; ``key`` BF16 ``[T, 4, 5120]`` and ``value`` BF16 ``[T, 5120]``,
     contiguous or views into a packed ``[T, 25600]`` buffer (unit column stride, stream stride 5120, token stride a
     multiple of 8); ``q_weight`` and ``k_weight`` BF16 or FP32 ``[4, 5120]``; ``token_mask`` bool ``[T]`` or None;
-    every tensor on one CUDA device, every BF16 operand 16-byte aligned.  ``T == 0`` launches nothing.  The forward
-    never consults ``torch.use_deterministic_algorithms``."""
-    return _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, out)
+    every tensor on one CUDA device, every BF16 operand 16-byte aligned.  ``dot_sum``: ``"compensated"`` (default)
+    or ``"fp32"`` (opt-in), how ``P`` is summed.  ``T == 0`` launches nothing.  The forward never consults
+    ``torch.use_deterministic_algorithms``."""
+    return _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum, out)
 
 
 def cake_engram_gate_nondet_train_backward(
@@ -738,12 +769,14 @@ def cake_engram_gate_nondet_train_backward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
     dx: Optional[torch.Tensor] = None,
     dkey: Optional[torch.Tensor] = None,
     dvalue: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The backward without autograd: ``(dx, dkey, dvalue, dq_weight, dk_weight)`` from the forward's inputs and
-    ``dout`` (BF16 ``[T, 4, 5120]``, contiguous); the forward's own output is not needed.
+    ``dout`` (BF16 ``[T, 4, 5120]``, contiguous); the forward's own output is not needed.  ``dot_sum`` sums ``P`` as
+    in :func:`cake_engram_gate_nondet_train_forward` (pass the forward's choice).
 
     ``dx`` BF16 ``[T, 4, 5120]`` (contiguous), ``dkey`` and ``dvalue`` BF16, each laid out as ``key`` and ``value``
     may be (caller views into one ``[T, 25600]`` gradient buffer are written in place), allocated when not given;
@@ -763,6 +796,7 @@ def cake_engram_gate_nondet_train_backward(
         token_mask,
         eps,
         clamp_value,
+        dot_sum,
         dx,
         dkey,
         dvalue,
@@ -786,9 +820,9 @@ def _grad_out(dout: Optional[torch.Tensor], x: torch.Tensor) -> torch.Tensor:
 
 class CakeEngramGateNondetFunction(torch.autograd.Function):
     """``out = engram_gate(x, key, value, q_weight, k_weight, token_mask)``.  The saved set is the inputs alone
-    (``ctx.save_for_backward``; ``eps`` and ``clamp_value`` on ``ctx``): the backward recomputes the norms and the
-    dot product, so a checkpointed forward keeps nothing alive.  The weight gradients are returned in each
-    parameter's dtype.
+    (``ctx.save_for_backward``; ``eps``, ``clamp_value`` and ``dot_sum`` on ``ctx``): the backward recomputes the
+    norms and the dot product, summed as the forward summed it, so a checkpointed forward keeps nothing alive.  The
+    weight gradients are returned in each parameter's dtype.
     The backward raises PyTorch's deterministic-algorithms alert (naming
     ``cake_pplx.cake_engram_gate_det_train.cake_engram_gate_det``); the forward never does.
     """
@@ -804,11 +838,13 @@ class CakeEngramGateNondetFunction(torch.autograd.Function):
         token_mask: Optional[torch.Tensor],
         eps: float,
         clamp_value: float,
+        dot_sum: str,
     ) -> torch.Tensor:
-        out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
+        out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)
         ctx.save_for_backward(x, key, value, q_weight, k_weight, token_mask)
         ctx.eps = eps
         ctx.clamp_value = clamp_value
+        ctx.dot_sum = dot_sum
         return out
 
     @staticmethod
@@ -825,6 +861,7 @@ class CakeEngramGateNondetFunction(torch.autograd.Function):
             token_mask,
             ctx.eps,
             ctx.clamp_value,
+            ctx.dot_sum,
             None,
             None,
             None,
@@ -840,14 +877,15 @@ class CakeEngramGateNondetFunction(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
 class CakeEngramGateNondetKvFunction(torch.autograd.Function):
     """``out = engram_gate(x, key, value, q_weight, k_weight, token_mask)`` with ``key`` and ``value`` the views of
     one packed ``kv [T, 25600]``.  The backward writes dK and dV straight into one new ``dkv [T, 25600]`` (no split
-    and no concatenation copy).  The saved set is the inputs alone, as in
-    :class:`CakeEngramGateNondetFunction`."""
+    and no concatenation copy).  The saved set is the inputs alone and the backward sums ``P`` as the forward did,
+    as in :class:`CakeEngramGateNondetFunction`."""
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -859,12 +897,14 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
         token_mask: Optional[torch.Tensor],
         eps: float,
         clamp_value: float,
+        dot_sum: str,
     ) -> torch.Tensor:
         key, value = _split_kv(kv)
-        out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
+        out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)
         ctx.save_for_backward(x, kv, q_weight, k_weight, token_mask)
         ctx.eps = eps
         ctx.clamp_value = clamp_value
+        ctx.dot_sum = dot_sum
         return out
 
     @staticmethod
@@ -884,6 +924,7 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
             token_mask,
             ctx.eps,
             ctx.clamp_value,
+            ctx.dot_sum,
             None,
             dkey,
             dvalue,
@@ -895,6 +936,7 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
             dkv if need[1] else None,
             _param_grad(dq, q_weight) if need[2] else None,
             _param_grad(dk, k_weight) if need[3] else None,
+            None,
             None,
             None,
             None,
@@ -911,10 +953,12 @@ def cake_engram_gate_nondet(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
 ) -> torch.Tensor:
     """The Engram context gate with autograd (:class:`CakeEngramGateNondetFunction`): ``out`` BF16
-    ``[T, 4, 5120]``; operands as in :func:`cake_engram_gate_nondet_train_forward`."""
-    return CakeEngramGateNondetFunction.apply(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
+    ``[T, 4, 5120]``; operands and ``dot_sum`` as in :func:`cake_engram_gate_nondet_train_forward` (the backward
+    sums ``P`` the same way)."""
+    return CakeEngramGateNondetFunction.apply(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)
 
 
 def cake_engram_gate_nondet_kv(
@@ -926,8 +970,9 @@ def cake_engram_gate_nondet_kv(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
 ) -> torch.Tensor:
     """The Engram context gate with autograd on the packed ``kv`` BF16 ``[T, 25600]`` (the four keys, then the
     value; unit column stride, token stride a multiple of 8) (:class:`CakeEngramGateNondetKvFunction`): ``out`` BF16
     ``[T, 4, 5120]``; the gradient of ``kv`` is one ``[T, 25600]`` buffer written by the backward kernel."""
-    return CakeEngramGateNondetKvFunction.apply(x, kv, q_weight, k_weight, token_mask, eps, clamp_value)
+    return CakeEngramGateNondetKvFunction.apply(x, kv, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)

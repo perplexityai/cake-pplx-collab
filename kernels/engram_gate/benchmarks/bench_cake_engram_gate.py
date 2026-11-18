@@ -31,8 +31,8 @@ Arms (each called as ``fn(x, kv, q_weight, k_weight, token_mask)`` through autog
 * ``eager``: the issue formula in eager PyTorch FP32.
 * ``torch_compile_fp64dot`` (optional diagnostic): ``torch_compile`` with ``P`` summed in FP64.
 * ``cake_nondet`` / ``cake_det``: ``cake_pplx.cake_engram_gate_<mode>_train.cake_engram_gate_<mode>_kv`` with the
-  package's default summation of the dot product; ``cake_<mode>_f32`` / ``cake_<mode>_dot2``: the same entry with the
-  backend's summation set to one FP32 word / a compensated FP32 dot product (both records ship in each package).
+  default sum of the dot product (``dot_sum="compensated"``: a compensated FP32 dot product); ``cake_nondet_fp32`` /
+  ``cake_det_fp32``: the same entry with the opt-in ``dot_sum="fp32"`` (one FP32 word).
 
 Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(x, kv, qw, kw, mask)`` (weight product,
 output allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
@@ -95,10 +95,11 @@ FE_BWD_CHUNK = 8192
 FE_FWD_MAX = 64 * 65535
 FE_TOKEN_MULTIPLE = 64
 SCALES = (0.25, 1.0, 2.0, 4.0)
+# The Cake arms: the default sum of the dot product, then the opt-in one-word FP32 sum (``dot_sum="fp32"``).
 CAKE_ARMS = ("cake_nondet", "cake_det")
-CAKE_ACC_ARMS = ("cake_nondet_f32", "cake_nondet_dot2", "cake_det_f32", "cake_det_dot2")
-DEFAULT_ARMS = CAKE_ARMS + ("cudnn_fe", "torch_compile", "torch_compile_tuned", "eager")
-ALL_ARMS = DEFAULT_ARMS + CAKE_ACC_ARMS + ("cudnn_fe_dev", "torch_compile_fp64dot")
+CAKE_FP32_ARMS = ("cake_nondet_fp32", "cake_det_fp32")
+DEFAULT_ARMS = CAKE_ARMS + CAKE_FP32_ARMS + ("cudnn_fe", "torch_compile", "torch_compile_tuned", "eager")
+ALL_ARMS = DEFAULT_ARMS + ("cudnn_fe_dev", "torch_compile_fp64dot")
 DETERMINISTIC_CLAIM = {
     "cudnn_fe": True,
     "cudnn_fe_dev": True,
@@ -108,10 +109,8 @@ DETERMINISTIC_CLAIM = {
     "torch_compile_fp64dot": True,
     "cake_nondet": False,
     "cake_det": True,
-    "cake_nondet_f32": False,
-    "cake_nondet_dot2": False,
-    "cake_det_f32": True,
-    "cake_det_dot2": True,
+    "cake_nondet_fp32": False,
+    "cake_det_fp32": True,
 }
 # Arms that evaluate the issue formula in FP32 (the "best baseline" column picks among these).
 FP32_BASELINES = ("cudnn_fe", "cudnn_fe_dev", "torch_compile", "torch_compile_tuned", "eager")
@@ -453,12 +452,11 @@ class FeArm(Arm):
 
 
 class CakeArm(Arm):
-    def __init__(self, mode, acc=None):
-        self.name = f"cake_{mode}" + (f"_{acc}" if acc else "")
+    def __init__(self, mode, dot_sum=None):
+        self.name = f"cake_{mode}" + (f"_{dot_sum}" if dot_sum else "")
         module = f"cake_pplx.cake_engram_gate_{mode}_train"
         try:
             self.mod = importlib.import_module(module)
-            self.backend = importlib.import_module(f"cake_pplx._backends.cake_engram_gate_{mode}_train.cake_backend")
         except Exception as exc:  # noqa: BLE001
             raise Unsupported(f"{module} not importable: {type(exc).__name__}: {exc}") from exc
         entry = f"cake_engram_gate_{mode}_kv"
@@ -468,20 +466,19 @@ class CakeArm(Arm):
         if torch.cuda.is_available() and not getattr(self.mod, f"is_cake_engram_gate_{mode}_train_supported")():
             raise Unsupported(f"{module} does not serve cc {torch.cuda.get_device_capability()}")
         self.mode = mode
-        # The summation of the dot product: the package default, or the record the arm names (the backend reads its
-        # module constant at each forward and backward call; the arm sets it before each of its calls).
-        self.acc = acc or self.backend._DOT_ACC
+        # The sum of the dot product: the entry's default, or the ``dot_sum`` the arm names.
+        default = inspect.signature(inspect.unwrap(self.entry)).parameters["dot_sum"].default
+        self.dot_sum = dot_sum or default
 
     def library(self) -> str:
-        return (f"cake-pplx-engram-gate {_dist('cake-pplx-engram-gate')} ({self.mod.__name__}, P summation "
-                f"{self.acc}, default {self.backend._DOT_ACC})")
+        return (f"cake-pplx-engram-gate {_dist('cake-pplx-engram-gate')} ({self.mod.__name__}, "
+                f"dot_sum={self.dot_sum!r})")
 
     def layer(self, mask):
-        entry, backend, acc = self.entry, self.backend, self.acc
+        entry, dot_sum = self.entry, self.dot_sum
 
         def fn(x, kv, qw, kw):
-            backend._DOT_ACC = acc
-            return entry(x, kv, qw, kw, mask, eps=EPS, clamp_value=CLAMP)
+            return entry(x, kv, qw, kw, mask, eps=EPS, clamp_value=CLAMP, dot_sum=dot_sum)
 
         return fn
 
@@ -500,9 +497,9 @@ def make_arm(name):
         return FeArm(name)
     if name in CAKE_ARMS:
         return CakeArm(name.split("_", 1)[1])
-    if name in CAKE_ACC_ARMS:
-        _, mode, acc = name.split("_")
-        return CakeArm(mode, acc)
+    if name in CAKE_FP32_ARMS:
+        _, mode, dot_sum = name.split("_")
+        return CakeArm(mode, dot_sum)
     raise ValueError(f"unknown arm {name}")
 
 

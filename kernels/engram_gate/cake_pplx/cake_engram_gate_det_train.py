@@ -31,6 +31,23 @@ masked token (``token_mask[t]`` False) gives ``out[t] = x[t]`` and
 ``dx[t] = dout[t]`` exactly, zero ``dkey[t]`` and ``dvalue[t]``, and adds
 nothing to the weight gradients.
 
+Every entry takes ``dot_sum``, how ``P`` is summed (the backward of an
+autograd entry sums it as its forward did).  The default, ``"compensated"``,
+is a compensated FP32 dot product: each product split with an FMA, each
+running sum with an error-free two-sum, the error words added once at the
+end.  It meets the accuracy bound of the acceptance tests on every output:
+the median and the largest relative L2 error against an FP64 reference, over
+random draws and over draws whose dot products nearly cancel (``|dot|`` from
+2e-6 to 2e-5), at most twice those of an FP32 evaluation of the formula.
+``"fp32"`` (opt-in) sums ``P`` in one FP32 word.  Where the products nearly
+cancel, that sum loses most of its digits and the gate's derivative magnifies
+the loss: measured on GB300, ``dx``, ``dkey``, ``dq_weight`` and
+``dk_weight`` per stream are off by a relative L2 error of about 1e-2 (at most
+2.6e-2), against bounds of 3.4e-3 (``dx``, ``dkey``) and 4.7e-7 (the weight
+gradients); on random draws its largest weight-gradient error is 1.1e-4,
+against 7.7e-5.  ``out``, ``dvalue`` and, on random draws, ``dx`` and
+``dkey`` meet the bound with either sum.
+
 Entries: :func:`cake_engram_gate_det` (with autograd; ``key`` and ``value``
 contiguous or views into one packed ``[T, 25600]``),
 :func:`cake_engram_gate_det_kv` (with autograd on the packed ``kv``: the
@@ -53,7 +70,8 @@ live in the backend package ``cake_pplx._backends.cake_engram_gate_det_train``,
 imported on first use; this module forwards every keyword.  Every switch is a
 keyword argument; no environment variable is read.  The token count is a
 run-time value: no recompilation, no device-to-host read, no host
-synchronization; the calls are CUDA-graph capturable after one eager call.
+synchronization; the calls are CUDA-graph capturable after one eager call
+(of each ``dot_sum`` the graph uses).
 
 Memory: the state kept for the backward is the inputs alone (the backward
 recomputes the norms and the dot product).  A backward call allocates FP32
@@ -68,6 +86,8 @@ Usage::
     kv = projection(rows)                          # BF16 [T, 25600]: four keys, then the value
     out = cake_engram_gate_det_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
     out.backward(dout)                             # x.grad, kv.grad [T, 25600], q_weight.grad, k_weight.grad
+    # opt-in: one FP32 word per dot product (less accurate where the products nearly cancel)
+    out = cake_engram_gate_det_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="fp32")
 """
 
 from __future__ import annotations
@@ -142,6 +162,7 @@ def cake_engram_gate_det(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
 ) -> torch.Tensor:
     r"""The Engram context gate with autograd (``CakeEngramGateDetFunction``).
 
@@ -162,6 +183,11 @@ def cake_engram_gate_det(
         Bool ``[T]``; ``False`` shuts the gate of the token.
     eps, clamp_value : float
         The RMS epsilon and the clamp of ``|dot|`` (run-time values; finite, non-negative).
+    dot_sum : {"compensated", "fp32"}
+        How the forward and its backward sum ``P = sum_d w_d h_d k_d``: ``"compensated"`` (default), a
+        compensated FP32 dot product that meets the accuracy bound on every output; ``"fp32"`` (opt-in), one FP32
+        word, about 1e-2 off in ``dx``, ``dkey`` and the weight gradients where the products nearly cancel (see the
+        module notes).
 
     Returns
     -------
@@ -170,9 +196,11 @@ def cake_engram_gate_det(
 
     Raises
     ------
+    TypeError
+        ``dot_sum`` is not a ``str``.
     ValueError
         A tensor is not a CUDA tensor of the operands' device, or has another dtype, shape, layout or alignment
-        than above; ``eps`` or ``clamp_value`` is not finite and non-negative.
+        than above; ``eps`` or ``clamp_value`` is not finite and non-negative; ``dot_sum`` is another value.
     RuntimeError
         The device is not one of ``ARCHES``.
 
@@ -181,7 +209,9 @@ def cake_engram_gate_det(
     Every output is bitwise reproducible run to run on one device; ``torch.use_deterministic_algorithms`` is not
     consulted.  ``T == 0`` launches nothing and gives zero weight gradients.
     """
-    return _pkg().cake_engram_gate_det(x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value)
+    return _pkg().cake_engram_gate_det(
+        x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
+    )
 
 
 @cake_api
@@ -194,6 +224,7 @@ def cake_engram_gate_det_kv(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
 ) -> torch.Tensor:
     r"""The Engram context gate with autograd on the packed projection output (``CakeEngramGateDetKvFunction``).
 
@@ -204,7 +235,7 @@ def cake_engram_gate_det_kv(
     kv : torch.Tensor
         BF16 ``[T, 25600]``: the four keys (columns ``0:20480``), then the value (``20480:25600``); unit column
         stride, token stride a multiple of 8 elements.
-    q_weight, k_weight, token_mask, eps, clamp_value
+    q_weight, k_weight, token_mask, eps, clamp_value, dot_sum
         As in :func:`cake_engram_gate_det`.
 
     Returns
@@ -214,14 +245,16 @@ def cake_engram_gate_det_kv(
 
     Raises
     ------
-    ValueError, RuntimeError
+    TypeError, ValueError, RuntimeError
         As in :func:`cake_engram_gate_det`.
 
     Notes
     -----
     Bitwise reproducible run to run; ``torch.use_deterministic_algorithms`` is not consulted.
     """
-    return _pkg().cake_engram_gate_det_kv(x, kv, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value)
+    return _pkg().cake_engram_gate_det_kv(
+        x, kv, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
+    )
 
 
 @cake_api
@@ -235,13 +268,14 @@ def cake_engram_gate_det_train_forward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     r"""The forward without autograd.
 
     Parameters
     ----------
-    x, key, value, q_weight, k_weight, token_mask, eps, clamp_value
+    x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum
         As in :func:`cake_engram_gate_det`.
     out : torch.Tensor, optional
         BF16 ``[T, 4, 5120]``, contiguous, 16-byte aligned: written in place and returned.
@@ -252,7 +286,7 @@ def cake_engram_gate_det_train_forward(
 
     Raises
     ------
-    ValueError, RuntimeError
+    TypeError, ValueError, RuntimeError
         As in :func:`cake_engram_gate_det`.
 
     Notes
@@ -261,7 +295,7 @@ def cake_engram_gate_det_train_forward(
     inputs again).
     """
     return _pkg().cake_engram_gate_det_train_forward(
-        x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, out=out
+        x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum, out=out
     )
 
 
@@ -277,6 +311,7 @@ def cake_engram_gate_det_train_backward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
+    dot_sum: str = "compensated",
     dx: Optional[torch.Tensor] = None,
     dkey: Optional[torch.Tensor] = None,
     dvalue: Optional[torch.Tensor] = None,
@@ -289,6 +324,8 @@ def cake_engram_gate_det_train_backward(
         BF16 ``[T, 4, 5120]``, contiguous: the gradient of ``out``.
     x, key, value, q_weight, k_weight, token_mask, eps, clamp_value
         The forward's operands, as in :func:`cake_engram_gate_det`.
+    dot_sum : {"compensated", "fp32"}
+        How ``P`` is summed, as in :func:`cake_engram_gate_det`; pass the forward's choice.
     dx : torch.Tensor, optional
         BF16 ``[T, 4, 5120]``, contiguous.
     dkey, dvalue : torch.Tensor, optional
@@ -302,7 +339,7 @@ def cake_engram_gate_det_train_backward(
 
     Raises
     ------
-    ValueError, RuntimeError
+    TypeError, ValueError, RuntimeError
         As in :func:`cake_engram_gate_det`.
 
     Notes
@@ -320,6 +357,7 @@ def cake_engram_gate_det_train_backward(
         token_mask,
         eps=eps,
         clamp_value=clamp_value,
+        dot_sum=dot_sum,
         dx=dx,
         dkey=dkey,
         dvalue=dvalue,
@@ -327,7 +365,9 @@ def cake_engram_gate_det_train_backward(
 
 
 @cake_api
-def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.device, int, str, None] = None) -> int:
+def cake_engram_gate_det_train_workspace_bytes(
+    T: int, device: Union[torch.device, int, str, None] = None, *, dot_sum: str = "compensated"
+) -> int:
     r"""Bytes of device memory one backward call allocates beside its operands and outputs.
 
     Parameters
@@ -336,7 +376,11 @@ def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.devic
         The token count.
     device : torch.device, int or str, optional
         The CUDA device (None: the current one).
-        The number of partial rows follows its SM count.
+        The number of partial rows follows its architecture and SM count (``RuntimeError`` on a device outside
+        ``ARCHES``).
+    dot_sum : {"compensated", "fp32"}
+        The backward's sum of ``P``, as in :func:`cake_engram_gate_det`.
+        Its backward grid sets the number of partial rows.
 
     Returns
     -------
@@ -349,7 +393,7 @@ def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.devic
     -----
     Workspace sizes do not depend on ``torch.use_deterministic_algorithms``.
     """
-    return _pkg().cake_engram_gate_det_train_workspace_bytes(T, device)
+    return _pkg().cake_engram_gate_det_train_workspace_bytes(T, device, dot_sum=dot_sum)
 
 
 @cake_api

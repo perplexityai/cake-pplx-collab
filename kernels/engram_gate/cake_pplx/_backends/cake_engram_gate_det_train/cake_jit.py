@@ -38,18 +38,20 @@ and one FP32 row of the weight-gradient partial sums per cluster,
 partial rows in one fixed order and writes ``dq_weight = dw * k_weight`` and
 ``dk_weight = dw * q_weight`` in FP32).  Every sum has one fixed order, so every
 output is bitwise reproducible run to run on one device: the cluster count
-follows the token count and the SM count only.
+follows the token count, the record and the device only.
 
 The ``fwd`` and ``bwd`` kernels give each token to one cluster of four CTAs
 (each CTA owns 1280 of the 5120 columns of every stream) and walk the tokens
 persistently: cluster ``c`` of ``n`` serves the tokens ``c, c + n, ...``.
-The grid is ``(4 * n, 1, 1)`` with ``n = min(T, max clusters)``; any grid is
-correct (the clusters never wait on each other).  The two programs of a stage
-differ only in how the dot product ``P = sum_d w_d h_d k_d`` is summed:
-``f32`` in one FP32 word, ``dot2`` as a compensated FP32 dot product (each
-product split with an FMA, each running sum with an error-free two-sum, the
-error words summed in FP32 and added once at the end).  Every other sum is one
-FP32 word.  Nothing launches cooperatively.
+The grid is ``(4 * n, 1, 1)`` with ``n = min(T, resident clusters)``, the
+clusters one device holds at once (:func:`resident_clusters`: measured per
+architecture, SM count and CTAs per SM); any grid is correct (the clusters
+never wait on each other).  The two programs of a stage differ only in how the
+dot product ``P = sum_d w_d h_d k_d`` is summed: ``dot2`` as a compensated
+FP32 dot product (each product split with an FMA, each running sum with an
+error-free two-sum, the error words summed in FP32 and added once at the end;
+the default), ``f32`` in one FP32 word (opt-in).  Every other sum is one FP32
+word.  Nothing launches cooperatively.
 """
 
 from __future__ import annotations
@@ -152,14 +154,28 @@ MODULES: dict[str, dict[str, Any]] = {
 
 # CTAs of one cluster; a token's columns are split over them.
 CLUSTER_CTAS = 4
-# CTAs per SM the persistent grid fills, per stage.  The grid is sized from the
-# SM count only (no device query and no host synchronization per call).
-CTAS_PER_SM = {"fwd": 4, "bwd": 2}
-# A cluster's four CTAs share one GPC, so a device holds fewer whole clusters
-# than CTAS_PER_SM * SMs / 4 (152 SMs at four CTAs per SM hold 148).  The grid
-# holds back one cluster per CLUSTER_SLACK_SMS SMs: a cluster that is not
-# resident starts its tokens only after a resident cluster has ended.
-CLUSTER_SLACK_SMS = 32
+# CTAs per SM each ``fwd`` / ``bwd`` program holds at once: the launch bound of
+# its build, which its register count reaches on every architecture (its
+# threads and shared memory would allow more).
+CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_f32": 3, "bwd_dot2": 3}
+# Whole four-CTA clusters one device holds at once for a count of CTAs per SM,
+# as ``cudaOccupancyMaxActiveClusters`` reports it for this family's programs
+# (spread cluster scheduling, as they launch): (architecture, SM count) ->
+# {CTAs per SM: clusters}.  The four CTAs of a cluster share one GPC, so a device holds
+# fewer clusters than CTAs per SM * SMs / 4: at four CTAs per SM, B200 (148
+# SMs) holds 142, GB300 (152 SMs) 148 and VR200 (212 SMs) 184.
+RESIDENT_CLUSTERS: dict[tuple[str, int], dict[int, int]] = {
+    ("sm_100a", 148): {4: 142, 6: 213},
+    ("sm_103a", 152): {2: 74, 3: 110, 4: 148},
+    ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 6: 276},
+}
+# On a device or a count of CTAs per SM the table does not hold, the grid takes
+# this fraction of CTAs per SM * SMs / 4 clusters: less than every measured
+# device holds (the least, VR200, holds 0.868 of it).  Any grid is correct;
+# a grid past the resident clusters is slow (a cluster that is not resident
+# starts its tokens only after a resident one has walked all of its own, about
+# twice the time at a large token count), a smaller one leaves CTA slots idle.
+UNMEASURED_CLUSTER_FRACTION = 0.85
 # Columns of the flattened [4 * 5120] weight gradient one CTA of ``dw_reduce``
 # sums (32 lanes of four columns; its eight warps split the partial rows).
 DW_REDUCE_COLUMNS_PER_CTA = 128
@@ -177,20 +193,38 @@ def record(stage: str, acc: str) -> str:
     return f"{stage}_{acc}"
 
 
-def clusters(stage: str, tokens: int, sm_count: int) -> int:
-    """The cluster count of the persistent ``fwd`` / ``bwd`` grid: about
-    ``CTAS_PER_SM[stage]`` CTAs per SM less one cluster per
-    ``CLUSTER_SLACK_SMS`` SMs, at least one cluster and never more clusters
-    than tokens."""
-    resident = CTAS_PER_SM[stage] * sm_count // CLUSTER_CTAS - sm_count // CLUSTER_SLACK_SMS
-    return max(1, min(tokens, resident))
+def resident_clusters(record_name: str, arch: str, sm_count: int) -> int:
+    """The four-CTA clusters of the ``fwd`` or ``bwd`` record ``record_name``
+    one device of ``arch`` with ``sm_count`` SMs holds at once: the
+    :data:`RESIDENT_CLUSTERS` entry of its ``CTAS_PER_SM``, else
+    :data:`UNMEASURED_CLUSTER_FRACTION` of ``CTAS_PER_SM * sm_count / 4``; at
+    least one."""
+    per_sm = CTAS_PER_SM[record_name]
+    measured = RESIDENT_CLUSTERS.get((arch, sm_count), {}).get(per_sm)
+    if measured is not None:
+        return measured
+    return max(1, int(UNMEASURED_CLUSTER_FRACTION * per_sm * sm_count) // CLUSTER_CTAS)
 
 
-def grid(record_name: str, tokens: int, sm_count: int) -> tuple[int, int, int]:
-    """The launch grid of ``record_name`` for ``tokens >= 1`` tokens: ``(4 *
-    clusters, 1, 1)`` for ``fwd`` and ``bwd``; for ``dw_reduce`` one CTA per
-    ``DW_REDUCE_COLUMNS_PER_CTA`` columns of the ``[4, 5120]`` gradient."""
-    stage = MODULES[record_name]["stage"]
-    if stage == "dw_reduce":
-        return (STREAMS * HIDDEN // DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
-    return (CLUSTER_CTAS * clusters(stage, tokens, sm_count), 1, 1)
+def clusters(record_name: str, tokens: int, arch: str, sm_count: int) -> int:
+    """The cluster count of the persistent grid of the ``fwd`` or ``bwd``
+    record ``record_name``: the clusters the device holds at once
+    (:func:`resident_clusters`), never more clusters than tokens, at least
+    one."""
+    return max(1, min(tokens, resident_clusters(record_name, arch, sm_count)))
+
+
+def dw_reduce_grid() -> tuple[int, int, int]:
+    """The ``dw_reduce`` grid: one CTA per ``DW_REDUCE_COLUMNS_PER_CTA``
+    columns of the ``[4, 5120]`` gradient, whatever the token count and the
+    device."""
+    return (STREAMS * HIDDEN // DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
+
+
+def grid(record_name: str, tokens: int, arch: str, sm_count: int) -> tuple[int, int, int]:
+    """The launch grid of ``record_name`` for ``tokens >= 1`` tokens on a
+    device of ``arch`` with ``sm_count`` SMs: ``(4 * clusters, 1, 1)`` for
+    ``fwd`` and ``bwd``, :func:`dw_reduce_grid` for ``dw_reduce``."""
+    if MODULES[record_name]["stage"] == "dw_reduce":
+        return dw_reduce_grid()
+    return (CLUSTER_CTAS * clusters(record_name, tokens, arch, sm_count), 1, 1)

@@ -17,14 +17,16 @@ Backend suite of ``cake_pplx._backends.cake_engram_gate_det_train``, the determi
 context gate (four streams of width 5120).
 
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
-product summation; the persistent grid sizes; every stage launcher passes every kernel parameter of its records by
-name (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its source
+product summation, and the record suffix of each ``dot_sum`` choice; the persistent grid sizes and the resident
+cluster table they come from; every stage launcher passes every kernel parameter of its records by name (the FFI
+entry replaced by a recorder); ``build.json`` covers every record on every architecture and its source
 digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment variable
 but the JIT shim's.
 
 On SM100 / SM103 / SM107: every record loads; the forward of each summation record writes every element of a
 NaN-filled ``out`` and meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the
-backward of each summation record meets the tier for ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and ``dk_weight``;
+backward of each ``dot_sum`` choice meets the tier for ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and
+``dk_weight``;
 ``dw_reduce`` alone meets the tier on random partial rows.
 """
 
@@ -53,6 +55,8 @@ PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 RECORDS = ("bwd_dot2", "bwd_f32", "dw_reduce", "fwd_dot2", "fwd_f32")
 ACC_MODES = ("f32", "dot2")
+# The public ``dot_sum`` choices and the record suffix each launches; the first is the default.
+DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
 ENTRIES = (
     "cake_engram_gate_det",
     "cake_engram_gate_det_kv",
@@ -118,8 +122,18 @@ def test_registry_records_are_well_formed() -> None:
 
 
 def test_every_summation_has_its_records() -> None:
-    """Both summations of the dot product ship a forward and a backward record; the backend launches one of them."""
-    assert cake_backend._DOT_ACC in ACC_MODES
+    """Both summations of the dot product ship a forward and a backward record, and each ``dot_sum`` choice names
+    one of them (``"compensated"``: ``dot2``, ``"fp32"``: ``f32``); another choice is refused."""
+    assert cake_backend._DOT_SUMS == DOT_SUMS
+    assert sorted(DOT_SUMS.values()) == sorted(ACC_MODES)
+    for choice, acc in DOT_SUMS.items():
+        assert cake_backend._dot_acc(choice) == acc
+    for bad in ("dot2", "f32", "FP32", "", "compensated "):
+        with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+            cake_backend._dot_acc(bad)
+    for bad in (None, 1, b"fp32", ("fp32",)):
+        with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+            cake_backend._dot_acc(bad)
     for acc in ACC_MODES:
         for stage in ("fwd", "bwd"):
             assert cake_jit.record(stage, acc) == f"{stage}_{acc}"
@@ -141,22 +155,59 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
         cake_backend.record("bwd_main")
 
 
+# The measured resident four-CTA clusters of the shipped programs: (architecture, SM count, record) -> clusters.
+MEASURED = {
+    ("sm_100a", 148, "fwd_dot2"): 142,
+    ("sm_100a", 148, "fwd_f32"): 142,
+    ("sm_103a", 152, "fwd_dot2"): 148,
+    ("sm_103a", 152, "fwd_f32"): 148,
+    ("sm_103a", 152, "bwd_dot2"): 110,
+    ("sm_103a", 152, "bwd_f32"): 110,
+    ("sm_107a", 212, "fwd_dot2"): 184,
+    ("sm_107a", 212, "fwd_f32"): 184,
+    ("sm_107a", 212, "bwd_dot2"): 138,
+    ("sm_107a", 212, "bwd_f32"): 138,
+}
+PERSISTENT_RECORDS = ("bwd_dot2", "bwd_f32", "fwd_dot2", "fwd_f32")
+
+
+def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
+    """Every ``fwd`` / ``bwd`` record has its CTAs per SM; the measured devices give their measured clusters; every
+    table entry is at most CTAs per SM * SMs / 4 clusters, and the fallback stays below every table entry (a grid
+    never exceeds what a measured device holds)."""
+    assert sorted(cake_jit.CTAS_PER_SM) == sorted(PERSISTENT_RECORDS)
+    assert sorted(name for name, rec in cake_jit.MODULES.items() if rec["stage"] != "dw_reduce") == sorted(
+        PERSISTENT_RECORDS
+    )
+    for (arch, sms, name), want in MEASURED.items():
+        assert cake_jit.resident_clusters(name, arch, sms) == want, (arch, sms, name)
+    fraction = cake_jit.UNMEASURED_CLUSTER_FRACTION
+    for (arch, sms), table in cake_jit.RESIDENT_CLUSTERS.items():
+        assert arch in ARCHES
+        for per_sm, held in table.items():
+            assert 1 <= held <= per_sm * sms // cake_jit.CLUSTER_CTAS, (arch, sms, per_sm)
+            assert int(fraction * per_sm * sms) // cake_jit.CLUSTER_CTAS <= held, (arch, sms, per_sm)
+    # A device or a CTA count the table does not hold: the fallback fraction.
+    assert cake_jit.resident_clusters("fwd_dot2", "sm_100a", 152) == int(fraction * 4 * 152) // 4
+    assert cake_jit.resident_clusters("bwd_dot2", "sm_103a", 160) == int(fraction * 3 * 160) // 4
+    assert cake_jit.resident_clusters("fwd_f32", "sm_107a", 1) == 1
+
+
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
 @pytest.mark.parametrize("T", (1, 2, 3, 129, 4096, 16384, 65536, 2**31 - 1))
 def test_grids_are_persistent_clusters(T, sms) -> None:
-    """``fwd`` and ``bwd`` run ``min(T, CTAs per SM * SMs / 4 - SMs / 32)`` clusters (at least one) of four CTAs, so
-    152 SMs run at most the 148 clusters they hold at four CTAs per SM; ``dw_reduce`` covers the 20480 weight-gradient
-    columns."""
-    for stage in ("fwd", "bwd"):
-        clusters = cake_jit.clusters(stage, T, sms)
-        assert 1 <= clusters <= T
-        resident = cake_jit.CTAS_PER_SM[stage] * sms // cake_jit.CLUSTER_CTAS - sms // cake_jit.CLUSTER_SLACK_SMS
-        assert clusters == max(1, min(T, resident))
-        if sms == 152:
-            assert clusters <= 148 * cake_jit.CTAS_PER_SM[stage] // 4
-        for acc in ACC_MODES:
-            assert cake_jit.grid(cake_jit.record(stage, acc), T, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
-    assert cake_jit.grid("dw_reduce", T, sms) == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
+    """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs; ``dw_reduce`` covers
+    the 20480 weight-gradient columns on any device."""
+    for arch in ARCHES:
+        for name in PERSISTENT_RECORDS:
+            resident = cake_jit.resident_clusters(name, arch, sms)
+            clusters = cake_jit.clusters(name, T, arch, sms)
+            assert 1 <= clusters <= T
+            assert clusters == max(1, min(T, resident))
+            assert resident <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
+            assert cake_jit.grid(name, T, arch, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
+        assert cake_jit.grid("dw_reduce", T, arch, sms) == cake_jit.dw_reduce_grid()
+    assert cake_jit.dw_reduce_grid() == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
     assert STREAMS * HIDDEN % cake_jit.DW_REDUCE_COLUMNS_PER_CTA == 0
 
 
@@ -229,7 +280,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         assert len(args) == len(params) + 3, (name, params)
         grid = args[-3:]
         if name == "dw_reduce":
-            assert grid == cake_jit.grid("dw_reduce", T, 1)
+            assert grid == cake_jit.dw_reduce_grid()
         else:
             assert grid == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
         named = dict(zip(params, args, strict=False))
@@ -408,12 +459,13 @@ def _record_failures(judge, failures, record_property) -> None:
 def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout, device, record_property) -> None:
     """The forward record of ``acc`` launched directly writes every element of a NaN-filled ``out`` and meets the
     tier."""
+    name, arch = cake_jit.record("fwd", acc), cake_backend.device_arch(device.index)
 
     def run(ns):
         out = torch.full_like(ns.x, math.nan)
         w = (ns.q_weight.float() * ns.k_weight.float()).contiguous()
         cake_backend.launch_fwd(
-            cake_jit.record("fwd", acc),
+            name,
             x=ns.x,
             key=ns.key,
             value=ns.value,
@@ -422,7 +474,7 @@ def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout,
             out=out,
             eps=1e-20,
             clamp_value=1e-6,
-            clusters=cake_jit.clusters("fwd", T, cake_backend.sm_count(device.index)),
+            clusters=cake_jit.clusters(name, T, arch, cake_backend.sm_count(device.index)),
         )
         torch.cuda.synchronize(device)
         return {"out": out}
@@ -433,19 +485,28 @@ def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout,
     _record_failures(*judge_draws(run, make, seed=11 + T), record_property)
 
 
-@pytest.mark.parametrize("acc", ACC_MODES)
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize(("T", "weights", "mask", "layout"), CASES, ids=CASE_IDS)
-def test_the_backward_records_match_the_reference(acc, T, weights, mask, layout, device, monkeypatch, record_property):
-    """The backward of ``acc`` (``bwd_<acc>`` then ``dw_reduce``), with NaN-filled ``dx``, ``dkey`` and ``dvalue``,
-    meets the tier for every gradient."""
-    monkeypatch.setattr(cake_backend, "_DOT_ACC", acc)
+def test_the_backward_records_match_the_reference(dot_sum, T, weights, mask, layout, device, record_property):
+    """The backward of ``dot_sum`` (``bwd_<acc>`` then ``dw_reduce``), with NaN-filled ``dx``, ``dkey`` and
+    ``dvalue``, meets the tier for every gradient."""
 
     def run(ns):
         dx = torch.full_like(ns.x, math.nan)
         dkey = torch.full_like(ns.x, math.nan)
         dvalue = torch.full_like(ns.value.contiguous(), math.nan)
         got = cake_backend.cake_engram_gate_det_train_backward(
-            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask, dx=dx, dkey=dkey, dvalue=dvalue
+            ns.dout,
+            ns.x,
+            ns.key,
+            ns.value,
+            ns.q_weight,
+            ns.k_weight,
+            ns.token_mask,
+            dot_sum=dot_sum,
+            dx=dx,
+            dkey=dkey,
+            dvalue=dvalue,
         )
         torch.cuda.synchronize(device)
         return dict(zip(("dx", "dkey", "dvalue", "dq", "dk"), got, strict=True))

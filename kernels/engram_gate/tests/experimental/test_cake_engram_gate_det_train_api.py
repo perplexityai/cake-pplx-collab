@@ -16,22 +16,26 @@ limitations under the License.
 Public-API suite of ``cake_pplx.cake_engram_gate_det_train``, the deterministic Engram context gate.
 
 Without a device: the entries are stable APIs, importing the module imports no backend, the module reads no
-environment variable, every keyword of an entry is the backend's keyword of the same name, the entries document their
-behaviour under ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a device of
-capability (10, 7) maps to ``sm_107a``.
+environment variable, every keyword of an entry is the backend's keyword of the same name, every entry takes the
+keyword-only ``dot_sum="compensated"`` and refuses another choice before it looks at the operands, the entries
+document their behaviour under ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a
+device of capability (10, 7) maps to ``sm_107a``.
 
-On SM100 / SM103 / SM107: the autograd entry (``key`` and ``value`` contiguous or views of a packed ``kv``; BF16, FP32
-or mixed weights; with and without a mask) and the packed entry meet the naive BF16 tier against an FP64 oracle
-(``tests/cake_naive.py``, 32 draws) for the output and every gradient; the packed entry equals the split entry bit
+On SM100 / SM103 / SM107, for both ``dot_sum`` choices unless a test names the default: each choice launches its own
+forward and backward records, the backward with its forward's choice (also under checkpoint); the autograd entry
+(``key`` and ``value`` contiguous or views of a packed ``kv``; BF16, FP32 or mixed weights; with and without a mask)
+and the packed entry meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws) for the
+output and every gradient; the packed entry equals the split entry bit
 for bit (and its ``kv`` gradient is the split gradients side by side); views and contiguous operands give the same
 bits; the explicit backward writes caller views into one ``dkv``; a masked token gives ``out = x`` and
 ``dx = dout`` exactly, zero ``dkey`` and ``dvalue`` and no weight-gradient contribution; rows with
 ``|dot| <= 5e-7`` get no gradient through the gate; an all-zero ``x`` or ``key`` stream gives a finite ``out`` and no
 gradient through the gate; ``T = 0`` and ``T = 1`` work; every documented ``ValueError``; the
-``torch.use_deterministic_algorithms`` behaviour; the launches run on the current stream without synchronizing; a
-call captured in a CUDA graph replays; ``torch.utils.checkpoint(use_reentrant=False)`` gives the gradients of plain
-autograd; the retained state and the workspace are reported; a device outside the architectures is a
-``RuntimeError``.
+``torch.use_deterministic_algorithms`` behaviour; with the default choice, the launches run on the current stream
+without synchronizing, a call captured in a CUDA graph replays, ``torch.utils.checkpoint(use_reentrant=False)`` gives
+the gradients of plain autograd and the retained state and the workspace are reported; a device outside the
+architectures is a ``RuntimeError``.  The issue's accuracy bound judges the default choice only
+(``test_cake_engram_gate_acceptance.py``).
 Every output is bitwise reproducible run to run.
 """
 
@@ -47,6 +51,7 @@ import subprocess
 import sys
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import pytest
 import torch
@@ -72,6 +77,10 @@ ENTRIES = (
     "is_cake_engram_gate_det_train_supported",
 )
 GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
+# The ``dot_sum`` choices (the default first) and the record suffix each launches.
+DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+# The entries that take ``dot_sum``.
+SUM_ENTRIES = ENTRIES[:-1]
 # The gradients with one fixed order: all of them.
 EXACT_GRADS = GRADS
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
@@ -129,14 +138,15 @@ def _leaves(ns):
     return x, key, value, None, qw, kw
 
 
-def _autograd(ns, *, packed: bool = False, checkpoint: bool = False) -> dict:
+def _autograd(ns, *, packed: bool = False, checkpoint: bool = False, dot_sum: Optional[str] = None) -> dict:
     """Output and gradients of the autograd entry (``packed``: the ``kv`` entry; ``checkpoint``: under
-    ``torch.utils.checkpoint(use_reentrant=False)``)."""
+    ``torch.utils.checkpoint(use_reentrant=False)``; ``dot_sum``: passed when given, else the entry's default)."""
     x, key, value, kv, qw, kw = _leaves(ns)
+    sums = {} if dot_sum is None else {"dot_sum": dot_sum}
     if packed:
-        fn = functools.partial(api.cake_engram_gate_det_kv, x, kv, qw, kw, ns.token_mask)
+        fn = functools.partial(api.cake_engram_gate_det_kv, x, kv, qw, kw, ns.token_mask, **sums)
     else:
-        fn = functools.partial(api.cake_engram_gate_det, x, key, value, qw, kw, ns.token_mask)
+        fn = functools.partial(api.cake_engram_gate_det, x, key, value, qw, kw, ns.token_mask, **sums)
     out = torch.utils.checkpoint.checkpoint(fn, use_reentrant=False) if checkpoint else fn()
     out.backward(ns.dout)
     if kv is not None:
@@ -203,6 +213,57 @@ def test_keywords_match_the_backend() -> None:
     assert gate["eps"].kind is inspect.Parameter.KEYWORD_ONLY and gate["eps"].default == 1e-20
     assert gate["clamp_value"].kind is inspect.Parameter.KEYWORD_ONLY and gate["clamp_value"].default == 1e-6
     assert gate["token_mask"].default is None
+    for name in SUM_ENTRIES:
+        param = inspect.signature(inspect.unwrap(getattr(api, name))).parameters["dot_sum"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "compensated", name
+    assert "dot_sum" not in inspect.signature(api.is_cake_engram_gate_det_train_supported).parameters
+    for cls in ("CakeEngramGateDetFunction", "CakeEngramGateDetKvFunction"):
+        assert list(inspect.signature(getattr(_backend(), cls).forward).parameters)[-1] == "dot_sum", cls
+
+
+def test_another_dot_sum_is_refused_before_the_operands() -> None:
+    """Every entry that takes ``dot_sum`` (and each autograd ``Function``) raises ``ValueError`` for another ``str``
+    and ``TypeError`` for a non-``str``, naming the choices, before it looks at the operands (CPU operands here)."""
+    ns = make_inputs(2, seed=1, device=torch.device("cpu"))
+    backend = _backend()
+    calls = {
+        "cake_engram_gate_det": lambda **kw: api.cake_engram_gate_det(
+            ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, **kw
+        ),
+        "cake_engram_gate_det_kv": lambda **kw: api.cake_engram_gate_det_kv(
+            ns.x, torch.zeros(2, KV_WIDTH, dtype=torch.bfloat16), ns.q_weight, ns.k_weight, **kw
+        ),
+        "cake_engram_gate_det_train_forward": lambda **kw: api.cake_engram_gate_det_train_forward(
+            ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, **kw
+        ),
+        "cake_engram_gate_det_train_backward": lambda **kw: api.cake_engram_gate_det_train_backward(
+            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, **kw
+        ),
+        "cake_engram_gate_det_train_workspace_bytes": lambda **kw: api.cake_engram_gate_det_train_workspace_bytes(
+            16, "cpu", **kw
+        ),
+        "CakeEngramGateDetFunction": lambda dot_sum: backend.CakeEngramGateDetFunction.apply(
+            ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, None, 1e-20, 1e-6, dot_sum
+        ),
+        "CakeEngramGateDetKvFunction": lambda dot_sum: backend.CakeEngramGateDetKvFunction.apply(
+            ns.x, torch.zeros(2, KV_WIDTH, dtype=torch.bfloat16), ns.q_weight, ns.k_weight, None, 1e-20, 1e-6, dot_sum
+        ),
+    }
+    assert set(SUM_ENTRIES) <= set(calls)
+    for label, call in calls.items():
+        for bad in ("dot2", "f32", "FP32", ""):
+            with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+                call(dot_sum=bad)
+                pytest.fail(f"{label} accepted dot_sum={bad!r}")
+        for bad in (None, 1):
+            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+                call(dot_sum=bad)
+                pytest.fail(f"{label} accepted dot_sum={bad!r}")
+    # Both choices pass the check; the CPU operands are refused next.
+    for choice in DOT_SUMS:
+        with pytest.raises(ValueError, match="CUDA"):
+            calls["cake_engram_gate_det"](dot_sum=choice)
+        assert api.cake_engram_gate_det_train_workspace_bytes(0, dot_sum=choice) == 0
 
 
 def test_the_entries_document_their_determinism() -> None:
@@ -241,6 +302,49 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# On SM100 / SM103 / SM107: the records of each dot_sum choice
+
+
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+@pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
+def test_each_dot_sum_launches_its_records_forward_and_backward(dot_sum, packed, monkeypatch) -> None:
+    """``dot_sum`` selects the forward and the backward records (``fwd_<acc>``, ``bwd_<acc>``, then ``dw_reduce``):
+    the autograd entry runs its backward with the forward's choice, also when ``torch.utils.checkpoint`` recomputes
+    the forward; the explicit halves launch the records of the choice each is given."""
+    device = _device_or_skip()
+    backend = _backend()
+    acc = DOT_SUMS[dot_sum]
+    launched: list[str] = []
+    entry = backend._entry
+
+    def recording(name, arch):
+        run = entry(name, arch)
+
+        def call(*args):
+            launched.append(name)
+            return run(*args)
+
+        return call
+
+    monkeypatch.setattr(backend, "_entry", recording)
+    ns = make_inputs(129, seed=53, device=device, weights="bf16", mask="some", layout="kv")
+    _autograd(ns, packed=packed, dot_sum=dot_sum)
+    assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    launched.clear()
+    _autograd(ns, packed=packed, checkpoint=True, dot_sum=dot_sum)
+    assert launched == [f"fwd_{acc}", f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    launched.clear()
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+    api.cake_engram_gate_det_train_forward(*args, dot_sum=dot_sum)
+    api.cake_engram_gate_det_train_backward(ns.dout, *args, dot_sum=dot_sum)
+    assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"]
+    if dot_sum == "compensated":
+        launched.clear()
+        _autograd(ns, packed=packed)
+        assert launched == [f"fwd_{acc}", f"bwd_{acc}", "dw_reduce"], "the default is the compensated sum"
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # On SM100 / SM103 / SM107: accuracy
 
 # (T, weights, mask, layout)
@@ -254,12 +358,13 @@ CASES = (
 CASE_IDS = [f"T{T}-{w}-{m}-{lay}" for T, w, m, lay in CASES]
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize(("T", "weights", "mask", "layout"), CASES, ids=CASE_IDS)
-def test_the_autograd_entry_matches_the_reference(T, weights, mask, layout, record_property) -> None:
+def test_the_autograd_entry_matches_the_reference(dot_sum, T, weights, mask, layout, record_property) -> None:
     device = _device_or_skip()
 
     def run(ns):
-        got = _autograd(ns)
+        got = _autograd(ns, dot_sum=dot_sum)
         got.pop("dkv", None)
         return got
 
@@ -269,12 +374,13 @@ def test_the_autograd_entry_matches_the_reference(T, weights, mask, layout, reco
     _record_failures(*judge_draws(run, make, seed=101 + T), record_property)
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize(("T", "weights", "mask"), ((1, "fp32", "none"), (129, "bf16", "some")), ids=("T1", "T129"))
-def test_the_packed_entry_matches_the_reference(T, weights, mask, record_property) -> None:
+def test_the_packed_entry_matches_the_reference(dot_sum, T, weights, mask, record_property) -> None:
     device = _device_or_skip()
 
     def run(ns):
-        got = _autograd(ns, packed=True)
+        got = _autograd(ns, packed=True, dot_sum=dot_sum)
         got.pop("dkv")
         return got
 
@@ -284,13 +390,14 @@ def test_the_packed_entry_matches_the_reference(T, weights, mask, record_propert
     _record_failures(*judge_draws(run, make, seed=211 + T), record_property)
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize("T", (1, 129, 4096))
-def test_the_packed_entry_equals_the_split_entry(T) -> None:
+def test_the_packed_entry_equals_the_split_entry(T, dot_sum) -> None:
     """The packed entry's output and gradients are the split entry's bits; its ``kv`` gradient is the key and value
     gradients side by side (one ``[T, 25600]`` tensor written by the backward)."""
     device = _device_or_skip()
     ns = make_inputs(T, seed=7, device=device, weights="bf16", mask="some", layout="kv")
-    split, packed = _autograd(ns), _autograd(ns, packed=True)
+    split, packed = _autograd(ns, dot_sum=dot_sum), _autograd(ns, packed=True, dot_sum=dot_sum)
     names = ("out", "dx", "dkey", "dvalue")
     names += ("dq", "dk")
     for name in names:
@@ -299,14 +406,15 @@ def test_the_packed_entry_equals_the_split_entry(T) -> None:
     assert _same_bits(packed["dkv"], torch.cat((split["dkey"].reshape(T, -1), split["dvalue"]), dim=1))
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize("T", (2, 129, 1031))
-def test_views_and_contiguous_operands_give_the_same_bits(T) -> None:
+def test_views_and_contiguous_operands_give_the_same_bits(T, dot_sum) -> None:
     """``key`` / ``value`` as views of ``kv`` and as contiguous tensors, and ``dkey`` / ``dvalue`` as caller views into
     one ``dkv`` and as contiguous tensors, give the same bits."""
     device = _device_or_skip()
     ns = make_inputs(T, seed=13, device=device, weights="fp32", mask="some", layout="kv")
     key_c, value_c = ns.key.contiguous(), ns.value.contiguous()
-    fwd = api.cake_engram_gate_det_train_forward
+    fwd = functools.partial(api.cake_engram_gate_det_train_forward, dot_sum=dot_sum)
     assert _same_bits(
         fwd(ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask),
         fwd(ns.x, key_c, value_c, ns.q_weight, ns.k_weight, ns.token_mask),
@@ -314,7 +422,7 @@ def test_views_and_contiguous_operands_give_the_same_bits(T) -> None:
     dkv = torch.full((T, KV_WIDTH), math.nan, dtype=torch.bfloat16, device=device)
     dkey_v = dkv[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN))
     dvalue_v = dkv[:, STREAMS * HIDDEN :]
-    bwd = api.cake_engram_gate_det_train_backward
+    bwd = functools.partial(api.cake_engram_gate_det_train_backward, dot_sum=dot_sum)
     views = bwd(ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask, dkey=dkey_v, dvalue=dvalue_v)
     plain = bwd(ns.dout, ns.x, key_c, value_c, ns.q_weight, ns.k_weight, ns.token_mask)
     assert views[1] is dkey_v and views[2] is dvalue_v
@@ -324,24 +432,26 @@ def test_views_and_contiguous_operands_give_the_same_bits(T) -> None:
             assert _same_bits(a, b), name
 
 
-def test_a_masked_token_is_exact() -> None:
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+def test_a_masked_token_is_exact(dot_sum) -> None:
     """``token_mask[t]`` False: ``out[t] == x[t]`` and ``dx[t] == dout[t]`` bit for bit, ``dkey[t]`` and ``dvalue[t]``
     zero; a call whose tokens are all masked gives zero weight gradients."""
     device = _device_or_skip()
     ns = make_inputs(129, seed=17, device=device, weights="bf16", mask="some", layout="kv")
     off = ~ns.token_mask
-    got = _autograd(ns)
+    got = _autograd(ns, dot_sum=dot_sum)
     assert _same_bits(got["out"][off], ns.x[off])
     assert _same_bits(got["dx"][off], ns.dout[off])
     assert not got["dkey"][off].float().abs().any() and not got["dvalue"][off].float().abs().any()
     ns.token_mask = torch.zeros_like(ns.token_mask)
-    got = _autograd(ns)
+    got = _autograd(ns, dot_sum=dot_sum)
     assert _same_bits(got["out"], ns.x) and _same_bits(got["dx"], ns.dout)
     for name in ("dkey", "dvalue", "dq", "dk"):
         assert not got[name].float().abs().any(), name
 
 
-def test_clamped_rows_have_no_gate_gradient() -> None:
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+def test_clamped_rows_have_no_gate_gradient(dot_sum) -> None:
     """Streams with ``|dot| <= 5e-7`` (``4e-7`` and ``-4e-7``) get no gradient through the gate (``dx = dout``,
     ``dkey = 0``, no weight gradient); streams with ``|dot| = 3e-6`` have a weight gradient (the dot product is
     ``q_weight[s, 0]`` by construction: ``x = 1``, ``key = 4`` in column 0 and 0 elsewhere, ``k_weight = 1``; the
@@ -362,7 +472,7 @@ def test_clamped_rows_have_no_gate_gradient() -> None:
         return ns
 
     ns = make(5)
-    got = _autograd(ns)
+    got = _autograd(ns, dot_sum=dot_sum)
     for s in (0, 1):
         assert _same_bits(got["dx"][:, s].contiguous(), ns.dout[:, s].contiguous()), s
         assert not got["dkey"][:, s].float().abs().any(), s
@@ -373,8 +483,9 @@ def test_clamped_rows_have_no_gate_gradient() -> None:
         assert torch.isfinite(got["dq"][s]).all() and torch.isfinite(got["dx"][:, s].float()).all(), s
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize("which", ("x", "key"))
-def test_an_all_zero_stream_gives_a_finite_output_and_no_gate_gradient(which, record_property) -> None:
+def test_an_all_zero_stream_gives_a_finite_output_and_no_gate_gradient(which, dot_sum, record_property) -> None:
     """An all-zero ``x`` or ``key`` stream gives ``dot = +0`` at ``eps = 1e-20``: a finite ``out`` that meets the
     tier, ``dx = dout`` and ``dkey = 0`` on that stream, every output finite."""
     device = _device_or_skip()
@@ -387,7 +498,7 @@ def test_an_all_zero_stream_gives_a_finite_output_and_no_gate_gradient(which, re
         return ns
 
     def run(ns):
-        got = _autograd(ns)
+        got = _autograd(ns, dot_sum=dot_sum)
         for name in ("out", *GRADS):
             assert torch.isfinite(got[name].float()).all(), name
         assert _same_bits(got["dx"][:, 1].contiguous(), ns.dout[:, 1].contiguous())
@@ -397,15 +508,16 @@ def test_an_all_zero_stream_gives_a_finite_output_and_no_gate_gradient(which, re
     _record_failures(*judge_draws(run, make, seed=401), record_property)
 
 
-def test_no_token() -> None:
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+def test_no_token(dot_sum) -> None:
     """``T = 0``: an empty output, empty gradients and zero weight gradients; nothing launches, nothing alerts."""
     device = _device_or_skip()
     ns = make_inputs(0, seed=3, device=device, weights="bf16", mask="some", layout="kv")
     with _torch_deterministic(warn_only=False):
-        got = _autograd(ns)
-        packed = _autograd(ns, packed=True)
+        got = _autograd(ns, dot_sum=dot_sum)
+        packed = _autograd(ns, packed=True, dot_sum=dot_sum)
         explicit = api.cake_engram_gate_det_train_backward(
-            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask
+            ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask, dot_sum=dot_sum
         )
     assert tuple(got["out"].shape) == (0, STREAMS, HIDDEN)
     for result in (got, packed):
@@ -538,19 +650,20 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 # On SM100 / SM103 / SM107: determinism, streams, graphs, checkpoint, memory
 
 
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
 @pytest.mark.parametrize("T", (1031, 4096))
-def test_every_output_repeats_bit_for_bit(T) -> None:
+def test_every_output_repeats_bit_for_bit(T, dot_sum) -> None:
     """Two calls on the same inputs give the same bytes, for the autograd and the packed entries; the strict and the
     ``warn_only`` deterministic modes change nothing (no alert, the same bytes)."""
     device = _device_or_skip()
     ns = make_inputs(T, seed=19, device=device, weights="bf16", mask="some", layout="kv")
-    first = _autograd(ns)
+    first = _autograd(ns, dot_sum=dot_sum)
     with _torch_deterministic(warn_only=False):
-        second = _autograd(ns)
+        second = _autograd(ns, dot_sum=dot_sum)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with _torch_deterministic(warn_only=True):
-            third = _autograd(ns, packed=True)
+            third = _autograd(ns, packed=True, dot_sum=dot_sum)
     for name in ("out", *GRADS):
         assert _same_bits(first[name], second[name]), name
         assert _same_bits(first[name], third[name]), name

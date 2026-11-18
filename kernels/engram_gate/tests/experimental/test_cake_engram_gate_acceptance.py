@@ -13,8 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The accuracy acceptance of issue #82 for both modules (``det`` and ``nondet``), through the autograd entry on
-operands as the issue's script draws them (``T = 16``, BF16 operands, FP32 weights rounded from BF16):
+The accuracy acceptance of issue #82 for both modules (``det`` and ``nondet``), through the autograd entry with its
+default sum of the dot product (``dot_sum="compensated"``), on operands as the issue's script draws them (``T = 16``,
+BF16 operands, FP32 weights rounded from BF16).  The opt-in ``dot_sum="fp32"`` is not held to these bounds: it misses
+the near-cancelling ones (the module documentation gives its measured errors); the API suites judge it against the
+naive BF16 tier and its exact semantics.
 
 * random draws (:data:`DRAWS`; ``x`` scaled 0.25, 1, 2, 4 per stream, ``key`` 4, 2, 1, 0.25, every fourth token
   masked): for each of ``out``, ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and ``dk_weight``, the median and the
@@ -31,6 +34,7 @@ maximum and the bounds.
 from __future__ import annotations
 
 import importlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -68,14 +72,16 @@ def _device_or_skip(mode: str) -> torch.device:
 
 
 def _kernel(mode: str, ns) -> dict[str, torch.Tensor]:
-    """Output and gradients of the module's autograd entry."""
+    """Output and gradients of the module's autograd entry with its default ``dot_sum``."""
     api = _api(mode)
+    entry = getattr(api, f"cake_engram_gate_{mode}")
+    assert inspect.signature(inspect.unwrap(entry)).parameters["dot_sum"].default == "compensated"
     x = ns.x.detach().clone().requires_grad_(True)
     key = ns.key.detach().clone().requires_grad_(True)
     value = ns.value.detach().clone().requires_grad_(True)
     qw = ns.q_weight.detach().clone().requires_grad_(True)
     kw = ns.k_weight.detach().clone().requires_grad_(True)
-    out = getattr(api, f"cake_engram_gate_{mode}")(x, key, value, qw, kw, ns.token_mask)
+    out = entry(x, key, value, qw, kw, ns.token_mask)
     out.backward(ns.dout)
     return {"out": out.detach(), "dx": x.grad, "dkey": key.grad, "dvalue": value.grad, "dq": qw.grad, "dk": kw.grad}
 
