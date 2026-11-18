@@ -24,8 +24,10 @@ user-facing module and documentation are
 :mod:`cake_pplx.cake_mhc_nondet_train`, which forwards every entry point
 here.
 
-Numerical contract: every output repeats bit for bit from run to run on one
-device (each sum runs in an order fixed by the token count and the device).
+Numerical contract: no bit promise.  Every sum of the current programs is a
+plain FP32 sum in an order fixed by the token count and the device, but the
+package does not promise that an output repeats bit for bit from run to run,
+and its outputs are not compared bitwise with the deterministic package's.
 The forward, the statistics replay, the residual mixing and
 ``backward_prepare`` run copies of the deterministic package's programs.
 ``backward_finish`` runs a copy of the deterministic token-owner pass, the
@@ -42,8 +44,10 @@ unit has stored its sums the grid adds each element's ``P <= 32`` partials
 |x_p|)`` of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
 ``u = 2^-24``), no addition flushing a subnormal.  By default
 (``accumulation="fp32"``) every sum is one plain FP32 word: no FP64
-arithmetic and no compensation word.  The opt-in ``accumulation="fp32x2"``
-(hidden 4096, ``sinkhorn_iters=20``) runs the two-word programs of the
+accumulation or reduction and no compensation word (a few scalar epilogues
+of the RMS scale, a finished FP32 sum times ``1/(4H)`` plus ``rms_eps`` or
+times the RMS scale, compute in FP64 and round once to FP32).  The opt-in
+``accumulation="fp32x2"`` (hidden 4096, ``sinkhorn_iters=20``) runs the two-word programs of the
 mapping pass, the token-owner pass and the column slab with its folds
 (``cake_jit.ACC_WORDS_PROGRAMS``): each of their sums is a compensated pair
 of FP32 words stored as one FP32 word, not FP64.
@@ -1408,10 +1412,11 @@ def cake_mhc_nondet_train_forward_stats(
 
     Returns
     -------
-    FP32 ``[T, 64]`` ``stats``, bitwise identical to the record
+    FP32 ``[T, 64]`` ``stats``: the record
     :func:`cake_mhc_nondet_train_forward_prepare` returns for the same inputs and mode on the
-    same device: the route is the strict prefix of the forward (fn split, mapping
-    pass, coefficients) under the same work partition, without the ``U`` write.
+    same device, computed by the same programs (no bit promise): the route is
+    the strict prefix of the forward (fn split, mapping pass, coefficients)
+    under the same work partition, without the ``U`` write.
 
     The launches run on the current torch stream of the tensors' device.
     """
@@ -1719,7 +1724,7 @@ def cake_mhc_nondet_train_backward_finish(
         The parameters of the forward (FP32 ``[24, 4H]``, ``[3]``, ``[24]``).
     stats : torch.Tensor
         FP32 ``[T, 64]`` record of the forward (saved, or recomputed with
-        :func:`cake_mhc_nondet_train_forward_stats`: the same record bit for bit).
+        :func:`cake_mhc_nondet_train_forward_stats`: the same programs, no bit promise).
     grad_stats : torch.Tensor
         FP32 ``[T, 32]`` record returned by :func:`cake_mhc_nondet_train_backward_prepare`.
     rms_eps, hc_eps, sinkhorn_iters : float, float, int
@@ -1747,9 +1752,9 @@ def cake_mhc_nondet_train_backward_finish(
 
     Returns
     -------
-    ``(dX, dfn, dscale, dbase)``, each the same bits on every run on one
-    device: the BF16 ``dX`` sums the mapping, collapse and residual-mixing
-    contributions in FP32 and rounds once.  ``dscale`` / ``dbase`` fold the
+    ``(dX, dfn, dscale, dbase)``, with no run-to-run bit promise (the sums
+    run in a fixed order today): the BF16 ``dX`` sums the mapping, collapse
+    and residual-mixing contributions in FP32 and rounds once.  ``dscale`` / ``dbase`` fold the
     token-owner pass's parameter rows in a fixed order (per-CTA rows, or
     8-token group rows where the deterministic package runs them: hidden 4096
     above 14927 tokens on sm_100a and sm_103a; see :mod:`.cake_jit`), each sum
@@ -2039,7 +2044,7 @@ class _MHCTrainState:
         self.workspace, self.backward_workspace = workspace, backward_workspace
 
     def replay(self, X: torch.Tensor) -> torch.Tensor:
-        """The bitwise-identical replay of the forward prefix's ``stats``."""
+        """The replay of the forward prefix's ``stats`` (the same programs)."""
 
         return cake_mhc_nondet_train_forward_stats(
             X,
@@ -2132,10 +2137,9 @@ class CakeMHCNondetPrepareFunction(torch.autograd.Function):
     the finish node takes as inputs), ``dY`` and the gradient statistics from the
     finish node's backward; it returns the single-cast ``dX`` (mapping, collapse
     and residual-mixing contributions summed in FP32) and the FP32 parameter
-    gradients (``dfn`` folded from its per-chunk slots in a fixed order), each
-    the same bits on every run on one device; the finish node returns no
-    gradient for ``X``.  ``state`` is the private state
-    :func:`cake_mhc_nondet_train_prepare` builds.
+    gradients (``dfn`` folded from its per-chunk slots in a fixed order), with
+    no run-to-run bit promise; the finish node returns no gradient for ``X``.
+    ``state`` is the private state :func:`cake_mhc_nondet_train_prepare` builds.
     """
 
     @staticmethod
@@ -2216,7 +2220,7 @@ class CakeMHCNondetFinishFunction(torch.autograd.Function):
     the gradients of ``edges``, the prepare node's edge outputs, so the autograd
     engine releases them once the prepare node's backward has run.  When a
     checkpoint region that starts after the prepare reruns this forward, the
-    statistics the state already released are replayed bitwise from ``X``; a
+    statistics the state already released are replayed from ``X``; a
     reentrant region reruns it without the edges, and its backward leaves them
     on the state for the prepare node instead.
     """
@@ -2231,7 +2235,7 @@ class CakeMHCNondetFinishFunction(torch.autograd.Function):
                 )
             # Replay: a checkpoint region that starts after the prepare reruns the
             # finish on a state that already released its statistics; recompute
-            # them bitwise from ``X``.
+            # them from ``X``.
             stats = state.replay(X)
         Y = cake_mhc_nondet_train_forward_finish(X, B, stats)
         if state.save_stats:
@@ -2301,8 +2305,8 @@ def cake_mhc_nondet_train_prepare(
         ``True`` (default): the per-token statistics are saved for the backward
         through the autograd saved tensors (an activation checkpoint frees and
         recomputes them with the inputs).  ``False``: they are dropped after the
-        forward and recomputed from ``X`` in the backward (checkpoint replay),
-        bit for bit the saved record.
+        forward and recomputed from ``X`` in the backward (checkpoint replay)
+        by the same programs as the saved record (no bit promise).
     workspace, backward_workspace : torch.Tensor, optional
         Caller-owned forward / backward workspaces sized for this ``H``
         (``hidden=X.shape[2]``); per-device defaults when omitted.

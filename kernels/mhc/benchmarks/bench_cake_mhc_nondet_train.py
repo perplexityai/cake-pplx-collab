@@ -21,7 +21,8 @@ The rows, operations, modes, timing and accuracy checks are those of ``bench_cak
 (``cake_mhc_harness.py``).  The first arm, the non-deterministic package, is the reference of the per-group ratios:
 ``over_cake_nondet`` of the deterministic arm is ``det / nondet`` (above 1: the non-deterministic package is faster),
 and of a non-Cake arm its time over the non-deterministic package's.  The non-deterministic package exports hidden
-5120 and 7168 on SM100 / SM103 only; on other devices those rows record it as unavailable and time the other arms.
+4096, 5120 and 7168 on SM100, SM103 and SM107, as the deterministic one does; a row whose hidden size an arm does not
+serve on the device records that arm as unavailable and times the other arms.
 
 Example::
 

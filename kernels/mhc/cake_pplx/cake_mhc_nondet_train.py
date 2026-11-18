@@ -27,8 +27,10 @@ Mode: the mode is part of the names (``cake_mhc_nondet_train_*``,
 keyword (passing one is a ``TypeError``), and nothing falls back to the
 deterministic package ``cake_pplx.cake_mhc_det_train``.
 
-Numerical contract: every output repeats bit for bit from run to run on one
-device (each sum runs in an order fixed by the token count and the device).
+Numerical contract: no bit promise.  Every sum of the current programs is a
+plain FP32 sum in an order fixed by the token count and the device, but the
+package does not promise that an output repeats bit for bit from run to run,
+and its outputs are not compared bitwise with the deterministic package's.
 ``backward_finish`` has no final reduction kernel: the column-slab pass
 stores the FP32 ``dfn`` sum of every (column slab, token chunk) unit in its
 chunk's slots of the backward workspace, and once every unit has stored its
@@ -40,8 +42,10 @@ sum (``x_p`` the partials, ``n`` the additions, ``gamma_n = n u / (1 - n
 u)``, ``u = 2^-24``).  The column-slab pass also folds ``dscale`` and
 ``dbase`` from the token-owner pass's parameter rows in a fixed order.
 By default (``accumulation="fp32"``) every sum is one plain FP32 word: no
-FP64 arithmetic and no compensation word.  The opt-in
-``accumulation="fp32x2"`` of ``forward_prepare``, ``forward_stats``,
+FP64 accumulation or reduction and no compensation word (a few scalar
+epilogues of the RMS scale, a finished FP32 sum times ``1/(4H)`` plus
+``rms_eps`` or times the RMS scale, compute in FP64 and round once to
+FP32).  The opt-in ``accumulation="fp32x2"`` of ``forward_prepare``, ``forward_stats``,
 ``backward_finish`` and ``prepare`` runs two-word programs of the mapping
 pass, the backward token-owner pass and the column slab with its folds: each
 of their sums is a compensated pair of FP32 words (the running sum and its
@@ -394,8 +398,9 @@ def cake_mhc_nondet_train_forward_stats(
 
     Returns
     -------
-    FP32 ``[T, 64]`` ``stats``, bitwise the record of
-    :func:`cake_mhc_nondet_train_forward_prepare` for the same inputs and mode.
+    FP32 ``[T, 64]`` ``stats``: the record of
+    :func:`cake_mhc_nondet_train_forward_prepare` for the same inputs and mode,
+    computed by the same programs (no bit promise).
     """
 
     return _pkg().cake_mhc_nondet_train_forward_stats(
@@ -518,7 +523,8 @@ def cake_mhc_nondet_train_backward_finish(
     The arguments and outputs are those of
     :func:`~cake_pplx.cake_mhc_det_train.cake_mhc_det_train_backward_finish`;
     the call runs the backend package's backward, with no final reduction
-    kernel.  Every output repeats bit for bit from run to run on one device.
+    kernel.  Its sums run in a fixed order today, but no output is promised
+    to repeat bit for bit from run to run.
     Each element of ``dfn`` adds its ``P <= 32`` per-chunk FP32 partials
     ``x_p`` in ascending chunk order as one FP32 sum from +0.0, the caller's
     ``dfn`` last under ``accumulate=True``: within ``gamma_n (|start| + sum
@@ -628,7 +634,7 @@ def cake_mhc_nondet_train_prepare(
     save_stats : bool
         ``True`` (default): the per-token statistics are kept for the backward.
         ``False``: they are recomputed from ``X`` in the backward (checkpoint
-        replay), bit for bit the saved record.
+        replay) by the same programs as the saved record (no bit promise).
     workspace : torch.Tensor, optional
         Caller-owned forward workspace (``hidden=X.shape[2]``); a per-device
         default when omitted.

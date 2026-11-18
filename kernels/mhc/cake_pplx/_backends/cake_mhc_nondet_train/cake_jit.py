@@ -108,17 +108,17 @@ forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``), the fn split and the column
 slab: no final reduction.  The ``bwd`` workspace holds the column slab's
 arrival counts (``slab_cnt``) right after the ticket region and its per-chunk
 ``dfn`` slots (``dfn_slot``, FP32 ``[min(32, ceil(T / 64)), 24, 4H]``) in place
-of the deterministic per-chunk partials (``dfn_part``).  Every
-output repeats bit for bit from run to run on one device: each sum runs in an
-order fixed by the token count and the device.  ``dscale`` and ``dbase`` fold
+of the deterministic per-chunk partials (``dfn_part``).  Each sum runs in
+an order fixed by the token count and the device; the package makes no
+run-to-run bit promise.  ``dscale`` and ``dbase`` fold
 the token-owner pass's parameter rows in a fixed order.  ``dfn`` is the FP32
 sum of at most ``P`` per-chunk slots ``x_p`` (``P <= 32``: the chunk count of
 :func:`k7_chunks`, the deterministic column slab's chunks) in ascending chunk
 order and the entry value ``in`` last under ``accumulate``: within
 ``gamma_n (|in| + sum |x_p|)`` of ``in + sum x_p`` (``n`` the additions,
 ``gamma_n = n u / (1 - n u)``, ``u = 2^-24``); no addition flushes a
-subnormal.  Every sum is one plain FP32 word: no FP64 arithmetic and no
-compensation word.
+subnormal.  Every sum is one plain FP32 word: no FP64 accumulation or
+reduction and no compensation word.
 The deterministic package's backward fn splits (``fn_split__tv128__t``,
 ``fn_split__tv128_t128__t``, ``fn_split__tv128__h<H>__t``) have no copy here:
 the atomic fn splits replace them.  The deterministic package's
@@ -141,7 +141,7 @@ verifying every source digest before the first build.
 A route is the ordered list of module records one public call launches:
 ``fwd_prepare`` (fn split, mapping GEMM, coefficients, collapse), ``fwd_recompute``
 (the strict prefix of ``fwd_prepare`` that regenerates the per-token statistics
-bitwise for checkpoint replay), ``fwd_finish`` (residual mixing), ``bwd_prepare``
+for checkpoint replay), ``fwd_finish`` (residual mixing), ``bwd_prepare``
 (``dB`` and the per-token gradient statistics) and ``bwd_finish`` (transposed fn
 split, token-owner pass, column-slab pass).  The token count ``T`` is a runtime
 scalar: a changed number of rows never recompiles anything, and ``T == 0``
@@ -10239,8 +10239,9 @@ RUN_TIME_ITERS_ROLES = ("fwd_coef", "bwd_token")
 # error (Kahan-compensated promotions in the mapping pass and the column slab, compensated partials and folds in the
 # token owner, TwoSum pairs in the column slab's parameter and ``dfn`` folds), and stored as one FP32 word.  It is a
 # compensated FP32 sum, not FP64.  The buffers between the kernels keep their one-word layouts, so the workspaces
-# and the host plan are the same, and the column slab's folds still add their words in arrival order (the mode has
-# no bit constraint, like the default).  The other passes (the fn split, the coefficients, the collapse, the
+# and the host plan are the same, and the column slab's folds add in fixed orders: each ``dfn`` element's chunk
+# slots in ascending chunk order, ``dscale`` / ``dbase`` from the parameter rows in a fixed order (the mode, like the
+# default, makes no bit promise).  The other passes (the fn split, the coefficients, the collapse, the
 # residual mixing, the backward prepare) run their one-word programs in both modes: no two-word form of them is
 # built.  The two-word programs are built at hidden ``ACC_WORDS_HIDDEN`` and for the Sinkhorn count of record only:
 # another hidden size or count is a ``NotImplementedError`` (:func:`check_accumulation`).  A two-word program runs at

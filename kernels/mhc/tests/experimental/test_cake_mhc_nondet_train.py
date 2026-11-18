@@ -281,9 +281,11 @@ def _require_lpt(hidden: int, order: str = "chunk") -> int:
     """Skip a case of the two-size column slab at ``hidden`` in the unit order ``order`` where the device's
     ``bwd_finish`` route of the size holds no such record (``lpt``, or ``lpt_os`` for ``"slab"``): where neither the
     size's table nor a board cell of ``BWD_SLAB_LPT_OVERRIDES`` at the size has a two-size calibration of the
-    architecture (sm_103a at 5120 and 7168), or for ``"slab"`` where neither its ``BWD_SLAB_ORDER`` of the size nor a
-    board cell of ``BWD_SLAB_ORDER_OVERRIDES`` at the size has a ``"slab"`` band; a calibrated size without the
-    record fails (every architecture's route holds ``lpt`` and ``lpt_os`` at hidden 4096)."""
+    architecture, or for ``"slab"`` where neither its ``BWD_SLAB_ORDER`` of the size nor a board cell of
+    ``BWD_SLAB_ORDER_OVERRIDES`` at the size has a ``"slab"`` band; a calibrated size without the record fails.  The
+    registry calibrates the two-size schedule nowhere today (``BWD_SLAB_LPT`` and ``BWD_SLAB_LPT_HIDDEN`` are None on
+    every architecture and hidden size, and ``BWD_SLAB_LPT_OVERRIDES`` is empty), so no route holds ``lpt`` or
+    ``lpt_os`` and every case that calls this skips on every architecture."""
     _require_hidden(hidden)
     arch = _arch()
     name = (LPT_OS if order == "slab" else LPT) + _suffix(hidden)
