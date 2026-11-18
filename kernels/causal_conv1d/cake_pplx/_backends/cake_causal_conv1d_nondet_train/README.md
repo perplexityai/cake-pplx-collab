@@ -204,8 +204,8 @@ Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
 package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
 is destroyed). Only eager calls that omit `workspace=` zero these buffers, the forward's and the backward's
-separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory adds no
-buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
+separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory zeroes no
+new buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
 the `_POOL_DEPTH` ready buffers, or needing more, or begun before their zero fills completed
 (`CUDAGraph.capture_begin` right after such an eager call with no synchronization; `torch.cuda.graph`
 synchronizes first), zeroes a buffer per call (a fill node each). So does every captured call when CUDA's capture id is not available. The package keeps no reference to
@@ -215,11 +215,12 @@ the tree's private pool. Memory the package frees stays cached in that pool (a r
 pre-zeroed buffer) and is never returned to the caching allocator's other pools. Per device and kind (forward
 counters, backward accumulators) the live pre-zeroed buffers are at most `_POOL_DEPTH` idle ones of the pool's size
 (the largest need of an eager zeroing that succeeded), those live graphs hold, and those graphs released since the
-last refill: a released buffer returns to the package only at the next eager refill, also after `cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()`. A kind
-whose refill failed (other than out of memory) refills no more: its idle buffers stay allocated for the life of the
-process, and a buffer its graphs held returns, once released, only at a refill of the device's other kind, which keeps
-it idle or drops it; a dropped buffer's memory stays cached in the package's pool. Without
-`torch.cuda.MemPool` the package keeps no pre-zeroed buffers and every captured call zeroes its buffer itself.
+last refill: a released buffer returns to the package only at the next eager refill, also after
+`cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()`. A kind whose refill failed (other than out of memory)
+refills no more: its idle buffers stay allocated for the life of the process, and a buffer its graphs held returns,
+once released, only at a refill of the device's other kind, which keeps it idle or drops it; a dropped buffer's
+memory stays cached in the package's pool. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
+every captured call zeroes its buffer itself.
 
 ### Rank agreement
 
