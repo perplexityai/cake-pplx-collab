@@ -19,8 +19,9 @@ Backend suite of the Cake deterministic routed-expert clamped SwiGLU training pa
 and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2304, on SM100, SM103 and SM107.
 
 Without a device: the registry (one program per stage, every record delivered for the three architectures and for no
-other, the launch facts, the argument plans), the launch grid, the build manifest (every record's library, the
-recorded source digests), the capability map, the required ``limit`` keyword, the refusal of CPU tensors and no
+other, the launch facts, the argument plans), the launch grid and the arguments of a launch in its plan's order, the
+build manifest (every record's library, the recorded source digests), the capability map, the required ``limit``
+keyword, the refusal of CPU tensors, the ignored weight of an unweighted launch (the gate's own memory) and no
 environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) judged against the
@@ -38,8 +39,11 @@ BF16; ``R = 0`` returns empty outputs and launches nothing; one library per stag
 flag and layout; the same bits at every call, in every layout, at every row count (a row's outputs do not depend on
 the other rows), on a side stream with no host synchronization, in CUDA graph replays and under
 ``torch.use_deterministic_algorithms``; the autograd function matches the steps bit for bit, saves only its inputs and
-gives the same bits under non-reentrant checkpointing; inputs the kernels can read are read in place, others copied
-once; unfit outputs, operands and limits are refused.  On one fixed draw, the L2 error against the FP64 oracle of
+gives the same bits under non-reentrant checkpointing, and gradients computed with ``create_graph=True`` have the
+steps' bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit
+outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call
+give the launches of the full checks; an unweighted step captured in a CUDA graph before any eager unweighted call
+reads the gate's own memory as its ignored weight.  On one fixed draw, the L2 error against the FP64 oracle of
 ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output, and the L2
 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
@@ -49,6 +53,7 @@ The suite names its package once, through the shared alias helper, and imports n
 from __future__ import annotations
 
 import ast
+import fractions
 import hashlib
 import inspect
 import json
@@ -337,6 +342,30 @@ def test_grid_is_one_cta_per_block_of_rows() -> None:
             cake_jit.grid(stage, 0)
 
 
+def test_launches_pass_the_argument_plan_and_the_grid(monkeypatch) -> None:
+    """``run_module`` passes a record's kernel parameters in its argument plan's order, then ``cake_jit.grid(stage,
+    rows)``; a missing parameter and a launch of no rows are ``ValueError``s naming them, raised before any library is
+    looked up."""
+    calls: list = []
+    monkeypatch.setattr(pkg, "device_arch", lambda index: "sm_100a")
+    monkeypatch.setattr(pkg, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
+    for stage in STAGES:
+        name = cake_jit.PROGRAM_OF[stage]
+        values = {key: f"<{key}>" for key in PARAMETERS[stage]}
+        for rows in (1, 2, 3, 4, 5, 7, 8, 9, 129, 4097, cake_jit.MAX_ROWS - 1):
+            calls.clear()
+            pkg.run_module(stage, values, rows=rows, device_index=0)
+            want = (*(values[key] for key in PARAMETERS[stage]), *cake_jit.grid(stage, rows))
+            assert calls == [(name, "sm_100a", want)], (stage, rows)
+        calls.clear()
+        with pytest.raises(ValueError, match="at least one row"):
+            pkg.run_module(stage, values, rows=0, device_index=0)
+        missing = {key: value for key, value in values.items() if key != "limit"}
+        with pytest.raises(ValueError, match=f"{name} needs argument 'limit'"):
+            pkg.run_module(stage, missing, rows=1, device_index=0)
+        assert calls == []
+
+
 def test_no_record_is_delivered_outside_the_architectures() -> None:
     for name, record in cake_jit.MODULES.items():
         for arch in ARCHES:
@@ -389,6 +418,27 @@ def test_cpu_tensors_are_refused() -> None:
         forward(x, limit=L)
     with pytest.raises(ValueError, match="CUDA"):
         backward(x[:, :WIDTH], x, limit=L)
+
+
+def test_the_ignored_weight_is_the_gates_memory() -> None:
+    """An unweighted launch's ``w`` (its one FP32 element read and ignored) is the gate's first two BF16 values as one
+    FP32 value, for a merged and a two-tensor gate and a row slice of a wider buffer: no buffer of its own.  A gate at
+    an odd BF16 offset of its storage, which has no FP32 view, gets a new one-element FP32 tensor set to 1."""
+    for gate in (
+        torch.zeros(3, 2 * WIDTH, dtype=torch.bfloat16),
+        torch.zeros(1, WIDTH, dtype=torch.bfloat16),
+        torch.zeros(3, WIDTH + 16, dtype=torch.bfloat16)[:, 8 : 8 + WIDTH],
+    ):
+        w = pkg._ignored_weight(gate)
+        assert w.dtype == torch.float32 and tuple(w.shape) == (1,) and w.is_contiguous()
+        assert w.data_ptr() == gate.data_ptr()
+        assert w.untyped_storage().data_ptr() == gate.untyped_storage().data_ptr()
+    odd = torch.zeros(3, WIDTH + 1, dtype=torch.bfloat16)[:, 1:]
+    assert odd.storage_offset() % 2 == 1
+    w = pkg._ignored_weight(odd)
+    assert w.dtype == torch.float32 and tuple(w.shape) == (1,) and w.is_contiguous()
+    assert w.untyped_storage().data_ptr() != odd.untyped_storage().data_ptr()
+    assert w.tolist() == [1.0]
 
 
 def test_manifest_covers_every_record_and_its_sources() -> None:
@@ -493,7 +543,7 @@ def _environment_reads(tree: ast.AST) -> tuple[set[str], list[int]]:
     return names, unresolved
 
 
-def test_the_package_reads_no_environment_variable() -> None:
+def test_only_the_jit_shim_reads_environment_variables() -> None:
     """No module of the package reads an environment variable, except the JIT shim (``_cake_pplx_jit.py``), which
     reads exactly :data:`JIT_SHIM_ENVIRONMENT_VARIABLES`, each by a literal name."""
     offenders = []
@@ -844,6 +894,35 @@ def test_autograd_returns_the_gradients_that_are_needed(device) -> None:
     assert_same_bits(leaves[2].grad, d_weight, "weight gradient of h.sum()")
 
 
+@pytest.mark.parametrize("layout", ["split", "merged"])
+def test_double_backward_raises(layout, device) -> None:
+    """Gradients computed with ``create_graph=True`` have the steps' bits, and differentiating them raises
+    ``RuntimeError``: with an upstream gradient that requires grad, and with a constant upstream gradient beside a
+    second use of the input (where a check of the upstream gradient alone would let this operation's second-order
+    terms drop silently)."""
+    t = make_inputs(Case(33, layout), seed=3, device=device)
+    want = _functional(t)
+    leaves = _leaves(t)
+    wants = [leaf for leaf in leaves if leaf is not None]
+    grads = torch.autograd.grad(clamped_swiglu(*leaves, limit=t.L), wants, t.dh, create_graph=True)
+    names = ["d_first", "d_weight"] if t.second is None else ["d_first", "d_up", "d_weight"]
+    for name, grad in zip(names, grads, strict=True):
+        assert grad.requires_grad, name
+        assert_same_bits(grad.detach(), want[name], f"{name} with create_graph=True")
+
+    leaves = _leaves(t)
+    dh = t.dh.detach().clone().requires_grad_(True)
+    (grad,) = torch.autograd.grad(clamped_swiglu(*leaves, limit=t.L), leaves[0], dh, create_graph=True)
+    with pytest.raises(RuntimeError, match="no double backward"):
+        grad.float().sum().backward()
+
+    leaves = _leaves(t)
+    loss = clamped_swiglu(*leaves, limit=t.L).float().sum() + leaves[0].float().square().sum()
+    (grad,) = torch.autograd.grad(loss, leaves[0], create_graph=True)
+    with pytest.raises(RuntimeError, match="no double backward"):
+        grad.float().sum().backward()
+
+
 def test_side_stream_and_no_host_sync(device) -> None:
     """On a side stream under ``torch.cuda.set_sync_debug_mode("error")``: the steps and an autograd step run without
     synchronizing and give the bits of the default stream."""
@@ -922,6 +1001,49 @@ def test_cuda_graph_capture_and_replay(device) -> None:
         assert_same_bits(d_up, want_b["d_up"], f"replay {k}: d_up")
 
 
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, device, launches) -> None:
+    """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted call
+    on their inputs before (only a weighted call, which loads the libraries): each captured launch reads the gate's own
+    memory as its ignored weight (the package keeps no buffer for it, so a process's first unweighted call may be a
+    capture), and each replay on new inputs copied into the captured tensors gives the bits of eager calls."""
+    R = 129
+    step_outputs(forward, backward, make_inputs(Case(R, layout), seed=70, device=device))
+    a = make_inputs(Case(R, layout, "none"), seed=71, device=device)
+    first = a.first.clone()
+    second = None if a.second is None else a.second.clone()
+    dh = a.dh.clone()
+    h = torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
+    d_first = torch.empty(R, WIDTH if second is not None else 2 * WIDTH, dtype=torch.bfloat16, device=device)
+    d_up = None if second is None else torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
+    launches.clear()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward(first, second, None, limit=a.L, out=h)
+        backward(dh, first, second, None, limit=a.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
+    assert [stage for stage, _, _ in launches] == ["fwd", "bwd"]
+    for stage, _, values in launches:
+        assert values["weighted"] == 0, stage
+        assert values["w"].dtype == torch.float32 and values["w"].numel() == 1, stage
+        assert values["w"].data_ptr() == values["gate"].data_ptr() == first.data_ptr(), stage
+    for k in range(3):
+        n = make_inputs(Case(R, layout, "none"), seed=80 + k, device=device)
+        first.copy_(n.first)
+        if second is not None:
+            second.copy_(n.second)
+        dh.copy_(n.dh)
+        for buffer in (h, d_first, d_up):
+            if buffer is not None:
+                buffer.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize(device)
+        want = _functional(n)
+        assert_same_bits(h, want["h"], f"replay {k}: h")
+        assert_same_bits(d_first, want["d_first"], f"replay {k}: d_first")
+        if d_up is not None:
+            assert_same_bits(d_up, want["d_up"], f"replay {k}: d_up")
+
+
 @pytest.mark.parametrize("warn_only", [False, True], ids=["strict", "warn_only"])
 def test_steps_neither_raise_nor_warn_under_deterministic_algorithms(warn_only, device) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only``) with warnings as errors, the
@@ -987,6 +1109,87 @@ def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -
     _, _, values = launches[-1]
     for name in ("gate", "up", "dh", "d_gate", "d_up"):
         assert values[f"{name}_stride"] == 0, name
+
+
+def _launch_facts(launched: list, caller: set[int]) -> list:
+    """The launches ``(stage, rows, values)`` with each tensor value as its dtype, shape, strides, storage offset and
+    memory: the caller's storage (its address, one of ``caller``) or ``"new"`` (a copy or a new output)."""
+    facts = []
+    for stage, rows, values in launched:
+        found = {}
+        for name, value in values.items():
+            if isinstance(value, torch.Tensor):
+                storage = value.untyped_storage().data_ptr()
+                value = (
+                    value.dtype,
+                    tuple(value.shape),
+                    value.stride(),
+                    value.storage_offset(),
+                    storage if storage in caller else "new",
+                )
+            found[name] = value
+        facts.append((stage, rows, found))
+    return facts
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("rows", [1, 33, 4097])
+def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, launches, monkeypatch) -> None:
+    """With the one-pass checks of the common call on and off (``_FAST_CHECKS``), every layout (merged, two tensors,
+    row slices of wider buffers, rows the host copies), with new and with preallocated outputs, gives the same launches
+    (each tensor's dtype, shape, strides, storage offset and memory, the caller's or new; every scalar) and the same
+    output bits.  With them on, a merged or two-tensor call of contiguous tensors runs no full check of any tensor."""
+    checked: list = []
+    check_tensor = pkg._check_tensor
+
+    def counted(tensor, name, *args):
+        checked.append(name)
+        return check_tensor(tensor, name, *args)
+
+    monkeypatch.setattr(pkg, "_check_tensor", counted)
+    t = make_inputs(Case(rows, "split", w, data="mixed"), seed=27, device=device)
+    for layout in ("merged", "split", "strided", "copied"):
+        x = _relayout(t, layout)
+        merged = x.second is None
+        for preallocated in (False, True):
+            h = d_first = d_up = d_weight = None
+            if preallocated:
+                h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+                d_first = torch.empty(rows, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
+                d_up = None if merged else torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+                d_weight = None if x.weight is None else torch.empty(rows, device=device)
+            tensors = (x.first, x.second, x.weight, x.dh, h, d_first, d_up, d_weight)
+            caller = {tensor.untyped_storage().data_ptr() for tensor in tensors if tensor is not None}
+            runs = []
+            for fast in (True, False):
+                monkeypatch.setattr(pkg, "_FAST_CHECKS", fast)
+                launches.clear()
+                checked.clear()
+                found = [forward(x.first, x.second, x.weight, limit=t.L, out=h)]
+                found += backward(
+                    x.dh,
+                    x.first,
+                    x.second,
+                    x.weight,
+                    limit=t.L,
+                    grad_gate_up_or_gate=d_first,
+                    grad_up=d_up,
+                    grad_weight=d_weight,
+                )
+                outputs = [None if tensor is None else tensor.clone() for tensor in found]
+                runs.append((_launch_facts(launches, caller), outputs))
+                if fast and layout in ("merged", "split"):
+                    assert not checked, (layout, preallocated, checked)
+                elif not fast:
+                    assert checked, (layout, preallocated)
+            what = f"{layout}, preallocated={preallocated}"
+            (fast_launches, fast_outputs), (full_launches, full_outputs) = runs
+            assert [stage for stage, _, _ in fast_launches] == ["fwd", "bwd"], what
+            assert fast_launches == full_launches, what
+            for got, want in zip(fast_outputs, full_outputs, strict=True):
+                assert (got is None) == (want is None), what
+                if got is not None:
+                    assert_same_bits(got, want, what)
 
 
 def test_preallocated_outputs(device) -> None:
@@ -1073,6 +1276,9 @@ def test_operand_and_limit_errors(device) -> None:
         "a limit past FP32": lambda: forward(gate, up, weight, limit=1e39),
         "a limit that rounds to 0 in FP32": lambda: forward(gate, up, weight, limit=1e-50),
         "a negative limit in the backward": lambda: backward(dh, gate, up, weight, limit=-10.0),
+        "an integer limit past every float": lambda: forward(gate, up, weight, limit=10**400),
+        "a fraction limit past every float": lambda: forward(gate, up, weight, limit=fractions.Fraction(10**400)),
+        "an integer limit past every float in the backward": lambda: backward(dh, gate, up, weight, limit=10**400),
     }
     type_errors = {
         "a tensor limit": lambda: forward(gate, up, weight, limit=torch.tensor(10.0, device=device)),
@@ -1096,6 +1302,89 @@ def test_operand_and_limit_errors(device) -> None:
     assert not misses, misses
     # An integer limit is a Python number: accepted, the same bits as the float.
     assert_same_bits(forward(gate, up, weight, limit=10), forward(gate, up, weight, limit=10.0), "integer limit")
+
+
+def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkeypatch) -> None:
+    """Beside inputs the kernels cannot read (row strides that are not multiples of 8 elements, copied when the call is
+    valid), a bad argument of each kind (the limit, a dtype, a shape, a device, an output buffer, the ``grad_up`` and
+    ``grad_weight`` rules, the row count, the architecture) is refused before the call copies an input, allocates an
+    output or launches a kernel: the caching allocator counts no allocation and nothing launches.  The same inputs in a
+    valid call are copied and launched."""
+    R = 33
+    t = make_inputs(Case(R, "copied"), seed=3, device=device)
+    gate, up, weight, dh = t.gate, t.up, t.weight, t.dh
+    merged = torch.zeros(R, 2 * WIDTH + 3, dtype=torch.bfloat16, device=device)[:, : 2 * WIDTH]
+    up32 = torch.zeros(R, WIDTH, device=device)
+    weight_cpu = weight.cpu()
+    out = torch.empty(R + 1, WIDTH, dtype=torch.bfloat16, device=device)
+    grad_up = torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
+    grad_weight = torch.empty(R, device=device)
+    tensor_limit = torch.tensor(L)
+    # R past the kernels' row count, as stride-0 rows: a gate read in place, and an up and a merged input that start
+    # 2 bytes past an aligned allocation (copied if the row count were valid).
+    many = cake_jit.MAX_ROWS
+    huge_gate = torch.zeros(1, WIDTH, dtype=torch.bfloat16, device=device).expand(many, WIDTH)
+    huge_up = torch.zeros(1, WIDTH + 1, dtype=torch.bfloat16, device=device)[:, 1:].expand(many, WIDTH)
+    huge_merged = torch.zeros(1, 2 * WIDTH + 1, dtype=torch.bfloat16, device=device)[:, 1:].expand(many, 2 * WIDTH)
+    calls = {
+        "a negative limit": (ValueError, lambda: forward(gate, up, weight, limit=-1.0)),
+        "a NaN limit in the backward": (ValueError, lambda: backward(dh, gate, up, weight, limit=float("nan"))),
+        "an integer limit past every float": (ValueError, lambda: forward(merged, None, weight, limit=10**400)),
+        "a tensor limit": (TypeError, lambda: backward(dh, merged, None, weight, limit=tensor_limit)),
+        "an FP32 up": (ValueError, lambda: forward(gate, up32, weight, limit=L)),
+        "a weight of another length": (ValueError, lambda: forward(gate, up, weight[:-1], limit=L)),
+        "a weight on the CPU": (ValueError, lambda: forward(merged, None, weight_cpu, limit=L)),
+        "dh of another shape": (ValueError, lambda: backward(dh[:, :100], gate, up, weight, limit=L)),
+        "an out of another shape": (ValueError, lambda: forward(gate, up, weight, limit=L, out=out)),
+        "grad_up with a merged input": (
+            ValueError,
+            lambda: backward(dh, merged, None, weight, limit=L, grad_up=grad_up),
+        ),
+        "grad_weight without a weight": (
+            ValueError,
+            lambda: backward(dh, gate, up, None, limit=L, grad_weight=grad_weight),
+        ),
+        "a grad_weight of another length": (
+            ValueError,
+            lambda: backward(dh, merged, None, weight, limit=L, grad_weight=grad_weight[:-1]),
+        ),
+        "too many rows": (ValueError, lambda: forward(huge_gate, huge_up, None, limit=L)),
+        "too many rows, merged": (ValueError, lambda: backward(dh, huge_merged, None, None, limit=L)),
+    }
+
+    def allocations() -> int:
+        return torch.cuda.memory_stats(device)["allocation.all.allocated"]
+
+    def refuse(calls: dict) -> None:
+        misses = []
+        for what, (kind, call) in calls.items():
+            try:
+                call()
+            except kind:
+                continue
+            except Exception as e:  # noqa: BLE001 - reported with the other misses
+                misses.append(f"{what}: {type(e).__name__} ({e}), not {kind.__name__}")
+            else:
+                misses.append(f"{what}: no {kind.__name__}")
+        assert not misses, misses
+
+    torch.cuda.synchronize(device)
+    before = allocations()
+    refuse(calls)
+    with monkeypatch.context() as patch:
+        patch.setattr(pkg, "_arch_of_index", lambda index: None)
+        refuse(
+            {
+                "another architecture": (RuntimeError, lambda: forward(gate, up, weight, limit=L)),
+                "another architecture, merged": (RuntimeError, lambda: backward(dh, merged, None, None, limit=L)),
+            }
+        )
+    assert allocations() == before, "a refused call allocated a copy or an output"
+    assert launches == []
+    forward(gate, up, weight, limit=L)
+    backward(dh, merged, None, None, limit=L)
+    assert allocations() > before
+    assert [stage for stage, _, _ in launches] == ["fwd", "bwd"]
 
 
 def test_unsupported_devices_raise(device, monkeypatch) -> None:

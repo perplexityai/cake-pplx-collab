@@ -63,22 +63,34 @@ Mode rules:
    ``TypeError``.
 3. Every call gives the same bits for the same inputs on the same
    architecture, whatever ``R``, the layout, the stream or a CUDA graph, so
-   under ``torch.use_deterministic_algorithms(True)`` no call alerts.
+   under ``torch.use_deterministic_algorithms(True)`` no call alerts and no
+   output bit changes.  With
+   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
+   PyTorch then fills each tensor a call allocates with NaN before the
+   kernel writes it: one more fill launch per new output (also the weight
+   gradient an unweighted backward drops) and per copied input.  Output
+   buffers allocated once and passed to every call avoid the fills of the
+   outputs.
 4. Autograd: ``CakeClampedSwiGLUDetFunction`` saves only its inputs (the
    gate and up, or the merged tensor, and the weight; no activation) and
    recomputes the activation in the backward: retained state is the inputs.
    ``torch.utils.checkpoint(..., use_reentrant=False)`` keeps the same inputs;
-   the function adds no saved state of its own and no activation.  No call
-   uses a workspace.  An unweighted call passes a one-element FP32 buffer of
-   the device as the weight, set to 1 by the device's first unweighted call
-   with ``R > 0`` (one more launch, once); the kernels read its one element
-   and ignore it.
+   the function adds no saved state of its own and no activation.  No double
+   backward: differentiating gradients computed with ``create_graph=True``
+   raises ``RuntimeError``.  No call uses a workspace or keeps state between
+   calls.  An unweighted call passes the gate's first two BF16 values, as one
+   FP32 value, as the weight: the kernels read it and ignore it, so the call
+   allocates nothing for it.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
-Before capturing a CUDA graph, run one eager call (or build the libraries) so
-that no JIT build happens during capture.  This module imports its backend
-package on first use and reads no environment variable.
+Every argument is checked before a call copies an input or allocates an
+output, so a call refused for its arguments copies, allocates and launches
+nothing.  Before capturing a CUDA graph, run one eager call (or build the
+libraries) so that no JIT build happens during capture.  A JIT build needs a
+CUDA toolkit of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5
+for ``sm_107a``.  This module imports its backend package on first use and
+reads no environment variable.
 
 Usage::
 
@@ -154,9 +166,8 @@ def cake_clamped_swiglu_det_train_forward(
 ) -> torch.Tensor:
     r"""Clamped SwiGLU forward: ``h = BF16(weight * silu(min(gate, L)) * clamp(up, -L, L))``.
 
-    The activation and the product with the FP32 route weight are FP32; ``h`` is rounded once.  One kernel launch
-    (the device's first unweighted call with ``R > 0`` also fills its one-element weight buffer once), no workspace.
-    The same inputs give the same bits at every call.
+    The activation and the product with the FP32 route weight are FP32; ``h`` is rounded once.  One kernel launch,
+    no workspace.  The same inputs give the same bits at every call.
 
     Parameters
     ----------
@@ -185,15 +196,21 @@ def cake_clamped_swiglu_det_train_forward(
         A non-tensor operand; a ``limit`` that is not a Python number (a tensor would need a host read).
     ValueError
         An operand off CUDA, off the gate's device, of another dtype or shape; a non-finite or non-positive
-        ``limit``; ``R >= 2**31 - 256``; an ``out`` of another layout.
+        ``limit``, or one past FP32 (an integer or a fraction past every Python float too); ``R >= 2**31 - 256``; an
+        ``out`` of another layout.
     RuntimeError
-        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with ``R = 0``.
+        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with ``R = 0``; a
+        local CUDA toolkit below the library's floor when the call JIT-builds it (12.8 for ``sm_100a``, 12.9 for
+        ``sm_103a``, 13.5 for ``sm_107a``).
 
     Notes
     -----
     An input with a layout the kernels cannot read (a non-unit last stride, a row stride that is not a multiple of
-    8 elements, a base that is not 16-byte aligned; a non-contiguous ``weight``) is copied once.  ``R = 0`` launches
-    nothing.
+    8 elements, a base that is not 16-byte aligned; a non-contiguous ``weight``) is copied once, after every argument
+    is checked: a call refused for its arguments copies and allocates nothing.  ``R = 0`` launches nothing.  Under
+    ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
+    PyTorch fills a new ``h`` and each copied input with NaN first (one fill launch each); an ``out`` allocated once
+    and passed to every call avoids the fill of ``h``.
     """
 
     return _backend().cake_clamped_swiglu_det_train_forward(gate_up_or_gate, up, weight, limit=limit, out=out)
@@ -220,9 +237,8 @@ def cake_clamped_swiglu_det_train_backward(
         d_up     = BF16(dh * w * g' s * [-L <= u <= L])
         d_weight = sum over c of dh * a        # FP32, one fixed order per row
 
-    in FP32, each BF16 output rounded once; the masks are inclusive.  One kernel launch (the device's first
-    unweighted call with ``R > 0`` also fills its one-element weight buffer once), no workspace.  The same inputs give
-    the same bits at every call.
+    in FP32, each BF16 output rounded once; the masks are inclusive.  One kernel launch, no workspace.  The same
+    inputs give the same bits at every call.
 
     Parameters
     ----------
@@ -261,7 +277,10 @@ def cake_clamped_swiglu_det_train_backward(
     ``d_weight`` is one FP32 word per row: each lane's two FMA chains (even and odd columns) in load order, added,
     then XOR shuffles across the row's 32 lanes, in one fixed order.  It uses the unweighted ``a``, so a zero-weight
     row keeps its sum.  The kernel writes a weight gradient on every call; an unweighted call allocates it and drops
-    it (``R`` FP32 values).
+    it (``R`` FP32 values).  Every argument is checked before an input is copied or an output allocated.  Under
+    ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
+    PyTorch fills each new output (the dropped weight gradient too) and each copied input with NaN first, one fill
+    launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
     return _backend().cake_clamped_swiglu_det_train_backward(
@@ -306,7 +325,8 @@ def cake_clamped_swiglu_det(
     Notes
     -----
     Saves only the inputs and recomputes the activation in the backward (no activation retained; works under
-    ``torch.utils.checkpoint(..., use_reentrant=False)``).  No double backward.
+    ``torch.utils.checkpoint(..., use_reentrant=False)``).  ``limit`` is checked once, in the forward.  No double
+    backward: differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
     return _backend().cake_clamped_swiglu_det(gate_up_or_gate, up, weight, limit=limit)

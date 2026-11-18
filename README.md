@@ -112,6 +112,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | fmha, causal_conv1d, mhc, mhc_head | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | engram_lookup | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| clamped_swiglu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 

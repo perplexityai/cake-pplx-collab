@@ -1604,7 +1604,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 
 - **Forward:** `g' = min(g, L)`, `u' = clamp(u, -L, L)`, `a = silu(g') * u'` in FP32, and `h = BF16(w * a)`, the only rounding.
 - **Backward:** with `s = sigmoid(g')`, `d_gate = BF16(dh * w * u' * s * (1 + g' (1 - s)) * [g <= L])`, `d_up = BF16(dh * w * silu(g') * [-L <= u <= L])` and the FP32 `d_weight = sum_c dh * a`. The masks are inclusive: the gradient passes at `g = L` and `u = ±L`. `d_weight` uses the unweighted `a` (no division by `w`), so a zero-weight row gets exactly 0 in `h`, `d_gate` and `d_up` and keeps its `d_weight`.
-- One kernel per call. The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
+- One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
 - The sigmoid uses the approximate FP32 base-2 exponential and the approximate reciprocal with one round-to-nearest Newton step (exact below the flushed reciprocal's range, subnormal results kept). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`, also for `R = 0`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
@@ -1616,6 +1616,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 - `dh`: BF16 `[R, 2304]`.
 - `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per stage and architecture serves every call, with no recompilation.
 - `R` is any count from 0 to `2**31 - 257`. Every operand is on one CUDA device.
+- Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
 
 ### `cake_pplx.cake_clamped_swiglu_det_train`
 
@@ -1658,8 +1659,9 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 **Caveats.**
 
 - The intermediate width is 2304 only.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them.
-- No double backward (`create_graph`). No MXFP8 or FP4 output.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes the gate's first two BF16 values, as one FP32 value, as the ignored weight, so it allocates nothing for it.
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output (also the weight gradient an unweighted backward drops) and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
 
 ---
