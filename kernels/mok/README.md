@@ -92,7 +92,10 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
 - Oracle: the layer and its gradients in float64 on the kernel's own inputs (BF16 `x`, `dY` and weights, FP32
   scores). With MXFP8 routed experts the routed GEMMs read `x` and the weights through the MXFP8 recipe.
 - Naive implementation: the standard PyTorch BF16 layer (autograd ops in BF16, one cuBLAS GEMM per expert and weight
-  gradient, `d_scores = (dY * y_route).sum(-1)`); MXFP8 adds only the recipe's quantization points.
+  gradient, `d_scores = (dY * y_e).sum(-1)`); MXFP8 adds only the recipe's quantization points.
+- Score gradient, in both: `y_e` is the routed expert's output as the backward holds it. With MXFP8 routed experts that
+  is the SwiGLU of the gate and up the backward reads, by the backward's copy of the down weight (the forward output
+  reads the forward's copy).
 - Rule: over 32 random inputs per case, the kernel's error against the oracle in the L2 norm has a median and a
   largest value at most 1.005 times the naive implementation's. In the max norm, the kernel's error is at most 1.005
   times the naive error on at least 16 of the 32 inputs; 11 or fewer fail, and with 12 to 15 the case runs 96 more

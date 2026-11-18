@@ -133,16 +133,24 @@ def test_an_output_the_case_draws_decide_keeps_its_verdict():
     assert verdicts["undecided"]["tier"] == "bf16" and verdicts["undecided"]["counted"]["max"] == 128
 
 
-@pytest.mark.parametrize("why", ["l2", "zero"])
-def test_an_output_that_misses_the_rest_of_the_tier_takes_no_stage_two(why):
+def test_an_output_that_misses_another_norm_still_takes_its_undecided_norm_to_stage_two():
+    # 13 wins of 32 in the max norm and an L2 miss (ours 1.2 x the tier's), which no further draw changes: stage 2
+    # still decides the max norm, which a known gap capped in L2 alone needs.
     judge = cn.TierJudge()
-    if why == "l2":
-        _fill(judge, "out", 13, l2=(0.6, 0.5))
-    else:
-        _fill(judge, "out", 13)
-        _record(judge, "out", 7, max_win=False, zero=True)
+    _fill(judge, "out", 13, l2=(0.6, 0.5))
     (found,) = judge.verdicts().values()
-    assert found["tier"] is None and found["undecided"] == ()
+    assert found["tier"] is None and found["undecided"] == ("max",) and found["met"] == {"l2": False, "max": None}
+    assert judge.stage_two() == range(32, 128)
+
+
+def test_an_output_the_zero_rule_misses_takes_no_stage_two():
+    # 12 wins of 32 in the max norm, but the tier is exact on draw 7 and the output is not: no draw undoes that miss.
+    judge = cn.TierJudge()
+    _fill(judge, "out", 13)
+    _record(judge, "out", 7, max_win=False, zero=True)
+    (found,) = judge.verdicts().values()
+    assert found["tier"] is None and found["undecided"] == () and found["zero"] == {"bf16": [7]}
+    assert found["wins"]["max"] == 12 and found["met"]["max"] is None
     assert judge.stage_two() == range(0)
 
 
@@ -309,6 +317,35 @@ def test_a_cap_of_another_form_is_refused(monkeypatch, caps):
 def test_the_main_item_leaves_the_known_gap_to_its_own_item(monkeypatch):
     recorded = _gap_item(monkeypatch, {"sm_103a": {"max": 1.25}}, part=gaps.OUTPUTS)
     assert [verdict["output"] for key, verdict in recorded] == ["fine"]
+
+
+@pytest.mark.parametrize("further,meets", [(43, True), (42, False)])
+def test_a_known_gap_capped_in_l2_takes_its_tied_max_norm_to_stage_two(monkeypatch, further, meets):
+    # The output misses L2 at ratio 1.2, a miss its cap holds, and wins the max norm on 13 of the case's 32 draws and on
+    # `further` of stage 2's 96: with 56 of 128 the max norm meets the tier and the item is the expected miss of its L2
+    # cap; with 55 it misses the max norm too, which has no cap, and the item fails.
+    judge = cn.TierJudge()
+    _fill(judge, "out", 13, l2=(0.6, 0.5))
+    assert judge.stage_two() == range(32, 128)
+    _fill(judge, "out", further, start=32, stop=128, l2=(0.6, 0.5))
+    (verdict,) = judge.verdicts().values()
+    assert verdict["undecided"] == () and verdict["wins"]["max"] == 13 + further
+    assert verdict["met"] == {"l2": False, "max": meets} and verdict["counted"] == {"l2": 32, "max": 128}
+    item = "test_x[case-out]"
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", f"tests/test_m.py::{item} (call)")
+    monkeypatch.setattr(gaps, "CAPS", {item: {"sm_103a": {"l2": 1.2}}})
+    monkeypatch.setattr(gaps, "arch", lambda: "sm_103a")
+    seen = []
+    expected = AssertionError if meets else gaps.GapCapError
+    with pytest.raises(expected, match="out: misses the naive tier") as info:
+        gaps.check(lambda k, v: seen.append((k, v)), "out", [verdict], judge.failures(), ["out"])
+    assert type(info.value) is expected
+    ((_, gap),) = [(key, value) for key, value in seen if key == "known_gap"]
+    if meets:
+        assert gap["ratios"] == {"l2": [1.2, 1.2]} and gap["beyond"] == []
+    else:
+        assert gap["ratios"] == {"l2": [1.2, 1.2], "max": [1.25, 1.25]}
+        assert gap["beyond"] == ["max: misses the tier, and the known gap has no cap in it"]
 
 
 def test_a_known_gap_item_records_its_ratios_and_caps(monkeypatch):

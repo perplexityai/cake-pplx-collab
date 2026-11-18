@@ -256,8 +256,10 @@ class TierJudge:
     A norm judged by its wins meets the tier with wins on at least
     :data:`PAIRED_MEETS` of the case's draws, misses it with wins on fewer than
     :data:`PAIRED_STAGE_TWO` of them, and is undecided between the two; an
-    output that meets the rest of the tier with an undecided norm is undecided.
-    An undecided output asks for stage 2 (:meth:`stage_two`; the owner's
+    output with an undecided norm is undecided, whether or not it misses
+    another norm (a known gap may hold that miss to its cap), unless its error
+    is not 0 on a draw where the tier's is (the zero rule, which no further
+    draw undoes).  An undecided output asks for stage 2 (:meth:`stage_two`; the owner's
     ruling): :data:`STAGE_TWO_DRAWS` times the case's draws in all.  On them,
     an undecided output is held to the zero rule, and each of its undecided
     norms meets the tier with wins on at least :data:`STAGE_TWO_MEETS` of them;
@@ -343,7 +345,8 @@ class TierJudge:
         (``by_draw``) the draws within :data:`NEAR_TIE` of the tier (``wins``)
         and the wins that meet it (``needed``), the norms left undecided
         without stage 2 (``undecided``), and per norm whether it meets the tier
-        (``met``: None for a norm left undecided)."""
+        (``met``: None for a norm left undecided, also where the zero rule
+        misses the output and so asks for no stage 2)."""
         found = {}
         (tier,) = TIERS
         for name in dict.fromkeys(name for name, _ in self.errors):
@@ -363,9 +366,8 @@ class TierJudge:
                     # None: undecided, a count that stage 2 decides.
                     met[norm] = True if wins[norm] >= needed[norm] else None
             zero = self._zero(name, self.case_draws)
-            undecided = (
-                () if zero or False in met.values() else tuple(norm for norm in PAIRED_NORMS if met[norm] is None)
-            )
+            # A miss in another norm still leaves this one to stage 2: a known gap may hold that miss to its cap.
+            undecided = () if zero else tuple(norm for norm in PAIRED_NORMS if met[norm] is None)
             if undecided and self.draws > self.case_draws:
                 zero = self._zero(name, self.draws)
                 for norm in undecided:

@@ -32,10 +32,16 @@ unweighted output (``y_route``), the gradient of ``x`` through that route (``dx_
 * The naive implementation (:data:`NAIVE`, bfloat16) is the standard PyTorch form of the same layer: the ops of
   autograd in BF16 with torch's own internal accumulation (one cuBLAS BF16 GEMM per expert and weight gradient,
   ``silu`` and its backward as torch computes them on BF16, the weighted sum promoted by the FP32 scores) and
-  ``d_scores = (dY * y_route).sum(-1)`` in BF16.  With MXFP8 routed experts it applies the MX recipe's quantization
+  ``d_scores = (dY * y_e).sum(-1)`` in BF16.  With MXFP8 routed experts it applies the MX recipe's quantization
   points and nothing else: ``x`` (both orientations), the SwiGLU activation (along K for the down GEMM, along the rows
   for its weight gradient), the saved gate and up the backward reads, the score-scaled ``dY`` and ``d_gate`` /
   ``d_up`` (both orientations).  An FP32 output gets the BF16 result widened exactly.
+* The score gradient ``d_scores = (dY * y_e).sum(-1)`` (``dY`` the unweighted upstream gradient) reads ``y_e``, the
+  routed expert's output as the backward holds it.  With BF16 routed experts that is ``y_route``.  With MXFP8 routed
+  experts it is the SwiGLU of the gate and up the backward reads (in the naive implementation through the recipe, in
+  the oracle unquantized), quantized along K in the naive implementation, times the backward's copy of the down weight
+  (the pair quantized along the hidden dimension, which ``dh = dY_s @ Wd`` reads), in both evaluations; ``y_route``
+  reads the forward's copy.  Both evaluations share this one formula.
 * :data:`ALTERNATIVE`: the kernel-shaped variants of the naive implementation, measured and reported beside the judged
   tier and never judged: BF16 weight gradients accumulated in BF16 per macrobatch (the kernel's order), and the score
   gradient as ``(dh * hidden).sum(-1) / s`` (the kernel's fused form).
@@ -253,8 +259,10 @@ def routed(
             index = routes[valid].long()
             y_route[index] = y[valid]
             dx_route[index] = dx[valid]
-            # d_scores of the standard form: (dY * y_route).sum(-1), dY the unweighted upstream gradient.
-            d_scores[index] = (dy.to(dtype) * y.to(dtype)).sum(-1)[valid]
+            # d_scores of the standard form: (dY * y_e).sum(-1), dY the unweighted upstream gradient and y_e the expert's
+            # output as the backward holds it (with MXFP8 routed experts the backward's copy of Wd, _mx_expert).
+            y_e = y if mx is None else extra["y_e"]
+            d_scores[index] = (dy.to(dtype) * y_e.to(dtype)).sum(-1)[valid]
             for dest, grad in zip(dw, dws, strict=True):
                 dest[e] = grad
             if alt_d_scores is not None:
@@ -287,7 +295,8 @@ def _mx_expert(x, dys, fwd, bwd, limit, dtype):
 
     ``fwd``: the dequantized forward weights ``(gate, up, down)`` (blocks along K); ``bwd``: the dequantized backward
     weights in the same orientation (gate and up quantized along the intermediate dimension, down along hidden),
-    FP32 values."""
+    FP32 values.  ``extra["y_e"]`` is the expert's output the score gradient reads: the SwiGLU of the gate and up the
+    backward reads, quantized along K in the naive implementation, by the backward's ``Wd``."""
     oracle = dtype == ORACLE
     x_n, x_t = qdq(x), qdq(x, transposed=True)
     xn = x_n.to(dtype)
@@ -323,9 +332,13 @@ def _mx_expert(x, dys, fwd, bwd, limit, dtype):
         dys_t = qdq(dys, transposed=True)
         hidden_t = qdq(hidden, transposed=True)
     dws = [dg_t.T @ xt, du_t.T @ xt, dys_t.T @ hidden_t]
+    hidden_ds = silu * u_c
+    # The score gradient's y_e: the SwiGLU of the gate and up the backward reads by the backward's copy of Wd.
+    y_e = (hidden_ds if oracle else qdq(hidden_ds)) @ wd_b.T
     extra = dict(
         dh=dh,
-        hidden_ds=(silu * u_c),
+        hidden_ds=hidden_ds,
+        y_e=y_e,
         d_gate_t=dg_t,
         d_up_t=du_t,
         x_t=xt,

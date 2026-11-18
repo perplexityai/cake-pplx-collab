@@ -56,7 +56,7 @@ CAPS: dict[str, dict[str, dict[str, float]]] = {}
 
 MXFP8_D_SCORES_WHAT = (
     "the MXFP8 kernels' score gradient (the fused form sum(dh * hidden) / score) misses the naive tier "
-    "(dY * y_route).sum(-1)"
+    "(dY * y_e).sum(-1)"
 )
 MXFP8_D_SCORES_FIX = "A follow-up kernel change fixes it."
 BF16_STRADDLE_DW_WHAT = (
