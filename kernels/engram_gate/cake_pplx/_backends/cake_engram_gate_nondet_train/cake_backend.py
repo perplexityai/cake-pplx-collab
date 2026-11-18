@@ -458,7 +458,7 @@ def _streams_layout(name: str, t: torch.Tensor, T: int, *, contiguous: bool, out
                 f"{name} must have the column stride 1 and the stream stride {HIDDEN} (a [T, {STREAMS}, {HIDDEN}] "
                 f"slice of a [T, n] buffer), got strides {stride}"
             )
-        if T > 1 and stride[0] % _STRIDE_ELEMENTS:
+        if stride[0] % _STRIDE_ELEMENTS:
             raise ValueError(f"{name} needs a token stride that is a multiple of {_STRIDE_ELEMENTS}, got {stride[0]}")
         if output and T > 1 and stride[0] < STREAMS * HIDDEN:
             raise ValueError(f"{name} is an output: its token rows must not overlap, got the token stride {stride[0]}")
@@ -476,7 +476,7 @@ def _value_layout(name: str, t: torch.Tensor, T: int, *, output: bool) -> None:
         stride = t.stride()
         if stride[1] != 1:
             raise ValueError(f"{name} must have the column stride 1, got strides {stride}")
-        if T > 1 and stride[0] % _STRIDE_ELEMENTS:
+        if stride[0] % _STRIDE_ELEMENTS:
             raise ValueError(f"{name} needs a token stride that is a multiple of {_STRIDE_ELEMENTS}, got {stride[0]}")
         if output and T > 1 and stride[0] < HIDDEN:
             raise ValueError(f"{name} is an output: its token rows must not overlap, got the token stride {stride[0]}")

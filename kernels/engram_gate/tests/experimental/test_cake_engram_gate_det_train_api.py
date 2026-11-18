@@ -509,6 +509,17 @@ def test_a_base_off_a_16_byte_boundary_is_a_value_error(name) -> None:
         _call_forward(ns, **{name: shifted})
 
 
+def test_the_token_stride_rule_holds_for_one_token() -> None:
+    device = _device_or_skip()
+    ns = make_inputs(1, seed=3, device=device, weights="fp32", mask="none")
+    bf16 = dict(dtype=torch.bfloat16, device=device)
+    key = torch.zeros(1, STREAMS * HIDDEN + 4, **bf16)[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN))
+    value = torch.zeros(1, HIDDEN + 4, **bf16)[:, :HIDDEN]
+    for edit in (dict(key=key), dict(value=value)):
+        with pytest.raises(ValueError, match="token stride"):
+            _call_forward(ns, **edit)
+
+
 def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
     device = _device_or_skip()
     ns = _valid(device)

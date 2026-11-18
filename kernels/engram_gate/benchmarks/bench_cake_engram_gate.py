@@ -891,7 +891,7 @@ def timing_unit(arm_names, T, wname, mask_every, args, device, cap_stream):
                     outs.append([y.detach()] + [leaf.grad for leaf in leaves])
                     del y
                 torch.cuda.synchronize()
-                base["run_to_run_bitwise"] = all(_bitwise_equal(a, b) for a, b in zip(*outs))
+                base["run_to_run_bitwise"] = all(_bitwise_equal(a, b) for a, b in zip(*outs, strict=True))
                 del outs
             _reset(leaves)
             torch.cuda.empty_cache()
@@ -956,7 +956,7 @@ def timing_unit(arm_names, T, wname, mask_every, args, device, cap_stream):
                     rec[failed[name][0]] = failed[name][1]
                 elif samples[name]:
                     xs = sorted(samples[name])
-                    q = lambda p: xs[min(len(xs) - 1, int(p * (len(xs) - 1) + 0.5))]  # noqa: E731
+                    q = lambda p, xs=xs: xs[min(len(xs) - 1, int(p * (len(xs) - 1) + 0.5))]  # noqa: E731
                     rec.update(median_us=1e3 * statistics.median(gmeds[name]), min_us=1e3 * xs[0], max_us=1e3 * xs[-1],
                                p10_us=1e3 * q(0.10), p90_us=1e3 * q(0.90), n=len(xs),
                                group_medians_us=[round(1e3 * v, 3) for v in gmeds[name]])
@@ -1228,7 +1228,7 @@ def cmd_report(args):
                   "bwd peak extra (MiB) | run-to-run bitwise |", "| --- | ---: | --- | --- | ---: | ---: | ---: | --- |"]
         for (arm, T, w, m), (mem, r2r) in sorted(memrows.items(), key=lambda kv: (order.index(kv[0][0])
                                                                                 if kv[0][0] in order else 99, kv[0][1:])):
-            mib = lambda k: f"{mem[k] / 2**20:.1f}" if k in mem else "-"  # noqa: E731
+            mib = lambda k, mem=mem: f"{mem[k] / 2**20:.1f}" if k in mem else "-"  # noqa: E731
             lines.append(f"| {arm} | {T} | {w} | {m} | {mib('fwd_retained_bytes')} | {mib('fwd_peak_extra_bytes')} | "
                          f"{mib('bwd_peak_extra_bytes')} | {r2r} |")
         lines.append("")
