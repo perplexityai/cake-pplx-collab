@@ -24,7 +24,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 |---|---|---|
 | rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is reproducible and within one BF16 ulp of det. | Backward always alerts |
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
-| causal_conv1d | `dweight` / `dbias` use unordered reductions. `y` and `dx` are bitwise det. | Backward raises |
+| causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
 | gdn | Fixed order today, with no run-to-run promise. Within det budgets but not bitwise det. | Runs unchanged |
 | mhc | Plain FP32 sums in a fixed order today. No bit promise; not compared bitwise with det. | No alert |
@@ -161,7 +161,7 @@ Other public names:
 
 `y`, `dx`, `dz` and an FP32 weight gradient repeat bit for bit.
 
-A BF16 weight gradient (or `compute_grad_weight=False`) in the **fused band** adds each CTA's FP32 column sums into FP32 replicas with FP32 atomic adds, so its last bits may vary between runs. The fused band is past 512 rows on SM100 and past 256 rows on SM103, up to 1000 rows per SM; on SM107 it is past 64 rows per SM, up to 256 rows per SM. Only that backward alerts under deterministic algorithms. The other bands (one-cluster, chunked, static/claimed and repeatable) are bitwise repeatable. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py).
+A BF16 weight gradient (or `compute_grad_weight=False`) in the **fused band** adds each CTA's FP32 column sums into FP32 replicas with FP32 atomic adds, so its last bits may vary between runs. The fused band is past 512 rows on SM100 and past 256 rows on SM103, up to 1000 rows per SM; on SM107 it is past 64 rows per SM, up to 256 rows per SM. Only that backward alerts under deterministic algorithms. The other bands (one-cluster, static and repeatable) are bitwise repeatable; in a repeatable band (a BF16 `dw` past the fused band, on SM107 also before it; an FP32 `dw` past 512 rows except in the static band) `dw` is the same bits for the same rows and SM count. The static band is an FP32 `dw` on SM100 and SM103 past 64 and up to 128 rows per SM; there `dw` is the exact sum of each chunk's FP32 partial (integer windows), rounded once to FP32, the same bits at any grid. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -216,7 +216,7 @@ ya.backward(dy)  # xa.grad == dx, za.grad == dz, wa.grad == dw
 **Computes.** A packed width-4 depthwise causal convolution followed by SiLU, over BF16 `[S, C]` activations split into documents by `cu_seqlens`. Each document starts with zero history.
 
 - **Forward:** `pre[t,c] = sum_k w[c,k]*x[t-3+k,c] + b[c]` and `y = bf16(pre*sigmoid(pre))`, computed in FP32 with one BF16 rounding.
-- **Backward:** recomputes `pre` from `x` and returns BF16 `dx`, `dweight[c,k] = sum_t dpre[t,c]*x[t-3+k,c]` and, optionally, `dbias[c] = sum_t dpre[t,c]`. SiLU' is evaluated at `bf16(pre)` by default, or at the unrounded FP32 `pre`.
+- **Backward:** recomputes `pre` from `x` and returns BF16 `dx`, `dweight[c,k] = sum_t dpre[t,c]*x[t-3+k,c]` and, optionally, `dbias[c] = sum_t dpre[t,c]`. Under the default `silu_grad_preactivation="bf16"`, SiLU' is evaluated at `bf16(pre)` with FP32 taps and at the unrounded FP32 `pre` with BF16 taps (routes `bwd_dt_bf16_taps` / `bwd_bias_bf16_taps`). Under `"fp32"` it is evaluated at the unrounded FP32 `pre`.
 - **KCP variants:** exchange 3 history rows between context-parallel ranks with one halo `all_to_all_single` per direction.
 
 **Architectures.** `ARCHES = ("sm_100a", "sm_103a", "sm_107a")`, with no family fallback. Optional routes (bias, BF16 taps/gradients, FP32 SiLU') are checked per call and raise `ValueError` when the architecture lacks them. In nondet KCP, `bwd_reserve_sms >= 1` raises `ValueError` on `sm_107a`.
@@ -229,13 +229,13 @@ The backward has two launches. A persistent main launch writes `dx` plus per-CTA
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_causal_conv1d_det` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1)` | As above | Autograd. Returns BF16 `y`. The backward saves only `x`, `weight`, `bias` and `cu_seqlens`. Parameter gradients come back in the parameters' dtypes. |
+| `cake_causal_conv1d_det` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1, dweight_sum="fp32")` | As above | Autograd. Returns BF16 `y`. The backward saves only `x`, `weight`, `bias` and `cu_seqlens`. Parameter gradients come back in the parameters' dtypes. |
 | `cake_causal_conv1d_det_train_forward` | `(x, weight, cu_seqlens, *, bias=None, out=None, workspace=None)` | `out` preallocated BF16; `workspace` int32 from `..._forward_workspace`, one per stream | Returns BF16 `y` of `x`'s shape. S == 0 returns an empty output without launching. Not autograd. |
-| `cake_causal_conv1d_det_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | `dy` BF16, contiguous; `workspace` uint8 from `..._backward_workspace` (no zeroing needed); `dx` BF16, `dweight [C,4]` and `dbias [C]` each FP32 or BF16 (`dbias` needs `bias`); `bwd_grid_mult` 1 to 4 | Returns `(dx, dweight)`, plus `dbias` when `bias` is given. `"bf16"` gives about 3e-5 rel-L2 `dweight` vs FP64. `"fp32"` uses an FP64 final reduction, gives about 2e-7, and is slower. `dx` is within one BF16 ulp either way. Size the workspace with the same or a larger `bwd_grid_mult`. A non-int `bwd_grid_mult` raises `TypeError`; other bad values raise `ValueError`. |
+| `cake_causal_conv1d_det_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1, dweight_sum="fp32")` | `dy` BF16, contiguous; `workspace` uint8 from `..._backward_workspace` (no zeroing needed); `dx` BF16, `dweight [C,4]` and `dbias [C]` each FP32 or BF16 (`dbias` needs `bias`); `bwd_grid_mult` 1 to 4; `dweight_sum` `"fp32"` or `"fp32_pair"` | Returns `(dx, dweight)`, plus `dbias` when `bias` is given. With FP32 taps, `"bf16"` evaluates SiLU' at the BF16-rounded preactivation, and `dweight` is within about 3e-5 rel-L2 of the exact FP64 gradient. With BF16 taps, `"bf16"` evaluates it at the unrounded FP32 preactivation. `"fp32"` evaluates it at the unrounded FP32 preactivation and is slower. By default both sum `dweight` and `dbias` in plain FP32 words, with no FP64 and no compensated sums. `dweight_sum="fp32_pair"` (opt-in, with `silu_grad_preactivation="fp32"` only) sums them as FP32 (hi, lo) pairs: a Kahan-compensated fold and a hi/lo pair row sum, rounded once, FP32 operations only. It keeps `dx`, the workspace and run-to-run bitwise reproducibility; its bits differ from the default's. `dx` is within one BF16 ulp either way. Size the workspace with the same or a larger `bwd_grid_mult`. A non-int `bwd_grid_mult` raises `TypeError`; other bad values raise `ValueError`. |
 
 Other public names:
 
-- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
+- `ARCHES`, `DWEIGHT_SUMS` (`("fp32", "fp32_pair")`), `SUPPORTED_COMPUTE_CAPABILITIES`.
 - `CakeCausalConv1dDetFunction`.
 - `cake_causal_conv1d_det_train_backward_workspace(S, C, device, *, bwd_grid_mult=1)` and `..._bytes(...)`: the size is the maximum over every backward program of every route.
 - `cake_causal_conv1d_det_train_forward_workspace(S, C, device)` and `..._bytes(...)`: returns a zeroed int32 buffer of token-chunk counters.
@@ -243,7 +243,7 @@ Other public names:
 
 ### `cake_pplx.cake_causal_conv1d_det_train_kcp`
 
-Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is reproducible and, per the backend docstring, within `5e-2 + 1e-4 * abs(dw)` of an FP64 oracle. Reducing it across ranks is the caller's job. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
+Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is summed in plain FP32 words and is bitwise reproducible run to run. There is no `dweight_sum` keyword, so there is no FP32 (hi, lo) pair opt-in. Reducing `dweight` across ranks is the caller's job. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -254,36 +254,37 @@ Other public names: `CakeCausalConv1dDetKcpFunction`, `CakeCausalConv1dDetKcpMul
 
 ### `cake_pplx.cake_causal_conv1d_nondet_train`
 
-The forward runs the det programs, so `y` is bitwise det. The backward is one launch that adds `dweight`/`dbias` into zeroed accumulators with unordered global reductions. `dx` is bitwise det. `dweight`/`dbias` are within det's error budgets but are not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before launch; with `warn_only=True` it emits a `UserWarning` and runs. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py).
+The forward runs copies of the det programs. The backward is one launch that adds `dweight`/`dbias` into zeroed accumulators with unordered global reductions. By default `dweight`/`dbias` accumulate in plain FP32 words, as the det reduce does, and their order across CTAs varies. The nondet package makes no bit promise. Under deterministic algorithms the backward raises `RuntimeError` before launch; with `warn_only=True` it emits a `UserWarning` and runs. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_causal_conv1d_nondet` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1)` | As det. `bwd_grid_mult` is checked at the forward call. | Autograd. Returns BF16 `y`. The backward raises under deterministic algorithms. |
-| `cake_causal_conv1d_nondet_train_forward` | `(x, weight, cu_seqlens, *, bias=None, out=None, workspace=None)` | As the det forward; workspace from `..._nondet_train_forward_workspace` | Returns BF16 `y`, bitwise det. No alert. |
-| `cake_causal_conv1d_nondet_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1)` | `"bf16"` uses FP32 accumulators and `"fp32"` uses FP64 accumulators. The workspace comes from `..._nondet_train_backward_workspace`; its size depends on `C` and the route, not on `S` or `bwd_grid_mult`. An FP32 `dweight` must be 16-byte aligned. | Returns `(dx, dweight)`, plus `dbias` with `bias`. S == 0 returns an empty `dx` and zero gradients. Never share a workspace between concurrent launches. |
+| `cake_causal_conv1d_nondet` | `(x, weight, cu_seqlens, bias=None, *, silu_grad_preactivation="bf16", bwd_grid_mult=1, dweight_sum="fp32")` | As det. `bwd_grid_mult` and `dweight_sum` are checked at the forward call. | Autograd. Returns BF16 `y`. The backward raises under deterministic algorithms. |
+| `cake_causal_conv1d_nondet_train_forward` | `(x, weight, cu_seqlens, *, bias=None, out=None, workspace=None)` | As the det forward; workspace from `..._nondet_train_forward_workspace` | Returns BF16 `y`. No alert. |
+| `cake_causal_conv1d_nondet_train_backward` | `(x, weight, cu_seqlens, dy, *, bias=None, silu_grad_preactivation="bf16", workspace=None, dx=None, dweight=None, dbias=None, bwd_grid_mult=1, dweight_sum="fp32")` | By default both `"bf16"` and `"fp32"` accumulate in plain FP32 words; the `"fp32"` routes spread the adds over sixteen FP32 accumulator copies, added in copy order at the end. `dweight_sum="fp32_pair"` (opt-in, with `"fp32"` only) keeps each accumulator word as an FP32 (hi, lo) pair: a Kahan-compensated fold, each add's rounding error kept in lo, four pair copies merged in copy order and rounded once. FP32 operations only; the cross-CTA order still varies. The workspace comes from `..._nondet_train_backward_workspace`; its size depends on `C` and the route, not on `S` or `bwd_grid_mult`. An FP32 `dweight` must be 16-byte aligned. | Returns `(dx, dweight)`, plus `dbias` with `bias`. S == 0 returns an empty `dx` and zero gradients. Never share a workspace between concurrent launches. |
 
 Other public names:
 
-- `ARCHES`, `BWD_GRID_MULTS` (`(1, 2, 3, 4)`), `SUPPORTED_COMPUTE_CAPABILITIES`, `CakeCausalConv1dNondetFunction`.
+- `ARCHES`, `BWD_GRID_MULTS` (`(1, 2, 3, 4)`), `DWEIGHT_SUMS` (`("fp32", "fp32_pair")`), `SUPPORTED_COMPUTE_CAPABILITIES`, `CakeCausalConv1dNondetFunction`.
 - `is_cake_causal_conv1d_nondet_train_supported(device)`.
 - `cake_causal_conv1d_nondet_train_backward_workspace(S, C, device, *, bwd_grid_mult=1)` and `..._bytes(...)`.
 - `cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)` and `..._bytes(...)`.
 
 ### `cake_pplx.cake_causal_conv1d_nondet_train_kcp`
 
-The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. `y` and `dx` are bitwise det KCP. The rank-local `dweight` partial is within det's budget but is not bitwise run to run. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
+The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. The nondet package makes no bit promise. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_causal_conv1d_nondet_kcp` | `(x_local, weight, ctx, *, recompute_handle=None, cooperative=None, bwd_reserve_sms=None)` | As det KCP. `ctx` is a `CakeKDADetKcpContext` from `cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`. `cooperative=True` raises `ValueError`. `bwd_reserve_sms`: `None` (= 0) or an int K >= 0 below the SM count. | Autograd. Returns BF16 `y`. The backward gives BF16 `dx` and this rank's FP32 `dweight` partial. With K >= 1, the one-program backward runs after the exchange with K x ctas_per_sm fewer CTAs. Each rank may choose its own K. A bool or non-int K raises `TypeError`; a negative or too-large K raises `ValueError`, as does K >= 1 on `sm_107a`. |
-| `cake_causal_conv1d_nondet_kcp_multi` | `(xs, weights, ctx, *, recompute_handle=None, cooperative=None, bwd_reserve_sms=None)` | As det multi. One `cooperative` / `bwd_reserve_sms` value applies to all tensors. | Returns n BF16 outputs. Outputs and `dx` are bitwise equal to the single calls. Each `dweight` is its own unordered FP32 partial. |
+| `cake_causal_conv1d_nondet_kcp` | `(x_local, weight, ctx, *, recompute_handle=None, cooperative=None, bwd_reserve_sms=None, dweight_sum=None)` | As det KCP. `ctx` is a `CakeKDADetKcpContext` from `cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`. `cooperative=True` raises `ValueError`. `bwd_reserve_sms`: `None` (= 0) or an int K >= 0 below the SM count. `dweight_sum`: `None` (= `"fp32"`) or `"fp32_pair"`. | Autograd. Returns BF16 `y`. The backward gives BF16 `dx` and this rank's FP32 `dweight` partial. With K >= 1, the one-program backward runs after the exchange with K x ctas_per_sm fewer CTAs. Each rank may choose its own K. A bool or non-int K raises `TypeError`; a negative or too-large K raises `ValueError`, as does K >= 1 on `sm_107a`. `dweight_sum="fp32_pair"` (opt-in) sums the overlapped main program's accumulator copies of a tile as an FP32 (hi, lo) pair and rounds once; the workspace and the exchanges are the same. It needs the overlapped backward: with K >= 1 the call raises `ValueError`, and a backward with tokens and C > 65536 raises `ValueError`. |
+| `cake_causal_conv1d_nondet_kcp_multi` | `(xs, weights, ctx, *, recompute_handle=None, cooperative=None, bwd_reserve_sms=None, dweight_sum=None)` | As det multi. One `cooperative` / `bwd_reserve_sms` / `dweight_sum` value applies to all tensors. | Returns n BF16 outputs. Each tensor runs the single call's programs. Each `dweight` is its own unordered FP32 partial. |
 
 Other public names: `CakeCausalConv1dNondetKcpRecomputeHandle`. Any object with an `entries` dict works as a handle for either package.
 
 **Options and environment.**
 
-- `silu_grad_preactivation` (`"bf16"` by default, or `"fp32"`): where SiLU' is evaluated.
+- `silu_grad_preactivation` (`"bf16"` by default, or `"fp32"`): where SiLU' is evaluated. Under `"bf16"`, a call with FP32 taps evaluates it at the BF16-rounded preactivation, and a call with BF16 taps at the unrounded FP32 preactivation (routes `bwd_dt_bf16_taps` / `bwd_bias_bf16_taps`). Under `"fp32"`, every call evaluates it at the unrounded FP32 preactivation.
 - `bwd_grid_mult` (1 by default, up to 4): an opt-in finer static token partition of the backward, which helps overlap with kernels on other streams. In det, the `dweight` bits change with each value and the workspace grows. In nondet, the workspace size does not change.
+- `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only, so no `bwd_reserve_sms` and at most 65536 channels). det KCP has no `dweight_sum` keyword and no pair opt-in. Other combinations and other strings raise `ValueError`, and a non-string raises `TypeError` (`None` is the nondet KCP default); no call falls back to another program. The default never selects a pair program.
 - `workspace=`: when omitted, the package keeps one zeroed buffer per (device, current stream), or one per capture inside CUDA Graph capture.
 - KCP: `recompute_handle` must be one per call and micro-step, created outside the outermost checkpoint region, and every rank passes one or none.
 - CUDA Graph: build every library of the architecture first (backend `cake_jit.specs_for_arch`) so that no JIT build runs inside capture.
@@ -316,7 +317,7 @@ y.backward(torch.randn_like(y))  # x.grad BF16, w.grad FP32
 - `is_*_supported` checks only the base routes. Optional routes can still raise `ValueError` per call.
 - Do not share workspaces between launches that may run concurrently, for example on two streams.
 - Ranks are not compared. A mismatch in KCP multi tensor count, channels or order, or in the recompute handle, hangs or silently corrupts data.
-- The accuracy figures (3e-5 and 2e-7 rel-L2) come from the source docstrings.
+- The 3e-5 rel-L2 figure comes from the source docstrings. The package tests judge the L2 and max error of every output against an FP64 oracle, relative to a PyTorch BF16 implementation of the same operation, over 32 random draws.
 
 ---
 

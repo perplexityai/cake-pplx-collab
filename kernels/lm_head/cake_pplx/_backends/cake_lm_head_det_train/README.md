@@ -603,8 +603,8 @@ keyword.
   form, `fuse_dw_cast=False` removes the fused candidates, the hidden count
   changes the chunk-0 buffers and an explicit `k_slices` the dX slabs -- so
   they can change the chosen form.  Bits: the budget forms are bitwise the
-  fast form's (above), with two exceptions, both within the accuracy budgets
-  and the same on every run: a log-probability backward in a budget form runs
+  fast form's (above), with two exceptions, both judged against the naive tier
+  (see "Tests") and the same on every run: a log-probability backward in a budget form runs
   without the zero-gradient row skip (its `dX` / `dW` bits can differ from
   the fast form's where valid rows have a zero `dlogp`), and a loss call with
   zero-weight policy rows decides its split as `"budget"` does, which can
@@ -856,8 +856,8 @@ previous mode; `zero_weight_loss_mode()` reads it):
 | `loss`, mode `"exact"` | identical, non-finite values in `Z` rows included (their term is `+-0` either way) |
 | `loss`, mode `"regroup"` | the same FP32 sum over other chunk boundaries: may differ in the last FP32 bits |
 | `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X`, logits or `infer_logp` is not finite) |
-| `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise within the accuracy budget |
-| `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): within the accuracy budget; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
+| `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise both are judged against the naive tier |
+| `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): both are judged against the naive tier; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
 
 Run to run every output is bitwise the same, as everywhere in this package.
 
@@ -892,7 +892,7 @@ split bounds both:
   slices than the largest count of the same call without the split
   (`dx_slices_cap`; a count above it becomes the cap fitted to the K steps).
   A chunk the cap lowers runs another dX slice count than the rule picks, so
-  its `dX` rows can differ in their last bits (within the accuracy budget,
+  its `dX` rows can differ in their last bits (both are judged against the naive tier,
   as any `G` row of another dX form); an explicit `k_slices` knob is the
   same in both calls and is not capped.
 * **The guard.** After the count readback the host predicts both peaks from
@@ -979,10 +979,10 @@ row, and its `dX` row is `+0` for finite inputs but NaN when that row's `X`,
 logits or `lse` (or `W`) are non-finite.  A live row's `dX` row is the same
 per-row arithmetic; its chunk
 can change (the live rows move to the front), and with it that chunk's dX
-K-slice count, so its bits can differ from a call without the skip within
-the accuracy budgets.  `dW` sums the same nonzero products over the live
+K-slice count, so its bits can differ from a call without the skip (both
+are judged against the naive tier).  `dW` sums the same nonzero products over the live
 rows in the new row order (FP32), so its bits can differ from a call without
-the skip within the accuracy budgets.  A call with no zero-gradient row keeps
+the skip (both are judged against the naive tier).  A call with no zero-gradient row keeps
 the row order, the chunks and the K steps of the call without the skip:
 `dX` and `dW` are then bit-identical to it.
 
@@ -1032,8 +1032,8 @@ recounts its valid rows (no forward row index), `logprob_dz=False`,
 `dx_finalize=False` with `dX`, the kept logits (`memory_mode="keep_logits"`),
 the opt-in forms (`memory_mode="budget"`, `num_valid_rows`) and a default
 call's backward in a budget form (its automatic form: its `dX` / `dW` bits can
-then differ from the fast form's for rows with `dlogp == 0`, within the
-accuracy budgets, the same on every run), the prepared runner, the reference
+then differ from the fast form's for rows with `dlogp == 0`; both are judged against the
+naive tier, the same on every run), the prepared runner, the reference
 backend and a temperature backward given `temperature_rows` without the
 temperature itself.
 
@@ -1378,13 +1378,44 @@ on a registered device).
 
 Tests: `tests/experimental/test_cake_lm_head_det_train.py` and the public-API suite
 `tests/experimental/test_cake_lm_head_det_train_api.py` (the host-layer tests
-run on any device through the reference path; the device tests skip without a
-registered program or a compute capability 10.0 / 10.3 / 10.7 device), and the
+run the reference path on the CPU, or on the GPU when it is a compute capability
+10.0 / 10.3 / 10.7 device; the device tests skip without a registered program or
+such a device), and the
 CPU-only `tests/experimental/test_cake_lm_head_det_train_standalone.py` (a copy of
 the package imports in an isolated interpreter and raises its host-side errors;
 `scripts/check_cake_build_manifests.py --vendored-gate` builds and loads the
 copy's libraries on a GPU node).  Benchmark:
 `benchmarks/bench_cake_lm_head_det_train.py`.
+
+Accuracy in the tests is judged against the naive tier (`tests/cake_naive.py`):
+each floating output's absolute error against a float64 oracle, in the L2 and
+the max norm over 32 random inputs, beside the error of PyTorch on the same
+BF16 inputs with the same operations in BF16.  An output meets the tier when,
+in both norms, the median and the largest of its errors are at most 1.005
+times the tier's and its error is 0 on every input where the tier's is 0;
+every input is also held to the output's contract (shape, dtype, finite
+values, exact zeros on the ignored rows).  The reference backend is judged at
+H 256, V 512 on the CPU, or on a compute capability 10.0 / 10.3 / 10.7 GPU (on
+another GPU the host tests run on the CPU); the cake backend at H 6144, V 8192
+(other shapes where a test's route needs them: other vocabularies, V 256 at
+H 2048 as well as at H 6144, and one call per entry at T 4097 at the
+production head, H 6144, V 154880) and the candidate-support entries at their
+own shapes.  Calls at the production shape keep their
+contract and their bitwise checks: the same bytes from run to run, and the
+bit identities between the forms documented above.  Each verdict prints a
+`TIER` line in pytest's terminal summary.  The outputs that miss the tier
+today are listed per architecture in
+`tests/experimental/test_helpers/cake_lm_head_known_misses.py`, each with a
+cap for each norm it misses: the largest ratio of its median or largest error
+over the tier's measured in that norm, rounded up to four decimals.  A test
+whose listed outputs miss within their caps reports as xfailed.  The list is
+checked through the tests that run: a new miss fails its test, and so does a
+listed output that misses beyond its caps (a ratio above a cap, a miss in a
+norm without a cap, or a draw where the tier's error is 0 and its own is not),
+that meets the tier, or that a test passing its other checks did not judge.
+The entries of a test that is not collected (a renamed or removed
+parametrization, or a run over other test ids) or that skips are not
+checked.
 
 Toolchain note: the package needs CUDA 12.9 or newer.  Every `sm_100a` and
 `sm_103a` entry of `build.json` has `min_cuda` 12.9

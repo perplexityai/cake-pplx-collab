@@ -19,7 +19,7 @@ Triton ``causal_conv1d`` (when installed; the baseline of the kernels' claim)
 and eager FP32 autograd of the document-local formula.
 
 The rows are the kernels' performance matrix: ``C = 512`` over eight packed
-token counts, ``S = 250340`` over eight channel counts (the round-6 tile rows
+token counts, ``S = 250340`` over eight channel counts (the multi-sub-tile rows
 C = 1280 and 1536 included) and C = 1280 / 1536 at ``S = 262144``, each packed
 as four unequal documents of 0.37 / 0.29 / 0.21 / rest of ``S`` tokens (each
 nudged off a multiple of 64).  Every row reports forward, backward (``dx`` and
@@ -35,7 +35,8 @@ span of their kernels' GPU time.
 
 The route of a run is chosen on the command line and applied to every
 comparator: ``--weight-dtype bfloat16`` (BF16 taps and a BF16 ``dweight``: the
-``fwd_dt`` / ``bwd_dt`` programs; FLA and eager take the BF16 taps as given),
+``fwd_dt`` / ``bwd_dt_bf16_taps`` programs, ``bwd_bias_bf16_taps`` with a bias;
+FLA and eager take the BF16 taps as given),
 ``--bias float32|bfloat16`` (the ``*_bias`` programs; FLA's conv takes the bias,
 eager adds it after the taps) and ``--silu-grad-preactivation fp32`` (the
 ``*_fp32g`` programs; FLA has no such option, so its row is its default
@@ -43,7 +44,11 @@ backward, a speed-only comparison).  ``--bwd-grid-mult 2|3|4`` runs the Cake
 backward at that opt-in grid multiple (``bwd_grid_mult``, a finer static
 partition of the token axis; its workspace sized for it); the other
 comparators have no such option.  The JSON records the backward route and the
-multiple.
+multiple.  With ``--silu-grad-preactivation fp32`` the ``cake_pair`` column
+runs the same Cake calls with the opt-in ``dweight_sum="fp32_pair"`` (FP32
+(hi, lo) pair ``dweight`` / ``dbias`` sums: the ``*_fp32g_pair`` routes) next to
+the default ``cake`` column, as absolute times; the JSON names its program
+(``pair_program``).
 
 ``--side-kernel`` adds, per row and comparator, the backward's wall latency on
 its stream (CUDA events, median of seven calls after three warm-ups) alone and
@@ -61,6 +66,7 @@ Example::
     python benchmarks/bench_cake_causal_conv1d_det_train.py --channels 512 --tokens 250340 --json out.json
     python benchmarks/bench_cake_causal_conv1d_det_train.py --weight-dtype bfloat16 --bias bfloat16
     python benchmarks/bench_cake_causal_conv1d_det_train.py --silu-grad-preactivation fp32 --channels 512 1280
+    python benchmarks/bench_cake_causal_conv1d_det_train.py --silu-grad-preactivation fp32 --skip fla eager_fp32
     python benchmarks/bench_cake_causal_conv1d_det_train.py --bwd-grid-mult 3 --side-kernel nccl-like --skip fla eager_fp32
 """
 
@@ -86,7 +92,7 @@ from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as loader
 
 WIDTH = 4
 # The performance matrix: P1 (C = 512 over the packed token counts), P2 (S = 250340 over the channel counts,
-# the round-6 tile rows 1280 / 1536 included) and P3 (the tile rows at S = 262144).
+# the multi-sub-tile rows 1280 / 1536 included) and P3 (the tile rows at S = 262144).
 P1_TOKENS = (239718, 245028, 249866, 250340, 258574, 259042, 259584, 261393)
 P1_CHANNELS = 512
 P2_TOKENS = 250340
@@ -135,11 +141,14 @@ class Mode:
     silu_grad_preactivation: str = "bf16"
     bwd_grid_mult: int = 1
 
-    def backward_route(self) -> str:
+    def backward_route(self, *, pair: bool = False) -> str:
         return loader.backward_route(
             bias=self.bias_dtype is not None,
             fp32_grad=self.silu_grad_preactivation == "fp32",
-            bf16_taps_or_dweight=self.weight_dtype == torch.bfloat16,
+            # dweight defaults to the taps' dtype
+            bf16_taps=self.weight_dtype == torch.bfloat16,
+            bf16_dweight=self.weight_dtype == torch.bfloat16,
+            pair=pair,
         )
 
     def describe(self) -> dict:
@@ -340,6 +349,7 @@ class Comparator:
 
 class Cake(Comparator):
     name = "cake"
+    dweight_sum = "fp32"
 
     def make(self, x, w, b, cu, mode: Mode):
         tokens, channels = x.shape
@@ -375,9 +385,18 @@ class Cake(Comparator):
                 dweight=dw,
                 dbias=db,
                 bwd_grid_mult=mode.bwd_grid_mult,
+                dweight_sum=self.dweight_sum,
             )
 
         return fwd, bwd
+
+
+class CakePair(Cake):
+    """The Cake calls with the opt-in FP32 (hi, lo) pair ``dweight`` / ``dbias`` sums (``--silu-grad-preactivation
+    fp32`` only)."""
+
+    name = "cake_pair"
+    dweight_sum = "fp32_pair"
 
 
 class _AutogradComparator(Comparator):
@@ -445,7 +464,7 @@ class FlashLinearAttention(_AutogradComparator):
         return y
 
 
-COMPARATORS = (Cake(), FlashLinearAttention(), EagerFp32())
+COMPARATORS = (Cake(), CakePair(), FlashLinearAttention(), EagerFp32())
 
 
 def _bytes(
@@ -469,11 +488,11 @@ def _bytes(
     return {"fwd": fwd, "bwd": bwd, "step": fwd + bwd}[phase]
 
 
-def _selected_program(arch: str, tokens: int, channels: int, mode: Mode) -> str:
+def _selected_program(arch: str, tokens: int, channels: int, mode: Mode, *, pair: bool = False) -> str:
     """The backward program the registry selects for the row (by route and channel count; ``tokens`` never
-    enters)."""
+    enters); ``pair``: the program of the route's pair route."""
 
-    return loader.selected_modules(arch, mode.backward_route(), C=channels, S=tokens)[0]
+    return loader.selected_modules(arch, mode.backward_route(pair=pair), C=channels, S=tokens)[0]
 
 
 def _partial_rows(
@@ -531,6 +550,11 @@ def bench_row(
         "documents": list(lens),
         "program": program,
         "partial_rows": partial_rows,
+        **(
+            {"pair_program": _selected_program(arch, tokens, channels, mode, pair=True)}
+            if any(c.name == CakePair.name for c in comparators)
+            else {}
+        ),
         **mode.describe(),
         "comparators": {},
     }
@@ -662,6 +686,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     comparators = []
     for comparator in COMPARATORS:
         if comparator.name in args.skip:
+            continue
+        if comparator.name == CakePair.name and mode.silu_grad_preactivation != "fp32":
+            print(f"{comparator.name}: needs --silu-grad-preactivation fp32 (the pair routes pair the fp32g routes)")
             continue
         ok, note = comparator.available()
         print(f"{comparator.name}: {'available' if ok else 'unavailable'} {note}")

@@ -38,11 +38,16 @@ FP32,
     dbias[c]      = sum_t dpre[t, c]                            # with a bias
 
 at ``p`` chosen by ``silu_grad_preactivation``: ``"bf16"`` (default), ``p =
-bf16(pre)``, the rounded value the forward stores and the boundary
-flash-linear-attention's backward uses (``dweight`` lands within about 3e-5
-rel-L2 of the exact FP64 gradient); ``"fp32"``, ``p = pre`` unrounded, with
-the final ``dweight`` reduction in FP64 (within about 2e-7; a slower program).
-``dx`` is within one BF16 ulp of exact under both.  The backward is two
+bf16(pre)`` with an FP32 ``weight``, the rounded value the forward stores and
+the boundary flash-linear-attention's backward uses (``dweight`` lands within
+about 3e-5 rel-L2 of the exact FP64 gradient), and ``p = pre`` unrounded with
+a BF16 ``weight`` (there the rounding can move ``dx`` across a BF16 rounding
+midpoint); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
+program).  By default (``dweight_sum="fp32"``), under both, every ``dweight``
+/ ``dbias`` sum is one plain FP32 word: no compensated (two-word) sums.  The
+opt-in ``dweight_sum="fp32_pair"`` (with ``"fp32"`` only) sums them as FP32
+(hi, lo) pairs.  No program uses FP64.  ``dx`` is within one BF16 ulp of
+exact under both.  The backward is two
 ordinary launches on one stream: a persistent main program writes ``dx`` and
 one FP32 partial row of ``dweight`` (and ``dbias``) per CTA into a workspace,
 and a reduce program launched programmatically dependent on it sums the rows
@@ -65,16 +70,18 @@ buffer per (device, current stream), and a call inside a CUDA Graph capture
 allocates a zeroed buffer of its own.  Two launches that may run at once need
 two buffers.
 
-Inputs and outputs are contiguous (``C`` a multiple of 8); ``dweight`` and
+Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
+``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and
 ``dbias`` are FP32 or BF16 (the parameter's dtype when not preallocated).
 ``S``, ``C`` and the document count are runtime scalars: they may change
 between calls, the host never reads ``cu_seqlens`` (no synchronization), ``S
 == 0`` returns empty outputs without launching, and the calls are CUDA Graph
 capturable once the libraries are built.
 
-A call's arguments (bias, BF16 taps or gradient, the SiLU' policy) select its
-route, and within a route the channel count selects one of the architecture's
-programs through a host-side rule of the backend's registry (never the data),
+A call's arguments (bias, BF16 taps or gradient, the SiLU' policy,
+``dweight_sum``) select its route, and within a route the channel count
+selects one of the architecture's programs through a host-side rule of the
+backend's registry (never the data),
 so a given ``(S, C, device)`` and route always run the same program.  The
 workspace size is the maximum over every backward program of every route, so
 one buffer of ``cake_causal_conv1d_det_train_backward_workspace_bytes(S, C,
@@ -94,9 +101,14 @@ Usage::
     y = cake_causal_conv1d_det_train_forward(x, weight, cu_seqlens, bias=bias)
     dx, dweight, dbias = cake_causal_conv1d_det_train_backward(x, weight, cu_seqlens, dy, bias=bias)
 
-    # SiLU' at the unrounded FP32 preactivation for a ~2e-7 rel-L2 weight gradient
+    # SiLU' at the unrounded FP32 preactivation (a slower program)
     dx, dweight = cake_causal_conv1d_det_train_backward(
         x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32"
+    )
+
+    # opt-in: dweight / dbias summed as FP32 (hi, lo) pairs (FP32 SiLU' only)
+    dx, dweight = cake_causal_conv1d_det_train_backward(
+        x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32", dweight_sum="fp32_pair"
     )
 
     # autograd (saves x, weight, bias and cu_seqlens only)
@@ -146,6 +158,7 @@ from ._cake_pplx_api_causal_conv1d import cake_api
 if TYPE_CHECKING:
     from ._backends.cake_causal_conv1d_det_train import (
         ARCHES,
+        DWEIGHT_SUMS,
         SUPPORTED_COMPUTE_CAPABILITIES,
         CakeCausalConv1dDetFunction,
         cake_causal_conv1d_det_train_backward_workspace,
@@ -163,6 +176,7 @@ if TYPE_CHECKING:
 _LAZY_EXPORTS = frozenset(
     {
         "ARCHES",
+        "DWEIGHT_SUMS",
         "SUPPORTED_COMPUTE_CAPABILITIES",
         "CakeCausalConv1dDetFunction",
         "cake_causal_conv1d_det_train_backward_workspace",
@@ -264,6 +278,7 @@ def cake_causal_conv1d_det_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward.
 
@@ -277,9 +292,9 @@ def cake_causal_conv1d_det_train_backward(
     on other streams never stall the call).
 
     The call's arguments select the route (bias, BF16 among ``weight`` /
-    ``dweight``, the SiLU' policy) and the channel count selects the route's
-    program through a host-side rule of the backend's registry (never the
-    data), so a given ``(S, C, device)`` and route always run the same program.
+    ``dweight``, the SiLU' policy, ``dweight_sum``) and the channel count
+    selects the route's program through a host-side rule of the backend's
+    registry (never the data), so a given ``(S, C, device)`` and route always run the same program.
     Before capturing a CUDA Graph, build every library of the device's
     architecture (the backend's ``cake_jit.specs_for_arch``, in
     ``cake_pplx._backends.cake_causal_conv1d_det_train``) so that no
@@ -294,12 +309,13 @@ def cake_causal_conv1d_det_train_backward(
     dy : torch.Tensor
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation (the
-        boundary flash-linear-attention's backward uses; ``dweight`` within
-        about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
-        the unrounded FP32 preactivation with an FP64 final reduction (about
-        2e-7; a slower program).  ``dx`` is within one BF16 ulp of exact under
-        both.
+        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
+        FP32 ``weight`` (the boundary flash-linear-attention's backward uses;
+        ``dweight`` within about 3e-5 rel-L2 of the exact FP64 gradient), at
+        the unrounded FP32 preactivation with a BF16 ``weight``.  ``"fp32"``: SiLU' at
+        the unrounded FP32 preactivation (a slower program).  Both sum
+        ``dweight`` / ``dbias`` in plain FP32 words by default (see
+        ``dweight_sum``).  ``dx`` is within one BF16 ulp of exact under both.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_causal_conv1d_det_train_backward_workspace` (the per-CTA FP32
@@ -325,6 +341,16 @@ def cake_causal_conv1d_det_train_backward(
         :func:`cake_causal_conv1d_det_train_backward_workspace` with the same (or a
         larger) ``bwd_grid_mult``.  ``TypeError`` for a non-int, ``ValueError``
         for another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``.  ``"fp32"`` (default): one
+        plain FP32 word per sum.  ``"fp32_pair"`` (opt-in): an FP32 (hi, lo)
+        pair per sum -- the main program's fold Kahan-compensated and the
+        partial rows summed as hi/lo pairs in the same fixed order, rounded
+        once to the output dtype; FP32 operations only, the same ``dx`` and the
+        same workspace, bitwise reproducible run to run (its bits differ from
+        the default's).  Only with ``silu_grad_preactivation="fp32"``;
+        ``ValueError`` otherwise and for another ``str``, ``TypeError`` for a
+        non-``str``.
 
     Returns
     -------
@@ -349,6 +375,7 @@ def cake_causal_conv1d_det_train_backward(
         dweight=dweight,
         dbias=dbias,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -361,6 +388,7 @@ def cake_causal_conv1d_det(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU.
 
@@ -381,6 +409,10 @@ def cake_causal_conv1d_det(
     bwd_grid_mult : {1, 2, 3, 4}
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_det_train_backward`).
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_det_train_backward`).
 
     Returns
     -------
@@ -399,11 +431,13 @@ def cake_causal_conv1d_det(
         bias,
         silu_grad_preactivation=silu_grad_preactivation,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
 __all__ = [
     "ARCHES",
+    "DWEIGHT_SUMS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "CakeCausalConv1dDetFunction",
     "cake_causal_conv1d_det",

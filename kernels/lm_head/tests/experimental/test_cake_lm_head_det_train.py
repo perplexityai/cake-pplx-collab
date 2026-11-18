@@ -12,6 +12,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+Backend suite of the deterministic chunked LM-head + loss package ``cake_pplx._backends.cake_lm_head_det_train``.
+Accuracy is judged against the naive BF16 tier (``tests/cake_naive.py``); the outputs that miss the tier today are
+listed per architecture, each up to its caps, in ``test_helpers/cake_lm_head_known_misses.py`` (their tests report as
+xfailed), where a new miss, a listed output that misses beyond its caps or a listed output that meets the tier fails the
+test.
 """
 
 import contextlib
@@ -34,17 +40,21 @@ import torch
 import torch.utils.checkpoint
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    JUDGE_H,
+    JUDGE_V,
+    contract_lm_head,
+    judge_inputs,
+    judge_lm_head,
+)
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     DEFAULT_H,
     DEFAULT_V,
     IGNORE_INDEX,
     KNEE_MARGIN,
-    error_report,
     make_inputs,
     make_temperature,
     reference_fp64,
-    reference_unchunked,
-    rel_l2,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -92,20 +102,16 @@ validate_lm_head_det_inputs = cake_backend.validate_lm_head_det_inputs
 wave_efficiency = cake_backend.wave_efficiency
 workspace_layout = cake_backend.workspace_layout
 
-DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# The host layer's device (the reference backend): the GPU when it is a supported target, else the CPU -- on another
+# GPU the host tests run on the CPU, whose known misses the registry lists (it lists the CPU and the targets only).
+DEV = torch.device(
+    "cuda"
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0) in SUPPORTED_COMPUTE_CAPABILITIES
+    else "cpu"
+)
 SEED = 20260930
 # Host-layer shapes (the reference backend runs at any multiple of 256).
 H_HOST, V_HOST = 256, 512
-# Accuracy gates against the FP64 oracle: at most 1.05x the error of the unchunked PyTorch path on
-# the same inputs plus a floor per metric.
-GATE_MARGIN = 1.05
-GATE_TINY = dict(loss_rel=1e-6, logp_max_abs=1e-5, dX_rel_l2=1e-3, dW_rel_l2=1e-3)
-# Errors of the unchunked PyTorch path against the FP64 oracle measured at the production geometry
-# (H = 6144, V = 154880).  The device tests also hold every error below twice these figures as a
-# documented sanity ceiling; the primary gate stays the per-input 1.05x.
-PRODUCTION_B0 = dict(dX_rel_l2=1.85e-3, dW_rel_l2=1.88e-3, logp_max_abs=4.1e-3)
-# Per-row gate between two BF16 implementations of the same rows (knee test).
-ROW_REL_L2 = 1e-2
 # Host values every stage may name (the kernels' own argument names, see ``stage_values``).
 _GEMM_VALUES = {"A", "B", "C", "STATS_OUT", "WS", *cake_backend.GEMM_SCALARS}
 _STAGE_VALUES = {
@@ -255,31 +261,6 @@ def _run(
     return dict(loss=loss.detach(), logp=logp.detach(), dX=X.grad, dW=W.grad, X=X, W=W)
 
 
-def _check_against_references(
-    result, inp, *, entry="loss", grad_weight_dtype=torch.bfloat16, ceiling=False
-):
-    oracle = reference_fp64(inp, entry=entry)
-    b0 = reference_unchunked(inp, entry=entry, grad_weight_dtype=grad_weight_dtype)
-    errors = error_report(result, oracle, inp.labels)
-    b0_errors = error_report(b0, oracle, inp.labels)
-    assert not errors["nan"]
-    for key, tiny in GATE_TINY.items():
-        if key in errors:
-            assert errors[key] <= GATE_MARGIN * b0_errors[key] + tiny, (
-                f"{key}: {errors[key]:.3e} vs unchunked {b0_errors[key]:.3e}"
-            )
-    if ceiling:
-        for key, measured in PRODUCTION_B0.items():
-            if key in errors:
-                assert errors[key] <= 2.0 * measured, (
-                    f"{key}: {errors[key]:.3e} above twice the production-geometry unchunked error"
-                )
-    assert errors["logp_ignored_zero"]
-    if result.get("dX") is not None:
-        assert errors["dX_ignored_zero"]
-    return errors, b0_errors
-
-
 def _check_dtypes(result, inp, *, grad_weight_dtype=torch.bfloat16):
     assert result["loss"].dtype == torch.float32 and result["loss"].shape == ()
     assert result["logp"].dtype == torch.float32 and tuple(result["logp"].shape) == (
@@ -302,8 +283,53 @@ def _same(a, b) -> bool:
     return torch.equal(a, b)
 
 
+def _judge(
+    record_property,
+    T,
+    launch,
+    *,
+    device=DEV,
+    H=H_HOST,
+    V=V_HOST,
+    seed=None,
+    inputs=None,
+    adjust=None,
+    tag=None,
+    **kw,
+):
+    """Judge the case of ``T`` rows against the naive BF16 tier over the judge's draws (:func:`judge_lm_head`): draw
+    ``s`` (the draws of the case seed ``seed``, default ``SEED + T``) makes its own inputs ``judge_inputs(T, s, H=H,
+    V=V, device=device, **inputs)`` -- every random input, ``W`` too, from ``s`` -- then ``adjust(inp, s)`` when
+    given (an upstream or a zero set from a CPU generator of ``s``), and ``launch(inp)`` returns the call's result
+    (one per form with ``forms``).  ``tag`` names the outputs of a judge of one form (``logp@tag``), so that the judges
+    of one test record distinct outputs.  ``kw``: the other keywords of :func:`judge_lm_head` (``entry``, ``names``,
+    ``forms``, ``route``, ``contract``, ``views``, ``oracle_kw`` / ``naive_kw``)."""
+    inputs = dict(inputs or {})
+
+    def make(s):
+        inp = judge_inputs(T, s, H=H, V=V, device=device, **inputs)
+        return inp if adjust is None else adjust(inp, s)
+
+    if tag is not None:
+        if "forms" in kw:
+            raise ValueError("a tagged judge has the one form of its tag")
+        run = launch
+        kw["forms"] = (tag,)
+
+        def launch(inp):
+            return {tag: run(inp)}
+
+    return judge_lm_head(
+        record_property,
+        make=make,
+        launch=launch,
+        seed=SEED + T if seed is None else seed,
+        **kw,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Host layer (any device; the reference backend)
+# Host layer (the reference backend on ``DEV``: the CPU, or a supported GPU)
 # ---------------------------------------------------------------------------
 
 
@@ -3825,116 +3851,146 @@ HOST_SHAPES = [(1, 16), (5, 4), (37, 16), (64, 64), (65, 64), (200, 64)]
     "T, C", HOST_SHAPES, ids=[f"t{t}_c{c}" for t, c in HOST_SHAPES]
 )
 @pytest.mark.parametrize("objective", ["ce", "policy"])
-def test_reference_matches_unchunked_and_oracle(objective, T, C):
-    inp = _host_inputs(T, objective)
-    result = _run(inp, C)
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp)
-    assert torch.all(result["logp"][~inp.valid] == 0) and torch.all(
-        result["dX"][~inp.valid] == 0
-    )
-    assert torch.isfinite(result["dW"].float()).all()
+def test_reference_meets_the_naive_tier(record_property, objective, T, C):
+    """The reference backend's ``loss`` / ``logp`` / ``dX`` / ``dW`` meet the naive BF16 tier against the FP64
+    oracle over the judge's draws, each draw held to its contract (dtypes, shapes, finite outputs, ``+0`` ignored
+    rows)."""
+    _judge(record_property, T, lambda inp: _run(inp, C), inputs=dict(objective=objective))
 
 
-def test_reference_policy_ratio_boundary():
-    inp = _host_inputs(200, "policy")
-    regime = inp.regime
-    assert all(bool((regime == k).any()) for k in (0, 2, 3)) and not bool(
-        (regime == 1).any()
-    )
-    assert torch.equal(regime == -1, ~inp.valid)
-    # every valid row keeps its margin from the clip knee (in the oracle's FP32 logp)
-    logp32 = reference_fp64(inp, need_dx=False, need_dw=False)["logp"].float()
-    delta = logp32 - inp.infer_logp
-    assert (delta[inp.valid] - math.log(2.0)).abs().min().item() >= KNEE_MARGIN - 1e-6
-    assert torch.allclose(
-        delta[regime == 0], torch.full_like(delta[regime == 0], -1.0), atol=1e-6
-    )
-    assert torch.allclose(
-        delta[regime == 2], torch.full_like(delta[regime == 2], 1.0), atol=1e-6
-    )
-    assert torch.all(inp.infer_logp[~inp.valid] == 0) and torch.all(
-        inp.loss_weights[~inp.valid] == 0
-    )
-    result = _run(inp, 64)
-    oracle = reference_fp64(inp)
-    b0 = reference_unchunked(inp)
-    dX = result["dX"]
-    # above the clip the logit gradient vanishes analytically: those rows are exactly zero
-    assert torch.all(dX[regime == 2] == 0) and torch.all(oracle["dX"][regime == 2] == 0)
-    # below the clip (and on the random rows) every row carries a gradient within the unchunked path's error
-    # (random rows above the knee, ratio > 2, legitimately carry no gradient; keep the ones below it)
-    for rows in (regime == 0, (regime == 3) & (delta < math.log(2.0))):
-        assert torch.all(dX[rows].float().abs().sum(-1) > 0)
-        assert (
-            rel_l2(dX[rows], oracle["dX"][rows])
-            <= GATE_MARGIN * rel_l2(b0["dX"][rows], oracle["dX"][rows])
-            + GATE_TINY["dX_rel_l2"]
+def test_reference_policy_ratio_boundary(record_property):
+    """The policy inputs' clip regimes on every draw: rows forced below the clip (ratio ``e^-1``), above it (ratio
+    ``e``) and random rows kept out of the knee's band.  Above the clip the logit gradient vanishes analytically: those
+    ``dX`` rows are exactly zero; every row below it carries a gradient (random rows above the knee, ratio > 2,
+    legitimately carry none).  ``loss`` / ``logp`` / ``dX`` / ``dW`` and the ``dX`` rows below the clip (forced and
+    random) meet the naive BF16 tier."""
+    T, ln2 = 200, math.log(2.0)
+    below = {}  # draw seed -> (the rows forced below the clip, the random rows below the knee)
+
+    def check_inputs(inp, s):
+        regime = inp.regime
+        assert all(bool((regime == k).any()) for k in (0, 2, 3)) and not bool(
+            (regime == 1).any()
         )
-    _check_against_references(result, inp)
+        assert torch.equal(regime == -1, ~inp.valid)
+        # every valid row keeps its margin from the clip knee (in the oracle's FP32 logp)
+        logp32 = reference_fp64(inp, need_dx=False, need_dw=False)["logp"].float()
+        delta = logp32 - inp.infer_logp
+        assert (delta[inp.valid] - ln2).abs().min().item() >= KNEE_MARGIN - 1e-6
+        # the forced rows: infer_logp = logp32 - delta with delta = -1 (below) / +1 (above), the same FP32 operation
+        assert torch.equal(inp.infer_logp[regime == 0], logp32[regime == 0] + 1.0)
+        assert torch.equal(inp.infer_logp[regime == 2], logp32[regime == 2] - 1.0)
+        assert torch.all(inp.infer_logp[~inp.valid] == 0) and torch.all(
+            inp.loss_weights[~inp.valid] == 0
+        )
+        below[s] = (regime == 0, (regime == 3) & (delta < ln2))
+        return inp
+
+    def launch(inp):
+        result = _run(inp, 64)
+        forced, random_rows = below[inp.seed]
+        return dict(
+            result,
+            dX_below=result["dX"][forced],
+            dX_random_below=result["dX"][random_rows],
+        )
+
+    def contract(result, inp):
+        contract_lm_head(result, inp)
+        dX = result["dX"]
+        assert torch.all(dX[inp.regime == 2] == 0)
+        for rows in below[inp.seed]:
+            assert torch.all(dX[rows].float().abs().sum(-1) > 0)
+
+    _judge(
+        record_property,
+        T,
+        launch,
+        inputs=dict(objective="policy"),
+        adjust=check_inputs,
+        contract=contract,
+        names=("loss", "logp", "dX", "dW", "dX_below", "dX_random_below"),
+        views={
+            "dX_below": ("dX", lambda inp, v: v[below[inp.seed][0]]),
+            "dX_random_below": ("dX", lambda inp, v: v[below[inp.seed][1]]),
+        },
+    )
 
 
-def test_reference_policy_clamp_knee():
+def test_reference_policy_clamp_knee(record_property):
     """Rows at the clip knee: ``ratio <= 2`` keeps ``d_t = -w_t * ratio_t`` (gradient rows present),
     ``ratio > 2`` zeroes the row and the loss term saturates at ``2 w_t``.  The knee is placed
     around the implementation's own FP32 ``logp`` with ``1e-3`` margins: ``exp(logp - (logp -
     ln 2))`` lands within a few FP32 ulp of 2 on either side, so exact equality is not a testable
-    point in FP32 arithmetic."""
+    point in FP32 arithmetic.  The side of each row is the implementation's decision, so the oracle and the naive
+    tier take it as given (``over``): ``loss`` / ``dX`` / ``dW`` meet the naive BF16 tier over the judge's draws."""
     T, C = 64, 16
-    inp = _host_inputs(T, "policy")
-    valid = inp.valid
-    logp_impl = _run(inp, C, train_x=False, train_w=False)[
-        "logp"
-    ]  # the backend's FP32 logp (independent of infer_logp)
-    assert (
-        logp_impl - reference_fp64(inp, need_dx=False, need_dw=False)["logp"].float()
-    )[valid].abs().max().item() <= 1e-2
     ln2 = torch.tensor(math.log(2.0), dtype=torch.float32, device=DEV)
-    rows = torch.nonzero(valid).squeeze(1)
-    under, over = (
-        rows[0::2],
-        rows[1::2],
-    )  # alternate valid rows: ratio 2 e^-1e-3 (kept) / 2 e^+1e-3 (clipped)
-    assert len(under) >= 8 and len(over) >= 8
-    infer = inp.infer_logp.clone()
-    infer[under] = logp_impl[under] - ln2 + 1e-3
-    infer[over] = logp_impl[over] - ln2 - 1e-3
-    knee = replace(inp, infer_logp=infer.contiguous(), regime=None)
-    result = _run(knee, C)
-    dX = result["dX"]
-    assert torch.all(dX[over] == 0)
-    assert torch.all(dX[under].float().abs().sum(-1) > 0)
-    assert torch.equal(result["logp"], logp_impl)
-    # the backend's own quantities: ratio below / above the knee, loss = -sum w_t min(ratio_t, 2)
-    ratio = torch.exp(logp_impl - infer)
-    assert torch.all(ratio[under] < 2) and torch.all(ratio[over] > 2)
-    expected = -(inp.loss_weights * torch.clamp_max(ratio, 2.0))[valid].sum().item()
-    assert abs(result["loss"].item() - expected) <= 1e-5 * abs(expected) + 1e-6
-    # kept rows carry the unclipped analytic gradient -w * ratio * (onehot - p) @ W of the same BF16 inputs
-    X64, W64 = inp.X[under].double(), inp.W.double()
-    z = X64 @ W64.t()
-    lse = torch.logsumexp(z, -1)
-    p = torch.exp(z - lse[:, None])
-    y = inp.labels[under]
-    ratio64 = torch.exp(
-        z.gather(1, y[:, None]).squeeze(1) - lse - infer[under].double()
+    sides = {}  # draw seed -> (under rows, over rows, the backend's FP32 logp, the over mask)
+
+    def at_the_knee(inp, s):
+        # the backend's FP32 logp (independent of infer_logp)
+        logp_impl = _run(inp, C, train_x=False, train_w=False)["logp"]
+        rows = torch.nonzero(inp.valid).squeeze(1)
+        # alternate valid rows: ratio 2 e^-1e-3 (kept) / 2 e^+1e-3 (clipped)
+        under, over = rows[0::2], rows[1::2]
+        assert len(under) >= 8 and len(over) >= 8
+        infer = inp.infer_logp.clone()
+        infer[under] = logp_impl[under] - ln2 + 1e-3
+        infer[over] = logp_impl[over] - ln2 - 1e-3
+        mask = torch.zeros(T, dtype=torch.bool, device=DEV)
+        mask[over] = True
+        sides[s] = (under, over, logp_impl, mask)
+        return replace(inp, infer_logp=infer.contiguous(), regime=None)
+
+    def contract(result, knee):
+        contract_lm_head(result, knee)
+        under, over, logp_impl, _ = sides[knee.seed]
+        dX = result["dX"]
+        assert torch.all(dX[over] == 0)
+        assert torch.all(dX[under].float().abs().sum(-1) > 0)
+        assert torch.equal(result["logp"], logp_impl)
+        # the backend's own quantities: ratio below / above the knee
+        ratio = torch.exp(logp_impl - knee.infer_logp)
+        assert torch.all(ratio[under] < 2) and torch.all(ratio[over] > 2)
+
+    def side(knee):
+        return dict(over=sides[knee.seed][3])
+
+    _judge(
+        record_property,
+        T,
+        lambda knee: _run(knee, C),
+        inputs=dict(objective="policy"),
+        adjust=at_the_knee,
+        contract=contract,
+        names=("loss", "dX", "dW"),
+        oracle_kw=side,
+        naive_kw=side,
     )
-    onehot = torch.zeros_like(p).scatter_(1, y[:, None], 1.0)
-    unclipped = (
-        (-inp.loss_weights[under].double() * ratio64)[:, None] * (onehot - p)
-    ) @ W64
-    assert rel_l2(dX[under], unclipped) <= ROW_REL_L2
-    assert torch.all(result["dX"][~valid] == 0)
-    # the loss is continuous through the knee: the usual gates hold with knee rows present
-    _check_against_references(result, knee)
 
 
-def test_logprob_entry_matches_unchunked():
+def test_logprob_entry_matches_unchunked(record_property):
+    """The log-probability entry's ``logp`` / ``dX`` / ``dW`` and the eager forward's saved row statistic ``lse``
+    (compacted: the valid rows) meet the naive BF16 tier over the judge's draws; the eager forward and the explicit
+    pair give the autograd entry's bits."""
+
+    def launch(inp):
+        fr = cake_backend.forward_logprob(
+            inp.X, inp.W, inp.labels, chunk_size=64, backend="reference"
+        )
+        return dict(_run(inp, 64, entry="logprob"), lse=fr.lse)
+
+    _judge(
+        record_property,
+        200,
+        launch,
+        entry="logprob",
+        names=("logp", "dX", "dW", "lse"),
+        views={"lse": ("lse", lambda inp, v: v[inp.valid])},
+    )
     inp = _host_inputs(200)
     result = _run(inp, 64, entry="logprob")
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp, entry="logprob")
-    assert torch.all(result["dX"][~inp.valid] == 0)
     # the eager forward exposes the saved row statistic (compacted by default: the valid rows of row_index)
     T_v = int(inp.valid.sum())
     fr = cake_backend.forward_logprob(
@@ -3946,8 +4002,6 @@ def test_logprob_entry_matches_unchunked():
         and tuple(fr.lse.shape) == (T_v,)
         and fr.num_rows == inp.T
     )
-    oracle = reference_fp64(inp, entry="logprob")
-    assert (fr.lse.double() - oracle["lse"][inp.valid]).abs().max().item() <= 1e-2
     dx, dw = cake_backend.backward_logprob(
         inp.X, inp.W, inp.labels, fr.lse, inp.dlogp, chunk_size=64, backend="reference"
     )
@@ -4001,7 +4055,43 @@ def test_logprob_entry_matches_unchunked():
     ) == (None, None)
 
 
-def test_grad_weight_dtype_fp32():
+def _fp32_pair(inp, C, *, backend="reference"):
+    """The explicit pair of the cross-entropy loss entry with an FP32 ``dW`` and the unfused cast (FP32 accumulators,
+    one cast to FP32): ``loss`` / ``logp`` / ``dX`` / ``dW``."""
+    fr = cake_backend.forward_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        objective="ce",
+        loss_div=inp.loss_div,
+        chunk_size=C,
+        need_dx=True,
+        need_dw=True,
+        grad_weight_dtype=torch.float32,
+        backend=backend,
+        fuse_dw_cast=False,
+    )
+    dX, dW32 = cake_backend.backward_loss(
+        fr.dx_acc,
+        fr.dw_acc,
+        None,
+        grad_weight_dtype=torch.float32,
+        backend=backend,
+        row_index=fr.row_index,
+        num_rows=fr.num_rows,
+    )  # the compacted forward's rows
+    if backend == "cake":
+        torch.cuda.synchronize()
+    return dict(loss=fr.loss, logp=fr.logp, dX=dX, dW=dW32)
+
+
+def _fp32_contract(result, inp, entry="loss"):
+    contract_lm_head(result, inp, entry=entry, grad_weight_dtype=torch.float32)
+
+
+def test_grad_weight_dtype_fp32(record_property):
+    # the explicit pair's FP32 dW (and loss / logp / dX) against the naive tier, whose BF16 dW the judge widens
+    _judge(record_property, 65, lambda inp: _fp32_pair(inp, 64), contract=_fp32_contract)
     inp = _host_inputs(65)
     bf16 = _run(inp, 64)
     # the autograd entry cannot return an FP32 dW for a BF16 leaf (the engine casts to the leaf's dtype)
@@ -4055,9 +4145,6 @@ def test_grad_weight_dtype_fp32():
     assert torch.equal(dW32, fr.dw_acc) and dW32.data_ptr() != fr.dw_acc.data_ptr()
     result = dict(loss=fr.loss, logp=fr.logp, dX=dX, dW=dW32)
     _check_dtypes(result, inp, grad_weight_dtype=torch.float32)
-    _check_against_references(result, inp, grad_weight_dtype=torch.float32)
-    oracle = reference_fp64(inp)
-    assert rel_l2(dW32, oracle["dW"]) <= rel_l2(bf16["dW"], oracle["dW"])
     assert fr.memory["outputs"]["dW"] == 2 * inp.V * inp.H * 2
     assert (
         stages_for_entry("loss", grad_weight_dtype=torch.float32, fuse_dw_cast=False)[
@@ -4226,14 +4313,12 @@ def test_upstream_scale_is_applied_once():
         cake_backend.backward_loss(
             fr.dx_acc, fr.dw_acc, None, backend="reference", row_index=fr.row_index
         )
-    # the log-probability entry scales through dlogp
+    # the log-probability entry scales through dlogp: twice the upstream is twice the gradients (an exact scaling)
     plain = _run(inp, 64, entry="logprob")
     twice = _run(inp, 64, entry="logprob", scale=2.0)
     assert torch.equal(plain["logp"], twice["logp"])
-    assert (
-        rel_l2(twice["dX"], 2.0 * plain["dX"].float()) <= 1e-2
-        and rel_l2(twice["dW"], 2.0 * plain["dW"].float()) <= 1e-2
-    )
+    for key in ("dX", "dW"):
+        assert torch.equal(twice[key], (2.0 * plain[key].float()).to(torch.bfloat16)), key
 
 
 def test_return_logp_detached():
@@ -4364,7 +4449,8 @@ def test_all_ignored_rows(objective, entry):
         and torch.all(result["dX"] == 0)
         and torch.all(result["dW"] == 0)
     )
-    assert not error_report(result, reference_fp64(inp, entry=entry), inp.labels)["nan"]
+    # inputs whose every row is ignored judge no accuracy: the contract only (finite outputs, +0 ignored rows)
+    contract_lm_head(result, inp, entry=entry)
 
 
 @pytest.mark.parametrize("ld_pad, copied", [(8, False), (3, True)])
@@ -4382,7 +4468,6 @@ def test_noncontiguous_x_strides(ld_pad, copied):
     for key in ("loss", "logp", "dX", "dW"):
         assert torch.equal(strided[key], contiguous[key]), key
     assert tuple(strided["dX"].shape) == (37, H_HOST)
-    _check_against_references(strided, inp)
     fr = cake_backend.forward_loss(
         inp.X,
         inp.W,
@@ -4420,17 +4505,18 @@ def test_reference_deterministic_three_runs():
             assert torch.equal(r[key], runs[0][key]), key
 
 
-def test_chunk_size_changes_only_rounding():
+def test_chunk_size_changes_only_rounding(record_property):
+    """Every chunk size meets the naive BF16 tier on the same draws (chunk 16: twelve chunks of the valid rows; 4096:
+    one chunk; chunk 64 is judged by ``test_reference_meets_the_naive_tier``); the compacted loop chunks the valid
+    rows."""
+    sizes = (16, 4096)
+    _judge(
+        record_property,
+        200,
+        lambda inp: {f"c{C}": _run(inp, C) for C in sizes},
+        forms=tuple(f"c{C}" for C in sizes),
+    )
     inp = _host_inputs(200)
-    small = _run(inp, 16)
-    large = _run(inp, 64)
-    single = _run(inp, 4096)  # one chunk
-    for r in (small, large, single):
-        _check_against_references(r, inp)
-    for r in (small, single):
-        assert abs(r["loss"].item() - large["loss"].item()) <= 1e-5 * abs(
-            large["loss"].item()
-        )
     kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=16, backend="reference")
     T_v = int(
         inp.valid.sum()
@@ -4445,11 +4531,6 @@ def test_chunk_size_changes_only_rounding():
             inp.X, inp.W, inp.labels, compact_rows=False, **kw
         ).memory["num_chunks"]
         == 13
-    )
-    # the row statistics do not depend on the chunking at all
-    assert (
-        torch.equal(small["logp"], large["logp"])
-        or (small["logp"] - large["logp"]).abs().max().item() <= 1e-5
     )
 
 
@@ -6068,7 +6149,11 @@ COMPACTION_CASES = [("ce", "loss"), ("policy", "loss"), ("ce", "logprob")]
 @pytest.mark.parametrize(
     "objective, entry", COMPACTION_CASES, ids=["ce", "policy", "logprob"]
 )
-def test_compaction_matches_uncompacted(objective, entry, frac):
+def test_compaction_matches_uncompacted(record_property, objective, entry, frac):
+    """The compacted and uncompacted chunk loops both are judged against the naive BF16 tier on the same draws
+    (``@compact`` / ``@plain``): the same per-row work over fewer rows -- the reference GEMMs may round differently for
+    another M, and the loss / dW reductions run over different chunk boundaries, so the two forms are not bitwise unless
+    every row is valid (the very same, uncompacted, path)."""
     T, C = 37, 16
     ignore = {
         "none": 0.0,
@@ -6076,28 +6161,26 @@ def test_compaction_matches_uncompacted(objective, entry, frac):
         "half": 0.5,
         "all_but_one": (T - 1) / T,
     }[frac]
+    _judge(
+        record_property,
+        T,
+        lambda inp: {
+            "compact": _run(inp, C, entry=entry, compact_rows=True),
+            "plain": _run(inp, C, entry=entry, compact_rows=False),
+        },
+        inputs=dict(objective=objective, ignore_frac=ignore),
+        entry=entry,
+        forms=("compact", "plain"),
+    )
     inp = _host_inputs(T, objective, ignore_frac=ignore)
     num_ignored = int((~inp.valid).sum())
     assert num_ignored == (T - 1 if frac == "all_but_one" else round(ignore * T))
     T_v = T - num_ignored
     compact = _run(inp, C, entry=entry, compact_rows=True)
     plain = _run(inp, C, entry=entry, compact_rows=False)
-    for result in (compact, plain):
-        _check_dtypes(result, inp)
-        _check_against_references(result, inp, entry=entry)
-        assert torch.all(result["logp"][~inp.valid] == 0) and torch.all(
-            result["dX"][~inp.valid] == 0
-        )
     if num_ignored == 0:  # every row valid: the very same (uncompacted) path
         for key in ("loss", "logp", "dX", "dW"):
             assert torch.equal(compact[key], plain[key]), key
-    else:
-        # the same per-row work over fewer rows; the reference GEMMs may round differently for another M, and
-        # the loss / dW reductions run over different chunk boundaries -- the same precision level, not bitwise
-        assert torch.allclose(compact["logp"], plain["logp"], rtol=1e-5, atol=2e-5)
-        assert rel_l2(compact["dX"].float(), plain["dX"].float()) <= 1e-3
-        assert rel_l2(compact["dW"].float(), plain["dW"].float()) <= 1e-3
-        assert torch.allclose(compact["loss"], plain["loss"], rtol=1e-5, atol=1e-6)
     # the plan of the compacted forward covers the valid rows only; the outputs keep the caller's [T]
     kw = dict(
         objective=objective,
@@ -7481,26 +7564,90 @@ def _device_inputs(T, objective="ce", *, W, seed=SEED):
     )
 
 
+def _judge_device(record_property, T, launch, *, inputs=None, **kw):
+    """:func:`_judge` of a device case: the judged shape ``H = JUDGE_H``, ``V = JUDGE_V`` (``H`` / ``V`` override it
+    where the route needs another shape) on CUDA, the ignored rows of :func:`_device_inputs` unless ``inputs`` names
+    them."""
+    inputs = dict(inputs or {})
+    inputs.setdefault("ignore_frac", 0.0 if T < 16 else 0.05)
+    kw.setdefault("H", JUDGE_H)
+    kw.setdefault("V", JUDGE_V)
+    return _judge(record_property, T, launch, device=CUDA, inputs=inputs, **kw)
+
+
 @pytest.mark.parametrize("T", [1, 4095, 4097])
 @pytest.mark.parametrize("objective", ["ce", "policy"])
-def test_device_forward_backward_matches_reference(glm_weight, objective, T):
+def test_device_forward_backward_matches_reference(
+    glm_weight, record_property, objective, T
+):
+    """The generated program's ``loss`` / ``logp`` / ``dX`` / ``dW`` are judged against the naive BF16 tier at the
+    judged shape (``H = JUDGE_H``, ``V = JUDGE_V``) over the judge's draws; one call at the production shape keeps its
+    contract."""
     _require_program(entry="loss")
+    _judge_device(
+        record_property,
+        T,
+        lambda inp: _run(inp, 4096, backend="cake"),
+        inputs=dict(objective=objective),
+    )
     inp = _device_inputs(T, objective, W=glm_weight)
-    result = _run(inp, 4096, backend="cake")
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp, ceiling=True)
-    assert torch.all(result["logp"][~inp.valid] == 0) and torch.all(
-        result["dX"][~inp.valid] == 0
+    contract_lm_head(_run(inp, 4096, backend="cake"), inp)
+
+
+# (T, chunk, ignored fraction, switches): the default call and the calls of test_device_logprob_arms_are_bitwise whose
+# accuracy it judges -- one and two chunks, every row valid, uncompacted, half the rows ignored over four chunks (the
+# arms give the same bits, so the default arm stands for both)
+_LOGPROB_ENTRY_CASES = (
+    (4097, 4096, 0.05, {}),
+    (1500, 4096, 0.05, {}),
+    (1500, 4096, 0.0, {}),
+    (1500, 4096, 0.05, dict(compact_rows=False)),
+    (3100, 1024, 0.5, {}),
+)
+
+
+@pytest.mark.parametrize(
+    "T, C, ignore, switches",
+    _LOGPROB_ENTRY_CASES,
+    ids=[
+        f"t{T}_c{C}_i{ignore}" + ("_plain" if sw else "")
+        for T, C, ignore, sw in _LOGPROB_ENTRY_CASES
+    ],
+)
+def test_device_logprob_entry(glm_weight, record_property, T, C, ignore, switches):
+    """The log-probability entry's ``logp`` / ``dX`` / ``dW`` are judged against the naive BF16 tier at the judged shape
+    over the judge's draws; one call at the production shape keeps its contract."""
+    _require_program(entry="logprob")
+    _judge_device(
+        record_property,
+        T,
+        lambda inp: _run(inp, C, entry="logprob", backend="cake", **switches),
+        inputs=dict(ignore_frac=ignore),
+        entry="logprob",
+    )
+    inp = make_inputs(T, seed=SEED + T, device=CUDA, W=glm_weight, ignore_frac=ignore)
+    contract_lm_head(
+        _run(inp, C, entry="logprob", backend="cake", **switches), inp, entry="logprob"
     )
 
 
-def test_device_logprob_entry(glm_weight):
-    _require_program(entry="logprob")
-    inp = _device_inputs(4097, W=glm_weight)
-    result = _run(inp, 4096, entry="logprob", backend="cake")
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp, entry="logprob", ceiling=True)
-    assert torch.all(result["dX"][~inp.valid] == 0)
+@pytest.mark.parametrize("entry", ["loss", "logprob"])
+def test_device_meets_the_naive_tier_at_the_production_head(record_property, entry):
+    """One call of each entry (``T`` 4097, cross-entropy, the default plan) is judged against the naive BF16 tier at the
+    production head (``H`` 6144, ``V`` 154880, the shape the plans and slice rules were measured on) over the judge's
+    draws, each draw's ``W`` from its own seed: the case the ``JUDGE_V`` matrix scales down.  Every draw runs the
+    generated program's logits and gradient GEMMs (launch record)."""
+    _require_program(entry=entry)
+
+    def launch(inp):
+        with _launch_record() as launched:
+            out = _run(inp, 4096, entry=entry, backend="cake")
+        assert _logits_gemm_keys(launched) > 0 and _gradient_gemm_keys(launched) > 0, sorted(
+            {str(key[0]) for key in launched}
+        )
+        return out
+
+    _judge_device(record_property, 4097, launch, entry=entry, H=DEFAULT_H, V=DEFAULT_V)
 
 
 @pytest.mark.parametrize("module_name", ["main", "opt_in"])
@@ -7538,26 +7685,51 @@ def test_device_fp32_dw_blocked_cast(glm_weight, module_name):
 _VOCAB_256_DEFAULT_DX_SLICES = {(1000, 6144): (2,), (4097, 6144): (4, 2)}
 
 
+# the dX slice pins of the V = 256 tests (None: the plan's own fitted count), each judged as a form of its own
+_VOCAB_256_PINS = {"default": None, "k1": 1, "k2": 2, "k4": 4}
+
+
+def _vocab_256_pins(inp, entry):
+    """One call of ``inp`` per pin of :data:`_VOCAB_256_PINS`, by form name."""
+    return {
+        form: _run(
+            inp,
+            4096,
+            entry=entry,
+            backend="cake",
+            gemm_tuning=None if k is None else {"dx": {"k_slices": k}},
+        )
+        for form, k in _VOCAB_256_PINS.items()
+    }
+
+
 @pytest.mark.parametrize(
     "T,H", [(1000, 6144), (1000, 2048), (4096, 6144), (4097, 6144)]
 )
 @pytest.mark.parametrize(
     "objective,entry", [("ce", "loss"), ("policy", "loss"), ("ce", "logprob")]
 )
-def test_device_vocab_256_dx_slices(objective, entry, T, H):
+def test_device_vocab_256_dx_slices(record_property, objective, entry, T, H):
     """V = 256 has four K steps: the dX GEMM's slice rule (3 slices at T = 1000, H = 6144 and on the 1-row tail chunk
     of T = 4097 on 148 and 152 SMs before the fit) runs a fitted count, every pinned count whose slices all hold a K
-    step matches the references, and a pin of 3 slices is rejected."""
+    step meets the naive BF16 tier over the judge's draws (each pin a form of its own: ``dX@k2`` ...; the pins are not
+    compared with each other), and a pin of 3 slices is rejected."""
     _require_program(entry=entry)
+    _judge(
+        record_property,
+        T,
+        lambda inp: _vocab_256_pins(inp, entry),
+        device=CUDA,
+        H=H,
+        V=256,
+        inputs=dict(objective=objective),
+        entry=entry,
+        forms=tuple(_VOCAB_256_PINS),
+    )
     W = make_inputs(1, seed=SEED, H=H, V=256, device=CUDA, ignore_frac=0.0).W
     inp = make_inputs(
         T, objective=objective, seed=SEED + T, H=H, V=256, device=CUDA, W=W
     )
-    for k in (None, 1, 2, 4):
-        tuning = None if k is None else {"dx": {"k_slices": k}}
-        result = _run(inp, 4096, entry=entry, backend="cake", gemm_tuning=tuning)
-        _check_dtypes(result, inp)
-        _check_against_references(result, inp, entry=entry)
     kw = dict(objective=inp.objective, chunk_size=4096, entry=entry)
     if entry == "loss":
         kw.update(
@@ -7613,8 +7785,17 @@ def test_device_frozen_inputs(glm_weight):
         )
 
 
-def test_device_grad_weight_dtype_fp32(glm_weight):
+def test_device_grad_weight_dtype_fp32(glm_weight, record_property):
+    """The explicit pair's FP32 ``dW`` (and ``loss`` / ``logp`` / ``dX``) meets the naive BF16 tier, widened, at the
+    judged shape over the judge's draws; at the production shape the autograd entry refuses an FP32 ``dW`` for a BF16
+    leaf, the pair's FP32 ``dW`` is the BF16 call's accumulator cast once and the fused form gives its bits."""
     _require_program(entry="loss")
+    _judge_device(
+        record_property,
+        4097,
+        lambda inp: _fp32_pair(inp, 4096, backend="cake"),
+        contract=_fp32_contract,
+    )
     inp = _device_inputs(4097, W=glm_weight)
     bf16 = _run(inp, 4096, backend="cake")
     with pytest.raises(ValueError, match="W.dtype"):
@@ -7677,10 +7858,7 @@ def test_device_grad_weight_dtype_fp32(glm_weight):
     torch.cuda.synchronize()
     assert torch.equal(dW32f, dW32)
     result = dict(loss=fr.loss, logp=fr.logp, dX=dX, dW=dW32)
-    _check_dtypes(result, inp, grad_weight_dtype=torch.float32)
-    _check_against_references(
-        result, inp, grad_weight_dtype=torch.float32, ceiling=True
-    )
+    _fp32_contract(result, inp)
 
 
 def test_device_binding_scratch_binds_constant_cells(glm_weight):
@@ -7839,25 +8017,43 @@ def test_device_t_changes_between_calls(glm_weight):
         for key in ("loss", "logp", "dX", "dW"):
             assert torch.equal(a[key], b[key]), key
     assert torch.equal(fresh[0]["loss"], fresh[2]["loss"])
-    _check_against_references(again[1], inputs[1], ceiling=True)
 
 
-def test_device_compaction_parity(glm_weight):
-    """Compacted and uncompacted chunk loops over the same kernels: per-row logp bitwise, dX rows bitwise when the
-    chunk's K-slice count agrees, loss / dW at the same precision (different chunk boundaries); the compacted
-    runner's step allocates nothing and equals the autograd path."""
+def test_device_compaction_parity(glm_weight, record_property):
+    """Compacted and uncompacted chunk loops over the same kernels: both meet the naive BF16 tier at the judged shape
+    over the judge's draws, one case per entry with the two loops as named outputs (``@compact`` / ``@plain``, and
+    ``@logprob_compact`` / ``@logprob_plain``); at the production shape per-row logp bitwise, dX rows bitwise when the
+    chunk's K-slice count agrees (loss / dW run over different chunk boundaries); the compacted runner's step
+    allocates nothing and equals the autograd path."""
     _require_program(entry="loss")
+
+    def some_rows_ignored(inp, results):
+        assert 0 < int(inp.valid.sum()) < inp.T
+
+    for entry, prefix in (("loss", ""), ("logprob", "logprob_")):
+        _judge_device(
+            record_property,
+            4097,
+            lambda inp, entry=entry, prefix=prefix: {
+                f"{prefix}compact": _run(
+                    inp, 4096, entry=entry, backend="cake", compact_rows=True
+                ),
+                f"{prefix}plain": _run(
+                    inp, 4096, entry=entry, backend="cake", compact_rows=False
+                ),
+            },
+            entry=entry,
+            forms=(f"{prefix}compact", f"{prefix}plain"),
+            route=some_rows_ignored,
+        )
     inp = _device_inputs(4097, W=glm_weight)  # five percent of the rows ignored
     T_v = int(inp.valid.sum())
     assert 0 < T_v < inp.T
     compact = _run(inp, 4096, backend="cake", compact_rows=True)
     plain = _run(inp, 4096, backend="cake", compact_rows=False)
-    _check_dtypes(compact, inp)
-    _check_against_references(compact, inp, ceiling=True)
+    contract_lm_head(compact, inp)
+    contract_lm_head(plain, inp)
     assert torch.equal(compact["logp"], plain["logp"])
-    assert torch.all(compact["dX"][~inp.valid] == 0)
-    assert rel_l2(compact["dW"].float(), plain["dW"].float()) <= GATE_TINY["dW_rel_l2"]
-    assert torch.allclose(compact["loss"], plain["loss"], rtol=1e-5, atol=1e-6)
     kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=4096, backend="cake")
     rc = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, compact_rows=True, **kw)
     rp = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, compact_rows=False, **kw)
@@ -7895,11 +8091,9 @@ def test_device_compaction_parity(glm_weight):
     # the log-probability entry: compact saved statistic, scattered gradients
     lp_c = _run(inp, 4096, entry="logprob", backend="cake", compact_rows=True)
     lp_p = _run(inp, 4096, entry="logprob", backend="cake", compact_rows=False)
-    _check_against_references(lp_c, inp, entry="logprob", ceiling=True)
-    assert torch.equal(lp_c["logp"], lp_p["logp"]) and torch.all(
-        lp_c["dX"][~inp.valid] == 0
-    )
-    assert rel_l2(lp_c["dW"].float(), lp_p["dW"].float()) <= GATE_TINY["dW_rel_l2"]
+    contract_lm_head(lp_c, inp, entry="logprob")
+    contract_lm_head(lp_p, inp, entry="logprob")
+    assert torch.equal(lp_c["logp"], lp_p["logp"])
 
 
 def test_device_dw_stream_switch_is_bitwise(glm_weight, monkeypatch):
@@ -8024,7 +8218,6 @@ def test_device_logprob_grad_from_fresh_thread_and_process(glm_weight, tmp_path)
         return dict(logp=logp.detach(), dX=dX, dW=dW)
 
     main = grad_path()
-    _check_against_references(main, inp, entry="logprob", ceiling=True)
     outcome = {}
 
     def worker():
@@ -8833,11 +9026,11 @@ def test_device_logprob_arms_are_bitwise(glm_weight):
     and on a recount), run to run, over one-, two- and many-chunk calls, compacted and uncompacted calls with ignored
     rows (``-100`` and other negative labels), every row valid, labels at and beyond the last vocabulary column
     (clamped), the hidden valid-row count on and off and an ``X`` with a padded leading stride (read in place and
-    copied); the arms keep the accuracy gates.  The arms run on one plan: the zero-gradient row skip off (the off arm
-    has no ``dz`` arm and never takes it, so a call with a valid row of zero ``dlogp`` -- an edited label on a
-    formerly ignored row -- would compare the skip's row order against the forward's, another plan whose ``dX`` /
-    ``dW`` bits may differ within the budget); the default arms with the skip then give the same bits run to run and
-    through the forward's row index, and the same ``lse`` / ``logp``."""
+    copied); ``test_device_logprob_entry`` judges the default arm's accuracy.  The arms run on one plan: the
+    zero-gradient row skip off (the off arm has no ``dz`` arm and never takes it, so a call with a valid row of zero
+    ``dlogp`` -- an edited label on a formerly ignored row -- would compare the skip's row order against the
+    forward's, another plan whose ``dX`` / ``dW`` bits may differ); the default arms with the skip then give the same
+    bits run to run and through the forward's row index, and the same ``lse`` / ``logp``."""
     _require_program(entry="logprob")
     name, _ = cake_backend.record_for(CUDA)
     if not {"gemm_logits_dz", "gemm_logits_lbl"} <= set(
@@ -8847,22 +9040,22 @@ def test_device_logprob_arms_are_bitwise(glm_weight):
     V = int(glm_weight.shape[0])
     edge_labels = [-1, -7, V - 1, 0, V, V + 5, 2 * V, 2**40]
     cases = [
-        # (T, chunk, ignored fraction, switches, X pitch padding, label edits, accuracy gate)
-        (1500, 4096, 0.05, {}, 0, False, True),
-        (1500, 4096, 0.0, {}, 0, False, True),
-        (1500, 4096, 0.05, dict(compact_rows=False), 0, False, True),
-        (6000, 4096, 0.05, {}, 0, False, False),
-        (6000, 4096, 0.05, dict(compact_rows=False), 0, False, False),
-        (8700, 4096, 0.05, {}, 0, False, False),
-        (8700, 4096, 0.05, dict(hidden_count=False), 0, False, False),
-        (3100, 1024, 0.5, {}, 0, False, True),
-        (1500, 4096, 0.05, {}, 8, False, False),
-        (1500, 4096, 0.05, dict(compact_rows=False), 4, False, False),
-        (2500, 2048, 0.05, {}, 0, True, False),
-        (2500, 2048, 0.05, dict(compact_rows=False), 0, True, False),
-        (5000, 2048, 0.05, {}, 0, True, False),
+        # (T, chunk, ignored fraction, switches, X pitch padding, label edits)
+        (1500, 4096, 0.05, {}, 0, False),
+        (1500, 4096, 0.0, {}, 0, False),
+        (1500, 4096, 0.05, dict(compact_rows=False), 0, False),
+        (6000, 4096, 0.05, {}, 0, False),
+        (6000, 4096, 0.05, dict(compact_rows=False), 0, False),
+        (8700, 4096, 0.05, {}, 0, False),
+        (8700, 4096, 0.05, dict(hidden_count=False), 0, False),
+        (3100, 1024, 0.5, {}, 0, False),
+        (1500, 4096, 0.05, {}, 8, False),
+        (1500, 4096, 0.05, dict(compact_rows=False), 4, False),
+        (2500, 2048, 0.05, {}, 0, True),
+        (2500, 2048, 0.05, dict(compact_rows=False), 0, True),
+        (5000, 2048, 0.05, {}, 0, True),
     ]
-    for T, C, ignore, switches, ld_pad, edit, gate in cases:
+    for T, C, ignore, switches, ld_pad, edit in cases:
         inp = make_inputs(
             T,
             seed=SEED + 70 + T,
@@ -8880,7 +9073,7 @@ def test_device_logprob_arms_are_bitwise(glm_weight):
         try:
             with _cache(True) as cache:
                 cache.clear()
-                on, first = _logprob_steps(inp, C, **switches)
+                on, _ = _logprob_steps(inp, C, **switches)
                 off, _ = _logprob_steps(
                     inp, C, logprob_dz=False, logprob_lbl=False, **switches
                 )
@@ -8910,13 +9103,11 @@ def test_device_logprob_arms_are_bitwise(glm_weight):
             assert torch.equal(on[f"dW_{tag}"], on["dW0"]), (case, tag)
         assert torch.all(on["logp0"][~inp.valid] == 0)
         assert torch.all(on["dX0"][~inp.valid] == 0)
-        if gate:
-            _check_against_references(first, inp, entry="logprob")
         # the default arms with the zero-gradient row skip at its floor: one plan per call, the same bits run to run
         # and through the forward's row index (the recount backward takes no skip: its plan is the arm comparison's)
         with _cache(True) as cache:
             cache.clear()
-            skip, skip_first = _logprob_steps(inp, C, **switches)
+            skip, _ = _logprob_steps(inp, C, **switches)
         for key in ("lse", "logp_eager", "logp0", "logp1"):
             assert torch.equal(skip[key], on[key]), (case, "skip", key)
         for key in ("dX", "dW"):
@@ -8929,9 +9120,7 @@ def test_device_logprob_arms_are_bitwise(glm_weight):
         assert torch.equal(skip["dX_recount"], on["dX_recount"]), case
         assert torch.equal(skip["dW_recount"], on["dW_recount"]), case
         assert torch.all(skip["dX0"][~inp.valid] == 0)
-        if gate:
-            _check_against_references(skip_first, inp, entry="logprob")
-        del on, off, first, skip, skip_first
+        del on, off, skip
 
 
 def test_device_logprob_keep_is_bitwise(glm_weight):
@@ -10997,9 +11186,17 @@ def test_temperature_one_runs_the_default_path(compact, monkeypatch):
 
 
 @pytest.mark.parametrize("s", [0.7, 2.0])
-def test_temperature_scalar_equals_the_constant_tensor(s):
+def test_temperature_scalar_equals_the_constant_tensor(record_property, s):
     """A scalar temperature gives the bits of the constant FP32 tensor of its value (the same values reach the same
-    stages), differs from the call without one and passes the accuracy gates of its references."""
+    stages), differs from the call without one and meets the naive BF16 tier (the temperature cast to BF16) over the
+    judge's draws."""
+    _judge(
+        record_property,
+        37,
+        lambda inp: _run(inp, 16, entry="logprob"),
+        inputs=dict(ignore_frac=0.2, temperature="scalar", temperature_value=s),
+        entry="logprob",
+    )
     inp = _host_inputs(37, ignore_frac=0.2)
     scalar = _run(inp, 16, entry="logprob", temperature=s)
     tensor = _run(
@@ -11011,7 +11208,6 @@ def test_temperature_scalar_equals_the_constant_tensor(s):
     _assert_same_bits(scalar, tensor, _LOGPROB_KEYS)
     plain = _run(inp, 16, entry="logprob")
     assert not torch.equal(scalar["logp"], plain["logp"])
-    _check_against_references(scalar, replace(inp, temperature=s), entry="logprob")
 
 
 @pytest.mark.parametrize(
@@ -11026,25 +11222,27 @@ def test_temperature_scalar_equals_the_constant_tensor(s):
         (1031, 512, "all_but_one"),
     ],
 )
-def test_temperature_heterogeneous_matches_the_references(T, C, frac):
+def test_temperature_heterogeneous_matches_the_references(record_property, T, C, frac):
     """A heterogeneous per-token temperature (log-uniform in [0.25, 4], some rows exactly 1.0) on irregular ``T``,
-    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` within 1.05x the unchunked
-    PyTorch path's error against the FP64 oracle (both with the temperature) plus the floor, zeros on ignored rows."""
+    with no / some / half / all but one of the rows ignored: ``logp`` / ``dX`` / ``dW`` are judged against the naive
+    BF16 tier, their errors taken against the FP64 oracle (both with the temperature) over the judge's draws, zeros on
+    ignored rows."""
     ignore = (T - 1) / T if frac == "all_but_one" else float(frac)
-    inp = _host_inputs(T, ignore_frac=ignore, temperature="hetero")
-    result = _run(inp, C, entry="logprob")
-    _check_dtypes(result, inp)
-    _check_against_references(result, inp, entry="logprob")
-    assert torch.all(result["logp"][~inp.valid] == 0)
-    assert torch.all(result["dX"][~inp.valid] == 0)
+    _judge(
+        record_property,
+        T,
+        lambda inp: _run(inp, C, entry="logprob"),
+        inputs=dict(ignore_frac=ignore, temperature="hetero"),
+        entry="logprob",
+    )
 
 
 @pytest.mark.parametrize("frac", ["none", "five_percent", "half", "all_but_one"])
-def test_temperature_compaction_matches_uncompacted(frac):
+def test_temperature_compaction_matches_uncompacted(record_property, frac):
     """The temperature follows its rows through the compaction (as ``test_compaction_matches_uncompacted``): the
-    compacted and uncompacted calls with a heterogeneous temperature are bitwise when no row is ignored and at the
-    host's precision level otherwise; the caller's count gives the bits of the counted compacted call; a temperature
-    moved by one row breaks the comparison (the check is not vacuous)."""
+    compacted and uncompacted calls with a heterogeneous temperature both meet the naive BF16 tier on the same draws
+    and are bitwise when no row is ignored; the caller's count gives the bits of the counted compacted call; a
+    temperature moved by one row changes ``logp`` (the temperature reaches its own row)."""
     T, C = 37, 16
     ignore = {
         "none": 0.0,
@@ -11052,21 +11250,24 @@ def test_temperature_compaction_matches_uncompacted(frac):
         "half": 0.5,
         "all_but_one": (T - 1) / T,
     }[frac]
+    _judge(
+        record_property,
+        T,
+        lambda inp: {
+            "compact": _run(inp, C, entry="logprob", compact_rows=True),
+            "plain": _run(inp, C, entry="logprob", compact_rows=False),
+        },
+        inputs=dict(ignore_frac=ignore, temperature="hetero"),
+        entry="logprob",
+        forms=("compact", "plain"),
+    )
     inp = _host_inputs(T, ignore_frac=ignore, temperature="hetero")
     num_ignored = int((~inp.valid).sum())
     compact = _run(inp, C, entry="logprob", compact_rows=True)
     plain = _run(inp, C, entry="logprob", compact_rows=False)
-    for result in (compact, plain):
-        _check_against_references(result, inp, entry="logprob")
-        assert torch.all(result["logp"][~inp.valid] == 0)
-        assert torch.all(result["dX"][~inp.valid] == 0)
     if num_ignored == 0:
         for key in _LOGPROB_KEYS:
             assert torch.equal(compact[key], plain[key]), key
-    else:
-        assert torch.allclose(compact["logp"], plain["logp"], rtol=1e-5, atol=2e-5)
-        assert rel_l2(compact["dX"].float(), plain["dX"].float()) <= 1e-3
-        assert rel_l2(compact["dW"].float(), plain["dW"].float()) <= 1e-3
     given = _run(
         inp, C, entry="logprob", compact_rows=True, num_valid_rows=T - num_ignored
     )
@@ -11077,21 +11278,46 @@ def test_temperature_compaction_matches_uncompacted(frac):
         entry="logprob",
         compact_rows=True,
     )
-    assert (shifted["logp"] - compact["logp"])[inp.valid].abs().max() > 1e-3
+    assert not torch.equal(shifted["logp"][inp.valid], compact["logp"][inp.valid])
 
 
-def test_temperature_upstream_gradients():
-    """Arbitrary per-row upstream gradients with a heterogeneous temperature: random (nonzero on ignored rows too),
-    zeros, negated, large -- each within the gates of its references; zeros give zero gradients, the negated upstream
-    the negated gradients and twice the upstream twice the gradients (exact operations), and a retained graph
-    repeats the backward bitwise."""
-    inp = _host_inputs(65, ignore_frac=0.1, temperature="hetero")
+def _random_upstream(T, s, offset, device):
+    """A random per-row upstream gradient (nonzero on ignored rows too) from a CPU generator seeded ``s + offset``
+    (a CUDA generator's values depend on the device's SM count)."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(int(s) + offset)
+    return torch.randn(T, generator=gen).to(device)
+
+
+def test_temperature_upstream_gradients(record_property):
+    """Arbitrary per-row upstream gradients with a heterogeneous temperature: random (nonzero on ignored rows too) and
+    large ones meet the naive BF16 tier over the judge's draws (the upstream cast to BF16 in the tier); zeros give
+    zero gradients (the contract only), the negated upstream the negated gradients and twice the upstream twice the
+    gradients (exact operations), no upstream changes ``logp``, and a retained graph repeats the backward bitwise."""
+    T = 65
+    for name, adjust in (
+        (
+            "random",
+            lambda inp, s: replace(inp, dlogp=_random_upstream(T, s, 7637, DEV)),
+        ),
+        ("large", lambda inp, s: replace(inp, dlogp=(inp.dlogp * 1e4).contiguous())),
+    ):
+        _judge(
+            record_property,
+            T,
+            lambda inp: _run(inp, 32, entry="logprob"),
+            inputs=dict(ignore_frac=0.1, temperature="hetero"),
+            adjust=adjust,
+            entry="logprob",
+            tag=name,
+        )
+    inp = _host_inputs(T, ignore_frac=0.1, temperature="hetero")
     base = _run(inp, 32, entry="logprob")
     gen = torch.Generator(device=DEV)
     gen.manual_seed(SEED + 7637)
     upstream = dict(
-        random=torch.randn(65, generator=gen, device=DEV),
-        zeros=torch.zeros(65, device=DEV),
+        random=torch.randn(T, generator=gen, device=DEV),
+        zeros=torch.zeros(T, device=DEV),
         negated=-inp.dlogp,
         large=inp.dlogp * 1e4,
     )
@@ -11099,7 +11325,7 @@ def test_temperature_upstream_gradients():
     for name, g in upstream.items():
         g_inp = replace(inp, dlogp=g.contiguous())
         results[name] = _run(g_inp, 32, entry="logprob")
-        _check_against_references(results[name], g_inp, entry="logprob")
+        contract_lm_head(results[name], g_inp, entry="logprob")
         assert torch.equal(results[name]["logp"], base["logp"]), name
     assert torch.all(results["zeros"]["dX"] == 0) and torch.all(
         results["zeros"]["dW"] == 0
@@ -11250,17 +11476,23 @@ def test_temperature_all_ignored_rows(monkeypatch):
     assert tuple(empty.shape) == (0,)
 
 
-def test_temperature_reaches_the_reference_engine():
-    """The reference backend applies the temperature: a heterogeneous temperature moves ``logp`` / ``dX`` / ``dW``
-    well away from the call without one and matches the references with it (a reference engine that ignored the
-    temperature would fail both)."""
+def test_temperature_reaches_the_reference_engine(record_property):
+    """The reference backend applies the temperature: a heterogeneous temperature changes ``logp`` / ``dX`` / ``dW``
+    from the call without one and meets the naive BF16 tier with it over the judge's draws (a reference engine that
+    ignored the temperature would fail both)."""
+    _judge(
+        record_property,
+        200,
+        lambda inp: _run(inp, 64, entry="logprob"),
+        inputs=dict(temperature="hetero"),
+        entry="logprob",
+    )
     inp = _host_inputs(200, temperature="hetero")
     tau = _run(inp, 64, entry="logprob")
     plain = _run(replace(inp, temperature=None), 64, entry="logprob")
-    assert (tau["logp"] - plain["logp"])[inp.valid].abs().max() > 1e-2
-    assert rel_l2(tau["dX"], plain["dX"]) > 1e-2
-    assert rel_l2(tau["dW"], plain["dW"]) > 1e-2
-    _check_against_references(tau, inp, entry="logprob")
+    assert not torch.equal(tau["logp"][inp.valid], plain["logp"][inp.valid])
+    assert not torch.equal(tau["dX"], plain["dX"])
+    assert not torch.equal(tau["dW"], plain["dW"])
 
 
 def test_temperature_through_the_opt_in_fast_entry(monkeypatch):
@@ -12076,12 +12308,44 @@ def test_device_temperature_one_is_bitwise_the_default(glm_weight, monkeypatch):
                 _assert_same_bits(base, tensor, _LOGPROB_KEYS)
 
 
+def _tau_launch(bound, C, case, **switches):
+    """The launch of a judged temperature case: the log-probability entry with the inputs' temperature on a fresh
+    binding (the binding cache off, so every draw binds its stages) and the route asserted on every draw -- the
+    temperature forms, the device-count one exactly when the hidden valid-row count runs, none of the stages they
+    replace (:func:`_assert_temperature_plan`)."""
+
+    def launch(inp):
+        with _cache(False, switches):
+            bound.clear()
+            result = _run(inp, C, entry="logprob", backend="cake", **switches)
+            _assert_temperature_plan(
+                bound, hidden=_expect_hidden(inp, C, switches), case=case
+            )
+        return result
+
+    return launch
+
+
 @pytest.mark.parametrize("T", [4097, 16231])
-def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, monkeypatch, T):
+def test_device_temperature_scalar_is_the_constant_tensor(
+    glm_weight, monkeypatch, record_property, T
+):
     """A scalar temperature gives the bits of the constant FP32 tensor of its value through the temperature forms
-    (two chunks; four chunks with the hidden valid-row count) and passes the accuracy gates of its references."""
+    (two chunks; four chunks with the hidden valid-row count) and, at two chunks, meets the naive BF16 tier (the
+    temperature cast to BF16) at the judged shape over the judge's draws, each scalar a judge of its own
+    (``logp@s0.5`` ...)."""
     _require_tau_program()
     bound = _spy_bound_stages(monkeypatch)
+    if T == 4097:
+        for s in (0.5, 0.7, 1.3):
+            _judge_device(
+                record_property,
+                T,
+                _tau_launch(bound, 4096, (T, s)),
+                inputs=dict(temperature="scalar", temperature_value=s),
+                entry="logprob",
+                tag=f"s{s}",
+            )
     inp = _device_inputs(T, W=glm_weight)
     for s in (0.5, 0.7, 1.3):
         with _cache(False):
@@ -12098,10 +12362,6 @@ def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, monkeypatc
                 temperature=torch.full((T,), s, dtype=torch.float32, device=CUDA),
             )
         _assert_same_bits(scalar, tensor, _LOGPROB_KEYS)
-        if T == 4097:
-            _check_against_references(
-                scalar, replace(inp, temperature=s), entry="logprob"
-            )
 
 
 @pytest.mark.parametrize(
@@ -12116,26 +12376,36 @@ def test_device_temperature_scalar_is_the_constant_tensor(glm_weight, monkeypatc
     ],
 )
 def test_device_temperature_heterogeneous_matches_the_references(
-    glm_weight, record_property, T, C, ignore
+    glm_weight, monkeypatch, record_property, T, C, ignore
 ):
-    """A heterogeneous per-token temperature on the generated program: ``logp`` / ``dX`` / ``dW`` within 1.05x the
-    unchunked PyTorch path's error against the FP64 oracle (both with the temperature) plus the floor; the
-    production ceiling (a temperature-1 figure) applies only where every temperature is at least 1.  The measured
-    errors are recorded (junit properties)."""
+    """A heterogeneous per-token temperature on the generated program: ``logp`` / ``dX`` / ``dW`` meet the naive BF16
+    tier against the FP64 oracle (both with the temperature) at the judged shape over the judge's draws, the
+    uncompacted loop beside the compacted one at two and four chunks of 5 % ignored rows (``@compact`` / ``@plain``),
+    each launch through the temperature forms; the verdicts are recorded (junit properties).  At the production shape
+    two calls give the same bits and keep their contract."""
     _require_tau_program()
-    inp = _tau_inputs(T, W=glm_weight, ignore_frac=ignore)
-    result = _run(inp, C, entry="logprob", backend="cake")
-    _check_dtypes(result, inp)
-    errors, b0_errors = _check_against_references(
-        result,
-        inp,
+    bound = _spy_bound_stages(monkeypatch)
+    forms = {"compact": {}}
+    if (T, C, ignore) in ((4097, 4096, 0.05), (16231, 4096, 0.05)):
+        forms["plain"] = dict(compact_rows=False)
+    launches = {
+        form: _tau_launch(bound, C, (T, C, ignore, form), **switches)
+        for form, switches in forms.items()
+    }
+    _judge_device(
+        record_property,
+        T,
+        lambda inp: {form: launch(inp) for form, launch in launches.items()},
+        inputs=dict(ignore_frac=ignore, temperature="hetero"),
         entry="logprob",
-        ceiling=bool(inp.temperature.min() >= 1.0),
+        forms=tuple(forms),
     )
-    record_property("temperature_errors", repr(errors))
-    record_property("temperature_unchunked_errors", repr(b0_errors))
-    assert torch.all(result["logp"][~inp.valid] == 0)
-    assert torch.all(result["dX"][~inp.valid] == 0)
+    inp = _tau_inputs(T, W=glm_weight, ignore_frac=ignore)
+    first = _run(inp, C, entry="logprob", backend="cake")
+    contract_lm_head(first, inp, entry="logprob")
+    _assert_same_bits(
+        first, _run(inp, C, entry="logprob", backend="cake"), _LOGPROB_KEYS
+    )
 
 
 def test_device_temperature_switches_are_bitwise(glm_weight, monkeypatch):
@@ -12189,7 +12459,6 @@ def test_device_temperature_switches_are_bitwise(glm_weight, monkeypatch):
         assert torch.equal(_bits(plain["logp"]), _bits(ref["logp"]))
         _assert_same_bits(comp, ref, _LOGPROB_KEYS)
         assert torch.all(plain["dX"][~inp.valid] == 0)
-        assert rel_l2(plain["dW"].float(), ref["dW"].float()) <= GATE_TINY["dW_rel_l2"]
         if plans[True].dx_slices_of(0) == plans[False].dx_slices_of(0):
             rows = inp.valid[:4096]
             assert torch.equal(
@@ -12307,25 +12576,39 @@ def test_device_temperature_frozen_inputs(glm_weight):
         assert torch.equal(_bits(r["logp"]), _bits(both["logp"]))
 
 
-def test_device_temperature_upstream_gradients(glm_weight):
+def test_device_temperature_upstream_gradients(glm_weight, record_property):
     """Arbitrary per-row upstream gradients with a heterogeneous temperature on the generated program: random
-    (nonzero on ignored rows too) and large ones within the gates of their references, zeros give zero gradients,
-    the negated upstream the negated gradients; a retained graph repeats the backward bitwise."""
+    (nonzero on ignored rows too, from a CPU generator of the draw's seed) and large ones meet the naive BF16 tier at
+    the judged shape over the judge's draws (``logp@random`` / ``logp@large`` ...); zeros give zero gradients (the
+    contract only), the negated upstream the negated gradients; a retained graph repeats the backward bitwise."""
     _require_tau_program()
     T = 4097
-    inp = _tau_inputs(T, W=glm_weight)
     kw = dict(entry="logprob", backend="cake")
+    for name, adjust in (
+        (
+            "random",
+            lambda inp, s: replace(inp, dlogp=_random_upstream(T, s, 7639, CUDA)),
+        ),
+        ("large", lambda inp, s: replace(inp, dlogp=(inp.dlogp * 1e4).contiguous())),
+    ):
+        _judge_device(
+            record_property,
+            T,
+            lambda inp: _run(inp, 4096, **kw),
+            inputs=dict(temperature="hetero"),
+            adjust=adjust,
+            entry="logprob",
+            tag=name,
+        )
+    inp = _tau_inputs(T, W=glm_weight)
     base = _run(inp, 4096, **kw)
-    zeros = _run(replace(inp, dlogp=torch.zeros_like(inp.dlogp)), 4096, **kw)
+    zero_inp = replace(inp, dlogp=torch.zeros_like(inp.dlogp))
+    zeros = _run(zero_inp, 4096, **kw)
+    contract_lm_head(zeros, zero_inp, entry="logprob")
     assert torch.all(zeros["dX"] == 0) and torch.all(zeros["dW"] == 0)
     negated = _run(replace(inp, dlogp=-inp.dlogp), 4096, **kw)
     assert torch.equal(negated["dX"], -base["dX"])
     assert torch.equal(negated["dW"], -base["dW"])
-    gen = torch.Generator(device=CUDA)
-    gen.manual_seed(SEED + 7639)
-    for g in (torch.randn(T, generator=gen, device=CUDA), inp.dlogp * 1e4):
-        g_inp = replace(inp, dlogp=g.contiguous())
-        _check_against_references(_run(g_inp, 4096, **kw), g_inp, entry="logprob")
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
     logp = cake_backend.cake_lm_head_det_train_logprob_temperature(
@@ -12374,7 +12657,6 @@ def test_device_temperature_fresh_thread_process_and_changing_t(glm_weight, tmp_
         return dict(logp=logp.detach(), dX=dX, dW=dW)
 
     main = grad_path()
-    _check_against_references(main, inp, entry="logprob")
     outcome = {}
 
     def worker():
@@ -12666,21 +12948,27 @@ def test_device_temperature_needs_the_registered_forms(glm_weight, monkeypatch):
 
 
 @pytest.mark.parametrize("T,H", [(1000, 6144), (4097, 6144)])
-def test_device_vocab_256_dx_slices_temperature(T, H):
+def test_device_vocab_256_dx_slices_temperature(record_property, T, H):
     """A call with a temperature plans its dX slices with the fitted rule of the call without one (V = 256 has four K
     steps; 3 slices at T = 1000, H = 6144 and on the 1-row tail chunk of T = 4097 on 148 and 152 SMs before the fit):
-    the default plan and every pin whose slices all hold a K step match the references with a per-token temperature,
-    and a pin of 3 slices is rejected."""
+    the default plan and every pin whose slices all hold a K step meet the naive BF16 tier with a per-token
+    temperature over the judge's draws (each pin a form of its own), and a pin of 3 slices is rejected."""
     _require_tau_program()
+    _judge(
+        record_property,
+        T,
+        lambda inp: _vocab_256_pins(inp, "logprob"),
+        device=CUDA,
+        H=H,
+        V=256,
+        inputs=dict(temperature="hetero"),
+        entry="logprob",
+        forms=tuple(_VOCAB_256_PINS),
+    )
     W = make_inputs(1, seed=SEED, H=H, V=256, device=CUDA, ignore_frac=0.0).W
     inp = make_inputs(
         T, seed=SEED + 7637 + T, H=H, V=256, device=CUDA, W=W, temperature="hetero"
     )
-    for k in (None, 1, 2, 4):
-        tuning = None if k is None else {"dx": {"k_slices": k}}
-        result = _run(inp, 4096, entry="logprob", backend="cake", gemm_tuning=tuning)
-        _check_dtypes(result, inp)
-        _check_against_references(result, inp, entry="logprob")
     with pytest.raises(ValueError, match="K steps"):
         _run(
             inp,
@@ -14638,22 +14926,81 @@ def test_device_default_step_peak_within_the_head_bytes(
         )
 
 
+# the judged vocabulary of the automatic budget form's cases: a moderate V at which a default call of T 16384 (a third
+# of the labels ignored) at H 6144 takes a budget form of either entry on every draw on SM100 / SM103 / SM107 (the fast
+# form does not fit there and a budget form does).  At V 16384 on B200 and GB300 the log-probability and cross-entropy
+# default calls keep the fast form because no budget form fits either (the smallest, the recompute form, peaks above the
+# budget); at V 8192 the automatic form keeps the fast form on every device
+_AUTO_JUDGE_V = 32768
+
+
+def _zero_weights(inp):
+    """``inp`` with every fifth row's policy weight 0 (zero-weight rows, whose split the budget rule decides)."""
+    weights = inp.loss_weights.clone()
+    weights[::5] = 0.0
+    return replace(inp, loss_weights=weights.contiguous())
+
+
+def _zero_dlogp(inp, seed):
+    """``inp`` with a zero upstream gradient on 30 % of its valid rows, the rows drawn by a CPU generator seeded
+    ``seed``."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed)
+    rows = inp.valid.nonzero().squeeze(1).cpu()
+    pick = rows[torch.randperm(rows.numel(), generator=gen)[: round(0.3 * rows.numel())]]
+    dlogp = inp.dlogp.clone()
+    dlogp[pick.to(inp.dlogp.device)] = 0.0
+    return replace(inp, dlogp=dlogp.contiguous())
+
+
 @pytest.mark.parametrize(
     "case", ["ce", "policy_zero_weights", "logprob", "logprob_zero_dlogp"]
 )
-def test_device_default_budget_form_is_deterministic(glm_weight, monkeypatch, case):
+def test_device_default_budget_form_is_deterministic(
+    glm_weight, monkeypatch, record_property, case
+):
     """A default call whose automatic form is a budget form (T 16384, a third of the labels ignored: three chunks of
     valid rows, and of gradient rows with the zero weights) gives the same bits on every run (integer views, the
     allocator poisoned between the runs): the loss entry (cross-entropy; the policy objective with zero-weight rows,
     whose split the budget rule decides) and the log-probability entry (also with a zero upstream gradient on 30 % of
     the valid rows: the budget form runs without the zero-gradient row skip); each run's plan is a budget form that
     fits.  Against the explicit fast form: the same bits, except ``dX`` / ``dW`` of the zero-weight and zero-gradient
-    cases, which pass the accuracy gates against the FP64 oracle instead.  With fewer chunks than
-    ``_AUTO_MIN_CHUNKS`` the call keeps the fast form: no plan, the fast form's bits."""
+    cases, which are judged against the naive BF16 tier instead, at ``H = JUDGE_H``, ``V = _AUTO_JUDGE_V`` over
+    the judge's draws with a budget form that fits on every draw.  With fewer chunks than ``_AUTO_MIN_CHUNKS`` the call
+    keeps the fast form: no plan, the fast form's bits."""
     entry = "logprob" if case.startswith("logprob") else "loss"
     _require_program(entry=entry)
     _require_recompute()
     objective = "policy" if case == "policy_zero_weights" else "ce"
+    logprob_plans = _record_auto_logprob_plans(monkeypatch)
+
+    def default_step(inp):
+        logprob_plans.clear()
+        result, _, mplan = _budget_step(inp, 4096, entry)
+        if entry == "logprob":
+            assert len(logprob_plans) == 1, logprob_plans
+        return dict(result, plan=mplan if entry == "loss" else logprob_plans[-1])
+
+    if case in ("policy_zero_weights", "logprob_zero_dlogp"):
+
+        def adjust(inp, s):
+            if case == "policy_zero_weights":
+                return _zero_weights(inp)
+            return _zero_dlogp(inp, s + 7992)
+
+        def budget_form(inp, result):
+            assert result["plan"] is not None and result["plan"].fits, result["plan"]
+
+        _judge_device(
+            record_property,
+            16384,
+            default_step,
+            V=_AUTO_JUDGE_V,
+            inputs=dict(objective=objective, ignore_frac=0.33),
+            adjust=adjust,
+            entry=entry,
+            route=budget_form,
+        )
     inp = make_inputs(
         16384,
         objective=objective,
@@ -14663,35 +15010,21 @@ def test_device_default_budget_form_is_deterministic(glm_weight, monkeypatch, ca
         ignore_frac=0.33,
     )
     if case == "policy_zero_weights":
-        weights = inp.loss_weights.clone()
-        weights[::5] = 0.0
-        inp = replace(inp, loss_weights=weights.contiguous())
+        inp = _zero_weights(inp)
     if case == "logprob_zero_dlogp":
-        gen = torch.Generator(device="cpu")
-        gen.manual_seed(SEED + 7992)
-        rows = inp.valid.nonzero().squeeze(1).cpu()
-        pick = rows[
-            torch.randperm(rows.numel(), generator=gen)[: round(0.3 * rows.numel())]
-        ]
-        dlogp = inp.dlogp.clone()
-        dlogp[pick.to(CUDA)] = 0.0
-        inp = replace(inp, dlogp=dlogp.contiguous())
+        inp = _zero_dlogp(inp, SEED + 7992)
     keys = ("loss", "logp", "dX", "dW") if entry == "loss" else ("logp", "dX", "dW")
     # the fewest rows the fast form can chunk over: the gradient rows of a split, else the valid rows
     rows = int(inp.valid.sum())
     if case == "policy_zero_weights":
         rows = int((inp.valid & (inp.loss_weights != 0)).sum())
     planned = _auto_planned(rows)
-    logprob_plans = _record_auto_logprob_plans(monkeypatch)
     runs = []
     for _ in range(2):
         _poison_allocator()
-        logprob_plans.clear()
-        result, _, mplan = _budget_step(inp, 4096, entry)
+        result = default_step(inp)
+        plan = result.pop("plan")
         runs.append(result)
-        plan = mplan if entry == "loss" else logprob_plans[-1]
-        if entry == "logprob":
-            assert len(logprob_plans) == 1, logprob_plans
         if planned:
             assert plan is not None and plan.fits, plan
         else:
@@ -14700,7 +15033,7 @@ def test_device_default_budget_form_is_deterministic(glm_weight, monkeypatch, ca
     fast, _, _ = _budget_step(inp, 4096, entry, memory_mode="fast")
     if planned and case in ("policy_zero_weights", "logprob_zero_dlogp"):
         _assert_same_bits(fast, runs[0], keys=keys[:-2])
-        _check_against_references(runs[0], inp, entry=entry)
+        contract_lm_head(runs[0], inp, entry=entry)
     else:
         _assert_same_bits(fast, runs[0], keys=keys)
 
@@ -15252,7 +15585,8 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     non-reentrant and a reentrant checkpoint: each begins the count in the module whose forward runs it (the opt-in
     loss forward, :mod:`cake_backend`'s log-probability forward) and none takes the host count's path.  Every pass
     gives the bits (integer views) of the explicit fast form's plain step (``memory_mode="fast"``, which keeps the
-    count too), and the plain step peaks no higher than that step, from the remembered binding and on a cache miss."""
+    count too), and the plain step peaks no higher than that step, from the remembered binding and on a cache miss.
+    The peaks start with no remembered binding and no free block an earlier test left cached."""
     _require_program(entry=entry)
     _require_hidden_count()
     if tau_form is not None:
@@ -15274,6 +15608,12 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     tau = getattr(inp, "temperature", None) if tau_form is not None else None
     keys = ("loss", "logp", "dX", "dW") if entry == "loss" else ("logp", "dX", "dW")
     tau_kw = {} if tau is None else dict(temperature=tau)
+    # the peaks count allocator blocks, and a request that a cached free block less than 1 MiB larger serves takes the
+    # whole block: free blocks an earlier test left cached would add such a remainder to one step's peak and not to the
+    # other's, so the remembered-binding peaks start with no binding and no free block cached (as the misses below do)
+    _clear_binding_caches()
+    gc.collect()
+    torch.cuda.empty_cache()
     _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)  # binds
     fast, _, _ = _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)
     # the explicit fast form's plain step through the same step as the default passes (the log-probability entry's

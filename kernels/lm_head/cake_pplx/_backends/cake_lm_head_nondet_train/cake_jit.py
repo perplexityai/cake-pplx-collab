@@ -2806,9 +2806,9 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          into C (dX_acc) itself: no slab, no slab sum.
 # ``dx_slab_sum``          after each ``gemm_dx_red`` launch of more than one
 #                          slice: dX_acc[rows] = ((s_0 + s_1) + ...) over the
-#                          launch's slabs in slice order, so dX repeats bit for
-#                          bit; it never reads dX_acc, which no call fills or
-#                          zeroes.  Launched
+#                          launch's slabs in slice order (one fixed order, no
+#                          run-to-run promise); it never reads dX_acc, which no
+#                          call fills or zeroes.  Launched
 #                          with programmatic dependent launch (it waits on the
 #                          GEMM first).  ``dx_slab_sum_dcnt`` stores the rows
 #                          below the chunk's live-row bound and -0.0 into the

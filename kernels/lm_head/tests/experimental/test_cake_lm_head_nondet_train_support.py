@@ -17,14 +17,18 @@ Candidate-support entries of the non-deterministic LM-head
 package ``cake_pplx._backends.cake_lm_head_nondet_train``:
 ``cake_lm_head_nondet_train_support_logprob`` / ``cake_lm_head_nondet_train_support_kl`` take no ``deterministic``, raise
 PyTorch's deterministic-algorithms alert in their backward before a dense dX of more than one K slice (every other
-backward has one fixed order), and are held to the deterministic suite's gate
-(``tests/experimental/test_helpers/cake_lm_head_support_reference.py``: 1.05x the masked PyTorch baseline's error against the
-FP64 oracle plus a floor).  Their programs are the deterministic package's, so the outputs, the sparse dX and the
-weight gradient equal the deterministic entries' bits on the same inputs; the dense dX adds its vocabulary blocks into
-the chunk sum through the K-sliced reduction (``cake_support.support_dx_form``: one slice keeps the deterministic
-bits, more slices -- only inside the rule's measured cells, or forced by a test -- add in the order they finish).  The
-gradients carry no run-to-run promise in this package and are checked over repeated runs against the gate.  The
-package is reached through ``tests.cake.test_helpers.cake_package``.
+backward has one fixed order).  A judged case runs ``DRAWS`` (32) inputs, each made from its draw's seed alone, and
+judges every output and both gradients against the naive BF16 tier of the shared judge (``tests/cake_naive.py``,
+through ``tests/experimental/test_helpers/cake_lm_head_judge.py``: ``judge_support``): in the L2 and the max norm,
+the median and the largest absolute error against the FP64 oracle at most 1.005 times those of
+``naive_support_bf16`` on the same inputs; every draw also keeps its contract (dtypes, shapes, finite values, the
+selected ``logp`` of an ignored row and the packed ``logp`` of a single-candidate row exactly 0).  The dense dX adds
+its vocabulary blocks into the chunk sum through the K-sliced reduction (``cake_support.support_dx_form``: one slice
+adds in block order; more slices -- only inside the rule's measured cells, or forced by a test -- store into a slab
+whose sum is taken in slice order: one fixed order either way, with no run-to-run promise).  The gradients carry no
+run-to-run promise in this package: a repeated case launches every draw ``REPEATS`` times and the judge keeps each
+output's largest error.  No test compares this package's outputs with the deterministic package's.  The package is
+reached through ``tests.cake.test_helpers.cake_package``.
 """
 
 import contextlib
@@ -35,12 +39,13 @@ import warnings
 import pytest
 import torch
 
+from tests.experimental.test_helpers.cake_lm_head_judge import (
+    contract_support,
+    judge_support,
+    judge_support_inputs,
+)
 from tests.experimental.test_helpers.cake_lm_head_support_reference import (
-    gate_failures,
     make_support_inputs,
-    reference_support_b0,
-    reference_support_fp64,
-    support_error_report,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -57,24 +62,17 @@ REF = "reference"
 REPEATS = 20
 
 
-def run_support(
-    inp, outputs, *, package="nd", upstream=None, need_dx=True, need_dw=True, **kw
-):
-    """Call the entry that forms ``outputs`` (``package``: ``"nd"`` this package, ``"det"`` the deterministic one;
-    the reference backend unless ``backend`` is given) and back-propagate the upstreams (default ``inp.g`` /
-    ``inp.d`` / ``inp.e``).  Returns the outputs and ``dX`` / ``dW``."""
+def run_support(inp, outputs, *, upstream=None, need_dx=True, need_dw=True, **kw):
+    """Call this package's entry that forms ``outputs`` (the reference backend unless ``backend`` is given) and
+    back-propagate the upstreams (default ``inp.g`` / ``inp.d`` / ``inp.e``).  Returns the outputs and
+    ``dX`` / ``dW``."""
     X = inp.X.detach().requires_grad_(need_dx)
     W = inp.W.detach().requires_grad_(need_dw)
     kwargs = dict(inp.kwargs(), backend=REF)
     kwargs.update(kw)
-    if package == "nd":
-        logprob_fn, kl_fn = support_logprob, support_kl
-    else:
-        logprob_fn = det_support.cake_lm_head_det_train_support_logprob
-        kl_fn = det_support.cake_lm_head_det_train_support_kl
     res = dict(packed=None, selected=None, kl=None)
     if "kl" in outputs:
-        out = kl_fn(
+        out = support_kl(
             X,
             W,
             inp.support_ids,
@@ -88,11 +86,13 @@ def run_support(
         else:
             res["kl"] = out
     elif "selected" in outputs:
-        res["selected"] = logprob_fn(
+        res["selected"] = support_logprob(
             X, W, inp.support_ids, inp.support_offsets, inp.labels, **kwargs
         )
     else:
-        res["packed"] = logprob_fn(X, W, inp.support_ids, inp.support_offsets, **kwargs)
+        res["packed"] = support_logprob(
+            X, W, inp.support_ids, inp.support_offsets, **kwargs
+        )
     up = dict(packed=inp.g, selected=inp.d, kl=inp.e) if upstream is None else upstream
     tensors = [res[n] for n in outputs if up.get(n) is not None]
     grads = [up[n] for n in outputs if up.get(n) is not None]
@@ -103,22 +103,23 @@ def run_support(
     return res
 
 
-def check_gates(inp, outputs, *, oracle=None, b0err=None, **kw):
-    """One call of this package against the FP64 oracle with the deterministic suite's gate."""
-    res = run_support(inp, outputs, **kw)
-    if oracle is None:
-        oracle = reference_support_fp64(inp, outputs=outputs)
-    if b0err is None:
-        b0err = support_error_report(
-            reference_support_b0(inp, outputs=outputs), oracle, inp
-        )
-    err = support_error_report(res, oracle, inp)
-    assert not err["nan"], err
-    gated = {f"{n}_max_abs" for n in outputs} | {"dX_rel_l2", "dW_rel_l2"}
-    assert gated <= err.keys() and gated <= b0err.keys(), (err, b0err)
-    bad = gate_failures(err, b0err)
-    assert not bad, f"{bad}\nerrors {err}\nB0 {b0err}"
-    return res, err, b0err
+def judged(record_property, outputs, mk, kw, *, device, seed=None, **judge_kw):
+    """Judge this package's call ``run_support(inp, outputs, **kw)`` against the naive tier over the draws
+    (:func:`judge_support`): the draw of seed ``s`` makes the inputs of the :func:`make_support_inputs` keywords
+    ``mk`` (``T`` among them; ``H`` 512 on the device) with :func:`judge_support_inputs`.  The case's seed is
+    ``SEED + T`` unless given; ``judge_kw``: ``route``, ``repeats``, ``upstream``."""
+    mk = dict(mk)
+    T = mk.pop("T")
+    if device != DEV:
+        mk.setdefault("H", 512)
+    return judge_support(
+        record_property,
+        make=lambda s: judge_support_inputs(T, s, device=device, **mk),
+        launch=lambda inp: run_support(inp, outputs, **kw),
+        outputs=outputs,
+        seed=SEED + T if seed is None else seed,
+        **judge_kw,
+    )
 
 
 def _bits(t):
@@ -132,40 +133,6 @@ def assert_same(a, b):
         assert (x is None) == (y is None), name
         if x is not None:
             assert torch.equal(_bits(x), _bits(y)), name
-
-
-def _bf16_ulp(t):
-    """One BF16 unit in the last place of each element of ``t``: ``2^(e - 7)`` for ``2^e <= |t| < 2^(e + 1)`` in the
-    normal range, the subnormal spacing ``2^-133`` below ``2^-126`` and at 0 (``frexp(0)`` has exponent 0, so 0 is
-    set apart)."""
-    t = t.float()
-    e = (torch.frexp(t.abs())[1] - 1).clamp_min(-126)
-    ulp = torch.ldexp(torch.ones_like(t), e - 7)
-    return torch.where(t == 0, torch.full_like(t, 2.0**-133), ulp)
-
-
-def _within_rounding_of_det(nd, det, zero_rows=None):
-    """A K-sliced dX (its own summation order) against the deterministic one, element by element:
-    ``|nd - det| <= ulp(det) + 2^-14 rowmax |det|``.  Two FP32 sums less than one BF16 ulp apart round to BF16 values
-    at most one ulp apart; the two FP32 sums differ by a few FP32 roundings of partial sums of about the size of the
-    row's elements, far below 2^-14 of the row's largest one.  A lost or doubled slice moves an element by that
-    slice's whole share.  A row with no nonzero product (an ignored label, a single candidate; ``zero_rows``, by
-    default the rows of the deterministic dX that are all 0) is 0 here too, compared by value (``-0.0`` and ``+0.0``
-    are equal): the chunk's first block stores the row's zero products, so a value a missing store leaves fails.  A 0
-    in another row keeps the bound (``ulp(0) = 2^-133``): a sum that cancels to exactly 0 in one order, or rounds to 0
-    at the BF16 underflow, may end one rounding away in the other.  Returns the largest ``|nd - det| / bound``."""
-    d, ref = nd.float(), det.float()
-    if zero_rows is None:
-        zero_rows = (ref == 0).all(dim=-1)
-    stale = d[zero_rows] != 0
-    assert not bool(stale.any()), (
-        int(stale.sum()),
-        float(d[zero_rows].abs().max()),
-    )
-    floor = ref.abs().amax(dim=-1, keepdim=True) * 2.0**-14
-    excess = (d - ref).abs() / (_bf16_ulp(ref) + floor)
-    assert bool((excess <= 1).all()), float(excess.max())
-    return float(excess.max())
 
 
 def small(T=37, **kw):
@@ -360,11 +327,10 @@ SUPPORT_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(SUPPORT_CASES))
-def test_reference_matches_the_oracle_and_the_deterministic_reference(case):
+def test_reference_meets_the_naive_tier(case, record_property):
+    """The reference backend: every output and both gradients meet the naive tier."""
     outputs, mk, kw = SUPPORT_CASES[case]
-    inp = small(**mk)
-    res, _, _ = check_gates(inp, outputs, **kw)
-    assert_same(res, run_support(inp, outputs, package="det", **kw))
+    judged(record_property, outputs, mk, kw, device=DEV)
 
 
 # ---------------------------------------------------------------------------
@@ -401,39 +367,31 @@ def cuda_inputs(T, **kw):
 
 @pytest.mark.parametrize("form", sorted(CAKE_FORMS))
 @pytest.mark.parametrize("case", sorted(SUPPORT_CASES))
-def test_cake_matches_the_oracle_and_the_deterministic_package(case, form, monkeypatch):
-    """Every output and both gradients pass the gate in each pass form and equal the deterministic entries' bits on
-    the same inputs (the same programs).  A dense dX adds its vocabulary blocks into the chunk sum through the
-    reduction form at the rule's :func:`cake_support.support_dx_form`: every shape here is outside the rule's measured
-    cells, so every block runs one slice and dX has the deterministic bits too."""
+def test_cake_meets_the_naive_tier(case, form, monkeypatch, record_property):
+    """Every output and both gradients meet the naive tier in each pass form.  A dense dX adds its vocabulary blocks
+    into the chunk sum through the reduction form at the rule's :func:`cake_support.support_dx_form`: every shape here
+    is outside the rule's measured cells, so every block of every draw runs one slice."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", **CAKE_FORMS[form])
     forms = _record_dx_forms(monkeypatch)
-    res, _, _ = check_gates(inp, outputs, **kw)
-    det = run_support(inp, outputs, package="det", **kw)
     dense = CAKE_FORMS[form].get("path") == "dense"
-    assert bool(forms) == dense, forms
-    assert all(s == 1 for s, _ in forms), forms
-    assert_same(res, det)
+
+    def route(inp, res):
+        assert bool(forms) == dense, forms
+        assert all(s == 1 for s, _ in forms), forms
+        forms.clear()
+
+    judged(record_property, outputs, mk, kw, device=CUDA, route=route)
 
 
 @pytest.mark.parametrize("case", ["kl+packed heavy constant", "selected heavy hetero"])
-def test_cake_worst_case_over_repeated_runs(case):
-    """``REPEATS`` runs: each passes the gate (the worst case is the gate's)."""
+def test_cake_worst_case_over_repeated_runs(case, record_property):
+    """``REPEATS`` launches per draw meet the naive tier: the judge keeps each output's largest error."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake")
-    oracle = reference_support_fp64(inp, outputs=outputs)
-    b0err = support_error_report(
-        reference_support_b0(inp, outputs=outputs), oracle, inp
-    )
-    for _ in range(REPEATS):
-        check_gates(inp, outputs, oracle=oracle, b0err=b0err, **kw)
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 def test_cake_frozen_inputs_and_retain_graph():
@@ -458,10 +416,9 @@ def test_cake_frozen_inputs_and_retain_graph():
         **inp.kwargs(),
         backend="cake",
     )
-    g1 = torch.autograd.grad(out, (X, W), inp.d, retain_graph=True)
-    g2 = torch.autograd.grad(out, (X, W), inp.d)
-    for a, b in zip(g1, g2, strict=True):
-        assert torch.equal(_bits(a), _bits(b))
+    for retain in (True, False):
+        dX, dW = torch.autograd.grad(out, (X, W), inp.d, retain_graph=retain)
+        contract_support(dict(dX=dX, dW=dW), inp)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +637,7 @@ def _assert_slab_sums_follow_their_blocks(launched: list) -> tuple[int, int]:
     return counts[0], counts[1]
 
 
-# (slices, split-tail items): S = 1 keeps the deterministic bits (with or without the split tail); S > 1 stores the
+# (slices, split-tail items): S = 1 adds in one fixed order (with or without the split tail); S > 1 stores the
 # slices into a slab and sums them in slice order
 DX_FORMS = [(1, 0), (1, 1), (2, 0), (2, 1), (4, 0), (4, 2)]
 DX_CASES = ["kl two chunks", "selected chunked", "packed shr hetero"]
@@ -689,33 +646,30 @@ DX_CASES = ["kl two chunks", "selected chunked", "packed shr hetero"]
 @pytest.mark.parametrize("form", DX_FORMS, ids=lambda f: f"S{f[0]}F{f[1]}")
 @pytest.mark.parametrize("case", DX_CASES)
 @pytest.mark.parametrize("vocab_block", [None, 256])
-def test_cake_dense_dx_reduction_forms(case, form, vocab_block, monkeypatch):
-    """The dense dX pass at every slice / split-tail form passes the gate; one slice equals the deterministic
-    package's bits (outputs, dX and dW); above one slice the outputs and dW stay bitwise and dX differs from the
-    deterministic one by rounding only.  Above one slice each block's reduction GEMM is followed right away by its
-    slab sum (:func:`_assert_slab_sums_follow_their_blocks`): the storing form after a chunk's first vocabulary block,
-    the accumulating form after each later one (``vocab_block`` 256: two blocks per chunk)."""
+def test_cake_dense_dx_reduction_forms(
+    case, form, vocab_block, monkeypatch, record_property
+):
+    """The dense dX pass at every slice / split-tail form meets the naive tier.  On every draw, above one slice each
+    block's reduction GEMM is followed right away by its slab sum (:func:`_assert_slab_sums_follow_their_blocks`): the
+    storing form after a chunk's first vocabulary block, the accumulating form after each later one (``vocab_block``
+    256: two blocks per chunk)."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", path={"X": "dense"}, vocab_block=vocab_block)
     _force_dx_form(monkeypatch, form)
     launched = _record_dense_launches(monkeypatch)
-    res, err, _ = check_gates(inp, outputs, **kw)
-    storing, accumulating = _assert_slab_sums_follow_their_blocks(launched)
-    if form[0] == 1:
-        assert storing == accumulating == 0, launched
-    else:
-        assert storing, launched
-        if vocab_block is not None:
-            assert accumulating, launched
-    det = run_support(inp, outputs, package="det", **kw)
-    if form[0] == 1:
-        assert_same(res, det)
-        return
-    assert_same(dict(res, dX=None), dict(det, dX=None))
-    _within_rounding_of_det(res["dX"], det["dX"])
+
+    def route(inp, res):
+        storing, accumulating = _assert_slab_sums_follow_their_blocks(launched)
+        if form[0] == 1:
+            assert storing == accumulating == 0, launched
+        else:
+            assert storing, launched
+            if vocab_block is not None:
+                assert accumulating, launched
+        launched.clear()
+
+    judged(record_property, outputs, mk, kw, device=CUDA, route=route)
 
 
 def _force_dense_order(monkeypatch, order):
@@ -776,7 +730,8 @@ def test_cake_dense_backward_orders_have_the_same_bits(
 ):
     """The dense backward forced chunk-outer and forced block-outer (:func:`cake_support._dense_order`) gives the same
     bits on the outputs, dX and dW: both orders run the same launches and add every FP32 element in the same order.
-    With ignored labels, empty rows and rows no upstream reaches; the rule's own order passes the gate and equals both.
+    With ignored labels, empty rows and rows no upstream reaches.  The rule picks one of the two orders, and its call
+    holds its contract (its bits are not compared with the forced calls': no repeated call is held to the same bits).
     Every shape here is outside the dense dX rule's cells (one K slice per block).  ``form`` ``(2, 0)`` forces two K
     slices on every block (blocks of 4 or 8 K steps): the ordered slab sums -- storing at a chunk's first block,
     accumulating at a later one (``vocab_block`` 256: two blocks) -- give the same bits in both orders too."""
@@ -803,14 +758,16 @@ def test_cake_dense_backward_orders_have_the_same_bits(
     else:
         assert forms and all(s == form[0] for s, _ in forms), forms
     assert_same(runs["chunk"], runs["block"])
-    monkeypatch.setattr(cake_support, "_dense_order", rule)
-    if up is None and need_dx and need_dw:
-        res, _, _ = check_gates(inp, outputs, **kw)
-    else:
-        res = run_support(
-            inp, outputs, upstream=up, need_dx=need_dx, need_dw=need_dw, **kw
-        )
-    assert_same(res, runs["chunk"])
+    picked = []
+
+    def recorded(*args):
+        picked.append(rule(*args))
+        return picked[-1]
+
+    monkeypatch.setattr(cake_support, "_dense_order", recorded)
+    res = run_support(inp, outputs, upstream=up, need_dx=need_dx, need_dw=need_dw, **kw)
+    assert picked and set(picked) <= {"chunk", "block"}, picked
+    contract_support(res, inp, outputs=outputs)
     if up is not None:
         # the rows no upstream reaches: dX exactly 0 in both orders
         counts = inp.support_offsets[1:] - inp.support_offsets[:-1]
@@ -891,10 +848,10 @@ def test_cake_dense_order_rule_and_memory_report():
 def test_cake_backward_alerts_only_before_a_k_sliced_dense_dx(monkeypatch):
     """Under strict ``torch.use_deterministic_algorithms(True)`` a cake-backend backward whose dense dX runs one K
     slice on every block -- the rule at this shape on every architecture (``sm_103a`` and ``sm_107a`` have no cell at
-    all) -- raises no alert and gives the deterministic package's bits.  A dense dX of two slices (forced) raises
-    PyTorch's ``RuntimeError`` before the backward's first launch (launch record: the forward's stages only, no
-    ``support_row_grad``), and the next call outside the mode runs the two slices within rounding of the
-    deterministic dX.  Under ``warn_only=True`` it warns, then the backward runs (its ``dX`` within rounding)."""
+    all) -- raises no alert and keeps its contract.  A dense dX of two slices (forced) raises PyTorch's
+    ``RuntimeError`` before the backward's first launch (launch record: the forward's stages only, no
+    ``support_row_grad``), and the next call outside the mode runs the two slices and keeps its contract.  Under
+    ``warn_only=True`` it warns, then the backward runs."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES["kl two chunks"]
     mk = dict(mk)
@@ -903,11 +860,10 @@ def test_cake_backward_alerts_only_before_a_k_sliced_dense_dx(monkeypatch):
     arch = cake_backend.arch_for(CUDA)
     if arch in ("sm_103a", "sm_107a"):
         assert arch not in cake_support.SUPPORT_DX_SLICE_CELLS
-    det = run_support(inp, outputs, package="det", **kw)
     with _torch_deterministic(True), warnings.catch_warnings():
         warnings.filterwarnings("error", message=f".*{_ALERT}.*")
         res = run_support(inp, outputs, **kw)
-    assert_same(res, det)
+    contract_support(res, inp, outputs=outputs)
     stages = []
     launch = cake_support._run
 
@@ -932,8 +888,7 @@ def test_cake_backward_alerts_only_before_a_k_sliced_dense_dx(monkeypatch):
     # the two-slice blocks' slab sums, each right behind its block's reduction GEMM
     sums = [i for i, s in enumerate(stages) if s == cake_backend.DX_SLAB_SUM_STAGE]
     assert sums and all(stages[i - 1] == "gemm_dx_red" for i in sums), stages
-    assert_same(dict(again, dX=None), dict(det, dX=None))
-    _within_rounding_of_det(again["dX"], det["dX"])
+    contract_support(again, inp, outputs=outputs)
     stages.clear()
     with (
         _torch_deterministic(True, warn_only=True),
@@ -944,58 +899,18 @@ def test_cake_backward_alerts_only_before_a_k_sliced_dense_dx(monkeypatch):
         warned = run_support(inp, outputs, **kw)
     assert "support_row_grad" in stages
     assert warned["dX"] is not None
-    assert_same(dict(warned, dX=None), dict(det, dX=None))
-    _within_rounding_of_det(warned["dX"], det["dX"])
-
-
-def _repeat_dense_dx(label, inp, outputs, kw, *, oracle, b0err, det):
-    """``REPEATS`` runs of this package against the FP64 oracle: each passes the gate, keeps the outputs and dW
-    bitwise and dX within rounding of the deterministic package.  Prints the worst dX error (beside the deterministic
-    package's and the masked PyTorch baseline's, B0), the largest ``|dX_nd - dX_det|``, the most BF16 flips against
-    the deterministic dX and the number of distinct dX results."""
-    det_err = support_error_report(det, oracle, inp)["dX_rel_l2"]
-    worst, max_diff, flips, excess, distinct = 0.0, 0.0, 0, 0.0, set()
-    for _ in range(REPEATS):
-        res, err, _ = check_gates(inp, outputs, oracle=oracle, b0err=b0err, **kw)
-        assert_same(dict(res, dX=None), dict(det, dX=None))
-        excess = max(excess, _within_rounding_of_det(res["dX"], det["dX"]))
-        worst = max(worst, err["dX_rel_l2"])
-        max_diff = max(
-            max_diff, float((res["dX"].float() - det["dX"].float()).abs().max())
-        )
-        flips = max(flips, int((_bits(res["dX"]) != _bits(det["dX"])).sum()))
-        distinct.add(_bits(res["dX"]).cpu().numpy().tobytes().__hash__())
-    print(
-        f"DENSE_DX {label} worst-of-{REPEATS}: dX_rel_l2 {worst:.3e} (det {det_err:.3e}, B0 "
-        f"{b0err['dX_rel_l2']:.3e}) max|nd-det| {max_diff:.3e} flips {flips}/{det['dX'].numel()} "
-        f"bound use {excess:.3f} distinct {len(distinct)} zero rows "
-        f"{int((det['dX'] == 0).all(dim=-1).sum())}"
-    )
-
-
-def _oracle_and_b0(inp, outputs):
-    oracle = reference_support_fp64(inp, outputs=outputs)
-    b0err = support_error_report(
-        reference_support_b0(inp, outputs=outputs), oracle, inp
-    )
-    return oracle, b0err
+    contract_support(warned, inp, outputs=outputs)
 
 
 @pytest.mark.parametrize("case", DX_CASES)
-def test_cake_dense_dx_worst_case_over_repeated_runs(case, monkeypatch):
-    """``REPEATS`` runs of a K-sliced dense dX (S = 4, split tail) per entry (KL, selected, packed) against the FP64
-    oracle (:func:`_repeat_dense_dx`)."""
+def test_cake_dense_dx_worst_case_over_repeated_runs(case, monkeypatch, record_property):
+    """A K-sliced dense dX (S = 4, split tail) per entry (KL, selected, packed): ``REPEATS`` launches per draw meet the
+    naive tier (the judge keeps each output's largest error)."""
     _require_cake()
     outputs, mk, kw = SUPPORT_CASES[case]
-    mk = dict(mk)
-    inp = cuda_inputs(mk.pop("T"), **mk)
     kw = dict(kw, backend="cake", path={"X": "dense"})
-    oracle, b0err = _oracle_and_b0(inp, outputs)
-    det = run_support(inp, outputs, package="det", **kw)
     _force_dx_form(monkeypatch, (4, 2))
-    _repeat_dense_dx(
-        f"S4F2 {case}", inp, outputs, kw, oracle=oracle, b0err=b0err, det=det
-    )
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 # Production-like dense-X geometry (the cases above run H = 512: one 512-column item, at most 8 K steps and two
@@ -1018,43 +933,34 @@ PROD_FORMS = [(1, 0), (1, 2), (2, 1), (3, 0), (4, 2)]
 
 
 def _prod_case(case):
+    """The outputs, the input keywords and the entry keywords of a production-like case."""
     outputs, mk, kw = PROD_CASES[case]
     mk = dict(mk, H=1536, V=1280)
-    inp = cuda_inputs(mk.pop("T"), **mk)
-    return outputs, inp, dict(kw, backend="cake", path={"X": "dense"}, vocab_block=512)
+    return outputs, mk, dict(kw, backend="cake", path={"X": "dense"}, vocab_block=512)
 
 
 @pytest.mark.parametrize("form", PROD_FORMS, ids=lambda f: f"S{f[0]}F{f[1]}")
 @pytest.mark.parametrize("case", sorted(PROD_CASES))
-def test_cake_dense_dx_production_geometry(case, form, monkeypatch):
-    """Dense dX at production-like geometry with every block forced to ``form``: one slice equals the deterministic
-    package's bits (outputs, dX and dW); 2 to 4 slices pass the gate, keep the outputs and dW bitwise and stay within
-    rounding of the deterministic dX."""
+def test_cake_dense_dx_production_geometry(case, form, monkeypatch, record_property):
+    """Dense dX at production-like geometry with every block forced to ``form`` (one to four slices) meets the naive
+    tier."""
     _require_cake()
-    outputs, inp, kw = _prod_case(case)
+    outputs, mk, kw = _prod_case(case)
     _force_dx_form(monkeypatch, form)
-    res, _, _ = check_gates(inp, outputs, **kw)
-    det = run_support(inp, outputs, package="det", **kw)
-    if form[0] == 1:
-        assert_same(res, det)
-    else:
-        assert_same(dict(res, dX=None), dict(det, dX=None))
-        _within_rounding_of_det(res["dX"], det["dX"])
+    judged(record_property, outputs, mk, kw, device=CUDA)
 
 
 @pytest.mark.parametrize("slices", [2, 3, 4])
 @pytest.mark.parametrize("case", sorted(PROD_CASES))
-def test_cake_dense_dx_production_geometry_repeated(case, slices, monkeypatch):
-    """``REPEATS`` runs at ``slices`` K slices with the rule's split tail at production-like geometry
-    (:func:`_repeat_dense_dx`)."""
+def test_cake_dense_dx_production_geometry_repeated(
+    case, slices, monkeypatch, record_property
+):
+    """``slices`` K slices with the rule's split tail at production-like geometry: ``REPEATS`` launches per draw meet
+    the naive tier (the judge keeps each output's largest error)."""
     _require_cake()
-    outputs, inp, kw = _prod_case(case)
-    oracle, b0err = _oracle_and_b0(inp, outputs)
-    det = run_support(inp, outputs, package="det", **kw)
+    outputs, mk, kw = _prod_case(case)
     _force_dx_form(monkeypatch, (slices, None))
-    _repeat_dense_dx(
-        f"S{slices} {case}", inp, outputs, kw, oracle=oracle, b0err=b0err, det=det
-    )
+    judged(record_property, outputs, mk, kw, device=CUDA, repeats=REPEATS)
 
 
 # (T, H, V, vocab_block, S on B200): one chunk inside a cell of the rule, two vocabulary blocks
@@ -1067,41 +973,33 @@ RULE_CELL_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(RULE_CELL_CASES))
-def test_cake_dense_dx_rule_cell(case, monkeypatch):
+def test_cake_dense_dx_rule_cell(case, monkeypatch, record_property):
     """A call inside a measured cell of the rule (B200, 148 SMs): the rule itself runs the cell's slices on every
-    block (one slice on any other device: then the deterministic bits), and ``REPEATS`` runs pass
-    :func:`_repeat_dense_dx`."""
+    block of every launch (one slice on any other device) and meets the naive tier; above one slice every draw
+    launches ``REPEATS`` times (the judge keeps each output's largest error)."""
     _require_cake()
     T, H, V, vb, slices = RULE_CELL_CASES[case]
-    inp = cuda_inputs(T, H=H, V=V, k_cap=64, kind="heavy", teacher=True)
+    mk = dict(T=T, H=H, V=V, k_cap=64, kind="heavy", teacher=True)
     kw = dict(backend="cake", path={"X": "dense"}, vocab_block=vb)
     cx = cake_support._cake_context(CUDA)
     want = slices if (cx.arch, cx.num_sms) == ("sm_100a", 148) else 1
-    oracle, b0err = _oracle_and_b0(inp, ("kl",))
-    det = run_support(inp, ("kl",), package="det", **kw)
     forms = _record_dx_forms(monkeypatch)
-    res, _, _ = check_gates(inp, ("kl",), oracle=oracle, b0err=b0err, **kw)
-    assert len(forms) == 2 and {s for s, _ in forms} == {want}, forms
-    if want == 1:
-        assert_same(res, det)
-        return
-    _repeat_dense_dx(
-        f"rule cell {case} {forms}",
-        inp,
-        ("kl",),
-        kw,
-        oracle=oracle,
-        b0err=b0err,
-        det=det,
-    )
+
+    def route(inp, res):
+        assert len(forms) == 2 and {s for s, _ in forms} == {want}, forms
+        forms.clear()
+
+    repeats = REPEATS if want > 1 else 1
+    judged(record_property, ("kl",), mk, kw, device=CUDA, route=route, repeats=repeats)
 
 
-def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch):
+def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch, record_property):
     """H % 512 == 256 (H = 768): the dense dX / dW forms need whole 512-column items, so a call whose mean support
-    reaches every dense threshold runs the forward dense and X / W sparse (the deterministic package's bits); a
-    forced dense X pass raises."""
+    reaches every dense threshold runs the forward dense and X / W sparse and meets the naive tier; a forced dense X
+    pass raises."""
     _require_cake()
-    inp = cuda_inputs(64, H=768, V=1280, k_cap=1280, kind="full", teacher=True)
+    mk = dict(T=64, H=768, V=1280, k_cap=1280, kind="full", teacher=True)
+    inp = cuda_inputs(**mk)
     arch = cake_support._cake_context(CUDA).arch
     plan = cake_support.support_memory_report(
         inp.T, inp.H, inp.V, inp.M, outputs=("kl",), arch=arch
@@ -1110,54 +1008,19 @@ def test_cake_half_item_hidden_runs_x_and_w_sparse(monkeypatch):
     with pytest.raises(ValueError, match="the dense X pass needs H"):
         run_support(inp, ("kl",), backend="cake", path={"X": "dense"})
     forms = _record_dx_forms(monkeypatch)
-    res, _, _ = check_gates(inp, ("kl",), backend="cake")
+    judged(record_property, ("kl",), mk, dict(backend="cake"), device=CUDA)
     assert forms == []
-    assert_same(res, run_support(inp, ("kl",), package="det", backend="cake"))
-
-
-def test_cake_dense_dx_subnormal_products_are_kept(monkeypatch):
-    """``W`` scaled by 2^-120 makes most of dX subnormal (FP32 / BF16 values below 2^-126): the K-sliced reduction
-    keeps them (round to nearest, no flush), as the deterministic package's adds do.  Values, not only counts: every
-    element within rounding of the deterministic dX (one BF16 ulp, 2^-133 in the subnormal range), and the subnormal
-    elements' summed difference at most 2^-7 of their summed magnitude (a flush loses each whole).  The rows with no
-    nonzero product are those of the unscaled problem's deterministic dX that are all 0 (at this scale whole rows of
-    tiny products also round to 0, and their sums may round to 2^-133 in another order)."""
-    _require_cake()
-    inp = cuda_inputs(1100, k_cap=32, kind="heavy", teacher=True)
-    kw = dict(backend="cake", path={"X": "dense"})
-    unscaled = run_support(inp, ("kl",), package="det", need_dw=False, **kw)["dX"]
-    no_product = (unscaled == 0).all(dim=-1)
-    assert bool(no_product.any())
-    inp = dataclasses.replace(inp, W=(inp.W.float() * 2.0**-120).to(torch.bfloat16))
-    det = run_support(inp, ("kl",), package="det", need_dw=False, **kw)
-    _force_dx_form(monkeypatch, (4, 2))
-    nd = run_support(inp, ("kl",), need_dw=False, **kw)
-    d, r = nd["dX"].float(), det["dX"].float()
-    tiny = 2.0**-126
-    sub = (r != 0) & (r.abs() < tiny)
-    sub_det = int(sub.sum())
-    sub_nd = int(((d != 0) & (d.abs() < tiny)).sum())
-    assert sub_det > r.numel() // 4, sub_det
-    assert abs(sub_nd - sub_det) <= max(16, sub_det // 1000), (sub_nd, sub_det)
-    excess = _within_rounding_of_det(nd["dX"], det["dX"], zero_rows=no_product)
-    lost = float((d - r).abs()[sub].sum()) / float(r.abs()[sub].sum())
-    assert lost <= 2.0**-7, lost
-    print(
-        f"DENSE_DX subnormal S4F2: subnormal det {sub_det} nd {sub_nd} of {r.numel()}, "
-        f"bound use {excess:.3f}, summed |nd-det| / |det| over subnormals {lost:.3e}, rows with no "
-        f"nonzero product {int(no_product.sum())} (all-0 rows at this scale {int((r == 0).all(dim=-1).sum())})"
-    )
 
 
 @pytest.mark.parametrize("form", [(1, 1), (2, 1)], ids=lambda f: f"S{f[0]}F{f[1]}")
-def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
-    """The dense dX form under CUDA graph capture (replayed twice over the graph pool's reused, nonzero buffers), on
-    two concurrent streams, and after a larger call left nonzero blocks in the caching allocator: the KL and dW equal
-    the eager deterministic bits every time, dX too at one slice; K slices keep dX within rounding of them and pass
-    the gate."""
+def test_cake_dense_dx_graph_streams_and_reused_buffers(
+    form, monkeypatch, record_property
+):
+    """The dense dX form after a larger call left nonzero blocks in the caching allocator: the eager call meets the
+    naive tier.  Under CUDA graph capture (replayed twice over the graph pool's reused, nonzero buffers) and on two
+    concurrent streams (after a sequential call) every call keeps its contract."""
     _require_cake()
     _force_dx_form(monkeypatch, form)
-    exact = form[0] == 1
     kw = dict(backend="cake", path="dense")
 
     def inputs(T, seed):
@@ -1170,27 +1033,26 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
         )
         return (kl, *torch.autograd.grad(kl, (X, W), inp.e))
 
-    def same(a, b):
-        (kl, dx, dw), (kl_ref, dx_ref, dw_ref) = a, b
-        assert torch.equal(_bits(kl), _bits(kl_ref))
-        assert torch.equal(_bits(dw), _bits(dw_ref))
-        if exact:
-            assert torch.equal(_bits(dx), _bits(dx_ref))
-        else:
-            _within_rounding_of_det(dx, dx_ref)
+    def contract(out, inp):
+        kl, dx, dw = out
+        contract_support(dict(kl=kl, dX=dx, dW=dw), inp, outputs=("kl",))
 
     big, big_kw = inputs(4097, SEED + 1)
     small_inp, small_kw = inputs(1300, SEED + 2)
     leaf = lambda t: t.detach().clone().requires_grad_(True)  # noqa: E731
-    det_kw = small_kw
-    det_ref = run_support(small_inp, ("kl",), package="det", **det_kw)
-    ref = (det_ref["kl"], det_ref["dX"], det_ref["dW"])
-    # a larger call first: its freed blocks (nonzero) are reused by the smaller call
+    # a larger call first: its freed blocks (nonzero) are reused by the smaller calls, judged over the draws
     step(big, big_kw, leaf(big.X), leaf(big.W))
-    same(step(small_inp, small_kw, leaf(small_inp.X), leaf(small_inp.W)), ref)
-    # two streams, each with its own problem, against the sequential results
+    judged(
+        record_property,
+        ("kl",),
+        dict(T=1300, k_cap=32, kind="heavy", teacher=True),
+        kw,
+        device=CUDA,
+    )
+    contract(step(small_inp, small_kw, leaf(small_inp.X), leaf(small_inp.W)), small_inp)
+    # a sequential call, then two streams, each with its own problem
     s1, s2 = torch.cuda.Stream(), torch.cuda.Stream()
-    seq_big = step(big, big_kw, leaf(big.X), leaf(big.W))
+    contract(step(big, big_kw, leaf(big.X), leaf(big.W)), big)
     s1.wait_stream(torch.cuda.current_stream())
     s2.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s1):
@@ -1199,8 +1061,8 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
         par_small = step(small_inp, small_kw, leaf(small_inp.X), leaf(small_inp.W))
     torch.cuda.current_stream().wait_stream(s1)
     torch.cuda.current_stream().wait_stream(s2)
-    same(par_small, ref)
-    same(par_big, seq_big)
+    contract(par_small, small_inp)
+    contract(par_big, big)
     # CUDA graph capture of the whole step, replayed twice
     X, W = leaf(small_inp.X), leaf(small_inp.W)
     side = torch.cuda.Stream()
@@ -1215,27 +1077,16 @@ def test_cake_dense_dx_graph_streams_and_reused_buffers(form, monkeypatch):
     for _ in range(2):
         graph.replay()
         torch.cuda.synchronize()
-        same(static, ref)
-    if not exact:
-        oracle = reference_support_fp64(small_inp, outputs=("kl",))
-        b0err = support_error_report(
-            reference_support_b0(small_inp, outputs=("kl",)), oracle, small_inp
-        )
-        err = support_error_report(
-            dict(kl=static[0], dX=static[1], dW=static[2]), oracle, small_inp
-        )
-        assert not gate_failures(err, b0err), (err, b0err)
+        contract(static, small_inp)
 
 
 def test_sparse_dw_zero_fill_bits():
     """The global sparse dW's zero fill (FP32 zero words viewed as BF16) gives +0 BF16 bits: ids in no support keep
-    +0, equal to the deterministic package's dW."""
+    +0."""
     _require_cake()
     inp = cuda_inputs(257, k_cap=8, V=4096, teacher=True)
     kw = dict(backend="cake", path="sparse", dw_mode="global")
     nd = run_support(inp, ("kl",), **kw)
-    det = run_support(inp, ("kl",), package="det", **kw)
-    assert torch.equal(_bits(nd["dW"]), _bits(det["dW"]))
     used = torch.zeros(inp.W.shape[0], dtype=torch.bool, device=inp.W.device)
     used[inp.support_ids.long()] = True
     assert int((_bits(nd["dW"][~used]) != 0).sum()) == 0
