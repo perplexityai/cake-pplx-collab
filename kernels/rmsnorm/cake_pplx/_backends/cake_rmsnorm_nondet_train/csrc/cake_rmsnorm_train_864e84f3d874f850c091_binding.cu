@@ -22,7 +22,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_rmsnorm_train_864e84f3d874f850c091(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, double* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0);
+extern "C" __global__ void kernel_cake_rmsnorm_train_864e84f3d874f850c091(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0);
 
 namespace cake_binding_kernel_cake_rmsnorm_train_864e84f3d874f850c091 {
 
@@ -63,7 +63,7 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
   check_cuda_tensor(a_dw, "dw");
   check_dtype(a_dw, DLDataType{kDLFloat, 32, 1}, "dw");
   check_cuda_tensor(a_partial, "partial");
-  check_dtype(a_partial, DLDataType{kDLFloat, 64, 1}, "partial");
+  check_dtype(a_partial, DLDataType{kDLFloat, 32, 1}, "partial");
   check_cuda_tensor(a_counters, "counters");
   check_dtype(a_counters, DLDataType{kDLUInt, 32, 1}, "counters");
   check_cuda_tensor(a_g_h, "g_h");
@@ -111,7 +111,7 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
     static thread_local uint64_t prepared_devices = 0;
     const uint64_t device_bit = dev.device_id < 64 ? uint64_t{1} << dev.device_id : uint64_t{0};
     if (device_bit == 0 || (prepared_devices & device_bit) == 0) {
-      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_rmsnorm_train_864e84f3d874f850c091), cudaFuncAttributeMaxDynamicSharedMemorySize, 136448), "cudaFuncSetAttribute");
+      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_rmsnorm_train_864e84f3d874f850c091), cudaFuncAttributeMaxDynamicSharedMemorySize, 124160), "cudaFuncSetAttribute");
       prepared_devices |= device_bit;
     }
   }
@@ -134,7 +134,7 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(384, 1, 1);
-  config.dynamicSmemBytes = 136448;
+  config.dynamicSmemBytes = 124160;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_rmsnorm_train_864e84f3d874f850c091), kernel_args),
             "cudaLaunchKernelExC");

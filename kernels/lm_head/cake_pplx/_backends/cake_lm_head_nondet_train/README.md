@@ -33,12 +33,12 @@ takes a `deterministic` keyword, and passing one is Python's own `TypeError`.
 | backend package | `cake_pplx._backends.cake_lm_head_det_train` | `cake_pplx._backends.cake_lm_head_nondet_train` |
 | public call | `cake_lm_head_det_train_*(...)` | `cake_lm_head_nondet_train_*(...)` |
 | `loss`, `logp`, `lse` | fixed order, bitwise run to run | fixed order (the same programs), no run-to-run bit promise; a one-pass cross-entropy call (`set_one_pass_rows`, by default a one-row loss call) sums `lse` and the loss in its own fixed order, not the deterministic package's bits |
-| zero-weight policy rows (`loss_weights == 0`) | in the chunk loop | left out of the gradient path (see "Zero-weight policy rows") |
+| zero-weight policy rows (`loss_weights == 0`) | left out of the gradient path when the memory rule (`zero_weight_plan`) allows the split, else kept in the chunk loop; the default `"exact"` loss mode keeps the loss bits of the call without the split | left out of the gradient path; no loss term for a zero-weight row, so `loss` bits may differ from the deterministic package's, and `dW` bits too where the deterministic package's memory rule keeps the rows (see "Zero-weight policy rows") |
 | log-probability backward of 2 to 4 chunks (see the exception below) | the chunk loop | vocabulary-major by default: no FP32 `[V, H]` weight-gradient accumulator, `dX` / `dW` summed in one fixed order, no run-to-run bit promise (see "Vocabulary-major log-probability backward") |
-| log-probability rows with `dlogp == 0` | in the chunk loop | ordered last; the backward's GEMMs skip their work (see "Zero-gradient rows of the log-probability backward") |
+| log-probability rows with `dlogp == 0` | ordered last; the dz arm and the weight-gradient GEMMs skip their work (the dX GEMM computes every row), from 1946 valid rows on sm_100a, 3891 on sm_103a and 4097 elsewhere (sm_107a included); not in the opt-in forms (`memory_mode="budget"`, `num_valid_rows`) or a default call's automatic budget form | ordered last; the backward's GEMMs skip their work, from 1946 valid rows on sm_107a (the other floors are the deterministic package's), also in a default call that the deterministic package runs in a budget form, so `dW` bits may differ from the deterministic package's (see "Zero-gradient rows of the log-probability backward") |
 | `dW` | chunk order, bitwise run to run | chunk order (the same programs); no run-to-run promise; the vocabulary-major log-probability backward forms each block in one GEMM (see "Vocabulary-major log-probability backward"); a one-pass cross-entropy call writes `dW` once from its kept logits, not the deterministic package's bits |
-| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does |
-| precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each | the same |
+| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does; the slab sum then folds the rows' FP32 label residuals (the fold alone after one slice) |
+| precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each; the `dX` of the loss and log-probability entries also folds each row's FP32 label residual (what the BF16 `dz` store dropped from the label column's FP32 gradient), so `dX`, `ForwardResult.dx_acc` and the `dx_cast=False` accumulator round differently from version 0.2.1 (the change of version 0.3.0; the other outputs' arithmetic is unchanged; the candidate-support entries fold nothing) | the same |
 | under `torch.use_deterministic_algorithms(True)` | runs, never alerts | raises PyTorch's alert before a K-sliced dX launch (below); with `warn_only=True` it warns and runs this package; nothing falls back to the deterministic package |
 
 ## Public entry points (`cake_pplx/cake_lm_head_nondet_train.py`)
@@ -421,7 +421,11 @@ only.
 A policy row with a valid label whose `loss_weights` entry is exactly zero
 (`+0` or `-0`) contributes exactly zero loss and zero gradient.  Its weight is
 known before the forward, like a `-100` label, so this package leaves such a
-row out of the gradient path:
+row out of the gradient path.  The deterministic package does the same when
+its memory rule (`zero_weight_plan`) allows the split; else it keeps the rows
+in its chunk loop, so its `dW` sums over every valid row and its bits may
+differ from this package's (its README, "Zero-weight policy rows of the loss
+entry", "The guard").  In this package:
 
 * The chunk loop runs over the gradient rows `G = (labels >= 0) &
   (loss_weights != 0)` only: the row compaction machinery uses this mask (the
@@ -462,16 +466,21 @@ row out of the gradient path:
   so adding the two overstates the call's peak.
 * A call of fewer than `cake_backend.zero_weight_min_rows()` rows `T`
   (default 4096, `set_zero_weight_min_rows`) keeps its zero-weight rows in the
-  chunk loop, as the deterministic package does (the split adds row kernels
-  and a second count to every call that takes it).
+  chunk loop, as the deterministic package does below the same default floor
+  (the split adds row kernels and a second count to every call that takes it).
+* The loss differs from the deterministic package's: this package adds no
+  loss term for a zero-weight row (the chunk loop's sum over `G`), while the
+  deterministic package's default `"exact"` loss mode keeps the loss bits of
+  the call without the split.  So `loss` bits may differ from the
+  deterministic package's; both are judged against the naive tier.
 
-| | deterministic package | this package |
+| | without the split (a call below the floor) | with the split (this package) |
 | --- | --- | --- |
 | zero-weight row, finite inputs | full chunk path; its terms are exact zeros | skipped for the gradients; the same mathematics |
-| `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs) |
+| `loss` | FP32 sum over the valid rows | FP32 sum over `G` (the `Z` terms are 0; the grouping differs; the deterministic package's `"exact"` mode keeps the bits of the call without the split instead) |
 | `dW` | sum over every valid row of a chunk | sum over the `G` rows (other chunk boundaries; bits may differ, both are judged against the naive tier) |
 | `logp` of a zero-weight row | loss-path logits GEMM + `row_finalize` | logp-only pass (`return_logp=True`); 0 in the internal output otherwise |
-| non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `loss` / `dX` / `dW` (`0 * inf`) | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |
+| non-finite `X` row, logits or `infer_logp` in a zero-weight row | NaN in `dX` / `dW` (`0 * inf`) for a non-finite `X` row or logit; the loss term is `+-0` | does not reach `loss` / `dX` / `dW` (the row is treated like an ignored row for the gradients) |
 | `dX` row of a zero-weight row under a non-finite upstream loss gradient | NaN (`bf16(g * 0)`) | exact 0 (as an ignored row's) |
 
 Not applied (the plain path runs, every valid row in the chunk loop): a call
@@ -588,6 +597,14 @@ the partition's int32 outputs (12 bytes per valid row plus 4 per row of T,
 about 31 KB at T = 2048 with 1946 valid rows) for the whole backward, so its peak
 memory is that much higher than without the skip.
 `set_zero_dlogp_min_rows(4097)` keeps every architecture at the generic floor.
+The deterministic package skips the same rows with the same floors on sm_100a
+and sm_103a and from 4097 valid rows on sm_107a, but not in its opt-in forms
+(`memory_mode="budget"`, `num_valid_rows`) or in a default call whose
+automatic form is a budget form (this package has no automatic form).  So a
+backward can run the skip here and not there: on sm_107a at 1946 to 4096
+valid rows, and on any architecture for a default call that the
+deterministic package runs in a budget form.  Its `dW` bits may then differ
+from the deterministic package's (both are judged against the naive tier).
 
 Not applied: `compact_rows=False`, a backward that recounts its valid rows,
 the kept-logits entry, the chunk-loop forms of `memory_mode="budget"`
@@ -625,6 +642,12 @@ rule, no switch), which keeps no such buffer:
   GEMM takes the chunk rule's tile, ring and split for the call's rows; on
   sm_100a, whose long-chunk ring has no split-tail form, a launch that would
   run that ring with a short last wave runs the table ring with the split.
+* The label residuals start at 0 and each block's dz arm stores those of the
+  rows whose label lies in the block (the shifted label of every other block
+  lies outside it).  After the last block, a call that forms `dX` launches
+  the slab sum `dx_slab_sum` once over every row as the fold alone
+  (`n_slabs = 0`), with the unshifted labels and the full head: the same
+  fold as the chunk loop's, after the last block's add.
 * The forward, `logp` and `lse` do not change.  `dX` and `dW` are summed in
   one fixed order (no unordered reduction; no run-to-run bit promise); they
   round differently from the chunk loop (other summation groupings under the
@@ -697,7 +720,9 @@ modules with the same configurations under this package's prefix.  The one
 stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
 
 * A chunk the slice rule leaves at one K slice stores its `dX_acc` rows
-  directly (the same arithmetic as the deterministic package).
+  directly (the same arithmetic as the deterministic package), and the slab
+  sum `dx_slab_sum` follows it as the fold alone (`n_slabs = 0`: it reads the
+  stored rows and folds their FP32 label residuals).
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
@@ -707,7 +732,14 @@ stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   each element in slice order (`((s_0 + s_1) + ...)`, IEEE round-to-nearest
   without flushing subnormals) and stores the sum into the chunk's `dX_acc`
   rows.  It never reads those rows and is their only writer, so no call
-  fills or zeroes `dX_acc`.  Each element is summed in one order (no
+  fills or zeroes `dX_acc`.  It then folds the rows' FP32 label residuals,
+  `fma(rlab[t], f32(W[y_t, h]), sum)` on each row whose label lies in
+  `[0, V)` and whose residual is nonzero, as the deterministic `slab_sum`
+  does.  Its operands: `dx`, the flat slab `ws`, `ws_slab`, `num_vecs`,
+  `n_slabs`, `row_vecs`, the rows' `labels` / `rlab`, the head `W`, `V` and
+  the fold switch `lr` (0 on the support path, whose rows hold no label
+  residual; `cake_backend.dx_slab_sum_operands`), then `CNT` for the counted
+  form.  Each element is summed in one order (no
   run-to-run bit promise); its bits may differ from the deterministic
   package's by the rounding of that sum.  The counted form stores the sum
   into the rows of the row-tile pairs the counted GEMM ran and `-0.0` into
@@ -874,7 +906,10 @@ norm without a cap, or a draw where the tier's error is 0 and its own is not),
 that meets the tier, or that a test passing its other checks did not judge.
 The entries of a test that is not collected (a renamed or removed
 parametrization, or a run over other test ids) or that skips are not
-checked.
+checked.  Since version 0.3.0 every listed output is a weight gradient (`dW`;
+81 outputs of 30 tests of both packages): the FP32 label residual folded into
+`dX` brought every `dX` output that version 0.2.1 listed within the tier, and
+those entries are removed.
 
 Toolchain: the deterministic package's rules apply unchanged (CUDA 12.9 or
 newer; the `sm_100a` 2-CTA producer loops issue the stage's

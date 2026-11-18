@@ -554,6 +554,7 @@ kernel_cake_rmsnorm_det_train_c1a3be946e94e94233af(__nv_bfloat16* __restrict__ g
             if (lane == 0) {
                 dot_slots[par + warp] = dot;
             }
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncthreads();
             ps[2] = 0;
             if (ps[0] < ps[1]) {

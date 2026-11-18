@@ -79,11 +79,9 @@ kernel_cake_rmsnorm_train_60bfcb24560bbae612c3(float* __restrict__ partial, floa
     int cg = tid - rsub * 16;
     int col = s * 64 + cg * 4;
     float a4[4];
-    float c4[4];
     #pragma unroll
     for (int e = 0; e < 4; e++) {
         a4[e] = 0.0f;
-        c4[e] = 0.0f;
     }
     int n_trips = (n_chunks + 23) / 24;
     #pragma unroll 4
@@ -100,40 +98,28 @@ kernel_cake_rmsnorm_train_60bfcb24560bbae612c3(float* __restrict__ partial, floa
             }
             #pragma unroll
             for (int e_1 = 0; e_1 < 4; e_1++) {
-                float y = __fmaf_rn(_vec_load_0[e_1], 1.0f, -c4[e_1]);
-                float t = a4[e_1] + y;
-                c4[e_1] = t - a4[e_1] - y;
-                a4[e_1] = t;
+                a4[e_1] = a4[e_1] + _vec_load_0[e_1];
             }
         }
     }
     #pragma unroll
     for (int e_2 = 0; e_2 < 4; e_2++) {
-        red_fold[rsub * 64 + cg * 4 + e_2] = a4[e_2] - c4[e_2];
+        red_fold[rsub * 64 + cg * 4 + e_2] = a4[e_2];
     }
     __syncthreads();
     if (tid < 16) {
         float o4[4];
-        float oc4[4];
         #pragma unroll
         for (int e_3 = 0; e_3 < 4; e_3++) {
             o4[e_3] = 0.0f;
-            oc4[e_3] = 0.0f;
         }
         #pragma unroll
         for (int k_1 = 0; k_1 < 24; k_1++) {
             #pragma unroll
             for (int e_4 = 0; e_4 < 4; e_4++) {
                 float d = red_fold[k_1 * 64 + tid * 4 + e_4];
-                float y_1 = __fmaf_rn(d, 1.0f, -oc4[e_4]);
-                float t_1 = o4[e_4] + y_1;
-                oc4[e_4] = t_1 - o4[e_4] - y_1;
-                o4[e_4] = t_1;
+                o4[e_4] = o4[e_4] + d;
             }
-        }
-        #pragma unroll
-        for (int e_5 = 0; e_5 < 4; e_5++) {
-            o4[e_5] = o4[e_5] - oc4[e_5];
         }
         int ocol = s * 64 + tid * 4;
         {

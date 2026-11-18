@@ -118,6 +118,7 @@ from .cake_backend import (
     LOGPROB_DZ_STAGE,
     LOGPROB_DZ_TAU_STAGE,
     LOGPROB_LBL_STAGE,
+    RLAB_ZERO_STAGE,
     TEMPERATURE_STAGES,
     Problem,
     ReferenceEngine,
@@ -140,6 +141,10 @@ from .cake_backend import (
     _dw_stream,
     _dx_keys,
     _dx_reduce,
+    _fold_values,
+    _rlab_zero,
+    _slab_count,
+    _with_rlab_zero,
     _evict,
     _ffi_stream_context,
     _gather_rows,
@@ -725,6 +730,7 @@ HOST_STAGES: dict[str, Callable[[dict[str, Any]], None]] = {
     "dx_reduce": _dx_reduce,
     "gather_rows": _gather_rows,
     "save_row_grad": _save_row_grad,
+    RLAB_ZERO_STAGE: _rlab_zero,
 }
 
 
@@ -1224,8 +1230,8 @@ def memory_plan(
     dx_out = live(2 * T * H) if need_dx else 0
     dw_out = live(2 * V * H)
     rowvec = (
-        live(4 * T, 4) + live(4 * R, 8)
-    )  # the O(T) vectors (16 T + 32 R bytes): labels, mask, scan, index, lse, logp, d, ...
+        live(4 * T, 4) + live(4 * R, 9)
+    )  # the O(T) vectors (16 T + 36 R bytes): labels, mask, scan, index, lse, logp, d, label residuals, ...
     xc = (
         live(2 * T * H) if x_copy and not compact else 0
     )  # the contiguous copy of X the chunk loop reads
@@ -1293,14 +1299,15 @@ def memory_plan(
 
     def block(vb: int) -> int:
         """One recompute block: the gathered rows, the block's ``dz`` and statistics, its FP32 accumulator (a
-        multi-chunk call) and the block-shifted labels (with their temporary)."""
+        multi-chunk call), the block-shifted labels (with their temporary) and the ``dz`` arm's scratch label
+        residuals (:func:`_dw_vocab_blocks`)."""
         return (
             live(2 * Cr * H)
             + live(2 * Cr * vb)
             + live(8 * Cr * -(-vb // tile))
             + (live(4 * vb * H) if n > 1 else 0)
             + live(8 * R)
-            + live(4 * R)
+            + live(4 * R, 2)
         )
 
     if entry == "loss":
@@ -1590,6 +1597,9 @@ def stage_values(
     caller's ``[T]`` operand ``t[index + "_full"]`` into ``t[index]``.
     """
     p, g = plan.problem, plan.geometry
+    if stage == RLAB_ZERO_STAGE:
+        # the host step ahead of the call's first row-gradient producer (:func:`.cake_backend._with_rlab_zero`)
+        return {"rlab": t["rlab"]}
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     values.update(
         T=int(plan.rows),
@@ -1707,7 +1717,8 @@ def stage_values(
             # the caller's ``[T]`` ``dlogp`` at ``d_in[d_off + r]`` (the operands ``row_grad`` reads)
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0))
+            # ... and stores each row's FP32 label residual at ``rlab[row0 + r]``
+            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0), rlab=t["rlab"])
     elif base == "gemm_dx":
         # every token chunk writes its own rows of dX_acc: the first K chunk of the GEMM always stores (first_chunk=1);
         # the K-sliced forms write slices >= 1 into the ``dx_ws`` slabs (added by ``dx_reduce`` afterwards)
@@ -1738,19 +1749,18 @@ def stage_values(
             ),
         )
     elif stage == "slab_sum":
-        # the fused dX finalize's slab reduction of the K-sliced dX GEMM: one kernel over the chunk's rows of dX_acc
-        k = plan.dx_slices_of(index)
-        if not plan.dx_finalize or k <= 1:
-            raise ValueError(
-                f"slab_sum belongs to a K-sliced dX GEMM of a plan with dx_finalize (chunk {index}: {k} slice(s))"
-            )
-        ws = t["dx_ws"]
+        # the last FP32 write of the chunk's rows of dX_acc (:func:`.cake_backend._dx_keys`): the fused dX finalize's
+        # slab reduction of a K-sliced dX GEMM, then the fold of the rows' FP32 label residuals; ``n_slabs`` 0 (a
+        # one-slice GEMM, or the host's ``dx_reduce`` adds) is the fold alone, ``ws`` unread
+        n_slabs = _slab_count(plan, index)
+        ws = t["dx_ws"] if n_slabs else t["f32_dummy"]
         values.update(
             dx=t["dx_acc"][row0:stop],
             ws=ws,
-            ws_slab=int(ws.stride(0)),
+            ws_slab=int(ws.stride(0)) if n_slabs else 0,
             num_vecs=int(rows_c * p.hidden // g.cast_vec),
-            n_slabs=int(k - 1),
+            n_slabs=n_slabs,
+            **_fold_values(t, row0, stop, p.hidden, g.cast_vec),
         )
     elif (
         stage == "dx_reduce"
@@ -1852,6 +1862,7 @@ def stage_values(
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if external else t["d"],
+            rlab=t["rlab"],  # each row's FP32 label residual, at ``rlab[row0 + r]``
             d_off=int(row0) if external else 0,
         )
     else:
@@ -1899,6 +1910,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
+    if stage == RLAB_ZERO_STAGE:
+        return stage_values(stage, t, plan, index)
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     if stage == "gather_rows":
         if isinstance(index, str):
@@ -1937,7 +1950,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         if base in (LOGPROB_DZ_STAGE, LOGPROB_LBL_STAGE):
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"])
+            values.update(lse=t["lse"], d_in=t["d_in"], rlab=t["rlab"])
     elif base == "gemm_dx":
         values.update(
             A=logits[:rows_c],
@@ -1947,7 +1960,13 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             WS=t["dx_ws"] if plan.dx_slices_of(index) > 1 else t["f32_dummy"],
         )
     elif stage == "slab_sum":
-        values.update(dx=t["dx_acc"][row0:stop], ws=t["dx_ws"])
+        values.update(
+            dx=t["dx_acc"][row0:stop],
+            ws=t["dx_ws"] if _slab_count(plan, index) else t["f32_dummy"],
+            labels=t["labels"][row0:stop],
+            rlab=t["rlab"][row0:stop],
+            W=t["W"],
+        )
     elif base == "gemm_dw_acc":
         v0, v1 = plan.dw_acc_rows(index)
         values.update(
@@ -1989,6 +2008,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if p.entry == "logprob" else t["d"],
+            rlab=t["rlab"],
         )
     else:
         return stage_values(stage, t, plan, index)
@@ -2005,6 +2025,8 @@ def _slot_values_temperature(
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
+    if stage == RLAB_ZERO_STAGE:
+        return stage_values(stage, t, plan, index)
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     if stage == "gather_rows":
         if isinstance(index, str):
@@ -2048,7 +2070,7 @@ def _slot_values_temperature(
         if base in (LOGPROB_DZ_STAGE, LOGPROB_LBL_STAGE):
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"])
+            values.update(lse=t["lse"], d_in=t["d_in"], rlab=t["rlab"])
         if tau_rows is not None:
             values.update(temperature=tau_rows)
     elif base == "gemm_dx":
@@ -2060,7 +2082,13 @@ def _slot_values_temperature(
             WS=t["dx_ws"] if plan.dx_slices_of(index) > 1 else t["f32_dummy"],
         )
     elif stage == "slab_sum":
-        values.update(dx=t["dx_acc"][row0:stop], ws=t["dx_ws"])
+        values.update(
+            dx=t["dx_acc"][row0:stop],
+            ws=t["dx_ws"] if _slab_count(plan, index) else t["f32_dummy"],
+            labels=t["labels"][row0:stop],
+            rlab=t["rlab"][row0:stop],
+            W=t["W"],
+        )
     elif base == "gemm_dw_acc":
         # a ``dw_rows`` / ``dw_split`` plan: the accumulated vocabulary rows (:meth:`Plan.dw_acc_rows`; the
         # :class:`_UpperRows` launch into ``dw_acc_hi``)
@@ -2106,6 +2134,7 @@ def _slot_values_temperature(
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if p.entry == "logprob" else t["d"],
+            rlab=t["rlab"],
         )
         if tau_rows is not None:
             values.update(temperature=tau_rows)
@@ -2149,7 +2178,7 @@ def forward_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
                     # the split accumulator's upper rows: the same form again (:func:`_run_split_keys` runs it right
                     # behind the first, on the same stream)
                     keys.append((plan.dw_acc_stage(index), _UpperRows(index)))
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -2183,7 +2212,7 @@ def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 keys.append(
                     (plan.dw_acc_stage(index), index)
                 )  # a deferred last chunk runs in the backward (cast_keys)
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def _run_split_keys(
@@ -2923,6 +2952,11 @@ def prepare_lm_head_det_loss(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -3396,6 +3430,11 @@ def prepare_lm_head_det_loss_temperature(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -3913,6 +3952,8 @@ class _Binding:
                     )
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
+            if plan.need_dx or plan.need_dw:
+                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -3977,6 +4018,8 @@ class _Binding:
         else:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
+        if plan.need_dx or plan.need_dw:
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -4178,6 +4221,8 @@ class _TemperatureBinding(_Binding):
                     )
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
+            if plan.need_dx or plan.need_dw:
+                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -4232,6 +4277,8 @@ class _TemperatureBinding(_Binding):
         else:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
+        if plan.need_dx or plan.need_dw:
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -6597,6 +6644,8 @@ def _dw_vocab_blocks(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     dummy = _device_constants(index)["f32_dummy"]
+    # the ``dz`` arm's FP32 label residuals: a scratch of this recompute, never the call's ``rlab``
+    rlab = torch.empty((int(plan.rows),), dtype=torch.float32, device=device)
     g = (
         _unit_scale(device)
         if grad is None
@@ -6679,6 +6728,7 @@ def _dw_vocab_blocks(
                     labels=lb,
                     lse=lse_c,
                     d_in=d_c,
+                    rlab=rlab,
                     rows_c=int(rows_c),
                     row0=int(row0),
                     d_off=int(row0),
@@ -6835,6 +6885,8 @@ def _dw_vocab_blocks_temperature(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     dummy = _device_constants(index)["f32_dummy"]
+    # the ``dz`` arm's FP32 label residuals: a scratch of this recompute, never the call's ``rlab``
+    rlab = torch.empty((int(plan.rows),), dtype=torch.float32, device=device)
     g = (
         _unit_scale(device)
         if grad is None
@@ -6917,6 +6969,7 @@ def _dw_vocab_blocks_temperature(
                     labels=lb,
                     lse=lse_c,
                     d_in=d_c,
+                    rlab=rlab,
                     rows_c=int(rows_c),
                     row0=int(row0),
                     d_off=int(row0),
