@@ -266,7 +266,11 @@ kernel_cake_moe_grouped_gemm_1edcad995dcc790600cb(const __grid_constant__ CUtens
             if (elect_sync()) {
                 #pragma unroll 1
                 for (unsigned int t = cluster_u; t < total_tiles; t += num_clusters_u) {
-                    while (next_cum <= t) {
+                    #pragma unroll 1
+                    for (unsigned int _gs = 0; _gs < (unsigned int)num_groups; _gs++) {
+                        if (next_cum > t) {
+                            break;
+                        }
                         cum_tiles = next_cum;
                         cur_start = g_end;
                         cur_g = cur_g + 1;
@@ -294,6 +298,12 @@ kernel_cake_moe_grouped_gemm_1edcad995dcc790600cb(const __grid_constant__ CUtens
                         load_stage += 1;
                         if (load_stage == 7) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
+                }
+                #pragma unroll
+                for (int _ = 0; _ < 7; _++) {
+                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    load_stage += 1;
+                    if (load_stage == 7) { load_stage = 0; _phase_mma_done ^= 1; }
                 }
             }
         }
@@ -327,7 +337,11 @@ kernel_cake_moe_grouped_gemm_1edcad995dcc790600cb(const __grid_constant__ CUtens
             if (cta_rank == 0) {
                 #pragma unroll 1
                 for (unsigned int t_m = cluster_m; t_m < total_tiles_m; t_m += num_clusters_m) {
-                    while (next_cum_m <= t_m) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_1 = 0; _gs_1 < (unsigned int)num_groups; _gs_1++) {
+                        if (next_cum_m > t_m) {
+                            break;
+                        }
                         cum_tiles_m = next_cum_m;
                         cur_start_m = g_end_m;
                         cur_g_m = cur_g_m + 1;
@@ -415,7 +429,11 @@ kernel_cake_moe_grouped_gemm_1edcad995dcc790600cb(const __grid_constant__ CUtens
             unsigned int _phase_mainloop_done = 0;
             #pragma unroll 1
             for (unsigned int t_e = cluster_e; t_e < total_tiles_e; t_e += num_clusters_e) {
-                while (next_cum_e <= t_e) {
+                #pragma unroll 1
+                for (unsigned int _gs_2 = 0; _gs_2 < (unsigned int)num_groups; _gs_2++) {
+                    if (next_cum_e > t_e) {
+                        break;
+                    }
                     cum_tiles_e = next_cum_e;
                     cur_start_e = g_end_e;
                     cur_g_e = cur_g_e + 1;

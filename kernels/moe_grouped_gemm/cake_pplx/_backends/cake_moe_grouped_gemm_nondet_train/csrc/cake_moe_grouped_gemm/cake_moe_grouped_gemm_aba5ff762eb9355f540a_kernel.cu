@@ -254,7 +254,11 @@ kernel_cake_moe_grouped_gemm_aba5ff762eb9355f540a(const __grid_constant__ CUtens
             if (elect_sync()) {
                 #pragma unroll 1
                 for (unsigned int t = cluster_u; t < total_tiles; t += num_clusters_u) {
-                    while (next_cum <= t) {
+                    #pragma unroll 1
+                    for (unsigned int _gs = 0; _gs < (unsigned int)num_groups; _gs++) {
+                        if (next_cum > t) {
+                            break;
+                        }
                         cum_tiles = next_cum;
                         cur_start = g_end;
                         cur_g = cur_g + 1;
@@ -275,14 +279,20 @@ kernel_cake_moe_grouped_gemm_aba5ff762eb9355f540a(const __grid_constant__ CUtens
                         tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, (&A), 0, off_m, iter_n, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 49152, (&B), off_k, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 49152 + 8192, (&B), off_k + 64, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 49152 + 16384, (&B), off_k + 256, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_3d_gmem2smem_cta2(smem_b_addr + load_stage * 49152 + 24576, (&B), off_k + 320, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152, (&B), off_k + 256, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_3d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152 + 8192, (&B), off_k + 320, iter_n * BLOCK_K, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         asm volatile(
                             "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
                             :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         load_stage += 1;
                         if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
+                }
+                #pragma unroll
+                for (int _ = 0; _ < 4; _++) {
+                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    load_stage += 1;
+                    if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                 }
             }
         }
@@ -315,7 +325,11 @@ kernel_cake_moe_grouped_gemm_aba5ff762eb9355f540a(const __grid_constant__ CUtens
             if (cta_rank == 0) {
                 #pragma unroll 1
                 for (unsigned int t_m = cluster_m; t_m < total_tiles_m; t_m += num_clusters_m) {
-                    while (next_cum_m <= t_m) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_1 = 0; _gs_1 < (unsigned int)num_groups; _gs_1++) {
+                        if (next_cum_m > t_m) {
+                            break;
+                        }
                         cum_tiles_m = next_cum_m;
                         cur_start_m = g_end_m;
                         cur_g_m = cur_g_m + 1;
@@ -1094,7 +1108,11 @@ kernel_cake_moe_grouped_gemm_aba5ff762eb9355f540a(const __grid_constant__ CUtens
             unsigned int _phase_acc_full0 = 0;
             #pragma unroll 1
             for (unsigned int t_e = cluster_e; t_e < total_tiles_e; t_e += num_clusters_e) {
-                while (next_cum_e <= t_e) {
+                #pragma unroll 1
+                for (unsigned int _gs_2 = 0; _gs_2 < (unsigned int)num_groups; _gs_2++) {
+                    if (next_cum_e > t_e) {
+                        break;
+                    }
                     cum_tiles_e = next_cum_e;
                     cur_start_e = g_end_e;
                     cur_g_e = cur_g_e + 1;

@@ -25,10 +25,12 @@ package ``cake_pplx._backends.cake_moe_grouped_gemm_det_train``.  This suite
 covers the module's entry points on CPU -- stable APIs with no experimental marking and
 no warning, the signatures and docstrings they share with the package functions, the
 two types resolved from the package, the support query, and the deferred import that
-keeps the package out of ``import`` of the module -- and checks the stable route on a GPU against the per-group fp64 reference (including the
-rows past ``m_indptr[-1]``, which belong to no group) and against the options the Cake
-backend does not take, and that a non-reentrant checkpoint of the module's
-``cake_moe_grouped_gemm_det`` with early stop on skips the recomputed forward GEMM.
+keeps the package out of ``import`` of the module -- and checks the stable route on a GPU,
+judged against the naive BF16 tier over ``cake_naive.DRAWS`` inputs
+(``tests/cake/test_helpers/cake_moe_judge.py``; the rows past ``m_indptr[-1]``, which
+belong to no group, untouched), against the options the Cake backend does not take, and
+that a non-reentrant checkpoint of the module's ``cake_moe_grouped_gemm_det`` with early
+stop on skips the recomputed forward GEMM.
 On CPU it also checks the deterministic-only contract: no entry takes a
 ``deterministic`` argument (``TypeError``, also a stale positional mode of
 ``CakeMoEGroupedGemmDetFunction.apply``), and torch's deterministic mode changes
@@ -60,9 +62,9 @@ from cake_pplx._backends.cake_moe_grouped_gemm_det_train import (
 from cake_pplx._backends.cake_moe_grouped_gemm_det_train.cake_backend import (
     SUPPORTED_COMPUTE_CAPABILITIES,
 )
+from tests.cake.test_helpers.cake_moe_judge import judge_draws
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ATOL = RTOL = 1e-2  # bf16 outputs
 
 # Group size lists: an empty group, a one-row group and sizes that are not tile
 # multiples (the same lists as the backend suite).
@@ -465,35 +467,29 @@ def _bounds(sizes):
     return list(zip([0] + ends[:-1], ends, strict=True))
 
 
-def _reference_fwd(x, w, sizes):
-    """Per-group fp64 reference of the forward projection ``Y = X @ W[e].T`` in fp32."""
-    out = torch.zeros(x.shape[0], w.shape[1], dtype=torch.float32, device=x.device)
-    for e, (s, t) in enumerate(_bounds(sizes)):
-        if t > s:
-            out[s:t] = (x[s:t].double() @ w[e].double().T).float()
-    return out
-
-
-def _assert_bf16_close(out, ref):
-    assert out.dtype == torch.bfloat16
-    torch.testing.assert_close(out.float(), ref, atol=ATOL, rtol=RTOL)
-
-
-def test_grouped_mm_bf16_cake_backend_matches_reference():
+def test_grouped_mm_bf16_cake_backend_matches_reference(record_property):
+    """``grouped_mm_bf16(..., backend="cake")`` over a ragged list (an empty and a one-row
+    group): ``Y`` judged against the naive BF16 tier over the draws, also into a given
+    ``out`` whose rows past ``m_indptr[-1]`` (no group's) stay untouched."""
     device = _require_program("fwd")
+    total = sum(RAGGED_E6)
+    m_indptr = _m_indptr(RAGGED_E6, device)
 
-    x, w, _g, _offs = _inputs(RAGGED_E6, 1024, 512, device)
-    out = grouped_mm_bf16(x, w, _m_indptr(RAGGED_E6, device), backend="cake")
-    assert out.shape == (sum(RAGGED_E6), 1024) and out.dtype == torch.bfloat16
-    _assert_bf16_close(out, _reference_fwd(x, w, RAGGED_E6))
-    # rows past m_indptr[-1] belong to no group and are left untouched
-    padded_x = torch.cat([x, torch.zeros(37, 512, dtype=x.dtype, device=device)])
-    out = torch.full(
-        (sum(RAGGED_E6) + 37, 1024), float("nan"), dtype=torch.bfloat16, device=device
-    )
-    grouped_mm_bf16(padded_x, w, _m_indptr(RAGGED_E6, device), out=out, backend="cake")
-    _assert_bf16_close(out[: sum(RAGGED_E6)], _reference_fwd(x, w, RAGGED_E6))
-    assert torch.isnan(out[sum(RAGGED_E6) :]).all()
+    def draw(d):
+        x, w, _g, _offs = _inputs(RAGGED_E6, 1024, 512, device, seed=d.seed)
+        out = grouped_mm_bf16(x, w, m_indptr, backend="cake")
+        assert out.shape == (total, 1024) and out.dtype == torch.bfloat16
+        d.op("Y", out, "fwd", x, w, RAGGED_E6)
+        # rows past m_indptr[-1] belong to no group and are left untouched
+        padded_x = torch.cat([x, torch.zeros(37, 512, dtype=x.dtype, device=device)])
+        out = torch.full(
+            (total + 37, 1024), float("nan"), dtype=torch.bfloat16, device=device
+        )
+        grouped_mm_bf16(padded_x, w, m_indptr, out=out, backend="cake")
+        d.op("Y_out", out[:total], "fwd", x, w, RAGGED_E6)
+        assert torch.isnan(out[total:]).all()
+
+    judge_draws(record_property, draw, seed=0)
 
 
 def test_grouped_mm_bf16_cake_backend_rejects_unsupported_options():
@@ -511,13 +507,14 @@ def test_grouped_mm_bf16_cake_backend_rejects_unsupported_options():
     "early_stop", [True, False], ids=["early_stop", "no_early_stop"]
 )
 def test_facade_autograd_checkpoint_early_stop_skips_the_forward_launch(
-    early_stop, monkeypatch
+    early_stop, monkeypatch, record_property
 ):
     """``cake_pplx.cake_moe_grouped_gemm_det_train.cake_moe_grouped_gemm_det`` hands off to the package's wrapper,
     which launches its forward after autograd saved the inputs: a non-reentrant
     checkpoint of one GEMM launches the forward once with early stop on (the
     recomputation stops before it) and twice with it off, with the bits of the plain
-    call for ``Y``, ``dX`` and ``dW``."""
+    call for ``Y``, ``dX`` and ``dW``; the plain call's ``Y``, ``dX`` and ``dW`` are judged
+    against the naive BF16 tier over the draws."""
     device = _require_program("fwd")
     _require_program("dgrad")
     _require_program("wgrad", torch.bfloat16)
@@ -557,4 +554,15 @@ def test_facade_autograd_checkpoint_early_stop_skips_the_forward_launch(
     assert n1 == (1 if early_stop else 2)
     for a, b in zip(checkpointed, plain, strict=True):
         assert torch.equal(a, b)
-    _assert_bf16_close(plain[0], _reference_fwd(x0, w0, RAGGED_E4))
+
+    def draw(d):
+        x, w, gd, _ = _inputs(RAGGED_E4, 512, 256, device, seed=d.seed)
+        x0.copy_(x)
+        w0.copy_(w)
+        g.copy_(gd)
+        y, dx, dw, _n = run(False)
+        d.op("Y", y, "fwd", x0, w0, RAGGED_E4)
+        d.op("dX", dx, "dgrad", g, w0, RAGGED_E4)
+        d.op("dW", dw, "wgrad", g, x0, RAGGED_E4)
+
+    judge_draws(record_property, draw, seed=55)

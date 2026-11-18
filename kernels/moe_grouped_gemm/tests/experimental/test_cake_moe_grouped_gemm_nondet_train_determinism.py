@@ -75,6 +75,14 @@ import torch.utils.checkpoint
 
 # The backend suite ``base`` names the package through ``cake_package`` only; nothing
 # else of ``cake_pplx`` is imported here.
+from tests.cake.test_helpers.cake_moe_judge import bounds as _bounds
+from tests.cake.test_helpers.cake_moe_judge import (
+    judge_draws,
+    naive_sum,
+    oracle_sum,
+    product,
+)
+from tests.cake.test_helpers.cake_naive import draw_seed
 from tests.experimental import test_cake_moe_grouped_gemm_nondet_train as base
 
 pkg = base.pkg
@@ -333,10 +341,16 @@ def _require_program(case, device):
         )
 
 
-def _inputs(case, device):
-    """Fixed inputs of ``case``: seeded from its label, so every process builds the same bits."""
+def _seed(case):
+    """The seed of ``case``'s own inputs: from its label, so every process builds the same
+    bits (draw 0 of its judge)."""
+    return zlib.crc32(case.label.encode())
+
+
+def _operands(case, device, seed):
+    """The operands ``(a, b)`` of ``case`` drawn from ``seed``."""
     gen = torch.Generator(device=device)
-    gen.manual_seed(zlib.crc32(case.label.encode()))
+    gen.manual_seed(seed)
     sum_m, num_groups = sum(case.sizes), len(case.sizes)
     scale = 1.0 / math.sqrt(case.k)
 
@@ -344,20 +358,26 @@ def _inputs(case, device):
         t = torch.randn(*shape, generator=gen, device=device, dtype=torch.float32)
         return t.mul_(scale).to(torch.bfloat16)
 
+    if case.op == "fwd":
+        return randn(sum_m, case.k, scale=scale), randn(num_groups, case.n, case.k, scale=scale)
+    if case.op == "dgrad":
+        return randn(sum_m, case.n), randn(num_groups, case.n, case.k, scale=scale)
+    return randn(sum_m, case.n), randn(sum_m, case.k, scale=scale)
+
+
+def _inputs(case, device):
+    """Fixed inputs of ``case``: seeded from its label (``_seed``), so every process builds
+    the same bits."""
+    sum_m, num_groups = sum(case.sizes), len(case.sizes)
     offs = torch.tensor(case.sizes, dtype=torch.int32, device=device).cumsum(
         0, dtype=torch.int32
     )
+    a, b = _operands(case, device, _seed(case))
     if case.op == "fwd":
-        a = randn(sum_m, case.k, scale=scale)
-        b = randn(num_groups, case.n, case.k, scale=scale)
         out = torch.empty(sum_m, case.n, dtype=torch.bfloat16, device=device)
     elif case.op == "dgrad":
-        a = randn(sum_m, case.n)
-        b = randn(num_groups, case.n, case.k, scale=scale)
         out = torch.empty(sum_m, case.k, dtype=torch.bfloat16, device=device)
     else:
-        a = randn(sum_m, case.n)
-        b = randn(sum_m, case.k, scale=scale)
         out = torch.empty(
             num_groups, case.n, case.k, dtype=case.out_dtype, device=device
         )
@@ -516,40 +536,63 @@ def _run_repeats(launch, out, repeats, device):
     return ref, launches, mismatches, worst, prefilled
 
 
-def _spot_check(case, a, b, out):
-    """Guard against a vacuous pass: the last non-empty group's first block matches an fp64
-    reference, and an empty group's weight gradient is exact zeros."""
-    ends = [sum(case.sizes[: i + 1]) for i in range(len(case.sizes))]
-    bounds = list(zip([0] + ends[:-1], ends, strict=True))
+def _spot(case, a, b, out):
+    """The spot block of ``case`` (None when no group has rows): on the last group with
+    rows, its first ``SPOT_ROWS`` rows by the first ``SPOT_COLS`` columns (forward, data
+    gradient) or its ``SPOT_COLS // 2`` x ``SPOT_COLS // 2`` corner (weight gradient):
+    ``(output block, a block, b block, sizes)``, whose per-group product
+    (``cake_moe_judge.product``) is the block."""
+    bounds = _bounds(case.sizes)
     nonempty = [e for e, (s, t) in enumerate(bounds) if t > s]
     if not nonempty:
-        return
+        return None
     e = nonempty[-1]
     s, t = bounds[e]
     if case.op == "fwd":
         r, c = min(t, s + SPOT_ROWS), min(case.n, SPOT_COLS)
-        ref = a[s:r].double() @ b[e, :c].double().T
-        got = out[s:r, :c]
-    elif case.op == "dgrad":
+        return out[s:r, :c], a[s:r], b[e : e + 1, :c], [r - s]
+    if case.op == "dgrad":
         r, c = min(t, s + SPOT_ROWS), min(case.k, SPOT_COLS)
-        ref = a[s:r].double() @ b[e][:, :c].double()
-        got = out[s:r, :c]
-    else:
-        rn, ck = min(case.n, SPOT_COLS // 2), min(case.k, SPOT_COLS // 2)
-        ref = a[s:t, :rn].double().T @ b[s:t, :ck].double()
-        got = out[e, :rn, :ck]
-        for empty in (i for i, (s0, t0) in enumerate(bounds) if t0 == s0):
-            assert int(_bits(out[empty]).count_nonzero()) == 0, (
-                f"group {empty} is empty but its weight gradient is not exact zeros"
-            )
-    torch.testing.assert_close(got.double(), ref, atol=3e-2, rtol=2e-2)
+        return out[s:r, :c], a[s:r], b[e : e + 1, :, :c], [r - s]
+    rn, ck = min(case.n, SPOT_COLS // 2), min(case.k, SPOT_COLS // 2)
+    return out[e : e + 1, :rn, :ck], a[s:t, :rn], b[s:t, :ck], [t - s]
 
 
-def _acc_out0(label, case, device):
+def _judge_spot(record_property, case, launch, a, b, out, device):
+    """Guard against a vacuous pass: the spot block (``_spot``) of ``launch``'s output,
+    judged against the naive BF16 tier over ``cake_naive.DRAWS`` inputs
+    (``tests/cake/test_helpers/cake_moe_judge.py``; draw ``j`` writes the operands of
+    ``draw_seed(_seed(case), j)`` into ``a`` and ``b``, draw 0, the last, is the case's
+    own), and an empty group's weight gradient is exact zeros (every bit) on every draw."""
+    if _spot(case, a, b, out) is None:
+        return
+    name = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}[case.op] + "[spot]"
+    empty = [i for i, size in enumerate(case.sizes) if not size]
+
+    def draw(d):
+        na, nb = _operands(case, device, d.seed)
+        a.copy_(na)
+        b.copy_(nb)
+        del na, nb
+        launch.launch()
+        got, sa, sb, sizes = _spot(case, a, b, out)
+        d.op(name, got, case.op, sa, sb, sizes)
+        if case.op == "wgrad":
+            for group in empty:
+                assert int(_bits(out[group]).count_nonzero()) == 0, (
+                    f"draw {d.index}: group {group} is empty but its weight gradient "
+                    "is not exact zeros"
+                )
+
+    judge_draws(record_property, draw, seed=_seed(case))
+
+
+def _acc_out0(label, case, device, draw=0):
     """The starting ``out`` of an accumulate: normal values of scale ``ACC_OUT0_SCALE``
-    (no -0.0) seeded from ``label``, so every process builds the same bits."""
+    (no -0.0) seeded from ``label`` (``draw_seed`` of it for draw ``draw`` of the judge),
+    so every process builds the same bits."""
     gen = torch.Generator(device=device)
-    gen.manual_seed(zlib.crc32(f"out0:{label}".encode()))
+    gen.manual_seed(draw_seed(zlib.crc32(f"out0:{label}".encode()), draw))
     out0 = torch.randn(
         len(case.sizes),
         case.n,
@@ -561,37 +604,33 @@ def _acc_out0(label, case, device):
     return out0.mul_(ACC_OUT0_SCALE).to(case.out_dtype)
 
 
-def _acc_spot_check(case, a, b, out0, out):
-    """Guard against a vacuous pass of an accumulate: on the first block of the last group
-    with rows ``out - out0`` matches the fp64 weight gradient, and an empty group keeps
-    ``out0``'s bits (``out0`` holds no -0.0, so the composed ``out.add_`` keeps them too)."""
-    bounds = base._bounds(case.sizes)
-    nonempty = [e for e, (s, t) in enumerate(bounds) if t > s]
-    assert nonempty, case.label
-    e = nonempty[-1]
-    s, t = bounds[e]
-    rn, ck = min(case.n, SPOT_COLS // 2), min(case.k, SPOT_COLS // 2)
-    ref = a[s:t, :rn].double().T @ b[s:t, :ck].double()
-    got = out[e, :rn, :ck].double() - out0[e, :rn, :ck].double()
-    torch.testing.assert_close(got, ref, atol=3e-2, rtol=2e-2)
-    for empty in (i for i, (s0, t0) in enumerate(bounds) if t0 == s0):
-        assert torch.equal(_bits(out[empty]), _bits(out0[empty])), (
-            f"group {empty} is empty but the accumulate changed it"
-        )
+def _judge_acc_spot(record_property, case, launch, a, b, out, device):
+    """Guard against a vacuous pass of an accumulate: one launch from ``_acc_out0``, the
+    spot block (``_spot``) of ``out`` judged against the naive BF16 tier of
+    ``out0 + dW`` over ``cake_naive.DRAWS`` inputs (draw ``j``: the operands of
+    ``draw_seed(_seed(case), j)``, the ``out0`` of draw ``j``), and an empty group keeps
+    ``out0``'s bits on every draw (``out0`` holds no -0.0, so the composed ``out.add_``
+    keeps them too)."""
+    assert _spot(case, a, b, out) is not None, case.label
+    empty = [i for i, size in enumerate(case.sizes) if not size]
 
+    def draw(d):
+        na, nb = _operands(case, device, d.seed)
+        a.copy_(na)
+        b.copy_(nb)
+        del na, nb
+        out0 = _acc_out0(case.label, case, device, d.index)
+        out.copy_(out0)
+        launch.launch()
+        got, sa, sb, sizes = _spot(case, a, b, out)
+        start = _spot(case, a, b, out0)[0]
+        d.op("out[spot]", got, "wgrad", sa, sb, sizes, start=start)
+        for group in empty:
+            assert torch.equal(_bits(out[group]), _bits(out0[group])), (
+                f"draw {d.index}: group {group} is empty but the accumulate changed it"
+            )
 
-def _assert_added(out, out0, dws, what):
-    """Guard against a vacuous pass: ``out`` is ``out0`` plus the weight gradients ``dws``
-    (fp64 references) within the package's bf16 budget applied per term, ``1e-2 + 1e-2 *
-    (|out0| + sum |dW|)``, on every element (an fp32 ``out`` meets it too)."""
-    ref = out0.double()
-    scale = out0.double().abs()
-    for dw in dws:
-        ref = ref + dw.double()
-        scale = scale + dw.double().abs()
-    err = (out.double() - ref).abs()
-    bad = int((err > base.ATOL + base.RTOL * scale).sum())
-    assert bad == 0, f"{what}: {bad} elements beyond the budget of out0 + dW"
+    judge_draws(record_property, draw, seed=_seed(case))
 
 
 def _assert_same_step_bits(got, want, what):
@@ -707,17 +746,18 @@ def test_repeat_launches_give_identical_bits(label, arm, record_property):
         # Every compared launch ran on prefilled slots; the tickets are back at rest.
         assert prefilled == launches, (prefilled, launches)
         base._assert_tail_at_rest(device)
-    _spot_check(case, a, b, out)
+    _judge_spot(record_property, case, launch, a, b, out, device)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("form", base.K512_FORMS)
-def test_forced_forms_give_identical_bits(form, out_dtype, monkeypatch):
+def test_forced_forms_give_identical_bits(form, out_dtype, monkeypatch, record_property):
     """Every 512-wide k tile form the device's architecture serves (forced through the host
     plan constants, ``base._force_form``) on a ``K512_E3`` shape whose plan splits its
     ordered tail (``base._split_tail_shape``): the launches of both pre-states give
-    identical bits, the result is within the budget of the fp64 reference with an
-    exact-zero empty group, and the stream's tickets rest at zero."""
+    identical bits, the stream's tickets rest at zero, and the result is judged against
+    the naive BF16 tier over ``cake_naive.DRAWS`` inputs with an exact-zero empty
+    group."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     arch = base._arch(device)
@@ -748,8 +788,16 @@ def test_forced_forms_give_identical_bits(form, out_dtype, monkeypatch):
     )
     assert prefilled == launches, (prefilled, launches)
     base._assert_tail_at_rest(device)
-    base._assert_wgrad_close(launch.out, base._reference("wgrad", g, x, sizes))
-    base._assert_empty_groups_zero(launch.out, sizes)
+
+    def draw(d):
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x.copy_(nx)
+        g.copy_(ng)
+        out = launch.launch()
+        d.op("dW", out, "wgrad", g, x, sizes)
+        base._assert_empty_groups_zero(out, sizes)
+
+    judge_draws(record_property, draw, seed=21)
 
 
 @pytest.mark.parametrize("label", list(ACC_CASE_BY_LABEL))
@@ -760,8 +808,9 @@ def test_accumulate_sequences_give_identical_bits(label, record_property):
     with zero bytes (first run) or ``FILL_BYTE`` (the others) before every launch: every
     run gives the first run's bits after each launch (after the first and the last where
     ``out`` is large), the 1-launch result is the first launch of the 4-launch sequence,
-    the first block of ``out - out0`` matches the fp64 weight gradient, an empty group
-    keeps ``out0``'s bits, and a split tail's tickets rest at zero."""
+    a split tail's tickets rest at zero, and one launch's spot block is judged against
+    the naive BF16 tier of ``out0 + dW`` over the draws (an empty group keeps ``out0``'s
+    bits)."""
     case = ACC_CASE_BY_LABEL[label]
     device = _device()
     _require_program(case, device)
@@ -794,8 +843,6 @@ def test_accumulate_sequences_give_identical_bits(label, record_property):
                 elif not torch.equal(bits, refs[step]):
                     differ = int((bits != refs[step]).sum())
                     mismatches.append((steps, run, step, differ))
-        if steps == 1:
-            _acc_spot_check(case, a, b, out0, out)
         firsts[steps] = refs[0]
         del refs
     torch.cuda.synchronize(device)
@@ -828,6 +875,7 @@ def test_accumulate_sequences_give_identical_bits(label, record_property):
     if split_tail:
         assert prefilled == launches, (prefilled, launches)
         base._assert_tail_at_rest(device)
+    _judge_acc_spot(record_property, case, launch, a, b, out, device)
 
 
 # ---------------------------------------------------------------------------
@@ -835,13 +883,14 @@ def test_accumulate_sequences_give_identical_bits(label, record_property):
 # ---------------------------------------------------------------------------
 
 
-def test_autograd_steps_give_identical_bits(monkeypatch):
+def test_autograd_steps_give_identical_bits(monkeypatch, record_property):
     """``cake_moe_grouped_gemm_nondet`` on a 512-wide k tile shape whose weight gradient
     splits its ordered tail (``base._tile_case``): plain steps (the stream's slots filled
     with ``FILL_BYTE`` before each), steps under a non-reentrant checkpoint with the early
     stop on and off, and a plain step under torch's deterministic mode (no launch alerts)
-    all give the first plain step's ``Y``, ``dX`` and ``dW`` bits; ``dW`` is within the
-    budget of the fp64 reference with an exact-zero empty group."""
+    all give the first plain step's ``Y``, ``dX`` and ``dW`` bits; a plain step's ``dW``
+    is judged against the naive BF16 tier over ``cake_naive.DRAWS`` inputs with an
+    exact-zero empty group."""
     device = base._require_autograd_programs()
     base._fresh_stream_workspaces(monkeypatch)
     sizes, (n, k) = base._tile_case(device, "k512")
@@ -865,20 +914,31 @@ def test_autograd_steps_give_identical_bits(monkeypatch):
         got = base._step(wrapper, base._leaves(x0, w0), (g,))
     _assert_same_step_bits(got, first, "deterministic_mode")
     base._assert_tail_at_rest(device)
-    dw = first[1][1]
-    assert dw.dtype == torch.bfloat16
-    base._assert_wgrad_close(dw, base._reference("wgrad", g, x0, sizes))
-    base._assert_empty_groups_zero(dw, sizes)
+    assert first[1][1].dtype == torch.bfloat16
+
+    def draw(d):
+        nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=d.seed)
+        x0.copy_(nx)
+        w0.copy_(nw)
+        g.copy_(ng)
+        dw = base._step(wrapper, base._leaves(x0, w0), (g,))[1][1]
+        d.op("dW", dw, "wgrad", g, x0, sizes)
+        base._assert_empty_groups_zero(dw, sizes)
+
+    judge_draws(record_property, draw, seed=13)
 
 
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
-def test_main_grad_accumulation_gives_identical_bits(out_dtype, monkeypatch):
+def test_main_grad_accumulation_gives_identical_bits(
+    out_dtype, monkeypatch, record_property
+):
     """``cake_moe_grouped_gemm_nondet(..., fuse_wgrad_accumulation=True)`` on the shape of
     ``test_autograd_steps_give_identical_bits``: two micro-steps from the same
     ``main_grad`` (fp32: the fused route, bf16: the composed one), plain twice and under a
     non-reentrant checkpoint with the early stop on and off, leave the same ``main_grad``
-    and ``x.grad`` bits with ``w.grad`` None, and ``main_grad`` is within the budget of
-    ``mg0 + dW1 + dW2``."""
+    and ``x.grad`` bits with ``w.grad`` None, and a plain run's ``main_grad`` is judged
+    against the naive BF16 tier of ``mg0 + dW1 + dW2`` over ``cake_naive.DRAWS``
+    inputs."""
     device = base._require_autograd_programs()
     base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
@@ -910,8 +970,24 @@ def test_main_grad_accumulation_gives_identical_bits(out_dtype, monkeypatch):
                 f"in {int((_bits(have) != _bits(want)).sum())} elements"
             )
     base._assert_tail_at_rest(device)
-    dws = [base._reference("wgrad", g, x0, sizes) for g in (g1, g2)]
-    _assert_added(first[0], mg0, dws, "main_grad")
+
+    def draw(d):
+        nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=draw_seed(14, d.index))
+        x0.copy_(nx)
+        w0.copy_(nw)
+        g1.copy_(ng)
+        g2.copy_(base._inputs(sizes, n, k, device, seed=draw_seed(15, d.index))[2])
+        gen_draw = torch.Generator(device=device).manual_seed(draw_seed(53, d.index))
+        start = torch.randn(w0.shape, generator=gen_draw, device=device)
+        start = (start * ACC_OUT0_SCALE).to(out_dtype)
+        w, _dxs = _main_grad_steps(fn, x0, w0, start, (g1, g2), None, True, device)
+        dws64 = [product("wgrad", g, x0, sizes, torch.float64) for g in (g1, g2)]
+        dws16 = [product("wgrad", g, x0, sizes, torch.bfloat16) for g in (g1, g2)]
+        d.output(
+            "main_grad", w.main_grad, oracle_sum(start, dws64), naive_sum(start, dws16)
+        )
+
+    judge_draws(record_property, draw, seed=14)
 
 
 # ---------------------------------------------------------------------------
@@ -920,14 +996,16 @@ def test_main_grad_accumulation_gives_identical_bits(out_dtype, monkeypatch):
 
 
 @pytest.mark.parametrize("kind", GRAPH_KINDS)
-def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
+def test_graph_replays_give_the_eager_bits(kind, monkeypatch, record_property):
     """A prepared launch captured into a CUDA graph (which takes workspaces of its own: a
     fresh scheduler, uninitialized tail slots, zeroed tickets, the plan's even queue split)
     replays the eager launch's bits: the forward and the data gradient over ``K512_E3``,
     and the weight gradient on a 512-wide k tile shape whose ordered tail splits,
     overwriting (``out`` and the graph's slots filled with ``FILL_BYTE`` before every
     replay) or accumulating (``r`` replays from ``out0`` give the bits of ``r`` eager
-    launches from ``out0``; fp32: the fused route, bf16: the composed one)."""
+    launches from ``out0``; fp32: the fused route, bf16: the composed one).  One replay
+    (from ``out0``) is judged against the naive BF16 tier over ``cake_naive.DRAWS``
+    inputs, the overwriting weight gradient with exact-zero empty groups."""
     base._fresh_stream_workspaces(monkeypatch)
     op = kind.split("_")[0]
     accumulate = "_acc_" in kind
@@ -945,12 +1023,9 @@ def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
     out0 = None
     if op == "fwd":
         launch = base.prepare_fwd(x, w, offs)
-        ref64 = base._reference("fwd", x, w, sizes)
     elif op == "dgrad":
         launch = base.prepare_dgrad(g, w, offs)
-        ref64 = base._reference("dgrad", g, w, sizes)
     else:
-        ref64 = base._reference("wgrad", g, x, sizes)
         if accumulate:
             gen = torch.Generator(device=device).manual_seed(9)
             out0 = torch.randn(len(sizes), n, k, generator=gen, device=device)
@@ -968,11 +1043,6 @@ def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
         base._poison_tail_sums(device)
         launch.launch()
         eager[1] = _bits(out).clone()
-        if op == "wgrad":
-            base._assert_wgrad_close(out, ref64)
-            base._assert_empty_groups_zero(out, sizes)
-        else:
-            base._assert_bf16_close(out, ref64)
     else:
         for count in GRAPH_ACC_REPLAYS:
             out.copy_(out0)
@@ -980,8 +1050,6 @@ def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
                 base._poison_tail_sums(device)
                 launch.launch()
             eager[count] = _bits(out).clone()
-            if count == 1:
-                _assert_added(out, out0, [ref64], "eager accumulate")
     if op == "wgrad":
         base._assert_tail_at_rest(device)
     side = torch.cuda.Stream(device)
@@ -1036,6 +1104,28 @@ def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
         assert int(buffer.view(torch.int32).count_nonzero()) == 0, (
             "the graph's tail tickets are not at rest after the replays"
         )
+    operands = {"fwd": (x, w), "dgrad": (g, w), "wgrad": (g, x)}[op]
+
+    def draw(d):
+        nx, nw, ng, _ = base._inputs(sizes, n, k, device, seed=draw_seed(8, d.index))
+        x.copy_(nx)
+        w.copy_(nw)
+        g.copy_(ng)
+        start = None
+        if out0 is not None:
+            gen_draw = torch.Generator(device=device).manual_seed(draw_seed(9, d.index))
+            start = torch.randn(len(sizes), n, k, generator=gen_draw, device=device)
+            start = start.mul_(ACC_OUT0_SCALE).to(out_dtype)
+            out.copy_(start)
+        for buffer in slots:
+            buffer.view(torch.uint8).fill_(FILL_BYTE)
+        graph.replay()
+        name = base.OUT_NAMES[op] if start is None else "out"
+        d.op(name, out, op, *operands, sizes, start=start)
+        if op == "wgrad" and start is None:
+            base._assert_empty_groups_zero(out, sizes)
+
+    judge_draws(record_property, draw, seed=8)
 
 
 @pytest.mark.parametrize(
@@ -1044,7 +1134,7 @@ def test_graph_replays_give_the_eager_bits(kind, monkeypatch):
     ids=[f"{base.DTYPE_NAMES[d]}-{'acc' if a else 'ovw'}" for d, a in STREAM_CASES],
 )
 def test_two_concurrent_streams_give_the_quiet_stream_bits(
-    out_dtype, accumulate, monkeypatch
+    out_dtype, accumulate, monkeypatch, record_property
 ):
     """Two launches of the same weight gradient (prepared twice, so each has its own
     ``out`` and descriptor slots) on a 512-wide k tile shape whose ordered tail splits,
@@ -1053,7 +1143,8 @@ def test_two_concurrent_streams_give_the_quiet_stream_bits(
     and GEMMs run on a fourth, each stream's slots filled with ``FILL_BYTE`` before each
     of its launches: every result has the bits of an isolated launch on a quiet stream
     (overwrite, or accumulate from ``out0``), each stream keeps its own slots and tickets,
-    and both streams' tickets rest at zero."""
+    and both streams' tickets rest at zero; the quiet stream's launch is judged against
+    the naive BF16 tier over ``cake_naive.DRAWS`` inputs."""
     device = base._require_program("wgrad", out_dtype)
     base._fresh_stream_workspaces(monkeypatch)
     sizes = list(base.K512_E3)
@@ -1091,11 +1182,6 @@ def test_two_concurrent_streams_give_the_quiet_stream_bits(
         isolated.launch()
     quiet.synchronize()
     ref = _bits(isolated.out).clone()
-    ref64 = base._reference("wgrad", g, x, sizes)
-    if accumulate:
-        _assert_added(isolated.out, out0, [ref64], "quiet accumulate")
-    else:
-        base._assert_wgrad_close(isolated.out, ref64)
     launches = [prepared(), prepared()]
     assert launches[1].plan == launches[0].plan == isolated.plan
     src = torch.randn(1 << 24, device=device)
@@ -1148,6 +1234,24 @@ def test_two_concurrent_streams_give_the_quiet_stream_bits(
         assert buffers[0].data_ptr() != buffers[1].data_ptr(), kind
     for stream in streams[:2]:
         base._assert_tail_at_rest(device, stream)
+
+    def draw(d):
+        nx, _nw, ng, _ = base._inputs(sizes, n, k, device, seed=draw_seed(12, d.index))
+        x.copy_(nx)
+        g.copy_(ng)
+        start = None
+        if accumulate:
+            gen_draw = torch.Generator(device=device).manual_seed(draw_seed(10, d.index))
+            start = torch.randn(len(sizes), n, k, generator=gen_draw, device=device)
+            start = start.mul_(ACC_OUT0_SCALE).to(out_dtype)
+            isolated.out.copy_(start)
+        with torch.cuda.stream(quiet):
+            quiet.wait_stream(main)
+            isolated.launch()
+        main.wait_stream(quiet)
+        d.op("dW" if start is None else "out", isolated.out, "wgrad", g, x, sizes, start=start)
+
+    judge_draws(record_property, draw, seed=12)
 
 
 # ---------------------------------------------------------------------------
