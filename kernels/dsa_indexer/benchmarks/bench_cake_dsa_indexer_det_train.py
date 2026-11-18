@@ -59,7 +59,9 @@ peaked variant):
   the candidate-block call outside the timed span; its workspace bound from
   ``cake_dsa_indexer_det_train_topk_in_candidates_workspace_size``) next to
   ``cake``: with the same ``q`` / ``w`` and ``top_k`` they select the plain
-  call's set (``rows_identical_to_cake``), and ``in_candidates`` records that
+  call's set on inputs whose FP32 scores are exact in any summation order; on
+  these random rows ``rows_identical_to_cake`` records how many rows do
+  (information only), and ``in_candidates`` records that
   every id lies in a consumed block.  Their bits are compared with each other
   only (the restricted scores are computed by another program).
 
@@ -921,7 +923,8 @@ class CakeArm(Arm):
         extra = row_extra(inputs)
         args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
         # the consumed candidate blocks: the row's own candidate-block call (the source layer), once, outside the
-        # timed span; with the same q / w and top_k the restricted call selects the plain call's set
+        # timed span; with the same q / w and top_k the restricted call selects the plain call's set on inputs whose
+        # FP32 scores are exact in any summation order (rows_identical_to_cake counts the rows that do here)
         self.source_blocks = (
             self.backend.cake_dsa_indexer_det_train_topk_with_candidates(
                 *args, **inputs.kwargs(), **extra

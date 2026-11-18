@@ -468,8 +468,9 @@ def cake_dsa_indexer_nondet_train_topk_in_candidates(
         ``q``, ``W <= 2048`` (the ``candidate_blocks`` output of
         :func:`cake_dsa_indexer_nondet_train_topk_with_candidates` fits as is).
         Any order; ``-1`` and ids at or past the row's visible blocks name no
-        key.  The non-negative ids of a row must be distinct.  Never read on
-        the host.
+        key.  The non-negative ids of a row must be distinct: a row that
+        repeats one gets an unspecified result for that row, without
+        out-of-bounds access.  Never read on the host.
     top_k : int
         Output slots per query, ``1 <= top_k <= 2048`` (default 512).
     ratio : int

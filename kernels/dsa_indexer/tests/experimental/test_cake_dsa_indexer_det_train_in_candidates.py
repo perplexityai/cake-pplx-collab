@@ -20,7 +20,8 @@ and its workspace bound, the argument checks and the refusal of an architecture 
 SM100 / SM103 device the exact sets against the FP64 oracle
 (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs with source-layer and
 synthetic candidate rows, the unrestricted sets from the source layer's own candidates and from every visible block,
-keys outside the pool that never count, row-strided keys read in place, the Gaussian rule, bitwise repetition, the caller-owned workspace and outputs, and the
+keys outside the pool that never count, row-strided keys read in place, batches of fewer than 8 keys, the partition
+knobs that keep the set, the Gaussian rule, bitwise repetition, the caller-owned workspace and outputs, and the
 absence of host synchronization.
 """
 
@@ -89,6 +90,25 @@ LAYOUTS = {
 # the visible blocks and past the segment's keys, the newest (maybe partial) block, fewer candidate keys than top_k,
 # no candidates, every visible block
 KINDS = ("subset", "past", "newest", "few", "empty", "all")
+# batches of fewer than 8 keys in all (0 < Tkv < 8: no complete block of 8 keys), as (seg_q, seg_k, offsets, rows):
+# one candidate row for every query, or one row per query (-1 anywhere, ids past the visible blocks and past the
+# keys, rows without visible keys)
+FEW_KEYS = {
+    "q4_k5": ((4,), (5,), None, [[0]]),
+    "q3_k1": ((3,), (1,), None, [[-1, 0]]),
+    "q2q3_k3k4_offsets": (
+        (2, 3),
+        (3, 4),
+        (1, -1),
+        [
+            [-1, 0, -1, -1],
+            [1, -1, 0, -1],
+            [0, -1, -1, -1],
+            [-1, 7, -1, 0],
+            [2147483647, -1, 0, -1],
+        ],
+    ),
+}
 
 
 def _device_supported() -> bool:
@@ -555,6 +575,130 @@ def test_strided_k_rows_are_read_in_place(stride):
                 f"{kind}: the strided k's outputs differ from the contiguous k's"
             )
     assert not failures, f"stride {stride}:\n" + "\n".join(failures[:20])
+
+
+@pytest.mark.parametrize("case", cb.EXACT_CASES)
+@pytest.mark.parametrize("layout", sorted(FEW_KEYS))
+def test_fewer_than_eight_keys(layout, case):
+    """A batch of fewer than 8 keys in all (``0 < Tkv < 8``: no block of the batch is complete) launches and selects:
+    on exact inputs every row's set equals the FP64 oracle's top ``min(top_k, |P_t|)`` of its pool for ``top_k`` 512
+    and 3 (a cutoff inside the pool) and the scores equal the FP64 scores of the ids, for the layout's candidate rows,
+    every visible block, ids past the visible blocks and past the keys, and no candidates; a row-strided ``k`` gives
+    the contiguous ``k``'s outputs, and eager calls and runs of a prepared runner repeat, bit for bit."""
+    _require_cand_program()
+    seg_q, seg_k, offsets, given = FEW_KEYS[layout]
+    assert 0 < sum(seg_k) < 8
+    seed = 8100 + 31 * cb.EXACT_CASES.index(case) + 7 * sorted(FEW_KEYS).index(layout)
+    q, k, w, cq, ck = cb.exact_inputs(case, seg_q, seg_k, seed=seed, device="cuda")
+    off = _offsets_tensor(offsets, q.device)
+    ns = _visible_counts(cq, ck, off)
+    rows = given * len(ns) if len(given) == 1 else given
+    sources = [("given", torch.tensor(rows, dtype=torch.int32, device=q.device))]
+    sources += [
+        (kind, cb.synthetic_rows(ns, CAND_WIDTH_MAX, kind, seed=seed, device=q.device))
+        for kind in ("all", "past", "empty")
+    ]
+    packed = torch.full((k.shape[0], 704), float("nan"), dtype=k.dtype, device=k.device)
+    packed[:, :128] = k
+    ks = packed[:, :128]
+    failures = []
+    for top_k in (TOP_K, 3):
+        for kind, cand in sources:
+            tag = f"top_k {top_k} / {kind}"
+            runner = prepare_in_candidates(
+                q,
+                k,
+                w,
+                cq,
+                ck,
+                cand,
+                top_k=top_k,
+                softmax_scale=cb.EXACT_SCALE,
+                q_causal_offsets=off,
+            )
+            assert CAND_ROLE in runner.stages, f"{tag}: the call launches nothing"
+            got = _call(q, k, w, cq, ck, cand, offsets=off, top_k=top_k)
+            failures += [f"{tag}: {f}" for f in _structure_failures(*got, cand, ns)]
+            failures += [
+                f"{tag}: {f}" for f in _exact_failures(q, k, w, cq, ck, off, cand, got)
+            ]
+            again = {
+                "eager": _call(q, k, w, cq, ck, cand, offsets=off, top_k=top_k),
+                "strided k": _call(q, ks, w, cq, ck, cand, offsets=off, top_k=top_k),
+            }
+            for run in range(2):
+                again[f"prepared run {run}"] = naive.cloned(runner())
+            for name, other in again.items():
+                if ORDERED:
+                    same = ref.same_bits(other, got)
+                else:
+                    same = naive.same_ids(other, got)
+                if not same:
+                    failures.append(f"{tag}: {name} differs from the first call")
+    assert not failures, f"{layout} / {case}:\n" + "\n".join(failures[:20])
+
+
+@pytest.mark.parametrize("top_k", (64, TOP_K))
+def test_partition_knobs_keep_the_set(top_k):
+    """``cand_cap`` / ``check_period`` and ``grid_ctas`` partition the work and never change the selected set: the
+    smallest buffer the plan admits (``cand_cap = top_k + 128``, ``check_period = 1``), persistent grids of 1 and 3
+    CTAs and both together give every row the default call's set, on exact inputs (where that set is the FP64
+    oracle's) for synthetic candidate rows and the source layer's own, and on Gaussian inputs for synthetic rows."""
+    _require_cand_program()
+    knobs = (
+        {"cand_cap": top_k + 128, "check_period": 1},
+        {"grid_ctas": 1},
+        {"grid_ctas": 3},
+        {"grid_ctas": 3, "cand_cap": top_k + 128, "check_period": 1},
+    )
+    seg_q, seg_k, offsets = LAYOUTS["explicit_offsets"]
+    q, k, w, cq, ck = cb.exact_inputs(
+        "MXFP4-grid", seg_q, seg_k, seed=8200, device="cuda"
+    )
+    off = _offsets_tensor(offsets, q.device)
+    ns = _visible_counts(cq, ck, off)
+    exact_kw = {
+        "top_k": top_k,
+        "softmax_scale": cb.EXACT_SCALE,
+        "q_causal_offsets": off,
+    }
+    source = topk_with_candidates(q, k, w, cq, ck, **exact_kw)[2].clone()
+    gauss = ref.make_random_inputs(
+        [48, 300], [20000, 4000], top_k=top_k, seed=8201, device="cuda"
+    )
+    gns = ref.visible_rows(gauss).tolist()
+    gargs = (gauss.q, gauss.k, gauss.w, gauss.cu_seqlens_q, gauss.cu_seqlens_k)
+    subset = cb.synthetic_rows(ns, CAND_WIDTH_MAX, "subset", seed=8202, device=q.device)
+    draws = [
+        ("exact / subset", (q, k, w, cq, ck), exact_kw, ns, subset),
+        ("exact / source", (q, k, w, cq, ck), exact_kw, ns, source),
+    ]
+    for kind in ("subset", "all"):
+        rows = cb.synthetic_rows(gns, CAND_WIDTH_MAX, kind, seed=8203, device=q.device)
+        draws.append((f"gaussian / {kind}", gargs, gauss.kwargs(), gns, rows))
+    failures = []
+    for name, args, kw, rows_n, cand in draws:
+        base = prepare_in_candidates(*args, cand, **kw)
+        assert base.choice.cand_cap == max(4096, 4 * top_k)
+        assert base.choice.grid_ctas > 3
+        want = naive.cloned(base())
+        failures += [f"{name}: {f}" for f in _structure_failures(*want, cand, rows_n)]
+        if name.startswith("exact"):
+            failures += [
+                f"{name}: {f}" for f in _exact_failures(*args, off, cand, want)
+            ]
+        for knob in knobs:
+            runner = prepare_in_candidates(*args, cand, **kw, **knob)
+            assert all(getattr(runner.choice, key) == v for key, v in knob.items())
+            got = naive.cloned(runner())
+            failures += [
+                f"{name} / {knob}: {f}" for f in _structure_failures(*got, cand, rows_n)
+            ]
+            if not torch.equal(
+                cb.ascending(got[0].long()), cb.ascending(want[0].long())
+            ):
+                failures.append(f"{name} / {knob}: sets differ from the default call's")
+    assert not failures, f"top_k {top_k}:\n" + "\n".join(failures[:20])
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))

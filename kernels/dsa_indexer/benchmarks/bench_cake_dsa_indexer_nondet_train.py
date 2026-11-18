@@ -52,8 +52,9 @@ package's ``prepare_dsa_indexer_nondet_topk_in_candidates``) and ``det_in``
 candidate blocks (computed once by the package's candidate-block call outside
 the timed span) next to ``nondet`` / ``det``; ``in_candidates`` records that
 every id lies in a consumed block and the number of rows whose set is the plain
-call's of the same package (with the same ``q`` / ``w`` and ``top_k``, every
-row).
+call's of the same package (``rows_with_plain_set``, information only: with the
+same ``q`` / ``w`` and ``top_k``, every row on inputs whose FP32 scores are
+exact in any summation order).
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
