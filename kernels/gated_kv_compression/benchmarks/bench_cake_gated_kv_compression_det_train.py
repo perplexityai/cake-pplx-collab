@@ -27,7 +27,8 @@ math, on one GPU, single rank.
   the ``halves`` layout, ``cake_gated_kv_compression_det`` in ``contiguous``), ``cake_aa`` (the same entry again: the
   A-A noise band), ``compile_default`` and ``compile_max_autotune`` (``torch.compile`` of the same pairwise math, a
   custom ``autograd.Function`` with a compiled forward and a compiled token-major backward, on the same operands:
-  device ``cu_seqlens``, the caller's ``G``), ``eager`` (the same functions uncompiled: the reference),
+  device ``cu_seqlens``, the caller's ``G``; the node saves the forward's pair prefix for the backward, as the Cake
+  node saves its pair table), ``eager`` (the same functions uncompiled: the reference),
   ``compile_autograd`` (the reference forward with autograd's softmax backward: informational) and ``copy`` (an SM
   elementwise kernel that reads and writes the bytes each phase must move: the bandwidth context; see
   :func:`copy_calls`).

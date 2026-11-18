@@ -26,9 +26,11 @@ one ``[T, 1024]`` gradient, the ``contiguous`` layout ``dC`` and ``dZ``.  Pair `
 * ``compile_default`` / ``compile_max_autotune``: ``torch.compile`` (Inductor; ``mode="default"`` /
   ``"max-autotune-no-cudagraphs"``; ``fullgraph=True``; ``dynamic`` as the caller sets it) of the same pairwise math in
   a custom ``torch.autograd.Function``: a compiled forward (each output row finds its pair on the device from
-  ``cu_seqlens``; ``out = p0 C[t0] + p1 C[t1]`` in FP32, one BF16 rounding) and a compiled token-major backward (one
-  pass over the tokens: ``dC[t0] = p0 g``, ``dC[t1] = p1 g``, ``dZ[t0] = p0 p1 (C[t0] - C[t1]) g = -dZ[t1]`` with
-  ``g = dout[r]``, tail rows +0.0; no scatter, no atomics).  Each arm built for a pack compiles its own copies of the
+  ``cu_seqlens`` and the prefix of the documents' pair counts; ``out = p0 C[t0] + p1 C[t1]`` in FP32, one BF16
+  rounding) and a compiled token-major backward (one pass over the tokens: ``dC[t0] = p0 g``, ``dC[t1] = p1 g``,
+  ``dZ[t0] = p0 p1 (C[t0] - C[t1]) g = -dZ[t1]`` with ``g = dout[r]``, tail rows +0.0; no scatter, no atomics).  The
+  node saves the forward's pair prefix for the backward, as the Cake node saves its pair table, so neither backward
+  scans the pair counts again.  Each arm built for a pack compiles its own copies of the
   functions (:func:`_fresh`), so no arm or pack reuses another's compiled code.
 * ``eager``: the same two functions uncompiled: the reference, not a speed baseline.
 * ``compile_autograd``: ``torch.compile`` of the reference forward written with ``torch.softmax``, differentiated by
@@ -242,10 +244,13 @@ def _probabilities(z0: torch.Tensor, z1: torch.Tensor) -> tuple[torch.Tensor, to
     return e0 / s, e1 / s
 
 
-def _row_pairs(cu: torch.Tensor, rows: int, tokens: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(t0, t1, valid)`` of output rows ``0 .. rows - 1``: row ``r`` is pair ``r - first[s]`` of the document ``s``
-    whose pair range holds ``r`` (documents without a pair are skipped); rows past the pack's pair count are not
-    ``valid`` and read token 0."""
+def _row_pairs(
+    cu: torch.Tensor, rows: int, tokens: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(t0, t1, valid, ends)`` of output rows ``0 .. rows - 1``: row ``r`` is pair ``r - (ends[s] - pairs[s])`` of
+    the document ``s`` whose pair range holds ``r`` (documents without a pair are skipped); rows past the pack's pair
+    count are not ``valid`` and read token 0.  ``ends`` (int64 ``[S]``) is the inclusive prefix of the documents' pair
+    counts."""
     cu = cu.to(torch.int64)
     starts = cu[:-1]
     pairs = (cu[1:] - starts) // 2
@@ -256,30 +261,32 @@ def _row_pairs(cu: torch.Tensor, rows: int, tokens: int) -> tuple[torch.Tensor, 
     doc = doc.clamp(max=pairs.shape[0] - 1)
     t0 = torch.where(valid, starts[doc] + 2 * (r - (ends[doc] - pairs[doc])), 0)
     t1 = (t0 + 1).clamp(max=tokens - 1)
-    return t0, t1, valid
+    return t0, t1, valid, ends
 
 
-def pair_forward(c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
-    """``out [rows, 512]`` BF16: ``p0 C[t0] + p1 C[t1]`` in FP32, rounded once; zero past the pair count."""
-    t0, t1, valid = _row_pairs(cu, rows, c.shape[0])
+def pair_forward(c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(out, ends)``: ``out [rows, 512]`` BF16, ``p0 C[t0] + p1 C[t1]`` in FP32, rounded once, zero past the pair
+    count; ``ends``, the pair prefix the row search computed (:func:`_row_pairs`), for the backward."""
+    t0, t1, valid, ends = _row_pairs(cu, rows, c.shape[0])
     p0, p1 = _probabilities(z[t0], z[t1])
     y = p0 * c[t0] + p1 * c[t1]
-    return torch.where(valid[:, None], y, 0.0).to(torch.bfloat16)
+    return torch.where(valid[:, None], y, 0.0).to(torch.bfloat16), ends
 
 
-def pair_forward_cz(cz: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
+def pair_forward_cz(cz: torch.Tensor, cu: torch.Tensor, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
     """:func:`pair_forward` on the column halves of ``cz [T, 1024]``."""
     return pair_forward(cz[:, :WIDTH], cz[:, WIDTH:], cu, rows)
 
 
-def _token_pairs(cu: torch.Tensor, rows: int, tokens: int):
+def _token_pairs(cu: torch.Tensor, ends: torch.Tensor, rows: int, tokens: int):
     """Per token ``t``: ``(t0, t1, row, second, valid)``: the pair holding ``t``, its output row, whether ``t`` is
     the pair's second token, and whether ``t`` belongs to a pair at all (False for tail tokens and tokens outside
-    every document)."""
+    every document).  ``ends`` is the forward's pair prefix (:func:`_row_pairs`): the pass does not scan the pair
+    counts again."""
     cu = cu.to(torch.int64)
     starts, stops = cu[:-1], cu[1:]
     pairs = (stops - starts) // 2
-    first = torch.cumsum(pairs, 0) - pairs
+    first = ends - pairs
     t = torch.arange(tokens, device=cu.device, dtype=torch.int64)
     doc = torch.searchsorted(stops, t, right=True).clamp(max=pairs.shape[0] - 1)
     pos = t - starts[doc]
@@ -293,11 +300,12 @@ def _token_pairs(cu: torch.Tensor, rows: int, tokens: int):
 
 
 def pair_backward(
-    dout: torch.Tensor, c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int
+    dout: torch.Tensor, c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, ends: torch.Tensor, rows: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(dC, dZ)`` FP32 ``[T, 512]`` in one pass over the tokens (no scatter): the first token of a pair gets
-    ``p0 g`` and ``p0 p1 (C[t0] - C[t1]) g``, the second ``p1 g`` and the negation; tail tokens +0.0."""
-    t0, t1, row, second, valid = _token_pairs(cu, rows, c.shape[0])
+    ``p0 g`` and ``p0 p1 (C[t0] - C[t1]) g``, the second ``p1 g`` and the negation; tail tokens +0.0.  ``ends``: the
+    forward's pair prefix."""
+    t0, t1, row, second, valid = _token_pairs(cu, ends, rows, c.shape[0])
     p0, p1 = _probabilities(z[t0], z[t1])
     g = dout[row].float()
     flip = second[:, None]
@@ -308,15 +316,17 @@ def pair_backward(
     return torch.where(keep, dc, 0.0), torch.where(keep, dz, 0.0)
 
 
-def pair_backward_cz(dout: torch.Tensor, cz: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
+def pair_backward_cz(
+    dout: torch.Tensor, cz: torch.Tensor, cu: torch.Tensor, ends: torch.Tensor, rows: int
+) -> torch.Tensor:
     """:func:`pair_backward` of the column halves, as one ``d[C | Z] [T, 1024]``."""
-    dc, dz = pair_backward(dout, cz[:, :WIDTH], cz[:, WIDTH:], cu, rows)
+    dc, dz = pair_backward(dout, cz[:, :WIDTH], cz[:, WIDTH:], cu, ends, rows)
     return torch.cat([dc, dz], dim=1)
 
 
 def release_forward(c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
     """The reference forward with ``torch.softmax`` over the stacked pair (differentiated by autograd)."""
-    t0, t1, valid = _row_pairs(cu, rows, c.shape[0])
+    t0, t1, valid, _ = _row_pairs(cu, rows, c.shape[0])
     p = torch.softmax(torch.stack([z[t0], z[t1]], dim=1), dim=1)
     y = (p * torch.stack([c[t0], c[t1]], dim=1)).sum(dim=1)
     return torch.where(valid[:, None], y, 0.0).to(torch.bfloat16)
@@ -363,7 +373,8 @@ def _empty(tokens: int, cu: torch.Tensor, rows: int) -> bool:
 
 class PairMath:
     """The forward and the token-major backward of one arm, eager (``mode`` None) or compiled; the empty cases
-    (``T == 0``, ``G == 0``, no document) are answered in Python, as the Cake host does."""
+    (``T == 0``, ``G == 0``, no document) are answered in Python, as the Cake host does.  The forward returns ``(out,
+    ends)``, its pair prefix ``ends`` (None in an empty case) for the backward."""
 
     def __init__(self, tag: str, mode: Optional[str], dynamic: bool) -> None:
         fns = {
@@ -380,59 +391,63 @@ class PairMath:
                 for key, fn in fns.items()
             }
 
-    def forward(self, c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
+    def forward(self, c: torch.Tensor, z: torch.Tensor, cu: torch.Tensor, rows: int):
         if _empty(c.shape[0], cu, rows):
-            return torch.zeros(rows, WIDTH, dtype=torch.bfloat16, device=c.device)
+            return torch.zeros(rows, WIDTH, dtype=torch.bfloat16, device=c.device), None
         return self.fns["forward"](c, z, cu, rows)
 
-    def forward_cz(self, cz: torch.Tensor, cu: torch.Tensor, rows: int) -> torch.Tensor:
+    def forward_cz(self, cz: torch.Tensor, cu: torch.Tensor, rows: int):
         if _empty(cz.shape[0], cu, rows):
-            return torch.zeros(rows, WIDTH, dtype=torch.bfloat16, device=cz.device)
+            return torch.zeros(rows, WIDTH, dtype=torch.bfloat16, device=cz.device), None
         return self.fns["forward_cz"](cz, cu, rows)
 
-    def backward(self, dout, c, z, cu, rows) -> tuple[torch.Tensor, torch.Tensor]:
+    def backward(self, dout, c, z, cu, ends, rows) -> tuple[torch.Tensor, torch.Tensor]:
         if _empty(c.shape[0], cu, rows):
             zeros = torch.zeros(c.shape[0], WIDTH, dtype=torch.float32, device=c.device)
             return zeros, zeros.clone()
-        return self.fns["backward"](dout, c, z, cu, rows)
+        return self.fns["backward"](dout, c, z, cu, ends, rows)
 
-    def backward_cz(self, dout, cz, cu, rows) -> torch.Tensor:
+    def backward_cz(self, dout, cz, cu, ends, rows) -> torch.Tensor:
         if _empty(cz.shape[0], cu, rows):
             return torch.zeros(cz.shape[0], CZ_WIDTH, dtype=torch.float32, device=cz.device)
-        return self.fns["backward_cz"](dout, cz, cu, rows)
+        return self.fns["backward_cz"](dout, cz, cu, ends, rows)
 
 
 class PairFunction(torch.autograd.Function):
-    """``out = pair(C, Z)`` with the pairwise backward (``contiguous`` layout: ``dC`` and ``dZ``)."""
+    """``out = pair(C, Z)`` with the pairwise backward (``contiguous`` layout: ``dC`` and ``dZ``).  The node saves
+    ``C``, ``Z``, ``cu_seqlens`` and the forward's pair prefix, which the backward reuses."""
 
     @staticmethod
     def forward(ctx, c, z, cu, rows, impl):  # type: ignore[override]
         ctx.impl, ctx.rows = impl, rows
-        ctx.save_for_backward(c, z, cu)
-        return impl.forward(c, z, cu, rows)
+        out, ends = impl.forward(c, z, cu, rows)
+        ctx.save_for_backward(c, z, cu, ends)
+        return out
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dout):  # type: ignore[override]
-        c, z, cu = ctx.saved_tensors
-        dc, dz = ctx.impl.backward(dout.contiguous(), c, z, cu, ctx.rows)
+        c, z, cu, ends = ctx.saved_tensors
+        dc, dz = ctx.impl.backward(dout.contiguous(), c, z, cu, ends, ctx.rows)
         return dc, dz, None, None, None
 
 
 class PairCzFunction(torch.autograd.Function):
-    """``out = pair(cz[:, :512], cz[:, 512:])`` with the pairwise backward as one ``d[C | Z] [T, 1024]``."""
+    """``out = pair(cz[:, :512], cz[:, 512:])`` with the pairwise backward as one ``d[C | Z] [T, 1024]``.  The node
+    saves ``cz``, ``cu_seqlens`` and the forward's pair prefix, which the backward reuses."""
 
     @staticmethod
     def forward(ctx, cz, cu, rows, impl):  # type: ignore[override]
         ctx.impl, ctx.rows = impl, rows
-        ctx.save_for_backward(cz, cu)
-        return impl.forward_cz(cz, cu, rows)
+        out, ends = impl.forward_cz(cz, cu, rows)
+        ctx.save_for_backward(cz, cu, ends)
+        return out
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dout):  # type: ignore[override]
-        cz, cu = ctx.saved_tensors
-        return ctx.impl.backward_cz(dout.contiguous(), cz, cu, ctx.rows), None, None, None
+        cz, cu, ends = ctx.saved_tensors
+        return ctx.impl.backward_cz(dout.contiguous(), cz, cu, ends, ctx.rows), None, None, None
 
 
 def _release_layer(layout: str, cu: torch.Tensor, rows: int, tag: str, dynamic: bool) -> Callable[..., torch.Tensor]:
@@ -470,12 +485,13 @@ def make_layer(name: str, *, layout: str, cu: torch.Tensor, rows: int, dynamic: 
 def describe(name: str, dynamic: bool) -> dict:
     """The implementation record of a non-Cake arm."""
     if name == "eager":
-        return {"implementation": "PyTorch eager, pairwise forward and token-major backward"}
+        return {"implementation": "PyTorch eager, pairwise forward and token-major backward (pair prefix saved)"}
     mode = "default" if name == "compile_autograd" else COMPILE_MODES[name]
     what = (
         "torch.compile of the reference forward (torch.softmax), autograd backward"
         if name == "compile_autograd"
-        else "torch.compile of the pairwise forward and the token-major backward, custom autograd.Function"
+        else "torch.compile of the pairwise forward and the token-major backward, custom autograd.Function saving "
+        "the forward's pair prefix for the backward"
     )
     return {"implementation": what, "mode": mode, "dynamic": dynamic, "fullgraph": True}
 
