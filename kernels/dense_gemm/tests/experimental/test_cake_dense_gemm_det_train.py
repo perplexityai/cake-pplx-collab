@@ -630,10 +630,11 @@ def _key_knobs(knobs: dict) -> dict:
 
 def _nopro(template: str) -> str:
     """``template`` without the round-33 pair prologue / cleanup sync suffix (``_pro<n>``, the LAST knob suffix of every
-    planned pair program since round 33) and the promoted-chunk token before it (``_kc<KC>``: the planner's promoted twin
-    of a long weight-gradient plan): the hand-written tests of rounds 15..27 assert their own round's program modulo that
-    suffix; the round-33 tests assert the suffix itself, the promotion tests the token."""
-    return re.sub(r"(?:_kc\d+)?_pro\d+$", "", template)
+    planned pair program since round 33) and the promoted-chunk token before it (``_kc128``: the planner's promoted twin
+    of a long weight-gradient plan; no other chunk size is a program): the hand-written tests of rounds 15..27 assert
+    their own round's program modulo that suffix; the round-33 tests assert the suffix itself, the promotion tests the
+    token."""
+    return re.sub(r"(?:_kc128)?_pro\d+$", "", template)
 
 
 def _promoted(arch, plan, template):
@@ -9902,7 +9903,109 @@ def test_gpu_promoted_programs(case):
     assert torch.equal(outs[True], outs[False])
 
 
-# The GB T-exact serpentine-K rules: (arch, B MN-major, N, K) -> (the T of the exact keys, the program on the 76-pair parts, the
+# Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T).  Each row is a weight gradient the planner
+# runs on that twin on some part of the twin's architectures, at a token count where its longest segment holds more
+# than 256 K blocks there; the test forces the twin's program (``_template_knobs``), so it runs on any SM count.  The
+# synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
+# ``PROMOTED_GPU_CASES`` does not reach.
+PROMOTED_TWIN_GPU_CASES = (
+    ("dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15", 32, 5120, 65535),
+    ("dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro7", 32, 6144, 32768),
+    ("dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7", 32, 5120, 32768),
+    ("dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15", 512, 5120, 32768),
+    ("dense_proj_det_gemm_nn_n192_hee_t_tma1_kc128_pro7", 576, 6144, 32768),
+    ("dense_proj_det_gemm_nn_n128_hen_t_skx_kc128_pro7", 32, 6144, 65535),
+    ("dense_proj_det_gemm_nn_n128_m64_hen_t_skx_kc128_pro15", 32, 4096, 65535),
+    ("dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt_kc128_pro15", 576, 6144, 32768),
+)
+
+
+def test_promoted_twin_gpu_cases_cover_every_twin():
+    """``PROMOTED_TWIN_GPU_CASES`` and ``PROMOTED_GPU_CASES`` together launch every shipped twin: the eight forms
+    above by their knobs, the 64-row 128- and 256-wide programs through the planner."""
+    forced = {case[0] for case in PROMOTED_TWIN_GPU_CASES}
+    planned = {
+        "dense_proj_det_gemm_nn_n256_m64_hen_t_kc128_pro15",
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15",
+    }
+    assert len(forced) == len(PROMOTED_TWIN_GPU_CASES) and not forced & planned
+    assert forced | planned == set(PROMOTED_TWINS)
+    for twin in forced:
+        knobs = cake_backend._template_knobs(twin)
+        assert knobs is not None and knobs["promote"] is True, twin
+
+
+@pytest.mark.parametrize(
+    "case",
+    PROMOTED_TWIN_GPU_CASES,
+    ids=lambda c: f"{c[0].removeprefix('dense_proj_det_gemm_')}-{c[1]}x{c[2]}-T{c[3]}",
+)
+def test_gpu_promoted_twin_forms(case):
+    """On each of its architectures, the twin ``case[0]`` forced by its knobs (``promote=True`` among them) plans
+    itself for the weight gradient of ``case``, with a longest segment of more than one chunk; it meets the naive BF16
+    tier against FP64 over the judge's draws, each launch into a NaN-poisoned output (three on the first draw), and
+    writes the same bits on three more launches."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch = arch_for(device)
+    twin, d_out, d_in, T = case
+    if arch not in PROMOTED_TWINS[twin]:
+        pytest.skip(
+            f"{twin} ships on {list(PROMOTED_TWINS[twin])}; the device is {arch}"
+        )
+    knobs = cake_backend._template_knobs(twin)
+    assert knobs.pop("kser", 0) == 0 and knobs["promote"] is True, twin
+    G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
+    A, B, transposed = wgrad_views(G, X, arch=arch)
+    out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
+    prepared = cake_dense_gemm_det_train_projection_prepare(
+        A, B, out, transposed_out=transposed, **knobs
+    )
+    plan = prepared.plan
+    assert prepared.template == twin, (prepared.template, twin)
+    assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, twin
+    assert cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_BLOCKS, twin
+
+    def draw(s):
+        for t, value in zip(
+            (G, X), _d1_wgrad_operands(T, d_out, d_in, s, device), strict=True
+        ):
+            t.copy_(value)
+        nan_fill([out])
+        return SimpleNamespace(G=G, X=X)
+
+    def launch(_inputs):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"promoted": out}
+
+    def product(v, dtype):
+        return {"promoted": torch.matmul(v.G.to(dtype).t(), v.X.to(dtype))}
+
+    judge_gemm(
+        None,
+        seed=SEED,
+        draw=draw,
+        launch=launch,
+        product=product,
+        launches=3,
+        poison=lambda v: [out],
+    )
+    # run to run: the same bits on every launch of the last draw's inputs
+    runs = []
+    for _ in range(3):
+        nan_fill([out])
+        prepared.launch()
+        torch.cuda.synchronize()
+        runs.append(out.clone())
+    assert all(torch.equal(run, runs[0]) for run in runs[1:])
+
+
+# The GB T-exact serpentine-K rules:(arch, B MN-major, N, K) -> (the T of the exact keys, the program on the 76-pair parts, the
 # program without ``kser``).  Each key names the T 16231 key's program of the row with ``kser`` 76 (at T 16172; at the T of
 # the row's round-9 / round-10 keys the key's own rule gains ``kser`` 76); the wave guard keeps it on
 # the 152-SM parts only (76 CTA pairs), every other part plans the program without it.
