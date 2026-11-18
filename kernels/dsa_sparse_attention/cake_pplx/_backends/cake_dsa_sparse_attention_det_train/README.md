@@ -7,8 +7,15 @@ training kernels (top-k sparse MLA with absorbed queries; 64 heads, 512 latent +
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_det_train` are stable
 APIs; this backend package is experimental (no compatibility guarantee for its
-own helpers).  The libraries compile for `sm_100a`, `sm_103a` and `sm_107a`
-from the same sources.  The feature does not participate in automatic backend
+own helpers).  The libraries compile for `sm_100a`, `sm_103a` and `sm_107a`.
+On `sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan`
+and `nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
+`sm_100a` and `sm_103a` (see "Layout of this package").  The `sm_107a`
+libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
+entries).  On `sm_100a` the libraries of the stages `fwd`, `bwd_main`,
+`bwd_main_pass`, `bwd_redo` and `bwd_compact`, each with its `nope_` form,
+need CUDA 12.9 or newer (`min_cuda` 12.9); the other `sm_100a` libraries
+need 12.8.  The feature does not participate in automatic backend
 selection, autotuning or trace-apply.  Its libraries are loaded prebuilt from
 `aot/` when the package ships them and JIT-built through the package's JIT
 shim from `build.json` otherwise (see "Layout of this package").
@@ -35,9 +42,9 @@ entry falls back to another package.
 | `cake_dsa_sparse_attention_det_nope_varlen` | `CakeDSASparseAttentionDetNopeVarlenFunction` |
 
 The entries take the arguments of the non-deterministic entries.
-`key_passes` and `num_segments` select the key-range passes of the rope
-backward (see below); `dkv_direct` is accepted and validated as there and has
-no effect: the accumulation into `dkv_acc` has one form.  The facade reads
+`key_passes` and `num_segments` select the key-range passes of the backward
+(see below); `dkv_direct` is accepted and validated as there and has no
+effect: the accumulation into `dkv_acc` has one form.  The facade reads
 `CAKE_PPLX_DSA_CHECK_DST_MAP` and
 `CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` (as the non-deterministic
 facade does, for this package's own cache); the backend reads no environment
@@ -60,8 +67,8 @@ The backward launches every registered stage of
 `cake_jit.BACKWARD_STAGES_OF[program]` on every call, in this order (the NoPE
 program prefixes the names with `nope_`); no stage is chosen by a tensor value:
 
-1. `bwd_delta`: `delta = rowsum(dout * (out + o_lo))` `[T, 64]` FP32 (the
-   non-deterministic package's bits), the per-query bound terms `qstat [T, 4]`
+1. `bwd_delta`: `delta = rowsum(dout * (out + o_lo))` `[T, 64]` FP32, the
+   per-query bound terms `qstat [T, 4]`
    (largest magnitudes and norms of `dout`, `delta` and the query parts,
    summed over the heads in a fixed order), and the zero fill of the global
    words.
@@ -101,18 +108,21 @@ program prefixes the names with `nope_`); no stage is chosen by a tensor value:
 Repeated destination rows of `dkv_dst_map` add into the same integers, so they
 combine exactly before the one FP32 addition.
 
-Key-range passes (rope program).  When the key row is much larger than the
-L2, the backward splits every token's keys into `P` equal key ranges and runs,
-per range and in place of `bwd_main`, the non-deterministic package's
-compaction of the token's keys in the range (`bwd_compact`) and the pass build
-of the main kernel over the compacted keys (`bwd_main_pass`).  dQ goes through
-an FP32 partial (147,456 B per token) between passes.  The integer sums and
-the overflow counters do not depend on the split, so dK/dV keep the bits of one
-launch; dQ is the non-deterministic package's dQ of the same passes.  `P`
+Key-range passes.  When the key row is much larger than the L2, the backward
+splits every token's keys into `P` equal key ranges and runs, per range and in
+place of `bwd_main` (NoPE: `nope_bwd_main`), the non-deterministic package's
+compaction of the token's keys in the range (`bwd_compact`; the NoPE stage
+`nope_bwd_compact` runs the same library) and the pass build of the main
+kernel over the compacted keys (`bwd_main_pass` / `nope_bwd_main_pass`).  dQ
+goes through an FP32 partial (147,456 B per token; NoPE 131,072 B) between
+passes.  The integer sums and the overflow counters do not depend on the split,
+so dK/dV keep the bits of one launch.  dQ is summed through the FP32 partial,
+so it can differ from the dQ of one launch in the last FP32 places.  `P`
 follows that package's policy (`cake_backend.plan_key_passes`); a row of more
-than one token chunk (4224 tokens at top-k 2048) takes one pass here, because
-every pass runs all tokens in one launch.  `key_passes` overrides `P`.  The
-redo stays one launch, and the NoPE program always runs one pass.
+than one token chunk (4224 tokens at top-k 2048 for rope) takes one pass here,
+because every pass runs all tokens in one launch.  The NoPE record's policy
+is that package's NoPE policy, which never plans a second pass.  `key_passes`
+overrides `P` in both programs.  The redo stays one launch.
 
 Non-finite values: a pair whose contribution is NaN or infinite has no integer
 image, so the counters flag its destination row, the redo flags it again, and
@@ -230,7 +240,8 @@ No entry synchronizes with the host unless a check that says so is enabled
 
 ### Measured peak memory and backward time
 
-Measured on GB200 (`sm_100a`), GB300 (`sm_103a`), R200 (`sm_107a`).
+Measured with version 0.1.0 on GB200 (`sm_100a`), GB300 (`sm_103a`), R200
+(`sm_107a`).
 
 Peak allocated bytes of one forward + backward after a warm step (`runner`: a
 prepared runner with the package defaults; `autograd`: the public entry through
@@ -280,11 +291,11 @@ sm_103a, sm_107a); `chunk_4096x268757` autograd (sm_100a, sm_103a, sm_107a);
 runner (sm_100a, sm_103a, sm_107a); `p8949_nope` autograd (sm_100a, sm_103a,
 sm_107a).
 
-Backward time of the non-deterministic package divided by this package's
-(median of 3 same-GPU rounds; below 1: this package is slower): 0.848 to 0.990
-on sm_100a (13 rows), 0.882 to 0.970 on sm_103a (13 rows), 0.830 to 0.967 on
-sm_107a (13 rows).  This package's backward is slower on every row.  The
-forward is the non-deterministic package's forward kernel.
+Backward time of the non-deterministic package divided by this package's,
+measured on version 0.1.0 (median of 3 same-GPU rounds; below 1: this package
+is slower): 0.848 to 0.990 on sm_100a (13 rows), 0.882 to 0.970 on sm_103a (13
+rows), 0.830 to 0.967 on sm_107a (13 rows).  This package's backward was slower
+on every row.
 
 ## NoPE (zero-rope) program
 
@@ -307,7 +318,11 @@ before either launch.
   shared by every architecture it compiles for; per stage the `library` stem
   of its `build.json` entries, the FFI entry and the launch geometry that the
   export rewrites), the stage names of both programs and the loader glue
-  (`library_name`, `load_cake_dsa_train_module`).
+  (`library_name`, `load_cake_dsa_train_module`).  A stage entry may narrow
+  the record's architectures with its own `arches`: `fwd_scan` /
+  `nope_fwd_scan` ship for `sm_107a`, `fwd` / `nope_fwd` for `sm_100a` and
+  `sm_103a`.  `SCAN_STAGES` and `stage_for` resolve a forward on `sm_107a` to
+  its scanner-warp stage, and `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`): one entry per `<library>_<arch>` with its translation units,
@@ -327,8 +342,9 @@ before either launch.
 * `csrc/cake_dsa_h64_det_train/` -- generated kernel and binding translation
   units, one pair per library, compiled once per library and architecture
   (`.clang-format` disables formatting: the sources are identity-checked by
-  the digests in `build.json`).  The forward units are those of the
-  non-deterministic package's forward under this package's program names.
+  the digests in `build.json`).  A library whose `sm_107a` binding differs
+  from its other bindings (the NoPE backward's main kernel) also ships its own
+  `sm_107a` binding unit.
 
 The package imports only itself, `torch` and `tvm_ffi`; `cake_build.py`
 imports the package's JIT shim (`_cake_pplx_jit.py`) only for the JIT
@@ -343,4 +359,8 @@ or a compute capability 10.0 / 10.3 / 10.7 device),
 public entry points and the environment variables of the facade) and the
 CPU-only `tests/experimental/test_cake_dsa_sparse_attention_det_train_names.py`
 and `tests/experimental/test_cake_dsa_sparse_attention_det_train_standalone.py`.
-Benchmark: `benchmarks/bench_cake_dsa_sparse_attention_det_train.py`.
+Accuracy is judged by `tests/cake_naive.py` through
+`tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
+reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
+one `TIER` line per judged output); the run-to-run and one-feature checks of
+this package are bitwise.  Benchmark: `benchmarks/bench_cake_dsa_sparse_attention_det_train.py`.

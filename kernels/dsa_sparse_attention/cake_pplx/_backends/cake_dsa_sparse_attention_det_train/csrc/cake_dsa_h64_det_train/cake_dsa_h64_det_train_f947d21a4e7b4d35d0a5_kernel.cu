@@ -368,21 +368,58 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                         int _parity_k_free = (int)((unsigned int)(tord + i) % 2) ^ 1;
                         mbarrier_wait(k_free_addr, _parity_k_free);
                         mbarrier_arrive_expect_tx(k_full_addr, 18432);
+#if __CUDA_ARCH__ == 1070
+                        #pragma unroll 1
+                        for (int c = 0; c < 8; c++) {
+                            asm volatile(
+                                "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+                                ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+                                :: "r"(k_blk_addr + (unsigned int)(8192 * c + pw * 512)), "l"((&kv_latent)), "r"(c * 64), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+                            asm volatile(
+                                "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+                                ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+                                :: "r"(k_blk_addr + (unsigned int)(8192 * c + 2048 + pw * 512)), "l"((&kv_latent)), "r"(c * 64), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+                            asm volatile(
+                                "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+                                ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+                                :: "r"(k_blk_addr + (unsigned int)(8192 * c + 4096 + pw * 512)), "l"((&kv_latent)), "r"(c * 64), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+                            asm volatile(
+                                "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
+                                ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+                                :: "r"(k_blk_addr + (unsigned int)(8192 * c + 6144 + pw * 512)), "l"((&kv_latent)), "r"(c * 64), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+                        }
+#else
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + (unsigned int)(65536 + pw * 512)), "l"((&k_rope)), "r"(0), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[0]), "r"(rows[1]), "r"(rows[2]), "r"(rows[3]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + (unsigned int)(67584 + pw * 512)), "l"((&k_rope)), "r"(0), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 2048 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[4]), "r"(rows[5]), "r"(rows[6]), "r"(rows[7]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + (unsigned int)(69632 + pw * 512)), "l"((&k_rope)), "r"(0), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 4096 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[8]), "r"(rows[9]), "r"(rows[10]), "r"(rows[11]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
+#if __CUDA_ARCH__ == 1070
+                            :: "r"(k_blk_addr + (unsigned int)(71680 + pw * 512)), "l"((&k_rope)), "r"(0), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#else
                             :: "r"(k_blk_addr + 6144 + (unsigned int)(pw * 512)), "l"((&kv_latent)), "r"(0), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
                         asm volatile(
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
@@ -512,6 +549,7 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
                             ".mbarrier::complete_tx::bytes.L2::cache_hint ""[%0], [%1, {%2, %3, %4, %5, %6}], [%7], %8;"
                             :: "r"(k_blk_addr + 65536 + 6144 + (unsigned int)(pw * 512)), "l"((&k_rope)), "r"(0), "r"(rows[12]), "r"(rows[13]), "r"(rows[14]), "r"(rows[15]), "r"(k_full_addr), "l"(0x14F0000000000000ULL) : "memory");
+#endif
                     }
                 }
                 tord += blocks;
@@ -3252,9 +3290,9 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                     if (elect_sync()) {
                         #pragma unroll 1
                         for (int i_3 = 0; i_3 < blocks_3; i_3++) {
+                            int _parity_k_full = (int)((unsigned int)(tord_3 + i_3) % 2);
+                            mbarrier_wait(k_full_addr, _parity_k_full);
                             if (i_3 == 0) {
-                                int _parity_k_full = (int)((unsigned int)tord_3 % 2);
-                                mbarrier_wait(k_full_addr, _parity_k_full);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
 #if __CUDA_ARCH__ == 1070
                                 int _smem_desc_lo_0 = ((q_k_addr) >> 4) & 0x7FFF;
@@ -3648,7 +3686,7 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             mbarrier_wait(p_full_addr, _parity_p_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
                             if (i_3 > 0) {
-                                int _parity_dkv_b_drained = (int)((unsigned int)(int)(unsigned int)(tord_3 + i_3 - 1) % 2);
+                                int _parity_dkv_b_drained = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
                                 mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                             }
@@ -4219,9 +4257,9 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             if (blocks_3 > i_3 + 1) {
                                 int _parity_dkr_drained = (int)((unsigned int)(tord_3 + i_3) % 2);
                                 mbarrier_wait(dkr_drained_addr, _parity_dkr_drained);
-                                int _parity_k_full_1 = (int)((unsigned int)(int)(unsigned int)(tord_3 + i_3 + 1) % 2);
+                                int _parity_k_full_1 = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
                                 mbarrier_wait(k_full_addr, _parity_k_full_1);
-                                int _parity_s_free = (int)((unsigned int)(int)(unsigned int)(tord_3 + i_3 + 1) % 2) ^ 1;
+                                int _parity_s_free = (int)((unsigned int)(tord_3 + i_3) % 2);
                                 mbarrier_wait(s_free_addr, _parity_s_free);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
 #if __CUDA_ARCH__ == 1070
@@ -4607,11 +4645,10 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                                 }
                             }
                         }
-                        int _warp_redux_3;
-                        asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_3) : "r"(best));
-                        best = _warp_redux_3;
-                        if (best >= 0) {
-                            last_valid = best;
+                        int best_w;
+                        asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(best_w) : "r"(best));
+                        if (best_w >= 0) {
+                            last_valid = best_w;
                             break;
                         }
                     }
@@ -4632,24 +4669,24 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             if (whole_tile != 0) {
                                 int _vec_load_1[8];
                                 {
-                                    uint32_t _iv_4_0;
-                                    uint32_t _iv_4_1;
-                                    uint32_t _iv_4_2;
-                                    uint32_t _iv_4_3;
-                                    uint32_t _iv_4_4;
-                                    uint32_t _iv_4_5;
-                                    uint32_t _iv_4_6;
-                                    uint32_t _iv_4_7;
+                                    uint32_t _iv_3_0;
+                                    uint32_t _iv_3_1;
+                                    uint32_t _iv_3_2;
+                                    uint32_t _iv_3_3;
+                                    uint32_t _iv_3_4;
+                                    uint32_t _iv_3_5;
+                                    uint32_t _iv_3_6;
+                                    uint32_t _iv_3_7;
                                     asm volatile("ld.global.nc.L1::evict_first.L2::evict_normal.L2::256B.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                                        : "=r"(_iv_4_0), "=r"(_iv_4_1), "=r"(_iv_4_2), "=r"(_iv_4_3), "=r"(_iv_4_4), "=r"(_iv_4_5), "=r"(_iv_4_6), "=r"(_iv_4_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
-                                    _vec_load_1[0 + 0] = (int32_t)_iv_4_0;
-                                    _vec_load_1[0 + 1] = (int32_t)_iv_4_1;
-                                    _vec_load_1[0 + 2] = (int32_t)_iv_4_2;
-                                    _vec_load_1[0 + 3] = (int32_t)_iv_4_3;
-                                    _vec_load_1[0 + 4] = (int32_t)_iv_4_4;
-                                    _vec_load_1[0 + 5] = (int32_t)_iv_4_5;
-                                    _vec_load_1[0 + 6] = (int32_t)_iv_4_6;
-                                    _vec_load_1[0 + 7] = (int32_t)_iv_4_7;
+                                        : "=r"(_iv_3_0), "=r"(_iv_3_1), "=r"(_iv_3_2), "=r"(_iv_3_3), "=r"(_iv_3_4), "=r"(_iv_3_5), "=r"(_iv_3_6), "=r"(_iv_3_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
+                                    _vec_load_1[0 + 0] = (int32_t)_iv_3_0;
+                                    _vec_load_1[0 + 1] = (int32_t)_iv_3_1;
+                                    _vec_load_1[0 + 2] = (int32_t)_iv_3_2;
+                                    _vec_load_1[0 + 3] = (int32_t)_iv_3_3;
+                                    _vec_load_1[0 + 4] = (int32_t)_iv_3_4;
+                                    _vec_load_1[0 + 5] = (int32_t)_iv_3_5;
+                                    _vec_load_1[0 + 6] = (int32_t)_iv_3_6;
+                                    _vec_load_1[0 + 7] = (int32_t)_iv_3_7;
                                 }
                                 values[0] = _vec_load_1[0];
                                 values[1] = _vec_load_1[1];

@@ -22,7 +22,8 @@ arrival order, so no test compares two runs bit for bit.
 Without a device: the registry (the three stages in launch order, one program per record, every record delivered for
 the three architectures and for no other, the launch facts), the routing table ``RECORD_OF`` (the preprocess,
 main-stage and postprocess record of each head dimension and causal flag, every record used), the launch grids, the
-stage launchers' keywords, the build manifest (every record's library, the recorded source digests), the standalone
+stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
+registry-ordered launch), the build manifest (every record's library, the recorded source digests), the standalone
 loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
@@ -217,6 +218,57 @@ def test_stage_launchers_take_named_buffers() -> None:
         rest = params[1:]
         assert all(p.kind is p.KEYWORD_ONLY for p in rest), launcher
         assert sorted(p.name for p in rest) == sorted(keywords), launcher
+
+
+@pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
+def test_stage_launchers_pass_the_registry_arguments_positionally(D, causal, monkeypatch) -> None:
+    """Every record ``RECORD_OF`` routes to is launched positionally by its stage launcher, and its FFI entry gets the
+    same arguments and grid, of the same types, as through the registry-ordered launch of ``_launch`` (no device: the
+    FFI entry is a recorder)."""
+    calls = []
+    monkeypatch.setattr(cake_backend, "device_arch", lambda index: ARCHES[0])
+    monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, args)))
+    # Sizes and tile counts all distinct, so a swapped integer argument or grid axis changes the recorded call.
+    B, H, Sq, Skv = 2, 3, 5 * cake_jit.BLOCK, 7 * cake_jit.BLOCK
+    assert len({B, H, Sq, Skv, Sq // cake_jit.BLOCK, Skv // cake_jit.BLOCK}) == 6
+    bf16, fp32 = {"dtype": torch.bfloat16}, {"dtype": torch.float32}
+    q, out, dout, dq = (torch.empty(B, Sq, H, D, **bf16) for _ in range(4))
+    k, v, dk, dv = (torch.empty(B, Skv, H, D, **bf16) for _ in range(4))
+    lse = torch.empty(B, H, Sq, **fp32)
+    lse_log2, dpsum = torch.empty(B * H, Sq, **fp32), torch.empty(B * H, Sq, **fp32)
+    dq_accum = torch.empty(B * H * Sq * D, **fp32)
+    pre, main, post = cake_jit.RECORD_OF[(D, causal)]
+
+    def launch_all() -> list:
+        calls.clear()
+        cake_backend.launch_bwd_pre(pre, out=out, dout=dout, lse=lse, lse_log2=lse_log2, dpsum=dpsum, dq_accum=dq_accum)
+        cake_backend.launch_bwd_main(
+            main,
+            q=q,
+            k=k,
+            v=v,
+            dout=dout,
+            lse_log2=lse_log2,
+            dpsum=dpsum,
+            dq_accum=dq_accum,
+            dk=dk,
+            dv=dv,
+            softmax_scale=0.0883883,
+        )
+        cake_backend.launch_bwd_post(post, dq_accum=dq_accum, dq=dq, softmax_scale=0.0883883)
+        return list(calls)
+
+    for stage, name in zip(STAGES, (pre, main, post), strict=True):
+        assert cake_backend._positional(name, stage), (stage, name)
+    positional = launch_all()
+    monkeypatch.setattr(cake_backend, "_positional", lambda name, stage: False)
+    registry = launch_all()
+    assert [name for name, _ in positional] == [name for name, _ in registry] == [pre, main, post]
+    for (name, got), (_, want) in zip(positional, registry, strict=True):
+        assert len(got) == len(want), name
+        for i, (a, b) in enumerate(zip(got, want, strict=True)):
+            assert type(a) is type(b), (name, i, type(a), type(b))
+            assert a is b if isinstance(a, torch.Tensor) else a == b, (name, i, a, b)
 
 
 def test_the_package_exports_the_backend_entry() -> None:

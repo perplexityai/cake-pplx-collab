@@ -859,65 +859,59 @@ kernel_cake_rmsnorm_silu_gate_train_348a297be36a61e8f015(__nv_bfloat16* __restri
         int column = rank * 8 + (warp & 7);
         float prev = 0.0f;
         if (warp < 8) {
-            if (accumulate != 0) {
-                prev = dw[column];
+            if (lane == 0) {
+                if (accumulate != 0) {
+                    prev = dw[column];
+                }
             }
-            float _shfl_sync_108 = __shfl_sync(0xFFFFFFFF, prev, 0);
-            prev = _shfl_sync_108;
         }
         mbarrier_wait_cluster_hint(recv_full_addr, 0, 10000000);
         if (warp < 8) {
-            float part = -0.0f;
+            float part = 0.0f;
             int c_0 = 8 * lane;
-            int cr_0 = ((c_0) < (nblocks - 1) ? (c_0) : (nblocks - 1));
-            float pv_0 = ((c_0 < nblocks) ? recv[cr_0 * 8 + warp + (cr_0 >> 3)] : -0.0f);
-            part = part + pv_0;
+            if (c_0 < nblocks) {
+                part = part + recv[c_0 * 8 + lane + warp];
+            }
             int c_1 = 8 * lane + 1;
-            int cr_1 = ((c_1) < (nblocks - 1) ? (c_1) : (nblocks - 1));
-            float pv_1 = ((c_1 < nblocks) ? recv[cr_1 * 8 + warp + (cr_1 >> 3)] : -0.0f);
-            part = part + pv_1;
+            if (c_1 < nblocks) {
+                part = part + recv[c_1 * 8 + lane + warp];
+            }
             int c_2 = 8 * lane + 2;
-            int cr_2 = ((c_2) < (nblocks - 1) ? (c_2) : (nblocks - 1));
-            float pv_2 = ((c_2 < nblocks) ? recv[cr_2 * 8 + warp + (cr_2 >> 3)] : -0.0f);
-            part = part + pv_2;
+            if (c_2 < nblocks) {
+                part = part + recv[c_2 * 8 + lane + warp];
+            }
             int c_3 = 8 * lane + 3;
-            int cr_3 = ((c_3) < (nblocks - 1) ? (c_3) : (nblocks - 1));
-            float pv_3 = ((c_3 < nblocks) ? recv[cr_3 * 8 + warp + (cr_3 >> 3)] : -0.0f);
-            part = part + pv_3;
+            if (c_3 < nblocks) {
+                part = part + recv[c_3 * 8 + lane + warp];
+            }
             int c_4 = 8 * lane + 4;
-            int cr_4 = ((c_4) < (nblocks - 1) ? (c_4) : (nblocks - 1));
-            float pv_4 = ((c_4 < nblocks) ? recv[cr_4 * 8 + warp + (cr_4 >> 3)] : -0.0f);
-            part = part + pv_4;
+            if (c_4 < nblocks) {
+                part = part + recv[c_4 * 8 + lane + warp];
+            }
             int c_5 = 8 * lane + 5;
-            int cr_5 = ((c_5) < (nblocks - 1) ? (c_5) : (nblocks - 1));
-            float pv_5 = ((c_5 < nblocks) ? recv[cr_5 * 8 + warp + (cr_5 >> 3)] : -0.0f);
-            part = part + pv_5;
+            if (c_5 < nblocks) {
+                part = part + recv[c_5 * 8 + lane + warp];
+            }
             int c_6 = 8 * lane + 6;
-            int cr_6 = ((c_6) < (nblocks - 1) ? (c_6) : (nblocks - 1));
-            float pv_6 = ((c_6 < nblocks) ? recv[cr_6 * 8 + warp + (cr_6 >> 3)] : -0.0f);
-            part = part + pv_6;
+            if (c_6 < nblocks) {
+                part = part + recv[c_6 * 8 + lane + warp];
+            }
             int c_7 = 8 * lane + 7;
-            int cr_7 = ((c_7) < (nblocks - 1) ? (c_7) : (nblocks - 1));
-            float pv_7 = ((c_7 < nblocks) ? recv[cr_7 * 8 + warp + (cr_7 >> 3)] : -0.0f);
-            part = part + pv_7;
+            if (c_7 < nblocks) {
+                part = part + recv[c_7 * 8 + lane + warp];
+            }
             int ngroups = (nblocks + 7) / 8;
-            if (ngroups > 1) {
-                float _shfl_xor_sync_109 = __shfl_xor_sync(0xFFFFFFFF, part, 1);
-                part = part + _shfl_xor_sync_109;
-            }
-            if (ngroups > 2) {
-                float _shfl_xor_sync_110 = __shfl_xor_sync(0xFFFFFFFF, part, 2);
-                part = part + _shfl_xor_sync_110;
-            }
-            if (ngroups > 4) {
-                float _shfl_xor_sync_111 = __shfl_xor_sync(0xFFFFFFFF, part, 4);
-                part = part + _shfl_xor_sync_111;
+            float folded = 0.0f;
+            #pragma unroll 1
+            for (int gq = 0; gq < ngroups; gq++) {
+                float _shfl_sync_108 = __shfl_sync(0xFFFFFFFF, part, gq);
+                folded = folded + _shfl_sync_108;
             }
             if (lane == 0) {
                 if (accumulate != 0) {
-                    part = part + prev;
+                    folded = folded + prev;
                 }
-                dw[column] = part;
+                dw[column] = folded;
             }
         }
     }
