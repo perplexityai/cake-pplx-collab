@@ -665,10 +665,10 @@ def cake_mhc_det_train_handoff_forward_prepare(
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
-    out: Optional[torch.Tensor] = None,
-    pre_next_out: Optional[torch.Tensor] = None,
-    stats_out: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
+    out: torch.Tensor | None = None,
+    pre_next_out: torch.Tensor | None = None,
+    stats_out: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""Pre-handoff forward of one sublayer: ``(U, pre_next, stats)``.
 
@@ -729,7 +729,7 @@ def cake_mhc_det_train_handoff_backward_finish(
     dU: torch.Tensor,
     pre_in: torch.Tensor,
     dpre_next: torch.Tensor,
-    B: Optional[torch.Tensor],
+    B: torch.Tensor | None,
     fn: torch.Tensor,
     scale: torch.Tensor,
     base: torch.Tensor,
@@ -741,12 +741,12 @@ def cake_mhc_det_train_handoff_backward_finish(
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
     accumulate: bool = False,
-    workspace: Optional[torch.Tensor] = None,
-    dX: Optional[torch.Tensor] = None,
-    dpre_in: Optional[torch.Tensor] = None,
-    dfn: Optional[torch.Tensor] = None,
-    dscale: Optional[torch.Tensor] = None,
-    dbase: Optional[torch.Tensor] = None,
+    workspace: torch.Tensor | None = None,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
+    dfn: torch.Tensor | None = None,
+    dscale: torch.Tensor | None = None,
+    dbase: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""Pre-handoff backward of one sublayer: ``(dX, dpre_in, dfn, dscale, dbase)``.
 
@@ -815,8 +815,8 @@ def cake_mhc_det_train_handoff_prepare(
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
     save_stats: bool = True,
-    workspace: Optional[torch.Tensor] = None,
-    backward_workspace: Optional[torch.Tensor] = None,
+    workspace: torch.Tensor | None = None,
+    backward_workspace: torch.Tensor | None = None,
 ):
     """Autograd-enabled ``handoff_forward_prepare``: ``(U, pre_next, handle)``.
 
@@ -862,7 +862,7 @@ def cake_mhc_det_train_collapse_forward(
     X: torch.Tensor,
     pre_in: torch.Tensor,
     *,
-    out: Optional[torch.Tensor] = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     r"""Standalone collapse: ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])`` (no parameters, no workspace).
 
@@ -889,8 +889,8 @@ def cake_mhc_det_train_collapse_backward(
     pre_in: torch.Tensor,
     dU: torch.Tensor,
     *,
-    dX: Optional[torch.Tensor] = None,
-    dpre_in: Optional[torch.Tensor] = None,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""VJP of the standalone collapse: ``(dX, dpre_in)``.
 

@@ -145,7 +145,7 @@ def test_default_oracle_is_the_standard_op_sequence(dtype, T: int, H: int, block
             rms_eps=RMS_EPS,
             hc_eps=HC_EPS,
             iters=ITERS,
-        )  # fmt: skip
+        )
         for lo in range(0, T, bt)
     ]
     assert set(got) == set(naive.OUTPUTS)
@@ -186,7 +186,9 @@ def test_handoff_oracle_exact_cases(dtype) -> None:
     T, H = 4, 16
     i = _inputs(T, H, seed=31)
     zeros = {k: torch.zeros_like(i[k]) for k in ("dpre_next", "dU", "dY")}
-    run = lambda **kw: naive.case_oracle({**i, **kw}, dtype=dtype)  # noqa: E731
+    def run(**kw):
+        return naive.case_oracle({**i, **kw}, dtype=dtype)
+
     omitted = naive.case_oracle({k: v for k, v in i.items() if k != "dpre_next"}, dtype=dtype)
     zero_next = run(dpre_next=zeros["dpre_next"])
     for name in naive.HANDOFF_OUTPUTS:

@@ -190,7 +190,7 @@ def is_cake_mhc_nondet_train_supported(
 
 
 def is_cake_mhc_nondet_train_handoff_supported(
-    device: torch.device, hidden: Optional[int] = None
+    device: torch.device, hidden: int | None = None
 ) -> bool:
     """Whether ``device`` (and optionally ``hidden``) has the pre-handoff routes and the standalone collapse."""
 
@@ -2094,10 +2094,10 @@ def cake_mhc_nondet_train_handoff_forward_prepare(
     hc_eps: float = 1e-6,
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
-    out: Optional[torch.Tensor] = None,
-    pre_next_out: Optional[torch.Tensor] = None,
-    stats_out: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
+    out: torch.Tensor | None = None,
+    pre_next_out: torch.Tensor | None = None,
+    stats_out: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""Forward mapping and coefficients of ``X``, collapse with the incoming ``pre_in``: ``(U, pre_next, stats)``.
 
@@ -2243,7 +2243,7 @@ def cake_mhc_nondet_train_handoff_backward_finish(
     dU: torch.Tensor,
     pre_in: torch.Tensor,
     dpre_next: torch.Tensor,
-    B: Optional[torch.Tensor],
+    B: torch.Tensor | None,
     fn: torch.Tensor,
     scale: torch.Tensor,
     base: torch.Tensor,
@@ -2255,12 +2255,12 @@ def cake_mhc_nondet_train_handoff_backward_finish(
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
     accumulate: bool = False,
-    workspace: Optional[torch.Tensor] = None,
-    dX: Optional[torch.Tensor] = None,
-    dpre_in: Optional[torch.Tensor] = None,
-    dfn: Optional[torch.Tensor] = None,
-    dscale: Optional[torch.Tensor] = None,
-    dbase: Optional[torch.Tensor] = None,
+    workspace: torch.Tensor | None = None,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
+    dfn: torch.Tensor | None = None,
+    dscale: torch.Tensor | None = None,
+    dbase: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""Backward of one pre-handoff sublayer: ``(dX, dpre_in, dfn, dscale, dbase)``.
 
@@ -2334,7 +2334,7 @@ def _handoff_backward_finish(
     dU: torch.Tensor,
     pre_in: torch.Tensor,
     dpre_next: torch.Tensor,
-    B: Optional[torch.Tensor],
+    B: torch.Tensor | None,
     fn: torch.Tensor,
     scale: torch.Tensor,
     base: torch.Tensor,
@@ -2346,12 +2346,12 @@ def _handoff_backward_finish(
     sinkhorn_iters: int,
     accumulation: str = "fp32",
     accumulate: bool,
-    workspace: Optional[torch.Tensor],
-    dX: Optional[torch.Tensor],
-    dpre_in: Optional[torch.Tensor],
-    dfn: Optional[torch.Tensor],
-    dscale: Optional[torch.Tensor],
-    dbase: Optional[torch.Tensor],
+    workspace: torch.Tensor | None,
+    dX: torch.Tensor | None,
+    dpre_in: torch.Tensor | None,
+    dfn: torch.Tensor | None,
+    dscale: torch.Tensor | None,
+    dbase: torch.Tensor | None,
     path: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """:func:`cake_mhc_nondet_train_handoff_backward_finish` along ``path`` (as
@@ -2528,7 +2528,7 @@ def cake_mhc_nondet_train_collapse_forward(
     X: torch.Tensor,
     pre_in: torch.Tensor,
     *,
-    out: Optional[torch.Tensor] = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     r"""Standalone collapse: ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])``.
 
@@ -2589,8 +2589,8 @@ def cake_mhc_nondet_train_collapse_backward(
     pre_in: torch.Tensor,
     dU: torch.Tensor,
     *,
-    dX: Optional[torch.Tensor] = None,
-    dpre_in: Optional[torch.Tensor] = None,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""VJP of the standalone collapse: ``(dX, dpre_in)``.
 
@@ -2951,7 +2951,7 @@ class CakeMHCNondetFinishFunction(torch.autograd.Function):
 
 
 def _as_operand(
-    grad: Optional[torch.Tensor],
+    grad: torch.Tensor | None,
     *,
     shape: tuple[int, ...],
     dtype: torch.dtype,
@@ -3198,8 +3198,8 @@ def cake_mhc_nondet_train_handoff_prepare(
     sinkhorn_iters: int = 20,
     accumulation: str = "fp32",
     save_stats: bool = True,
-    workspace: Optional[torch.Tensor] = None,
-    backward_workspace: Optional[torch.Tensor] = None,
+    workspace: torch.Tensor | None = None,
+    backward_workspace: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, _MHCTrainHandle]:
     """Autograd-enabled ``handoff_forward_prepare``: ``(U, pre_next, handle)``; pass ``handle`` to
     :func:`cake_mhc_nondet_train_finish` and ``pre_next`` to the next sublayer (or the final collapse).

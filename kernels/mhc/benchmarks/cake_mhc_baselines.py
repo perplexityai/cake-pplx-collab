@@ -794,8 +794,8 @@ class Compiled(AutogradArm):
         self.trials = max(1, int(trials))
         self.library = f"torch.compile (mode={mode or 'default'}, fullgraph, static shapes, TF32 off, no buffer donation)"
         self._fn: Optional[Callable] = None
-        self._fn_handoff: Optional[Callable] = None
-        self._fn_collapse: Optional[Callable] = None
+        self._fn_handoff: Callable | None = None
+        self._fn_collapse: Callable | None = None
         self._count = 0
 
     def available(self, device, hidden):
@@ -933,7 +933,11 @@ class Liger(AutogradArm):
     def forward_handoff(self, leaves, pre_in, iters):
         """Liger's coefficient function at ``rms_eps`` 1e-20, its pre-mix applied to the incoming ``pre_in``, its post
         / residual mix; the coefficient function's ``h_pre`` is handed on as ``pre_next``."""
-        from liger_kernel.ops.mhc import LigerMHCCoeffsFunction, LigerMHCPostResFunction, LigerMHCPreFunction
+        from liger_kernel.ops.mhc import (
+            LigerMHCCoeffsFunction,
+            LigerMHCPostResFunction,
+            LigerMHCPreFunction,
+        )
 
         X, phi, base, s0, s1, s2, B = leaves
         h_pre, h_post, h_res = LigerMHCCoeffsFunction.apply(
