@@ -143,11 +143,7 @@ kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d(__nv_bfloat16* __restri
         }
     }
     int s_ahead = 0;
-#if __CUDA_ARCH__ == 1070
     if ((nblocks - 1) / num_bids + 1 <= 64) {
-#else
-    if ((nblocks - 1) / num_bids + 1 <= 96) {
-#endif
         s_ahead = 1;
     }
     if (bid < nblocks) {

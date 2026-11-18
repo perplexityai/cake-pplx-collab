@@ -310,14 +310,7 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 }
             }
             float total = 0.0f;
-#if __CUDA_ARCH__ == 1000
-            float2 dx2_acc = make_float2(0.0f, 0.0f);
-            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[0], xr[1]), make_float2(xr[0], xr[1]), dx2_acc);
-            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[2], xr[3]), make_float2(xr[2], xr[3]), dx2_acc);
-            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[4], xr[5]), make_float2(xr[4], xr[5]), dx2_acc);
-            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[6], xr[7]), make_float2(xr[6], xr[7]), dx2_acc);
-            total = dx2_acc.x + dx2_acc.y;
-#elif __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1030
             float2 dx2_lo = make_float2(0.0f, 0.0f);
             float2 dx2_hi = make_float2(0.0f, 0.0f);
             dx2_lo = fma_f32x2_rn_noftz(make_float2(xr[0], xr[1]), make_float2(xr[0], xr[1]), dx2_lo);
@@ -326,14 +319,12 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
             dx2_hi = fma_f32x2_rn_noftz(make_float2(xr[6], xr[7]), make_float2(xr[6], xr[7]), dx2_hi);
             total = dx2_lo.x + dx2_lo.y + (dx2_hi.x + dx2_hi.y);
 #else
-            total = __fmaf_rn(xr[0], xr[0], total);
-            total = __fmaf_rn(xr[1], xr[1], total);
-            total = __fmaf_rn(xr[2], xr[2], total);
-            total = __fmaf_rn(xr[3], xr[3], total);
-            total = __fmaf_rn(xr[4], xr[4], total);
-            total = __fmaf_rn(xr[5], xr[5], total);
-            total = __fmaf_rn(xr[6], xr[6], total);
-            total = __fmaf_rn(xr[7], xr[7], total);
+            float2 dx2_acc = make_float2(0.0f, 0.0f);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[0], xr[1]), make_float2(xr[0], xr[1]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[2], xr[3]), make_float2(xr[2], xr[3]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[4], xr[5]), make_float2(xr[4], xr[5]), dx2_acc);
+            dx2_acc = fma_f32x2_rn_noftz(make_float2(xr[6], xr[7]), make_float2(xr[6], xr[7]), dx2_acc);
+            total = dx2_acc.x + dx2_acc.y;
 #endif
             float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, total, 1);
             total = total + _shfl_xor_sync_7;
@@ -559,17 +550,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 }
                 gr[6] = dn2_3.x;
                 gr[7] = dn2_3.y;
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(gr[0], xr[0], dot);
-                dot = __fmaf_rn(gr[1], xr[1], dot);
-                dot = __fmaf_rn(gr[2], xr[2], dot);
-                dot = __fmaf_rn(gr[3], xr[3], dot);
-                dot = __fmaf_rn(gr[4], xr[4], dot);
-                dot = __fmaf_rn(gr[5], xr[5], dot);
-                dot = __fmaf_rn(gr[6], xr[6], dot);
-                dot = __fmaf_rn(gr[7], xr[7], dot);
-#endif
             } else {
                 #pragma unroll
                 for (int _pair = 0; _pair < 1; _pair++) {
@@ -589,10 +569,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_0 = gr[0] * gate_0;
                 float dzj_0 = gr[0] * (nj_0 * wk[0]) * sig_0 * __fmaf_rn(zr[0], 1.0f - sig_0, 1.0f);
                 float dnj_0 = aj_0 * wk[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_0, xr[0], dot);
-#endif
                 zr[0] = dzj_0;
                 gr[0] = dnj_0;
                 float _exp_60 = __nv_expf(zr[1] * -1.0f);
@@ -603,10 +579,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_1 = gr[1] * gate_1;
                 float dzj_1 = gr[1] * (nj_1 * wk[1]) * sig_1 * __fmaf_rn(zr[1], 1.0f - sig_1, 1.0f);
                 float dnj_1 = aj_1 * wk[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_1, xr[1], dot);
-#endif
                 zr[1] = dzj_1;
                 gr[1] = dnj_1;
                 #pragma unroll
@@ -632,10 +604,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_2 = gr[2] * gate_2;
                 float dzj_2 = gr[2] * (nj_2 * wk[0]) * sig_2 * __fmaf_rn(zr[2], 1.0f - sig_2, 1.0f);
                 float dnj_2 = aj_2 * wk[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_2, xr[2], dot);
-#endif
                 zr[2] = dzj_2;
                 gr[2] = dnj_2;
                 float _exp_62 = __nv_expf(zr[3] * -1.0f);
@@ -646,10 +614,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_3 = gr[3] * gate_3;
                 float dzj_3 = gr[3] * (nj_3 * wk[1]) * sig_3 * __fmaf_rn(zr[3], 1.0f - sig_3, 1.0f);
                 float dnj_3 = aj_3 * wk[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_3, xr[3], dot);
-#endif
                 zr[3] = dzj_3;
                 gr[3] = dnj_3;
                 #pragma unroll
@@ -675,10 +639,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_4 = gr[4] * gate_4;
                 float dzj_4 = gr[4] * (nj_4 * wk[0]) * sig_4 * __fmaf_rn(zr[4], 1.0f - sig_4, 1.0f);
                 float dnj_4 = aj_4 * wk[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_4, xr[4], dot);
-#endif
                 zr[4] = dzj_4;
                 gr[4] = dnj_4;
                 float _exp_64 = __nv_expf(zr[5] * -1.0f);
@@ -689,10 +649,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_5 = gr[5] * gate_5;
                 float dzj_5 = gr[5] * (nj_5 * wk[1]) * sig_5 * __fmaf_rn(zr[5], 1.0f - sig_5, 1.0f);
                 float dnj_5 = aj_5 * wk[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_5, xr[5], dot);
-#endif
                 zr[5] = dzj_5;
                 gr[5] = dnj_5;
                 #pragma unroll
@@ -718,10 +674,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_6 = gr[6] * gate_6;
                 float dzj_6 = gr[6] * (nj_6 * wk[0]) * sig_6 * __fmaf_rn(zr[6], 1.0f - sig_6, 1.0f);
                 float dnj_6 = aj_6 * wk[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_6, xr[6], dot);
-#endif
                 zr[6] = dzj_6;
                 gr[6] = dnj_6;
                 float _exp_66 = __nv_expf(zr[7] * -1.0f);
@@ -732,10 +684,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 float aj_7 = gr[7] * gate_7;
                 float dzj_7 = gr[7] * (nj_7 * wk[1]) * sig_7 * __fmaf_rn(zr[7], 1.0f - sig_7, 1.0f);
                 float dnj_7 = aj_7 * wk[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                dot = __fmaf_rn(dnj_7, xr[7], dot);
-#endif
                 zr[7] = dzj_7;
                 gr[7] = dnj_7;
                 #pragma unroll
@@ -744,14 +692,7 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     packed_dz[_lp + 3] = *(uint32_t*)&_bf2;
                 }
             }
-#if __CUDA_ARCH__ == 1000
-            float2 dx2_acc_0 = make_float2(0.0f, 0.0f);
-            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[0], gr[1]), make_float2(xr[0], xr[1]), dx2_acc_0);
-            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[2], gr[3]), make_float2(xr[2], xr[3]), dx2_acc_0);
-            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[4], gr[5]), make_float2(xr[4], xr[5]), dx2_acc_0);
-            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[6], gr[7]), make_float2(xr[6], xr[7]), dx2_acc_0);
-            dot = dx2_acc_0.x + dx2_acc_0.y;
-#elif __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1030
             float2 dx2_lo_0 = make_float2(0.0f, 0.0f);
             float2 dx2_hi_0 = make_float2(0.0f, 0.0f);
             dx2_lo_0 = fma_f32x2_rn_noftz(make_float2(gr[0], gr[1]), make_float2(xr[0], xr[1]), dx2_lo_0);
@@ -759,6 +700,13 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
             dx2_lo_0 = fma_f32x2_rn_noftz(make_float2(gr[4], gr[5]), make_float2(xr[4], xr[5]), dx2_lo_0);
             dx2_hi_0 = fma_f32x2_rn_noftz(make_float2(gr[6], gr[7]), make_float2(xr[6], xr[7]), dx2_hi_0);
             dot = dx2_lo_0.x + dx2_lo_0.y + (dx2_hi_0.x + dx2_hi_0.y);
+#else
+            float2 dx2_acc_0 = make_float2(0.0f, 0.0f);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[0], gr[1]), make_float2(xr[0], xr[1]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[2], gr[3]), make_float2(xr[2], xr[3]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[4], gr[5]), make_float2(xr[4], xr[5]), dx2_acc_0);
+            dx2_acc_0 = fma_f32x2_rn_noftz(make_float2(gr[6], gr[7]), make_float2(xr[6], xr[7]), dx2_acc_0);
+            dot = dx2_acc_0.x + dx2_acc_0.y;
 #endif
             float _shfl_xor_sync_67 = __shfl_xor_sync(0xFFFFFFFF, dot, 1);
             dot = dot + _shfl_xor_sync_67;
@@ -817,11 +765,7 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
         int _min_71 = ((num_bids) < (rest) ? (num_bids) : (rest));
         int t_sl = ((_min_71) > (1) ? (_min_71) : (1));
         int t_share = (rest + t_sl - 1) / t_sl;
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
         if (t_share <= 96) {
-#else
-        if (t_share <= 64) {
-#endif
             ahead = 1;
         }
         int t_tail = (((t_share + 63) / 64) > (1) ? ((t_share + 63) / 64) : (1));
@@ -999,14 +943,7 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     }
                 }
                 float total_1 = 0.0f;
-#if __CUDA_ARCH__ == 1000
-                float2 dx2_acc_1 = make_float2(0.0f, 0.0f);
-                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[0], xr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_acc_1);
-                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[2], xr_1[3]), make_float2(xr_1[2], xr_1[3]), dx2_acc_1);
-                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[4], xr_1[5]), make_float2(xr_1[4], xr_1[5]), dx2_acc_1);
-                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[6], xr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_acc_1);
-                total_1 = dx2_acc_1.x + dx2_acc_1.y;
-#elif __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1030
                 float2 dx2_lo_1 = make_float2(0.0f, 0.0f);
                 float2 dx2_hi_1 = make_float2(0.0f, 0.0f);
                 dx2_lo_1 = fma_f32x2_rn_noftz(make_float2(xr_1[0], xr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_lo_1);
@@ -1015,14 +952,12 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 dx2_hi_1 = fma_f32x2_rn_noftz(make_float2(xr_1[6], xr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_hi_1);
                 total_1 = dx2_lo_1.x + dx2_lo_1.y + (dx2_hi_1.x + dx2_hi_1.y);
 #else
-                total_1 = __fmaf_rn(xr_1[0], xr_1[0], total_1);
-                total_1 = __fmaf_rn(xr_1[1], xr_1[1], total_1);
-                total_1 = __fmaf_rn(xr_1[2], xr_1[2], total_1);
-                total_1 = __fmaf_rn(xr_1[3], xr_1[3], total_1);
-                total_1 = __fmaf_rn(xr_1[4], xr_1[4], total_1);
-                total_1 = __fmaf_rn(xr_1[5], xr_1[5], total_1);
-                total_1 = __fmaf_rn(xr_1[6], xr_1[6], total_1);
-                total_1 = __fmaf_rn(xr_1[7], xr_1[7], total_1);
+                float2 dx2_acc_1 = make_float2(0.0f, 0.0f);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[0], xr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[2], xr_1[3]), make_float2(xr_1[2], xr_1[3]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[4], xr_1[5]), make_float2(xr_1[4], xr_1[5]), dx2_acc_1);
+                dx2_acc_1 = fma_f32x2_rn_noftz(make_float2(xr_1[6], xr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_acc_1);
+                total_1 = dx2_acc_1.x + dx2_acc_1.y;
 #endif
                 float _shfl_xor_sync_78 = __shfl_xor_sync(0xFFFFFFFF, total_1, 1);
                 total_1 = total_1 + _shfl_xor_sync_78;
@@ -1248,17 +1183,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     }
                     gr_1[6] = dn2_7.x;
                     gr_1[7] = dn2_7.y;
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(gr_1[0], xr_1[0], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[1], xr_1[1], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[2], xr_1[2], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[3], xr_1[3], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[4], xr_1[4], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[5], xr_1[5], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[6], xr_1[6], dot_1);
-                    dot_1 = __fmaf_rn(gr_1[7], xr_1[7], dot_1);
-#endif
                 } else {
                     #pragma unroll
                     for (int _pair = 0; _pair < 1; _pair++) {
@@ -1278,10 +1202,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_8 = gr_1[0] * gate_8;
                     float dzj_8 = gr_1[0] * (nj_8 * wk_1[0]) * sig_8 * __fmaf_rn(zr_1[0], 1.0f - sig_8, 1.0f);
                     float dnj_8 = aj_8 * wk_1[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_8, xr_1[0], dot_1);
-#endif
                     zr_1[0] = dzj_8;
                     gr_1[0] = dnj_8;
                     float _exp_131 = __nv_expf(zr_1[1] * -1.0f);
@@ -1292,10 +1212,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_9 = gr_1[1] * gate_9;
                     float dzj_9 = gr_1[1] * (nj_9 * wk_1[1]) * sig_9 * __fmaf_rn(zr_1[1], 1.0f - sig_9, 1.0f);
                     float dnj_9 = aj_9 * wk_1[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_9, xr_1[1], dot_1);
-#endif
                     zr_1[1] = dzj_9;
                     gr_1[1] = dnj_9;
                     #pragma unroll
@@ -1321,10 +1237,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_10 = gr_1[2] * gate_10;
                     float dzj_10 = gr_1[2] * (nj_10 * wk_1[0]) * sig_10 * __fmaf_rn(zr_1[2], 1.0f - sig_10, 1.0f);
                     float dnj_10 = aj_10 * wk_1[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_10, xr_1[2], dot_1);
-#endif
                     zr_1[2] = dzj_10;
                     gr_1[2] = dnj_10;
                     float _exp_133 = __nv_expf(zr_1[3] * -1.0f);
@@ -1335,10 +1247,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_11 = gr_1[3] * gate_11;
                     float dzj_11 = gr_1[3] * (nj_11 * wk_1[1]) * sig_11 * __fmaf_rn(zr_1[3], 1.0f - sig_11, 1.0f);
                     float dnj_11 = aj_11 * wk_1[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_11, xr_1[3], dot_1);
-#endif
                     zr_1[3] = dzj_11;
                     gr_1[3] = dnj_11;
                     #pragma unroll
@@ -1364,10 +1272,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_12 = gr_1[4] * gate_12;
                     float dzj_12 = gr_1[4] * (nj_12 * wk_1[0]) * sig_12 * __fmaf_rn(zr_1[4], 1.0f - sig_12, 1.0f);
                     float dnj_12 = aj_12 * wk_1[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_12, xr_1[4], dot_1);
-#endif
                     zr_1[4] = dzj_12;
                     gr_1[4] = dnj_12;
                     float _exp_135 = __nv_expf(zr_1[5] * -1.0f);
@@ -1378,10 +1282,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_13 = gr_1[5] * gate_13;
                     float dzj_13 = gr_1[5] * (nj_13 * wk_1[1]) * sig_13 * __fmaf_rn(zr_1[5], 1.0f - sig_13, 1.0f);
                     float dnj_13 = aj_13 * wk_1[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_13, xr_1[5], dot_1);
-#endif
                     zr_1[5] = dzj_13;
                     gr_1[5] = dnj_13;
                     #pragma unroll
@@ -1407,10 +1307,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_14 = gr_1[6] * gate_14;
                     float dzj_14 = gr_1[6] * (nj_14 * wk_1[0]) * sig_14 * __fmaf_rn(zr_1[6], 1.0f - sig_14, 1.0f);
                     float dnj_14 = aj_14 * wk_1[0];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_14, xr_1[6], dot_1);
-#endif
                     zr_1[6] = dzj_14;
                     gr_1[6] = dnj_14;
                     float _exp_137 = __nv_expf(zr_1[7] * -1.0f);
@@ -1421,10 +1317,6 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                     float aj_15 = gr_1[7] * gate_15;
                     float dzj_15 = gr_1[7] * (nj_15 * wk_1[1]) * sig_15 * __fmaf_rn(zr_1[7], 1.0f - sig_15, 1.0f);
                     float dnj_15 = aj_15 * wk_1[1];
-#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
-#else
-                    dot_1 = __fmaf_rn(dnj_15, xr_1[7], dot_1);
-#endif
                     zr_1[7] = dzj_15;
                     gr_1[7] = dnj_15;
                     #pragma unroll
@@ -1433,14 +1325,7 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                         packed_dz_1[_lp + 3] = *(uint32_t*)&_bf2;
                     }
                 }
-#if __CUDA_ARCH__ == 1000
-                float2 dx2_acc_1_1 = make_float2(0.0f, 0.0f);
-                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[0], gr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_acc_1_1);
-                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[2], gr_1[3]), make_float2(xr_1[2], xr_1[3]), dx2_acc_1_1);
-                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[4], gr_1[5]), make_float2(xr_1[4], xr_1[5]), dx2_acc_1_1);
-                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[6], gr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_acc_1_1);
-                dot_1 = dx2_acc_1_1.x + dx2_acc_1_1.y;
-#elif __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1030
                 float2 dx2_lo_1_1 = make_float2(0.0f, 0.0f);
                 float2 dx2_hi_1_1 = make_float2(0.0f, 0.0f);
                 dx2_lo_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[0], gr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_lo_1_1);
@@ -1448,6 +1333,13 @@ kernel_cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49(__nv_bfloat16* __restri
                 dx2_lo_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[4], gr_1[5]), make_float2(xr_1[4], xr_1[5]), dx2_lo_1_1);
                 dx2_hi_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[6], gr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_hi_1_1);
                 dot_1 = dx2_lo_1_1.x + dx2_lo_1_1.y + (dx2_hi_1_1.x + dx2_hi_1_1.y);
+#else
+                float2 dx2_acc_1_1 = make_float2(0.0f, 0.0f);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[0], gr_1[1]), make_float2(xr_1[0], xr_1[1]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[2], gr_1[3]), make_float2(xr_1[2], xr_1[3]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[4], gr_1[5]), make_float2(xr_1[4], xr_1[5]), dx2_acc_1_1);
+                dx2_acc_1_1 = fma_f32x2_rn_noftz(make_float2(gr_1[6], gr_1[7]), make_float2(xr_1[6], xr_1[7]), dx2_acc_1_1);
+                dot_1 = dx2_acc_1_1.x + dx2_acc_1_1.y;
 #endif
                 float _shfl_xor_sync_138 = __shfl_xor_sync(0xFFFFFFFF, dot_1, 1);
                 dot_1 = dot_1 + _shfl_xor_sync_138;

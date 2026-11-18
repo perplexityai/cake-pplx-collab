@@ -744,11 +744,7 @@ kernel_cake_rmsnorm_silu_gate_train_cefc51faec88b7212f3c(__nv_bfloat16* __restri
         int _min_71 = ((num_bids) < (rest) ? (num_bids) : (rest));
         int t_sl = ((_min_71) > (1) ? (_min_71) : (1));
         int t_share = (rest + t_sl - 1) / t_sl;
-#if __CUDA_ARCH__ == 1070
-        if (t_share <= 64) {
-#else
         if (t_share <= 96) {
-#endif
             ahead = 1;
         }
         int t_tail = (((t_share + 63) / 64) > (1) ? ((t_share + 63) / 64) : (1));
