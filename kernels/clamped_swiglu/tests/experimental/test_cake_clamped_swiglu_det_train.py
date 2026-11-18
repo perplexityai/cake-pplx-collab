@@ -28,15 +28,20 @@ naive BF16 tier (``tests/cake/test_helpers/cake_naive.py``: the error against an
 independent draws, in the L2 and the max norm, median and largest, beside the error of the same operation in BF16,
 :mod:`tests.cake.test_helpers.clamped_swiglu_reference`) over row counts 1 to 4097, the merged, two-tensor, strided
 and copied layouts, weighted and unweighted calls, values on the clamp boundary, deep negative gates, the edge of the
-FP32 sigmoid, every BF16 gate, a limit between two BF16 values and a small limit.  Beside the judge, exact facts of the
-contract (no tolerance): the inclusive masks (a gradient is 0 exactly where its mask is 0 and passes at ``g = L`` and
-``u = +-L``); zero-weight rows give exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other
-weight; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row count, limit,
-weight flag and layout; the same bits at every call, in every layout, at every row count (a row's outputs do not
-depend on the other rows), on a side stream with no host synchronization, in CUDA graph replays and under
+FP32 sigmoid, a gate below -87 in each third of every row beside ordinary and boundary values, every BF16 gate, a
+limit between two BF16 values and a small limit.  Beside the judge, exact facts of the contract (no tolerance): the
+inclusive masks (a gradient is 0 exactly where its mask is 0 and passes at ``g = L`` and ``u = +-L``); zero-weight
+rows give exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other weight; the sigmoid's
+exact path (taken by a group of loads with a clamped gate at or below -87) gives the bits of its fast path wherever
+the clamped gate is above -87; ``d_weight`` sums the FP32 ``a``, and ``h`` is the FP32 product ``w a`` rounded once to
+BF16; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row count, limit, weight
+flag and layout; the same bits at every call, in every layout, at every row count (a row's outputs do not depend on
+the other rows), on a side stream with no host synchronization, in CUDA graph replays and under
 ``torch.use_deterministic_algorithms``; the autograd function matches the steps bit for bit, saves only its inputs and
 gives the same bits under non-reentrant checkpointing; inputs the kernels can read are read in place, others copied
-once; unfit outputs, operands and limits are refused.
+once; unfit outputs, operands and limits are refused.  On one fixed draw, the L2 error against the FP64 oracle of
+``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output, and the L2
+error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -58,14 +63,18 @@ import pytest
 import torch
 import torch.utils.checkpoint
 
+from tests.cake.test_helpers.cake_naive import norm_errors
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake.test_helpers.clamped_swiglu_reference import (
+    SLOW_COLUMNS,
+    SLOW_GATE,
     WIDTH,
     Case,
     bf16_edges,
     fp32,
     judge,
     make_inputs,
+    oracle,
 )
 from tests.cake.test_helpers.clamped_swiglu_reference import outputs as step_outputs
 
@@ -125,6 +134,10 @@ CASES = [
     Case(129, data="newton_edge"),
     Case(129, data="sigmoid_edge"),
     Case(129, "merged", data="mixed"),
+    Case(129, data="slow_mixed"),  # a gate of -88 in each third of every row, beside ordinary and boundary values
+    Case(257, "merged", data="slow_mixed"),
+    Case(129, "merged", w="none", data="slow_mixed"),
+    Case(257, w="none", data="slow_mixed"),
     Case(29, data="all_gates"),  # 29 x 2304 >= 65536 gate patterns
 ]
 
@@ -209,16 +222,25 @@ def _relayout(t: types.SimpleNamespace, layout: str) -> types.SimpleNamespace:
     return out
 
 
-def _rows(t: types.SimpleNamespace, rows: int) -> types.SimpleNamespace:
-    """The first ``rows`` rows of the inputs ``t`` (views)."""
+def _rows(t: types.SimpleNamespace, rows: int, offset: int = 0) -> types.SimpleNamespace:
+    """Rows ``[offset, offset + rows)`` of the inputs ``t`` (views)."""
+    span = slice(offset, offset + rows)
     out = types.SimpleNamespace(R=rows, L=t.L, layout=t.layout)
-    out.gate, out.up, out.dh = t.gate[:rows], t.up[:rows], t.dh[:rows]
-    out.weight = None if t.weight is None else t.weight[:rows]
+    out.gate, out.up, out.dh = t.gate[span], t.up[span], t.dh[span]
+    out.weight = None if t.weight is None else t.weight[span]
     if t.second is None:
-        out.first, out.second = t.first[:rows], None
+        out.first, out.second = t.first[span], None
     else:
         out.first, out.second = out.gate, out.up
     return out
+
+
+def _weights(rows: int, *, seed: int, device: torch.device) -> torch.Tensor:
+    """``rows`` FP32 route weights that are not powers of two: 0.7, 1.3, 2.2 and 2.9, then ``3 x U[0, 1)``."""
+    gen = torch.Generator(device=device).manual_seed(seed)
+    w = 3.0 * torch.rand(rows, device=device, generator=gen)
+    w[:4] = torch.tensor([0.7, 1.3, 2.2, 2.9], device=device)
+    return w
 
 
 def _leaves(t: types.SimpleNamespace) -> tuple:
@@ -551,12 +573,14 @@ def test_clamp_masks_are_inclusive(limit, device) -> None:
         assert bool(d_weight.isfinite().all())
 
 
+@pytest.mark.parametrize("data", ["boundary", "slow_mixed"])
 @pytest.mark.parametrize("layout", ["split", "merged"])
 @pytest.mark.parametrize("limit", [10.0, 7.3])
-def test_masked_gradients_are_exactly_zero(layout, limit, device) -> None:
-    """On boundary data, ``d_gate`` is exactly 0 wherever ``gate > L`` and ``d_up`` wherever ``|up| > L``, and the
-    gradient passes on the boundary: nonzero at ``gate <= L`` (``up = +-L``) wherever its other factors are."""
-    t = make_inputs(Case(257, layout, data="boundary", L=limit), seed=3, device=device)
+def test_masked_gradients_are_exactly_zero(data, layout, limit, device) -> None:
+    """On boundary data, also with a gate of -88 in each third of every row (the sigmoid's exact path), ``d_gate`` is
+    exactly 0 wherever ``gate > L`` and ``d_up`` wherever ``|up| > L``, and the gradient passes on the boundary:
+    nonzero at ``gate <= L`` (``up = +-L``) wherever its other factors are."""
+    t = make_inputs(Case(257, layout, data=data, L=limit), seed=3, device=device)
     found = step_outputs(forward, backward, t)
     g, u, d = t.gate.float(), t.up.float(), t.dh.float()
     assert bool((found["d_gate"][g > t.L] == 0).all())
@@ -672,8 +696,8 @@ def test_layouts_give_the_same_bits(w, device) -> None:
 
 @pytest.mark.parametrize("layout", ["split", "merged"])
 def test_rows_do_not_depend_on_the_row_count(layout, device) -> None:
-    """A row's outputs are the same bits whatever the other rows and the row count (each row is computed alone; the
-    sigmoid's two paths give the same bits)."""
+    """A row's outputs are the same bits whatever the other rows and the row count (each row is computed alone, on
+    the sigmoid path its own gates select)."""
     t = make_inputs(Case(4097, layout, data="mixed"), seed=9, device=device)
     full = step_outputs(forward, backward, t)
     for rows in (1, 7, 129, 1000):
@@ -684,8 +708,8 @@ def test_rows_do_not_depend_on_the_row_count(layout, device) -> None:
 
 @pytest.mark.parametrize("rows", [98304, 196608])
 def test_large_row_counts(rows, device) -> None:
-    """The issue's row count and twice it: finite outputs, the same bits at a second call, and the first 4097 rows the
-    bits of a call with 4097 rows."""
+    """The issue's row count and twice it: finite outputs, the same bits at a second call, and the first and the last
+    4097 rows the bits of a call on those 4097 rows (views of the inputs, the last ones at a large row offset)."""
     t = make_inputs(Case(rows, "merged"), seed=31, device=device)
     want = step_outputs(forward, backward, t)
     for name, value in want.items():
@@ -694,6 +718,83 @@ def test_large_row_counts(rows, device) -> None:
     part = step_outputs(forward, backward, _rows(t, 4097))
     for name, value in part.items():
         assert_same_bits(value, want[name][:4097], f"{name} of the first 4097 rows")
+    part = step_outputs(forward, backward, _rows(t, 4097, offset=rows - 4097))
+    for name, value in part.items():
+        assert_same_bits(value, want[name][rows - 4097 :], f"{name} of the last 4097 rows")
+
+
+@pytest.mark.parametrize("layout", ["split", "merged"])
+@pytest.mark.parametrize("w", ["random", "none"])
+def test_the_exact_sigmoid_gives_the_bits_of_the_fast_one(layout, w, device) -> None:
+    """On ordinary and boundary values whose clamped gates are all above -87 (the sigmoid's fast path everywhere), a
+    gate of -88 at columns 0, 768 and 1536 of every row (one in each third: each forward row and each run of 768
+    columns of the backward take the exact path) keeps the bits of ``h``, ``d_gate`` and ``d_up`` at every other
+    column, and the value of ``d_weight`` (``dh`` is 0 at those columns in both inputs).  The exact path ran: at the
+    gates of -88, ``h`` and ``d_gate`` (``dh`` 1 there) are nonzero in every row with a nonzero weight, where the fast
+    path's sigmoid is 0 (its approximate reciprocal of ``1 + e^88`` flushes to 0)."""
+    columns = list(SLOW_COLUMNS)
+    t = make_inputs(Case(257, "split", w, data="boundary"), seed=17, device=device)
+    assert bool((t.gate.float().clamp(max=t.L) > -87).all())
+    t.dh[:, columns] = 0
+    slow = types.SimpleNamespace(R=t.R, L=t.L, weight=t.weight, gate=t.gate.clone(), up=t.up, dh=t.dh)
+    slow.gate[:, columns] = SLOW_GATE
+    want = step_outputs(forward, backward, _relayout(t, layout))
+    got = step_outputs(forward, backward, _relayout(slow, layout))
+    other = torch.ones(WIDTH, dtype=torch.bool, device=device)
+    other[columns] = False
+    for name in ("h", "d_gate", "d_up"):
+        assert_same_bits(got[name][:, other], want[name][:, other], f"{name} beside the gates of {SLOW_GATE}")
+    if w != "none":
+        assert bool((got["d_weight"] == want["d_weight"]).all())
+    live = slice(None) if t.weight is None else t.weight != 0
+    probe = types.SimpleNamespace(R=t.R, L=t.L, weight=t.weight, gate=slow.gate, up=t.up, dh=torch.zeros_like(t.dh))
+    probe.dh[:, columns] = 1.0
+    d_gate = step_outputs(forward, backward, _relayout(probe, layout))["d_gate"]
+    assert bool((got["h"][:, columns][live] != 0).all()), "h at the gates of -88"
+    assert bool((d_gate[:, columns][live] != 0).all()), "d_gate at the gates of -88"
+
+
+@pytest.mark.parametrize("layout", ["split", "merged"])
+def test_h_is_the_fp32_weighted_activation_rounded_once(layout, device) -> None:
+    """With ``dh`` 1 at one column ``c`` of each row and 0 elsewhere (``c`` in each third of the row, even and odd),
+    ``d_weight`` is the FP32 activation ``a[r, c]`` (one product with 1, the others with 0; not every value of it a
+    BF16 value), and ``h[r, c]`` is ``bf16(w[r] d_weight[r])`` bit for bit: the FP32 product of the weight and ``a``,
+    rounded once, for weights that are not powers of two."""
+    t = make_inputs(Case(257, layout, data="boundary"), seed=19, device=device)
+    t.weight = _weights(t.R, seed=19, device=device)
+    rows = torch.arange(t.R, device=device)
+    columns = rows * 37 % WIDTH
+    t.dh = torch.zeros(t.R, WIDTH, dtype=torch.bfloat16, device=device)
+    t.dh[rows, columns] = 1.0
+    found = step_outputs(forward, backward, t)
+    assert bool((found["d_weight"].bfloat16().float() != found["d_weight"]).any()), "d_weight holds BF16 values only"
+    want = (t.weight * found["d_weight"]).bfloat16()
+    assert_same_bits(found["h"][rows, columns], want, "h at the column of dh = 1")
+
+
+def test_no_bf16_intermediate_before_the_weight_or_the_sum(device) -> None:
+    """On one draw of 2049 rows with weights that are not powers of two, the L2 error against the FP64 oracle of
+    ``h``, ``d_gate`` and ``d_up`` is strictly below that of the weight applied after a BF16 rounding,
+    ``bf16(w x)`` (the product in FP32), for ``x`` the unweighted call's output on the same inputs (the bits of a
+    kernel that applies the weight after its BF16 rounding) and for ``x`` the unweighted FP64 value rounded to BF16;
+    the L2 error of ``d_weight`` is strictly below that of ``sum over c of dh bf16(a)`` (``a`` in FP64)."""
+    t = make_inputs(Case(2049, "split"), seed=23, device=device)
+    t.weight = _weights(t.R, seed=23, device=device)
+    found = step_outputs(forward, backward, t)
+    want = oracle(t)
+    unweighted = types.SimpleNamespace(
+        R=t.R, L=t.L, first=t.first, second=t.second, gate=t.gate, up=t.up, dh=t.dh, weight=None
+    )
+    plain = step_outputs(forward, backward, unweighted)
+    plain64 = oracle(unweighted)
+    for name in ("h", "d_gate", "d_up"):
+        for source, rounded in (("kernel", plain[name]), ("FP64", plain64[name].bfloat16())):
+            late = (t.weight[:, None] * rounded.float()).bfloat16()
+            (ours, theirs), _ = norm_errors(want[name], (found[name], late), "l2")
+            assert ours < theirs, (name, source, ours, theirs)
+    late = (t.dh.double() * plain64["h"].bfloat16().double()).sum(dim=1)
+    (ours, theirs), _ = norm_errors(want["d_weight"], (found["d_weight"], late), "l2")
+    assert ours < theirs, ("d_weight", ours, theirs)
 
 
 @pytest.mark.parametrize(

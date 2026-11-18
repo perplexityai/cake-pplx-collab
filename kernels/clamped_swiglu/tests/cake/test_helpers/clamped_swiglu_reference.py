@@ -33,8 +33,10 @@ shapes the gate:
 ``"boundary"`` (every fourth column of ``g`` and of ``u`` from ``L``, ``-L`` and their BF16 neighbours),
 ``"deep_negative"`` (every gate in ``[-100, -80]``), ``"newton_edge"`` (every gate in ``[-86.7, -80]``),
 ``"sigmoid_edge"`` (every gate in ``[-89, -86.5]``: FP32 ``exp(-g)`` overflows from -88.72 and the FP32 sigmoid is
-subnormal below -87.34), ``"mixed"`` (every third row ``"sigmoid_edge"``, the others ``"normal"``) or ``"all_gates"``
-(every finite BF16 bit pattern as a gate, in order, 0 for the others).  ``dh`` is a unit normal.  Every value is finite.
+subnormal below -87.34), ``"mixed"`` (every third row ``"sigmoid_edge"``, the others ``"normal"``), ``"slow_mixed"``
+(``"boundary"`` with a gate of -88 at columns 0, 768 and 1536 of every row: one in each third of the row, beside
+ordinary gates, gates at, above and next to ``L``, and ups at and beyond ``+-L``) or ``"all_gates"`` (every finite
+BF16 bit pattern as a gate, in order, 0 for the others).  ``dh`` is a unit normal.  Every value is finite.
 
 The oracle (:func:`oracle`) evaluates each step in float64 from the stored inputs and the FP32 value of ``L``, the
 inclusive masks as factors, and returns every output unrounded.  The naive tier (:func:`naive`) is the same graph in
@@ -61,7 +63,10 @@ WIDTH = 2304
 SCALE = 6.0
 LAYOUTS = ("split", "merged", "strided", "copied")
 WEIGHTS = ("random", "zeros", "none")
-DATA = ("normal", "boundary", "deep_negative", "newton_edge", "sigmoid_edge", "mixed", "all_gates")
+DATA = ("normal", "boundary", "deep_negative", "newton_edge", "sigmoid_edge", "mixed", "slow_mixed", "all_gates")
+# The gate of ``"slow_mixed"`` (exact in BF16) and its columns, the first column of each third of the row.
+SLOW_GATE = -88.0
+SLOW_COLUMNS = (0, WIDTH // 3, 2 * WIDTH // 3)
 # Rows of one float64 block of the oracle.
 ORACLE_ROWS = 4096
 
@@ -101,10 +106,12 @@ def _uniform(R: int, low: float, high: float, gen: torch.Generator, device: torc
 def _gates(data: str, R: int, limit: float, gen: torch.Generator, device: torch.device):
     g = SCALE * torch.randn(R, WIDTH, device=device, generator=gen)
     u = SCALE * torch.randn(R, WIDTH, device=device, generator=gen)
-    if data == "boundary":
+    if data in ("boundary", "slow_mixed"):
         edges = bf16_edges(limit, device)
         g[:, 0::4] = edges[torch.randint(0, len(edges), (R, WIDTH // 4), device=device, generator=gen)]
         u[:, 0::4] = edges[torch.randint(0, len(edges), (R, WIDTH // 4), device=device, generator=gen)]
+        if data == "slow_mixed":
+            g[:, list(SLOW_COLUMNS)] = SLOW_GATE
     elif data == "deep_negative":
         g = _uniform(R, -100.0, -80.0, gen, device)
     elif data == "newton_edge":
