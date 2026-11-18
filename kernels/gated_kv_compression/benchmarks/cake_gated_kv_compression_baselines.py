@@ -191,8 +191,9 @@ def draw(
     close: Optional[int] = None,
     gates: bool = False,
 ) -> types.SimpleNamespace:
-    """The operands of one call on ``lengths``: FP32 ``cz [T, 1024]`` and BF16 ``dout [G, 512]`` drawn with a device
-    generator seeded with ``seed``; ``c`` and ``z`` its column halves (``halves``) or contiguous copies of them
+    """The operands of one call on ``lengths``: FP32 ``cz [T, 1024]`` and BF16 ``dout [G, 512]`` drawn with a CPU
+    generator seeded with ``seed`` and moved to ``device`` (every GPU draws the same inputs, as in the family's
+    tests); ``c`` and ``z`` its column halves (``halves``) or contiguous copies of them
     (``contiguous``).  ``close``: every pair has ``C[t1] = C[t0] (1 + 2^-close)`` in FP32.  ``gates``: fixed channel
     blocks of every pair get logit gaps of -100, +100, +2000 and -2000, exact ties and ties at 100 (where ``exp`` of
     the logit itself overflows FP32)."""
@@ -200,9 +201,9 @@ def draw(
         raise ValueError(f"layout must be one of {LAYOUTS}, got {layout!r}")
     T = sum(lengths)
     G = sum(n // 2 for n in lengths)
-    generator = torch.Generator(device=device).manual_seed(seed)
-    cz = torch.randn(T, CZ_WIDTH, generator=generator, device=device, dtype=torch.float32)
-    dout = torch.randn(G, WIDTH, generator=generator, device=device, dtype=torch.float32).to(torch.bfloat16)
+    generator = torch.Generator().manual_seed(seed)
+    cz = torch.randn(T, CZ_WIDTH, generator=generator, dtype=torch.float32).to(device)
+    dout = torch.randn(G, WIDTH, generator=generator, dtype=torch.float32).to(torch.bfloat16).to(device)
     t0 = torch.tensor(pair_starts(lengths), dtype=torch.long, device=device)
     if t0.numel():
         if close is not None:
