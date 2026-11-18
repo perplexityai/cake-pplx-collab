@@ -112,9 +112,10 @@ SM100 and SM103, 1536 on SM107) run its long role (``bwd_bf16_rep_long`` or
 same build, the same grid, block schedule and bits).  A call with
 ``compute_grad_weight=False`` (stage ``backward_nodw``) runs its band's
 program without the weight gradient: one cluster in a small-row band, in the
-fused and the repeatable bands up to their cut of rows per SM a strided
-program of one CTA per 16-row block with no claim and no ticket, past it the
-claimed program.  Beside a long-resident
+fused and the repeatable bands up to their cut of rows per SM (at every row
+count where the band routes no claimed program) a strided program of the
+band's grid, each CTA walking its 16-row blocks with no claim and no ticket,
+past it the claimed program.  Beside a long-resident
 one-thread kernel on another stream each call must keep its speed: per token
 count, the median of seven event-timed calls with the side kernel resident is
 at most ``MAX_RATIO`` times the median of seven calls alone, or at most

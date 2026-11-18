@@ -68,12 +68,14 @@ Host design (every control is a keyword; no environment variable):
   weight gradient (``cake_jit.nodw_module``; its weight-gradient work removed
   at build time), whose ``dx`` and ``dz`` are the bits of the BF16 backward
   that computes it, at every grid: up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
-  rows per SM (provisional: 240 on SM100 and SM103, 300 on SM107) the strided
-  program, one CTA per 16-row block, which takes no claim and no ticket and
-  reads and writes no workspace word; past it the claimed program, the BF16
-  backward's claims and ticket on the workspace; and where the BF16 backward
-  runs its long module, the long program built without the weight gradient
-  (or, where none is routed, that long module with ``weight_grad`` 0).
+  rows per SM (measured: 768 on SM100 and SM103) the strided program, the
+  BF16 backward's CTAs walking their 16-row blocks, which takes no claim and
+  no ticket and reads and writes no workspace word; past it the claimed
+  program, the BF16 backward's claims and ticket on the workspace (SM107
+  routes none: its strided program runs every row count); and where the
+  BF16 backward runs its long module, the long program built without the
+  weight gradient (or, where none is routed, that long module with
+  ``weight_grad`` 0).
   ``dx`` and ``dz`` are FP32 formulas rounded once each, with ``rstd`` from the
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
@@ -781,7 +783,8 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     compute_grad_weight : bool
         ``False`` returns ``None`` for the weight gradient and runs a program
         built without it (see the module): ``dx`` and ``dz`` are the bits
-        of the call that computes it; up to the strided cut the call uses no
+        of the call that computes it; where it runs the strided program (up to
+        the strided cut; on SM107 short of the long program) the call uses no
         workspace.
     workspace : torch.Tensor, optional
         Zero-filled FP32 workspace of at least
@@ -857,7 +860,8 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     )
     if dw is None:
         # The program built without the weight gradient (the same dx and dz
-        # bits): strided up to its cut, else claimed, or the long one.
+        # bits): strided up to its cut (or at every row count where no claimed
+        # one is routed), else claimed, or the long one.
         name = nodw_module(arch, name, rows, sm_count)
     if dw is None and "workspace" not in _loader.MODULES[name]:
         # The strided program reads and writes no workspace word: no stream

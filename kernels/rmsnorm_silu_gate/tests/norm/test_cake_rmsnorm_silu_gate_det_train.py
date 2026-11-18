@@ -42,10 +42,11 @@ strided rows, a single token and fewer rows run the role's module; the two
 give the same ``dx``, ``dz`` and weight-gradient bits on the same inputs and
 grid.  A backward with ``compute_grad_weight=False`` runs the program
 ``nodw_module`` names (strided up to ``NODW_STRIDED_ROWS_PER_SM`` rows per
-SM, claimed past it, the long one where packed rows run the long module, and
-the long module itself where no long program without the weight gradient is
-routed) and gives the ``dx`` and ``dz`` bits of the call that computes the
-weight gradient, a row and an SM's rows around that cut, on packed and strided
+SM, claimed past it, strided at every row count where no claimed program is
+routed, the long one where packed rows run the long module, and the long
+module itself where no long program without the weight gradient is routed)
+and gives the ``dx`` and ``dz`` bits of the call that computes the weight
+gradient, a row and an SM's rows around that cut, on packed and strided
 rows; the strided program makes no stream workspace and takes no reserve
 workspace, eagerly and in CUDA Graph capture, and leaves a caller workspace
 as it is.  The tests never compare this package with the non-deterministic one
@@ -1216,10 +1217,21 @@ NODW_LONG = "bwd_bf16" + loader.NODW + loader.LONG
 
 def _nodw_cut(arch):
     """The rows per SM up to which a backward without the weight gradient
-    runs the strided program on ``arch``; skips where none is routed."""
+    runs the strided program on ``arch``, ``None`` where it runs it at every
+    row count (no claimed program routed, no cut); skips where no strided
+    program is routed."""
     if NODW_STRIDED not in loader.ROUTES[arch]:
         pytest.skip(f"{arch} routes no strided program without the weight gradient")
-    return loader.NODW_STRIDED_ROWS_PER_SM[arch]["bwd_bf16"]
+    return loader.NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16")
+
+
+def _claimed_cut(arch):
+    """``_nodw_cut`` of an architecture that routes the claimed program too;
+    skips where it routes none."""
+    cut = _nodw_cut(arch)
+    if cut is None:
+        pytest.skip(f"{arch} routes no claimed program without the weight gradient")
+    return cut
 
 
 def _routes_without(arch, *roles):
@@ -1231,21 +1243,22 @@ def _routes_without(arch, *roles):
 def test_compute_grad_weight_false_touches_no_weight_state(program, launches):
     """``compute_grad_weight=False`` returns ``None`` for the weight gradient,
     leaves ``grad_weight`` as it is and gives the ``dx`` and ``dz`` bits of a
-    call that computes it.  257 x 48 rows (up to the cut on every product)
-    run the strided program, which makes no stream workspace and leaves a
-    caller workspace zero; a row past the cut runs the claimed program, which
-    takes the arrival ticket and claims row blocks and leaves a caller
-    workspace and, without one, the stream's workspace zero.  Autograd with a
-    weight that needs no gradient gives the same ``dx`` and ``dz``."""
+    call that computes it.  257 x 48 rows (up to the cut on every product
+    that has one) run the strided program, which makes no stream workspace
+    and leaves a caller workspace zero; a row past the cut (where a claimed
+    program is routed) runs the claimed program, which takes the arrival
+    ticket and claims row blocks and leaves a caller workspace and, without
+    one, the stream's workspace zero.  Autograd with a weight that needs no
+    gradient gives the same ``dx`` and ``dz``."""
     arch, sms = _device()
     routes = loader.ROUTES[arch]
-    cut = _nodw_cut(arch)
     if program == "strided":
+        cut = _nodw_cut(arch)
         T, H = 257, 48
-        assert T * H <= cut * sms
+        assert cut is None or T * H <= cut * sms
         want = routes[NODW_STRIDED]
     else:
-        T, H = cut * sms + 1, 1
+        T, H = _claimed_cut(arch) * sms + 1, 1
         want = routes[NODW_CLAIMED]
     assert loader.nodw_module(arch, routes["bwd_bf16"], T * H, sms) == want
     x, z, w, dy = make(T, H, seed=12)
@@ -1295,7 +1308,8 @@ def test_strided_program_without_the_weight_gradient_uses_no_workspace(
     pytest.importorskip("cuda.bindings.runtime")
     arch, sms = _device()
     T, H = 257, 48
-    assert T * H <= _nodw_cut(arch) * sms
+    cut = _nodw_cut(arch)
+    assert cut is None or T * H <= cut * sms
     strided = loader.ROUTES[arch][NODW_STRIDED]
     x, z, w, dy = make(T, H, seed=13)
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
@@ -1358,20 +1372,27 @@ def test_programs_without_the_weight_gradient_give_the_bits_at_the_cut(
     ``compute_grad_weight=False`` runs the strided program up to the cut and
     the claimed one past it, gives the ``dx`` and ``dz`` bits of the BF16
     call that computes the weight gradient and leaves a caller workspace
-    zero."""
+    zero.  An architecture without a cut runs the strided program instead
+    at a row per SM fewer than the long modules' first row count and at a
+    row fewer than it."""
     arch, sms = _device()
     sm_count = sm_count or sms
     cut = _nodw_cut(arch)
     routes = loader.ROUTES[arch]
-    with pytest.MonkeyPatch.context() as patch:
-        for module in (pkg, loader):
-            patch.setattr(module, "device_sm_count", lambda index: sm_count)
-        for rows in (
+    if cut is None:
+        last = LONG_MIN_ROWS_PER_SM[arch]
+        row_counts = ((last - 1) * sm_count, last * sm_count - 1)
+    else:
+        row_counts = (
             (cut - 1) * sm_count,
             cut * sm_count,
             cut * sm_count + 1,
             (cut + 1) * sm_count,
-        ):
+        )
+    with pytest.MonkeyPatch.context() as patch:
+        for module in (pkg, loader):
+            patch.setattr(module, "device_sm_count", lambda index: sm_count)
+        for rows in row_counts:
             what = f"{rows} rows on {sm_count} SMs ({layout})"
             x, z, w, dy = make(rows, 1, layout=layout, seed=14)
             ws = workspace_for(rows, x.device)
@@ -1380,7 +1401,8 @@ def test_programs_without_the_weight_gradient_give_the_bits_at_the_cut(
             dx, dz, dw = backward(
                 dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws
             )
-            program = NODW_STRIDED if rows <= cut * sm_count else NODW_CLAIMED
+            strided = cut is None or rows <= cut * sm_count
+            program = NODW_STRIDED if strided else NODW_CLAIMED
             assert launches == [routes["bwd_bf16"], routes[program]], what
             assert dw is None
             assert_same_bits(dx, dx_d, f"{what}: dx")
@@ -1395,15 +1417,17 @@ def test_programs_without_the_weight_gradient_at_forced_grids(
 ):
     """On grids of ``ctas`` CTAs (``launch_grid`` patched), fewer than the
     row blocks of 257 x 48 rows, the strided program and the claimed one (the
-    strided one unrouted) give the ``dx`` and ``dz`` bits of the call that
-    computes the weight gradient; the claimed one leaves a caller workspace
-    zero after back-to-back calls."""
+    strided one unrouted; where routed) give the ``dx`` and ``dz`` bits of the
+    call that computes the weight gradient; the claimed one leaves a caller
+    workspace zero after back-to-back calls."""
     arch, _ = _device()
+    routes = loader.ROUTES[arch]
+    if program == "claimed" and NODW_CLAIMED not in routes:
+        pytest.skip(f"{arch} routes no claimed program without the weight gradient")
     T, H = 257, 48
     x, z, w, dy = make(T, H, seed=15)
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
     ws = workspace_for(T * H, x.device)
-    routes = loader.ROUTES[arch]
     with pytest.MonkeyPatch.context() as patch:
         if program == "claimed":
             patch.setitem(loader.ROUTES, arch, _routes_without(arch, NODW_STRIDED))
@@ -2232,8 +2256,9 @@ def test_registry_records_reference_the_build_manifest():
     architecture routes the long module of each backward role
     (``LONG_ROLES``), an architecture may also route a forward of packed rows
     (``PACKED_ROLES``) and programs of a backward without the weight gradient
-    (``NODW_ROLES``, each with its row cut in ``NODW_STRIDED_ROWS_PER_SM``),
-    and no other role is routed; every module record
+    (``NODW_ROLES``; ``NODW_STRIDED_ROWS_PER_SM`` cuts the rows between the
+    strided and the claimed one exactly where both are routed), and no other
+    role is routed; every module record
     names its ``build.json`` library (schema ``cake-build/1``), whose entries
     carry the package's kernel and binding sources and the precise-arithmetic
     flags."""
@@ -2249,7 +2274,8 @@ def test_registry_records_reference_the_build_manifest():
     )
     assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
     for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
-        assert set(cuts) == {"bwd_bf16"}, arch
+        both = {NODW_STRIDED, NODW_CLAIMED} <= set(loader.ROUTES[arch])
+        assert set(cuts) == ({"bwd_bf16"} if both else set()), arch
         assert all(isinstance(v, int) and v >= 1 for v in cuts.values()), arch
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
@@ -2343,8 +2369,9 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
     ``min_rows_per_sm`` (``LONG_MIN_ROWS_PER_SM``) and ``packed_rows``, and it
     launches and takes its arguments as its role's module does.  Each program
     without the weight gradient launches and takes its arguments as the
-    ``bwd_bf16`` module it replaces (the long one for ``bwd_bf16_nodw_long``)
-    and keeps its rule and workspace, but the strided one, whose
+    ``bwd_bf16`` module it replaces (the long one for ``bwd_bf16_nodw_long``),
+    on some or all of that module's architectures, and keeps its rule and
+    workspace, but the strided one, whose
     ``strided_row_blocks`` rule has 4 CTAs per SM over 16-row blocks and which
     has no workspace."""
     for name, record in loader.MODULES.items():
@@ -2431,8 +2458,9 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             if role not in routes:
                 continue
             nodw, twin = (loader.MODULES[routes[r]] for r in (role, twin_role))
-            for key in ("logical", "arg_plan", "ffi_entry", "arches"):
+            for key in ("logical", "arg_plan", "ffi_entry"):
                 assert nodw[key] == twin[key], (arch, role, key)
+            assert set(nodw["arches"]) <= set(twin["arches"]), (arch, role)
             for key in ("block", "cluster", "cooperative", "use_pdl"):
                 assert nodw["launch"][key] == twin["launch"][key], (arch, role, key)
             if role != NODW_STRIDED:
@@ -2475,15 +2503,13 @@ def _grid_rows(rule, sm_count):
     return sorted(r for r in rows if r >= 1)
 
 
-def test_launch_grid_takes_rows_the_sm_count_and_the_architecture():
-    """A grid depends on the record, the rows, the SM count and, for the
-    strided program without the weight gradient only, the architecture (whose
-    cut it reads); a rule of another kind is a ``ValueError``."""
+def test_launch_grid_takes_rows_and_the_sm_count_only():
+    """A grid depends on the record, the rows and the SM count only; a rule
+    of another kind is a ``ValueError``."""
     assert list(inspect.signature(loader.launch_grid).parameters) == [
         "record",
         "rows",
         "sm_count",
-        "arch",
     ]
     rule = {"ctas_per_sm": 1, "kind": "row_blocks", "rows_per_block": 16}
     with pytest.raises(ValueError, match="row_blocks"):
@@ -2633,18 +2659,22 @@ NODW_DROPS = (
 def test_nodw_module_and_the_strided_grid(sm_count):
     """``nodw_module`` and the strided program's grid (host only), with each
     of ``NODW_DROPS`` unrouted: for the ``bwd_bf16`` module the strided
-    program up to ``NODW_STRIDED_ROWS_PER_SM * SMs`` rows where routed, else
-    the claimed program where routed, else the strided one, else the module
-    itself; for the long module the long program without the weight gradient
-    where routed, else the long module (run with ``weight_grad`` 0).  The
-    strided program launches one CTA a 16-row block up to its cut and
-    ``min(blocks, 4 * SMs)`` CTAs past it or without an architecture."""
+    program up to ``NODW_STRIDED_ROWS_PER_SM * SMs`` rows where routed (at
+    every row count where the architecture has no cut), else the claimed
+    program where routed, else the strided one, else the module itself; for
+    the long module the long program without the weight gradient where
+    routed, else the long module (run with ``weight_grad`` 0).  The strided
+    program launches ``min(blocks, 4 * SMs)`` CTAs, the ``bwd_bf16``
+    module's grid, at every row count."""
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
         base, long = routes["bwd_bf16"], routes["bwd_bf16" + loader.LONG]
-        cut = loader.NODW_STRIDED_ROWS_PER_SM[arch]["bwd_bf16"] * sm_count
+        per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16")
+        cut = None if per_sm is None else per_sm * sm_count
         wave = 4 * sm_count
-        edges = {1, 15, 16, 17, cut - 1, cut, cut + 1, 16 * wave, 16 * wave + 1}
+        edges = {1, 15, 16, 17, 16 * wave, 16 * wave + 1}
+        if cut is not None:
+            edges |= {cut - 1, cut, cut + 1}
         rows_list = sorted(r for r in {*edges, *ISSUE_ROWS} if r >= 1)
         for drop in NODW_DROPS:
             table = _routes_without(arch, *drop)
@@ -2653,7 +2683,7 @@ def test_nodw_module_and_the_strided_grid(sm_count):
             with pytest.MonkeyPatch.context() as patch:
                 patch.setitem(loader.ROUTES, arch, table)
                 for rows in rows_list:
-                    if strided is not None and rows <= cut:
+                    if strided is not None and cut is not None and rows <= cut:
                         want = strided
                     else:
                         want = claimed or strided or base
@@ -2666,8 +2696,7 @@ def test_nodw_module_and_the_strided_grid(sm_count):
         record = loader.MODULES[routes[NODW_STRIDED]]
         for rows in rows_list:
             blocks = -(-rows // 16)
-            got = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
-            want = blocks if rows <= cut else min(blocks, wave)
-            assert got == (want, 1, 1), (arch, rows, got)
             got = loader.launch_grid(record, rows=rows, sm_count=sm_count)
             assert got == (min(blocks, wave), 1, 1), (arch, rows, got)
+            twin = loader.launch_grid(loader.MODULES[base], rows=rows, sm_count=sm_count)
+            assert got == twin, (arch, rows, got, twin)

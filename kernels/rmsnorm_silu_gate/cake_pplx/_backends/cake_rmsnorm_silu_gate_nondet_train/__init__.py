@@ -134,14 +134,17 @@ its band module's place, that program built without the weight gradient
 where the architecture routes one (``cake_jit.nodw_module``; all of its
 weight-gradient work removed at build time), so ``dx`` and ``dz`` are the
 bits of the BF16 call that computes the weight gradient, at every grid: in
-a small-row band its one-cluster program without the weight gradient; in
-the fused and the repeatable bands up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
-rows per SM (provisional: 208 and 240 on sm_100a, 160 and 240 on sm_103a,
-300 on sm_107a) the strided program, one 256-thread CTA per 16-row block
-with no claim, no ticket and no workspace word, past it the claimed program
-(the band's claims and ticket on its workspace); where the repeatable band
-runs its long role, the long program without the weight gradient (or,
-where none is routed, the long role with ``weight_grad`` 0).
+a small-row band its one-cluster program without the weight gradient; on
+sm_100a and sm_103a in the fused band up to
+``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM (measured: 512 on
+sm_100a, 448 on sm_103a) the strided program, 256-thread CTAs walking
+16-row blocks with no claim, no ticket and no workspace word, past it the
+claimed program (the band's claims and ticket on its workspace), and in the
+repeatable band the claimed program; on sm_107a, which routes no claimed
+program, the strided program at every row count of the fused and the
+repeatable bands; where the repeatable band runs its long role, the long
+program without the weight gradient (or, where none is routed, the long
+role with ``weight_grad`` 0).
 
 Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
 either weight gradient, accumulated or not) to the PyTorch BF16 naive
@@ -338,11 +341,10 @@ Host design (the input layout rules are the deterministic package's):
   team ``q`` of the exact tiny backward's CTA ``r`` running the 8-row block
   ``r + 16 q``, CTA ``r`` of the short backward the 16-row blocks ``r``,
   ``r + 16``, ....  A strided program without the weight gradient launches
-  one 256-thread CTA per 16-row block up to its band's
-  ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` cut and ``min(blocks, 4 * SMs)``
-  CTAs past it (``cake_jit.backward_ctas``), CTA ``b`` running the blocks
-  ``b``, ``b + G``, ...; a claimed or long one launches its band program's
-  grid.  No kernel is cooperative; no
+  ``G = min(blocks, 4 * SMs)`` 256-thread CTAs over 16-row blocks
+  (``cake_jit.backward_ctas``), CTA ``b`` running the blocks ``b``,
+  ``b + G``, ...; a claimed or long one launches its band program's grid.
+  No kernel is cooperative; no
   call synchronizes the host or the device, and every kernel runs on the
   current torch stream.
 - Beside kernels resident on other streams: a kernel
@@ -1091,10 +1093,11 @@ def _backward(
     name = module_for_rows(arch, role, rows, sm_count, packed=packed)
     if dw is None:
         # The band's program built without the weight gradient (the same dx
-        # and dz bits): strided up to its cut, else claimed, or the long or
-        # the one-cluster one.
+        # and dz bits): strided up to its cut (or at every row count where
+        # the band routes no claimed one), else claimed, or the long or the
+        # one-cluster one.
         name = nodw_module(arch, name, rows, sm_count)
-    ctas = backward_ctas(name, rows, sm_count, arch)
+    ctas = backward_ctas(name, rows, sm_count)
     buffers: dict[str, Optional[torch.Tensor]] = {
         "dw_win": None,
         "dw_sums": None,
@@ -1234,10 +1237,11 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     weight gradient on chip in a fixed order) and uses none.  A call with
     ``compute_grad_weight=False`` takes the BF16 bands and runs the band's
     program built without the weight gradient (``cake_jit.nodw_module``):
-    ``dx`` and ``dz`` the bits of the call that computes it; up to
-    ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM in the fused and the
-    repeatable bands (and in the small-row bands) it uses no workspace, past
-    that the claimed program uses one.  The arguments are those of
+    ``dx`` and ``dz`` the bits of the call that computes it.  It uses no
+    workspace in the small-row bands, on sm_100a and sm_103a in the fused
+    band up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM, and on
+    sm_107a in every band short of the long program; the claimed and long
+    programs use one.  The arguments are those of
     :func:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train.cake_rmsnorm_silu_gate_nondet_train_backward`;
     ``workspace`` is this package's uint8 buffer
     (:func:`cake_rmsnorm_silu_gate_nondet_train_backward_workspace`) or ``None`` (the

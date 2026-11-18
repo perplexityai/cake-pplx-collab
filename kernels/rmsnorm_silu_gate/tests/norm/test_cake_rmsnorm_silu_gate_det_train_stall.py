@@ -25,8 +25,10 @@ one kernel of ``min(row blocks, ctas_per_sm * SMs)`` CTAs; past one block per
 CTA its CTAs claim chunks of row blocks from a counter, so a CTA that becomes
 resident late takes only the blocks left.  A backward with
 ``compute_grad_weight=False`` (stage ``backward_nodw``) runs the program
-without the weight gradient: up to its cut of rows per SM one CTA per row
-block with no claim and no ticket, past it the claimed program.  No kernel
+without the weight gradient: up to its cut of rows per SM, and on an
+architecture without a claimed program at every row count, the strided
+program (the backward's grid, each CTA walking its row blocks with no claim
+and no ticket), past it the claimed program.  No kernel
 waits for another CTA or grid, so none needs the whole device.  Beside a
 long-resident one-thread kernel on another stream each call must keep its
 speed: per token count, the median of seven event-timed calls with the side

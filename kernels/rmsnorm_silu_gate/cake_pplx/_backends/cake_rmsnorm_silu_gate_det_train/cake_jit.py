@@ -54,9 +54,11 @@ time, so ``dx`` and ``dz`` are the bits of the BF16 backward on the same rows
 runs the blocks ``b``, ``b + grid``, ... with no claim, no ticket and no
 workspace) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed
 program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket and
-workspace) past it, and the long one (``bwd_bf16_nodw_long``: its look-ahead
-loop) where :func:`backward_module` runs ``bwd_bf16_long``; an architecture
-that routes none of them runs the BF16 backward's module with
+workspace; sm_100a and sm_103a) past it, and the long one
+(``bwd_bf16_nodw_long``: its look-ahead loop) where :func:`backward_module`
+runs ``bwd_bf16_long``; sm_107a routes no claimed program, so there the
+strided program runs every row count short of the long one.  An
+architecture that routes none of them runs the BF16 backward's module with
 ``weight_grad`` 0, which gives the same bits.
 
 Grids (:func:`launch_grid`): the forward launches one CTA per block of
@@ -72,9 +74,8 @@ the row count and the grid, add each thread's FP32 runs of rows into plain
 FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
 so the weight gradient's bits depend on the rows and
 the SM count only, not on which CTA runs a chunk.  The strided program
-launches ``ceil(rows / rows_per_block)`` CTAs up to its cut (one block a
-CTA) and ``min(blocks, ctas_per_sm * SMs)`` past it, its CTAs walking their
-blocks with no claim.  The backward's workspace
+launches the same ``min(blocks, ctas_per_sm * SMs)`` CTAs, its CTAs walking
+their blocks with no claim.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two
 32-bit words of the arrival ticket and the claim counter) starts zero and the
@@ -633,10 +634,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # time), CTA b running the 16-row blocks b, b + grid, ... with no claim,
     # no ticket and no workspace word, so dx and dz are the BF16 backward's
     # bits at any grid; the BF16 backward's kernel parameters (the
-    # weight-gradient and workspace ones unread); a call with
+    # weight-gradient and workspace ones unread) and CTA count; a call with
     # compute_grad_weight=False runs it up to NODW_STRIDED_ROWS_PER_SM rows
-    # per SM (build {"dw": False, "math": "ax", "min_blocks": 4, "out":
-    # "bf16", "prefetch_share": None, "strided": True, "threads": 256}).
+    # per SM, on sm_107a at every row count but the long program's (build
+    # {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
+    # "prefetch_share": None, "strided": True, "threads": 256}).
     "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d": {
         "arches": [
             "sm_100a",
@@ -715,14 +717,13 @@ MODULES: dict[str, dict[str, Any]] = {
     # and its claim counter (its grid and workspace; the kernel leaves the
     # claim counter and the ticket words zero), so dx and dz are the BF16
     # backward's bits; a call with compute_grad_weight=False runs it past
-    # NODW_STRIDED_ROWS_PER_SM rows per SM (build {"dw": False, "math": "ax",
-    # "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads":
-    # 256}).
+    # NODW_STRIDED_ROWS_PER_SM rows per SM on sm_100a and sm_103a (build
+    # {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
+    # "prefetch_share": None, "threads": 256}).
     "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c": {
         "arches": [
             "sm_100a",
             "sm_103a",
-            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "dy"],
@@ -913,7 +914,6 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_packed": "cake_rmsnorm_silu_gate_det_train_8a371a49c065b60c88a9",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
-        "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
@@ -949,14 +949,18 @@ NODW_ROLES = ("bwd_bf16_nodw", "bwd_bf16_nodw_strided", "bwd_bf16_nodw_long")
 GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks")
 # A call without the weight gradient runs the strided program (``role + NODW
 # + STRIDED``) up to this many rows per SM, by architecture and role, and the
-# claimed program (``role + NODW``) past it; the strided program launches one
-# CTA per row block up to the cut (no claim and no ticket) and at most
-# ``ctas_per_sm`` CTAs per SM past it.  Provisional cuts, set by measurement.
-# Host plan only: a new cut needs no new program.
+# claimed program (``role + NODW``) past it: a role has a cut where its
+# architecture routes both.  The cuts are measured per architecture (CUDA
+# Graph replays, cold L2): up to them the strided program is the faster.
+# sm_107a routes no claimed program (its strided program is as fast or
+# faster at every row count measured), so it has no cut and the strided
+# program runs every row count (:func:`nodw_module`).  The strided program
+# launches the claimed program's ``min(blocks, ctas_per_sm * SMs)`` CTAs
+# (no claim and no ticket).  Host plan only: a new cut needs no new program.
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
-    "sm_100a": {"bwd_bf16": 240},
-    "sm_103a": {"bwd_bf16": 240},
-    "sm_107a": {"bwd_bf16": 300},
+    "sm_100a": {"bwd_bf16": 768},
+    "sm_103a": {"bwd_bf16": 768},
+    "sm_107a": {},
 }
 # Elements of one normalized row.
 HEAD_DIM = 128
@@ -1092,8 +1096,9 @@ def nodw_module(arch: str, name: str, rows: int, sm_count: int) -> str:
     otherwise the strided module (``role + NODW + STRIDED``) where ``arch``
     routes one and ``rows <= NODW_STRIDED_ROWS_PER_SM[arch][role] *
     sm_count``, else the claimed module (``role + NODW``) where routed, else
-    the strided module where routed, else ``name``.  Every one gives the
-    ``dx`` and ``dz`` bits of ``name``."""
+    the strided module where routed (an architecture without a claimed
+    module has no cut: its strided module runs every row count), else
+    ``name``.  Every one gives the ``dx`` and ``dz`` bits of ``name``."""
 
     routes = ROUTES.get(arch, {})
     role = MODULES[name]["role"]
@@ -1121,17 +1126,15 @@ def workspace_elements(name: str) -> int:
 
 
 def launch_grid(
-    record: dict[str, Any], *, rows: int, sm_count: int, arch: str = ""
+    record: dict[str, Any], *, rows: int, sm_count: int
 ) -> tuple[int, int, int]:
     """The grid of one module record for ``rows`` rows on a device with
-    ``sm_count`` SMs of architecture ``arch``.  The forward launches one CTA
-    per block of ``rows_per_block`` rows below ``persistent_from_rows_per_sm``
-    rows per SM, and from there the fewest whole waves of ``ctas_per_sm *
-    sm_count`` CTAs whose CTAs walk at most ``max_blocks_per_cta`` blocks
-    each, and at most one CTA per block; the backward ``min(blocks,
-    ctas_per_sm * sm_count)`` CTAs, and so does the strided program but up
-    to its role's ``NODW_STRIDED_ROWS_PER_SM[arch]`` cut, where it launches
-    one CTA per block (the only grid that depends on ``arch``)."""
+    ``sm_count`` SMs.  The forward launches one CTA per block of
+    ``rows_per_block`` rows below ``persistent_from_rows_per_sm`` rows per SM,
+    and from there the fewest whole waves of ``ctas_per_sm * sm_count`` CTAs
+    whose CTAs walk at most ``max_blocks_per_cta`` blocks each, and at most one
+    CTA per block; the backward ``min(blocks, ctas_per_sm * sm_count)`` CTAs,
+    and so does the strided program."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
@@ -1142,13 +1145,7 @@ def launch_grid(
             return (blocks, 1, 1)
         waves = max(1, -(-blocks // (wave * int(rule["max_blocks_per_cta"]))))
         return (min(blocks, waves * wave), 1, 1)
-    if kind == "claimed_row_blocks":
-        return (min(blocks, wave), 1, 1)
-    if kind == "strided_row_blocks":
-        role = str(record["role"]).removesuffix(NODW + STRIDED)
-        cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
-        if cut is not None and int(rows) <= int(cut) * int(sm_count):
-            return (blocks, 1, 1)
+    if kind in ("claimed_row_blocks", "strided_row_blocks"):
         return (min(blocks, wave), 1, 1)
     raise ValueError(
         f"unknown Cake SiLU-gated RMSNorm grid rule: {kind!r} (known: {GRID_KINDS})"
@@ -1217,16 +1214,13 @@ def run_module(
 
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
-    grid is the module's :func:`launch_grid` on the device's SM count and
-    architecture, and the kernel runs on the current torch stream.
+    grid is the module's :func:`launch_grid` on the device's SM count, and the
+    kernel runs on the current torch stream.
     """
 
     record = MODULES[name]
     logical = record["logical"]
-    arch = device_arch(device_index)
-    grid = launch_grid(
-        record, rows=rows, sm_count=device_sm_count(device_index), arch=arch
-    )
+    grid = launch_grid(record, rows=rows, sm_count=device_sm_count(device_index))
     grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
     args = []
     for kind, key in record["arg_plan"]:
@@ -1239,7 +1233,7 @@ def run_module(
                 f"module {name} needs {logical_name!r} (kernel parameter {key!r})"
             )
         args.append(values[logical_name])
-    module = load(name, arch)
+    module = load(name, device_arch(device_index))
     with tvm_ffi.use_torch_stream():
         getattr(module, record["ffi_entry"])(*args)
 

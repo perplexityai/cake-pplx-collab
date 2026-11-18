@@ -176,12 +176,13 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   band's program built without the weight gradient (all weight-gradient
   work removed at build time), so its ``dx`` and ``dz`` are the bits of the
   BF16 call that computes the weight gradient: in the one-cluster bands that
-  cluster program without its column sums and cluster synchronization; in
-  the fused and the repeatable bands, up to a cut of rows per SM, a strided
-  program of one 256-thread CTA per 16-row block with no claim, no ticket and
-  no workspace, and past it the claimed program on the workspace; where
-  packed rows run the look-ahead program, that program without the weight
-  gradient.
+  cluster program without its column sums and cluster synchronization; a
+  strided program (256-thread CTAs walking 16-row blocks with no claim, no
+  ticket and no workspace) in the fused band up to 512 rows per SM on SM100
+  and 448 on SM103, and in the fused and the repeatable bands on SM107; the
+  claimed program on the workspace past those cuts and in the repeatable
+  band on SM100 and SM103; where packed rows run the look-ahead program,
+  that program without the weight gradient.
 
 Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
 either weight gradient, accumulated or not) to the PyTorch BF16 naive
@@ -598,12 +599,14 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
         ``False`` returns ``None`` for the weight gradient and runs the BF16
         band's program built without it, whose ``dx`` and ``dz`` are the bits
         of the BF16 call that computes it; it touches no ``grad_weight``.  A
-        call of up to 512 rows (256 on SM103) runs a one-cluster program,
-        and a call in the fused or the repeatable band up to a cut of rows
-        per SM a strided program; neither uses a workspace (a ``workspace``
-        passed is checked and left as it is).  Past that cut the claimed
-        program takes the arrival ticket and claims blocks from the claim
-        counter, so it uses a workspace too (and leaves it zero).
+        call of up to 512 rows (256 on SM103) runs a one-cluster program, a
+        call in the fused band up to 512 rows per SM on SM100 and 448 on
+        SM103, or in the fused or the repeatable band on SM107, a strided
+        program; neither uses a workspace (a ``workspace`` passed is checked
+        and left as it is).  The claimed program (past those cuts, and in the
+        repeatable band on SM100 and SM103) and the look-ahead one take the
+        arrival ticket and claim blocks from the claim counter, so they use a
+        workspace too (and leave it zero).
     workspace : torch.Tensor, optional
         Caller-owned zero-filled ``torch.uint8`` buffer from
         :func:`cake_rmsnorm_silu_gate_nondet_train_backward_workspace`, which the
