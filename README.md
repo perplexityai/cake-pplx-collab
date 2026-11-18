@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 16 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 17 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -22,6 +22,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | dense_gemm | `cake-pplx-dense-gemm` | `cake_dense_gemm_{det,nondet}_train` | BF16 projection GEMM, FP32 router GEMM | [API](docs/API.md#dense_gemm) |
 | moe_grouped_gemm | `cake-pplx-moe-grouped-gemm` | `cake_moe_grouped_gemm_{det,nondet}_train` | Ragged BF16 MoE grouped GEMM | [API](docs/API.md#moe_grouped_gemm) |
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
+| clamped_swiglu | `cake-pplx-clamped-swiglu` | `cake_clamped_swiglu_det_train` | Routed-expert clamped SwiGLU, FP32 route weight before the one BF16 rounding (I = 2304) | [API](docs/API.md#clamped_swiglu) |
 | engram_lookup | `cake-pplx-engram-lookup` | `cake_engram_lookup_det_train` | Engram row lookup: FP8 E4M3 rows with E8M0 scales to BF16 (forward only) | [API](docs/API.md#engram_lookup) |
 | lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 
@@ -69,7 +70,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for lm_head and for some dsa_sparse_attention, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_lookup, fmha, gdn, gqa, lm_head, mhc, mhc_head and rmsnorm_silu_gate). Some moe_grouped_gemm libraries need 13.4 on every architecture. An older toolkit raises `RuntimeError` when that library is built. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
