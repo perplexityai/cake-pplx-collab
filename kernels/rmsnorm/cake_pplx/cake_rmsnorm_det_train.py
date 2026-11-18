@@ -110,6 +110,23 @@ of any call: the call runs on the other SMs and slows down by about the share
 of SMs those kernels hold.  The limits and lists above are measured on B200
 (SM100), GB300 (SM103) and R200 (SM107).
 
+Memory beside work on other streams: a call allocates, through PyTorch's
+caching allocator, each output it is not given (``y``, ``rstd`` and ``h_new``;
+``dx`` and ``dw``), the backward workspace when ``workspace`` is omitted, and
+a copy of each input it cannot read in place.  When no cached block fits, the
+allocator calls ``cudaMalloc``, which holds the calling thread, and so the
+launch of the call's kernels, until the driver returns (from under 2 ms to 65
+ms for a few hundred MB on the GB200, GB300 and R200 systems measured).  When
+the allocation would exceed the device memory or the process's limit, the
+allocator first releases its cached blocks with ``cudaFree``, which waits for
+all work on the device, a collective resident on another stream included: the
+call then starts only after that work ends (measured on GB200, GB300 and R200
+beside all-gathers of 37 to 47 ms).  A call given contiguous aligned ``out``,
+``rstd`` and ``residual_out`` that share no memory with its inputs (forward) or
+``dx``, ``dw`` and ``workspace`` (backward), with inputs it reads in place,
+allocates nothing and does not wait this way.  :func:`cake_rmsnorm_det` allocates its
+outputs and its backward workspace on every call.
+
 Usage::
 
     y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
@@ -194,13 +211,18 @@ def cake_rmsnorm_det_train_forward(
         Preallocated outputs: BF16 ``y`` of ``x``'s shape, FP32 reciprocal RMS of
         its leading shape (``[T]``) and (residual only) BF16 ``h_new`` of ``x``'s
         shape.  Contiguous aligned buffers are written directly; any other layout
-        receives a copy after the launch.
+        receives a copy after the launch.  A buffer that shares memory with ``x``,
+        ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
+        kernels write a temporary, which is copied into it after the launch.
+        The outputs must not share memory with one another; the call does not
+        check this.
 
     Returns
     -------
     ``(y, rstd)`` or ``(y, rstd, h_new)`` when ``residual`` is given.
     ``rstd`` is the FP32 per-row ``1 / sqrt(mean(h_new^2) + eps)`` the backward
-    needs; no other ``[T, H]`` temporary is produced.
+    needs.  No other ``[T, H]`` temporary is produced unless a preallocated
+    output takes the copy described above.
 
     Notes
     -----
@@ -235,12 +257,15 @@ def cake_rmsnorm_det_train_backward(
         feature dimension, 16-byte aligned storage and a row stride that is a
         multiple of 16 bytes (expanded or sliced autograd gradients included) are
         read in place; other layouts are materialized once.  An N-D gradient,
-        ``[..., H]``, takes ``x``'s shape and collapses its leading dimensions
-        into rows under the forward's rule.
+        ``[..., H]``, takes ``x``'s shape; its leading dimensions collapse into
+        rows under the forward's rule, and a layout that rule rejects (the
+        gradient of a transposed consumer of ``y``, for example) is copied once
+        into a contiguous ``[rows, H]`` tensor instead of raising ``ValueError``.
     x : torch.Tensor
         The BF16 ``[T, H]`` (or ``[..., H]``) tensor that was normalized (``x`` of
         the plain forward, ``h_new`` of the residual forward); same layout rules
-        as the forward's ``x``.
+        as ``g``, except that an N-D ``x`` whose layout the forward's rule
+        rejects raises ``ValueError`` (it is not copied).
     w : torch.Tensor
         BF16 or FP32 ``[H]`` weight (the forward's).  BF16 is read in place when
         contiguous and 16-byte aligned, FP32 when contiguous and 32-byte aligned;
@@ -257,11 +282,16 @@ def cake_rmsnorm_det_train_backward(
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_rmsnorm_det_train_backward_workspace` sized for at least this
-        many rows; allocated when omitted.
+        many rows; allocated when omitted.  ``workspace`` must not share memory
+        with ``g``, ``x``, ``w``, ``rstd`` or ``g_residual``; the call does not
+        check this.
     dx, dw : torch.Tensor, optional
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout
         receives a copy after the launch.
+        ``dx`` and ``dw`` must not share memory with ``g``, ``x``, ``w``,
+        ``rstd``, ``g_residual`` or ``workspace``, or with each other; the call
+        does not check this.
 
     Returns
     -------

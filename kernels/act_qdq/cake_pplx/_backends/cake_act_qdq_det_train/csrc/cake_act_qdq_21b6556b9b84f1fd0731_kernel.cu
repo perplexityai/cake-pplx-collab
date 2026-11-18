@@ -47,6 +47,12 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
     return result;
 }
 
+#if __CUDA_ARCH__ == 1070
+#define LAUNCH_MIN_BLOCKS 16
+#else
+#define LAUNCH_MIN_BLOCKS 32
+#endif
+
 #include <math_constants.h>
 
 
@@ -58,7 +64,7 @@ __device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
 
 extern "C" {
 
-__global__ __launch_bounds__(256) void
+__global__ __launch_bounds__(64, LAUNCH_MIN_BLOCKS) void
 kernel_cake_act_qdq_21b6556b9b84f1fd0731(const __nv_bfloat16* x, __nv_bfloat16* y, int n_vecs)
 {
     const int tid = threadIdx.x;
@@ -72,113 +78,107 @@ kernel_cake_act_qdq_21b6556b9b84f1fd0731(const __nv_bfloat16* x, __nv_bfloat16* 
     const int cta_rank = 0;
 
     // === Task calls (declaration order) ===
-    int chunks = n_vecs + 255 >> 8;
-    int last = n_vecs - 1;
-    int warm = 1;
 #if __CUDA_ARCH__ == 1070
+    int tiles = n_vecs + 255 >> 8;
 #else
-    warm = ((chunks <= num_bids * 4) ? 1 : 0);
+    int tiles = n_vecs + 127 >> 7;
 #endif
-    if (warm != 0) {
-        if (tid == 0) {
-            #pragma unroll
-            for (int k = 1; k < 2; k++) {
-                int qc = bid + num_bids * k;
-                if (qc < chunks) {
-                    int _min_0 = ((n_vecs - qc * 256) < (256) ? (n_vecs - qc * 256) : (256));
-                    int qbytes = _min_0 * 16;
-                    asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(x + (long long)qc * 2048ll), "r"((uint32_t)(qbytes)) : "memory");
-                }
-            }
-        }
-    }
+    int last = n_vecs - 1;
     #pragma unroll 1
-    for (int c = bid; c < chunks; c += num_bids) {
-        if (warm != 0) {
-            if (tid == 0) {
-                int pc = c + num_bids * 2;
-                if (pc < chunks) {
-                    int _min_1 = ((n_vecs - pc * 256) < (256) ? (n_vecs - pc * 256) : (256));
-                    int pbytes = _min_1 * 16;
-                    asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(x + (long long)pc * 2048ll), "r"((uint32_t)(pbytes)) : "memory");
-                }
-            }
-        }
-        int i = c * 256 + tid;
-        int ci = ((i < n_vecs) ? i : last);
-        long long off = (long long)ci * 8ll;
-        float v[8];
-        {
-            const uint4* _vptr_2 = reinterpret_cast<const uint4*>(x + off + 0);
-            uint4 _vld_2[1];
-            #pragma unroll
-            for (int _blk = 0; _blk < 1; _blk++) {
-                asm volatile("ld.global.L2::cache_hint.v4.b32 {%0, %1, %2, %3}, [%4], %5;"
-                    : "=r"(_vld_2[_blk].x), "=r"(_vld_2[_blk].y), "=r"(_vld_2[_blk].z), "=r"(_vld_2[_blk].w) : "l"((const void*)(_vptr_2 + _blk)), "l"(0x12F0000000000000ULL) : "memory");
-                uint32_t* _vpairs_2 = reinterpret_cast<uint32_t*>(&_vld_2[_blk]);
+    for (int c = bid; c < tiles; c += num_bids) {
+#if __CUDA_ARCH__ == 1070
+        float v[32];
+#else
+        float v[16];
+#endif
+        #pragma unroll
+#if __CUDA_ARCH__ == 1070
+        for (int r = 0; r < 4; r++) {
+            int i = c * 256 + r * 64 + tid;
+#else
+        for (int r = 0; r < 2; r++) {
+            int i = c * 128 + r * 64 + tid;
+#endif
+            int ci = ((i < n_vecs) ? i : last);
+            {
+                const uint4* _vptr_0 = reinterpret_cast<const uint4*>(x + (long long)ci * 8ll + 0);
+                uint4 _vld_0[1];
                 #pragma unroll
-                for (int _pair = 0; _pair < 4; _pair++) {
-                    (&v[0 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_2[_pair]) << 16);
-                    (&v[0 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_2[_pair]) & 0xffff0000u);
+                for (int _blk = 0; _blk < 1; _blk++) {
+                    asm volatile("ld.global.L2::cache_hint.v4.b32 {%0, %1, %2, %3}, [%4], %5;"
+                        : "=r"(_vld_0[_blk].x), "=r"(_vld_0[_blk].y), "=r"(_vld_0[_blk].z), "=r"(_vld_0[_blk].w) : "l"((const void*)(_vptr_0 + _blk)), "l"(0x12F0000000000000ULL) : "memory");
+                    uint32_t* _vpairs_0 = reinterpret_cast<uint32_t*>(&_vld_0[_blk]);
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&v[r * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_0[_pair]) << 16);
+                        (&v[r * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_0[_pair]) & 0xffff0000u);
+                    }
                 }
             }
         }
-        float am = fmaxf(v[0], -v[0]);
         #pragma unroll
-        for (int k_1 = 1; k_1 < 8; k_1++) {
-            float _max3_3;
-            #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 1000)
-            #error "Max3 requires PTX three-input max.f32 support on sm_100+"
-            #endif
-            asm volatile("max.f32 %0, %1, %2, %3;" : "=f"(_max3_3) : "f"(am), "f"(v[k_1]), "f"(-v[k_1]));
-            am = _max3_3;
-        }
-        float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, am, 1);
-        am = fmaxf(am, _shfl_xor_sync_4);
-        float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, am, 2);
-        am = fmaxf(am, _shfl_xor_sync_5);
-        float s = 0.0f;
-        float inv = 0.0f;
-        int abits = 0;
-        abits = reinterpret_cast<int*>(&am)[0];
-        int rounded = (abits >> 23) - 8 + (((abits & 8388607) > 6291456) ? 1 : 0);
-        int sbyte = ((rounded > 105) ? rounded : 105);
-        int sbits = sbyte << 23;
-        int ibits = 254 - sbyte << 23;
-        s = reinterpret_cast<float*>(&sbits)[0];
-        inv = reinterpret_cast<float*>(&ibits)[0];
-        float u[8];
-        #pragma unroll
-        for (int k_2 = 0; k_2 < 8; k_2++) {
-            u[k_2] = mul_f32_rn_noftz(v[k_2], inv);
-        }
-        unsigned int halves[4];
-        #pragma unroll
-        for (int p = 0; p < 4; p++) {
-            uint16_t _cvt_satfinite_e4m3x2_f32_7;
-            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_cvt_satfinite_e4m3x2_f32_7) : "f"(u[2 * p + 1]), "f"(u[2 * p]));
-            uint32_t _cvt_f16x2_e4m3x2_6;
-            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_cvt_f16x2_e4m3x2_6) : "h"((uint16_t)(_cvt_satfinite_e4m3x2_f32_7)));
-            halves[p] = _cvt_f16x2_e4m3x2_6;
-        }
-        float yq[8];
-        #pragma unroll
-        for (int p_1 = 0; p_1 < 4; p_1++) {
-            float _cvt_f32_f16_8;
-            asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_8) : "h"((uint16_t)(halves[p_1])));
-            yq[2 * p_1] = mul_f32_rn_noftz(_cvt_f32_f16_8, s);
-            float _cvt_f32_f16_9;
-            asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_9) : "h"((uint16_t)(halves[p_1] >> 16)));
-            yq[2 * p_1 + 1] = mul_f32_rn_noftz(_cvt_f32_f16_9, s);
-        }
-        unsigned int packed[4];
-        #pragma unroll
-        for (int _lp = 0; _lp < 4; _lp++) {
-            __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(yq[_lp*2 + 0], yq[_lp*2+1 + 0]));
-            packed[_lp] = *(uint32_t*)&_bf2;
-        }
-        if (i < n_vecs) {
-            reinterpret_cast<int4*>(y + off)[0] = reinterpret_cast<int4*>(packed)[0];
+#if __CUDA_ARCH__ == 1070
+        for (int r_1 = 0; r_1 < 4; r_1++) {
+            int i_1 = c * 256 + r_1 * 64 + tid;
+#else
+        for (int r_1 = 0; r_1 < 2; r_1++) {
+            int i_1 = c * 128 + r_1 * 64 + tid;
+#endif
+            float am = fmaxf(v[r_1 * 8], -v[r_1 * 8]);
+            #pragma unroll
+            for (int k = 1; k < 8; k++) {
+                float _max3_1;
+                #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 1000)
+                #error "Max3 requires PTX three-input max.f32 support on sm_100+"
+                #endif
+                asm volatile("max.f32 %0, %1, %2, %3;" : "=f"(_max3_1) : "f"(am), "f"(v[r_1 * 8 + k]), "f"(-v[r_1 * 8 + k]));
+                am = _max3_1;
+            }
+            float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, am, 1);
+            am = fmaxf(am, _shfl_xor_sync_2);
+            float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, am, 2);
+            am = fmaxf(am, _shfl_xor_sync_3);
+            float s = 0.0f;
+            float inv = 0.0f;
+            int abits = 0;
+            abits = reinterpret_cast<int*>(&am)[0];
+            int rounded = (abits >> 23) - 8 + (((abits & 8388607) > 6291456) ? 1 : 0);
+            int sbyte = ((rounded > 105) ? rounded : 105);
+            int sbits = sbyte << 23;
+            int ibits = 254 - sbyte << 23;
+            s = reinterpret_cast<float*>(&sbits)[0];
+            inv = reinterpret_cast<float*>(&ibits)[0];
+            float u[8];
+            #pragma unroll
+            for (int k_1 = 0; k_1 < 8; k_1++) {
+                u[k_1] = mul_f32_rn_noftz(v[r_1 * 8 + k_1], inv);
+            }
+            unsigned int halves[4];
+            #pragma unroll
+            for (int p = 0; p < 4; p++) {
+                uint16_t _cvt_satfinite_e4m3x2_f32_5;
+                asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_cvt_satfinite_e4m3x2_f32_5) : "f"(u[2 * p + 1]), "f"(u[2 * p]));
+                uint32_t _cvt_f16x2_e4m3x2_4;
+                asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_cvt_f16x2_e4m3x2_4) : "h"((uint16_t)(_cvt_satfinite_e4m3x2_f32_5)));
+                halves[p] = _cvt_f16x2_e4m3x2_4;
+            }
+            float yq[8];
+            #pragma unroll
+            for (int p_1 = 0; p_1 < 4; p_1++) {
+                float _cvt_f32_f16_6;
+                asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_6) : "h"((uint16_t)(halves[p_1])));
+                yq[2 * p_1] = mul_f32_rn_noftz(_cvt_f32_f16_6, s);
+                float _cvt_f32_f16_7;
+                asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_7) : "h"((uint16_t)(halves[p_1] >> 16)));
+                yq[2 * p_1 + 1] = mul_f32_rn_noftz(_cvt_f32_f16_7, s);
+            }
+            unsigned int packed[4];
+            #pragma unroll
+            for (int _lp = 0; _lp < 4; _lp++) {
+                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(yq[_lp*2 + 0], yq[_lp*2+1 + 0]));
+                packed[_lp] = *(uint32_t*)&_bf2;
+            }
+            asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %5, 0; @p_ st.global.v4.b32 [%0], {%1, %2, %3, %4}; }" :: "l"(y + (long long)i_1 * 8ll), "r"(packed[(0) + 0]), "r"(packed[(0) + 1]), "r"(packed[(0) + 2]), "r"(packed[(0) + 3]), "r"((unsigned int)(i_1 < n_vecs)) : "memory");
         }
     }
 }

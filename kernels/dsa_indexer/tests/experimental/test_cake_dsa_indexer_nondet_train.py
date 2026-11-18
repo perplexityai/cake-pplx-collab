@@ -331,8 +331,9 @@ def test_set_comparison_ignores_slot_order_and_keeps_every_pair():
 def test_registry_records_are_well_formed():
     assert cake_jit.ABI == ABI_CONTRACT
     assert record_zero_sign_policy() in ZERO_SIGN_POLICIES
-    # the scan and the plain split merge, positionally as the deterministic package binds them; no ordering pass
-    assert cake_jit.STAGES == ["scan", "merge"]
+    # the scan and the plain split merge, positionally as the deterministic package binds them; no ordering pass;
+    # then the additive candidate-block scan (``scan_blocks``)
+    assert cake_jit.STAGES == ["scan", "merge", "scan_blocks"]
     assert set(cake_jit.ARG_PLANS) == set(cake_jit.STAGES)
     for role, plan in cake_jit.ARG_PLANS.items():
         for kind, arg in plan:
@@ -395,7 +396,10 @@ def test_registry_records_are_well_formed():
         policy = policy_for(arch)
         assert set(cake_jit.POLICY[arch]) == set(POLICY_FIELDS)
         scan_keys = sorted(k for k in keys if k.startswith("scan:"))
-        assert scan_keys and set(keys) == set(scan_keys) | {MERGE_KEY}, arch
+        cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
+        assert scan_keys and set(keys) == set(scan_keys) | set(cb_keys) | {MERGE_KEY}, (
+            arch
+        )
         assert keys[MERGE_KEY] == MERGE_PROGRAM, arch
         # every scan key follows the key grammar; an FP8 key (``:fp8`` before ``:lsf``) runs the sampled-fit form, in
         # the plain unit order or as the snake copy of a registered plain FP8 program, and the BF16 record's rules
@@ -1158,12 +1162,15 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
         if any(r for r, _ in rows):
             # every drawing program reads it, no static one does
             assert all(r != s for r, s in rows), arch
-    assert cake_jit.ARG_PLANS["scan"][-5] == ["buffer", "TicketWord"]
-    assert cake_jit.ARG_PLANS["scan"][-6] == ["buffer", "K_scale"]
+    # the scan and the candidate-block scan (``scan_blocks``: the scan's plan with its block arguments before
+    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; no other role does
+    for role in ("scan", "scan_blocks"):
+        assert cake_jit.ARG_PLANS[role][-5] == ["buffer", "TicketWord"], role
+        assert cake_jit.ARG_PLANS[role][-6] == ["buffer", "K_scale"], role
     assert all(
         ["buffer", "TicketWord"] not in plan and ["buffer", "K_scale"] not in plan
         for role, plan in cake_jit.ARG_PLANS.items()
-        if role != "scan"
+        if role not in ("scan", "scan_blocks")
     )
 
 

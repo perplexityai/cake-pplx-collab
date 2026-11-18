@@ -22,7 +22,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
-| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is reproducible and within one BF16 ulp of det. | Backward always alerts |
+| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is bitwise reproducible. | Backward always alerts |
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
@@ -62,8 +62,8 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_rmsnorm_det` | `(x, w, eps=1e-6, residual=None)` | `x` BF16 `[T, H]` or `[..., H]`; `w` BF16 or FP32 `[H]`; `residual` optional BF16 of `x`'s shape | Autograd. Returns BF16 `y`, or `(y, h_new)` with `residual`. `dw` is returned in `w.dtype`. |
-| `cake_rmsnorm_det_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | `x` BF16 `[T, H]`, or `[..., H]` with leading dims row-major contiguous with one another; `w` FP32 only on routes listed by `cake_rmsnorm_det_train_weight_dtypes`; `out`/`rstd`/`residual_out` preallocated | Returns `(y, rstd)`, or `(y, rstd, h_new)` with `residual`. `rstd` is FP32 `1/sqrt(mean(h_new^2)+eps)`. Not autograd. T == 1 is supported. T == 0 returns empty outputs without launching. |
-| `cake_rmsnorm_det_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | `g` BF16 `[T, H]`; `x` is the normalized tensor (`x`, or `h_new` in residual mode); `rstd` FP32 `[T]`; `g_residual` BF16 (residual mode); `workspace` uint8 from the factory, allocated when omitted | Returns `(dx, dw)` with FP32 `dw [H]`. The caller decides whether to cast. |
+| `cake_rmsnorm_det_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | `x` BF16 `[T, H]`, or `[..., H]` with leading dims row-major contiguous with one another; `w` FP32 only on routes listed by `cake_rmsnorm_det_train_weight_dtypes`; `out`/`rstd`/`residual_out` preallocated, must not overlap one another (not checked) | Returns `(y, rstd)`, or `(y, rstd, h_new)` with `residual`. `rstd` is FP32 `1/sqrt(mean(h_new^2)+eps)`. Not autograd. A preallocated output that is not contiguous and aligned, or that shares memory with `x`, `residual` or `w`, is written through a temporary and copied after the launch. T == 1 is supported. T == 0 returns empty outputs without launching. |
+| `cake_rmsnorm_det_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | `g` BF16 `[T, H]`; `x` is the normalized tensor (`x`, or `h_new` in residual mode); `rstd` FP32 `[T]`; `g_residual` BF16 (residual mode); `workspace` uint8 from the factory, allocated when omitted, must not overlap `g`, `x`, `w`, `rstd` or `g_residual` (not checked); `dx`/`dw` preallocated, must not overlap `g`, `x`, `w`, `rstd`, `g_residual`, `workspace` or each other (not checked) | Returns `(dx, dw)` with FP32 `dw [H]`. The caller decides whether to cast. |
 
 Other public names:
 
@@ -79,13 +79,13 @@ Other public names:
 
 The forward runs the det forward programs and is bitwise reproducible.
 
-In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP64 sums in scheduling order (or into FP32 TwoSum pairs for the pair-row kernel), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible and within one BF16 ulp of `max(|dx|, rms(dx))` of the det `dx`. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
+Each backward token-count window runs one form, and `dx` is bitwise reproducible in every form. Two forms sum `dw` in scheduling order, so their `dw` is not guaranteed bitwise reproducible: the single kernel adds per-CTA `dw` sums into replicated FP32 column sums and stores their sum as `dw`, and the part-row single kernel writes one FP32 row per CTA, which helper CTAs fold. Every other window runs a fixed-order form: the one-cluster kernel, which reads no workspace, at small token counts (up to a top of T 2 to 16, or 64 rows at H = 256), a column-task program (its CTAs sum whole `dw` columns over every row) or the deterministic pair. Their `dw` is bitwise reproducible for a given token count on devices with the same SM count. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_rmsnorm_nondet` | `(x, w, eps=1e-6, residual=None)` | Same as `cake_rmsnorm_det` | Autograd. Returns `y` or `(y, h_new)`. `dw` is returned in `w.dtype`. The backward alerts and names `cake_rmsnorm_det`. |
-| `cake_rmsnorm_nondet_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | Same as the det forward | Returns `(y, rstd)` or `(y, rstd, h_new)`. Never alerts. |
-| `cake_rmsnorm_nondet_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | Same as the det backward. Use one workspace from `cake_rmsnorm_nondet_train_backward_workspace` per concurrently running backward. | Returns `(dx, dw)` with FP32 `dw`. T == 0 returns an empty `dx` and a zero `dw`. Under deterministic algorithms it raises `RuntimeError` naming `cake_rmsnorm_det_train_backward`. With `warn_only=True` it emits one `UserWarning` and runs. If `workspace` is omitted, the call allocates and zero-fills one (about 3 us fill plus about 35 us host time on B200). |
+| `cake_rmsnorm_nondet_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | Same as the det forward | Returns `(y, rstd)` or `(y, rstd, h_new)`. Never alerts. Preallocated outputs follow the det forward's rules and must not overlap one another (not checked). |
+| `cake_rmsnorm_nondet_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | Same as the det backward. Use one workspace from `cake_rmsnorm_nondet_train_backward_workspace` per concurrently running backward. The workspace must not overlap `g`, `x`, `w`, `rstd` or `g_residual` (not checked). `dx`/`dw` must not overlap `g`, `x`, `w`, `rstd`, `g_residual`, `workspace` or each other (not checked). | Returns `(dx, dw)` with FP32 `dw`. T == 0 returns an empty `dx` and a zero `dw`. Under deterministic algorithms it raises `RuntimeError` naming `cake_rmsnorm_det_train_backward`. With `warn_only=True` it emits one `UserWarning` and runs. If `workspace` is omitted, the call allocates and zero-fills one (about 3 us fill plus about 35 us host time on B200). |
 
 Other public names:
 
@@ -1111,8 +1111,9 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - Score: `s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])`, in FP32, over the visible causal prefix of each packed segment.
 - Selection: the exact global top `min(top_k, visible)` keys per query row, ranked by score descending, then key id descending. det returns them in ascending id order, and nondet leaves the slot order unspecified.
 - Forward only. It returns int32 indices and FP32 scores. No autograd or backward is documented.
+- Candidate blocks (`*_topk_with_candidates`): the same call also returns, per query, up to 2048 blocks of 8 keys chosen from the same scores (below).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The candidate-block call: `sm_100a` and `sm_103a` (`NotImplementedError` on `sm_107a`).
 
 **Inputs.**
 
@@ -1134,8 +1135,10 @@ Identical inputs give identical ids and score bits, independent of the internal 
 |---|---|---|---|
 | `cake_dsa_indexer_det_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True, k_scale=None)` | As above. `scores` must be omitted when `return_scores=False` (`ValueError`). `k_scale` is FP32 `[Tkv]`, contiguous, FP8 form only. In the FP8 form `softmax_scale` must be `None`. | Returns `(indices, scores)`. `indices` are int32 `[T, top_k]` segment-local ids, ascending and unique, with tail `-1`. `scores` are FP32, aligned with `indices`, with tail `-inf`, or `None`. Not autograd. Never materializes `[T, Tkv]`, does not sync with the host, and can be captured in a CUDA graph. |
 | `cake_dsa_indexer_det_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | Python ints. `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Workspace bound in bytes for one call geometry. It follows the scan program chosen from T, Tkv, S, `ratio`, `top_k` and the SM count; for example, 74 MiB at `top_k=2048` with 4 queries per unit on a 148-SM `sm_100a`. Raises `NotImplementedError` when no program is registered for the architecture. |
+| `cake_dsa_indexer_det_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As `cake_dsa_indexer_det_train_topk`, BF16 only, `ratio=1`, `1 <= top_k <= 2047`. `candidate_blocks`: caller-owned int32 `[T, 2048]`, contiguous. `max_seqlen_k` must bound every key segment (it sizes the block entries). | Returns `(indices, scores, candidate_blocks)`. `indices` / `scores` as `cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit. `candidate_blocks` holds ascending segment-local block ids with tail `-1`. Identical inputs give identical bits. |
+| `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | Python ints; the call's `max_seqlen_k`. | Workspace bound in bytes: the scan's candidate buffers and tickets plus `grid x queries_per_unit x blk_cap x 8` bytes of block entries (`blk_cap = ceil(W/8) - 1` when `ceil(W/8) > 2048`, else 0; `W` = `max_seqlen_k`, else `Tkv`). The `[T, 2048]` output is not part of it. |
 
-The module exports only these two functions.
+The module exports only these four functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
@@ -1145,6 +1148,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 |---|---|---|---|
 | `cake_dsa_indexer_nondet_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True, k_scale=None)` | As det. `k_scale` is FP32 `[Tkv]`, contiguous, FP8 form only. In the FP8 form `softmax_scale` must be `None`. | Returns `(indices, scores)`. Ids are unique within a row, with `-1` in unused slots; scores are `-inf` at the `-1` slots. Can be captured in a CUDA graph. |
 | `cake_dsa_indexer_nondet_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Same bound as det for the same call and form. Never consults the deterministic-algorithms setting. |
+| `cake_dsa_indexer_nondet_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As det. | Returns `(indices, scores, candidate_blocks)`. Each row of `candidate_blocks` holds its block set with `-1` in the other slots, in no specified order. Raises under deterministic algorithms, as `cake_dsa_indexer_nondet_train_topk`. |
+| `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | As det. | Same bound as det for the same call. Never consults the deterministic-algorithms setting. |
 
 **Options and environment.**
 
@@ -1152,6 +1157,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 - `max_seqlen_k`: does not change the selected ids (det: nor the score bits). It selects the rank-finalize variant (det) and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
 - `return_scores=False` returns `None` for `scores`, but the scores are still computed internally.
 - The facades read no environment variable of their own. Backend partition knobs are private.
+
+**Candidate blocks.** Block `b` holds the segment-local keys `8b .. 8b+7`. A row with `n` visible keys sees `nb = ceil(n/8)` blocks; the newest block, `nb-1`, may be partial and its future keys do not count. A block's score is the largest score of its visible keys. With `nb <= 2048` the row holds blocks `0 .. nb-1`. Otherwise it holds block `nb-1` and the 2047 blocks of `0 .. nb-2` with the largest scores, ties broken by the larger block id (`+0.0 == -0.0`), the tie rule of `indices`. A row with `n == 0` is all `-1`. With `top_k <= 2047` every id of `indices` lies in a block of its row. The call runs the unsplit narrow or six-query scan unit, so its timing can differ from the plain top-k call of the same shape.
 
 **Cross-family.** There is no runtime contract with other families. The `k` docstring mentions the `packed[:, :128]` view of a `[Tkv, 704]` tensor, the same row layout that dsa_sparse_attention describes. Neither family consumes the other's objects.
 
@@ -1939,7 +1946,7 @@ Other public names:
 - `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
 - `is_cake_act_qdq_det_train_supported(device)`.
 
-**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output; the grid is `min(ceil(numel/2048), 8 * SM count)` CTAs, so a new shape or row count never recompiles. The facade reads no environment variable.
+**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output in 64-thread CTAs. The grid is one CTA per tile of 128 vectors (256 on `sm_107a`) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on `sm_107a`), else the resident CTAs walk the tiles; a new shape or row count never recompiles. The facade reads no environment variable.
 
 **Cross-family.** None.
 
