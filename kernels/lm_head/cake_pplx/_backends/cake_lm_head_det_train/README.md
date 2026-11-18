@@ -90,8 +90,11 @@ keyword.
   is unchanged (one rounding).  The `dX` bits differ from version 0.2.1 (each
   version is bitwise the same run to run): `ForwardResult.dx_acc` and the
   `dx_cast=False` accumulator hold the folded FP32 value.  `dW` keeps the
-  BF16 `dz` and its bits.  The call holds `rlab` beside `lse` (4 bytes a row
-  of the chunk loop).
+  BF16 `dz` and its bits.  The fold is the change of version 0.3.0: on the
+  shapes checked for it (the production head, H 6144, V 154880, at `T` from 1
+  to 8193, the loss and log-probability entries) `loss`, `logp`, `lse` and
+  `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The call
+  holds `rlab` beside `lse` (4 bytes a row of the chunk loop).
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every
