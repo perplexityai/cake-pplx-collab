@@ -117,8 +117,8 @@ program of the band's grid, each CTA walking its 16-row blocks with no claim
 and no ticket, past it the claimed program, and in the repeatable band the
 claimed program at every row count; on SM107, which routes no claimed
 program, the strided program in the fused and the repeatable bands (the
-repeatable band's ``min(row blocks, 8 * SMs)`` 128-thread CTAs over 8-row
-blocks); and on
+repeatable band's on the packed rows of these calls ``min(row blocks, 8 *
+SMs)`` 128-thread CTAs over 8-row blocks); and on
 packed rows of the repeatable band's long role the long program without the
 weight gradient.  Beside a long-resident
 one-thread kernel on another stream each call must keep its speed: per token

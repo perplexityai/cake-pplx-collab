@@ -68,11 +68,13 @@ Host design (every control is a keyword; no environment variable):
   weight gradient (``cake_jit.nodw_module``; its weight-gradient work removed
   at build time), whose ``dx`` and ``dz`` are the bits of the BF16 backward
   that computes it, at every grid: up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
-  rows per SM (measured: 768 on SM100 and SM103) the strided program,
-  ``min(ceil(rows / 8), 8 * SMs)`` 128-thread CTAs walking their 8-row
-  blocks (a row to each 16 lanes, as in the BF16 backward; packed rows read
-  at their linear offsets), which takes no claim and no ticket and reads
-  and writes no workspace word; past it the claimed
+  rows per SM (measured: 768 on SM100 and SM103) the strided program, which
+  takes no claim and no ticket and reads and writes no workspace word: where
+  ``grad_out``, ``x`` and ``z`` hold packed rows its 128-thread build,
+  ``min(ceil(rows / 8), 8 * SMs)`` CTAs walking their 8-row blocks (a row to
+  each 16 lanes, as in the BF16 backward; packed rows read at their linear
+  offsets), on other layouts the BF16 backward's ``min(ceil(rows / 16), 4 *
+  SMs)`` 256-thread CTAs walking their 16-row blocks; past it the claimed
   program, the BF16 backward's claims and ticket on the workspace (SM107
   routes none: its strided program runs every row count); and where the
   BF16 backward runs its long module, the long program built without the
@@ -177,6 +179,7 @@ from .cake_jit import (
     ROUTES,
     arch_for_capability,
     backward_module,
+    backward_packed,
     device_sm_count,
     nodw_module,
     workspace_elements,
@@ -879,8 +882,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     if dw is None:
         # The program built without the weight gradient (the same dx and dz
         # bits): strided up to its cut (or at every row count where no claimed
-        # one is routed), else claimed, or the long one.
-        name = nodw_module(arch, name, rows, sm_count)
+        # one is routed; its 128-thread build on packed rows), else claimed,
+        # or the long one.
+        packed = backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
+        name = nodw_module(arch, name, rows, sm_count, packed=packed)
     if dw is None and "workspace" not in _loader.MODULES[name]:
         # The strided program reads and writes no workspace word: no stream
         # workspace and no reserve; a caller's was checked above and is left
