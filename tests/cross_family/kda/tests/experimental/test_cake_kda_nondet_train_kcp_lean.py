@@ -1380,7 +1380,7 @@ def _run_lean_row(row, lean_passes: int | None, record_property) -> None:
             lean_passes,
         )
         assert report["pass"], report
-        if report.get("naive", {}).get("verdicts"):  # rank 0 of a judged row
+        if "naive" in report:  # rank 0
             settle_naive(record_property, report["naive"])
         return
     _device_or_skip()
@@ -1398,5 +1398,4 @@ def _run_lean_row(row, lean_passes: int | None, record_property) -> None:
         with open(os.path.join(result_dir, rid + ".json")) as fh:
             report = json.load(fh)
     assert report["pass"], {k: v for k, v in report.items() if k != "naive"}
-    if report["naive"]["verdicts"] or report["naive"]["failures"]:
-        settle_naive(record_property, report["naive"])
+    settle_naive(record_property, report["naive"])
