@@ -22,7 +22,7 @@ beside the repository's naive-tier judge (``tests/cake_naive.py``), which every 
   in BF16 values between ``out`` and the FP64 result rounded once (round to nearest even) to BF16, on every element.
 * ``dC`` and ``dZ`` have a relative L2 error of at most 1e-6 (:data:`GRAD_REL_L2`), also when every pair has
   ``C[t1] = C[t0] (1 + 2^-12)`` and ``C[t1] = C[t0] (1 + 2^-16)``.
-* Document lengths 0, 1, 2 and 3 and the pack ``(0, 1, 3, 2, 7, 4)``: ``out`` equals the per-document result.
+* Document lengths 0, 1, 2 and 3, in the pack ``(0, 1, 3, 2, 7, 4)``: ``out`` equals the per-document result.
   Changing the last token of an odd-length document changes no output, and its gradient rows are exactly zero.
 * Packs with no complete pair (no documents, ``(0,)``, ``(1, 0, 1)``) return an empty ``out`` and all-zero ``dC``
   and ``dZ``.
@@ -171,13 +171,11 @@ def test_gradients_are_within_the_relative_l2_bound(pack, variant, record_proper
 # Documents, tails and empty packs
 
 
-@pytest.mark.parametrize(
-    "pack",
-    (Pack((0,)), Pack((1,)), Pack((2,)), Pack((3,)), Pack((0, 1, 3, 2, 7, 4)), MIXED),
-    ids=lambda p: p.id,
-)
+@pytest.mark.parametrize("pack", (Pack((0, 1, 3, 2, 7, 4)), MIXED), ids=lambda p: p.id)
 def test_the_pack_equals_the_per_document_result(pack) -> None:
-    """Each document run alone gives the bits of its rows of the pack's ``out``, ``dC`` and ``dZ``."""
+    """Each document run alone gives the bits of its rows of the pack's ``out``, ``dC`` and ``dZ``: the six documents
+    of ``(0, 1, 3, 2, 7, 4)`` (lengths 0, 1, 2 and 3 among them) and the four of ``(127, 256, 1, 641)``.  A pack of
+    one document is not a case: it would compare a call with an identical call."""
     device = _device_or_skip()
     x = make_inputs(pack, seed=101, device=device)
     out, dc, dz = _explicit(x, "contiguous")
