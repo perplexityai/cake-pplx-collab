@@ -223,12 +223,15 @@ the bits of the band's program at every grid.  A small-row band runs its
 one-cluster program built so (``<band>_nodw``: no weight-gradient sums and
 no cluster synchronization).  On sm_100a and sm_103a the fused band runs
 its strided program (``<band>_nodw_strided``: CTA ``b`` runs the 16-row
-blocks ``b``, ``b + grid``, ... with no claim, no ticket and no workspace)
-up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM and its claimed program
+blocks ``b``, ``b + grid``, ... of 256-thread CTAs with no claim, no ticket
+and no workspace, packed rows read at their linear offsets) up to
+``NODW_STRIDED_ROWS_PER_SM`` rows per SM and its claimed program
 (``<band>_nodw``: the band's claims, ticket, grid and workspace) past it,
 and the repeatable band its claimed program; on sm_107a, which routes no
 claimed program, the fused and the repeatable band run their strided
-programs at every row count.  The repeatable band's long role runs its
+programs at every row count, the repeatable band's in 128-thread CTAs of
+8-row blocks (a row to each 16 lanes, as in the 256-thread programs).  The
+repeatable band's long role runs its
 long program built so (``bwd_bf16_rep_nodw_long``), or, where none is
 routed, the long role with ``weight_grad`` 0.  A band whose architecture
 routes no such program runs its own module with ``weight_grad`` 0, the
@@ -255,7 +258,9 @@ long programs ``G =
 min(ceil(rows / rows_per_block), ctas_per_sm * SMs)`` (:func:`backward_ctas`;
 the CTAs claim the blocks).  A strided program without the weight gradient
 launches the same ``G = min(ceil(rows / rows_per_block), ctas_per_sm *
-SMs)``, CTA ``b`` walking the blocks ``b``, ``b + G``, ... with no claim.
+SMs)`` of its own rule (the fused band's 16-row blocks and 4 CTAs per SM,
+the repeatable band's 8-row blocks and 8 CTAs per SM), CTA ``b`` walking
+the blocks ``b``, ``b + G``, ... with no claim.
 Every backward is correct at any grid, every
 chunked or small-row one gives the same bits at any grid and the
 repeatable ones the same bits for the rows and the SM count; the cuts between
@@ -2105,7 +2110,9 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The fused backward without the weight gradient, strided: the fused
     # backward built without the weight gradient, CTA b running the 16-row
-    # blocks b, b + grid, ... with no claim, no ticket and no workspace word,
+    # blocks b, b + grid, ... with no claim, no ticket and no workspace word
+    # (packed rows read at their linear offsets; a CTA of one block takes its
+    # block count and prefetch test without an integer division),
     # so dx and dz are the fused backward's bits at any grid; the fused
     # backward's kernel parameters (the weight-gradient and workspace ones
     # unread) and CTA count; a call with compute_grad_weight=False runs it in
@@ -2267,16 +2274,20 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The repeatable backward without the weight gradient, strided: the
     # deterministic package's BF16 backward program built without the weight
-    # gradient (its build plus "dw": False and "strided": True), CTA b
-    # running the 16-row blocks b, b + grid, ... with no claim, no ticket and
-    # no workspace word, so dx and dz are the repeatable backward's bits at
-    # any grid; the repeatable backward's kernel parameters (the
-    # weight-gradient and workspace ones unread) and CTA count; a call with
+    # gradient, strided, in 128-thread CTAs (its build with "threads": 128,
+    # "min_blocks": 8, "dw": False and "strided": True), a row to each 16
+    # lanes as in the repeatable backward, CTA b running the 8-row blocks b,
+    # b + grid, ... with no claim, no ticket and no workspace word (packed
+    # rows read at their linear offsets; a CTA of one block takes its block
+    # count and prefetch test without an integer division), so dx and dz are
+    # the repeatable backward's bits at any grid; the repeatable backward's
+    # kernel parameters (the weight-gradient and workspace ones unread) and
+    # its own grid, min(ceil(rows / 8), 8 * SMs) CTAs; a call with
     # compute_grad_weight=False runs it in a repeatable band on sm_107a at
     # every row count but the long program's (build {"dw": False, "math":
-    # "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None,
-    # "strided": True, "threads": 256}).
-    "cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d": {
+    # "ax", "min_blocks": 8, "out": "bf16", "prefetch_share": None,
+    # "strided": True, "threads": 128}).
+    "cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79": {
         "arches": [
             "sm_107a",
         ],
@@ -2308,20 +2319,20 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {
-            "ctas_per_sm": 4,
+            "ctas_per_sm": 8,
             "kind": "strided_row_blocks",
-            "rows_per_block": 16,
+            "rows_per_block": 8,
         },
-        "kernel": "cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d",
-        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d",
+        "kernel": "cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79",
         "launch": {
-            "block": (256, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d",
+        "library": "cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79",
         "logical": {
             "acc": "acc",
             "accumulate": "accumulate",
@@ -2591,7 +2602,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_t512_nodw": "cake_rmsnorm_silu_gate_train_a374cf1736d501ae6d3f",
         "bwd_bf16_fused_nodw_strided": "cake_rmsnorm_silu_gate_train_1b2751f09a6c95f35605",
         "bwd_bf16_rep_nodw_long": "cake_rmsnorm_silu_gate_train_d8dd2e7dae0ca8233241",
-        "bwd_bf16_rep_nodw_strided": "cake_rmsnorm_silu_gate_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_rep_nodw_strided": "cake_rmsnorm_silu_gate_train_07de4b4c9a438a52ff79",
         "bwd_f32_t512": "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015",
         "bwd_f32_rep": "cake_rmsnorm_silu_gate_train_ae2073f31d0923e61736",
         "bwd_f32_rep_long": "cake_rmsnorm_silu_gate_train_be861a132bbc76cb6433",
@@ -2814,9 +2825,12 @@ LONG_BACKWARD_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # is the faster.  The repeatable band routes only its claimed program there
 # (its strided program is slower in the band's rows), and sm_107a routes no
 # claimed program (its strided programs are as fast or faster at every row
-# count measured), so neither has a cut.  The strided program launches the
-# claimed program's ``min(blocks, ctas_per_sm * SMs)`` CTAs (no claim and no
-# ticket).  Host plan only, as the bands.
+# count measured), so neither has a cut.  A strided program launches
+# ``min(blocks, ctas_per_sm * SMs)`` CTAs of its own rule (no claim and no
+# ticket): in the fused band ``min(ceil(rows / 16), 4 * SMs)`` 256-thread
+# CTAs over 16-row blocks (the fused backward's grid), in the repeatable band
+# ``min(ceil(rows / 8), 8 * SMs)`` 128-thread CTAs over 8-row blocks.  Host
+# plan only, as the bands.
 NODW = "_nodw"
 STRIDED = "_strided"
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {

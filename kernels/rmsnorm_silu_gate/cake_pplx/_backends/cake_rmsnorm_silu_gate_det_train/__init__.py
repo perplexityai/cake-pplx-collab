@@ -68,9 +68,11 @@ Host design (every control is a keyword; no environment variable):
   weight gradient (``cake_jit.nodw_module``; its weight-gradient work removed
   at build time), whose ``dx`` and ``dz`` are the bits of the BF16 backward
   that computes it, at every grid: up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
-  rows per SM (measured: 768 on SM100 and SM103) the strided program, the
-  BF16 backward's CTAs walking their 16-row blocks, which takes no claim and
-  no ticket and reads and writes no workspace word; past it the claimed
+  rows per SM (measured: 768 on SM100 and SM103) the strided program,
+  ``min(ceil(rows / 8), 8 * SMs)`` 128-thread CTAs walking their 8-row
+  blocks (a row to each 16 lanes, as in the BF16 backward; packed rows read
+  at their linear offsets), which takes no claim and no ticket and reads
+  and writes no workspace word; past it the claimed
   program, the BF16 backward's claims and ticket on the workspace (SM107
   routes none: its strided program runs every row count); and where the
   BF16 backward runs its long module, the long program built without the

@@ -231,11 +231,13 @@ WORKSPACE_BYTES = {"sm_100a": 29192, "sm_103a": 29192, "sm_107a": 36360}
 RESERVE_STRIDE = {"sm_100a": 29440, "sm_103a": 29440, "sm_107a": 36608}
 # The programs without the weight gradient (``NODW_ROLES``) and the band
 # role of the program each runs in place of for ``compute_grad_weight=False``
-# (its twin, whose ``dx`` and ``dz`` bits it gives), which it launches as,
-# with the same arguments: the one-cluster and the claimed programs keep
-# their twin's grid rule and workspace; the strided programs launch their
-# twin's CTA count of 256-thread CTAs over 16-row blocks
-# (``NODW_STRIDED_GRID_RULE``) and take no workspace.
+# (its twin, whose ``dx`` and ``dz`` bits it gives), whose arguments it
+# takes: the one-cluster and the claimed programs launch as their twin and
+# keep its grid rule and workspace; the strided programs take no workspace
+# and launch by their own rule (``NODW_STRIDED_GRID_RULES``) CTAs of
+# ``NODW_STRIDED_THREADS`` threads: in the fused band its twin's CTA count of
+# 256-thread CTAs over 16-row blocks, in the repeatable band 128-thread CTAs
+# over 8-row blocks, at most 8 per SM.
 NODW_TWINS = {
     "bwd_bf16_short_nodw": "bwd_bf16_short",
     "bwd_bf16_t512_nodw": "bwd_bf16_t512",
@@ -245,10 +247,21 @@ NODW_TWINS = {
     "bwd_bf16_rep_nodw_strided": "bwd_bf16_rep",
     "bwd_bf16_rep_nodw_long": "bwd_bf16_rep_long",
 }
-NODW_STRIDED_GRID_RULE = {
-    "ctas_per_sm": 4,
-    "kind": "strided_row_blocks",
-    "rows_per_block": 16,
+NODW_STRIDED_GRID_RULES = {
+    "bwd_bf16_fused_nodw_strided": {
+        "ctas_per_sm": 4,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 16,
+    },
+    "bwd_bf16_rep_nodw_strided": {
+        "ctas_per_sm": 8,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 8,
+    },
+}
+NODW_STRIDED_THREADS = {
+    "bwd_bf16_fused_nodw_strided": 256,
+    "bwd_bf16_rep_nodw_strided": 128,
 }
 # The bands with a strided program, which has a cut
 # (``NODW_STRIDED_ROWS_PER_SM``) where the band's architecture routes both
@@ -2407,7 +2420,10 @@ def test_empty_and_errors():
 # (f2f608aa8d7a81906c9b, 75a7f19a91e6ec05dffc): past its small-row band an
 # FP32 weight gradient runs the repeatable backward (``bwd_f32_rep``, the
 # deterministic package's FP32 backward program), and on sm_100a and sm_103a
-# the static backward 421e73578399336342e3 in a band of rows per SM.
+# the static backward 421e73578399336342e3 in a band of rows per SM.  The
+# repeatable band's strided program without the weight gradient in 256-thread
+# CTAs (cfe88bc164eeaa58821d; the 128-thread program ships, with the same
+# bits).
 REMOVED_PROGRAMS = tuple(
     f"cake_rmsnorm_silu_gate_train_{digest}"
     for digest in (
@@ -2429,6 +2445,7 @@ REMOVED_PROGRAMS = tuple(
         "a8cfbb391df971a9cb59",
         "f2f608aa8d7a81906c9b",
         "75a7f19a91e6ec05dffc",
+        "cfe88bc164eeaa58821d",
     )
 )
 
@@ -2470,7 +2487,8 @@ def test_registry_records_reference_the_build_manifest():
     architectures that route it, each of which routes its twin
     (``NODW_TWINS``), launches as its twin with the same arguments and keeps
     its twin's grid rule and workspace, but a strided program, whose rule is
-    ``NODW_STRIDED_GRID_RULE`` and which takes no workspace; the strided
+    its ``NODW_STRIDED_GRID_RULES`` entry, whose CTAs have its
+    ``NODW_STRIDED_THREADS`` threads and which takes no workspace; the strided
     cuts (``NODW_STRIDED_ROWS_PER_SM``) of an architecture name exactly the
     bands of ``NODW_CUT_BANDS`` whose strided and claimed programs it both
     routes."""
@@ -2563,13 +2581,16 @@ def test_registry_records_reference_the_build_manifest():
                 assert arch in twin["arches"], (name, arch)
                 for key in ("logical", "arg_plan", "ffi_entry"):
                     assert record[key] == twin[key], (name, arch, key)
-                for key in ("block", "cluster", "cooperative", "use_pdl"):
+                for key in ("cluster", "cooperative", "use_pdl"):
                     assert record["launch"][key] == twin["launch"][key], (name, key)
                 if not strided:
+                    assert record["launch"]["block"] == twin["launch"]["block"], name
                     assert record["grid_rule"] == twin["grid_rule"], (name, arch)
                     assert record.get("workspace") == twin.get("workspace"), name
             if strided:
-                assert record["grid_rule"] == NODW_STRIDED_GRID_RULE, name
+                assert record["grid_rule"] == NODW_STRIDED_GRID_RULES[role], name
+                threads = NODW_STRIDED_THREADS[role]
+                assert record["launch"]["block"] == (threads, 1, 1), name
                 assert record.get("workspace") is None, name
                 assert loader.workspace_layout(name) == (), name
                 assert loader.workspace_bytes(name) == 0, name
@@ -5353,8 +5374,10 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
     its one-cluster program where routed, else the module; for the long
     role's module the long program where routed, else the long role's module
     (run with ``weight_grad`` 0); for any other module the module itself.  A
-    strided program launches ``min(blocks, 4 * SMs)`` CTAs, its twin's
-    count, at every row count."""
+    strided program launches ``min(ceil(rows / rows_per_block), ctas_per_sm
+    * SMs)`` CTAs of its ``NODW_STRIDED_GRID_RULES`` rule at every row count:
+    the fused band's ``min(ceil(rows / 16), 4 * SMs)``, its twin's count, the
+    repeatable band's ``min(ceil(rows / 8), 8 * SMs)``."""
     wave = 4 * sm_count
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
@@ -5364,7 +5387,7 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
             cut = None if per_sm is None else per_sm * sm_count
             strided_role = band + loader.NODW + loader.STRIDED
             claimed_role = band + loader.NODW
-            edges = {1, 15, 16, 17, 16 * wave, 16 * wave + 1}
+            edges = {1, 7, 8, 9, 15, 16, 17, 16 * wave - 1, 16 * wave, 16 * wave + 1}
             if cut is not None:
                 edges |= {cut - 1, cut, cut + 1}
             rows_list = sorted(r for r in edges | {2**31 - 1} if r >= 1)
@@ -5390,13 +5413,15 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
             if strided is None:
                 continue
             record = loader.MODULES[strided]
+            rule = NODW_STRIDED_GRID_RULES[strided_role]
             for rows in rows_list:
-                blocks = -(-rows // 16)
+                blocks = -(-rows // rule["rows_per_block"])
                 got = loader.backward_ctas(strided, rows, sm_count)
-                want = min(blocks, wave)
+                want = min(blocks, rule["ctas_per_sm"] * sm_count)
                 assert got == want, (arch, strided, rows, got)
-                twin = loader.backward_ctas(name, rows, sm_count)
-                assert got == twin, (arch, strided, rows, got, twin)
+                if band == "bwd_bf16_fused":
+                    twin = loader.backward_ctas(name, rows, sm_count)
+                    assert got == twin, (arch, strided, rows, got, twin)
                 grid = loader.launch_grid(
                     record, rows=rows, sm_count=sm_count, ctas=got
                 )

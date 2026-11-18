@@ -2443,8 +2443,8 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
     without the weight gradient launches and takes its arguments as the
     ``bwd_bf16`` module it replaces (the long one for ``bwd_bf16_nodw_long``),
     on some or all of that module's architectures, and keeps its rule and
-    workspace, but the strided one, whose
-    ``strided_row_blocks`` rule has 4 CTAs per SM over 16-row blocks and which
+    workspace, but the strided one, which launches 128 threads, whose
+    ``strided_row_blocks`` rule has 8 CTAs per SM over 8-row blocks and which
     has no workspace."""
     for name, record in loader.MODULES.items():
         launch = record["launch"]
@@ -2476,12 +2476,12 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             assert set(logical.values()) == FORWARD_ARGUMENTS, name
         elif record["role"] == NODW_STRIDED:
             want = {
-                "ctas_per_sm": 4,
+                "ctas_per_sm": 8,
                 "kind": "strided_row_blocks",
-                "rows_per_block": 16,
+                "rows_per_block": 8,
             }
             assert rule == want, name
-            assert tuple(launch["block"]) == (256, 1, 1), name
+            assert tuple(launch["block"]) == (128, 1, 1), name
             assert "workspace" not in record, name
             assert set(logical.values()) == BACKWARD_ARGUMENTS, name
         else:
@@ -2534,6 +2534,8 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
                 assert nodw[key] == twin[key], (arch, role, key)
             assert set(nodw["arches"]) <= set(twin["arches"]), (arch, role)
             for key in ("block", "cluster", "cooperative", "use_pdl"):
+                if key == "block" and role == NODW_STRIDED:
+                    continue
                 assert nodw["launch"][key] == twin["launch"][key], (arch, role, key)
             if role != NODW_STRIDED:
                 for key in ("grid_rule", "workspace"):
@@ -2736,15 +2738,18 @@ def test_nodw_module_and_the_strided_grid(sm_count):
     program where routed, else the strided one, else the module itself; for
     the long module the long program without the weight gradient where
     routed, else the long module (run with ``weight_grad`` 0).  The strided
-    program launches ``min(blocks, 4 * SMs)`` CTAs, the ``bwd_bf16``
-    module's grid, at every row count."""
+    program launches ``min(ceil(rows / 8), 8 * SMs)`` CTAs (8-row blocks)
+    and the ``bwd_bf16`` module ``min(ceil(rows / 16), 4 * SMs)`` at every
+    row count."""
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
         base, long = routes["bwd_bf16"], routes["bwd_bf16" + loader.LONG]
         per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16")
         cut = None if per_sm is None else per_sm * sm_count
         wave = 4 * sm_count
-        edges = {1, 15, 16, 17, 16 * wave, 16 * wave + 1}
+        strided_wave = 8 * sm_count
+        edges = {1, 7, 8, 9, 15, 16, 17, 16 * wave, 16 * wave + 1}
+        edges |= {8 * strided_wave - 1, 8 * strided_wave, 8 * strided_wave + 1}
         if cut is not None:
             edges |= {cut - 1, cut, cut + 1}
         rows_list = sorted(r for r in {*edges, *ISSUE_ROWS} if r >= 1)
@@ -2767,8 +2772,8 @@ def test_nodw_module_and_the_strided_grid(sm_count):
             continue
         record = loader.MODULES[routes[NODW_STRIDED]]
         for rows in rows_list:
-            blocks = -(-rows // 16)
+            blocks = -(-rows // 8)
             got = loader.launch_grid(record, rows=rows, sm_count=sm_count)
-            assert got == (min(blocks, wave), 1, 1), (arch, rows, got)
+            assert got == (min(blocks, strided_wave), 1, 1), (arch, rows, got)
             twin = loader.launch_grid(loader.MODULES[base], rows=rows, sm_count=sm_count)
-            assert got == twin, (arch, rows, got, twin)
+            assert twin == (min(-(-rows // 16), wave), 1, 1), (arch, rows, twin)

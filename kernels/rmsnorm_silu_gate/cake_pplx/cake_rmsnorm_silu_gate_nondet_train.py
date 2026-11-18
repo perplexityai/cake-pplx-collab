@@ -55,7 +55,12 @@ package's FP32 backward's bits), except on SM100 and SM103 past 64 and up
 to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2 ran it
 up to 256 rows per SM there).  Version 0.2.4 changes no bits: a call with
 ``compute_grad_weight=False`` runs a program built without the weight
-gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  A band runs a
+gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  Version 0.2.5
+changes no bits: the strided programs without the weight gradient read
+packed rows at their linear offsets, a CTA of one block takes no integer
+division before its loads, and the repeatable band's strided program
+(SM107) runs 128-thread CTAs of 8-row blocks (twice the CTAs of 16-row
+blocks at a small row count).  A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
 about 3 % or more faster than with the repeatable backward (near a band's
@@ -177,9 +182,11 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   work removed at build time), so its ``dx`` and ``dz`` are the bits of the
   BF16 call that computes the weight gradient: in the one-cluster bands that
   cluster program without its column sums and cluster synchronization; a
-  strided program (256-thread CTAs walking 16-row blocks with no claim, no
-  ticket and no workspace) in the fused band up to 512 rows per SM on SM100
-  and 448 on SM103, and in the fused and the repeatable bands on SM107; the
+  strided program (CTAs walking their row blocks with no claim, no ticket
+  and no workspace: 256-thread CTAs of 16-row blocks in the fused band,
+  128-thread CTAs of 8-row blocks in the repeatable band) in the fused band
+  up to 512 rows per SM on SM100 and 448 on SM103, and in the fused and the
+  repeatable bands on SM107; the
   claimed program on the workspace past those cuts and in the repeatable
   band on SM100 and SM103; where packed rows run the look-ahead program,
   that program without the weight gradient.

@@ -50,9 +50,11 @@ A backward that computes no weight gradient (``compute_grad_weight=False``)
 runs a program built without it (``NODW_ROLES``, :func:`nodw_module`): the
 BF16 backward's row arithmetic with all weight-gradient work removed at build
 time, so ``dx`` and ``dz`` are the bits of the BF16 backward on the same rows
-(at every grid).  The strided program (``bwd_bf16_nodw_strided``: CTA ``b``
-runs the blocks ``b``, ``b + grid``, ... with no claim, no ticket and no
-workspace) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed
+(at every grid).  The strided program (``bwd_bf16_nodw_strided``: 128-thread
+CTAs of 8-row blocks, a row to each 16 lanes as in the BF16 backward, CTA
+``b`` running the blocks ``b``, ``b + grid``, ... with no claim, no ticket
+and no workspace, packed rows read at their linear offsets) runs up to
+``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed
 program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket and
 workspace; sm_100a and sm_103a) past it, and the long one
 (``bwd_bf16_nodw_long``: its look-ahead loop) where :func:`backward_module`
@@ -74,7 +76,8 @@ the row count and the grid, add each thread's FP32 runs of rows into plain
 FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
 so the weight gradient's bits depend on the rows and
 the SM count only, not on which CTA runs a chunk.  The strided program
-launches the same ``min(blocks, ctas_per_sm * SMs)`` CTAs, its CTAs walking
+launches ``min(blocks, ctas_per_sm * SMs)`` CTAs of its own rule (8-row
+blocks, 8 CTAs per SM: ``min(ceil(rows / 8), 8 * SMs)``), its CTAs walking
 their blocks with no claim.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two
@@ -630,17 +633,21 @@ MODULES: dict[str, dict[str, Any]] = {
             "slots": 2,
         },
     },
-    # The backward without the weight gradient, strided: the BF16 backward
-    # built without the weight gradient (all of its work removed at build
-    # time), CTA b running the 16-row blocks b, b + grid, ... with no claim,
-    # no ticket and no workspace word, so dx and dz are the BF16 backward's
-    # bits at any grid; the BF16 backward's kernel parameters (the
-    # weight-gradient and workspace ones unread) and CTA count; a call with
+    # The backward without the weight gradient, strided: the BF16 backward's
+    # row arithmetic built without the weight gradient (all of its work
+    # removed at build time) in 128-thread CTAs at most 8 per SM, a row to
+    # each 16 lanes as in the BF16 backward, CTA b running the 8-row blocks
+    # b, b + grid, ... with no claim, no ticket and no workspace word (packed
+    # rows read at their linear offsets; a CTA of one block takes its block
+    # count and prefetch test without an integer division), so dx and dz are
+    # the BF16 backward's bits at any grid; the BF16 backward's kernel
+    # parameters (the weight-gradient and workspace ones unread) and its own
+    # grid, min(ceil(rows / 8), 8 * SMs) CTAs; a call with
     # compute_grad_weight=False runs it up to NODW_STRIDED_ROWS_PER_SM rows
     # per SM, on sm_107a at every row count but the long program's (build
-    # {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
-    # "prefetch_share": None, "strided": True, "threads": 256}).
-    "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d": {
+    # {"dw": False, "math": "ax", "min_blocks": 8, "out": "bf16",
+    # "prefetch_share": None, "strided": True, "threads": 128}).
+    "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79": {
         "arches": [
             "sm_100a",
             "sm_103a",
@@ -674,20 +681,20 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {
-            "ctas_per_sm": 4,
+            "ctas_per_sm": 8,
             "kind": "strided_row_blocks",
-            "rows_per_block": 16,
+            "rows_per_block": 8,
         },
-        "kernel": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
-        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "kernel": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "launch": {
-            "block": (256, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "library": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "logical": {
             "acc": "acc",
             "accumulate": "accumulate",
@@ -896,7 +903,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
         "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
-        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -906,7 +913,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
         "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
-        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -916,7 +923,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
-        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -940,8 +947,8 @@ LONG_ROLES = ("bwd_bf16_long", "bwd_f32_long")
 # The suffixes of the roles of a backward without the weight gradient, and
 # those roles (:func:`nodw_module`): the BF16 backward built without the
 # weight gradient, claimed (``bwd_bf16_nodw``), strided
-# (``bwd_bf16_nodw_strided``: no claim, no ticket, no workspace) and in the
-# look-ahead loop (``bwd_bf16_nodw_long``); a call with
+# (``bwd_bf16_nodw_strided``: its 128-thread build, no claim, no ticket, no
+# workspace) and in the look-ahead loop (``bwd_bf16_nodw_long``); a call with
 # ``compute_grad_weight=False`` runs one of them where its architecture routes
 # it.
 NODW = "_nodw"
@@ -956,8 +963,8 @@ GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks
 # sm_107a routes no claimed program (its strided program is as fast or
 # faster at every row count measured), so it has no cut and the strided
 # program runs every row count (:func:`nodw_module`).  The strided program
-# launches the claimed program's ``min(blocks, ctas_per_sm * SMs)`` CTAs
-# (no claim and no ticket).  Host plan only: a new cut needs no new program.
+# launches its own ``min(ceil(rows / 8), 8 * SMs)`` 128-thread CTAs (no
+# claim and no ticket).  Host plan only: a new cut needs no new program.
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 768},
     "sm_103a": {"bwd_bf16": 768},

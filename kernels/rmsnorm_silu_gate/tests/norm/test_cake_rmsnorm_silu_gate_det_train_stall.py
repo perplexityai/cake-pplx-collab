@@ -27,8 +27,9 @@ resident late takes only the blocks left.  A backward with
 ``compute_grad_weight=False`` (stage ``backward_nodw``) runs the program
 without the weight gradient: up to its cut of rows per SM, and on an
 architecture without a claimed program at every row count, the strided
-program (the backward's grid, each CTA walking its row blocks with no claim
-and no ticket), past it the claimed program, and packed rows from the long
+program (``min(row blocks, 8 * SMs)`` 128-thread CTAs over 8-row blocks,
+each CTA walking its row blocks with no claim and no ticket), past it the
+claimed program, and packed rows from the long
 modules' rows per SM the long program without the weight gradient.  No kernel
 waits for another CTA or grid, so none needs the whole device.  Beside a
 long-resident one-thread kernel on another stream each call must keep its
