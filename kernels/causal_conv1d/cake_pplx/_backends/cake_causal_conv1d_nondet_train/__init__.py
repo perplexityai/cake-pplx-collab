@@ -279,9 +279,10 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # kind off (``_pool_off``) frees nothing itself: the kind's idle buffers and the user
 # objects, semaphores and flag slots of an interrupted refill stay allocated for the
 # life of the process.  The buffers its graphs hold then wait, once released, in
-# ``_GRAPH_HELD`` until a refill of the device's other kind drains them
-# (``_pool_drain`` returns the released buffers of every kind of the device): it
-# keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``, at least the
+# ``_GRAPH_HELD`` (or in ``uo.released``, where a refill on another device moves the
+# released buffers of every other device) until a refill of the device's other kind
+# takes them (``_pool_drain`` returns the released buffers of every kind of its
+# device): it keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``, at least the
 # kind's ``_POOL_SIZE``, which the failed refill already raised) or drops it; with no
 # such refill (the other kind off too, or the device without its memory pool) they
 # stay.  A dropped buffer's memory stays cached in the package's memory pool.

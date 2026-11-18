@@ -1997,15 +1997,16 @@ def _posted(sem: int) -> bool:
 
 
 # The seconds after which :func:`_stream_held` lets its stream go on by itself (the block then fails).
-HOLD_TIMEOUT = 120.0
+HOLD_TIMEOUT = 60.0
 
 
 @contextlib.contextmanager
 def _stream_held(stream: torch.cuda.Stream):
     """The work queued on ``stream`` inside the block starts on the device only when the block ends: the stream first
     waits (``cuStreamWaitValue32``) for a mapped pinned host word that the block's end sets to 1, so checks inside the
-    block see that work not started, whatever the host's speed.  If the host waits for the stream inside the block, a
-    watchdog sets the word after ``HOLD_TIMEOUT`` seconds and the block fails."""
+    block see that work not started, whatever the host's speed.  If the host waits for the stream inside the block (a
+    call that synchronizes the device, such as a program's first launch in the process under CUDA's lazy module
+    loading), a watchdog sets the word after ``HOLD_TIMEOUT`` seconds and sets the yielded event; the block fails."""
 
     from cuda.bindings import driver, runtime
 
@@ -2028,7 +2029,7 @@ def _stream_held(stream: torch.cuda.Stream):
         watchdog = threading.Timer(HOLD_TIMEOUT, release)
         watchdog.start()
         try:
-            yield
+            yield fired
         finally:
             watchdog.cancel()
             value.value = 1
@@ -2497,24 +2498,30 @@ def test_out_of_memory_keeps_the_package_pool(fresh_pool) -> None:
 
 
 class _WatchedLock:
-    """A lock that records, in ``waiting``, the names of the threads waiting to take it (``cond`` notified on every
-    change): ``pkg._POOL_LOCK`` with the package's ``with`` statements unchanged."""
+    """``pkg._POOL_LOCK`` with the package's ``with`` statements unchanged, recording under ``cond`` (notified on every
+    change) its ``owner`` (the name of the thread that holds it, or ``None``) and the names of the threads ``waiting``
+    for it: a thread enters ``waiting`` only after a non-blocking attempt to take it failed."""
 
     def __init__(self, lock, cond: threading.Condition, waiting: set) -> None:
-        self.lock, self.cond, self.waiting = lock, cond, waiting
+        self.lock, self.cond, self.waiting, self.owner = lock, cond, waiting, None
 
     def __enter__(self):
         me = threading.current_thread().name
-        with self.cond:
-            self.waiting.add(me)
-            self.cond.notify_all()
-        self.lock.acquire()
+        if not self.lock.acquire(blocking=False):
+            with self.cond:
+                self.waiting.add(me)
+                self.cond.notify_all()
+            self.lock.acquire()
         with self.cond:
             self.waiting.discard(me)
+            self.owner = me
             self.cond.notify_all()
         return self
 
     def __exit__(self, *exc) -> None:
+        with self.cond:
+            self.owner = None
+            self.cond.notify_all()
         self.lock.release()
 
 
@@ -2527,12 +2534,15 @@ LOCK_TIMEOUT = 60.0
 def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch) -> None:
     """``_POOL_LOCK`` lets one thread at a time into the package's memory pool.  ``torch.cuda.use_mem_pool`` is
     wrapped to count the threads inside each pool, and a thread that enters stays at the entry until another thread
-    is inside too, or every other thread waits for ``_POOL_LOCK`` or has finished.  A refill that grows the backward
-    pool enters first; only then two threads make their first eager steps on two new streams (each zeroes its
-    per-stream workspaces in the pool).  With the lock they wait for it while the refill is inside (forced contention,
-    no timing); a ``_package_zeros`` or refill without it would put a second thread inside the pool.  At most one
-    thread is ever inside, the refill entered once and each step twice, all into the device's pool, which stays on
-    (no ``_pool_off``, the grown pre-zeroed buffers in place) and the steps' workspaces read back zero."""
+    is inside too, or each other thread has finished or is blocked on ``_POOL_LOCK`` while the entering thread holds
+    it (:class:`_WatchedLock`).  A refill that grows the backward pool enters first; only then two threads make their
+    first eager steps on two new streams (each zeroes its per-stream workspaces in the pool).  With the lock around
+    every pool entry the steps block on it while the refill is inside (forced contention, no timing).  An entry
+    without the lock (``_package_zeros`` or the refill) does not hold it, so it stays at the entry until another
+    thread is inside too, and a step cannot finish without entering the pool: two threads are inside at once whatever
+    the schedule.  At most one thread is ever inside, the refill entered once (holding the lock) and each step twice,
+    all into the device's pool, which stays on (no ``_pool_off``, the grown pre-zeroed buffers in place) and the
+    steps' workspaces read back zero."""
 
     kind, case, device = "bwd", GRAPH_CASES[2], _device()
     d = device.index
@@ -2561,6 +2571,10 @@ def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch)
     errors: list = []
     entered = threading.Event()  # the refill is inside the pool
     real = torch.cuda.use_mem_pool
+    watched = _WatchedLock(pkg._POOL_LOCK, cond, waiting)
+
+    def blocked(name: str, me: str) -> bool:  # ``name`` waits for the lock that ``me`` holds
+        return name in waiting and watched.owner == me
 
     @contextlib.contextmanager
     def counted(pool, *args, **kwargs):
@@ -2569,18 +2583,18 @@ def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch)
         deadline = time.monotonic() + LOCK_TIMEOUT
         with cond:
             inside[id(pool)] = inside.get(id(pool), 0) + 1
-            entry = [me, id(pool), inside[id(pool)]]  # + the threads waiting for the lock when it went in
+            entry = [me, id(pool), inside[id(pool)]]  # + the lock's waiting threads and owner when it went in
             entries.append(entry)
             cond.notify_all()
             if me == "refill":
                 entered.set()
-            while inside[id(pool)] < 2 and not all(name in waiting or name in done for name in others):
+            while inside[id(pool)] < 2 and not all(name in done or blocked(name, me) for name in others):
                 left = deadline - time.monotonic()
                 if left <= 0:
                     errors.append(AssertionError(f"{me}: the other threads neither waited for the lock nor ended"))
                     break
                 cond.wait(left)
-            entry.append(frozenset(waiting))
+            entry += [frozenset(waiting), watched.owner]
         try:
             with real(pool, *args, **kwargs):
                 yield
@@ -2616,7 +2630,7 @@ def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch)
         for name, body in zip(LOCK_THREADS, bodies, strict=True)
     ]
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(pkg, "_POOL_LOCK", _WatchedLock(pkg._POOL_LOCK, cond, waiting))
+        patch.setattr(pkg, "_POOL_LOCK", watched)
         patch.setattr(torch.cuda, "use_mem_pool", counted)
         for thread in threads:
             thread.start()
@@ -2626,10 +2640,11 @@ def test_pool_lock_keeps_one_thread_in_the_package_pool(fresh_pool, monkeypatch)
     torch.cuda.synchronize(device)
     if errors:
         raise errors[0]
-    assert max(count for _, _, count, _ in entries) == 1, f"two threads were inside the package's pool: {entries}"
+    assert max(entry[2] for entry in entries) == 1, f"two threads were inside the package's pool: {entries}"
     assert sorted(name for name, *_ in entries) == ["refill", "worker-0", "worker-0", "worker-1", "worker-1"], entries
-    assert {pool for _, pool, _, _ in entries} == {id(mem_pool)}, entries
+    assert {entry[1] for entry in entries} == {id(mem_pool)}, entries
     (refill_entry,) = [entry for entry in entries if entry[0] == "refill"]
+    assert refill_entry[4] == "refill", f"the refill entered the pool without the lock: {entries}"
     assert {"worker-0", "worker-1"} <= refill_entry[3], f"the steps did not wait for the lock: {entries}"
     assert pkg._MEM_POOLS.get(d) is mem_pool, "the device left its memory pool"
     assert pkg._POOL_READY["fwd"][d] == ready["fwd"] and pkg._POOL_READY["bwd"][d] == grown, pkg._POOL_READY
@@ -2736,17 +2751,20 @@ def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypa
 
 def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
     """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
-    C 1280 and then C 2560 on another stream, held on the device until the checks end (:func:`_stream_held`: their
-    zero fills and readiness copies wait), each raise the pool size: the idle buffers below the new size leave the
-    pool and ``_POOL_DEPTH`` buffers of the new size replace them, a released buffer whose readiness copy has not run
-    gives its flag back as pending, and no semaphore or flag serves two buffers.  CUDA gets the released idle buffers'
-    user objects only after the checks, so their semaphores are not posted at the second growth's drain: they stay
-    retired and no new buffer takes one.  After the copies complete and the semaphores are posted, a capture at
-    C 2560 (G2) takes new buffers (no fallback) and the next eager step's drain gives the posted semaphores back (free,
-    or taken by a new buffer; none retired) and the pending flags.  On every draw G1 and G2 replay at once on two
-    streams: both judged against the naive tier, their buffers zero after the replays and held by one graph each.
-    Then G1 is deleted: after a capture at C 2560 (G3), an eager step's drain drops each of G1's released buffers that
-    is smaller than the grown size (the package keeps no reference to it) and gives its semaphore back."""
+    C 1280 and then C 2560 on another stream (their programs launched once before on caller-owned workspaces; the
+    steps in the hold launch no other program), held on the device until the checks end (:func:`_stream_held`: their
+    zero fills and readiness copies wait; the host never waits for the stream), each raise the pool size: the idle
+    buffers below the new size leave the pool and ``_POOL_DEPTH`` buffers of the new size replace them, a released
+    buffer whose readiness copy has not run gives its flag back as pending, and no semaphore or flag serves two buffers.
+    CUDA gets the first growth's released user objects only after the checks, so their semaphores are not posted at
+    the second growth's drains: they stay retired and no new buffer takes one.  The second growth's releases run the
+    package's own release: each semaphore is retired (or free, or in a new buffer, once a drain took its post), and
+    after the hold CUDA posts every released semaphore.  A capture at C 2560 (G2) then takes new buffers (no fallback)
+    and the next eager step's drain gives the posted semaphores back (free, or taken by a new buffer; none retired) and
+    the pending flags.  On every draw G1 and G2 replay at once on two streams: both judged against the naive tier,
+    their buffers zero after the replays and held by one graph each.  Then G1 is deleted: after a capture at C 2560
+    (G3), an eager step's drain drops each of G1's released buffers that is smaller than the grown size (the package
+    keeps no reference to it) and gives its semaphore back."""
 
     kind, device = "bwd", _device()
     d = device.index
@@ -2779,49 +2797,80 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
         assert not set(flags) & spare, f"{label}: a buffer's flag is free"
 
     stages = [state()]
-    released = []
-    deferred: list = []  # (user object, semaphore) of each idle buffer the growth released; CUDA gets it later
+    released: list = [[], []]  # the idle buffers each growth step released
+    deferred: list = []  # (user object, semaphore) of each idle buffer the FIRST growth released; CUDA gets it later
 
     def release_later(obj, sem: int) -> None:
         deferred.append((obj, sem))
         uo.retired.append(sem)
 
-    stream_b.wait_stream(torch.cuda.current_stream(device))
-    try:
-        with pytest.MonkeyPatch.context() as patch, _stream_held(stream_b):
-            patch.setattr(uo, "release", release_later)
-            with torch.cuda.stream(stream_b):
-                for i in (1, 2):
-                    _phase_step("step", inputs[i], outs[i], kind)
+    with pytest.MonkeyPatch.context() as watch:
+        seen = _record_programs(watch)
+        # The eager steps' programs launched once first, on this thread and device and on caller-owned workspaces (no
+        # pool refill): a program's first launch in the process may synchronize the device (CUDA's lazy module loading,
+        # a binding's first call per thread and device), which would wait for the held stream.  The steps in the hold
+        # then launch only programs launched here (asserted), and any other host wait for the held stream fails the
+        # ``waited`` check right after them.
+        for (S, C, _), (x, w, cu, dy, b), out in zip(cases[1:], inputs[1:], outs[1:], strict=True):
+            _forward(x, w, cu, bias=b, out=out["y"][0],
+                     workspace=pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device))
+            _backward(x, w, cu, dy, b, ROUTE_SETTINGS[kind]["policy"], kind=kind,
+                      workspace=pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device),
+                      dx=out["dx"][0], dweight=out["dweight"][0], dbias=out["dbias"][0] if out["dbias"] else None)
+        torch.cuda.synchronize(device)
+        warm = {name for name, _, _ in seen}
+        seen.clear()
+        assert state() == stages[0], "an eager call with caller-owned workspaces changed the pool"
+        stream_b.wait_stream(torch.cuda.current_stream(device))
+        try:
+            with _stream_held(stream_b) as waited:
+                with torch.cuda.stream(stream_b):
+                    with pytest.MonkeyPatch.context() as patch:
+                        patch.setattr(uo, "release", release_later)  # the first growth's releases: deferred
+                        _phase_step("step", inputs[1], outs[1], kind)
                     stages.append(state())
-            assert not stream_b.query(), "the held stream ran"
-            pending = {f[2] for f in uo.pending_flags}
-            free = {f[2] for f in uo.free_flags}
-            check_unique("after the growth")
-            for (old, old_size), (new, new_size) in zip(stages, stages[1:]):
-                assert new_size["bwd"] > old_size["bwd"], (old_size, new_size)
+                    _phase_step("step", inputs[2], outs[2], kind)  # the second growth's: the package's release
+                    stages.append(state())
+                assert not waited.is_set(), "the host waited for the held stream (a call that synchronizes the device)"
+                assert not stream_b.query(), "the held stream ran"
+                in_hold = {name for name, _, _ in seen}
+                assert in_hold and in_hold <= warm, f"a program first launched inside the hold: {in_hold - warm}"
+                pending = {f[2] for f in uo.pending_flags}
+                free = {f[2] for f in uo.free_flags}
+                check_unique("after the growth")
+                for step, ((old, old_size), (new, new_size)) in enumerate(zip(stages, stages[1:])):
+                    assert new_size["bwd"] > old_size["bwd"], (old_size, new_size)
+                    for k in kinds:
+                        assert len(new[k]) == pkg._POOL_DEPTH and all(b.tensor.numel() >= new_size[k] for b in new[k])
+                        if new_size[k] > old_size[k]:
+                            stayed = {id(b) for b in old[k]} & {id(b) for b in new[k]}
+                            assert not stayed, f"{k}: a smaller buffer stayed idle"
+                            released[step] += old[k]
                 for k in kinds:
-                    assert len(new[k]) == pkg._POOL_DEPTH and all(b.tensor.numel() >= new_size[k] for b in new[k]), k
-                    if new_size[k] > old_size[k]:
-                        stayed = {id(b) for b in old[k]} & {id(b) for b in new[k]}
-                        assert not stayed, f"{k}: a smaller buffer stayed idle"
-                        released += old[k]
-            for k in kinds:
-                assert pkg._POOL_READY[k][d] == stages[-1][1][k], (k, pkg._POOL_READY[k][d])
-            # the second growth released the first growth's buffers before their readiness copies ran
-            for buf in stages[1][0]["bwd"]:
-                assert buf.flag[2] in pending and buf.flag[2] not in free, "a flag whose copy had not run was freed"
-            # the later refills' drains kept the semaphores that were not posted retired and gave none to a new buffer
-            retired = {sem for _, sem in deferred}
-            assert retired == {buf.sem for buf in released}, "a released idle buffer was not released by the refill"
-            assert retired <= set(uo.retired), "a drain recycled a semaphore that was not posted"
-            assert not retired & live_sems(), "a new buffer took a semaphore that was not posted"
-    finally:
-        for obj, _ in deferred:
-            uo.cudart.cudaUserObjectRelease(obj, 1)
+                    assert pkg._POOL_READY[k][d] == stages[-1][1][k], (k, pkg._POOL_READY[k][d])
+                # the second growth released the first growth's buffers before their readiness copies ran
+                for buf in stages[1][0]["bwd"]:
+                    assert buf.flag[2] in pending and buf.flag[2] not in free, "a flag whose copy had not run was freed"
+                # the first growth's semaphores are not posted yet: the later drains kept them retired, no new buffer
+                # took one
+                deferred_sems = {sem for _, sem in deferred}
+                assert deferred_sems == {buf.sem for buf in released[0]}, "a first-growth release was not deferred"
+                assert deferred_sems <= set(uo.retired), "a drain recycled a semaphore that was not posted"
+                assert not deferred_sems & live_sems(), "a new buffer took a semaphore that was not posted"
+                # the second growth ran the package's release: each semaphore is retired, or free or in a new buffer
+                # once its post was taken
+                real_sems = {buf.sem for buf in released[1]}
+                assert real_sems and not real_sems & deferred_sems, (real_sems, deferred_sems)
+                accounted = set(uo.retired) | set(uo.free_sems) | live_sems()
+                assert real_sems <= accounted, "a released idle buffer's semaphore was lost (no release)"
+        finally:
+            for obj, _ in deferred:
+                uo.cudart.cudaUserObjectRelease(obj, 1)
     torch.cuda.synchronize(device)
+    released_sems = deferred_sems | real_sems
     deadline = time.monotonic() + 10.0
-    while not all(_posted(sem) for sem in retired):
+    # CUDA ran the destructor of every released idle object: its semaphore is posted, or a drain already took the post
+    while not all(_posted(sem) or sem not in uo.retired for sem in released_sems):
         assert time.monotonic() < deadline, "CUDA did not release the released buffers' user objects"
         time.sleep(0.001)
     second = _capture(lambda: _phase_step("step", inputs[2], outs[2], kind), stream_b, debug=False)
@@ -2829,8 +2878,8 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
     with torch.cuda.stream(stream_b):
         _phase_step("step", inputs[2], _phase_outs("step", inputs[2][0], inputs[2][1], inputs[2][4], kind), kind)
     torch.cuda.synchronize(device)
-    assert not retired & set(uo.retired), "a posted semaphore stayed retired"
-    assert retired <= set(uo.free_sems) | live_sems(), "a drain lost a posted semaphore"
+    assert not released_sems & set(uo.retired), "a posted semaphore stayed retired"
+    assert released_sems <= set(uo.free_sems) | live_sems(), "a drain lost a posted semaphore"
     assert not uo.pending_flags, "a flag whose copy completed stayed pending"
     check_unique("after the refill")
     taken = first["taken"] + second["taken"]
