@@ -54,6 +54,7 @@ import os
 import statistics
 import tempfile
 import types
+import weakref
 
 import pytest
 import torch
@@ -525,8 +526,16 @@ def _run_rank_graph_cache(rank: int, W: int, port: int, result_dir: str | None, 
     first = pack(SEED)
     info["T_r"] = int(first.x.shape[0])
     stats = dict(conv_kcp.GRAPH_STATS)
+
+    def fallbacks() -> int:
+        return sum(backend._CAPTURE_FILL_FALLBACKS.get((device.index, k), 0) for k in ("fwd", "bwd"))
+
+    fills = fallbacks()
     keys = []  # the keyed inputs stay alive, so no later key reuses their addresses
-    held_ok, cached_ok, worst = True, True, 0
+    held_ok, cached_ok, worst, most = True, True, 0, 0
+    seen: list = []  # weak references to every buffer a capture took
+    previous: list = []
+    taken = recycled = 0
     for _ in range(conv_kcp.GRAPH_CACHE_MAX + GRAPH_CACHE_EXTRA):
         keys.append(first.x.clone())
         for _ in range(4):
@@ -534,16 +543,29 @@ def _run_rank_graph_cache(rank: int, W: int, port: int, result_dir: str | None, 
         torch.cuda.synchronize(device)
         live = sum(e.graph is not None for e in conv_kcp._GRAPHS.values())
         held = len(backend._GRAPH_HELD)
-        worst = max(worst, held - live)
+        worst, most = max(worst, held - live), max(most, held)
         cached_ok = cached_ok and len(conv_kcp._GRAPHS) <= conv_kcp.GRAPH_CACHE_MAX
         held_ok = held_ok and held <= live + 4
+        now = [buf.tensor for buf in backend._GRAPH_HELD]
+        for t in now:
+            if not any(t is p for p in previous):
+                taken += 1
+                recycled += any(ref() is t for ref in seen)
+                seen.append(weakref.ref(t))
+        previous = now
     captures = conv_kcp.GRAPH_STATS["capture"] - stats["capture"]
     replays = conv_kcp.GRAPH_STATS["replay"] - stats["replay"]
-    info["graph_stats"] = {"captures": captures, "replays": replays, "held_beyond_live_max": worst}
+    info["graph_stats"] = {
+        "captures": captures, "replays": replays, "held_beyond_live_max": worst, "held_max": most,
+        "taken": taken, "recycled": recycled, "fill_fallbacks": fallbacks() - fills,
+    }  # fmt: skip
     n_keys = conv_kcp.GRAPH_CACHE_MAX + GRAPH_CACHE_EXTRA
     flags["captured_every_key"] = captures >= 2 * n_keys and replays >= n_keys
     flags["cache_bounded"] = cached_ok
     flags["held_buffers_bounded"] = held_ok
+    # every capture took a pre-zeroed buffer (no fill node), and evicted graphs' buffers were taken again
+    flags["captures_took_prezeroed_buffers"] = fallbacks() == fills and taken >= captures
+    flags["evicted_buffers_taken_again"] = recycled >= 1
     flags["idle_pool_bounded"] = all(len(p) <= backend._POOL_DEPTH for p in backend._ZEROED_POOL.values())
     del keys
 

@@ -82,10 +82,11 @@ channel tile (a ticket on its ``work`` counter) stores the rank-local FP32
 programs' workspaces are the package's cached backward workspace of the device
 and current stream (zero before and after every launch; inside a CUDA Graph
 capture with a nonzero capture id one zeroed buffer per capture and stream,
-shared by the capture's backward calls on that stream, with another fill node
-when a call needs a larger buffer, and kept alive after its graph is freed
-until a later capture on that stream replaces it; with capture id 0, also
-without ``cuda.bindings``, each captured call zeroes a buffer of its own).
+shared by the capture's backward calls on that stream: a buffer the package
+zeroed before the capture, held by the graph until it is destroyed and its
+launches have completed, else one the capture zeroes (a fill node); with
+capture id 0, also without ``cuda.bindings``, each captured call zeroes a
+buffer of its own; as for a single-rank call).
 
 Two-launch forward (the deterministic KCP package's forward): the forward can run as a main
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,

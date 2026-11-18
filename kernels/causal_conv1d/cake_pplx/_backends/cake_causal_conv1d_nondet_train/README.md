@@ -210,7 +210,8 @@ warm-up does not take them into the tree's private pool. That memory is not retu
 pools (a replaced per-stream buffer's memory stays cached in the package's pool): per device and kind (forward
 counters, backward accumulators) at most `_POOL_DEPTH` idle buffers of the largest eager need, plus the buffers live
 graphs hold, besides the per-stream buffers. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
-every captured call zeroes its own.
+captures zero their buffers themselves, as in 0.2.1: the backward one per capture and stream, the forward one per
+call.
 
 ### Rank agreement
 
