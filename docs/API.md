@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 19 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 20 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,7 +11,7 @@ This page covers the public modules of all 19 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). mok has no autograd entry: its entries are `prepare_mok_bf16` (an adapter with forward, recompute and backward methods), `create_mok_bf16_workspace` and `quantize_mok_mxfp8_weights`; its backend package is `cake_mok_bf16`. Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -40,6 +40,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
 | engram_lookup | Has no nondet module | — |
+| mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
 
 ---
@@ -1727,6 +1728,64 @@ out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))
 - The row width is 256 with 8 scales per row.
 - `row_ids` must lie in `[0, R)`; see Inputs for what an id outside that range does.
 - `weight` and `scale` need a unit column stride, a row stride that is a multiple of 8 elements and an 8-byte aligned start. A packed `[R, 264]` buffer from the caching allocator meets these rules.
+
+---
+
+## mok
+
+**Computes.** One expert-parallel MoE layer for training (Mixture of Kittens): the routed-token scheduler, the fused forward (dispatch, gate/up GEMMs, SwiGLU, down GEMM, combine), the context-only recompute and the fused backward (`dx`, router-score gradient, six expert-weight gradients).
+
+- Routed experts run in BF16, or in MXFP8 with caller-prequantized weights. The shared expert runs in BF16.
+- `swiglu_limit` (a per-call value) selects clamped SwiGLU, `silu(min(gate, L)) * clamp(up, -L, L)`.
+- With `fp32_wgrad=True`, the backward adds every weight gradient into six caller-owned FP32 accumulators.
+- Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, EP group, build and GPU model).
+
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
+
+**Distributed requirements.** The caller passes an initialized `torch.distributed` process group with its CUDA device current. All ranks share one peer-accessible NVLink domain with multicast (PyTorch symmetric memory). EP sizes: 1, 4, 8, 16, 32 and 64. EP1 uses plain tensors.
+
+### `cake_pplx.cake_mok_det_train`
+
+This family has a det module only. The backend package is `cake_pplx._backends.cake_mok_bf16`. Source: [`kernels/mok/cake_pplx/cake_mok_det_train.py`](../kernels/mok/cake_pplx/cake_mok_det_train.py).
+
+| Name | Signature | Returns / notes |
+|---|---|---|
+| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False)` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. |
+| `create_mok_bf16_workspace` | `(*, group, device, num_local_tokens, hidden_size, topk, source_capacity=None, fwd_num_comm_sms="auto", bwd_num_comm_sms="auto", minibatch_size=4096, macrobatch_size=32768, schedule_capacity_multiplier=3/16, precision="bf16", imbalance_comm_sms="auto", imbalance_threshold="auto")` | Collective. Returns `(config, workspace)`. Call it outside CUDA Graph capture. |
+| `quantize_mok_mxfp8_weights` | `(gate, up, down)` | `(forward_weights, backward_weights)` of BF16 routed weights `gate`/`up [E_local, I, H]`, `down [E_local, H, I]` in the MXFP8 recipe. PyTorch operations; requantize after every weight update. |
+
+Other public names: `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOLDS`, `IMBALANCE_THRESHOLD`, `IMBALANCE_THRESHOLDS`, `MOK_PRECISIONS`, `resolve_comm_sms`, `resolve_imbalance_comm_sms`, `resolve_imbalance_threshold` (loaded from the backend on first access).
+
+**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
+
+**Options and environment.** The options are the keywords of `prepare_mok_bf16` and `create_mok_bf16_workspace` above. The facade reads no family-specific environment variable; the JIT variables in the README apply.
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+from cake_pplx.cake_mok_det_train import (
+    create_mok_bf16_workspace,
+    prepare_mok_bf16,
+)
+
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=6144, topk=8,
+)
+backend = prepare_mok_bf16(ep_size=16, local_experts=16, topk=8)
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=16)
+y, context = backend.forward(config, workspace, schedule, x, scores, *weights)
+grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *weights)
+```
+
+**Caveats.**
+
+- This is the MoE layer only. Optimizer steps, router-network backpropagation and the all-reduce of shared-expert gradients are outside the adapter; shared-expert weight gradients stay local to each source rank.
+- All ranks must make matching collective calls. Keep workspaces and peer mappings alive while the adapter or a captured graph can use them, and use a separate workspace and adapter for concurrent executions.
+- Prepare and warm up before CUDA Graph capture. Pass the matching context and schedule to `backward`.
+- The MXFP8 forward always saves its context and rejects `save_context=False`.
+- Schedule capacity must hold every padded route; an overflow traps.
 
 ---
 
