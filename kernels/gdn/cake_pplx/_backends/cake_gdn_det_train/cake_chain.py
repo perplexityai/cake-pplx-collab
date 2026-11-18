@@ -21,7 +21,7 @@ with FLA's ``chunk_gated_delta_rule`` signature (no context parallelism).
 
 The forward runs the prep (``prep_tma``, the q / k tiles staged by TMA and one
 CTA per (chunk, key head), unless its dispatch rule :func:`use_prep_tma` keeps
-the plain prep; both give the same bits), the tcgen05 WY stage
+the plain prep for contiguous q / k; both give the same bits), the tcgen05 WY stage
 (:func:`wy_stage`: ``wy_tc2``, five CTAs per SM, on the architectures of
 ``WY_TC2_ARCHS``, else ``wy_tc``; the same bits) and the fused tcgen05 scan
 and output (``fwd_ho``; a split plan first runs the pre-scan and the stitch
@@ -2074,6 +2074,9 @@ def host_plans(
 # plain prep reads contiguous rows only.
 PREP_TMA_CONSTANTS = ("ctas_per_sm", "window")
 TMA_ALIGN_BYTES = 16
+# q / k views that prep_tma reads in place (row-major, not overlapping: :func:`_view_rows`) run prep_tma inside the
+# rule's plain band too, so the forward copies no q / k; a ``prep`` pin still decides
+VIEWS_TAKE_PREP_TMA = True
 
 
 def _tma_rows(t: torch.Tensor) -> bool:
@@ -2094,6 +2097,15 @@ def _tma_rows(t: torch.Tensor) -> bool:
         if t.size(axis) > 1 and t.stride(axis) != expected:
             return False
     return True
+
+
+def _view_rows(t: torch.Tensor) -> bool:
+    """Whether ``t`` is a strided view that :data:`VIEWS_TAKE_PREP_TMA` lets ``prep_tma`` read in place: not
+    contiguous, read in place by the tensor map (:func:`_tma_rows`), and row-major without overlap (a head pitch of at
+    least 128 elements, a token pitch of at least ``H`` heads), as the head views of a packed row are."""
+    if t.is_contiguous() or not _tma_rows(t):
+        return False
+    return t.stride(-2) >= t.size(-1) and t.stride(-3) >= t.size(-2) * t.stride(-2)
 
 
 def _v_rows(v: torch.Tensor) -> int | None:
@@ -2151,15 +2163,26 @@ def use_prep_tma(num_chunks: int, num_heads: int, device_index: int) -> bool:
 
 
 def _prep_stage(
-    q, k, num_chunks: int, num_heads: int, arch: str, options: ChainOptions
+    q,
+    k,
+    num_chunks: int,
+    num_heads: int,
+    arch: str,
+    options: ChainOptions,
+    *,
+    views: bool = False,
 ) -> str:
-    """``prep_tma`` or ``prep`` for one call: the ``prep`` pin, else the rule; the plain prep when q or k is not
-    16-byte aligned or the architecture has no ``prep_tma`` record."""
+    """``prep_tma`` or ``prep`` for one call: the ``prep`` pin, else the rule (``views``: ``prep_tma`` without the
+    rule); the plain prep when q or k is not 16-byte aligned or the architecture has no ``prep_tma`` record."""
     if options.prep == "plain" or not _available("prep_tma", arch):
         return "prep"
     if any(t.data_ptr() % TMA_ALIGN_BYTES for t in (q, k)):
         return "prep"
-    if options.prep == "tma" or use_prep_tma(num_chunks, num_heads, _tensor_index(q)):
+    if (
+        options.prep == "tma"
+        or views
+        or use_prep_tma(num_chunks, num_heads, _tensor_index(q))
+    ):
         return "prep_tma"
     return "prep"
 
@@ -3493,13 +3516,14 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
                    output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
                    tape=tape)  # fmt: skip
     device = q.device
-    # q and k stay views when prep_tma reads them in place (a packed row's head views); v stays a view when the
-    # stages that read it take its row pitch (wy_tc reads contiguous rows only); an operand whose address the loads
-    # cannot take is copied
+    # q and k stay views when prep_tma reads them in place (a packed row's head views; inside the rule's plain band
+    # too, :data:`VIEWS_TAKE_PREP_TMA`); v stays a view when the stages that read it take its row pitch (wy_tc reads
+    # contiguous rows only); an operand whose address the loads cannot take is copied
     in_place = _tma_rows(q) and _tma_rows(k)
     if not in_place:
         q, k = _aligned(q, PREP_ALIGN_BYTES), _aligned(k, PREP_ALIGN_BYTES)
-    prep = _prep_stage(q, k, meta.num_chunks, num_heads, arch, options)
+    views = VIEWS_TAKE_PREP_TMA and _view_rows(q) and _view_rows(k)
+    prep = _prep_stage(q, k, meta.num_chunks, num_heads, arch, options, views=views)
     if prep != "prep_tma" and in_place:
         q, k = q.contiguous(), k.contiguous()
     v_rows = _v_rows(v) if wy_stage(arch) == "wy_tc2" else None
