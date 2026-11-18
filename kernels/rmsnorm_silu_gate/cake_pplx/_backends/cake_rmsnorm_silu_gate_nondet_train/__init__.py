@@ -1108,7 +1108,7 @@ def _backward(
         # and dz bits): strided up to its cut (or at every row count where
         # the band routes no claimed one; on packed rows its 128-thread build
         # where routed), else claimed, or the long or the one-cluster one.
-        name = nodw_module(arch, name, rows, sm_count, packed=packed)
+        name = nodw_module(arch, name, rows, sm_count, packed)
     ctas = backward_ctas(name, rows, sm_count)
     buffers: dict[str, Optional[torch.Tensor]] = {
         "dw_win": None,

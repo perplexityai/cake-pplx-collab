@@ -1218,7 +1218,7 @@ def backward_module(
 
 
 def nodw_module(
-    arch: str, name: str, rows: int, sm_count: int, *, packed: bool = False
+    arch: str, name: str, rows: int, sm_count: int, packed: bool = False
 ) -> str:
     """The module of a backward without the weight gradient for ``rows``
     rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
