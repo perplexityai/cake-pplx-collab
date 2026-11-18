@@ -400,8 +400,8 @@ def judge_lm_head(
 ) -> TierJudge:
     """Judge one LM-head case over ``draws`` draws against the naive BF16 tier, record every output's verdict with
     ``record_property`` and settle the judge's failures (:func:`settle`): every draw kept its contract and every
-    output met the tier, except the outputs listed as known misses of the running test on its architecture
-    (``cake_lm_head_known_misses.py``).
+    output met the tier, except the outputs listed as known misses of the running test on its architecture, each
+    within its caps (``cake_lm_head_known_misses.py``).
 
     * ``make(s)``: the draw's inputs from its seed alone (:func:`judge_inputs`).
     * ``launch(inp)``: the kernel's result (``loss`` / ``logp`` / ``dX`` / ``dW`` ...), or with ``forms`` one result

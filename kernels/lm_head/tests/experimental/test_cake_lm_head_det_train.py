@@ -15,8 +15,9 @@ limitations under the License.
 
 Backend suite of the deterministic chunked LM-head + loss package ``cake_pplx._backends.cake_lm_head_det_train``.
 Accuracy is judged against the naive BF16 tier (``tests/cake_naive.py``); the outputs that miss the tier today are
-listed per architecture in ``test_helpers/cake_lm_head_known_misses.py`` (their tests report as xfailed), where a new
-miss or a listed output that meets the tier fails the test.
+listed per architecture, each up to its caps, in ``test_helpers/cake_lm_head_known_misses.py`` (their tests report as
+xfailed), where a new miss, a listed output that misses beyond its caps or a listed output that meets the tier fails the
+test.
 """
 
 import contextlib

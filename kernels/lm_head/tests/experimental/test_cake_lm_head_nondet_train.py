@@ -33,8 +33,9 @@ on one draw keeps each output's largest error, and each draw asserts the launch'
 test checks the contract (dtype, shape, finite values, ignored rows ``+0``), exact zeros and the bits of one option
 against another on the same inputs.  The package promises no run-to-run bit equality: no test asserts that a call
 repeated on the same inputs gives the same bits.  No test compares an output with the deterministic package's.  The
-outputs that miss the tier today are listed per architecture in ``test_helpers/cake_lm_head_known_misses.py`` (their
-tests report as xfailed), where a new miss or a listed output that meets the tier fails the test.  A
+outputs that miss the tier today are listed per architecture, each up to its caps, in
+``test_helpers/cake_lm_head_known_misses.py`` (their tests report as xfailed), where a new miss, a listed output that
+misses beyond its caps or a listed output that meets the tier fails the test.  A
 log-probability backward of more than one chunk runs vocabulary-major by default
 (``cake_backend._set_logprob_vocab_major``): its ``dX`` / ``dW`` are judged against the same tier; the tests of the
 chunk loop's own machinery and bits pin the chunk loop (``logprob_chunk_loop``).  The host layer (no mode keyword,

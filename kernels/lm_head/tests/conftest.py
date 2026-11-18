@@ -17,8 +17,9 @@ def pytest_runtest_call(item):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item, call):
-    # a passed call with known misses -> xfailed (reason: each output and its ratios); a listed output the test never
-    # judged -> failed; a failed call stays failed.  The TIER lines read every report, xfailed ones too.
+    # a passed call with known misses within their caps -> xfailed (reason: each output, its ratios and caps); a listed
+    # output the test never judged -> failed; a failed call (a miss beyond its caps among them) stays failed.  The TIER
+    # lines read every report, xfailed ones too.
     report = yield
     if call.when == "call":
         known_misses.finish(item.nodeid, report)

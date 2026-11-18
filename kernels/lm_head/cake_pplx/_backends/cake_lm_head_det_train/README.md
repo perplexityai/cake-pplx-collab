@@ -1405,11 +1405,15 @@ contract and their bitwise checks: the same bytes from run to run, and the
 bit identities between the forms documented above.  Each verdict prints a
 `TIER` line in pytest's terminal summary.  The outputs that miss the tier
 today are listed per architecture in
-`tests/experimental/test_helpers/cake_lm_head_known_misses.py` (a test whose
-listed outputs miss reports as xfailed).  The list is checked through the
-tests that run: a new miss fails its test, and so does a listed output that
-meets the tier or that a test passing its other checks did not judge.  The
-entries of a test that is not collected (a renamed or removed
+`tests/experimental/test_helpers/cake_lm_head_known_misses.py`, each with a
+cap for each norm it misses: the largest ratio of its median or largest error
+over the tier's measured in that norm, rounded up to four decimals.  A test
+whose listed outputs miss within their caps reports as xfailed.  The list is
+checked through the tests that run: a new miss fails its test, and so does a
+listed output that misses beyond its caps (a ratio above a cap, a miss in a
+norm without a cap, or a draw where the tier's error is 0 and its own is not),
+that meets the tier, or that a test passing its other checks did not judge.
+The entries of a test that is not collected (a renamed or removed
 parametrization, or a run over other test ids) or that skips are not
 checked.
 
