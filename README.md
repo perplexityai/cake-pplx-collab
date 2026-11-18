@@ -107,7 +107,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | Validated | NVIDIA GB300 (`sm_103a`), driver 580.159.03, CUDA 13.4.92, torch 2.14.1+cu130, apache-tvm-ffi 0.1.15 |
 | Supported by the code, not yet validated here | `sm_100a`, `sm_107a` |
 | fmha, causal_conv1d, mhc, mhc_head | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
-| gated_kv_compression | Not yet validated on GB200 (`sm_100a`), GB300 (`sm_103a`) or VR200 (`sm_107a`); results pending |
+| gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5. The `out` criterion of issue #76 (1 BF16 ulp per element) fails on cancellation elements and awaits the issue owner's decision |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 
