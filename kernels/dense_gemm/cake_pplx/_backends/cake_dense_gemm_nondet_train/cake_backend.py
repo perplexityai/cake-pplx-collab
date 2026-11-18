@@ -1711,7 +1711,9 @@ def k1_program_knobs(program: str) -> tuple:
     ``dense_proj_det_gemm_`` prefix, e.g. ``kn_n128_f32_tma2_s4_c1``), as sorted ``(name, value)`` pairs: that
     package's inverse of its symbol (``_template_knobs``).  ``ValueError`` for a symbol that names no planner knobs.
     The serpentine K walk ``kser`` of that inverse is not a planner keyword: it is dropped when 0, and a ``_ks<P>``
-    program (``kser`` P > 0), which that package plans from its own rules only, names no planner knobs."""
+    program (``kser`` P > 0), which that package plans from its own rules only, names no planner knobs.  A program
+    without the promoted-chunk token ``_kc128`` names ``promote=False``: that planner then plans exactly this program at
+    every token count, never its promoted twin (a ``_kc128`` program names ``promote=True``)."""
     det = deterministic_backend()
     knobs = det._template_knobs(det._TEMPLATE_PREFIX + program)
     if knobs is None or knobs.pop("kser", 0):
@@ -2562,7 +2564,9 @@ def _launch_wgrad_sk(
 #: deterministic plan (one chain over the tokens).  Measured on a 148-SM part at exactly these rows and token counts,
 #: against the deterministic plan in the same process: faster in eager launches and in CUDA graph replays in 5 of 5
 #: paired groups of a screen (1.1 to 3.2 %), within the deterministic package's error budgets against FP64, and the same
-#: bits on 20 repeats.
+#: bits on 20 repeats.  These rows run the named program as measured, never its promoted twin
+#: (:func:`k1_program_knobs` names ``promote=False``), although its whole tiles hold more than 128 K blocks; every
+#: other row this package keeps on the deterministic program runs that package's plan, its promoted chunks included.
 # fmt: off
 K1_WGRAD_DET_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
