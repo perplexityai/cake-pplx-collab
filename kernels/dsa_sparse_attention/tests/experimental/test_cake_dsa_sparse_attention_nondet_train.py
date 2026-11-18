@@ -10673,11 +10673,16 @@ NOPE_DSINK_ARGS = (
     "grid_y",
     "grid_z",
 )
-# The acceptance bounds of the sink (beside the judge), per draw: the rel-L2 of out, dq and the accumulator's
-# increment at most SINK_REL_L2_FACTOR x the same call's without a sink; every finite lse within SINK_LSE_FACTOR x the
-# largest lse error without a sink plus SINK_LSE_REL x |lse_ref|; dsink within SINK_DSINK_REL_L2 rel-L2 and every head
-# within SINK_DSINK_HEAD x max |dsink_ref|.
+# The acceptance bounds of the sink (beside the judge), per draw.  out: e, its rel-L2 over the rel-L2 of the FP64
+# reference rounded to BF16, at most SINK_REL_L2_FACTOR x the e of the same call without a sink (the issue's
+# definition: no BF16 output is closer to the reference than its rounding, and the sink moves that floor -- without a
+# sink, a row with one valid slot is a row of kv exactly).  dq and the accumulator's increment: rel-L2 at most
+# SINK_REL_L2_FACTOR x the same call's without a sink.  Every finite lse within SINK_LSE_FACTOR x the largest lse error
+# without a sink plus SINK_LSE_REL x |lse_ref|; dsink within SINK_DSINK_REL_L2 rel-L2 and every head within
+# SINK_DSINK_HEAD x max |dsink_ref|.  Each call also reports the raw out ratio (rel-L2 with the sink over rel-L2
+# without it) and the same ratio over the rows with more than SINK_MANY_KEYS valid slots.
 SINK_REL_L2_FACTOR = 1.1
+SINK_MANY_KEYS = 16
 SINK_LSE_FACTOR = 4.0
 SINK_LSE_REL = 1e-6
 SINK_DSINK_REL_L2 = 5e-3
@@ -11190,20 +11195,46 @@ def _sink_calls(inp, *, sink, key_passes, dst_map, acc_rows, gen) -> dict:
     return {"autograd": autograd, "eager": eager}
 
 
-def _assert_sink_bounds(found, oracle, *, forms=("autograd", "eager")) -> None:
-    """The acceptance bounds of one draw beside the judge (outputs named ``"sink <form> <name>"`` with the sink and
-    ``"no sink <form> <name>"`` for the same call without it): the rel-L2 of ``out``, ``dq`` and the accumulator's
-    increment at most :data:`SINK_REL_L2_FACTOR` x the call's without a sink; every finite ``lse`` within
-    :data:`SINK_LSE_FACTOR` x the largest ``lse`` error without a sink plus :data:`SINK_LSE_REL` x ``|lse_ref|``, and
-    ``-inf`` exactly where the reference is; ``dsink`` within :data:`SINK_DSINK_REL_L2` rel-L2 and every head within
-    :data:`SINK_DSINK_HEAD` x ``max |dsink_ref|``; on the dominant head (about 100 above the scores) ``lse`` is the
-    sink to FP32 rounding on every row."""
+def _sink_out_ratios(found, oracle, form: str, many_keys: torch.Tensor) -> dict:
+    """The ``out`` ratios of one call with the sink to the same call without it (outputs ``"sink <form> out"`` and
+    ``"no sink <form> out"``): ``raw``, of their rel-L2 errors; ``floor``, of the rel-L2 errors of their FP64
+    references rounded to BF16; ``e = raw / floor``, of their e (a call's rel-L2 over its floor), the bounded one;
+    and ``many_keys``, the raw ratio over the rows ``many_keys`` selects (``[T]``, more than :data:`SINK_MANY_KEYS`
+    valid slots)."""
+    errors = []
+    for side in ("sink", "no sink"):
+        got, ref = found[f"{side} {form} out"], oracle[f"{side} {form} out"]
+        errors.append(
+            (
+                _rel_l2(got, ref),
+                _rel_l2(ref.to(torch.bfloat16), ref),
+                _rel_l2(got[many_keys], ref[many_keys]),
+            )
+        )
+    (raw_s, floor_s, many_s), (raw_n, floor_n, many_n) = errors
+    raw, floor = raw_s / raw_n, floor_s / floor_n
+    return dict(raw=raw, floor=floor, e=raw / floor, many_keys=many_s / many_n)
+
+
+def _assert_sink_bounds(found, oracle, out_ratios: dict) -> None:
+    """The acceptance bounds of one draw beside the judge, for each form of ``out_ratios`` (form ->
+    :func:`_sink_out_ratios`; outputs named ``"sink <form> <name>"`` with the sink and ``"no sink <form> <name>"`` for
+    the same call without it): the ``e`` ratio of ``out`` at most :data:`SINK_REL_L2_FACTOR`; the rel-L2 of ``dq``
+    and the accumulator's increment at most :data:`SINK_REL_L2_FACTOR` x the call's without a sink; every finite
+    ``lse`` within :data:`SINK_LSE_FACTOR` x the largest ``lse`` error without a sink plus :data:`SINK_LSE_REL` x
+    ``|lse_ref|``, and ``-inf`` exactly where the reference is; ``dsink`` within :data:`SINK_DSINK_REL_L2` rel-L2 and
+    every head within :data:`SINK_DSINK_HEAD` x ``max |dsink_ref|``; on the dominant head (about 100 above the
+    scores) ``lse`` is the sink to FP32 rounding on every row."""
     dominant = max(nope_ref.SINK_SPECIAL_HEADS, key=nope_ref.SINK_SPECIAL_HEADS.get)
     top = nope_ref.SINK_SPECIAL_HEADS[dominant]
     half_ulp = 0.5 * torch.finfo(torch.float32).eps * 2.0 ** math.floor(math.log2(top))
-    for form in forms:
+    for form, ratios in out_ratios.items():
         with_sink, without = f"sink {form} ", f"no sink {form} "
-        for name in ("out", "dq", "dkv_acc"):
+        assert ratios["e"] <= SINK_REL_L2_FACTOR, (
+            f"{form} out: e (rel-L2 over its BF16 floor) {ratios['e']:.4f} x the call's without a sink "
+            f"(raw {ratios['raw']:.4f} x, floor {ratios['floor']:.4f} x; at most {SINK_REL_L2_FACTOR} x)"
+        )
+        for name in ("dq", "dkv_acc"):
             base = _rel_l2(found[without + name], oracle[without + name])
             got = _rel_l2(found[with_sink + name], oracle[with_sink + name])
             assert got <= SINK_REL_L2_FACTOR * base, (
@@ -11255,7 +11286,9 @@ def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
     output -- ``out``, ``lse``, ``o_sum``, ``dq``, the accumulator's increment and ``dsink`` -- is judged against the
     FP64 oracle beside the BF16 naive tier (the calls without a sink against the problem without one), the contract
     holds (``lse`` the sink on the row without a valid slot, zero ``out`` / ``dq`` there, ``dsink`` exactly 0 on the
-    ``-inf`` head, every output finite), and the acceptance bounds hold (:func:`_assert_sink_bounds`)."""
+    ``-inf`` head, every output finite), and the acceptance bounds hold (:func:`_assert_sink_bounds`).  Each call's
+    ``out`` ratios (:func:`_sink_out_ratios`: ``e``, raw, floor and the rows with more than :data:`SINK_MANY_KEYS`
+    valid slots) are recorded (``sink_out_ratios``) and printed, one line per call."""
     _require_nope_sink_program()
     T, width, make_kw, key_passes = SINK_CASES[case]
 
@@ -11282,7 +11315,18 @@ def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
             for prefix, sink in (("sink ", inp.sink), ("no sink ", None))
         ]
         found, oracle, naive = nv.merge(*judged)
-        _assert_sink_bounds(found, oracle)
+        many_keys = (inp.indices >= 0).sum(1) > SINK_MANY_KEYS
+        out_ratios = {
+            form: _sink_out_ratios(found, oracle, form, many_keys)
+            for form in ("autograd", "eager")
+        }
+        for form, r in out_ratios.items():
+            record_property("sink_out_ratios", dict(case=case, draw=j, form=form, **r))
+            print(
+                f"sink out {case} draw {j} {form}: e {r['e']:.4f} raw {r['raw']:.4f} "
+                f"floor {r['floor']:.4f} rows over {SINK_MANY_KEYS} valid slots {r['many_keys']:.4f}"
+            )
+        _assert_sink_bounds(found, oracle, out_ratios)
         return found, oracle, naive
 
     nv.judge_draws(
