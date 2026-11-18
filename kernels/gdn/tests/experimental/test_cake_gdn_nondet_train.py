@@ -126,6 +126,14 @@ def device() -> torch.device:
     return _device_or_skip()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_workspace_pool(monkeypatch) -> None:
+    # every test starts on an empty workspace pool, as in a process of its own: on a pool that earlier tests filled, a
+    # new layout's first call evicts a buffer past WORKSPACE_SHAPES_PER_ROLE, which drops every recorded plan, the one
+    # its own forward just recorded too, so the next call records again instead of replaying it
+    monkeypatch.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
+
+
 def _cu(seq_lens) -> list[int]:
     cu = [0]
     for n in seq_lens:
