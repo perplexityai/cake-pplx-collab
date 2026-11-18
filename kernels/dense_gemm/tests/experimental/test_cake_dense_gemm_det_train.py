@@ -13035,9 +13035,9 @@ def test_sm107a_212_tranche_token_floors(monkeypatch, key):
 
 
 # ---------------------------------------------------------------------------
-# The routing of version 0.3.4: the exact-split fit and the exact-wave yield of BF16 weight gradients on 148-SM parts,
-# the 148-SM sm_100a FP32 input-gradient part rules (ROW_RULES_BY_SM), the long-token 5120 -> 64 / 128 BF16 weight
-# gradients of sm_100a and the 212-SM sm_107a FP32 token ranges (ROW_RULE_RANGES_BY_SM)
+# The routing of versions 0.3.4 and 0.3.5: the exact-split fit and the exact-wave yield of BF16 weight gradients on
+# 148-SM parts, the 148-SM sm_100a FP32 input-gradient part rules (ROW_RULES_BY_SM), the long-token 5120 -> 64 / 128
+# BF16 weight gradients of sm_100a (0.3.4) and the 212-SM sm_107a FP32 token ranges (ROW_RULE_RANGES_BY_SM, 0.3.5)
 # ---------------------------------------------------------------------------
 
 #: The token tiers of the sm_100a 5120 -> 64 / 128 BF16 weight gradients (cake_backend.ROW_RULE_MIN_T): below T 32768
@@ -13197,14 +13197,16 @@ ROUTING_034_SWEEP = (
     *((op, d_in, d_out, "f32", tuple(sorted({4096, 8192, 16172, 16231, 16384}
                                             | {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)})))
       for op, d_in, d_out, ranges, *_ in SM107A_212_F32_RANGES.values()),
-    *(("wgrad", d_in, d_out, "bf16", (4096, 8192)) for d_in, d_out in ((16384, 6144), (17408, 5120), (6144, 12288))),
+    *(("wgrad", d_in, d_out, "bf16", (4096, 8192))
+      for d_in, d_out in ((16384, 6144), (17408, 5120), (6144, 12288), (5120, 17408), (12288, 6144))),
     ("dgrad", 16384, 6144, "bf16", (8192,)),
 )
 # fmt: on
 
 
 def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
-    """The program a plan of version 0.3.4 runs where it differs from the plan of version 0.3.3, else ``None``."""
+    """The program a plan of version 0.3.4 or 0.3.5 runs where it differs from the plan of version 0.3.3, else
+    ``None``."""
     k_blocks = -(-T // 64)
     gb = arch in ("sm_100a", "sm_103a")
     if (arch, sm_count) == ("sm_107a", 212) and out_dtype == "f32":
@@ -13634,7 +13636,7 @@ def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
 
 
 class _Routing034Case(NamedTuple):
-    """A GPU case of a plan version 0.3.4 changed (``ROUTING_034_GPU_CASES``)."""
+    """A GPU case of a plan version 0.3.4 or 0.3.5 changed (``ROUTING_034_GPU_CASES``)."""
 
     op: str
     d_in: int
@@ -13650,7 +13652,7 @@ class _Routing034Case(NamedTuple):
     same_bits: bool = False
 
 
-# GPU cases of the plans version 0.3.4 changed.  Every supported device runs the default plan of each case (judged
+# GPU cases of the plans versions 0.3.4 and 0.3.5 changed.  Every supported device runs the default plan of each case (judged
 # against the naive BF16 tier, then the same bits on repeated launches), a scoped case only the listed device classes;
 # on a listed device class the plan runs the listed program.
 _GB_148 = (("sm_100a", 148), ("sm_103a", 148))
@@ -13706,7 +13708,7 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
     arch, sm_count = arch_for(device), _sm_count()
     if scoped and (arch, sm_count) not in programs:
         pytest.skip(
-            f"a case of the device classes {sorted(programs)} alone, where version 0.3.4 changed the plan; this "
+            f"a case of the device classes {sorted(programs)} alone, where version 0.3.4 or 0.3.5 changed the plan; this "
             f"device is {arch} with {sm_count} SMs"
         )
     odt = torch.float32 if out_dtype == "f32" else torch.bfloat16
