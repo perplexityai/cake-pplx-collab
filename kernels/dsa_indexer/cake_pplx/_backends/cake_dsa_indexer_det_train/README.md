@@ -12,7 +12,9 @@ counterpart is `cake_pplx.cake_dsa_indexer_nondet_train`,
 which leaves the slot order of each row
 unspecified.
 SM107 (Rubin) is the primary target of the request, SM100 (B200 / GB200) the
-comparison architecture, SM103 (B300 / GB300) the third target.  The feature
+comparison architecture, SM103 (B300 / GB300) the third target.  The `sm_107a`
+libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
+entries).  The feature
 does not participate in automatic backend selection, autotuning or
 trace-apply; its libraries are loaded prebuilt from `aot/` when the package
 ships them and JIT-built through the package's JIT shim from `build.json`
@@ -73,7 +75,7 @@ between package versions.
 | output | contents | repeats bit for bit | not specified |
 |---|---|---|---|
 | `indices [T, top_k]` int32 | segment-local key ids: per row, the `min(top_k, visible)` selected ids in ascending order, then `-1` in every other slot | every slot: the selected ids, their order and the `-1` tail | nothing |
-| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the computed FP32 score of the id in the same slot (a selected `-0.0` stays `-0.0`); `-inf` in every padding slot; `None` with `return_scores=False` | every slot's bits | nothing |
+| `scores [T, top_k]` FP32 | aligned slot by slot with `indices`: the computed FP32 score of the id in the same slot; `-inf` in every padding slot; `None` with `return_scores=False` | every slot's bits | nothing |
 
 Neither the program that the host dispatches nor the partition knobs of the
 backend change these bits (see "Selection, ties, output order, padding").
@@ -103,21 +105,16 @@ on which program, CTA, tile or warp evaluates it:
 3. **Weights**: `w'_h = fl(w_h * softmax_scale)` once per query block
    (`relu(scale * x) = scale * relu(x)` for `scale > 0`).
 
-Every head term therefore sees at most 11 roundings after the MMA, and two
-independent FP32 evaluations of one score differ by at most `gamma_n * A`
-with `n = 2D + 4H + 4 = 388`, `gamma_n = n u / (1 - n u)`, `u = 2 ** -24` and
-`A = softmax_scale * sum_h |w_h| sum_d |q_hd k_jd|` (the bound the tests
-enforce against an independent FP64 / FP32 reference).
+Every head term therefore sees at most 11 roundings after the MMA.
 
 **Signed zeros.**  Every chain accumulator is initialised to `+0.0` and the
 FMA order is fixed, and `fma(+0, w', +0) = +0` for either sign of `w'`, so a
 row whose head terms are all zero yields `+0.0`; a `-0.0` score cannot arise
 from this reduction (registry field `NUMERICS["zero_sign_policy"] =
 "positive_accumulator"`).  Ordering rule: `+0.0` and `-0.0` compare equal, an
-equal-score tie goes to the larger key id, and the written score keeps the
-computed bits -- it is never canonicalised.  The reference in
-`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` follows the same reduction
-model, so the bit-exact test cases compare like with like.
+equal-score tie goes to the larger key id.  The tests hold the signed-zero
+cases to the exact selection of
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py`.
 
 ## FP8 form
 
@@ -136,13 +133,12 @@ s[t, j] = k_scale[j] * sum_h w[t, h] * relu(sum_d q[t, h, d] * k[j, d])
 
 * **Dot product**: the e4m3 x e4m3 products are exact and accumulate in FP32
   on the tensor cores: four K = 32 steps over `d = 0 .. 127` on `sm_100a` /
-  `sm_103a`, the order of DeepGEMM's `fp8_mqa_logits`, whose logits these
-  programs reproduce bit for bit; two K = 64 steps on `sm_107a`, whose logits
-  can differ from DeepGEMM's in the last bits.
+  `sm_103a`, in the order of DeepGEMM's `fp8_mqa_logits`; two K = 64 steps on
+  `sm_107a`.
 * **Head reduction**: the sum over the heads of `w[t, h] * relu(logit)` and
-  its product with `k_scale[j]` are FP32; the tests bound the score like the
-  BF16 form (`gamma_n * A` against an FP64 score of the e4m3 inputs, `A`
-  scaled by `|k_scale[j]|`).
+  its product with `k_scale[j]` are FP32; the tests judge the score like the
+  BF16 form (against its FP64 value from the e4m3 inputs, beside the naive
+  tier's).
 * **Invariance**: every FP8 program of one architecture computes the same ids
   and score bits (program-dispatch invariance holds per form and
   architecture).  FP8 results are not BF16 results of the dequantized
@@ -325,8 +321,8 @@ that writes the registry verifies the record against them before it is frozen.
   `sm_100a`, BF16 calls of 5.5 to 6 wide rounds per CTA (`wide_rule[0]`; the
   FP8 form decides by its `wide_wave_rule`) now take eight queries per unit as
   well: 148 MiB (155197568 B) at the 16384-slot floor at `top_k = 2048` on 148
-  SMs, where the previous package needed 74 MiB (77602944 B), with identical
-  ids and score bits; re-size a buffer reused across such calls the same way.  It is
+  SMs, where the previous package needed 74 MiB (77602944 B); re-size a
+  buffer reused across such calls the same way.  It is
   the larger of the sampled default's plan and the plan with the sampled first
   threshold off (`sample_tiles_max=0`): on sm_107a the unpaired
   three-warpgroup preference can give an unsampled call six queries per unit
@@ -335,8 +331,8 @@ that writes the registry verifies the record against them before it is frozen.
   `top_k` below `cand_cap_floor_rule[0]` (1024) take the 8192-slot floor: a
   `top_k = 512` call with six queries per unit (for example the ratio-4 pooled
   selection) needs 57 MiB (59768960 B) on 152 SMs, where the previous package
-  needed 114 MiB (119537792 B), with identical ids and score bits; a
-  `top_k = 256` call needs the same 57 MiB.  `sm_103a` sets no rule and keeps
+  needed 114 MiB (119537792 B); a `top_k = 256` call needs the same 57 MiB.
+  `sm_103a` sets no rule and keeps
   the 16384-slot floor on every `top_k` (114 MiB for that call).  Separate
   from the inputs and the two `[T, top_k]` outputs.
 * **No host synchronization**: the segment boundaries and offsets are read on
@@ -395,8 +391,9 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
   units: one kernel per program or per group of programs that differ only in
   their constants (a scan lever-twin group, the rank-finalize programs of one
   window form, the CUB finalize programs) and one binding per launcher text
-  (the 76 scan programs share 9 bindings, the 25 rank-finalize programs 9, the
-  5 CUB finalize programs 1; the merge program has its own).  A shared kernel
+  (scan programs with the same launcher text share a binding, and so do the
+  rank-finalize programs and the CUB finalize programs; `build.json` lists each
+  library with its kernel and binding units).  A shared kernel
   source names its kernel `CAKE_PROGRAM_KERNEL` and reads its constants (the
   window, block size, tile unroll and snake order) from `CAKE_INDEXER_<KNOB>`; a
   shared binding names the kernel, its host-shim namespace, block size and
@@ -412,26 +409,33 @@ imports the package only through `tests/cake/test_helpers/cake_package.py`),
 `tests/experimental/test_cake_dsa_indexer_det_train_api.py` (the
 `cake_pplx.cake_dsa_indexer_det_train` entry points) and
 `tests/experimental/test_cake_dsa_indexer_det_train_names.py` (the naming
-rules), with the independent
-FP64 / FP32 reference in `tests/experimental/test_helpers/cake_dsa_indexer_reference.py`
-(exact semantic cases incl. cutoff ties, all-equal scores, mixed signed zeros
-at the boundary with bit checks, negative scores and a few winners over a
-large tie; packed causality incl. explicit positive and negative offsets,
-`ratio = 2`, empty and singleton segments, short rows, `top_k = 1` and
-`4096`; random-input accuracy under the `gamma_n A` bound; near ties; both
-recorded token counts; tile-boundary neighbours; changing shapes; bitwise
+rules), with the reference in
+`tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and the
+naive-tier judge in `tests/experimental/test_helpers/cake_dsa_indexer_naive.py`
+(on `tests/cake_naive.py`).  On integer inputs every score is exact in FP32,
+so the ids and valid counts must equal the exact selection.  Over 32 draws
+the scores are judged against their FP64 values beside the naive tier's (the
+same scores in torch BF16), on integer inputs and, at the kernel's own keys,
+on Gaussian inputs.  Coverage: exact semantic cases incl. cutoff ties,
+all-equal scores, mixed signed zeros at the boundary,
+negative scores and a few winners over a large tie; packed causality incl.
+explicit positive and negative offsets, `ratio = 2`, empty and singleton
+segments, short rows, `top_k = 1` and `4096`; random rows judged against the
+naive tier; near ties; both recorded token counts; tile-boundary neighbours;
+changing shapes; bitwise
 repeatability, partition-knob and program-dispatch invariance; strided `k`;
-non-finite inputs; CUDA-graph capture; the workspace bound).  The host-only
+non-finite inputs; CUDA-graph capture; the workspace bound.  The host-only
 tests (registry shape, dispatch policy, validation, binding, the reference
 itself) run without a GPU.  The FP8 form has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_fp8.py`: host-only key grammar,
 FP8 record, kind mapping and reachability of every registered FP8 key,
-validation and BF16 plan / workspace identity; on the GPU, accuracy against
-an FP64 reference of the e4m3 inputs under the `gamma_n A` bound with exact
-ids up to near ties, bitwise program-dispatch invariance over every
+validation and BF16 plan / workspace identity; on the GPU, the exact
+selection's ids and counts on integer e4m3 inputs and the scores judged
+against the naive tier (integer and amax-quantized Gaussian e4m3 inputs),
+bitwise program-dispatch invariance over every
 registered FP8 key, the prepared runner's `k_scale` binding, the per-form
-ticket decision and, where `deep_gemm` imports on `sm_100a` / `sm_103a`, a
-bitwise comparison of the logits with `deep_gemm.fp8_mqa_logits`.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
+ticket decision and, on `sm_100a` / `sm_103a` where `deep_gemm` imports, the
+ids against the top-k of DeepGEMM's FP8 MQA logits on integer e4m3 inputs.  Benchmark: `benchmarks/bench_cake_dsa_indexer_det_train.py`
 (paired AB / BA / interleaved CUPTI spans of the complete operator across the
 package's arms: sampling on / off, forced dispatch and a second copy of the
 package).  `--form fp8` times the FP8 form against the BF16 form on the same

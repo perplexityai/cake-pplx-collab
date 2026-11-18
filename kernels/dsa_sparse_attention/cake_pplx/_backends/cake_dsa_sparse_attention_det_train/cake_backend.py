@@ -60,13 +60,14 @@ limitations under the License.
 #
 # Deterministic dK / dV.  The backward launches the registered stages of
 # ``cake_jit.BACKWARD_STAGES_OF[program]`` in that order, every one of them on
-# every call (no stage is chosen by a tensor value; a RoPE backward of P > 1
+# every call (no stage is chosen by a tensor value; a backward of P > 1
 # key-range passes runs ``bwd_compact`` + ``bwd_main_pass`` P times in place of
-# ``bwd_main``, see :func:`plan_key_passes`):
+# ``bwd_main`` -- the NoPE program ``nope_bwd_compact`` + ``nope_bwd_main_pass``
+# in place of ``nope_bwd_main`` --, see :func:`plan_key_passes`):
 #
-# * ``bwd_delta``: ``delta = rowsum(dout * (out + o_lo))`` ``[T, 64]`` FP32 (the
-#   non-deterministic package's bits) and the per-query bound terms ``qstat
-#   [T, 4]`` FP32 (from the largest magnitudes and the norms of ``dout``,
+# * ``bwd_delta``: ``delta = rowsum(dout * (out + o_lo))`` ``[T, 64]`` FP32 and
+#   the per-query bound terms ``qstat [T, 4]`` FP32 (from the largest
+#   magnitudes and the norms of ``dout``,
 #   ``delta`` and the query parts, each summed over the heads in a fixed
 #   order); it also zeroes the global words the later stages reduce into.
 # * ``bwd_norm``: the key norms ``||kv_latent[k]||`` ``[S]`` FP32 and their
@@ -210,8 +211,8 @@ O_LO_BYTES_PER_TOKEN = NUM_HEADS * D_LATENT * 2  # BF16 o_lo: 64 KiB per query t
 
 def _check_key_passes(key_passes: Optional[int], num_kv: int) -> None:
     """``key_passes`` is validated as in the non-deterministic package (``None`` or a positive integer no larger than
-    ``num_kv``).  The RoPE backward runs that many key-range passes (:func:`plan_key_passes`; the dK/dV bits do not
-    depend on it); the NoPE backward runs its main stage once over all keys."""
+    ``num_kv``).  The backward of either program runs that many key-range passes (:func:`plan_key_passes`; the dK/dV
+    bits do not depend on it)."""
     if key_passes is None:
         return
     if isinstance(key_passes, bool) or int(key_passes) != key_passes:
@@ -224,19 +225,25 @@ def _check_key_passes(key_passes: Optional[int], num_kv: int) -> None:
         )
 
 
-# Key-range passes of the RoPE backward.  A backward whose key row is far larger than the L2 can split every token's
-# keys into P ranges [pass_lo, pass_hi) (:func:`key_pass_ranges`) and run, per range and in place of ``bwd_main``, the
+# Key-range passes of the backward.  A backward whose key row is far larger than the L2 can split every token's keys
+# into P ranges [pass_lo, pass_hi) (:func:`key_pass_ranges`) and run, per range and in place of the main stage, the
 # non-deterministic package's compaction of the token's keys inside the range (``bwd_compact``: ``key_scratch``
-# [T, topk] int32 and ``pass_counts`` [T]) and the pass build of the main stage (``bwd_main_pass``, which reads
-# ``indices = key_scratch`` and ``topk_length = pass_counts``).  Its dQ goes through the FP32 partial ``dq_partial``
-# [T, 64 * 576] between passes: ``dq_mode`` 1 stores it, 2 adds and stores, 3 adds and writes the BF16 dQ (0: one
-# launch, :func:`key_pass_dq_mode`).  dK/dV and the overflow counters are integer sums, so they keep the bits of one
-# launch; dQ is the non-deterministic package's dQ of the same passes.  The redo stays one launch over all keys.
-# The pass count is the non-deterministic package's policy (the record's ``key_pass_policy``, :class:`KeyPassPolicy`),
-# with one difference: every pass runs all T tokens in one launch (``token_base = 0``), so a row the policy would run
-# in several token chunks (T above :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.
+# [T, topk] int32 and ``pass_counts`` [T]; one library serving both programs, the NoPE program's ``nope_bwd_compact``)
+# and the pass build of the main stage (``bwd_main_pass`` / ``nope_bwd_main_pass``, which reads the compacted keys
+# ``key_scratch`` and their counts ``pass_counts``).  Its dQ goes through the FP32 partial ``dq_partial`` [T, 64 * 576]
+# (NoPE: [T, 64 * 512]) between passes: ``dq_mode`` 1 stores it, 2 adds and stores, 3 adds and writes the BF16 dQ (0:
+# one launch, :func:`key_pass_dq_mode`).  dK/dV and the overflow counters are integer sums, so they keep the bits of one
+# launch; dQ, summed through the FP32 partial, can differ from the dQ of one launch in the last FP32 places.  The
+# redo stays one launch over all keys.
+# The pass count is the non-deterministic package's policy (the record's ``key_pass_policy``, :class:`KeyPassPolicy`;
+# the NoPE record's never plans a second pass), with one difference: every pass runs all T tokens in one launch
+# (``token_base = 0``), so a row the policy would run in several token chunks (T above
+# :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.
 # one FP32 dQ / dQ_rope partial row (147,456 B)
 DQ_PARTIAL_BYTES_PER_TOKEN = NUM_HEADS * D_QK * 4
+# The NoPE program carries no rope part: one FP32 dQ partial row is 64 x 512 x 4 B (131,072 B); its record states the
+# value (``key_pass_policy.dq_partial_bytes_per_token``).
+NOPE_DQ_PARTIAL_BYTES_PER_TOKEN = NUM_HEADS * D_LATENT * 4
 KEY_PASS_POLICY_FIELDS = (
     "l2_budget_bytes",
     "key_bytes",
@@ -269,6 +276,9 @@ class KeyPassPolicy:
     token_chunk_multiple: int
     # the formula's count is taken only up to this many passes, else one pass (4)
     max_passes: int
+    # FP32 dQ partial bytes per token of the pass scratch (147,456 with the rope part; the NoPE record states
+    # 131,072)
+    dq_partial_bytes_per_token: int = DQ_PARTIAL_BYTES_PER_TOKEN
     # the per-target rules: ((arch, (tail_rows, fixed_passes, min_kv, tail_min_kv, tail_cap)), ...)
     rules: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
@@ -281,6 +291,10 @@ class KeyPassPolicy:
         if missing:
             raise ValueError(f"registry record: key_pass_policy lacks {missing}")
         values = {name: int(raw[name]) for name in KEY_PASS_POLICY_FIELDS}
+        if "dq_partial_bytes_per_token" in raw:
+            values["dq_partial_bytes_per_token"] = int(
+                raw["dq_partial_bytes_per_token"]
+            )
         if any(v <= 0 for v in values.values()):
             raise ValueError(
                 f"registry record: key_pass_policy needs positive values, got {raw}"
@@ -316,7 +330,7 @@ class KeyPassPolicy:
 
     def token_chunk(self, topk: int) -> int:
         """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget."""
-        per_token = DQ_PARTIAL_BYTES_PER_TOKEN + 4 * int(topk) + 4
+        per_token = self.dq_partial_bytes_per_token + 4 * int(topk) + 4
         m = self.token_chunk_multiple
         return max(m, (self.workspace_budget_bytes // per_token) // m * m)
 
@@ -365,19 +379,21 @@ def plan_key_passes(
     *,
     num_segments: int = 1,
     arch: Optional[str] = None,
+    program: str = cake_jit.PROGRAM,
 ) -> int:
-    """Key-range passes of one RoPE backward.  ``key_passes`` (validated by :func:`_check_key_passes`) overrides the
-    policy; a program without the pass stages (``cake_jit.KEY_PASS_STAGES`` in ``stages``) serves one pass only.
-    Otherwise the record's policy (:meth:`KeyPassPolicy.passes`) decides for a row whose pass scratch fits one token
-    chunk (``T`` within :meth:`KeyPassPolicy.token_chunk`); a longer row, or a record without a policy, takes one
-    pass."""
-    multi_pass = all(stage in stages for stage in cake_jit.KEY_PASS_STAGES)
+    """Key-range passes of one backward of ``program``.  ``key_passes`` (validated by :func:`_check_key_passes`)
+    overrides the policy; a program without the pass stages (``cake_jit.KEY_PASS_STAGES_OF[program]`` in ``stages``)
+    serves one pass only.  Otherwise the record's policy (:meth:`KeyPassPolicy.passes`) decides for a row whose pass
+    scratch fits one token chunk (``T`` within :meth:`KeyPassPolicy.token_chunk`); a longer row, or a record without a
+    policy, takes one pass."""
+    pass_stages = cake_jit.KEY_PASS_STAGES_OF[program]
+    multi_pass = all(stage in stages for stage in pass_stages)
     if key_passes is not None:
         _check_key_passes(key_passes, num_kv)
         if int(key_passes) > 1 and not multi_pass:
             raise NotImplementedError(
                 "the registered DSA training program has no key-range-pass stages "
-                f"({cake_jit.KEY_PASS_STAGES}); key_passes > 1 is unavailable"
+                f"({pass_stages}); key_passes > 1 is unavailable"
             )
         return int(key_passes)
     if int(num_segments) < 1:
@@ -1057,8 +1073,8 @@ def workspace_layout(
     own); ``delta`` (``[T, 64]`` FP32), ``qstat`` (``[T, 4]`` FP32; absent with ``dq_scratch``: it lives in dQ,
     :func:`dq_scratch_layout`) and the global words exist for the backward (``delta`` absent with
     ``delta_in_output``: it lives in the fresh dK/dV output, :func:`output_scratch_layout`), the scratch of a
-    backward of ``key_passes > 1`` key-range passes (``dq_partial``, 147,456 B per token; ``key_scratch``, ``topk``
-    int32 per token; ``pass_counts``) and the accumulator region (:func:`accumulator_region_layout` over
+    backward of ``key_passes > 1`` key-range passes (``dq_partial``, 147,456 B per token, NoPE 131,072 B; ``key_scratch``,
+    ``topk`` int32 per token; ``pass_counts``) and the accumulator region (:func:`accumulator_region_layout` over
     ``num_dst`` destination rows, ``num_kv`` by default; without the key norms with ``dq_scratch``, without the
     redo lists with ``redo_in_output``) unless the runner carves it from ``o_lo`` (``region=False``)."""
     sizes = [] if per_call else [("topk_length", int(num_queries) * 4)]
@@ -1071,7 +1087,7 @@ def workspace_layout(
         if int(key_passes) > 1:
             T = int(num_queries)
             sizes += [
-                ("dq_partial", T * DQ_PARTIAL_BYTES_PER_TOKEN),
+                ("dq_partial", T * dq_partial_bytes(program)),
                 ("key_scratch", T * int(topk) * 4),
                 ("pass_counts", T * 4),
             ]
@@ -1093,6 +1109,14 @@ def workspace_layout(
     return _layout_of(sizes)
 
 
+def dq_partial_bytes(program: str) -> int:
+    """FP32 dQ partial bytes per token of a key-range-pass backward of ``program``: :data:`DQ_PARTIAL_BYTES_PER_TOKEN`
+    with the rope part, :data:`NOPE_DQ_PARTIAL_BYTES_PER_TOKEN` for the NoPE program."""
+    if program == cake_jit.NOPE_PROGRAM:
+        return NOPE_DQ_PARTIAL_BYTES_PER_TOKEN
+    return DQ_PARTIAL_BYTES_PER_TOKEN
+
+
 def workspace_layout_nope(
     num_queries: int,
     num_kv: int,
@@ -1103,10 +1127,12 @@ def workspace_layout_nope(
     region: bool = True,
     accumulator: bool = True,
     dq_scratch: bool = False,
+    key_passes: int = 1,
     per_call: bool = False,
 ) -> dict:
     """:func:`workspace_layout` of a NoPE runner (``accumulator=False`` for a fresh ``dkv``, its own accumulator;
-    the redo lists always in the region: a fresh NoPE ``dkv`` holds the integer accumulator)."""
+    the redo lists always in the region: a fresh NoPE ``dkv`` holds the integer accumulator; the key-range-pass
+    scratch with :data:`NOPE_DQ_PARTIAL_BYTES_PER_TOKEN` of dQ partial per token)."""
     return workspace_layout(
         num_queries,
         num_kv,
@@ -1117,6 +1143,7 @@ def workspace_layout_nope(
         program=cake_jit.NOPE_PROGRAM,
         accumulator=accumulator,
         dq_scratch=dq_scratch,
+        key_passes=key_passes,
         per_call=per_call,
     )
 
@@ -1234,12 +1261,27 @@ def dsa_nope_train_workspace_size(
     o_lo_scratch: bool = False,
 ) -> int:
     """Workspace bytes :func:`prepare_dsa_nope_train` needs for ``(T, S, K_slots)`` on ``device``: as
-    :func:`dsa_train_workspace_size`; without ``dkv_acc`` the fresh ``dkv`` is its own accumulator, so the region
-    holds the per-row words only (the key norms in dQ when they fit it)."""
-    record_for(device, cake_jit.NOPE_PROGRAM)
+    :func:`dsa_train_workspace_size` (``key_passes`` and ``num_segments`` select the key-range passes, whose scratch
+    is part of the workspace); without ``dkv_acc`` the fresh ``dkv`` is its own accumulator, so the region holds the
+    per-row words only (the key norms in dQ when they fit it)."""
+    _module_name, record = record_for(device, cake_jit.NOPE_PROGRAM)
     _check_key_passes(key_passes, num_kv)
     _check_dkv_direct(dkv_direct)
-    del num_segments
+    passes = (
+        plan_key_passes(
+            record,
+            cake_jit.registered_stages(cake_jit.NOPE_PROGRAM),
+            num_queries,
+            num_kv,
+            topk,
+            key_passes,
+            num_segments=num_segments,
+            arch=arch_for(device),
+            program=cake_jit.NOPE_PROGRAM,
+        )
+        if backward
+        else 1
+    )
     R = int(num_kv) if num_dst is None else int(num_dst)
     accumulator = bool(dkv_acc)
     dq_scratch = dq_scratch_layout(num_queries, num_kv) is not None
@@ -1262,6 +1304,7 @@ def dsa_nope_train_workspace_size(
             region=storage == "workspace",
             accumulator=accumulator,
             dq_scratch=dq_scratch,
+            key_passes=passes,
         )["total"]
     )
 
@@ -2251,7 +2294,7 @@ def _scratch(
             layout,
             "dq_partial",
             torch.float32,
-            (T, DQ_PARTIAL_BYTES_PER_TOKEN // 4),
+            (T, dq_partial_bytes(plan.program) // 4),
         )
         t["key_scratch"] = _carve(
             flat, layout, "key_scratch", torch.int32, (T, plan.topk)
@@ -2305,12 +2348,12 @@ def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
 def _pass_values(
     plan: _Plan, stage: str, index: int, values: dict[str, Any]
 ) -> dict[str, Any]:
-    """The launch values of pass ``index`` of ``stage`` (``bwd_compact`` / ``bwd_main_pass``): the key range of the
-    pass for the compaction (over the caller's indices and lengths); the compacted keys for the main stage
-    (``indices = key_scratch`` with row stride ``topk``, ``topk_length = pass_counts``) and the pass's
-    ``dq_mode``."""
+    """The launch values of pass ``index`` of ``stage`` (``bwd_compact`` / ``bwd_main_pass``, the NoPE program's
+    ``nope_`` forms): the key range of the pass for the compaction (over the caller's indices and lengths); the
+    compacted keys for the main stage (``indices = key_scratch`` with row stride ``topk``, ``topk_length =
+    pass_counts``) and the pass's ``dq_mode``."""
     override = plan.pass_overrides[index]
-    if stage == "bwd_compact":
+    if stage.removeprefix(cake_jit.STAGE_PREFIX[plan.program]) == "bwd_compact":
         return dict(values, pass_lo=override["pass_lo"], pass_hi=override["pass_hi"])
     return dict(
         values,
@@ -2607,18 +2650,18 @@ def prepare_dsa_train(
     ``key_passes`` and ``num_segments`` select the key-range passes of the
     backward (:func:`plan_key_passes`: the non-deterministic package's policy
     for a row of one token chunk, ``key_passes`` overriding it); the dK/dV bits
-    do not depend on them, and dQ is the non-deterministic package's dQ of the
-    same passes.  ``dkv_direct`` is accepted for parity with that package and
+    do not depend on them, and dQ is summed through an FP32 partial between
+    passes.  ``dkv_direct`` is accepted for parity with that package and
     validated as there; the accumulation has one form here.
 
     Row lengths: with ``topk_length`` the kernels use the caller's lengths.
     Without it the forward kernel derives them itself (last valid slot + 1 per
     row) into the binding's own ``[T]`` vector while it runs and skips the
-    trailing invalid key blocks; the backward stages of such a binding treat
-    every slot as potentially valid (the results are those of the full row
-    either way).  ``derive_topk_length=True`` makes the forward derive the
-    lengths into the caller's ``topk_length`` tensor instead (its contents are
-    ignored on entry), so a training step can hand them to its backward.
+    trailing invalid key blocks (they hold only invalid slots); the backward
+    stages of such a binding treat every slot as potentially valid.
+    ``derive_topk_length=True`` makes the forward derive the lengths into the
+    caller's ``topk_length`` tensor instead (its contents are ignored on
+    entry), so a training step can hand them to its backward.
     """
     if backend != "cake":
         raise ValueError("DSA sparse-attention training supports backend='cake'")
@@ -3688,9 +3731,11 @@ def nope_bwd_launch_grid(num_queries: int, num_kv_in_pass: int, sm_count: int) -
     return int(num_queries)
 
 
-# The NoPE backward stages launched with a persistent grid instead of the generated rule, and their grid.
+# The NoPE backward stages launched with a persistent grid instead of the generated rule, and their grid (a key-range
+# pass launch takes the main stage's grid over the row's ``num_kv``, as the non-deterministic package's NoPE passes).
 NOPE_PERSISTENT_GRIDS: dict[str, Callable[[int, int, int], int]] = {
     "nope_bwd_main": nope_bwd_launch_grid,
+    "nope_bwd_main_pass": nope_bwd_launch_grid,
     "nope_bwd_redo": lambda num_queries, num_kv, sm_count: redo_launch_grid(
         num_queries, sm_count
     ),
@@ -3741,8 +3786,8 @@ def _plan_nope(
     o_lo_scratch: bool = False,
 ) -> _Plan:
     """Validate one NoPE geometry and resolve its plan (no allocation, no launch).  ``check_dst_map`` /
-    ``o_lo_scratch`` as in :func:`prepare_dsa_nope_train`; ``key_passes``, ``num_segments`` and ``dkv_direct`` are
-    validated and otherwise unused."""
+    ``o_lo_scratch`` as in :func:`prepare_dsa_nope_train`; ``key_passes`` and ``num_segments`` select the key-range
+    passes (:func:`plan_key_passes` over the NoPE record); ``dkv_direct`` is validated and otherwise unused."""
     program = cake_jit.NOPE_PROGRAM
     if derive_topk_length and topk_length is None:
         raise ValueError(
@@ -3753,7 +3798,6 @@ def _plan_nope(
     )
     _check_key_passes(key_passes, num_kv)
     _check_dkv_direct(dkv_direct)
-    del num_segments
     if backward and dout is None:
         raise ValueError("a backward binding needs dout")
     accumulate = dkv_acc is not None
@@ -3781,7 +3825,7 @@ def _plan_nope(
     tensors += list(outputs.values())
     if not all(t.is_cuda and t.device == device for t in tensors if t is not None):
         raise ValueError("Expected all tensors on one CUDA device")
-    module_name, _record = record_for(device, program)
+    module_name, record = record_for(device, program)
     arch = arch_for(device)
     stages = cake_jit.registered_stages(program)
     if not generated_program_available(device, backward=backward, program=program):
@@ -3841,6 +3885,21 @@ def _plan_nope(
     )
     if backward:
         _check_accumulator_span(num_dst, D_LATENT, dst_row_stride)
+    passes = (
+        plan_key_passes(
+            record,
+            stages,
+            num_queries,
+            num_kv,
+            topk,
+            key_passes,
+            num_segments=num_segments,
+            arch=arch,
+            program=program,
+        )
+        if backward
+        else 1
+    )
     layout, call_layout = (
         workspace_layout_nope(
             num_queries,
@@ -3851,6 +3910,7 @@ def _plan_nope(
             region=storage == "workspace",
             accumulator=own_accumulator,
             dq_scratch=dq_scratch,
+            key_passes=passes,
             per_call=per_call,
         )
         for per_call in (False, True)
@@ -3884,8 +3944,11 @@ def _plan_nope(
         search_iters=1,
         causal=0,
         convert=0,
-        **token_order(T, arch, True, "nope"),  # the persistent loop (one key pass)
-        # the single key pass of the main stage (the pass operands are never read)
+        # the persistent loop's token order: descending only for a single key pass (a multi-pass backward's
+        # compacted keys, partial dQ and pass counts are rows of the launch order, ascending)
+        **token_order(T, arch, passes == 1, "nope"),
+        # the single key pass of the main stage (its pass operands are never read); a multi-pass backward's
+        # launches take their pass's values (:func:`_pass_values`)
         pass_lo=0,
         pass_hi=S,
         dq_mode=0,
@@ -3908,16 +3971,32 @@ def _plan_nope(
         )
     fwd = cake_jit.stage_name("fwd", program)
     entries: dict[str, _StageEntry] = {fwd: _stage_entry(fwd, arch, scalars, program)}
-    backward_order: tuple[str, ...] = ()
+    backward_order: tuple = ()
+    pass_overrides: tuple[dict[str, int], ...] = ()
     if backward:
         accumulated = accumulate_stages(
             cake_jit.NOPE_BACKWARD_STAGES, program, fold_mode == FOLD_ACCUMULATE
         )
+        if passes > 1:
+            # the compaction and the pass build of the main stage per key range, in place of nope_bwd_main
+            pass_overrides = tuple(
+                dict(pass_lo=lo, pass_hi=hi, dq_mode=key_pass_dq_mode(index, passes))
+                for index, (lo, hi) in enumerate(key_pass_ranges(S, passes))
+            )
+            main = accumulated.index(cake_jit.stage_name("bwd_main", program))
+            accumulated[main : main + 1] = [
+                (stage, index)
+                for index in range(passes)
+                for stage in cake_jit.KEY_PASS_STAGES_OF[program]
+            ]
         backward_order = _nope_pipe_order(
             _pack27_order(tuple(accumulated), program, T, topk), program, arch
         )
         sm_count = _sm_count(_device_index(device))
-        for stage in backward_order:
+        for key in backward_order:
+            stage = key[0] if isinstance(key, tuple) else key
+            if stage in entries:
+                continue
             rule = NOPE_PERSISTENT_GRIDS.get(stage)
             grid = (rule(T, S, sm_count), 1, 1) if rule is not None else None
             entries[stage] = _stage_entry(stage, arch, scalars, program, grid)
@@ -3945,6 +4024,8 @@ def _plan_nope(
         region=region,
         dq_scratch=dq_scratch,
         redo_in_output=redo_in_output,
+        key_passes=passes,
+        pass_overrides=pass_overrides,
         call_layout=call_layout,
         fold_mode=fold_mode,
         forward_stages=cake_jit.NOPE_FORWARD_STAGES,
@@ -3972,8 +4053,8 @@ def _inert_cu_seqlens(device: torch.device) -> torch.Tensor:
 def _bound_values_nope(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
     """Launch values of a NoPE ``plan`` over the tensors ``t`` (the kernels' own argument names): those of
     :func:`_bound_values` (the integer accumulator -- the region's ``acc``, or the int32 view of the fresh ``dkv`` --
-    as ``dkv_acc``, its grid exponents as ``e_dkv``), the converting forward's inert operands and the never-read
-    pass operands of the main stage."""
+    as ``dkv_acc``, its grid exponents as ``e_dkv``), the converting forward's inert operands and the pass operands
+    of the main stage: the key-range-pass scratch of a multi-pass plan, else never-read placeholders."""
     values = _bound_values(plan, t)
     # the converting forward's pointer operands under ``convert = 0``: the index operand stands as ``indices_out``
     # -- as the contiguous span of its storage when the rows are a strided view (a column slice of a wider
@@ -3989,11 +4070,14 @@ def _bound_values_nope(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any
         values.update(
             e_dkv=t["e_lat"],
             dst_latent_f32=t["dkv"] if plan.fresh_dkv else values["dst_latent_f32"],
-            # the single pass never reads its pass operands: contiguous tensors of the argument dtypes
-            dq_partial=t["delta"],
-            key_scratch=t["topk_length"],
-            pass_counts=t["topk_length"],
         )
+        if "dq_partial" not in t:
+            # the single pass never reads its pass operands: contiguous tensors of the argument dtypes
+            values.update(
+                dq_partial=t["delta"],
+                key_scratch=t["topk_length"],
+                pass_counts=t["topk_length"],
+            )
     return values
 
 
@@ -4066,8 +4150,9 @@ def prepare_dsa_nope_train(
     :func:`_check_dkv_acc`), ADDS the gradient into columns ``0:512`` of row ``dkv_dst_map[s]`` (optional int32
     ``[S]``; identity by default; repeated rows combine exactly) and returns ``None`` for ``dkv``; the caller owns
     the zeroing of ``dkv_acc``.  ``o_lo_scratch``, ``check_dst_map``, ``derive_topk_length``, the row length
-    semantics and the parity keywords ``key_passes`` / ``num_segments`` / ``dkv_direct`` as in
-    :func:`prepare_dsa_train`.
+    semantics, ``key_passes`` / ``num_segments`` (the key-range passes over the NoPE record's policy, which never
+    plans a second pass: ``key_passes > 1`` asks for them, with their scratch in the workspace) and the parity
+    keyword ``dkv_direct`` as in :func:`prepare_dsa_train`.
     """
     if backend != "cake":
         raise ValueError("DSA sparse-attention training supports backend='cake'")
@@ -4157,6 +4242,7 @@ def prepare_dsa_nope_train(
         forward_stages=plan.forward_stages,
         num_dst=plan.num_dst,
         storage=_bound_storage(plan, o_lo),
+        key_passes=plan.key_passes,
         fresh_dkv=plan.fresh_dkv,
     )
 
@@ -4200,10 +4286,10 @@ def backward_binding_key_nope(
     o_lo_scratch: bool = False,
 ) -> tuple:
     """Cache key of a NoPE backward plan (tag ``"nope_bwd"``): the forward key's inputs plus the saved outputs,
-    ``dout``, the geometry of ``dkv_acc`` / ``dkv_dst_map`` (``None`` when absent) and whether the call consumes
-    ``o_lo``.  ``key_passes``, ``num_segments`` and ``dkv_direct`` do not change the plan and are not part of the
-    key."""
-    del key_passes, num_segments, dkv_direct
+    ``dout``, the geometry of ``dkv_acc`` / ``dkv_dst_map`` (``None`` when absent), whether the call consumes
+    ``o_lo`` and what selects the key-range passes (``key_passes``; whether ``num_segments`` exceeds 1).
+    ``dkv_direct`` does not change the plan and is not part of the key."""
+    del dkv_direct
     return (
         "nope_bwd",
         _geometry(q_latent),
@@ -4218,6 +4304,8 @@ def backward_binding_key_nope(
         _geometry(dkv_acc),
         _geometry(dkv_dst_map),
         bool(o_lo_scratch),
+        None if key_passes is None else int(key_passes),
+        int(num_segments) > 1,
     )
 
 
@@ -4447,13 +4535,14 @@ def forward_nope(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """NoPE forward pass: ``(out, lse, o_lo)``.
 
-    ``q_latent`` BF16 ``[T, 64, 512]``, ``kv_latent`` BF16 ``[S, 512]`` (the shared latent, K = V), ``indices``
-    int32 ``[T, K_slots]`` global key rows (any ``K_slots >= 1``; ``-1`` / ``>= S`` invalid).  ``softmax_scale``
-    defaults to 1/16.  A fully masked row gives ``out = 0`` and ``lse = -inf``.  Allocates the outputs (or writes
-    the given ``out`` / ``lse`` / ``o_lo``, all three or none) and launches over the remembered plan of the input
-    geometry; a call without query rows returns empty outputs without launching.  ``topk_length`` /
-    ``derive_topk_length`` as in :func:`forward`.
+    ``q_latent`` BF16 ``[T, 64, 512]``, ``kv_latent`` BF16 ``[S, 512]`` or ``[S, 1, 512]`` (the shared latent,
+    K = V), ``indices`` int32 ``[T, K_slots]`` global key rows (any ``K_slots >= 1``; ``-1`` / ``>= S`` invalid).
+    ``softmax_scale`` defaults to 1/16.  A fully masked row gives ``out = 0`` and ``lse = -inf``.  Allocates the
+    outputs (or writes the given ``out`` / ``lse`` / ``o_lo``, all three or none) and launches over the remembered
+    plan of the input geometry; a call without query rows returns empty outputs without launching.
+    ``topk_length`` / ``derive_topk_length`` as in :func:`forward`.
     """
+    kv_latent = _kv_latent_rows(kv_latent)
     if derive_topk_length and topk_length is None:
         raise ValueError(
             "derive_topk_length=True needs a topk_length [T] int32 tensor for the forward to fill"
@@ -4526,11 +4615,13 @@ def backward_nope(
 
     ``dout`` may be a head-major view (strides ``[512, T * 512, 1]``) or any strided ``[T, 64, 512]`` view the
     layout rules admit: it is read in place (no host copy; the delta stage takes its token / head strides).
-    ``check_dst_map`` and ``o_lo_scratch`` as in :func:`backward`; ``key_passes``, ``num_segments`` and
-    ``dkv_direct`` are accepted for parity with the non-deterministic package (validated, otherwise unused).  A
-    call without query rows returns an empty ``dq`` and a zero ``dkv`` (``None`` with ``dkv_acc``) without
-    launching.
+    ``check_dst_map``, ``o_lo_scratch``, ``key_passes`` and ``num_segments`` as in :func:`backward` (the key-range
+    passes over the NoPE record's policy, which never plans a second pass: ``key_passes > 1`` asks for them; dK/dV
+    keep the bits of one pass); ``dkv_direct`` is accepted for parity with the non-deterministic package (validated,
+    otherwise unused).  A call without query rows returns an empty ``dq`` and a zero ``dkv`` (``None`` with
+    ``dkv_acc``) without launching.
     """
+    kv_latent = _kv_latent_rows(kv_latent)
     if dkv_dst_map is not None and dkv_acc is None:
         raise ValueError("dkv_dst_map is only meaningful together with dkv_acc")
     _check_key_passes(key_passes, int(kv_latent.shape[0]))
@@ -4560,6 +4651,8 @@ def backward_nope(
         dout,
         topk_length,
         scale,
+        key_passes=key_passes,
+        num_segments=num_segments,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
         o_lo_scratch=o_lo_scratch,
@@ -4697,6 +4790,8 @@ class CakeDSASparseAttentionDetNopeFunction(torch.autograd.Function):
             dkv_dst_map,
             check_dst_map,
             replay_derive,
+            key_passes=key_passes,
+            num_segments=num_segments,
         )
         return out, lse
 
@@ -4740,6 +4835,8 @@ class _NopeBackwardPrep:
         "operands",
         "replay_derive",
         "o_lo_spent",
+        "key_passes",
+        "num_segments",
     )
 
     def __init__(
@@ -4757,10 +4854,16 @@ class _NopeBackwardPrep:
         dkv_dst_map,
         check_dst_map,
         replay_derive=False,
+        *,
+        key_passes=None,
+        num_segments=1,
     ):
         if dkv_dst_map is not None and dkv_acc is None:
             raise ValueError("dkv_dst_map is only meaningful together with dkv_acc")
         self.softmax_scale = float(softmax_scale)
+        # what selects the backward's key-range passes (:func:`plan_key_passes`), validated by the caller
+        self.key_passes = None if key_passes is None else int(key_passes)
+        self.num_segments = int(num_segments)
         self.check_dst_map = bool(check_dst_map)
         self.replay_derive = bool(replay_derive)
         self.o_lo_spent = False
@@ -4850,6 +4953,8 @@ class _NopeBackwardPrep:
             dout,
             topk_length,
             self.softmax_scale,
+            key_passes=self.key_passes,
+            num_segments=self.num_segments,
             dkv_acc=dkv_acc,
             dkv_dst_map=dst_map,
             o_lo_scratch=True,
@@ -4865,9 +4970,10 @@ class _NopeBackwardPrep:
                 softmax_scale=self.softmax_scale,
                 outputs=dict(out=out, lse=lse, o_lo=o_lo),
                 backward=True,
-                key_passes=None,
+                key_passes=self.key_passes,
                 dkv_acc=dkv_acc,
                 dkv_dst_map=dst_map,
+                num_segments=self.num_segments,
                 o_lo_scratch=True,
             ),
             _NopeBinding,
@@ -5701,7 +5807,6 @@ class CakeDSASparseAttentionDetNopeVarlenFunction(torch.autograd.Function):
     ):
         _check_key_passes(key_passes, int(kv_latent.shape[0]))
         _check_dkv_direct(dkv_direct)
-        del num_segments
         out, lse, o_lo, indices, lengths = _packed_forward_nope(
             q_latent,
             kv_latent,
@@ -5728,6 +5833,8 @@ class CakeDSASparseAttentionDetNopeVarlenFunction(torch.autograd.Function):
             dkv_acc,
             dkv_dst_map,
             check_dst_map,
+            key_passes=key_passes,
+            num_segments=num_segments,
         )
         return out, lse
 
