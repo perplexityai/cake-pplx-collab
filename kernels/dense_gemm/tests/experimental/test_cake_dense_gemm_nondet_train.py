@@ -3435,6 +3435,7 @@ def test_k1_promote_exempt_rows_keep_the_program_without_promotion(monkeypatch):
             assert plan is None, what
         else:
             assert fields(T, 5120, 1024, sm_count) == plain, what
+            assert fields(T, 5120, 1024, sm_count, promote=True) == promoted, what
         assert fields(T, 5120, 1024, sm_count, **one) == plain, what
         assert fields(T, 5120, 1024, sm_count, promote=True, **one) == promoted, what
         assert fields(T, 4096, 1024, sm_count, **one) == promoted, what
