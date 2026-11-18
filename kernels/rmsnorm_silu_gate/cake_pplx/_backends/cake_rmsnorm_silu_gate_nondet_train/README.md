@@ -503,7 +503,9 @@ The repeatable backwards (BF16 and FP32) and their long programs lay three,
 | `bwd_bf16_rc` | `dw_sums` and `dw_done`, 2056 bytes | (no program) |
 | `bwd_bf16_rc_mid` | `dw_sums` and `dw_done`, 2056 bytes | (no program) |
 | `bwd_bf16_mid` | 4 slots, 29192 bytes | 4 slots, 29192 bytes |
-| `bwd_bf16_short_nodw`, `bwd_bf16_t512_nodw`, `bwd_bf16_fused_nodw_strided`, `bwd_bf16_rep_nodw_strided` | none | none |
+| `bwd_bf16_short_nodw`, `bwd_bf16_fused_nodw_strided` | none | none |
+| `bwd_bf16_t512_nodw` | none (`sm_100a`; no program on `sm_103a`) | none |
+| `bwd_bf16_rep_nodw_strided` | (no program) | none |
 | `bwd_bf16_fused_nodw` | `dw_sums` and `dw_done`, 4104 bytes | (no program) |
 | `bwd_bf16_rep_nodw` | `acc`, `flags` and `done`, 18952 bytes | (no program) |
 | `bwd_bf16_rep_nodw_long` | `acc`, `flags` and `done`, 18952 bytes | `acc`, `flags` and `done`, 18952 bytes |

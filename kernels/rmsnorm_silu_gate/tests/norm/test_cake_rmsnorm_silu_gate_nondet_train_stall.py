@@ -111,11 +111,14 @@ SM100 and SM103, 1536 on SM107) run its long role (``bwd_bf16_rep_long`` or
 ``bwd_f32_rep_long``: the deterministic package's look-ahead program of the
 same build, the same grid, block schedule and bits).  A call with
 ``compute_grad_weight=False`` (stage ``backward_nodw``) runs its band's
-program without the weight gradient: one cluster in a small-row band, in the
-fused and the repeatable bands up to their cut of rows per SM (at every row
-count where the band routes no claimed program) a strided program of the
-band's grid, each CTA walking its 16-row blocks with no claim and no ticket,
-past it the claimed program.  Beside a long-resident
+program without the weight gradient: one cluster in a small-row band; on
+SM100 and SM103 in the fused band up to its cut of rows per SM a strided
+program of the band's grid, each CTA walking its 16-row blocks with no claim
+and no ticket, past it the claimed program, and in the repeatable band the
+claimed program at every row count; on SM107, which routes no claimed
+program, the strided program in the fused and the repeatable bands; and on
+packed rows of the repeatable band's long role the long program without the
+weight gradient.  Beside a long-resident
 one-thread kernel on another stream each call must keep its speed: per token
 count, the median of seven event-timed calls with the side kernel resident is
 at most ``MAX_RATIO`` times the median of seven calls alone, or at most

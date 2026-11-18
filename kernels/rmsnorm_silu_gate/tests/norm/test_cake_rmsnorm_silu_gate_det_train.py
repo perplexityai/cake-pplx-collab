@@ -834,8 +834,10 @@ def test_backward_route_follows_the_layout_and_rows(layout, launches):
     fewer, on strided, head-major and broadcast inputs and for a single
     token, for a BF16 and an FP32 weight gradient, accumulated or not, and
     for ``compute_grad_weight=False`` the program ``nodw_module`` names for
-    that module; the workspace is zero after the calls, and the long modules
-    give the bits of the role's modules on the same calls."""
+    that module, whose ``dx`` and ``dz`` are the bits of the first call's (a
+    BF16 weight gradient) on every layout; the workspace is zero after the
+    calls, and the long modules give the bits of the role's modules on the
+    same calls."""
     arch, sms = _device()
     start = LONG_MIN_ROWS_PER_SM[arch] * sms
     H = 48
@@ -865,6 +867,10 @@ def test_backward_route_follows_the_layout_and_rows(layout, launches):
     want = _long_call_modules(arch, suffix, rows, sms)
     assert launches == want, (layout, launches)
     assert_zero(ws)
+    # _long_calls' third call (compute_grad_weight=False, outputs 6 and 7)
+    # against its first (a BF16 weight gradient, outputs 0 and 1)
+    for i, what in ((6, "dx"), (7, "dz")):
+        assert_same_bits(got[i], got[i - 6], f"{layout} ({rows} rows): nodw {what}")
     if not long:
         return
     with pytest.MonkeyPatch.context() as patch:
@@ -1408,6 +1414,72 @@ def test_programs_without_the_weight_gradient_give_the_bits_at_the_cut(
             assert_same_bits(dx, dx_d, f"{what}: dx")
             assert_same_bits(dz, dz_d, f"{what}: dz")
             assert_zero(ws, f"the workspace after {what}")
+
+
+# Inputs the backward reads with their own head and token strides (a gate and
+# ``grad_out`` sliced from projections, head-major ``x`` and ``z``, ``grad_out``
+# alone sliced from a projection, a token-stride-0 broadcast of ``x`` and
+# ``z``, one token of many heads) and as packed rows (contiguous).
+NODW_INPUT_LAYOUTS = (
+    "contiguous",
+    "projection",
+    "head_major",
+    "dy_projection",
+    "broadcast",
+    "single_token",
+)
+
+
+def _nodw_inputs(layout, tokens, H, seed):
+    """``(x, z, w, dy)`` of ``tokens`` tokens of ``H`` heads in the
+    ``NODW_INPUT_LAYOUTS`` layout ``layout`` (``single_token``: one token of
+    ``tokens * H`` heads)."""
+    if layout == "single_token":
+        return make(1, tokens * H, seed=seed)
+    if layout == "broadcast":
+        x, z, w, _ = make(1, H, seed=seed)
+        dy = make(tokens, H, seed=seed + 1)[3]
+        return x.expand(tokens, H, D), z.expand(tokens, H, D), w, dy
+    if layout == "dy_projection":
+        x, z, w, _ = make(tokens, H, seed=seed)
+        return x, z, w, make(tokens, H, layout="projection", seed=seed + 1)[3]
+    return make(tokens, H, layout=layout, seed=seed)
+
+
+@pytest.mark.parametrize("program", ["strided", "claimed"])
+@pytest.mark.parametrize("layout", NODW_INPUT_LAYOUTS)
+def test_programs_without_the_weight_gradient_on_strided_inputs(
+    layout, program, launches
+):
+    """On ``NODW_INPUT_LAYOUTS`` inputs of 48 heads, 65 tokens (up to the cut
+    on every product that has one) for the strided program and a token past
+    the cut for the claimed one (where routed): a call with
+    ``compute_grad_weight=False`` runs that program, gives the ``dx`` and
+    ``dz`` bits of the BF16 call that computes the weight gradient on the
+    same inputs and leaves a caller workspace zero."""
+    arch, sms = _device()
+    routes = loader.ROUTES[arch]
+    H = 48
+    if program == "strided":
+        cut = _nodw_cut(arch)
+        tokens = 65
+    else:
+        cut = _claimed_cut(arch)
+        tokens = cut * sms // H + 1
+    x, z, w, dy = _nodw_inputs(layout, tokens, H, seed=46)
+    rows = x.numel() // D
+    assert cut is None or (rows <= cut * sms) == (program == "strided"), rows
+    want = routes[NODW_STRIDED if program == "strided" else NODW_CLAIMED]
+    ws = workspace_for(rows, x.device)
+    launches.clear()
+    dx_d, dz_d, _ = backward(dy, x, z, w, EPS, workspace=ws)
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
+    what = f"{layout} ({rows} rows, {program})"
+    assert launches == [routes["bwd_bf16"], want], (what, launches)
+    assert dw is None
+    assert_same_bits(dx, dx_d, f"{what}: dx")
+    assert_same_bits(dz, dz_d, f"{what}: dz")
+    assert_zero(ws, f"the workspace after {what}")
 
 
 @pytest.mark.parametrize("ctas", [1, 3, 7])

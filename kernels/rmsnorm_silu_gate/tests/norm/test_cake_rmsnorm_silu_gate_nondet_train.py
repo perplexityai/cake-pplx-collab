@@ -1258,6 +1258,56 @@ def test_one_cluster_programs_without_the_weight_gradient(band, launches):
         assert torch.equal(dz, dz_d), f"{band} at {rows} rows: dz"
 
 
+# The BF16 bands of a call with ``compute_grad_weight=False`` and the layouts
+# of ``BULK_BAND_CASES`` (:func:`_bulk_band_shape`: 64 heads, a gate and
+# ``grad_out`` sliced from projections, head-major ``x`` and ``z``, one token
+# of many heads, contiguous tokens; a long role's band packed rows only).
+NODW_LAYOUT_CASES = [
+    pytest.param(band, layout, id=f"{band}-{layout}")
+    for band in (
+        "bwd_bf16_short",
+        "bwd_bf16_t512",
+        "bwd_bf16_fused",
+        "bwd_bf16_rep",
+        "bwd_bf16_rep_long",
+    )
+    for layout in ("projection", "head_major", "one_token", "contiguous")
+]
+
+
+@pytest.mark.parametrize("band,layout", NODW_LAYOUT_CASES)
+def test_programs_without_the_weight_gradient_on_strided_layouts(
+    band, layout, launches
+):
+    """``NODW_LAYOUT_CASES`` at the band's first rows of 64 heads on this
+    device: a call with ``compute_grad_weight=False`` runs the program
+    ``nodw_module`` names for the band's module (one cluster, strided,
+    claimed or look-ahead; skipped where this device routes no such band or
+    shape), gives the ``dx`` and ``dz`` bits of the BF16 call on the band's
+    module on the same inputs and leaves a caller workspace zero."""
+    shape = _bulk_band_shape(band, layout)
+    if shape is None:
+        pytest.skip(f"this device routes no {band} band with a {layout} input")
+    T, H, layout = shape
+    rows = T * H
+    name = _backward_module(rows, packed=_backward_packed(T, H, layout))
+    assert name == _routes()[band], (rows, name)
+    nodw = _nodw_module(name, rows)
+    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, (band, nodw)
+    x, z, w, dy = make(T, H, layout=layout, seed=91)
+    ws = workspace_for(rows, x.device)
+    launches.clear()
+    dx_d, dz_d, _ = backward(dy, x, z, w, EPS, workspace=ws)
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
+    what = f"{band} ({layout}, {T} x {H})"
+    assert launches == [name, nodw], (what, launches)
+    assert dw is None
+    assert torch.equal(dx, dx_d), f"{what}: dx"
+    assert torch.equal(dz, dz_d), f"{what}: dz"
+    torch.cuda.synchronize()
+    assert not bool(ws.any()), f"the workspace after {what}"
+
+
 # The band roles of the backwards that run on a workspace: the static
 # backwards (the call roles: ``bwd_f32`` on sm_100a and sm_103a; ``bwd_bf16``,
 # which no band runs: skipped), the row-claims backwards and the claimed
@@ -4621,8 +4671,8 @@ def test_backward_alerts_under_deterministic_algorithms(band, edge, launches):
     of the call with the mode off, ``dw`` a finite BF16 weight gradient (the
     accuracy of these bands' weight gradient is judged by the band tests).  The
     forward, the workspace entry points, the reset, the support query, the
-    backward without the weight gradient (on the same row-claims module) and
-    with an FP32 one, and the autograd backward of a weight that needs no
+    backward without the weight gradient (the band's program built without
+    it, ``nodw_module``) and with an FP32 one, and the autograd backward of a weight that needs no
     gradient run without a warning."""
     found = _device_band(band)
     if found is None:

@@ -84,7 +84,8 @@ and writes no workspace word.  No module is cooperative, and none waits for anot
 CTA or grid inside a kernel.  A kernel resident on another stream delays a
 call roughly by its share of the SMs; a forward CTA whose slot such a kernel
 holds walks all of its blocks once it starts, and a backward CTA that starts
-late claims only the chunks left.
+late claims only the chunks left (a strided program's CTA, which claims
+none, runs all of its own blocks once it starts).
 
 The program name ``cake_rmsnorm_silu_gate_det_train_<20 hex>`` is the first twenty
 hex digits of the SHA-256 of the compact JSON ``{"build": <build keywords,

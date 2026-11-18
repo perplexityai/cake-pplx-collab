@@ -141,7 +141,9 @@ Host design (every control is a keyword; no environment variable):
   current torch stream.  No launch is cooperative or uses programmatic
   dependent launch, and no CTA waits for another CTA: beside a kernel resident
   on another stream, a backward CTA that is not resident yet starts as any of
-  the backward's CTAs exits and claims only the blocks left.
+  the backward's CTAs exits and claims only the blocks left (a CTA of the
+  strided program without the weight gradient, which claims none, runs all of
+  its own blocks once it starts).
 - Mode: the mode is part of the name (``det``).  Every entry point is
   deterministic and takes no ``deterministic`` keyword (passing one is a
   ``TypeError``); every launch gives the same bits for the same inputs on

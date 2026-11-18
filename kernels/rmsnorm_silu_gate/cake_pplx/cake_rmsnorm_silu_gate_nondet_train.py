@@ -601,10 +601,12 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
         of the BF16 call that computes it; it touches no ``grad_weight``.  A
         call of up to 512 rows (256 on SM103) runs a one-cluster program, a
         call in the fused band up to 512 rows per SM on SM100 and 448 on
-        SM103, or in the fused or the repeatable band on SM107, a strided
-        program; neither uses a workspace (a ``workspace`` passed is checked
-        and left as it is).  The claimed program (past those cuts, and in the
-        repeatable band on SM100 and SM103) and the look-ahead one take the
+        SM103, or in the fused or the repeatable band on SM107 (but for the
+        look-ahead program's packed rows), a strided program; neither uses a
+        workspace (a ``workspace`` passed is checked and left as it is).  The
+        claimed program (past those cuts, and in the repeatable band on SM100
+        and SM103) and the look-ahead one (packed rows of the repeatable band
+        from 2560 rows per SM on SM100 and SM103 and 1536 on SM107) take the
         arrival ticket and claim blocks from the claim counter, so they use a
         workspace too (and leave it zero).
     workspace : torch.Tensor, optional

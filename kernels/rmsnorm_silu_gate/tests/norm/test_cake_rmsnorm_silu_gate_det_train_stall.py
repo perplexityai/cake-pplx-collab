@@ -28,7 +28,8 @@ resident late takes only the blocks left.  A backward with
 without the weight gradient: up to its cut of rows per SM, and on an
 architecture without a claimed program at every row count, the strided
 program (the backward's grid, each CTA walking its row blocks with no claim
-and no ticket), past it the claimed program.  No kernel
+and no ticket), past it the claimed program, and packed rows from the long
+modules' rows per SM the long program without the weight gradient.  No kernel
 waits for another CTA or grid, so none needs the whole device.  Beside a
 long-resident one-thread kernel on another stream each call must keep its
 speed: per token count, the median of seven event-timed calls with the side

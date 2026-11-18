@@ -1279,8 +1279,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd_bf16_short",
     },
-    # The exact small-row backward into a BF16 weight gradient (or none, with
-    # compute_grad_weight=False):
+    # The exact small-row backward into a BF16 weight gradient (a call with
+    # compute_grad_weight=False runs bwd_bf16_t512_nodw in its band):
     # one cluster of 16 CTAs of 4 teams of the 128-thread CTA of the
     # deterministic backward at 2e989556 (team q of CTA r runs the 8-row
     # block r + 16q), each term and partial of the weight gradient one FP32
