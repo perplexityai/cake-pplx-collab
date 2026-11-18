@@ -2206,10 +2206,12 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 K1_PROMOTE_BLOCKS = 128
 #: The longest segment (:func:`segment_blocks`) above which :func:`k1_promote_blocks` names the promoted twin, in K
 #: blocks of 64 tokens: the twin runs where a segment holds more than this many, 256 (16384 tokens in one
-#: accumulator).  Plans whose segments hold up to 256 K blocks already meet the naive BF16 tier at the measured token
-#: counts, and the promoted twin costs up to 1.7 % kernel time on some forms there; the accuracy misses are at longer
-#: segments.  So no plan changes where no segment holds more than 16384 tokens.  At :data:`K1_PROMOTE_BLOCKS` (8192
-#: tokens) a plan would promote wherever the twin's bits differ from the program's.
+#: accumulator).  The promoted twin costs up to 1.7 % kernel time on some forms of the plans whose segments hold up to
+#: 256 K blocks, so no plan changes where no segment holds more than 16384 tokens.  This length alone does not keep a
+#: plan within the naive BF16 tier: plans whose longest segment holds 254 to 256 K blocks missed it on some BF16 weight
+#: gradients (errors up to 1.0055 times the tier's): 5120 -> 128 at T 16231 and 5120 -> 32 / 48 at T 32768 on B200 or
+#: GB200, and 5120 -> 48 / 64 at T 32768 on VR200.  At :data:`K1_PROMOTE_BLOCKS` (8192 tokens) a plan would promote
+#: wherever the twin's bits differ from the program's.
 K1_PROMOTE_MIN_SEGMENT = 256
 #: Rows whose plans keep the program without promotion where :func:`k1_promote_blocks` names the twin, keyed as
 #: ``ROW_RULES`` (the planned orientation): an exact ``(N, K, M)`` key holds at that token count ``K`` only, a ragged
