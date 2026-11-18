@@ -67,20 +67,22 @@ share one between two backward launches that may run at once, e.g. on two
 streams); when omitted the package keeps one zeroed buffer per (device,
 current stream), or inside a CUDA Graph capture one buffer per capture and
 stream, shared by its calls on that stream: a buffer the package zeroed
-before the capture, on an eager call, so the graph records no fill node for
-it (the graph holds it until the graph and its instantiations are destroyed
-and their launches have completed; then it returns to the package, zero
-again).  The replays of one graph must not overlap.  When the package has no
-such buffer ready (no earlier eager call on the device, all taken, or too
-small) the capture zeroes one itself (one fill node, and another for a larger
-buffer when a call needs more bytes).  With capture id 0 (also when
-``cuda.bindings`` is not importable) each captured backward call allocates
-and zeroes a buffer of its own.  The forward workspace (zeroed int32
-token-chunk counters) has the deterministic package's size and rules; inside
-a capture the forward's omitted workspace is a pre-zeroed buffer per capture
-and stream, shared by its later forward calls on that stream, like the
-backward's, but without one ready each captured forward call zeroes a buffer
-of its own (one fill node per call).
+before the capture, on an eager call that omitted ``workspace=``, so the
+graph records no fill node for it (the graph holds it until the graph and
+its instantiations are destroyed and their launches have completed; it
+returns to the package, zero again, at the package's next refill).  The
+replays of one graph must not overlap.  Only eager calls without
+``workspace=`` zero these buffers, the forward's and the backward's
+separately, sized to the largest need of such a call so far.  When none is
+ready (no such eager call of the kind before the capture, all taken by
+earlier captures, or too small) each captured call zeroes a buffer of its
+own (one fill node per call), as every captured call does with capture id 0
+(also when ``cuda.bindings`` is not importable).  The forward workspace
+(zeroed int32 token-chunk counters) has the deterministic package's size and
+rules; inside a capture the forward's omitted workspace follows the
+backward's rules with buffers of its own.  Memory these buffers free stays
+cached in the package's own memory pool (``torch.cuda.MemPool``); the package
+does not return it to torch's other pools.
 
 Programmatic dependent launch: the single-rank forward and backward programs
 (not those of the opt-in pair routes) take it per call, by architecture and

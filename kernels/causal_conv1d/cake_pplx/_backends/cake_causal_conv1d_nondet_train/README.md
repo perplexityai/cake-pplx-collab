@@ -203,15 +203,19 @@ barrier.
 Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
 package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
-is destroyed; when the package has none ready, the capture zeroes one, a fill node). When CUDA's capture
-id is not available, each captured call gets its own buffer. The package allocates these pre-zeroed buffers and its
-per-stream workspaces from a memory pool of its own (`torch.cuda.MemPool`, one per device), so a CUDA Graph tree's
-warm-up does not take them into the tree's private pool. That memory is not returned to the caching allocator's other
-pools (a replaced per-stream buffer's memory stays cached in the package's pool): per device and kind (forward
-counters, backward accumulators) at most `_POOL_DEPTH` idle buffers of the largest eager need, plus the buffers live
-graphs hold, besides the per-stream buffers. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
-captures zero their buffers themselves, as in 0.2.1: the backward one per capture and stream, the forward one per
-call.
+is destroyed). Only eager calls that omit `workspace=` zero these buffers, the forward's and the backward's
+separately, sized to the largest need of such a call so far; a capture with no such eager call of the kind before
+it, or after earlier captures took the `_POOL_DEPTH` ready buffers, or needing more, zeroes a buffer per call (a fill
+node each). So does every captured call when CUDA's capture id is not available. The package keeps no reference to
+such a buffer after the call. The package allocates the pre-zeroed buffers and its per-stream workspaces from a
+memory pool of its own (`torch.cuda.MemPool`, one per device), so a CUDA Graph tree's warm-up does not take them into
+the tree's private pool. Memory the package frees stays cached in that pool (a replaced per-stream buffer, a dropped
+pre-zeroed buffer) and is never returned to the caching allocator's other pools. Per device and kind (forward
+counters, backward accumulators) the live pre-zeroed buffers are at most `_POOL_DEPTH` idle ones of the largest eager
+need, those live graphs hold, and those graphs released since the last refill: a released buffer returns to the
+package only at the next eager refill, also after `cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()`. A kind
+whose refill failed keeps its idle buffers and those its graphs held then for the life of the process. Without
+`torch.cuda.MemPool` the package keeps no pre-zeroed buffers and every captured call zeroes its buffer itself.
 
 ### Rank agreement
 
