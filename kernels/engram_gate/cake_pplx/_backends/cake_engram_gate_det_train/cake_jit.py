@@ -80,7 +80,7 @@ ACC_MODES: dict[str, tuple[str, ...]] = {"fwd": ("f32", "dot2"), "bwd": ("dot2",
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_dot2": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "w"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_engram_gate_det_train_cc81efe1193ac4c512e6",
         "launch": {
@@ -95,7 +95,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "dw_reduce": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dw_part"], ["buffer", "qw"], ["buffer", "kw"], ["buffer", "dq"], ["buffer", "dk"], ["parameter", "NP"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dw_part"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "dq"], ["buffer", "dk"], ["parameter", "NP"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_engram_gate_det_train_eec3759c50f56c38622b",
         "launch": {
@@ -112,30 +112,30 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "w"], ["buffer", "mask"], ["buffer", "out"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_det_train_0b4021c3018aeb70e4c6",
+        "kernel_symbol": "kernel_cake_engram_gate_det_train_a57119f3d68014e5ef17",
         "launch": {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 2560,
+            "dynamic_smem_bytes": 23040,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_det_train_0b4021c3018aeb70e4c6",
+        "library": "cake_engram_gate_det_train_a57119f3d68014e5ef17",
         "stage": "fwd",
     },
     "fwd_f32": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "w"], ["buffer", "mask"], ["buffer", "out"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_det_train_6cccb018c50e0f3078b9",
+        "kernel_symbol": "kernel_cake_engram_gate_det_train_179f3828f40d28d02c7a",
         "launch": {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 2560,
+            "dynamic_smem_bytes": 23040,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_det_train_6cccb018c50e0f3078b9",
+        "library": "cake_engram_gate_det_train_179f3828f40d28d02c7a",
         "stage": "fwd",
     },
 }
