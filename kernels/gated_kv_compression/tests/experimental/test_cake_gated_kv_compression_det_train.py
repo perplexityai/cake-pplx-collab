@@ -33,9 +33,10 @@ same math in BF16), every output buffer filled with NaN before the launch so eve
 forward (``out``) and the backward (``dC``, ``dZ``, the tail rows exactly +0.0) on contiguous ``C`` / ``Z`` and on the
 column halves of one ``[T, 1024]`` tensor (the gradients written into the halves of one ``[T, 1024]`` buffer), on
 small packs with empty and one-token documents, close pairs, gate extremes, many small odd documents and the two
-performance packs; the forward rows past the pair count stored as +0.0.  Then the documented invariances, bit for
-bit: repeated calls, the two layouts, one call with four different row strides (judged too), each document alone
-against the pack, the tail tokens' values, and the records each call launches.
+performance packs; the forward rows past the pair count stored as +0.0, and a forward ``G`` below the pair count
+giving the first ``G`` rows.  Then the documented invariances, bit for bit: repeated calls, the two layouts, one call
+with four different row strides (judged too), a ``G`` past the pair count in the explicit and autograd backward, each
+document alone against the pack, the tail tokens' values, and the records each call launches.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -613,6 +614,18 @@ def test_forward_rows_past_the_pair_count_are_zero(device) -> None:
         assert_zero_rows(wide, range(pack.G, pack.G + 37), f"{pack.id}: the rows past the pair count")
 
 
+def test_forward_with_fewer_rows_than_pairs_gives_the_first_rows(device) -> None:
+    """A caller ``G`` below the pair count: ``out`` (NaN first) has the bits of the first ``G`` rows of the call with
+    the exact ``G``."""
+    for pack in (MIXED, Pack((0, 1, 3, 2, 7, 4))):
+        x = make_inputs(pack, seed=7, device=device, layout="halves")
+        exact = pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, pack.G)
+        for rows in sorted({1, pack.G // 2, pack.G - 1}):
+            short = nan_like_rows(rows, torch.bfloat16, device)
+            pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, out=short)
+            assert_bitwise(short, exact[:rows], f"{pack.id}: G = {rows} of {pack.G} pairs")
+
+
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("pack", PAIR_PACKS, ids=[p.id for p in PAIR_PACKS])
 def test_the_backward_kernel_matches_the_reference(pack, layout, device, record_property) -> None:
@@ -745,6 +758,34 @@ def test_mixed_row_strides_give_the_bits_of_contiguous_operands(device, record_p
         return judged(x, {"mixed": {"out": out, "dc": dc, "dz": dz}})
 
     judge_draws(record_property, draw)
+
+
+@pytest.mark.parametrize("extra", (1, 5, 37), ids=lambda k: f"G+{k}")
+@pytest.mark.parametrize("pack", (Pack((0, 1, 3, 2, 7, 4)), MIXED, PERF_PACKS[0]), ids=lambda p: p.id)
+def test_rows_past_the_pair_count_change_no_gradient(pack, extra, device) -> None:
+    """``G`` = the pair count + ``extra``, with NaN in the rows of ``dout`` past the pair count: the explicit backward
+    (``dC`` / ``dZ`` NaN first) and the autograd backward of ``cake_gated_kv_compression_det_cz`` give the bits of the
+    explicit backward with the exact ``G`` (the rows past the pair count are not read, every token row is written),
+    and the autograd forward's rows past the pair count are +0.0."""
+    x = make_inputs(pack, seed=11, device=device, layout="halves")
+    wide = torch.cat([x.dout, nan_like_rows(extra, torch.bfloat16, device)])
+    _, dc, dz = nan_halves(x.T, device)
+    pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, dc=dc, dz=dz)
+    _, dc_wide, dz_wide = nan_halves(x.T, device)
+    pkg.cake_gated_kv_compression_det_train_backward(wide, x.c, x.z, x.cu, dc=dc_wide, dz=dz_wide)
+    assert_bitwise(dc_wide, dc, f"{pack.id}: explicit dC with G + {extra}")
+    assert_bitwise(dz_wide, dz, f"{pack.id}: explicit dZ with G + {extra}")
+    out = pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, pack.G)
+    cz = x.cz.detach().clone().requires_grad_(True)
+    out_wide = pkg.cake_gated_kv_compression_det_cz(cz, x.cu, pack.G + extra)
+    # A freed NaN block of the gradient's size: the backward's uninitialized gradient most likely reuses it.
+    poison = torch.full((x.T, 2 * WIDTH), float("nan"), dtype=torch.float32, device=device)
+    del poison
+    out_wide.backward(wide)
+    assert_bitwise(out_wide.detach()[: pack.G], out, f"{pack.id}: autograd out with G + {extra}")
+    assert_zero_rows(out_wide.detach(), range(pack.G, pack.G + extra), f"{pack.id}: autograd out past the pairs")
+    assert_bitwise(cz.grad[:, :WIDTH], dc, f"{pack.id}: autograd dC with G + {extra}")
+    assert_bitwise(cz.grad[:, WIDTH:], dz, f"{pack.id}: autograd dZ with G + {extra}")
 
 
 @pytest.mark.parametrize("pack", (Pack((0, 1, 3, 2, 7, 4)), MIXED), ids=["L0-1-3-2-7-4", MIXED.id])
