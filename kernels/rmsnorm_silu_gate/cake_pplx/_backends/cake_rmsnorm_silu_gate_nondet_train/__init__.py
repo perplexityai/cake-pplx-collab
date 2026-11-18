@@ -651,9 +651,13 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     return _forward(x, z, weight, eps, out=out)
 
 
+@functools.cache
 def _workspace_bytes(arch: str) -> int:
     """Bytes of a workspace that serves every backward module of ``arch``
-    (both weight-gradient dtypes, any row count)."""
+    (both weight-gradient dtypes, any row count).  Cached: the module tables
+    are constant, and a backward call with a workspace checks it against this
+    size, which would otherwise lay out every backward module's workspace on
+    every call."""
 
     return max(
         workspace_bytes(name)
