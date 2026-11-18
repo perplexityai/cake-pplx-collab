@@ -1992,9 +1992,14 @@ def test_graph_buffers_return_after_graph_deletion(fresh_pool) -> None:
         assert all(len(p) <= pkg._POOL_DEPTH for p in pkg._ZEROED_POOL.values()), cycle
         allocated.append(torch.cuda.memory_allocated(device))
     assert judged, "no capture took a buffer that a deleted graph released"
-    one_graph = sum(pkg._POOL_SIZE[(device.index, k)] * pkg._POOL_DTYPES[k].itemsize for k in ("fwd", "bwd"))
+    # one graph's two buffers as the caching allocator counts them (512-byte blocks); two graphs' buffers may wait
+    # for their release at once (the held bound above)
+    one_graph = sum(
+        -(-pkg._POOL_SIZE[(device.index, k)] * pkg._POOL_DTYPES[k].itemsize // 512) * 512 for k in ("fwd", "bwd")
+    )
     half = GRAPH_CYCLES // 2
-    assert max(allocated[half:]) <= max(allocated[10:half]) + one_graph, allocated
+    early, late = max(allocated[10:half]), max(allocated[half:])
+    assert late <= early + 2 * one_graph, (early, late, one_graph, sorted(set(allocated)))
 
 
 def test_graph_deleted_while_replay_in_flight(fresh_pool, monkeypatch) -> None:
@@ -2159,11 +2164,13 @@ def test_capture_without_cuda_bindings(fresh_pool, monkeypatch) -> None:
 @pytest.mark.parametrize("failure", ("missing", "raising"))
 def test_capture_without_mem_pool(failure, fresh_pool, monkeypatch) -> None:
     """Without ``torch.cuda.MemPool`` (``missing``), or with ``torch.cuda.use_mem_pool`` raising, the package keeps
-    no pre-zeroed buffers: the eager calls still work on per-stream workspaces of the caching allocator and every
-    captured step zeroes its two buffers itself (two fill nodes, one fallback per kind); replays are judged against
-    the naive tier."""
+    no pre-zeroed buffers (the pool of each kind is off) and no memory pool: the eager calls still work on new
+    per-stream workspaces of the caching allocator and every captured step zeroes its two buffers itself (two fill
+    nodes, one fallback per kind); replays are judged against the naive tier."""
 
     monkeypatch.setattr(pkg, "_MEM_POOLS", {})
+    monkeypatch.setattr(pkg, "_FORWARD_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_BACKWARD_WORKSPACES", {})
     if failure == "missing":
         monkeypatch.setattr(torch.cuda, "MemPool", None)
     else:
@@ -2178,6 +2185,7 @@ def test_capture_without_mem_pool(failure, fresh_pool, monkeypatch) -> None:
     stream = torch.cuda.Stream(device=device)
     cap = _capture(lambda: _phase_step("step", inputs, outs, kind), stream)
     assert not pkg._ZEROED_POOL.get((device.index, "bwd")) and not pkg._ZEROED_POOL.get((device.index, "fwd"))
+    assert all(pkg._POOL_READY[k].get(device.index) == sys.maxsize for k in ("fwd", "bwd")), pkg._POOL_READY
     assert pkg._MEM_POOLS.get(device.index) is None
     assert cap["fallbacks"] == {"fwd": 1, "bwd": 1} and not cap["taken"], cap["fallbacks"]
     assert _graph_nodes(cap["graph"])["fill"] == 2
