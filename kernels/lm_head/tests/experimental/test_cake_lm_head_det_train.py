@@ -4838,11 +4838,16 @@ def test_logprob_arm_plan_keys():
     assert [k for k in bwd if k[0] == "gemm_logits_dz"] == [
         ("gemm_logits_dz", i) for i in range(3)
     ]
-    assert [k for k in bwd if k[0] != "gemm_logits_dz"] == [
+    assert [k for k in bwd if k[0] not in ("gemm_logits_dz", "rlab_zero")] == [
         k
         for k in cake_backend.recompute_keys(plain)
         if k[0] not in ("row_grad", "gemm_logits_nostats")
     ]
+    # the dz arm stores no label residual on a row with no label column: its recompute keeps the zero step, right
+    # before chunk 0's arm; ``row_grad`` writes every row of its chunk, so the plain recompute has none
+    assert bwd.count(("rlab_zero", None)) == 1
+    assert bwd[bwd.index(("rlab_zero", None)) + 1] == ("gemm_logits_dz", 0)
+    assert ("rlab_zero", None) not in cake_backend.recompute_keys(plain)
     assert {"gemm_logits_dz", "gemm_logits_lbl"} <= set(arms.stages)
     assert not {"row_grad", "gemm_logits", "gemm_logits_nostats"} & set(arms.stages)
     assert list(arms.stages) == [s for s in cake_jit.STAGES if s in arms.stages]
@@ -5537,9 +5542,10 @@ def test_dx_finalize_plan_keys():
     """Every chunk's dX rows end with the ``slab_sum`` kernel, which folds the rows' FP32 label residuals: right behind
     the dX GEMM, adding a sliced GEMM's slabs, under ``dx_finalize``; behind the host ``dx_reduce`` step of a sliced
     GEMM without it, as the fold alone (``n_slabs`` 0, as after a one-slice GEMM).  It is registered in the plan's
-    stages in launch order whenever the plan computes dX, and the call zeroes its label residuals once, right before
-    chunk 0's row gradient.  ``dx_cast=False`` leaves the flat dX cast out of the cast keys; the reference path never
-    slices K, so its slab sums are the fold alone."""
+    stages in launch order whenever the plan computes dX.  The loss plan has no zero step for its label residuals: its
+    producers are ``row_grad`` alone, which writes every row of its chunk (:func:`cake_backend._rlab_zero_needed`).
+    ``dx_cast=False`` leaves the flat dX cast out of the cast keys; the reference path never slices K, so its slab sums
+    are the fold alone."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
     for finalize in (False, True):
         plan = cake_backend.make_plan(
@@ -5570,8 +5576,10 @@ def test_dx_finalize_plan_keys():
             else:
                 assert ("dx_reduce", i) not in keys
                 assert keys.index(slab) == keys.index(dx) + 1
-        assert keys.count(("rlab_zero", None)) == 1
-        assert keys.index(("rlab_zero", None)) + 1 == keys.index(("row_grad", 0))
+        assert ("rlab_zero", None) not in keys
+        assert [k for k in keys if k[0] in cake_backend.DZ_PRODUCER_STAGES] == [
+            ("row_grad", i) for i in range(plan.num_chunks)
+        ]
         assert "slab_sum" in plan.stages
         assert list(plan.stages) == [s for s in cake_jit.STAGES if s in plan.stages]
         assert ("scale_cast_bf16", "dx") in cake_backend.cast_keys(plan)
@@ -9041,6 +9049,130 @@ def test_device_logprob_arms_store_the_same_label_residual(glm_weight):
         dz, rlab, rows_labels = out[True]
         _check_label_residual(dz, rlab, rows_labels, V, case)
         assert bool((rlab != 0).any()), case
+
+
+def test_rlab_zero_step_follows_the_producers():
+    """``_rlab_zero_needed`` / ``_with_rlab_zero``: a plan computing dX whose row-gradient producers are ``row_grad``
+    alone, over chunks that tile its loop rows (the rows of ``rlab``), has no ``rlab_zero`` step: ``row_grad`` writes
+    every row of its chunk (+0 on a row with no label column).  A ``dz`` arm among the producers keeps exactly one
+    step, right before the first producer; so do chunks that leave a loop row out or start past row 0.  A plan without
+    dX has none."""
+    g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+    common = dict(
+        need_dx=True,
+        need_dw=True,
+        geometry=g,
+        dx_max_slices=4,
+        num_sms=148,
+        dx_resident=74,
+        fuse_dw_cast=True,
+        dx_finalize=True,
+        arch="sm_100a",
+    )
+    zero = (cake_backend.RLAB_ZERO_STAGE, None)
+    for valid_rows in (None, 8265):
+        loss = cake_backend.make_plan(
+            _problem(8700, 6144, 154880, 4096), valid_rows=valid_rows, **common
+        )
+        keys = cake_backend.forward_keys(loss)
+        assert zero not in keys and not cake_backend._rlab_zero_needed(
+            loss, list(keys)
+        ), valid_rows
+        assert cake_backend._chunks_tile_rows(loss), loss.chunks
+    lp = _problem(8700, 6144, 154880, 4096, entry="logprob")
+    plain = cake_backend.make_plan(lp, valid_rows=8265, **common)
+    assert zero not in cake_backend.recompute_keys(plain)
+    arms = cake_backend.make_plan(
+        lp, valid_rows=8265, logprob_dz=True, logprob_lbl=True, **common
+    )
+    rk = cake_backend.recompute_keys(arms)
+    assert rk.count(zero) == 1 and rk[rk.index(zero) + 1] == ("gemm_logits_dz", 0), rk
+    hk = cake_backend.recompute_keys(
+        replace(arms, hidden_count=True, hidden_stats=False)
+    )
+    assert hk.count(zero) == 1 and hk[hk.index(zero) + 1] == ("row_grad", 0), hk
+    no_dx = cake_backend.make_plan(
+        _problem(8700, 6144, 154880, 4096), **dict(common, need_dx=False)
+    )
+    assert zero not in cake_backend.forward_keys(no_dx)
+    # the predicate over stand-in plans: the chunks must cover [0, rows) in order, each row once
+    rg = [
+        ("gemm_logits", 0),
+        ("row_finalize", 0),
+        ("loss_reduce", 0),
+        ("row_grad", 0),
+        ("gemm_dx", 0),
+        ("slab_sum", 0),
+    ]
+
+    def stub(chunks, rows=64, need_dx=True):
+        return SimpleNamespace(need_dx=need_dx, chunks=chunks, rows=rows)
+
+    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(rg)) == rg
+    assert cake_backend._with_rlab_zero(stub(((0, 40), (40, 24))), list(rg)) == rg
+    for chunks in (
+        ((0, 32),),
+        ((8, 56),),
+        ((0, 32), (40, 24)),
+        ((0, 40), (32, 32)),
+        (),
+    ):
+        assert (
+            cake_backend._with_rlab_zero(stub(chunks), list(rg))
+            == rg[:3] + [zero] + rg[3:]
+        ), chunks
+    assert cake_backend._with_rlab_zero(stub(((0, 32),), need_dx=False), list(rg)) == rg
+    dz = [("gemm_logits_dz", 0), ("gemm_dx", 0), ("slab_sum", 0)]
+    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(dz)) == [zero] + dz
+
+
+def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
+    """A loss runner whose row-gradient producers are ``row_grad`` alone has no ``rlab_zero`` step: ``row_grad`` writes
+    every row of its chunk.  With the label residuals ``rlab`` prefilled with NaN before the step (compacted and not,
+    so ignored rows run too), every loop row of ``rlab`` holds a finite value afterwards: the residual on a row whose
+    label lies in ``[0, V)``, +0 (the bit pattern 0) on every other row; the loss, ``logp``, dX and dW equal those of
+    a step whose ``rlab`` was prefilled with zeros (the state the zero step left), bit for bit."""
+    _require_program(entry="loss")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
+    inp = make_inputs(4097, seed=SEED + 61, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    labels = inp.labels.clone()
+    labels[: edge.numel()] = edge
+    for compact in (True, False):
+        out = {}
+        for fill in (float("nan"), 0.0):
+            runner = prepare_lm_head_det_loss(
+                inp.X,
+                inp.W,
+                labels,
+                objective="ce",
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                backend="cake",
+                compact_rows=compact,
+            )
+            keys = runner.forward_order + runner.backward_order
+            assert ("rlab_zero", None) not in keys and ("row_grad", 0) in keys, compact
+            runner.tensors["rlab"].fill_(fill)
+            loss, logp = runner.forward()
+            dx, dw = runner.backward()
+            torch.cuda.synchronize()
+            rows = runner.plan.rows
+            out[fill == 0.0] = [x.clone() for x in (loss, logp, dx, dw)] + [
+                runner.tensors["rlab"][:rows].clone(),
+                runner.tensors["labels"][:rows].clone(),
+            ]
+            del runner
+        for name, a, b in zip(
+            ("loss", "logp", "dX", "dW", "rlab"), out[False], out[True]
+        ):
+            assert torch.equal(_bits(a), _bits(b)), (compact, name)
+        rlab, y = out[False][4], out[False][5].long()
+        live = (y >= 0) & (y < V)
+        assert bool((~live).any()) and bool(live.any()), compact
+        assert bool(torch.isfinite(rlab).all()), compact
+        assert bool((_bits(rlab)[~live] == 0).all()), compact
+        assert bool((rlab[live] != 0).any()), compact
 
 
 def test_reference_slab_sum_folds_the_label_residual():
