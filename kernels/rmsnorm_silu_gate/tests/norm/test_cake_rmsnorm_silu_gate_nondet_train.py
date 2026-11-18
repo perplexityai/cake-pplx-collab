@@ -1343,8 +1343,9 @@ def test_claimed_programs_without_the_weight_gradient_on_strided_layouts(
 ):
     """For each band with a cut on this device (``NODW_STRIDED_ROWS_PER_SM``:
     its strided program up to the cut, its claimed program past it), the
-    ``NODW_LAYOUTS`` layout a row past the cut (64 heads; one token of a head
-    past it): a call with ``compute_grad_weight=False`` runs the band's
+    ``NODW_LAYOUTS`` layout just past the cut (the fewest tokens of 64 heads
+    past it; one token of a head past it, a row past the cut): a call with
+    ``compute_grad_weight=False`` runs the band's
     claimed program without the weight gradient, gives the ``dx`` and ``dz``
     bits of the BF16 call on the band's module on the same inputs and leaves
     a caller workspace zero (skipped where this device has no cut)."""
