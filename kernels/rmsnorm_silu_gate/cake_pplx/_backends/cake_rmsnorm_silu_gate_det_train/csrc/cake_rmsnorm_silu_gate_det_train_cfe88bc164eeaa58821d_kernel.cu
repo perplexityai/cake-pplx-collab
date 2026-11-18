@@ -144,36 +144,24 @@ kernel_cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d(__nv_bfloat16* __re
     }
     int s_ahead = 0;
 #if __CUDA_ARCH__ == 1070
-    if ((long long)nblocks <= 64ll * (long long)num_bids) {
+    if ((nblocks - 1) / num_bids + 1 <= 64) {
 #else
-    if ((long long)nblocks <= 96ll * (long long)num_bids) {
+    if ((nblocks - 1) / num_bids + 1 <= 96) {
 #endif
         s_ahead = 1;
     }
     if (bid < nblocks) {
-        int s_count = 1;
-        if (nblocks - bid > num_bids) {
-            s_count = (nblocks - 1 - bid) / num_bids + 1;
-        }
+        int s_count = (nblocks - 1 - bid) / num_bids + 1;
         #pragma unroll 1
         for (int i = 0; i < s_count; i++) {
             int u = bid + i * num_bids;
             int row = u * 16 + group;
             int src = ((row) < (rows - 1) ? (row) : (rows - 1));
-            long long goff = 0ll;
-            long long xoff = 0ll;
-            long long zoff = 0ll;
-            if (packed != 0) {
-                goff = (long long)src * 128ll + (long long)col;
-                xoff = goff;
-                zoff = goff;
-            } else {
-                uint32_t tq = (heads.divisor != 1) ? (__umulhi((uint32_t)((unsigned int)src), heads.multiplier) >> heads.shift_right) : (uint32_t)((unsigned int)src);
-                uint32_t th = (uint32_t)((unsigned int)src) - tq * (uint32_t)(heads.divisor);
-                goff = (long long)tq * dy_tok + (long long)th * dy_head + (long long)col;
-                xoff = (long long)tq * x_tok + (long long)th * x_head + (long long)col;
-                zoff = (long long)tq * z_tok + (long long)th * z_head + (long long)col;
-            }
+            uint32_t tq = (heads.divisor != 1) ? (__umulhi((uint32_t)((unsigned int)src), heads.multiplier) >> heads.shift_right) : (uint32_t)((unsigned int)src);
+            uint32_t th = (uint32_t)((unsigned int)src) - tq * (uint32_t)(heads.divisor);
+            long long goff = (long long)tq * dy_tok + (long long)th * dy_head + (long long)col;
+            long long xoff = (long long)tq * x_tok + (long long)th * x_head + (long long)col;
+            long long zoff = (long long)tq * z_tok + (long long)th * z_head + (long long)col;
             float gr[8];
             float xr[8];
             float zr[8];
