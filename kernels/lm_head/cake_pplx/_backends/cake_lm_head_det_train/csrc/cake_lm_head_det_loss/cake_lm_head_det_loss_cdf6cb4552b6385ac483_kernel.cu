@@ -168,10 +168,17 @@ __device__ __forceinline__ void tmem_ld_x16(float* dst, int tmem_addr) {
 }
 
 
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(224) __cluster_dims__(2,1,1) void
-kernel_cake_lm_head_det_loss_cdf6cb4552b6385ac483(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ temperature)
+kernel_cake_lm_head_det_loss_cdf6cb4552b6385ac483(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap C, float* __restrict__ STATS_OUT, int M, int m_tiles, int k_iters, int first_chunk, float* __restrict__ WS, int ws_slab, int ldc, int k_slices, int k_slice_iters, int group_m, int group_n, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ dlogp, int row0, int d_off, float* __restrict__ rlab, float* __restrict__ temperature)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -573,6 +580,7 @@ kernel_cake_lm_head_det_loss_cdf6cb4552b6385ac483(const __grid_constant__ CUtens
                 dz_d = _fdiv_0;
                 int dz_skip = ((rin_lbl < 0ll) ? 1 : 0);
                 int dz_col = (int)rin_lbl - ep_off_n;
+                int dz_res = (((unsigned long long)rin_lbl < (unsigned long long)ldc) ? 1 : 0);
                 #pragma unroll 1
                 for (int ep_kc = 0; ep_kc < 1; ep_kc++) {
                     int lane_addr = taddr + (unsigned int)(epi_warp * 32 << 16) + epi_stage * 256;
@@ -611,11 +619,32 @@ kernel_cake_lm_head_det_loss_cdf6cb4552b6385ac483(const __grid_constant__ CUtens
                                 dzp_s[j] = _exp_1;
                                 dzv_s[j] = ((dz_skip != 0) ? 0.0f : dz_d * (-dzp_s[j]));
                             }
+                            float dzf_s = 0.0f;
+                            float dzf_r = 0.0f;
                             if (dz_skip == 0) {
                                 if ((unsigned int)(dz_col - fcol) < 16) {
                                     #pragma unroll
                                     for (int jl = 0; jl < 16; jl++) {
-                                        dzv_s[jl] = ((fcol + jl == dz_col) ? dz_d * (1.0f - dzp_s[jl]) : dzv_s[jl]);
+                                        if (fcol + jl == dz_col) {
+                                            float _sub_3;
+                                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_3) : "f"(1.0f), "f"(dzp_s[jl]));
+                                            dzv_s[jl] = mul_f32_rn_noftz(dz_d, _sub_3);
+                                            dzf_s = dzv_s[jl];
+                                        }
+                                    }
+                                    float lr_hi = (float)(__nv_bfloat16)dzf_s;
+                                    float _abs_4;
+                                    asm("abs.f32 %0, %1;" : "=f"(_abs_4) : "f"(lr_hi));
+                                    float _sub_5;
+                                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_5) : "f"(dzf_s), "f"(lr_hi));
+                                    float lr_r = ((_abs_4 <= 3.4028235e+38f) ? _sub_5 : 0.0f);
+                                    dzf_r = lr_r;
+                                }
+                            }
+                            if (global_row < M) {
+                                if (dz_res != 0) {
+                                    if ((unsigned int)(dz_col - fcol) < 16) {
+                                        rlab[rin_t] = dzf_r;
                                     }
                                 }
                             }

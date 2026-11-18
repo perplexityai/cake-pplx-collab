@@ -22,7 +22,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_rmsnorm_train_744aa77460c886f4f429(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, double* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0);
+extern "C" __global__ void kernel_cake_rmsnorm_train_744aa77460c886f4f429(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0);
 
 namespace cake_binding_kernel_cake_rmsnorm_train_744aa77460c886f4f429 {
 
@@ -63,7 +63,7 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
   check_cuda_tensor(a_dw, "dw");
   check_dtype(a_dw, DLDataType{kDLFloat, 32, 1}, "dw");
   check_cuda_tensor(a_partial, "partial");
-  check_dtype(a_partial, DLDataType{kDLFloat, 64, 1}, "partial");
+  check_dtype(a_partial, DLDataType{kDLFloat, 32, 1}, "partial");
   check_cuda_tensor(a_counters, "counters");
   check_dtype(a_counters, DLDataType{kDLUInt, 32, 1}, "counters");
   check_cuda_tensor(a_g_h, "g_h");
@@ -109,15 +109,6 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z
       << ") is not a multiple of the cluster shape (2, 1, 1)";
   cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(dev.device_type, dev.device_id));
-  {
-    // Once per thread per device: the kernel's function attributes hold per device.
-    static thread_local uint64_t prepared_devices = 0;
-    const uint64_t device_bit = dev.device_id < 64 ? uint64_t{1} << dev.device_id : uint64_t{0};
-    if (device_bit == 0 || (prepared_devices & device_bit) == 0) {
-      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_rmsnorm_train_744aa77460c886f4f429), cudaFuncAttributeMaxDynamicSharedMemorySize, 50560), "cudaFuncSetAttribute");
-      prepared_devices |= device_bit;
-    }
-  }
   void* v_g = DataPtr(a_g);
   void* v_x = DataPtr(a_x);
   void* v_w = DataPtr(a_w);
@@ -137,7 +128,7 @@ void Run(TensorView a_g, TensorView a_x, TensorView a_w, TensorView a_r, TensorV
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(768, 1, 1);
-  config.dynamicSmemBytes = 50560;
+  config.dynamicSmemBytes = 25984;
   config.stream = stream;
   cudaLaunchAttribute attrs[2] = {};
   attrs[0].id = cudaLaunchAttributeClusterDimension;

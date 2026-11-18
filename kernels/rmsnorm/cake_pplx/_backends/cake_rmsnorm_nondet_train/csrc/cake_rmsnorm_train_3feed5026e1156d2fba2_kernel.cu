@@ -78,8 +78,6 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
     const int red_fold_addr = smem + 256;
     float* row_fold = reinterpret_cast<float*>(smem_raw + 4352);
     const int row_fold_addr = smem + 4352;
-    float* comp_smem = reinterpret_cast<float*>(smem_raw + 20736);
-    const int comp_smem_addr = smem + 20736;
     unsigned int* w_sm = reinterpret_cast<unsigned int*>(smem_raw + 20864);
     const int w_sm_addr = smem + 20864;
     float* part_sm = reinterpret_cast<float*>(smem_raw + 20992);
@@ -119,8 +117,7 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
         }
     }
     float acc[16];
-    float comp[16];
-    unsigned int compw[8];
+    float casc[16];
     if (tid == 0) {
         flags[1] = (int)nxt;
     }
@@ -205,7 +202,7 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
         #pragma unroll
         for (int j = 0; j < 16; j++) {
             acc[j] = 0.0f;
-            comp[j] = 0.0f;
+            casc[j] = 0.0f;
         }
         unsigned int gwA[8];
         unsigned int xwA[8];
@@ -313,14 +310,8 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
                             float g1_1 = __uint_as_float(gwd_1 & 4294901760u);
                             float x0_1 = __uint_as_float(xwd_1 << 16);
                             float x1_1 = __uint_as_float(xwd_1 & 4294901760u);
-                            float y = __fmaf_rn(g0_1 * x0_1, rq, -comp[v_4 * 8 + 2 * e_1]);
-                            float t = acc[v_4 * 8 + 2 * e_1] + y;
-                            comp[v_4 * 8 + 2 * e_1] = t - acc[v_4 * 8 + 2 * e_1] - y;
-                            acc[v_4 * 8 + 2 * e_1] = t;
-                            float y_0 = __fmaf_rn(g1_1 * x1_1, rq, -comp[v_4 * 8 + 2 * e_1 + 1]);
-                            float t_0 = acc[v_4 * 8 + 2 * e_1 + 1] + y_0;
-                            comp[v_4 * 8 + 2 * e_1 + 1] = t_0 - acc[v_4 * 8 + 2 * e_1 + 1] - y_0;
-                            acc[v_4 * 8 + 2 * e_1 + 1] = t_0;
+                            acc[v_4 * 8 + 2 * e_1] = __fmaf_rn(g0_1 * x0_1, rq, acc[v_4 * 8 + 2 * e_1]);
+                            acc[v_4 * 8 + 2 * e_1 + 1] = __fmaf_rn(g1_1 * x1_1, rq, acc[v_4 * 8 + 2 * e_1 + 1]);
                             out[2 * e_1] = __fmaf_rn(nkx, x0_1, rq * (g0_1 * __uint_as_float(ww[v_4 * 4 + e_1] << 16)));
                             out[2 * e_1 + 1] = __fmaf_rn(nkx, x1_1, rq * (g1_1 * __uint_as_float(ww[v_4 * 4 + e_1] & 4294901760u)));
                         }
@@ -415,14 +406,8 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
                             float g1_3 = __uint_as_float(gwd_3 & 4294901760u);
                             float x0_3 = __uint_as_float(xwd_3 << 16);
                             float x1_3 = __uint_as_float(xwd_3 & 4294901760u);
-                            float y_1 = __fmaf_rn(g0_3 * x0_3, rq_0, -comp[v_7 * 8 + 2 * e_3]);
-                            float t_1 = acc[v_7 * 8 + 2 * e_3] + y_1;
-                            comp[v_7 * 8 + 2 * e_3] = t_1 - acc[v_7 * 8 + 2 * e_3] - y_1;
-                            acc[v_7 * 8 + 2 * e_3] = t_1;
-                            float y_1_1 = __fmaf_rn(g1_3 * x1_3, rq_0, -comp[v_7 * 8 + 2 * e_3 + 1]);
-                            float t_1_1 = acc[v_7 * 8 + 2 * e_3 + 1] + y_1_1;
-                            comp[v_7 * 8 + 2 * e_3 + 1] = t_1_1 - acc[v_7 * 8 + 2 * e_3 + 1] - y_1_1;
-                            acc[v_7 * 8 + 2 * e_3 + 1] = t_1_1;
+                            acc[v_7 * 8 + 2 * e_3] = __fmaf_rn(g0_3 * x0_3, rq_0, acc[v_7 * 8 + 2 * e_3]);
+                            acc[v_7 * 8 + 2 * e_3 + 1] = __fmaf_rn(g1_3 * x1_3, rq_0, acc[v_7 * 8 + 2 * e_3 + 1]);
                             out_1[2 * e_3] = __fmaf_rn(nkx_0, x0_3, rq_0 * (g0_3 * __uint_as_float(ww[v_7 * 4 + e_3] << 16)));
                             out_1[2 * e_3 + 1] = __fmaf_rn(nkx_0, x1_3, rq_0 * (g1_3 * __uint_as_float(ww[v_7 * 4 + e_3] & 4294901760u)));
                         }
@@ -524,14 +509,8 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
                             float g1_5 = __uint_as_float(gwd_5 & 4294901760u);
                             float x0_5 = __uint_as_float(xwd_5 << 16);
                             float x1_5 = __uint_as_float(xwd_5 & 4294901760u);
-                            float y_2 = __fmaf_rn(g0_5 * x0_5, rq_1, -comp[v_10 * 8 + 2 * e_5]);
-                            float t_2 = acc[v_10 * 8 + 2 * e_5] + y_2;
-                            comp[v_10 * 8 + 2 * e_5] = t_2 - acc[v_10 * 8 + 2 * e_5] - y_2;
-                            acc[v_10 * 8 + 2 * e_5] = t_2;
-                            float y_2_1 = __fmaf_rn(g1_5 * x1_5, rq_1, -comp[v_10 * 8 + 2 * e_5 + 1]);
-                            float t_2_1 = acc[v_10 * 8 + 2 * e_5 + 1] + y_2_1;
-                            comp[v_10 * 8 + 2 * e_5 + 1] = t_2_1 - acc[v_10 * 8 + 2 * e_5 + 1] - y_2_1;
-                            acc[v_10 * 8 + 2 * e_5 + 1] = t_2_1;
+                            acc[v_10 * 8 + 2 * e_5] = __fmaf_rn(g0_5 * x0_5, rq_1, acc[v_10 * 8 + 2 * e_5]);
+                            acc[v_10 * 8 + 2 * e_5 + 1] = __fmaf_rn(g1_5 * x1_5, rq_1, acc[v_10 * 8 + 2 * e_5 + 1]);
                             out_2[2 * e_5] = __fmaf_rn(nkx_1, x0_5, rq_1 * (g0_5 * __uint_as_float(ww[v_10 * 4 + e_5] << 16)));
                             out_2[2 * e_5 + 1] = __fmaf_rn(nkx_1, x1_5, rq_1 * (g1_5 * __uint_as_float(ww[v_10 * 4 + e_5] & 4294901760u)));
                         }
@@ -629,14 +608,8 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
                                 float g1_7 = __uint_as_float(gwd_7 & 4294901760u);
                                 float x0_7 = __uint_as_float(xwd_7 << 16);
                                 float x1_7 = __uint_as_float(xwd_7 & 4294901760u);
-                                float y_3 = __fmaf_rn(g0_7 * x0_7, rq_2, -comp[v_13 * 8 + 2 * e_7]);
-                                float t_3 = acc[v_13 * 8 + 2 * e_7] + y_3;
-                                comp[v_13 * 8 + 2 * e_7] = t_3 - acc[v_13 * 8 + 2 * e_7] - y_3;
-                                acc[v_13 * 8 + 2 * e_7] = t_3;
-                                float y_3_1 = __fmaf_rn(g1_7 * x1_7, rq_2, -comp[v_13 * 8 + 2 * e_7 + 1]);
-                                float t_3_1 = acc[v_13 * 8 + 2 * e_7 + 1] + y_3_1;
-                                comp[v_13 * 8 + 2 * e_7 + 1] = t_3_1 - acc[v_13 * 8 + 2 * e_7 + 1] - y_3_1;
-                                acc[v_13 * 8 + 2 * e_7 + 1] = t_3_1;
+                                acc[v_13 * 8 + 2 * e_7] = __fmaf_rn(g0_7 * x0_7, rq_2, acc[v_13 * 8 + 2 * e_7]);
+                                acc[v_13 * 8 + 2 * e_7 + 1] = __fmaf_rn(g1_7 * x1_7, rq_2, acc[v_13 * 8 + 2 * e_7 + 1]);
                                 out_3[2 * e_7] = __fmaf_rn(nkx_5, x0_7, rq_2 * (g0_7 * __uint_as_float(ww[v_13 * 4 + e_7] << 16)));
                                 out_3[2 * e_7 + 1] = __fmaf_rn(nkx_5, x1_7, rq_2 * (g1_7 * __uint_as_float(ww[v_13 * 4 + e_7] & 4294901760u)));
                             }
@@ -667,10 +640,6 @@ kernel_cake_rmsnorm_train_3feed5026e1156d2fba2(__nv_bfloat16* __restrict__ g, __
                     }
                 }
             }
-        }
-        #pragma unroll
-        for (int j2 = 0; j2 < 16; j2++) {
-            acc[j2] = acc[j2] - comp[j2];
         }
         unsigned long long pbase = (unsigned long long)c * 512ull;
         #pragma unroll

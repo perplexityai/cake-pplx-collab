@@ -20,11 +20,17 @@ loader and the generated CUDA sources under ``csrc/``).
 
 This package runs its own kernels only: the forward programs of the
 deterministic package (rendered here; the forward has no cross-row reduction)
-and, per token-count window, the backward form the registry lists for it: in
-the windows that ship it, one kernel whose CTAs add their ``dw`` sums into FP64
-workspace sums in the order they finish, so ``dw`` is not guaranteed bitwise
-reproducible; in the others, the deterministic package's backward pair (main
-kernel and fixed-order ``dw`` reduce) rendered here.  The mode is part of the
+and, per token-count window, the backward form the registry lists for it.
+Two forms sum ``dw`` in an order that depends on scheduling, so their ``dw`` is
+not guaranteed bitwise reproducible: the single kernel, whose CTAs add their
+``dw`` sums into replicated FP32 column sums in the workspace in the order
+they finish, and the part-row single kernel, whose CTAs write their ``dw`` sums as
+one FP32 row each into workspace scratch that its helper CTAs fold.  Every
+other window runs a fixed-order form, whose ``dw`` is bitwise reproducible for
+a given token count on devices with the same SM count: the one-cluster kernel
+of small token counts, a column-task program (its CTAs sum whole columns of
+``dw`` over every row) or the deterministic package's backward pair (main
+kernel and fixed-order ``dw`` reduce), rendered here.  The mode is part of the
 name only: every public name carries ``nondet`` (the constants excepted) and no
 entry point takes a ``deterministic`` keyword (passing one raises Python's
 ``TypeError`` for an unexpected keyword argument); the deterministic package is
@@ -369,6 +375,42 @@ def _route_error(
     )
 
 
+def _read_ranges(
+    x: torch.Tensor,
+    residual: Optional[torch.Tensor],
+    w: torch.Tensor,
+    *,
+    rows: int,
+    hidden: int,
+) -> tuple[tuple[int, int], ...]:
+    """The byte ranges ``(first, end)`` a forward launch reads, ``end`` one past
+    the last byte: ``x`` and ``residual`` as :func:`_kernel_input` returns them
+    (``[rows, hidden]``, feature dimension contiguous, rows one ``stride(0)``
+    apart) and the contiguous ``w``.  Plain integer arithmetic on the pointers
+    and strides, so the check adds little host time to a call."""
+
+    if not hidden:
+        return ()
+    w_first = w.data_ptr()
+    ranges = [(w_first, w_first + hidden * w.element_size())]
+    if rows:
+        for tensor in (x, residual):
+            if tensor is not None:
+                first = tensor.data_ptr()
+                span = (rows - 1) * tensor.stride(0) + hidden
+                ranges.append((first, first + span * tensor.element_size()))
+    return tuple(ranges)
+
+
+def _meets(first: int, end: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether the bytes ``[first, end)`` meet one of ``ranges``."""
+
+    for other_first, other_end in ranges:
+        if first < other_end and other_first < end:
+            return True
+    return False
+
+
 def _output_buffer(
     tensor: Optional[torch.Tensor],
     name: str,
@@ -378,14 +420,17 @@ def _output_buffer(
     dtype: torch.dtype,
     alignment: int,
     lead: Optional[tuple[int, ...]] = None,
+    reads: tuple[tuple[int, int], ...] = (),
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """``(kernel buffer, the tensor returned to the caller, user buffer to copy back into or None)``.
 
     A caller-provided output of any layout is honoured: the kernel writes a
-    contiguous aligned buffer directly when the caller's tensor is one, otherwise
-    into a temporary that is copied back into the caller's view after the launch.
-    ``lead`` (an N-D call) is the leading shape the caller's buffer and the
-    returned tensor have in place of the ``shape[0]`` rows of the kernel buffer.
+    contiguous aligned buffer directly when the caller's tensor is one and its
+    bytes meet none of ``reads`` (:func:`_read_ranges` of the inputs the launch
+    reads), otherwise into a temporary that is copied back into the caller's
+    view after the launch.  ``lead`` (an N-D call) is the leading shape the
+    caller's buffer and the returned tensor have in place of the ``shape[0]``
+    rows of the kernel buffer.
     """
 
     user_shape = shape if lead is None else (*lead, *shape[1:])
@@ -393,10 +438,15 @@ def _output_buffer(
         kernel = torch.empty(shape, dtype=dtype, device=device)
         return kernel, (kernel if lead is None else kernel.view(user_shape)), None
     _validate_tensor(tensor, name, shape=user_shape, device=device, dtype=dtype)
-    if tensor.numel() == 0 or (
-        tensor.is_contiguous() and tensor.data_ptr() % alignment == 0
-    ):
+    numel = tensor.numel()
+    if numel == 0:
         return (tensor if lead is None else tensor.reshape(shape)), tensor, None
+    if tensor.is_contiguous():
+        first = tensor.data_ptr()
+        if first % alignment == 0 and not _meets(
+            first, first + numel * tensor.element_size(), reads
+        ):
+            return (tensor if lead is None else tensor.reshape(shape)), tensor, None
     return torch.empty(shape, dtype=dtype, device=device), tensor, tensor
 
 
@@ -534,12 +584,12 @@ def cake_rmsnorm_nondet_train_backward_workspace_bytes(
     (``cake_jit.workspace_layout``, offsets fixed by the package): the
     deterministic pairs' ``uint32`` counters (``cake_jit.COUNTERS_BYTES``), the
     single kernel's counters (``cake_jit.SINGLE_COUNTERS_BYTES`` at
-    ``cake_jit.SINGLE_COUNTERS_OFFSET``), its FP64 column sums
+    ``cake_jit.SINGLE_COUNTERS_OFFSET``), its FP32 column sums
     (``cake_jit.SUMS_BYTES`` at ``cake_jit.SUMS_OFFSET``, the largest
     ``workspace_bytes`` of the package's single kernels) and, when a window up
     to ``rows`` of the width runs the deterministic pair, that pair's FP32
     partial rows at ``cake_jit.PAIR_ROWS_OFFSET``, which grow with ``rows`` (a
-    pair-row single kernel's FP32 scratch, one row of FP32 pairs per CTA, takes
+    part-row single kernel's FP32 scratch, one FP32 row per CTA, takes
     the same place).
     The size returned is the largest layout of the records the width's
     backward routes (``hidden``, ``residual``, both weight dtypes) run for up
@@ -589,10 +639,11 @@ def _workspace_views(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(the region bound to ``partial``, the counters, the layout)`` of the
-    launched workspace owner ``record``: the FP64 column sums of a single
-    kernel (its workspace rule's ``sum_bytes``, the kernel's
-    ``workspace_bytes``), the FP32 scratch of a pair-row single kernel (its
-    workspace rule's ``part_row_bytes``, one row of FP32 pairs, per CTA of the
+    launched workspace owner ``record``: the FP32 column sums of a single
+    kernel (``[replicas, hidden]``, one word per column; its workspace rule's
+    ``sum_bytes``, the kernel's ``workspace_bytes``), the FP32 scratch of a
+    part-row single kernel (its workspace rule's ``part_row_bytes``, one FP32
+    row, per CTA of the
     launch grid; the kernel's ``workspace_bytes`` is 0), the FP32
     ``[n_chunks, hidden]`` partial rows of a pair
     main kernel (``capacity``: the routes' pair record of the largest
@@ -621,11 +672,11 @@ def _workspace_views(
     begin = layout["partial_offset"]
     hidden = int(record["hidden"])
     kind = record["workspace_rule"]["kind"]
-    if kind == "claim_sum_f64":
-        partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float64)
-        required = int(record["workspace_rule"]["sum_bytes"]) // 8
+    if kind == "claim_sum_f32":
+        partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float32)
+        required = int(record["workspace_rule"]["sum_bytes"]) // 4
     elif kind == "claim_part_f32":
-        # one row of FP32 (hi, lo) pairs per CTA of the launch grid (the layout's
+        # one FP32 row per CTA of the launch grid (the layout's
         # ``grid``; the chunk table's ``slots`` may differ from it)
         partial = workspace[begin : begin + layout["partial_bytes"]].view(torch.float32)
         required = (
@@ -737,6 +788,13 @@ def _forward(
         w_dtype=w_dtype,
     ):
         raise _route_error("fwd", hidden, has_residual, w, arch)
+    # A caller's output that shares memory with an input is written through a
+    # temporary: a forward program may read an input again after it stores an
+    # output, and every kernel takes its pointers as not aliased.
+    caller_buffers = out is not None or rstd is not None or residual_out is not None
+    reads = (
+        _read_ranges(x, residual, w, rows=rows, hidden=hidden) if caller_buffers else ()
+    )
     out, y_result, out_user = _output_buffer(
         out,
         "out",
@@ -745,6 +803,7 @@ def _forward(
         dtype=torch.bfloat16,
         alignment=align,
         lead=nd,
+        reads=reads,
     )
     rstd, rstd_result, rstd_user = _output_buffer(
         rstd,
@@ -754,6 +813,7 @@ def _forward(
         dtype=torch.float32,
         alignment=BACKWARD_ALIGNMENT_BYTES,
         lead=nd,
+        reads=reads,
     )
     residual_out_user = None
     results: tuple[torch.Tensor, ...] = (y_result, rstd_result)
@@ -766,6 +826,7 @@ def _forward(
             dtype=torch.bfloat16,
             alignment=align,
             lead=nd,
+            reads=reads,
         )
         results = (y_result, rstd_result, h_new_result)
     copy_backs = [(out, out_user), (rstd, rstd_user), (residual_out, residual_out_user)]
@@ -843,13 +904,18 @@ def cake_rmsnorm_nondet_train_forward(
         Preallocated outputs: BF16 ``y`` of ``x``'s shape, FP32 reciprocal RMS of
         its leading shape (``[T]``) and (residual only) BF16 ``h_new`` of ``x``'s
         shape.  Contiguous aligned buffers are written directly; any other layout
-        receives a copy after the launch.
+        receives a copy after the launch.  A buffer that shares memory with ``x``,
+        ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
+        kernels write a temporary, which is copied into it after the launch.
+        The outputs must not share memory with one another; the call does not
+        check this.
 
     Returns
     -------
     ``(y, rstd)`` or ``(y, rstd, h_new)`` when ``residual`` is given.
     ``rstd`` is the FP32 per-row ``1 / sqrt(mean(h_new^2) + eps)`` the backward
-    needs; no other ``[T, H]`` temporary is produced.
+    needs.  No other ``[T, H]`` temporary is produced unless a preallocated
+    output takes the copy described above.
     """
 
     return _forward(
@@ -955,7 +1021,7 @@ def _backward(
     )
     # The plain kernels keep the residual-gradient parameters in their signature
     # and never read them: bind them to ``g`` exactly like the source launcher.
-    # The single kernel's last CTA (a pair-row single kernel's helper CTAs), or
+    # The single kernel's last CTA (a part-row single kernel's helper CTAs), or
     # the pair's dw reduce, stores all of ``dw``, so a caller's ``dw`` buffer may
     # hold anything.
     g_h = g_residual if has_residual else g
@@ -996,15 +1062,34 @@ def cake_rmsnorm_nondet_train_backward(
     r"""Fused BF16 RMSNorm backward: ``dx`` and the FP32 weight gradient ``dw``.
 
     The call runs, per window of ``T``, the form the "Program selection by
-    token count" notes list for that window: in the windows that ship it, one
-    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP64
-    sums in the workspace, which the CTA that finishes last rounds into ``dw``
-    (``dx`` is bitwise reproducible and within one BF16 ulp of
-    ``max(|dx|, rms(dx))`` of the deterministic kernel's ``dx``, not always
-    bitwise equal to it; the order of the FP64 additions depends on
-    scheduling, so ``dw`` is not guaranteed bitwise reproducible); in the
-    others, the deterministic package's backward pair rendered into this
-    package.
+    token count" notes list for that window; ``dx`` is bitwise reproducible
+    in every form.  Two forms add the ``dw`` sums of their CTAs in an order
+    that depends on scheduling, so their ``dw`` is not guaranteed bitwise
+    reproducible: the single kernel adds them into replicated FP32 column
+    sums in the workspace, and the CTA that finishes last stores ``dw``, the
+    FP32 sum of the replicas; the part-row single kernel writes them as one
+    FP32 row per CTA into scratch in the workspace, which its helper CTAs
+    add in FP32 and store as ``dw`` once every row is in (no column sums and
+    no atomic add of a sum).  Every other window runs a fixed-order form:
+    the one-cluster kernel (one launch that reads no workspace and uses no
+    atomic) up to a top of T 2 to 16 (64 rows on the H = 256 routes), a
+    column-task program (its CTAs sum whole columns of ``dw`` over every
+    row, each in a fixed order) or the deterministic package's backward pair
+    (main kernel and fixed-order ``dw`` reduce) rendered into this package.
+    Their ``dw`` is bitwise reproducible for a given token count on devices
+    with the same SM count.  The notes' table marks only the ``(one
+    cluster)`` and ``(det pair)`` windows, and its legend says that the
+    other windows run the single kernel and that ``dw`` is not bitwise
+    reproducible.  Both statements hold only for the windows whose registry
+    record (``cake_jit.MODULES``) has the ``workspace_rule``
+    ``claim_sum_f32`` with a nonzero ``sum_bytes`` (the single kernel) or
+    ``claim_part_f32`` (the part-row single kernel); the other unmarked
+    windows run a column-task program.  The notes' prose has the same gap:
+    where it says that the lowest window of 9 backward routes (T 1 up to a
+    token count from 1 to 31) or of sm_103a ``bwd_h4096`` and
+    ``bwd_w32_h4096`` runs a single kernel, the registry runs the
+    one-cluster kernel there and, in every other window that starts below T
+    31, a column-task program.
 
     While ``torch.use_deterministic_algorithms(True)`` is in effect every call
     raises ``RuntimeError`` naming
@@ -1022,11 +1107,15 @@ def cake_rmsnorm_nondet_train_backward(
         feature dimension, 16-byte aligned storage and a row stride that is a
         multiple of 16 bytes (expanded or sliced autograd gradients included) are
         read in place; other layouts are materialized once.  An N-D gradient,
-        ``[..., H]``, takes ``x``'s shape and collapses its leading dimensions
-        into rows under the forward's rule.
+        ``[..., H]``, takes ``x``'s shape; its leading dimensions collapse into
+        rows under the forward's rule, and a layout that rule rejects (the
+        gradient of a transposed consumer of ``y``, for example) is copied once
+        into a contiguous ``[rows, H]`` tensor instead of raising ``ValueError``.
     x : torch.Tensor
         The BF16 tensor that was normalized (``x`` of the plain forward,
-        ``h_new`` of the residual forward); same layout rules as ``g``.
+        ``h_new`` of the residual forward); same layout rules as ``g``, except
+        that an N-D ``x`` whose layout the forward's rule rejects raises
+        ``ValueError`` (it is not copied).
     w : torch.Tensor
         The forward's weight: BF16 ``[H]`` (read in place when contiguous and
         16-byte aligned), or, on the FP32-weight routes, FP32 ``[H]`` (in place
@@ -1048,10 +1137,15 @@ def cake_rmsnorm_nondet_train_backward(
         allocates and zero-fills one: a caching-allocator call, one fill kernel
         (about 3 us on B200) and about 35 us of host time per call.  One buffer
         per backward that may run concurrently (on another stream).
+        ``workspace`` must not share memory with ``g``, ``x``, ``w``, ``rstd``
+        or ``g_residual``; the call does not check this.
     dx, dw : torch.Tensor, optional
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout
         receives a copy after the launch.  Their previous contents are ignored.
+        ``dx`` and ``dw`` must not share memory with ``g``, ``x``, ``w``,
+        ``rstd``, ``g_residual`` or ``workspace``, or with each other; the call
+        does not check this.
 
     Returns
     -------
