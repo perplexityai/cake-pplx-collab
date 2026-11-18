@@ -49,7 +49,8 @@ Host design (every control is an argument; no environment variable):
   inputs (not checked).
 - Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
   stage through ``cake_jit.PROGRAM_OF``), CTAs of ``threads / lanes`` rows
-  (256 threads and 32 lanes a row: 8 rows), one CTA per block of rows on the
+  (32 lanes a row; 256 threads and 8 rows in the forward, 128 threads and
+  4 rows in the backward), one CTA per block of rows on the
   grid's x axis (``cake_jit.grid``).  ``R == 0`` launches nothing and loads no
   library.
   Every launch is a plain stream-ordered launch on the current torch stream

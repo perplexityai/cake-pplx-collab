@@ -66,11 +66,11 @@ STAGES = ("fwd", "bwd")
 MODULES: dict[str, dict[str, Any]] = {
     # The forward: h = bf16(w * silu(min(g, L)) * clamp(u, -L, L)), 256 threads,
     # 32 lanes a row, one row a thread (8 rows a CTA).
-    "cake_clamped_swiglu_det_train_0dddfba03f753508a937": {
+    "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_0dddfba03f753508a937",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
         "launch": {
             "block": (1, 1, 1),
             "cluster": (1, 1, 1),
@@ -78,16 +78,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_clamped_swiglu_det_train_0dddfba03f753508a937",
+        "library": "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
         "stage": "fwd",
     },
     # The backward: d_gate, d_up (BF16) and d_weight (FP32, one fixed-order
-    # warp sum a row), 256 threads, 32 lanes a row, one row a thread.
-    "cake_clamped_swiglu_det_train_815715cef4387daa0406": {
+    # warp sum a row), 128 threads, 32 lanes a row, one row a thread (4 rows a CTA).
+    "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_815715cef4387daa0406",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
         "launch": {
             "block": (1, 1, 1),
             "cluster": (1, 1, 1),
@@ -95,7 +95,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_clamped_swiglu_det_train_815715cef4387daa0406",
+        "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
         "stage": "bwd",
     },
 }

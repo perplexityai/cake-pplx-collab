@@ -64,8 +64,10 @@ Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by prog
 a stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and compiled with the exact `-gencode`
 flag of each (`build.json`).  Each is one kernel: 32 lanes own a row, each lane 9 loads of 8 BF16 values of the gate
 and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a warp is
-contiguous.  A CTA of 256 threads owns 8 consecutive rows, and the grid is `ceil(R / 8)` CTAs (`cake_jit.grid`, from
-the launch block and `cake_jit.BUILD_OF`); a row past `R` loads the last row and stores nothing.  No program uses shared
+contiguous.  The forward's CTA of 256 threads owns 8 consecutive rows, and the backward's CTA of 128 threads owns 4;
+the grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`).  A row past
+`R` loads the last row and stores nothing.  The backward splits a lane's 9 loads into 3 runs of 3, so it holds fewer
+registers and more warps fit on an SM.  No program uses shared
 memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the limit, the weight flag
 and the strides are launch arguments, so one library per program and architecture serves every call.
 
