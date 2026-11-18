@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 15 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 16 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -107,7 +107,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 |---|---|
 | Validated | NVIDIA GB300 (`sm_103a`), driver 580.159.03, CUDA 13.4.92, torch 2.14.1+cu130, apache-tvm-ffi 0.1.15 |
 | Supported by the code, not yet validated here | `sm_100a`, `sm_107a` |
-| fmha, causal_conv1d, mhc, mhc_head | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| fmha, causal_conv1d, mhc, mhc_head, mok | Validated on NVIDIA GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 
