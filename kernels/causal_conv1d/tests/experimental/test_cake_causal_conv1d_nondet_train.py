@@ -2839,7 +2839,7 @@ def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool)
     assert not any(t is h for t in idle for h in taken), "a buffer a graph holds is idle"
     graphs = ((first, inputs[0], outs[0], cases[0], 0), (second, inputs[2], outs[2], cases[2], 2))
 
-    def launch(_draw: int, seed: int):
+    def launch(_draw: int, seed: int, graphs=graphs, taken=taken):  # bound here: G1 is deleted below
         fresh = [_draw_inputs(*case, kind, key=145 + i, seed=seed) for _, _, _, case, i in graphs]
         for (_, held, out, _, _), values in zip(graphs, fresh, strict=True):
             _load(held, values, out)
