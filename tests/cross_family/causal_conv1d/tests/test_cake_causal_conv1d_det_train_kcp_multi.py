@@ -49,8 +49,8 @@ MROWS = [(name, lens, cuts, (C, C, C)) for name, lens, cuts, C in ROWS] + [
 ]
 # The multi entry's production layer: one rank's 16384 tokens and three convolutions of
 # C = 8192; kept out of ``MROWS`` (other suites import it).
-MROWS_8365 = [
-    ("8365-c8192x3", (9000, 5000, 2384), (4095, 4097, 4099, 4093), (8192, 8192, 8192)),
+MROWS_PRODUCTION = [
+    ("production-c8192x3", (9000, 5000, 2384), (4095, 4097, 4099, 4093), (8192, 8192, 8192)),
 ]
 
 
@@ -92,7 +92,7 @@ def _singles_explicit(conv_kcp, ctx, xs, ws, dys):
 
 
 @pytest.mark.parametrize(
-    "name,lens,cuts,Cs", MROWS + MROWS_8365, ids=[r[0] for r in MROWS + MROWS_8365]
+    "name,lens,cuts,Cs", MROWS + MROWS_PRODUCTION, ids=[r[0] for r in MROWS + MROWS_PRODUCTION]
 )
 def test_multi_forward_backward_bitwise_single_calls(name, lens, cuts, Cs) -> None:
     conv_kcp = _kcp()

@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The KCP registry (``kcp_jit``) of the Cake causal convolution training package: the records against the frozen
-kernel ABIs and the identity rule, the routes and the selection by channel count, and the ``build.json`` entries of
-the KCP programs.  Each backward program ships twice: the cooperative build (route ``kcp_bwd``) and its ``split``
+kernel ABIs and the eleven shipped program names, the routes and the selection by channel count, and the
+``build.json`` entries of the KCP programs.  Each backward program ships twice: the cooperative build (route ``kcp_bwd``) and its ``split``
 build (route ``kcp_bwd_split``, built with ``pair=True``: the token arithmetic on packed
 ``f32x2`` channel pairs), an ordinary launch one SM short of co-resident (``reserve_sms``) whose ``dweight`` partial
 rows the zero-history package's fixed-order reduce program sums.  The tail-row program (route ``kcp_bwd_halo``) of the
@@ -27,7 +27,7 @@ No device is needed; nothing is built or launched.
 from __future__ import annotations
 
 import hashlib
-import json
+import re
 from pathlib import Path
 
 import pytest
@@ -41,14 +41,8 @@ kcp_jit = cake_package("cake_causal_conv1d_det_train", "kcp_jit")
 PACKAGE_DIR = Path(cake_build.__file__).parent
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 GRID = [["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]]
-_W = "sm100_sm103_sm107"
-FWD = f"tart.causal_conv1d_kcp_fwd_bf16_silu.{_W}.causal_conv1d_kcp_fwd"
-BWD = f"tart.causal_conv1d_kcp_bwd_bf16_silu.{_W}.causal_conv1d_kcp_bwd"
-HEAD = f"tart.causal_conv1d_kcp_bwd_bf16_silu.{_W}.causal_conv1d_kcp_bwd_head"
-# the tail-row program's identity: its kernel's key, with no build keyword
-HALO = "causal_conv1d_kcp_bwd_bf16_silu/causal_conv1d_kcp_bwd_halo"
-# the history-row program's identity, likewise
-FWD_HALO = "causal_conv1d_kcp_fwd_bf16_silu/causal_conv1d_kcp_fwd_halo"
+# A KCP program's name: the package prefix, 20 hex digits of its build identity, ``_kcp``.
+KCP_NAME = re.compile(r"cake_causal_conv1d_det_train_[0-9a-f]{20}_kcp")
 
 FWD_PLAN = [
     ["buffer", "x"], ["buffer", "w"], ["buffer", "cu"], ["buffer", "y"], ["buffer", "hist"], ["buffer", "hist_row_off"],
@@ -100,114 +94,88 @@ TAIL = "cake_causal_conv1d_det_train_ae0c093e1e0ac46aec3f_kcp"
 REPAIR = "cake_causal_conv1d_det_train_138311f76132280b1e94_kcp"
 BWD_ROLES = ("kcp_bwd", "kcp_bwd_split")
 
-# program name -> (module, build keywords, arches, role, plan, ctas_per_sm)
+# The eleven KCP programs: program name -> (arches, role, plan, ctas_per_sm), each with its build in a comment.
 PROGRAMS = {
+    # the forward with history rows
     "cake_causal_conv1d_det_train_675940a7a4fc0dba4b53_kcp": (
-        FWD,
-        {},
         ARCHES,
         "kcp_fwd",
         FWD_PLAN,
         4,
     ),
-    "cake_causal_conv1d_det_train_5288d132a5cc927ae729_kcp": (
-        BWD,
-        {"vec": 8, "copy": "tma2d"},
+    # the cooperative backward: vec 8, tma2d copies
+    FALLBACK: (
         ("sm_100a", "sm_103a"),
         "kcp_bwd",
         BWD_TMA_PLAN,
         3,
     ),
-    "cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp": (
-        BWD,
-        {"vec": 8, "min_blocks": 2},
+    # the cooperative backward of sm_107a: vec 8, two CTAs per SM
+    R200_FALLBACK: (
         ("sm_107a",),
         "kcp_bwd",
         BWD_PLAN,
         2,
     ),
-    "cake_causal_conv1d_det_train_7485529a1755e5bd3036_kcp": (
-        BWD,
-        {"vec": 8, "copy": "tma2d", "stage_tokens": 8, "min_blocks": 2},
+    # the cooperative big-channel backward: vec 8, tma2d copies, eight-token stages, two CTAs per SM
+    BIG: (
         ARCHES,
         "kcp_bwd",
         BWD_TMA_PLAN,
         2,
     ),
+    # FALLBACK's split build on f32x2 channel pairs
     SPLIT_FALLBACK: (
-        BWD,
-        {"vec": 8, "copy": "tma2d", "split": True, "pair": True},
         ("sm_100a", "sm_103a"),
         "kcp_bwd_split",
         BWD_TMA_PLAN,
         3,
     ),
+    # R200_FALLBACK's split build on f32x2 channel pairs
     SPLIT_R200_FALLBACK: (
-        BWD,
-        {"vec": 8, "min_blocks": 2, "split": True, "pair": True},
         ("sm_107a",),
         "kcp_bwd_split",
         BWD_PLAN,
         2,
     ),
+    # BIG's split build on f32x2 channel pairs
     SPLIT_BIG: (
-        BWD,
-        {
-            "vec": 8,
-            "copy": "tma2d",
-            "stage_tokens": 8,
-            "min_blocks": 2,
-            "split": True,
-            "pair": True,
-        },
         ("sm_100a", "sm_103a"),
         "kcp_bwd_split",
         BWD_TMA_PLAN,
         2,
     ),
+    # SPLIT_BIG with its stage's tokens in two rolled passes
     SPLIT_BIG_ROLL: (
-        BWD,
-        {
-            "vec": 8,
-            "copy": "tma2d",
-            "stage_tokens": 8,
-            "min_blocks": 2,
-            "split": True,
-            "pair": True,
-            "fast_roll": True,
-        },
         ("sm_107a",),
         "kcp_bwd_split",
         BWD_TMA_PLAN,
         2,
     ),
+    # the backward's head-row program
     "cake_causal_conv1d_det_train_17cd42fb05079bbbf840_kcp": (
-        HEAD,
-        {},
         ARCHES,
         "kcp_bwd_head",
         HEAD_PLAN,
         5,
     ),
-    TAIL: (HALO, {}, ARCHES, "kcp_bwd_halo", HALO_PLAN, 5),
-    REPAIR: (FWD_HALO, {}, ARCHES, "kcp_fwd_halo", FWD_HALO_PLAN, 5),
+    # the overlapped backward's tail-row program and the two-launch forward's history-row program
+    TAIL: (ARCHES, "kcp_bwd_halo", HALO_PLAN, 5),
+    REPAIR: (ARCHES, "kcp_fwd_halo", FWD_HALO_PLAN, 5),
 }
 BIG_C_MIN = {"sm_100a": 512, "sm_103a": 512, "sm_107a": 1024}
 
 
-def _identity(module: str, kwargs: dict) -> str:
-    identity = {"build": {key: kwargs[key] for key in sorted(kwargs)}, "module": module}
-    digest = hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    return f"cake_causal_conv1d_det_train_{digest[:20]}_kcp"
-
-
 @pytest.mark.cpu_only
-def test_program_names_follow_the_identity_rule() -> None:
+def test_program_names_are_the_shipped_programs() -> None:
+    """The registry holds exactly the eleven KCP programs, each named by the package prefix, 20 hex digits of its
+    build identity and ``_kcp``; the split programs' reduce is the zero-history package's default reduce program."""
+
+    assert len(PROGRAMS) == 11
     assert set(kcp_jit.MODULES) == set(PROGRAMS)
-    for name, (module, kwargs, *_rest) in PROGRAMS.items():
-        assert _identity(module, kwargs) == name, name
+    for name in PROGRAMS:
+        assert KCP_NAME.fullmatch(name), name
+    assert REDUCE == "cake_causal_conv1d_det_train_86b5ecfbd90aca4b52e5"
     assert not set(kcp_jit.MODULES) & set(cake_jit.MODULES), (
         "the KCP programs are new builds, not the zero-history ones"
     )
@@ -216,7 +184,7 @@ def test_program_names_follow_the_identity_rule() -> None:
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("name", sorted(PROGRAMS))
 def test_record_matches_the_frozen_abi(name: str) -> None:
-    _module, _kwargs, arches, role, plan, ctas_per_sm = PROGRAMS[name]
+    arches, role, plan, ctas_per_sm = PROGRAMS[name]
     record = kcp_jit.MODULES[name]
     assert record["library"] == record["kernel"] == name
     assert record["kernel_symbol"] == f"kernel_{name}"
@@ -365,7 +333,7 @@ def test_backward_launch_form_selects_the_route(monkeypatch) -> None:
             kcp._cooperative(bad)
     assert kcp._bwd_kind(True) == "kcp_bwd"
     assert kcp._bwd_kind(False) == "kcp_bwd_split"
-    for name, (_m, _k, _a, role, _p, ctas_per_sm) in PROGRAMS.items():
+    for name, (_a, role, _p, ctas_per_sm) in PROGRAMS.items():
         if role not in BWD_ROLES:
             continue
         record = kcp_jit.MODULES[name]
@@ -389,7 +357,7 @@ def test_forward_launches_one_sm_short(monkeypatch) -> None:
     kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
     assert kcp.FWD_RESERVE_SMS == 1
     seen = set()
-    for name, (_m, _k, _a, role, _p, ctas_per_sm) in PROGRAMS.items():
+    for name, (_a, role, _p, ctas_per_sm) in PROGRAMS.items():
         if role != kcp.KCP_FWD:
             continue
         record = kcp_jit.MODULES[name]

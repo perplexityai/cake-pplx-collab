@@ -40,9 +40,11 @@ nudged off a multiple of 64).  Per row and mode:
 The timings interleave the modes: ``--rounds`` rounds, each timing every phase of both modes (det first in even
 rounds, nondet first in odd ones).  Each value is the median over the rounds of the round's median, with its
 ``[min, max]`` over the rounds (``*_us_range``).  ``speedup`` is ``det / nondet`` of the medians (above 1: the
-non-deterministic mode is faster), ``speedup_range`` the ``[min, max]`` of the per-round ratios.  A sanity check per
-row (not a gate) records whether ``dx`` is bitwise equal between the modes and the largest relative ``dweight``
-difference.  The route is chosen as in the deterministic benchmark (``--weight-dtype``, ``--bias``,
+non-deterministic mode is faster), ``speedup_range`` the ``[min, max]`` of the per-round ratios.  Per row the accuracy
+gate (``--draws``, ``cake_causal_conv1d_numerics.py``: the training tests' judge, each arm's error against a float64
+oracle beside PyTorch BF16's over 32 random inputs) judges both Cake modes and every baseline (``gate`` of each
+entry); the modes are never compared with each other.  The route is chosen as in the deterministic benchmark
+(``--weight-dtype``, ``--bias``,
 ``--silu-grad-preactivation``); ``--side-kernel`` adds the backward's wall latency beside a kernel resident on another
 stream.
 
@@ -52,19 +54,26 @@ with its atomic (``dao``) and deterministic (``dao_det``) weight gradients, and 
 ``cudnn.ops.causal_conv1d`` (``cudnn_fe``).  They run through autograd on the row's tensors, interleaved with the
 two Cake modes in the same rounds and timed the same way (``fwd``: the training forward with its graph recorded;
 ``bwd``: the backward of a recorded forward; ``step``: both; ``ckpt``: as above), and are reported per row under
-``sota`` with the library version, determinism, feature match and a numerics check against the Cake
-non-deterministic result, or as unsupported with the reason.  ``best_sota`` names the fastest eligible arm per phase
+``sota`` with the library version, determinism claim, features and its accuracy gate, or as unsupported with the
+reason.  ``best_sota`` names the fastest eligible arm per phase
 and measure, ``speedup_vs_sota`` its time over the non-deterministic time (above 1: Cake faster), and every arm's
 ``speedup`` its own ratio.  ``comparison`` is the row's two-baseline comparison on one column, the ``gpu`` time
 (``COMPARISON_COLUMN``): per phase the deterministic and non-deterministic Cake times, the best eligible arm with
 its library, determinism and match (or ``unsupported`` with every arm's reason; a feature- or precision-mismatched
 arm is listed but never the best), ``det_over_nondet`` and ``sota_over_nondet``; the ``compare`` lines print it.
 
+``--pair`` (with ``--silu-grad-preactivation fp32``) adds the opt-in FP32 (hi, lo) pair ``dweight`` / ``dbias`` sums
+of both packages (``dweight_sum="fp32_pair"``) as two more modes, ``det_pair`` and ``nondet_pair``, timed in the same
+interleaved rounds and gated the same way; ``pair_over_single`` is each package's pair time over its default
+(single FP32 word) time per phase and measure (above 1: the pair sums are slower), with the range of the per-round
+ratios.
+
 Example::
 
     python benchmarks/bench_cake_causal_conv1d_nondet_train.py
     python benchmarks/bench_cake_causal_conv1d_nondet_train.py --channels 512 1280 --tokens 250340 --json out.json
     python benchmarks/bench_cake_causal_conv1d_nondet_train.py --silu-grad-preactivation fp32 --bias float32
+    python benchmarks/bench_cake_causal_conv1d_nondet_train.py --silu-grad-preactivation fp32 --pair --sota none
     python benchmarks/bench_cake_causal_conv1d_nondet_train.py --channels 512 --tokens 250340 --sota fla_gluon dao
 """
 
@@ -93,6 +102,7 @@ from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cake_causal_conv1d_baselines as baselines  # noqa: E402
+import cake_causal_conv1d_numerics as numerics  # noqa: E402
 
 WIDTH = 4
 P1_TOKENS = (239718, 245028, 249866, 250340, 258574, 259042, 259584, 261393)
@@ -124,6 +134,18 @@ MODES: dict[str, dict[str, Callable]] = {
         "autograd": nondet_conv.cake_causal_conv1d_nondet,
     },
 }
+# The pair modes of ``--pair``: each package's entry points with ``dweight_sum="fp32_pair"``.
+PAIR_MODES = {"det_pair": "det", "nondet_pair": "nondet"}
+
+
+def modes_of(pair: bool) -> dict[str, dict]:
+    """The timed modes: :data:`MODES`, plus the :data:`PAIR_MODES` with ``pair``."""
+
+    modes: dict[str, dict] = dict(MODES)
+    if pair:
+        for name, single in PAIR_MODES.items():
+            modes[name] = {**MODES[single], "dweight_sum": "fp32_pair"}
+    return modes
 PHASES = ("fwd", "bwd", "step", "ckpt")
 KINDS = ("gpu", "wall", "host")
 ROUNDS = 7
@@ -155,11 +177,14 @@ class Route:
     bias_dtype: Optional[torch.dtype] = None
     silu_grad_preactivation: str = "bf16"
 
-    def backward_route(self) -> str:
+    def backward_route(self, *, pair: bool = False) -> str:
         return loader.backward_route(
             bias=self.bias_dtype is not None,
             fp32_grad=self.silu_grad_preactivation == "fp32",
-            bf16_taps_or_dweight=self.weight_dtype == torch.bfloat16,
+            # dweight defaults to the taps' dtype
+            bf16_taps=self.weight_dtype == torch.bfloat16,
+            bf16_dweight=self.weight_dtype == torch.bfloat16,
+            pair=pair,
         )
 
     def describe(self) -> dict:
@@ -433,10 +458,12 @@ def _calls(p: Problem, route: Route, api: dict[str, Callable], *, own_workspace:
     def fwd():
         return forward(p.x, p.w, p.cu, bias=p.b, out=y, workspace=fws)
 
+    dweight_sum = api.get("dweight_sum", "fp32")
+
     def bwd():
         return backward(
             p.x, p.w, p.cu, p.dy, bias=p.b, silu_grad_preactivation=route.silu_grad_preactivation,
-            workspace=bws, dx=dx, dweight=dw, dbias=db,
+            workspace=bws, dx=dx, dweight=dw, dbias=db, dweight_sum=dweight_sum,
         )  # fmt: skip
 
     def step():
@@ -455,6 +482,7 @@ def _calls(p: Problem, route: Route, api: dict[str, Callable], *, own_workspace:
             p.cu,
             b_,
             silu_grad_preactivation=route.silu_grad_preactivation,
+            dweight_sum=dweight_sum,
         )
 
     def ckpt():
@@ -479,44 +507,41 @@ def _calls(p: Problem, route: Route, api: dict[str, Callable], *, own_workspace:
     }
 
 
-def _cake_reference(p: Problem, route: Route) -> tuple:
-    """The non-deterministic Cake ``(y, dx, dweight, dbias)`` of the row through autograd (the baselines' check)."""
+def _cake_layer(p: Problem, route: Route, api: dict[str, Callable]) -> Callable[..., tuple]:
+    def layer(*t: torch.Tensor) -> tuple:
+        return (
+            api["autograd"](
+                t[0], t[1], p.cu, t[2] if len(t) > 2 else None,
+                silu_grad_preactivation=route.silu_grad_preactivation,
+                dweight_sum=api.get("dweight_sum", "fp32"),
+            ),
+        )  # fmt: skip
 
-    leaves = [
-        t.detach().clone().requires_grad_(True)
-        for t in (p.x, p.w, p.b)
-        if t is not None
-    ]
-    y = nondet_conv.cake_causal_conv1d_nondet(
-        leaves[0],
-        leaves[1],
-        p.cu,
-        leaves[2] if len(leaves) > 2 else None,
-        silu_grad_preactivation=route.silu_grad_preactivation,
-    )
-    y.backward(p.dy)
-    return (y.detach(), *(leaf.grad for leaf in leaves))
+    return layer
 
 
 def _baselines(
-    p: Problem, route: Route, sota: Sequence[str], device: torch.device
-) -> tuple[dict[str, dict], dict[str, dict]]:
-    """``(entries, calls)`` of the requested non-Cake arms on the row: each built, checked against the Cake result
-    and warmed up (JIT compilation and autotuning happen here, outside the timing)."""
+    p: Problem, route: Route, sota: Sequence[str], device: torch.device, draws: int, modes: dict[str, dict] = MODES
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    """``(entries, calls, cake_gates)`` of the requested non-Cake arms on the row: each built and warmed up (JIT
+    compilation and autotuning happen here, outside the timing); then the accuracy gate of every baseline and of both
+    Cake modes (``cake_gates``)."""
 
     entries: dict[str, dict] = {}
     calls: dict[str, dict] = {}
-    if not sota:
-        return entries, calls
-    reference = _cake_reference(p, route)
+    runs = {
+        f"cake_{mode}": baselines.gate_run(_cake_layer(p, route, api), {})
+        for mode, api in modes.items()
+    }
     for name in sota:
-        entry, arm = baselines.single_rank_arm(
+        entry, arm, run = baselines.single_rank_arm(
             name, x=p.x, w=p.w, b=p.b, dy=p.dy, cu=p.cu, lens=p.lens,
-            cake_preactivation=route.silu_grad_preactivation, reference=reference,
+            cake_preactivation=route.silu_grad_preactivation,
         )  # fmt: skip
         entries[name] = entry
         if arm is None:
             continue
+        runs[name] = run
         try:
             with baselines.environment(entry["env"]):
                 for phase in PHASES:
@@ -528,9 +553,16 @@ def _baselines(
             continue
         entry["ckpt_ahead_late"] = 0
         calls[name] = arm
-    del reference
+    runs = {name: run for name, run in runs.items() if name.startswith("cake_") or name in calls}
+    verdicts = numerics.gate(
+        runs, S=p.x.shape[0], C=p.x.shape[1], cu=p.cu, weight_dtype=route.weight_dtype,
+        bias_dtype=route.bias_dtype, draws=draws,
+    ) if draws else {}  # fmt: skip
+    for name, entry in entries.items():
+        if name in verdicts:
+            baselines.apply_gate(entry, verdicts[name])
     torch.cuda.empty_cache()
-    return entries, calls
+    return entries, calls, {mode: verdicts.get(f"cake_{mode}") for mode in modes}
 
 
 def bench_row(
@@ -543,6 +575,8 @@ def bench_row(
     rounds: int,
     ahead: _GpuAhead,
     sota: Sequence[str] = (),
+    draws: int = 32,
+    modes: dict[str, dict] = MODES,
 ) -> dict:
     p = Problem(tokens, channels, route, device)
     arch = loader.arch_for_capability(torch.cuda.get_device_capability(device))
@@ -553,13 +587,22 @@ def bench_row(
         "nondet_program": loader.selected_modules(
             arch, route.backward_route(), C=channels, S=tokens
         )[0],
+        **(
+            {
+                "nondet_pair_program": loader.selected_modules(
+                    arch, route.backward_route(pair=True), C=channels, S=tokens
+                )[0]
+            }
+            if "nondet_pair" in modes
+            else {}
+        ),
         **route.describe(),
         "rounds": rounds,
         "modes": {},
     }
     entries: dict[str, dict] = {}
     timed: dict[str, dict] = {}
-    for mode, api in MODES.items():
+    for mode, api in modes.items():
         entry: dict = {
             "backward_workspace_bytes": api["backward_workspace_bytes"](
                 tokens, channels, device
@@ -583,7 +626,9 @@ def bench_row(
             entry["ckpt_ahead_late"] = 0
         except Exception as exc:  # keep the other mode's row
             entry["error"] = repr(exc)[:300]
-    sota_entries, sota_calls = _baselines(p, route, sota, device)
+    sota_entries, sota_calls, cake_gates = _baselines(p, route, sota, device, draws, modes)
+    for mode, verdict in cake_gates.items():
+        entries[mode]["gate"] = verdict
     # Interleaved rounds: every phase of both modes and of every baseline per round, the order alternating.
     runners = {
         **{mode: (calls, {}, entries[mode]) for mode, calls in timed.items()},
@@ -620,7 +665,7 @@ def bench_row(
                             }
                         )
             except Exception as exc:  # keep the other rows
-                if name in MODES:
+                if name in modes:
                     record["error"] = repr(exc)[:300]
                 else:
                     record["unsupported"] = repr(exc)[:300]
@@ -636,7 +681,6 @@ def bench_row(
             record[f"{key}_us"] = _median(values)
             record[f"{key}_us_range"] = [min(values), max(values)]
     sota_calls.clear()
-    grads = {}
     for mode, calls in timed.items():
         entry = entries[mode]
         if "error" in entry:
@@ -649,9 +693,6 @@ def bench_row(
                     beside * 1e3,
                 )
                 entry["bwd_beside_ratio"] = beside / alone
-            out = calls["bwd"]()
-            torch.cuda.synchronize(device)
-            grads[mode] = tuple(t.clone() for t in out)
         except Exception as exc:  # keep the other mode's row
             entry["error"] = repr(exc)[:300]
     result["modes"] = entries
@@ -680,16 +721,21 @@ def bench_row(
             for d, n in zip(samples["det"][key], samples["nondet"][key], strict=True)
         ]
         result["speedup_range"][key] = [min(ratios), max(ratios)]
-    if "det" in grads and "nondet" in grads:
-        (dx_d, dw_d, *_), (dx_n, dw_n, *_) = grads["det"], grads["nondet"]
-        result["check"] = {
-            "dx_bitwise_equal": bool(torch.equal(dx_d, dx_n)),
-            "dweight_max_rel_diff": float(
-                (
-                    (dw_n.double() - dw_d.double()).abs().max()
-                    / dw_d.double().abs().max().clamp_min(1e-30)
-                ).item()
-            ),
+    result["pair_over_single"] = {}
+    for pair_mode, single in PAIR_MODES.items():
+        if pair_mode not in entries:
+            continue
+        a, b = entries[single], entries[pair_mode]
+        both = [f"{phase}_{kind}" for phase in PHASES for kind in KINDS if f"{phase}_{kind}_us" in a and f"{phase}_{kind}_us" in b]
+        result["pair_over_single"][single] = {
+            key: {
+                "ratio": b[f"{key}_us"] / a[f"{key}_us"],
+                "range": [
+                    min(q / s for s, q in zip(samples[single][key], samples[pair_mode][key], strict=True)),
+                    max(q / s for s, q in zip(samples[single][key], samples[pair_mode][key], strict=True)),
+                ],
+            }
+            for key in both
         }
     return result
 
@@ -731,8 +777,34 @@ def _format(result: dict) -> list[str]:
                 f"{head} {mode} bwd beside a resident kernel: alone {entry['bwd_alone_us']:9.2f} us, "
                 f"beside {entry['bwd_beside_us']:9.2f} us, {entry['bwd_beside_ratio']:.2f}x"
             )
-    if "check" in result:
-        lines.append(f"{head} check {result['check']}")
+    for mode, entry in (("det", det), ("nondet", nondet)):
+        verdict = entry.get("gate")
+        if verdict is not None:
+            lines.append(
+                f"{head} {mode} accuracy gate {'pass' if verdict.get('passed') else 'FAIL'}"
+                + ("" if verdict.get("passed") else f": {(verdict.get('failures') or [verdict.get('error')])[:3]}")
+            )
+    for pair_mode, single in PAIR_MODES.items():
+        entry = result["modes"].get(pair_mode)
+        if entry is None:
+            continue
+        if "error" in entry:
+            lines.append(f"{head} {pair_mode}: {entry['error']}")
+            continue
+        for phase in PHASES:
+            gpu, base = entry.get(f"{phase}_gpu_us"), result["modes"][single].get(f"{phase}_gpu_us")
+            ratio = result["pair_over_single"].get(single, {}).get(f"{phase}_gpu")
+            lines.append(
+                f"{head} {phase:4s} | {single} {'-' if base is None else f'{base:9.2f}'} gpu | {pair_mode} "
+                f"{'-' if gpu is None else f'{gpu:9.2f}'} gpu | pair/single "
+                + ("-" if ratio is None else f"{ratio['ratio']:5.3f}x [{ratio['range'][0]:5.3f}, {ratio['range'][1]:5.3f}]")
+            )
+        verdict = entry.get("gate")
+        if verdict is not None:
+            lines.append(
+                f"{head} {pair_mode} accuracy gate {'pass' if verdict.get('passed') else 'FAIL'}"
+                + ("" if verdict.get("passed") else f": {(verdict.get('failures') or [verdict.get('error')])[:3]}")
+            )
     lines.extend(baselines.format_sota(result, head, PHASES, COMPARISON_COLUMN))
     lines.extend(baselines.format_comparison(result, head))
     return lines
@@ -790,7 +862,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=["all"],
         help=f"non-Cake baselines: all (default), none, or names from {list(baselines.SINGLE_RANK_ARMS)}",
     )
+    parser.add_argument(
+        "--pair",
+        action="store_true",
+        help='also time both packages with dweight_sum="fp32_pair" (needs --silu-grad-preactivation fp32)',
+    )
+    parser.add_argument(
+        "--draws",
+        type=int,
+        default=32,
+        help="accuracy gate draws per row (at least 32; 0: no gate, no baseline eligible)",
+    )
     args = parser.parse_args(argv)  # fmt: skip
+    if 0 < args.draws < 32:
+        parser.error("--draws: the gate judges at least 32 draws (or 0)")
+    if args.pair and args.silu_grad_preactivation != "fp32":
+        parser.error("--pair: the pair routes pair the fp32g routes; pass --silu-grad-preactivation fp32")
+    modes = modes_of(args.pair)
     sota = baselines.parse_arms(args.sota, baselines.SINGLE_RANK_ARMS)
     route = Route(
         weight_dtype=DTYPES[args.weight_dtype],
@@ -840,6 +928,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             rounds=args.rounds,
             ahead=ahead,
             sota=sota,
+            draws=args.draws,
+            modes=modes,
         )
         results.append(result)
         torch.cuda.empty_cache()
@@ -857,6 +947,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "cuda": torch.version.cuda,
                     "torch": torch.__version__,
                     "route": route.describe(),
+                    "modes": list(modes),
                     "sota_arms": sota,
                     "rows": results,
                 },

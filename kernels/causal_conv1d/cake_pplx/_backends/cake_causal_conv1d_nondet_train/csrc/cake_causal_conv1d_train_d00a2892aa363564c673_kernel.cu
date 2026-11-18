@@ -236,14 +236,12 @@ kernel_cake_causal_conv1d_train_d00a2892aa363564c673(__nv_bfloat16* __restrict__
         int _atomic_fetch_add_1 = atomicAdd(&work[ct], 1);
         last = _atomic_fetch_add_1;
         cells[0] = last;
-        cells[4] = last;
         cells[1] = last;
-        cells[5] = last;
     }
     __syncthreads();
     #pragma unroll 1
     for (int k0 = 0; k0 < 2; k0++) {
-        int qn = cells[4 + k0];
+        int qn = cells[k0];
         if (qn < nch) {
             int stage_t0 = qn * n_sub * 16 + (int)((unsigned int)k0 % 2) * 8;
             if (tid == 0) {
@@ -256,7 +254,7 @@ kernel_cake_causal_conv1d_train_d00a2892aa363564c673(__nv_bfloat16* __restrict__
                     int _min_3 = ((_max_4) < (8) ? (_max_4) : (8));
                     tail_rows = _min_3;
                 }
-                mbarrier_arrive_expect_tx(stage_full_addr + ((int)((unsigned int)k0 % 2)) * 8, (n_full * 8 + tail_rows) * cbytes);
+                mbarrier_arrive_expect_tx(stage_full_addr + ((int)((unsigned int)k0 % 2)) * 8, (unsigned int)(n_full * 8 + tail_rows) * (unsigned int)cbytes);
             }
             if (tid - sub * ct_vec == 0 && sub < n_sub) {
                 int ts_n = stage_t0 + sub * 16;
@@ -512,7 +510,7 @@ kernel_cake_causal_conv1d_train_d00a2892aa363564c673(__nv_bfloat16* __restrict__
                     int _min_25 = ((_max_26) < (8) ? (_max_26) : (8));
                     tail_rows_1 = _min_25;
                 }
-                mbarrier_arrive_expect_tx(stage_full_addr + ((int)((unsigned int)(k + 2) % 2)) * 8, (n_full_1 * 8 + tail_rows_1) * cbytes);
+                mbarrier_arrive_expect_tx(stage_full_addr + ((int)((unsigned int)(k + 2) % 2)) * 8, (unsigned int)(n_full_1 * 8 + tail_rows_1) * (unsigned int)cbytes);
             }
             if (tid - sub * ct_vec == 0 && sub < n_sub) {
                 int ts_n_1 = stage_t0_1 + sub * 16;

@@ -40,9 +40,11 @@ nudged off a multiple of 64).  Per row and mode:
 The timings interleave the modes: ``--rounds`` rounds, each timing every phase of both modes (det first in even
 rounds, nondet first in odd ones).  Each value is the median over the rounds of the round's median, with its
 ``[min, max]`` over the rounds (``*_us_range``).  ``speedup`` is ``det / nondet`` of the medians (above 1: the
-non-deterministic mode is faster), ``speedup_range`` the ``[min, max]`` of the per-round ratios.  A sanity check per
-row (not a gate) records whether ``dx`` is bitwise equal between the modes and the largest relative ``dweight``
-difference.  The route is chosen as in the deterministic benchmark (``--weight-dtype``, ``--bias``,
+non-deterministic mode is faster), ``speedup_range`` the ``[min, max]`` of the per-round ratios.  Per row the accuracy
+gate (``--draws``, ``cake_causal_conv1d_numerics.py``: the training tests' judge, each arm's error against a float64
+oracle beside PyTorch BF16's over 32 random inputs) judges both Cake modes and every baseline (``gate`` of each
+entry); the modes are never compared with each other.  The route is chosen as in the deterministic benchmark
+(``--weight-dtype``, ``--bias``,
 ``--silu-grad-preactivation``); ``--side-kernel`` adds the backward's wall latency beside a kernel resident on another
 stream.
 
@@ -52,8 +54,8 @@ with its atomic (``dao``) and deterministic (``dao_det``) weight gradients, and 
 ``cudnn.ops.causal_conv1d`` (``cudnn_fe``).  They run through autograd on the row's tensors, interleaved with the
 two Cake modes in the same rounds and timed the same way (``fwd``: the training forward with its graph recorded;
 ``bwd``: the backward of a recorded forward; ``step``: both; ``ckpt``: as above), and are reported per row under
-``sota`` with the library version, determinism, feature match and a numerics check against the Cake
-non-deterministic result, or as unsupported with the reason.  ``best_sota`` names the fastest eligible arm per phase
+``sota`` with the library version, determinism claim, features and its accuracy gate, or as unsupported with the
+reason.  ``best_sota`` names the fastest eligible arm per phase
 and measure, ``speedup_vs_sota`` its time over the non-deterministic time (above 1: Cake faster), and every arm's
 ``speedup`` its own ratio.  ``comparison`` is the row's two-baseline comparison on one column, the ``gpu`` time
 (``COMPARISON_COLUMN``): per phase the deterministic and non-deterministic Cake times, the best eligible arm with
@@ -93,6 +95,7 @@ from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cake_causal_conv1d_baselines as baselines  # noqa: E402
+import cake_causal_conv1d_numerics as numerics  # noqa: E402
 
 WIDTH = 4
 P1_TOKENS = (239718, 245028, 249866, 250340, 258574, 259042, 259584, 261393)
@@ -159,7 +162,9 @@ class Route:
         return loader.backward_route(
             bias=self.bias_dtype is not None,
             fp32_grad=self.silu_grad_preactivation == "fp32",
-            bf16_taps_or_dweight=self.weight_dtype == torch.bfloat16,
+            # dweight defaults to the taps' dtype
+            bf16_taps=self.weight_dtype == torch.bfloat16,
+            bf16_dweight=self.weight_dtype == torch.bfloat16,
         )
 
     def describe(self) -> dict:
@@ -479,44 +484,40 @@ def _calls(p: Problem, route: Route, api: dict[str, Callable], *, own_workspace:
     }
 
 
-def _cake_reference(p: Problem, route: Route) -> tuple:
-    """The non-deterministic Cake ``(y, dx, dweight, dbias)`` of the row through autograd (the baselines' check)."""
+def _cake_layer(p: Problem, route: Route, api: dict[str, Callable]) -> Callable[..., tuple]:
+    def layer(*t: torch.Tensor) -> tuple:
+        return (
+            api["autograd"](
+                t[0], t[1], p.cu, t[2] if len(t) > 2 else None,
+                silu_grad_preactivation=route.silu_grad_preactivation,
+            ),
+        )  # fmt: skip
 
-    leaves = [
-        t.detach().clone().requires_grad_(True)
-        for t in (p.x, p.w, p.b)
-        if t is not None
-    ]
-    y = nondet_conv.cake_causal_conv1d_nondet(
-        leaves[0],
-        leaves[1],
-        p.cu,
-        leaves[2] if len(leaves) > 2 else None,
-        silu_grad_preactivation=route.silu_grad_preactivation,
-    )
-    y.backward(p.dy)
-    return (y.detach(), *(leaf.grad for leaf in leaves))
+    return layer
 
 
 def _baselines(
-    p: Problem, route: Route, sota: Sequence[str], device: torch.device
-) -> tuple[dict[str, dict], dict[str, dict]]:
-    """``(entries, calls)`` of the requested non-Cake arms on the row: each built, checked against the Cake result
-    and warmed up (JIT compilation and autotuning happen here, outside the timing)."""
+    p: Problem, route: Route, sota: Sequence[str], device: torch.device, draws: int
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
+    """``(entries, calls, cake_gates)`` of the requested non-Cake arms on the row: each built and warmed up (JIT
+    compilation and autotuning happen here, outside the timing); then the accuracy gate of every baseline and of both
+    Cake modes (``cake_gates``)."""
 
     entries: dict[str, dict] = {}
     calls: dict[str, dict] = {}
-    if not sota:
-        return entries, calls
-    reference = _cake_reference(p, route)
+    runs = {
+        f"cake_{mode}": baselines.gate_run(_cake_layer(p, route, api), {})
+        for mode, api in MODES.items()
+    }
     for name in sota:
-        entry, arm = baselines.single_rank_arm(
+        entry, arm, run = baselines.single_rank_arm(
             name, x=p.x, w=p.w, b=p.b, dy=p.dy, cu=p.cu, lens=p.lens,
-            cake_preactivation=route.silu_grad_preactivation, reference=reference,
+            cake_preactivation=route.silu_grad_preactivation,
         )  # fmt: skip
         entries[name] = entry
         if arm is None:
             continue
+        runs[name] = run
         try:
             with baselines.environment(entry["env"]):
                 for phase in PHASES:
@@ -528,9 +529,16 @@ def _baselines(
             continue
         entry["ckpt_ahead_late"] = 0
         calls[name] = arm
-    del reference
+    runs = {name: run for name, run in runs.items() if name.startswith("cake_") or name in calls}
+    verdicts = numerics.gate(
+        runs, S=p.x.shape[0], C=p.x.shape[1], cu=p.cu, weight_dtype=route.weight_dtype,
+        bias_dtype=route.bias_dtype, draws=draws,
+    ) if draws else {}  # fmt: skip
+    for name, entry in entries.items():
+        if name in verdicts:
+            baselines.apply_gate(entry, verdicts[name])
     torch.cuda.empty_cache()
-    return entries, calls
+    return entries, calls, {mode: verdicts.get(f"cake_{mode}") for mode in MODES}
 
 
 def bench_row(
@@ -543,6 +551,7 @@ def bench_row(
     rounds: int,
     ahead: _GpuAhead,
     sota: Sequence[str] = (),
+    draws: int = 32,
 ) -> dict:
     p = Problem(tokens, channels, route, device)
     arch = loader.arch_for_capability(torch.cuda.get_device_capability(device))
@@ -583,7 +592,9 @@ def bench_row(
             entry["ckpt_ahead_late"] = 0
         except Exception as exc:  # keep the other mode's row
             entry["error"] = repr(exc)[:300]
-    sota_entries, sota_calls = _baselines(p, route, sota, device)
+    sota_entries, sota_calls, cake_gates = _baselines(p, route, sota, device, draws)
+    for mode, verdict in cake_gates.items():
+        entries[mode]["gate"] = verdict
     # Interleaved rounds: every phase of both modes and of every baseline per round, the order alternating.
     runners = {
         **{mode: (calls, {}, entries[mode]) for mode, calls in timed.items()},
@@ -636,7 +647,6 @@ def bench_row(
             record[f"{key}_us"] = _median(values)
             record[f"{key}_us_range"] = [min(values), max(values)]
     sota_calls.clear()
-    grads = {}
     for mode, calls in timed.items():
         entry = entries[mode]
         if "error" in entry:
@@ -649,9 +659,6 @@ def bench_row(
                     beside * 1e3,
                 )
                 entry["bwd_beside_ratio"] = beside / alone
-            out = calls["bwd"]()
-            torch.cuda.synchronize(device)
-            grads[mode] = tuple(t.clone() for t in out)
         except Exception as exc:  # keep the other mode's row
             entry["error"] = repr(exc)[:300]
     result["modes"] = entries
@@ -680,17 +687,6 @@ def bench_row(
             for d, n in zip(samples["det"][key], samples["nondet"][key], strict=True)
         ]
         result["speedup_range"][key] = [min(ratios), max(ratios)]
-    if "det" in grads and "nondet" in grads:
-        (dx_d, dw_d, *_), (dx_n, dw_n, *_) = grads["det"], grads["nondet"]
-        result["check"] = {
-            "dx_bitwise_equal": bool(torch.equal(dx_d, dx_n)),
-            "dweight_max_rel_diff": float(
-                (
-                    (dw_n.double() - dw_d.double()).abs().max()
-                    / dw_d.double().abs().max().clamp_min(1e-30)
-                ).item()
-            ),
-        }
     return result
 
 
@@ -731,8 +727,13 @@ def _format(result: dict) -> list[str]:
                 f"{head} {mode} bwd beside a resident kernel: alone {entry['bwd_alone_us']:9.2f} us, "
                 f"beside {entry['bwd_beside_us']:9.2f} us, {entry['bwd_beside_ratio']:.2f}x"
             )
-    if "check" in result:
-        lines.append(f"{head} check {result['check']}")
+    for mode, entry in (("det", det), ("nondet", nondet)):
+        verdict = entry.get("gate")
+        if verdict is not None:
+            lines.append(
+                f"{head} {mode} accuracy gate {'pass' if verdict.get('passed') else 'FAIL'}"
+                + ("" if verdict.get("passed") else f": {(verdict.get('failures') or [verdict.get('error')])[:3]}")
+            )
     lines.extend(baselines.format_sota(result, head, PHASES, COMPARISON_COLUMN))
     lines.extend(baselines.format_comparison(result, head))
     return lines
@@ -790,7 +791,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=["all"],
         help=f"non-Cake baselines: all (default), none, or names from {list(baselines.SINGLE_RANK_ARMS)}",
     )
+    parser.add_argument(
+        "--draws",
+        type=int,
+        default=32,
+        help="accuracy gate draws per row (at least 32; 0: no gate, no baseline eligible)",
+    )
     args = parser.parse_args(argv)  # fmt: skip
+    if 0 < args.draws < 32:
+        parser.error("--draws: the gate judges at least 32 draws (or 0)")
     sota = baselines.parse_arms(args.sota, baselines.SINGLE_RANK_ARMS)
     route = Route(
         weight_dtype=DTYPES[args.weight_dtype],
@@ -840,6 +849,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             rounds=args.rounds,
             ahead=ahead,
             sota=sota,
+            draws=args.draws,
         )
         results.append(result)
         torch.cuda.empty_cache()
