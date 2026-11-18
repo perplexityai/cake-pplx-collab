@@ -46,8 +46,8 @@ included).  The package is chosen by name, so a checkpoint recompute
 
 Numerical contract: the non-deterministic package makes no bit promise (no
 output is promised to repeat bit for bit run to run or to match the
-deterministic package's bits).  The forward runs the deterministic package's
-programs.  ``dx`` uses the deterministic backward's per-thread FP32 arithmetic
+deterministic package's bits).  The forward runs this package's copies of the
+deterministic package's programs.  ``dx`` uses the deterministic backward's per-thread FP32 arithmetic
 and one BF16 rounding.  By default (``dweight_sum="fp32"``) ``dweight`` /
 ``dbias`` accumulate in plain FP32 words on every route, as the deterministic
 reduce sums (the default ``silu_grad_preactivation="bf16"``: within about
