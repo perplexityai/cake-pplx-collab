@@ -68,11 +68,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # 32 lanes a row, one row a thread (8 rows a CTA).
     "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
@@ -85,11 +85,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # warp sum a row), 128 threads, 32 lanes a row, one row a thread (4 rows a CTA).
     "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
