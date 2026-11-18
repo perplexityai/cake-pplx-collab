@@ -600,7 +600,6 @@ def test_candidate_blocks_output_is_checked():
             inputs.k.to(torch.float8_e4m3fn),
             *args[2:],
             top_k=TOP_K,
-            k_scale=torch.ones(inputs.num_keys, device=device),
         )
     good = topk_with_candidates(*args, **kwargs)
     assert good[2].dtype == torch.int32 and tuple(good[2].shape) == (T, CB_SLOTS)

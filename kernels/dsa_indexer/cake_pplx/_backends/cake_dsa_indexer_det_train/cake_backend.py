@@ -628,7 +628,11 @@ def _check_cb_call(
         raise ValueError(
             f"candidate blocks need ratio == 1 (blocks of 8 keys), got {ratio!r}"
         )
-    if q.dtype != torch.bfloat16 or k_scale is not None:
+    if (
+        not isinstance(q, torch.Tensor)
+        or q.dtype != torch.bfloat16
+        or k_scale is not None
+    ):
         raise ValueError("candidate blocks take bfloat16 q / k (no k_scale)")
 
 
@@ -1305,6 +1309,9 @@ def _prepare_runner(
     instead of a block of its own."""
     if backend != "cake":
         raise ValueError("DSA indexer top-k supports backend='cake'")
+    if with_candidates:
+        # before the family's checks, which would ask an FP8 call for the k_scale this call does not take
+        _check_cb_call(top_k, ratio, q, k_scale)
     fp8 = q.dtype == torch.float8_e4m3fn
     if softmax_scale is None:
         # the FP8 programs take 1.0: every scale but k_scale is folded into w
@@ -1340,7 +1347,6 @@ def _prepare_runner(
     _check_output(indices, "indices", (num_queries, int(top_k)), torch.int32, device)
     _check_output(scores, "scores", (num_queries, int(top_k)), torch.float32, device)
     if with_candidates:
-        _check_cb_call(top_k, ratio, q, k_scale)
         _check_output(
             candidate_blocks,
             "candidate_blocks",
