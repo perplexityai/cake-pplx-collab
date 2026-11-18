@@ -40,20 +40,23 @@ outputs):
 * ``eager``: the explicit FP32 formulas in eager PyTorch: ``torch.clamp`` for ``min(g, L)`` and ``clamp(u, -L, L)``,
   ``torch.where`` for the inclusive gradient masks, and in the merged layout ``torch.cat`` (a separate copy) of the
   two gradient halves.
-* ``cudnn``: a cuDNN frontend pointwise graph (``min``, ``max``, ``swish``, ``mul``; FP32 compute, BF16 output) for
-  the forward.  For the backward the benchmark first builds one graph (pointwise ``d_gate`` / ``d_up`` with the masks
-  as ``binary_select`` on BOOLEAN comparisons, and with a route weight the per-row ``reduction`` (ADD) of
-  ``d_weight``), then, if a weighted one is refused, a pointwise graph for ``d_gate`` / ``d_up`` plus a pointwise +
-  ``reduction`` graph for ``d_weight`` (a composite that reads the inputs twice).  Each graph takes the plans of the
-  heuristics modes A, B and FALLBACK (if refused: A and FALLBACK) and builds all of them
-  (``build_plan_policy.ALL``); each plan's 10 calls are captured in one CUDA graph and replayed, timed with CUDA
-  events (warm L2, the median of 5 samples after one warm-up sample), and the fastest plan is kept.  A plan the
-  capture refuses is timed over 10 eager calls instead (which include the host's issue time) and is kept only when no
-  plan captures.  The arm's ``plans`` record holds the number of candidates, each one's time, timer or error, the
-  timer that ranked them, and the chosen plan's index and name.  If every build of all plans is refused, the graph
-  runs the first plan of the modes A and FALLBACK that builds; if the frontend has no indexed plan calls or no
-  candidate runs, it runs the frontend's selected plan; the record says why.  The composite's two graphs are also
-  timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints as unavailable with the error.
+* ``cudnn``: a cuDNN frontend pointwise graph (``min``, ``max``, ``swish``, ``mul``; FP32 compute, BF16 output) for the
+  forward.  For the backward the benchmark first builds one graph (pointwise ``d_gate`` / ``d_up`` with the masks as
+  ``binary_select`` on BOOLEAN comparisons, and with a route weight the per-row ``reduction`` (ADD) of ``d_weight``),
+  then, if a weighted one is refused, a pointwise graph for ``d_gate`` / ``d_up`` plus a pointwise + ``reduction`` graph
+  for ``d_weight`` (a composite that reads the inputs twice).  Each graph takes the plans of the heuristics modes A, B
+  and FALLBACK (if refused: A and FALLBACK), deselects the runtime-compiled engines (behavior note
+  ``RUNTIME_COMPILATION``; ``--cudnn-runtime-compiled`` keeps them: with them, building every plan did not finish in 45
+  minutes on B200 and GB300, using up to 230 GB of host memory) and builds all the others (``build_plan_policy.ALL``);
+  each plan's 10 calls are captured in one CUDA graph and replayed, timed with CUDA events (warm L2, the median of 5
+  samples after one warm-up sample), and the fastest plan is kept.  A plan the capture refuses is timed over 10 eager
+  calls instead (which include the host's issue time) and is kept only when no plan captures.  The arm's ``plans``
+  record holds the number of candidates, each one's time, timer or error, the timer that ranked them, the chosen plan's
+  index and name, each plan's behavior notes, and whether runtime-compiled engines were searched.  If every build of all
+  plans is refused, the graph runs the first plan of the modes A and FALLBACK that builds; if the frontend has no
+  indexed plan calls or no candidate runs, it runs the frontend's selected plan; the record says why.  The composite's
+  two graphs are also timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints as unavailable
+  with the error.
 
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
@@ -121,6 +124,8 @@ DEEP_GATE_COLUMNS = (0, 768, 1536)
 DEEP_GATE = -88.0
 # cuDNN plan selection: warm-up samples, timed samples and calls per sample of every candidate plan.
 PLAN_WARMUP, PLAN_ROUNDS, PLAN_LOOP = 1, 5, 10
+# Whether the cuDNN arm's plan search includes runtime-compiled engines (``--cudnn-runtime-compiled``).
+CUDNN_OPTIONS = {"runtime_compiled": False}
 
 
 class Unavailable(Exception):
@@ -670,6 +675,11 @@ class CudnnGraphs:
                 refused.append(f"modes {'+'.join(modes)}, policy {how}: {type(exc).__name__}: {str(exc)[:300]}")
                 continue
             record: dict[str, Any] = {"heuristics": list(modes), "policy": "default" if policy is None else "ALL"}
+            record["runtime_compiled_engines"] = (
+                "not filtered (the first plan that builds)"
+                if policy is None
+                else ("included" if CUDNN_OPTIONS["runtime_compiled"] else "excluded")
+            )
             if refused:
                 record["refused"] = refused
             if policy is None:
@@ -698,6 +708,12 @@ class CudnnGraphs:
         g.validate()
         g.build_operation_graph()
         g.create_execution_plans([getattr(c.heur_mode, mode) for mode in modes])
+        if policy is not None and not CUDNN_OPTIONS["runtime_compiled"]:
+            # Before check_support, which builds a plan to check it: no runtime-compiled engine is built.
+            note = getattr(getattr(c, "behavior_note", None), "RUNTIME_COMPILATION", None)
+            if note is None or not hasattr(g, "deselect_behavior_notes"):
+                raise RuntimeError("the frontend cannot deselect the runtime-compiled engines")
+            g.deselect_behavior_notes([note])
         g.check_support()
         if policy is None:
             g.build_plans()
@@ -732,6 +748,8 @@ class CudnnGraphs:
             entry: dict[str, Any] = {"index": index}
             with contextlib.suppress(Exception):
                 entry["name"] = str(g.get_plan_name_at_index(index))
+            with contextlib.suppress(Exception):
+                entry["behavior_notes"] = [str(note) for note in g.get_behavior_notes_for_plan_at_index(index)]
             try:
                 entry.update(self._time_plan(built, outputs, index))
             except Exception as exc:  # noqa: BLE001 - a plan that does not build or run is recorded and skipped
@@ -1201,6 +1219,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="gates at columns 0, 768 and 1536 of every row are -88 (Cake's exact sigmoid path everywhere)",
     )
+    parser.add_argument(
+        "--cudnn-runtime-compiled",
+        action="store_true",
+        help="the cuDNN plan search also builds runtime-compiled engines (default: excluded)",
+    )
     parser.add_argument("--loop", type=int, default=20, help="calls per eager / graph sample")
     parser.add_argument("--warmup", type=int, default=5, help="eager / graph samples before timing")
     parser.add_argument("--rounds", type=int, default=15, help="eager / graph samples timed")
@@ -1209,6 +1232,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
     args.arms = list(dict.fromkeys(["cake", *args.arms]))  # cake first: the other arms are compared with its outputs
+    CUDNN_OPTIONS["runtime_compiled"] = args.cudnn_runtime_compiled
     ident = identity()
     ident["deep_gate"] = {"columns": list(DEEP_GATE_COLUMNS), "value": DEEP_GATE} if args.deep_gate else None
     print(
