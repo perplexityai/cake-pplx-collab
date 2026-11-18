@@ -81,10 +81,13 @@ GRID_KINDS = ("one_cta", "rows")
 WIDTH = 512
 CZ_WIDTH = 2 * WIDTH
 # Row strides of the strided FP32 operands (C, Z, dC, dZ) are multiples of this many elements (32 bytes), so every
-# row starts on the 32-byte boundary of the kernels' 256-bit accesses.
+# row starts on the 32-byte boundary of the backward's 256-bit accesses.  The forward reads C and Z as 128-bit vectors
+# (a multiple of 4 elements would do); the host keeps the backward's rule for both, so an input the forward takes is
+# one the backward takes.
 ROW_STRIDE_MULTIPLE = 8
-# Base alignment of each operand (bytes).  The FP32 rows are read and written as 256-bit vectors, the BF16 rows as
-# 128-bit vectors, the int32 tables as words.
+# Base alignment of each operand (bytes).  The backward reads C and Z and writes dC and dZ as 256-bit vectors and reads
+# dout as 128-bit vectors; the forward reads C and Z as 128-bit vectors and writes out as 64-bit vectors (16 bytes kept
+# for out, as for dout); the int32 tables are read as words.
 ALIGNMENT_BYTES: dict[str, int] = {
     "c": 32,
     "z": 32,
@@ -95,11 +98,12 @@ ALIGNMENT_BYTES: dict[str, int] = {
     "cu_seqlens": 4,
     "cu_pairs": 4,
 }
-# The kernels take G, S and the pair-table entries as int32 and index the BF16 rows of out / dout with 32-bit
-# element offsets: G * 512 stays below 2^31.
+# The kernels take G, S, the token rows and the pair-table entries as int32 and form every element offset in 64 bits
+# (row times row stride).  Their launch preconditions bound S by 2^24 and G by 2^26 (the backward's G + S virtual rows
+# stay int32); T is bounded by the int32 cu_seqlens.
 INT32_MAX = 2**31 - 1
-MAX_PAIRS = INT32_MAX // WIDTH
-MAX_DOCS = INT32_MAX - 1
+MAX_PAIRS = 1 << 26
+MAX_DOCS = 1 << 24
 MAX_TOKENS = INT32_MAX
 
 # The derived leaves of every record (``library``, ``kernel_symbol``, ``launch.block``, ``launch.cluster``,
@@ -124,7 +128,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "",
         "role": "pair_table",
@@ -146,14 +150,14 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
-        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
         "kernel_symbol": "",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "",
         "role": "fwd",
@@ -186,7 +190,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "",
         "role": "bwd",
@@ -256,12 +260,16 @@ def specs_for_arch(arch: str) -> list[Any]:
 
 @functools.cache
 def parameters(name: str) -> tuple[str, ...]:
-    """The kernel parameter names of record ``name`` in ``run`` order (the argument plan without the grid)."""
+    """The kernel parameter names of record ``name`` in ``run`` order (the argument plan without the launch options,
+    such as ``enable_pdl``, and the grid)."""
     names: list[str] = []
     axes: list[str] = []
     for kind, key in record(name)["arg_plan"]:
         if kind == "grid":
             axes.append(key)
+        elif kind == "launch":
+            if axes:
+                raise ValueError(f"record {name}: launch option {key!r} follows the grid arguments")
         else:
             if axes:
                 raise ValueError(f"record {name}: argument {key!r} follows the grid arguments")
@@ -329,7 +337,8 @@ def run_module(name: str, values: Mapping[str, Any], *, rows: int, device_index:
 
     ``values`` maps the kernel parameter names of the record (through its ``logical`` map when the record has one) to
     tensors and Python scalars.  A ``["launch", "enable_pdl"]`` entry of the argument plan (a binding whose PDL launch
-    is chosen per call) gets ``True``.  Nothing here reads device memory or synchronizes."""
+    is chosen per call, an int64 host parameter) gets ``1`` unless ``values`` sets it.  Nothing here reads device
+    memory or synchronizes."""
     import torch  # noqa: PLC0415
 
     found = record(name)
@@ -341,7 +350,7 @@ def run_module(name: str, values: Mapping[str, Any], *, rows: int, device_index:
         if kind == "grid":
             args.append(axes[key])
         elif kind == "launch":
-            args.append(bool(values.get(key, True)))
+            args.append(int(bool(values.get(key, True))))
         else:
             want = logical.get(key, key)
             if want not in values:

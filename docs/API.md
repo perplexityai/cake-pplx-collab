@@ -1005,7 +1005,7 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - `cz`: FP32 `[T, 1024]`, `C` in columns `[0, 512)` and `Z` in `[512, 1024)`, with the same layout rules (row stride at least 1024).
 - `cu_seqlens`: int32 `[S + 1]` on the same device, `0 = b_0 <= ... <= b_S = T`. The host never reads it, so the caller keeps this contract.
 - `dout`, `out`: BF16 `[G, 512]`, contiguous, 16-byte aligned. `dc`, `dz`: FP32 `[T, 512]` with the layout rules of `c`; the two halves of one `[T, 1024]` buffer qualify.
-- `G`, the sum over documents of `floor(L_s / 2)`, comes from the caller: `num_pairs`, or the rows of a caller `out` or `dout`. `G` is at most 4194303.
+- `G`, the sum over documents of `floor(L_s / 2)`, comes from the caller: `num_pairs`, or the rows of a caller `out` or `dout`. `G` is at most 2^26 (67108864) and `S` at most 2^24 (16777216).
 - `T`, `S` and `G` are run-time values. There is no recompilation, no device-to-host read and no synchronization.
 
 ### `cake_pplx.cake_gated_kv_compression_det_train`

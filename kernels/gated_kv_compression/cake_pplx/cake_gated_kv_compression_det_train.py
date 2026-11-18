@@ -161,7 +161,8 @@ def cake_gated_kv_compression_det_train_forward(
     ValueError
         An operand off the CUDA device of ``c``, of another dtype or shape, of a layout the kernels cannot read in
         place (feature stride, row stride, base alignment); ``out`` not contiguous, misaligned or overlapping an
-        input; neither ``num_pairs`` nor ``out``, or the two disagreeing; ``G`` outside ``[0, 4194303]``.
+        input; neither ``num_pairs`` nor ``out``, or the two disagreeing; ``G`` outside ``[0, 2^26]``; more than
+        ``2^24`` documents.
     RuntimeError
         A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``); a local CUDA toolkit
         older than the library's ``build.json`` minimum when it is built.
