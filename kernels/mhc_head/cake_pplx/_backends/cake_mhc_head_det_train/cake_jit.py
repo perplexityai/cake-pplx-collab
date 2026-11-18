@@ -45,7 +45,8 @@ vectors, 256-thread CTAs).
 The unsuffixed libraries take any hidden size (``hidden`` 0), with 128-bit
 forward vectors (8 values) and 256-bit backward vectors (16 values) in
 256-thread CTAs; they serve a small problem (:data:`SMALL_ROUTES`): every role
-on sm_107a, the backward that writes ``dX`` on sm_100a and sm_103a.  Each
+on sm_107a, the backward that writes ``dX`` on sm_100a and sm_103a; and on
+sm_107a every call of hidden 5120 or 7168 (:data:`ROUTES`).  Each
 output element is one fixed chain of operations, the same chain in every
 build (the one addition of an accumulating element is L2's in the bulk-reduce
 library and the thread's in the others, both a BF16 addition rounded to
@@ -833,12 +834,18 @@ ROUTES: dict[str, dict[str, dict[int, str]]] = {
     "sm_107a": {
         "head_fwd": {
             4096: "cake_mhc_det_train_head_fwd__lw256_t128_h4096",
+            5120: "cake_mhc_det_train_head_fwd",
+            7168: "cake_mhc_det_train_head_fwd",
         },
         "head_bwd": {
             4096: "cake_mhc_det_train_head_bwd__lw256_t128_h4096",
+            5120: "cake_mhc_det_train_head_bwd",
+            7168: "cake_mhc_det_train_head_bwd",
         },
         "head_bwd_acc": {
             4096: "cake_mhc_det_train_head_bwd__acc_l2red_lw128_t256_h4096",
+            5120: "cake_mhc_det_train_head_bwd__acc",
+            7168: "cake_mhc_det_train_head_bwd__acc",
         },
     },
 }
@@ -877,12 +884,12 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 }
 STREAMS = 4
 # The hidden sizes each architecture serves: the keys of each of its routes.
-# SM107 serves 4096, as the rest of the package does, until its 5120 / 7168
-# correctness and timing are recorded on R200.
+# SM107 serves 5120 and 7168 with the unsuffixed libraries (any hidden size) of
+# every role: no library is built for those sizes there.
 HIDDEN_SIZES: dict[str, tuple[int, ...]] = {
     "sm_100a": (4096, 5120, 7168),
     "sm_103a": (4096, 5120, 7168),
-    "sm_107a": (4096,),
+    "sm_107a": (4096, 5120, 7168),
 }
 # The kernels' launch preconditions ``T <= MAX_TOKENS`` and ``1 <= hv <=
 # MAX_VECTORS``.  A kernel never forms the flat vector index ``T * hv``: within

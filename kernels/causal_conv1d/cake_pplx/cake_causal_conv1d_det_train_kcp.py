@@ -35,6 +35,9 @@ loads none of it); the single-rank entry points are in ``cake_pplx.cake_causal_c
     # a layer's q / k / v convolutions with one halo exchange per direction
     # (bitwise three single calls)
     q, k, v = cake_causal_conv1d_det_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
+
+The KCP path has no ``dweight_sum`` keyword: it offers no FP32 (hi, lo) pair opt-in, and ``dweight`` is summed
+in plain FP32 words.
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ def cake_causal_conv1d_det_kcp(
     The first tokens of a fragment that continues a document read the history rows of the preceding fragment
     (exchanged through the context's halo collective) instead of zeros, so the result equals the single-rank
     :func:`cake_pplx.cake_causal_conv1d_det_train.cake_causal_conv1d_det` of the whole batch on this rank's tokens.  The KCP path takes FP32 taps and no
-    bias (the package's pre-round-6 contract).
+    bias (the package's earlier contract).
 
     Parameters
     ----------
@@ -100,8 +103,8 @@ def cake_causal_conv1d_det_kcp(
         SM short of the co-resident CTA count, then a fixed-order reduce kernel on the same stream; it starts beside
         a small kernel of another stream (for example a communication kernel).  ``True``: one cooperative launch,
         which starts only when all its CTAs fit on the GPU at once, so it waits for any kernel of another stream
-        that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible and within the
-        same FP64-oracle bound in each form, but its bits differ between the forms, so keep one form for runs whose
+        that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible and summed in
+        plain FP32 words in each form, but its bits differ between the forms, so keep one form for runs whose
         ``dweight`` bits must match.  Every rank of ``ctx.group`` passes the same value: no collective depends on
         the form, but the ranks' ``dweight`` partials would otherwise mix two reduction orders.
 

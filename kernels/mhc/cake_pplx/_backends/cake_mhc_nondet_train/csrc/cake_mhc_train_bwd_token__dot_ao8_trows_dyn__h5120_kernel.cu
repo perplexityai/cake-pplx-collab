@@ -6282,108 +6282,44 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_trows_dyn__h5120(__nv_bfloat16* __restr
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + 2ll + lane64])), "f"(_add_1), "r"((unsigned int)(tok < t1 && lane_1 < 4)) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(c_37), "r"((unsigned int)(tok < t1 && (lane_1 >= 8 && lane_1 < 24))) : "memory");
         asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&tokp[trow + lane64 - 2ll])), "f"(0.0f), "r"((unsigned int)(tok < t1 && (lane_1 >= 24 && lane_1 < 26))) : "memory");
-        float _sub_830;
-        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_830) : "f"(0.0f), "f"(daz));
-        float dazl;
-        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(dazl) : "f"(da_0), "f"(z), "f"(_sub_830));
-        gfold[(gi[0] & 1) * 768 + warp_0 * 96 + lane_1] = ((tok < t1) ? da_0 : 0.0f);
-        gfold[(gi[0] & 1) * 768 + warp_0 * 96 + 32 + lane_1] = ((tok < t1) ? daz : 0.0f);
-        gfold[(gi[0] & 1) * 768 + warp_0 * 96 + 64 + lane_1] = ((tok < t1) ? dazl : 0.0f);
+        gfold[(gi[0] & 1) * 512 + warp_0 * 64 + lane_1] = ((tok < t1) ? da_0 : 0.0f);
+        gfold[(gi[0] & 1) * 512 + warp_0 * 64 + 32 + lane_1] = ((tok < t1) ? daz : 0.0f);
         if (gi[0] > 0) {
             if (warp_0 == (gi[0] & 7)) {
                 float o[2];
-                float oc[2];
-                float ol[1];
                 #pragma unroll
                 for (int e = 0; e < 2; e++) {
                     o[e] = 0.0f;
-                    oc[e] = 0.0f;
                 }
-                ol[0] = 0.0f;
                 #pragma unroll
                 for (int w = 0; w < 8; w++) {
-                    int src = (gi[0] - 1 & 1) * 768 + w * 96 + lane_1;
-                    float sub_0;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_0) : "f"(gfold[src]), "f"(oc[0]));
-                    float add_20;
-                    asm("add.rn.f32 %0, %1, %2;" : "=f"(add_20) : "f"(o[0]), "f"(sub_0));
-                    float _sub_832;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_832) : "f"(add_20), "f"(o[0]));
-                    float _sub_831;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_831) : "f"(_sub_832), "f"(sub_0));
-                    oc[0] = _sub_831;
-                    o[0] = add_20;
-                    float sub_1;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_1) : "f"(gfold[src + 32]), "f"(oc[1]));
-                    float add_21;
-                    asm("add.rn.f32 %0, %1, %2;" : "=f"(add_21) : "f"(o[1]), "f"(sub_1));
-                    float _sub_834;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_834) : "f"(add_21), "f"(o[1]));
-                    float _sub_833;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_833) : "f"(_sub_834), "f"(sub_1));
-                    oc[1] = _sub_833;
-                    o[1] = add_21;
-                    float _add_835;
-                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_835) : "f"(ol[0]), "f"(gfold[src + 64]));
-                    ol[0] = _add_835;
+                    int src = (gi[0] - 1 & 1) * 512 + w * 64 + lane_1;
+                    float _add_830;
+                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_830) : "f"(o[0]), "f"(gfold[src]));
+                    o[0] = _add_830;
+                    float _add_831;
+                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_831) : "f"(o[1]), "f"(gfold[src + 32]));
+                    o[1] = _add_831;
                 }
-                float dbase_n;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(dbase_n) : "f"(o[0]), "f"(oc[0]));
-                float _sub_836;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_836) : "f"(o[0]), "f"(dbase_n));
-                float dbase_l;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(dbase_l) : "f"(_sub_836), "f"(oc[0]));
-                float zc;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(zc) : "f"(oc[1]), "f"(ol[0]));
-                float zh;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(zh) : "f"(o[1]), "f"(zc));
-                gsumv[lane_1] = zh;
-                float _sub_838;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_838) : "f"(o[1]), "f"(zh));
-                float _sub_837;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_837) : "f"(_sub_838), "f"(zc));
-                gsumv[32 + lane_1] = _sub_837;
+                gsumv[lane_1] = o[1];
                 __syncwarp();
-                int gj = ((lane_1 < 27) ? lane_1 - 24 : lane_1 - 27);
+                int gj = lane_1 - 24;
                 int glo = ((gj < 2) ? gj * 4 : 8);
                 int ghi = ((gj < 2) ? gj * 4 + 4 : 24);
                 float ga[1];
-                float gc_0[1];
-                float gl[1];
                 ga[0] = 0.0f;
-                gc_0[0] = 0.0f;
-                gl[0] = 0.0f;
-                if (lane_1 >= 24 && lane_1 < 30) {
+                if (lane_1 >= 24 && lane_1 < 27) {
                     #pragma unroll
                     for (int m_37 = 0; m_37 < 16; m_37++) {
                         if (glo + m_37 < ghi) {
-                            float sub_2;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_2) : "f"(gsumv[glo + m_37]), "f"(gc_0[0]));
-                            float add_22;
-                            asm("add.rn.f32 %0, %1, %2;" : "=f"(add_22) : "f"(ga[0]), "f"(sub_2));
-                            float _sub_840;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_840) : "f"(add_22), "f"(ga[0]));
-                            float _sub_839;
-                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_839) : "f"(_sub_840), "f"(sub_2));
-                            gc_0[0] = _sub_839;
-                            ga[0] = add_22;
-                            float _add_841;
-                            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_841) : "f"(gl[0]), "f"(gsumv[32 + glo + m_37]));
-                            gl[0] = _add_841;
+                            float _add_832;
+                            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_832) : "f"(ga[0]), "f"(gsumv[glo + m_37]));
+                            ga[0] = _add_832;
                         }
                     }
                 }
-                float gcl;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(gcl) : "f"(gc_0[0]), "f"(gl[0]));
-                float gval_0;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(gval_0) : "f"(ga[0]), "f"(gcl));
-                float _sub_842;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_842) : "f"(ga[0]), "f"(gval_0));
-                float glow;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(glow) : "f"(_sub_842), "f"(gcl));
-                float v_37 = ((lane_1 < 24) ? dbase_n : ((lane_1 < 27) ? gval_0 : ((lane_1 < 30) ? glow : 0.0f)));
+                float v_37 = ((lane_1 < 24) ? o[0] : ((lane_1 < 27) ? ga[0] : 0.0f));
                 *(reinterpret_cast<float*>(param_partial + (lane64 * (long long)n_groups + (long long)pg[0])) + (0)) = v_37;
-                asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&param_partial[(lane64 + 32ll) * (long long)n_groups + (long long)pg[0]])), "f"(dbase_l), "r"((unsigned int)(lane_1 < 24)) : "memory");
             }
         }
         pg[0] = gcur;
@@ -6404,98 +6340,39 @@ kernel_cake_mhc_train_bwd_token__dot_ao8_trows_dyn__h5120(__nv_bfloat16* __restr
         __syncthreads();
         if (warp_0 == (gi[0] & 7)) {
             float o_1[2];
-            float oc_1[2];
-            float ol_1[1];
             #pragma unroll
             for (int e_1 = 0; e_1 < 2; e_1++) {
                 o_1[e_1] = 0.0f;
-                oc_1[e_1] = 0.0f;
             }
-            ol_1[0] = 0.0f;
             #pragma unroll
             for (int w_1 = 0; w_1 < 8; w_1++) {
-                int src_1 = (gi[0] - 1 & 1) * 768 + w_1 * 96 + lane_1;
-                float sub_3;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_3) : "f"(gfold[src_1]), "f"(oc_1[0]));
-                float add_23;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(add_23) : "f"(o_1[0]), "f"(sub_3));
-                float _sub_844;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_844) : "f"(add_23), "f"(o_1[0]));
-                float _sub_843;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_843) : "f"(_sub_844), "f"(sub_3));
-                oc_1[0] = _sub_843;
-                o_1[0] = add_23;
-                float sub_3_1;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_3_1) : "f"(gfold[src_1 + 32]), "f"(oc_1[1]));
-                float add_23_1;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(add_23_1) : "f"(o_1[1]), "f"(sub_3_1));
-                float _sub_846;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_846) : "f"(add_23_1), "f"(o_1[1]));
-                float _sub_845;
-                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_845) : "f"(_sub_846), "f"(sub_3_1));
-                oc_1[1] = _sub_845;
-                o_1[1] = add_23_1;
-                float _add_847;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_847) : "f"(ol_1[0]), "f"(gfold[src_1 + 64]));
-                ol_1[0] = _add_847;
+                int src_1 = (gi[0] - 1 & 1) * 512 + w_1 * 64 + lane_1;
+                float _add_833;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_833) : "f"(o_1[0]), "f"(gfold[src_1]));
+                o_1[0] = _add_833;
+                float _add_834;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_834) : "f"(o_1[1]), "f"(gfold[src_1 + 32]));
+                o_1[1] = _add_834;
             }
-            float dbase_n_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(dbase_n_1) : "f"(o_1[0]), "f"(oc_1[0]));
-            float _sub_848;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_848) : "f"(o_1[0]), "f"(dbase_n_1));
-            float dbase_l_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(dbase_l_1) : "f"(_sub_848), "f"(oc_1[0]));
-            float zc_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(zc_1) : "f"(oc_1[1]), "f"(ol_1[0]));
-            float zh_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(zh_1) : "f"(o_1[1]), "f"(zc_1));
-            gsumv[lane_1] = zh_1;
-            float _sub_850;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_850) : "f"(o_1[1]), "f"(zh_1));
-            float _sub_849;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_849) : "f"(_sub_850), "f"(zc_1));
-            gsumv[32 + lane_1] = _sub_849;
+            gsumv[lane_1] = o_1[1];
             __syncwarp();
-            int gj_1 = ((lane_1 < 27) ? lane_1 - 24 : lane_1 - 27);
+            int gj_1 = lane_1 - 24;
             int glo_1 = ((gj_1 < 2) ? gj_1 * 4 : 8);
             int ghi_1 = ((gj_1 < 2) ? gj_1 * 4 + 4 : 24);
             float ga_1[1];
-            float gc_1[1];
-            float gl_1[1];
             ga_1[0] = 0.0f;
-            gc_1[0] = 0.0f;
-            gl_1[0] = 0.0f;
-            if (lane_1 >= 24 && lane_1 < 30) {
+            if (lane_1 >= 24 && lane_1 < 27) {
                 #pragma unroll
                 for (int m_38 = 0; m_38 < 16; m_38++) {
                     if (glo_1 + m_38 < ghi_1) {
-                        float sub_4;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(sub_4) : "f"(gsumv[glo_1 + m_38]), "f"(gc_1[0]));
-                        float add_24;
-                        asm("add.rn.f32 %0, %1, %2;" : "=f"(add_24) : "f"(ga_1[0]), "f"(sub_4));
-                        float _sub_852;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_852) : "f"(add_24), "f"(ga_1[0]));
-                        float _sub_851;
-                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_851) : "f"(_sub_852), "f"(sub_4));
-                        gc_1[0] = _sub_851;
-                        ga_1[0] = add_24;
-                        float _add_853;
-                        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_853) : "f"(gl_1[0]), "f"(gsumv[32 + glo_1 + m_38]));
-                        gl_1[0] = _add_853;
+                        float _add_835;
+                        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_835) : "f"(ga_1[0]), "f"(gsumv[glo_1 + m_38]));
+                        ga_1[0] = _add_835;
                     }
                 }
             }
-            float gcl_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(gcl_1) : "f"(gc_1[0]), "f"(gl_1[0]));
-            float gval_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(gval_1) : "f"(ga_1[0]), "f"(gcl_1));
-            float _sub_854;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_854) : "f"(ga_1[0]), "f"(gval_1));
-            float glow_1;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(glow_1) : "f"(_sub_854), "f"(gcl_1));
-            float v_38 = ((lane_1 < 24) ? dbase_n_1 : ((lane_1 < 27) ? gval_1 : ((lane_1 < 30) ? glow_1 : 0.0f)));
+            float v_38 = ((lane_1 < 24) ? o_1[0] : ((lane_1 < 27) ? ga_1[0] : 0.0f));
             *(reinterpret_cast<float*>(param_partial + (lane64 * (long long)n_groups + (long long)pg[0])) + (0)) = v_38;
-            asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %2, 0; @p_ st.global.f32 [%0], %1; }" :: "l"(reinterpret_cast<uint64_t>(&param_partial[(lane64 + 32ll) * (long long)n_groups + (long long)pg[0]])), "f"(dbase_l_1), "r"((unsigned int)(lane_1 < 24)) : "memory");
         }
     }
     if (own_last[0] != 0) {

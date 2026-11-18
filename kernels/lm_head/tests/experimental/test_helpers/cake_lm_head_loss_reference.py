@@ -13,8 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Seeded inputs, the unchunked PyTorch baseline and the chunked FP64 oracle of
-the chunked LM-head + loss training problem (``X [T, H]`` BF16 hidden states,
+Seeded inputs, the unchunked PyTorch baseline, the chunked FP64 oracle and the
+naive BF16 tier of the chunked LM-head + loss training problem (``X [T, H]`` BF16 hidden states,
 ``W [V, H]`` BF16 output weight, int64 labels with ``-100`` = ignored), shared
 by ``tests/experimental/test_cake_lm_head_det_train.py``,
 ``tests/experimental/test_cake_lm_head_det_train_api.py`` and
@@ -44,8 +44,10 @@ Contract reproduced here (see ``cake_pplx.cake_lm_head_det_train``):
   temperature as an FP32 ``[T]`` tensor), never by a Python scalar.
 
 The FP64 oracle applies the analytic gradient to the same BF16 input values
-in float64 without any intermediate rounding; the unchunked baseline is the
-plain PyTorch autograd path at the contract's rounding boundaries.  The
+in float64 without any intermediate rounding; the naive BF16 tier
+(:func:`naive_bf16`) runs the same ops in BF16 through PyTorch autograd, the
+yardstick of the shared judge ``tests/cake_naive.py``; the unchunked baseline
+is the plain PyTorch autograd path at the contract's rounding boundaries.  The
 policy inputs keep every valid row at least ``KNEE_MARGIN`` (0.05) away from
 the clip knee in ``logp - infer_logp`` (a BF16 implementation moves the ratio
 by about ``+-1e-3`` through the selected logit's rounding, so a row at the
@@ -360,6 +362,8 @@ def reference_fp64(
     need_dx: bool = True,
     need_dw: bool = True,
     chunk_rows: int = 512,
+    scale: Optional[float] = None,
+    over: Optional[torch.Tensor] = None,
 ) -> dict:
     """Analytic float64 oracle from the BF16 input values, chunked over rows.
 
@@ -371,12 +375,17 @@ def reference_fp64(
     accumulates ``dW`` in float64.  ``T == 0`` and all-ignored batches give
     zeros.  With ``inp.temperature`` (log-probability entry only) the rows use
     ``q = z / tau`` with the FP32 temperature values promoted to float64, and
-    ``dz = (d / tau) * (1[v = y] - softmax(q))``.
+    ``dz = (d / tau) * (1[v = y] - softmax(q))``.  ``scale`` multiplies the
+    upstream gradient (the gradients of ``scale * loss``, or of the incoming
+    ``scale * dlogp``); the values stay the unscaled ones.  ``over`` (bool
+    ``[T]``, policy loss only) fixes each valid row's side of the clip instead
+    of the row's own ratio: see :func:`reference_fp64_forced_side`.
     """
     if entry not in ("loss", "logprob"):
         raise ValueError("entry must be 'loss' or 'logprob'")
     if inp.temperature is not None and entry != "logprob":
         raise ValueError("a temperature belongs to the log-probability entry")
+    over = _forced_side(inp, entry, over)
     X, W, labels = inp.X, inp.W, inp.labels
     T, H, V = inp.T, inp.H, inp.V
     device = X.device
@@ -405,8 +414,15 @@ def reference_fp64(
         else:
             ratio = torch.exp(lp - inp.infer_logp[r0:r1].double())
             w = inp.loss_weights[r0:r1].double()
-            total += -(w * torch.clamp_max(ratio, RATIO_CLIP))[valid].sum()
-            d = torch.where(valid & (ratio <= RATIO_CLIP), -w * ratio, zero)
+            if over is None:
+                total += -(w * torch.clamp_max(ratio, RATIO_CLIP))[valid].sum()
+                d = torch.where(valid & (ratio <= RATIO_CLIP), -w * ratio, zero)
+            else:  # each valid row on its given side: saturated (term 2 w, no gradient) or unclipped
+                o = over[r0:r1]
+                total += -(w * torch.where(o, torch.full_like(ratio, RATIO_CLIP), ratio))[valid].sum()
+                d = torch.where(valid & ~o, -w * ratio, zero)
+        if scale is not None:
+            d = d * float(scale)
         if need_dx or need_dw:
             dz = torch.exp(z - l[:, None]).neg_()  # -softmax
             dz.scatter_add_(
@@ -425,6 +441,104 @@ def reference_fp64(
         total / inp.loss_div if (entry == "loss" and inp.objective == "ce") else total
     )
     return dict(loss=loss, logp=logp, lse=lse, dX=dX, dW=dW)
+
+
+def _forced_side(inp: Inputs, entry: str, over: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """``over`` as a bool ``[T]`` tensor on the inputs' device after its checks; ``None`` stays ``None``."""
+    if over is None:
+        return None
+    if entry != "loss" or inp.objective != "policy":
+        raise ValueError("a forced clip side belongs to the policy loss")
+    over = torch.as_tensor(over, device=inp.X.device)
+    if over.dtype != torch.bool or tuple(over.shape) != (inp.T,):
+        raise ValueError(f"over must be a bool [{inp.T}] tensor")
+    return over
+
+
+def reference_fp64_forced_side(inp: Inputs, over: torch.Tensor, **kw) -> dict:
+    """The float64 oracle of the policy loss with each valid row's side of the clip given: the rows of ``over``
+    (bool ``[T]``) are saturated (loss term ``2 w``, ``d = 0``), every other valid row is unclipped (``d = -w *
+    ratio``).  A row at the knee has ``ratio`` within rounding of 2, so its side is a decision of the
+    implementation's own FP32 ``logp``, not of the float64 ratio: the knee tests take the side from that ``logp``
+    and judge both sides of it.  ``kw``: the other keywords of :func:`reference_fp64`."""
+    return reference_fp64(inp, entry="loss", over=over, **kw)
+
+
+# ---------------------------------------------------------------------------
+# The naive BF16 tier
+# ---------------------------------------------------------------------------
+
+
+def naive_bf16(
+    inp: Inputs,
+    *,
+    entry: str = "loss",
+    need_dx: bool = True,
+    need_dw: bool = True,
+    scale: Optional[float] = None,
+    over: Optional[torch.Tensor] = None,
+) -> dict:
+    """The naive tier of the shared judge (``tests/cake_naive.py``): PyTorch on the same BF16 inputs, the same
+    ops in BF16 with torch's own internal accumulation, unchunked, through autograd.
+
+    ``z = X @ W^T`` is torch's default BF16 GEMM (no split-K setting is touched); a temperature divides ``z`` by
+    the BF16 temperature rows; ``logsumexp``, the gather, the objective and the backward all run on BF16 tensors.
+    Every FP32 or Python operand beside the inputs is cast to BF16 first: ``loss_div``, ``infer_logp``,
+    ``loss_weights``, ``dlogp``, the temperature and ``scale``.  ``scale`` multiplies the upstream gradient as in
+    :func:`reference_fp64`; ``over`` forces the clip sides as in :func:`reference_fp64_forced_side`.
+
+    Returns BF16 ``loss`` (0-dim; ``None`` for the log-probability entry, whose loss the tests make themselves),
+    ``logp`` / ``lse`` ``[T]``, ``dX [T, H]`` and ``dW [V, H]`` (``None`` when not requested)."""
+    if entry not in ("loss", "logprob"):
+        raise ValueError("entry must be 'loss' or 'logprob'")
+    if inp.temperature is not None and entry != "logprob":
+        raise ValueError("a temperature belongs to the log-probability entry")
+    over = _forced_side(inp, entry, over)
+    bf = torch.bfloat16
+    device = inp.X.device
+    X = inp.X.detach().requires_grad_(bool(need_dx))
+    W = inp.W.detach().requires_grad_(bool(need_dw))
+    valid = inp.labels >= 0
+    index = torch.where(valid, inp.labels, torch.zeros_like(inp.labels))
+    tau = inp.temperature_rows()
+    factor = None if scale is None else torch.tensor(float(scale), device=device).to(bf)
+    loss = None
+    with torch.enable_grad():
+        z = X @ W.t()  # BF16 [T, V]
+        if tau is not None:
+            z = z / tau.to(bf)[:, None]
+        lse = torch.logsumexp(z, dim=-1)
+        zy = z.gather(1, index[:, None]).squeeze(1)
+        logp = torch.where(valid, zy - lse, torch.zeros_like(lse))
+        if entry == "logprob":
+            if need_dx or need_dw:
+                g = inp.dlogp.to(bf)
+                logp.backward(g if factor is None else g * factor)
+        else:
+            if inp.objective == "ce":
+                loss = -logp[valid].sum() / torch.tensor(inp.loss_div, device=device).to(bf)
+            else:
+                ratio = torch.exp(logp - inp.infer_logp.to(bf))
+                term = (
+                    torch.clamp_max(ratio, RATIO_CLIP)
+                    if over is None
+                    else torch.where(over, torch.full_like(ratio, RATIO_CLIP), ratio)
+                )
+                loss = -(inp.loss_weights.to(bf) * term)[valid].sum()
+            if need_dx or need_dw:
+                (loss if factor is None else loss * factor).backward()
+    return dict(
+        loss=None if loss is None else loss.detach(),
+        logp=logp.detach(),
+        lse=lse.detach(),
+        dX=X.grad if need_dx else None,
+        dW=W.grad if need_dw else None,
+    )
+
+
+def naive_bf16_forced_side(inp: Inputs, over: torch.Tensor, **kw) -> dict:
+    """:func:`naive_bf16` of the policy loss with the clip sides of :func:`reference_fp64_forced_side`."""
+    return naive_bf16(inp, entry="loss", over=over, **kw)
 
 
 # ---------------------------------------------------------------------------

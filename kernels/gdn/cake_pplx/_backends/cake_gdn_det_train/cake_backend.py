@@ -72,7 +72,7 @@ __all__ = [
 ]
 
 # One verified build per architecture: B200 / GB200 (``sm_100a``), B300 /
-# GB300 (``sm_103a``) and R200 (``sm_107a``, CUDA 13.4 or newer).  Every
+# GB300 (``sm_103a``) and R200 (``sm_107a``, CUDA 13.5 or newer).  Every
 # architecture is compiled with its exact ``-gencode`` flag set
 # (``build.json`` ``arch_flags``); no family fallback.
 ARCHES: tuple[str, ...] = tuple(cake_jit.ARCHES)

@@ -14,27 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Single-GPU tests of the non-deterministic KCP convolution (``cake_causal_conv1d_nondet_kcp``): one process, world
-size 1, no process group (the halo exchange of one rank is the identity), on the deterministic KCP suite's rows,
-contexts and FP64 oracle, plus a C = 10240 row for (a) and (b).
+size 1, no process group (the halo exchange of one rank is the identity), on the deterministic KCP suite's rows and
+contexts, plus a C = 10240 row for (a) and (b).  The outputs are judged by the naive judge
+(``tests/cake/test_helpers/cake_naive.py``): over 32 random draws, the error of ``y`` / ``dx`` (in the rank's local
+order) and of the FP32 ``dweight`` partial against the float64 oracle of the unpartitioned problem, in the L2 and the
+max norm, has its median and its maximum within ``NEAR_TIE`` x the error of PyTorch's BF16 naive convolution (zero
+where the naive error is zero).  No bit rule holds the package: its outputs are never compared bit for bit with
+another launch and never with the deterministic package.
 
-(a) ``y`` and ``hist`` are bitwise the deterministic KCP forward's (the same programs); ``dx`` is bitwise the
-    deterministic KCP backward's (the same per-thread arithmetic and fold); the FP32 ``dweight`` partial is within
-    the package budget (``atol 5e-2 + rtol 1e-4``) of the FP64 oracle and of the deterministic partial.
-(b) ``REPEATS`` launches of the same inputs: ``dx`` bitwise every time, ``dweight`` within budget every time (the worst
-    case is recorded); the package's accumulator workspace reads back all zero after every launch.
-(c) The autograd entry equals the direct calls (``y`` / ``dx`` bitwise), activation checkpointing with and without a
-    recompute handle (2 x forward + backward; one exchange per direction, none in a recompute with a handle),
-    gradient accumulation, graph replay (bitwise ``y`` / ``hist`` / ``dx``), the legacy channel-tile plan, a side
-    kernel (the backward is an ordinary launch: no stall beside a resident kernel),
-    the grid that gives up one SM when the last channel-tile rank is partial and torch's deterministic
-    mode (the backward alerts, through the package's entries and through the non-deterministic KCP package
-    ``cake_pplx.cake_causal_conv1d_nondet_train_kcp``, whose entries take no ``deterministic`` keyword).
+(a) ``y``, ``dx`` and ``dweight`` judged on every row.
+(b) ``REPEATS`` launches on each draw's inputs: every launch judged (the worst launch of a draw counts); the
+    package's accumulator workspace reads back all zero after every launch.
+(c) The autograd entry and the direct calls, activation checkpointing with and without a recompute handle
+    (2 x forward + backward; one exchange per direction, none in a recompute with a handle), gradient
+    accumulation, graph replay, the legacy channel-tile plan, a side kernel (the backward is an ordinary launch: no
+    stall beside a resident kernel), the grid that gives up one SM when the last channel-tile rank is partial and
+    torch's deterministic mode (the backward alerts, through the package's entries and through the
+    non-deterministic KCP package ``cake_pplx.cake_causal_conv1d_nondet_train_kcp``, whose entries take no
+    ``deterministic`` keyword): every output judged.
 
 Every test skips until the exporter has rendered the non-deterministic package.
 """
 
 from __future__ import annotations
 
+import contextlib
 import statistics
 
 import pytest
@@ -44,24 +48,22 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
-from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import naive_bf16, oracle
+from tests.cake.test_helpers.cake_naive import (
+    DRAWS,
+    TierJudge,
+    contract,
+    draw_seed,
+    seed_all,
+)
 from tests.test_cake_causal_conv1d_det_train_kcp import (
-    DW_ATOL,
-    DW_RTOL,
     ROWS,
     WIDTH,
-    Y_ATOL,
-    Y_RTOL,
-    _assert_within,
-    _bits,
     _context,
     _ExchangeCounter,
     _problem,
-    _reference,
+    judge_kcp,
 )
-
-# the deterministic package's KCP backend, through the one place the suites name packages
-det_kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
 
 REPEATS = 20
 # Beside the deterministic suite's rows: C = 10240 (a packed q / k / v projection width), a fragment cut inside each
@@ -73,7 +75,7 @@ pytestmark = pytest.mark.skipif(
     or not pkg.is_cake_causal_conv1d_nondet_train_supported(torch.device("cuda")),
     reason=(
         "the non-deterministic cake_causal_conv1d_nondet_train package needs a supported CUDA device (SM100 / SM103 / "
-        "SM107) and its rendered build.json / csrc (TODO-EXPORT until the exporter renders it)"
+        "SM107) and its rendered build.json / csrc"
     ),
 )
 
@@ -94,102 +96,73 @@ def _stream_workspace() -> torch.Tensor | None:
     return pkg._BACKWARD_WORKSPACES.get(key)
 
 
-def _dw_within(actual, expected, label, *, scale=1.0):
-    return _assert_within(
-        actual, expected, atol=scale * DW_ATOL, rtol=scale * DW_RTOL, label=label
+@pytest.mark.parametrize(
+    "name,lens,cuts,C", ROWS + WIDE_ROWS, ids=[r[0] for r in ROWS + WIDE_ROWS]
+)
+def test_forward_matches_reference(name, lens, cuts, C):
+    """``y`` judged against the naive tier on every row."""
+
+    judge_kcp(
+        lens, cuts, C, lambda p: {"y": _fwd(p.x_local, p.w, p.ctx)[0]}, label=name
     )
-
-
-def _same(a, b, *, scale=1.0) -> bool:
-    """``y`` / ``dx`` bitwise, ``dweight`` within ``scale`` x the budget."""
-
-    if not all(torch.equal(_bits(a[n]), _bits(b[n])) for n in ("y", "dx")):
-        return False
-    _dw_within(a["dw"], b["dw"], "dweight", scale=scale)
-    return True
 
 
 @pytest.mark.parametrize(
     "name,lens,cuts,C", ROWS + WIDE_ROWS, ids=[r[0] for r in ROWS + WIDE_ROWS]
 )
-def test_forward_is_the_deterministic_forward(name, lens, cuts, C):
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    y, hist = _fwd(p.x_local, p.w, p.ctx)
-    y_det, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    assert torch.equal(_bits(y), _bits(y_det)) and torch.equal(
-        _bits(hist), _bits(hist_det)
-    )
-    y_ref, _, _ = _reference(p.x, p.w, p.cu, p.dy)
-    _assert_within(y, y_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="y vs FP64 oracle")
+def test_backward_repeats_are_judged(name, lens, cuts, C, record_property):
+    """``REPEATS`` backward launches on each draw's inputs: every launch's ``dx`` and ``dweight`` judged against the
+    naive tier (the worst launch of a draw counts), the accumulator workspace zero after every launch; the number of
+    distinct ``dweight`` bit patterns of the first draw is recorded (the order of the cross-CTA sums may vary; no
+    bound is placed on that count)."""
 
-
-@pytest.mark.parametrize(
-    "name,lens,cuts,C", ROWS + WIDE_ROWS, ids=[r[0] for r in ROWS + WIDE_ROWS]
-)
-def test_backward_repeats_dx_bitwise_dweight_within_budget(
-    name, lens, cuts, C, record_property
-):
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    _, hist = _fwd(p.x_local, p.w, p.ctx)
-    _, dx_ref, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
-    _, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    dx_det, dw_det = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-        p.x_local, p.w, p.ctx, p.dy_local, hist_det
-    )
-    worst_ref = worst_det = 0.0
     patterns = set()
-    for repeat in range(REPEATS):
-        dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-        torch.cuda.synchronize()
-        assert torch.equal(_bits(dx), _bits(dx_det)), (
-            f"dx differs from the deterministic KCP backward ({repeat})"
-        )
-        stats = _dw_within(dw, dw_ref, f"dweight vs FP64 oracle ({repeat})")
-        worst_ref = max(worst_ref, stats["max_ratio_to_bound"])
-        stats = _dw_within(dw, dw_det, f"dweight vs deterministic ({repeat})")
-        worst_det = max(worst_det, stats["max_ratio_to_bound"])
-        patterns.add(bytes(dw.contiguous().view(torch.uint8).cpu().numpy()))
-        held = _stream_workspace()
-        if held is not None:
-            assert int(torch.count_nonzero(held)) == 0, (
+    draws = []
+
+    def run(p):
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
+        found = {"dx": [], "dweight": []}
+        for repeat in range(REPEATS):
+            dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
+            torch.cuda.synchronize()
+            held = _stream_workspace()
+            assert held is None or int(torch.count_nonzero(held)) == 0, (
                 f"accumulators not zero after repeat {repeat}"
             )
-    _assert_within(
-        dx_det, dx_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="dx vs FP64 oracle"
-    )
-    # The independent reference for this package's own dx too (one rank: the whole pack, in local order).
-    _assert_within(
-        dx, dx_ref[p.l2g], atol=Y_ATOL, rtol=Y_RTOL, label="non-det dx vs FP64 oracle"
-    )
-    print(f"{name}: {REPEATS} launches, worst dweight |err|/budget vs FP64 {worst_ref:.3f}, vs det {worst_det:.3f}, "
-          f"{len(patterns)} distinct dweight bit patterns")  # fmt: skip
+            found["dx"].append(dx)
+            found["dweight"].append(dw)
+            if not draws:
+                patterns.add(bytes(dw.contiguous().view(torch.uint8).cpu().numpy()))
+        draws.append(len(draws))
+        return found
+
+    judge_kcp(lens, cuts, C, run, label=name)
+    print(f"{name}: {REPEATS} launches per draw, {len(patterns)} distinct dweight bit patterns")
     record_property("repeats", REPEATS)
-    record_property("worst_dweight_ratio_vs_fp64", worst_ref)
-    record_property("worst_dweight_ratio_vs_det", worst_det)
     record_property("distinct_dweight_patterns", len(patterns))
 
 
 @pytest.mark.parametrize("name,lens,cuts,C", ROWS[:3], ids=[r[0] for r in ROWS[:3]])
-def test_autograd_function_matches_the_direct_calls(name, lens, cuts, C):
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    runs = []
-    for _ in range(2):
-        x = p.x_local.clone().requires_grad_(True)
-        w = p.w.clone().requires_grad_(True)
-        y = conv_kcp.cake_causal_conv1d_nondet_kcp(x, w, p.ctx)
-        y.backward(p.dy_local)
-        runs.append({"y": y.detach(), "dx": x.grad, "dw": w.grad})
-    y_direct, hist = _fwd(p.x_local, p.w, p.ctx)
-    dx_direct, dw_direct = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-    assert _same(runs[0], runs[1])
-    assert _same(runs[0], {"y": y_direct, "dx": dx_direct, "dw": dw_direct})
+def test_autograd_function_and_the_direct_calls(name, lens, cuts, C):
+    """Two passes through the autograd entry and one through the direct calls: every pass's ``y``, ``dx`` and
+    ``dweight`` judged against the naive tier."""
+
+    def run(p):
+        found = {"y": [], "dx": [], "dweight": []}
+        for _ in range(2):
+            x = p.x_local.clone().requires_grad_(True)
+            w = p.w.clone().requires_grad_(True)
+            y = conv_kcp.cake_causal_conv1d_nondet_kcp(x, w, p.ctx)
+            y.backward(p.dy_local)
+            for out, value in (("y", y.detach()), ("dx", x.grad), ("dweight", w.grad)):
+                found[out].append(value)
+        y, hist = _fwd(p.x_local, p.w, p.ctx)
+        dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
+        for out, value in (("y", y), ("dx", dx), ("dweight", dw)):
+            found[out].append(value)
+        return found
+
+    judge_kcp(lens, cuts, C, run, label=name)
 
 
 def test_empty_rank_returns_empty_outputs():
@@ -220,13 +193,12 @@ def test_rejects_mismatched_context_and_keeps_the_kcp_contract():
 def test_fp32_dweight_must_be_16_byte_aligned():
     """The KCP backward stores one channel's four FP32 ``dweight`` taps with one 16-byte store: a ``dweight`` off
     the 16-byte grid is refused (``ValueError``) before anything launches; a 16-byte aligned view inside a larger
-    buffer is written (``dx`` the direct call's bits, ``dweight`` within budget of its FP64 oracle)."""
+    buffer is written (``dx`` and the view judged against the naive tier)."""
 
     device = torch.device("cuda")
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    p = _problem(lens, cuts, C, device)
     _, hist = _fwd(p.x_local, p.w, p.ctx)
-    dx_direct, _ = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-    _, _, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
     n = p.C * WIDTH
     buf = torch.zeros(n + 4, dtype=torch.float32, device=device)
     for offset in (1, 2, 3):
@@ -238,19 +210,24 @@ def test_fp32_dweight_must_be_16_byte_aligned():
     assert int(torch.count_nonzero(buf)) == 0
     held = _stream_workspace()
     assert held is None or int(torch.count_nonzero(held)) == 0
-    aligned = buf[4:].view(p.C, WIDTH)
-    dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist, dweight=aligned)
-    assert dw is aligned
-    assert torch.equal(_bits(dx), _bits(dx_direct))
-    _dw_within(dw, dw_ref, "16-byte aligned dweight view vs FP64 oracle")
+
+    def run(p):
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
+        buf = torch.zeros(n + 4, dtype=torch.float32, device=device)
+        aligned = buf[4:].view(p.C, WIDTH)
+        dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist, dweight=aligned)
+        assert dw is aligned
+        return {"dx": dx, "dweight": dw}
+
+    judge_kcp(lens, cuts, C, run, label="16-byte aligned dweight view")
 
 
 def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):
     """The KCP programs plan their launches with ``cake_jit.plan(..., legacy=True)``: the single backward program
     (the ``bwd_route`` test knob ``"single"``; the overlapped pair plans with its own work plan) and the one-launch
     forward (knobs ``fwd_main`` 0, ``fwd_overlap`` 0), while the shipped forward's single-rank main program
-    (``FWD_MAIN_ARCHS``) plans with the ``fwd`` route's rule for the device's architecture.  ``y`` is bitwise the
-    deterministic KCP forward's and ``dx`` its backward's either way."""
+    (``FWD_MAIN_ARCHS``) plans with the ``fwd`` route's rule for the device's architecture.  ``y``, ``dx`` and
+    ``dweight`` are judged against the naive tier either way."""
     calls = []
     original = conv_kcp.plan
 
@@ -260,35 +237,35 @@ def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):
 
     device = torch.device("cuda")
     arch = conv_kcp._device_arch(device)
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 1280, device)
-    y_det, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    dx_det, _ = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-        p.x_local, p.w, p.ctx, p.dy_local, hist_det
-    )
     monkeypatch.setattr(conv_kcp, "plan", recording_plan)
-    for knobs in ({"fwd_main": 0, "fwd_overlap": 0}, {}):
-        calls.clear()
-        # the trimmed host path caches its plans per context: each form plans afresh
+
+    def run(p):
+        found = {"y": [], "dx": [], "dweight": []}
+        for knobs in ({"fwd_main": 0, "fwd_overlap": 0}, {}):
+            calls.clear()
+            # the trimmed host path caches its plans per context: each form plans afresh
+            conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+            conv_kcp._set_test_knobs(knobs)
+            try:
+                y, hist = _fwd(p.x_local, p.w, p.ctx)
+                conv_kcp._set_test_knobs({**knobs, "bwd_route": "single"})
+                dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
+            finally:
+                conv_kcp._set_test_knobs(None)
+            assert len(calls) == 2 and calls[1].get("legacy") is True, (knobs, calls)
+            if not knobs and arch in conv_kcp.FWD_MAIN_ARCHS:
+                assert calls[0].get("legacy") is not True, calls
+                assert (calls[0].get("route"), calls[0].get("arch")) == ("fwd", arch), calls
+            else:
+                assert calls[0].get("legacy") is True, (knobs, calls)
+            for out, value in (("y", y), ("dx", dx), ("dweight", dw)):
+                found[out].append(value)
+        return found
+
+    try:
+        judge_kcp((5000, 1003), (1, 2, 4997, 1003), 1280, run, label="legacy plan")
+    finally:
         conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-        conv_kcp._set_test_knobs(knobs)
-        try:
-            y, hist = _fwd(p.x_local, p.w, p.ctx)
-            conv_kcp._set_test_knobs({**knobs, "bwd_route": "single"})
-            dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-        finally:
-            conv_kcp._set_test_knobs(None)
-        assert len(calls) == 2 and calls[1].get("legacy") is True, (knobs, calls)
-        if not knobs and arch in conv_kcp.FWD_MAIN_ARCHS:
-            assert calls[0].get("legacy") is not True, calls
-            assert (calls[0].get("route"), calls[0].get("arch")) == ("fwd", arch), calls
-        else:
-            assert calls[0].get("legacy") is True, (knobs, calls)
-        assert torch.equal(_bits(y), _bits(y_det)), knobs
-        assert torch.equal(_bits(hist), _bits(hist_det)), knobs
-        assert torch.equal(dx, dx_det) and torch.isfinite(dw).all(), knobs
-    conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
 
 
 def _one_sm_rows(device: torch.device) -> list[tuple[int, tuple[int, int, int]]]:
@@ -316,9 +293,8 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
     """The single backward program (the ``bwd_route`` test knob ``"single"``): it launches
     ``ctas_per_sm x SM count`` CTAs, less ``ctas_per_sm`` when
     the last channel-tile rank of that grid holds at least ``ctas_per_sm`` CTAs (so a kernel on another stream that
-    keeps one SM's shared memory leaves the launch one wave), else the whole grid, on both host paths; ``dx`` is
-    bitwise the deterministic backward's, ``dweight`` within budget of the FP64 oracle and the workspace reads back
-    zero either way."""
+    keeps one SM's shared memory leaves the launch one wave), else the whole grid, on both host paths; ``dx`` and
+    ``dweight`` judged against the naive tier and the workspace reads back zero either way."""
 
     device = torch.device("cuda")
     rows = _one_sm_rows(device)
@@ -341,17 +317,11 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
 
     monkeypatch.setattr(conv_kcp, "_launch_plan", recording_plan)
     monkeypatch.setattr(conv_kcp, "run_module", recording_run)
-    try:
-        for C, expected in rows:
-            p = _problem((5000, 1003), (1, 2, 4997, 1003), C, device)
+    def run_for(C, expected):
+        def run(p):
+            conv_kcp._set_test_knobs(None)
             _, hist = _fwd(p.x_local, p.w, p.ctx)
-            _, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-                p.x_local, p.w, p.ctx
-            )
-            dx_det, _ = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-                p.x_local, p.w, p.ctx, p.dy_local, hist_det
-            )
-            _, _, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
+            found = {"dx": [], "dweight": []}
             for host_trim in (1, 0):
                 conv_kcp._set_test_knobs(
                     {"host_trim": host_trim, "bwd_route": "single"}
@@ -362,10 +332,19 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
                 torch.cuda.synchronize()
                 label = f"C={C} host_trim={host_trim}"
                 assert seen == [expected], (label, seen)
-                assert torch.equal(_bits(dx), _bits(dx_det)), label
-                _dw_within(dw, dw_ref, f"dweight vs FP64 oracle, {label}")
                 held = _stream_workspace()
                 assert held is None or int(torch.count_nonzero(held)) == 0, label
+                found["dx"].append(dx)
+                found["dweight"].append(dw)
+            return found
+
+        return run
+
+    try:
+        for C, expected in rows:
+            judge_kcp(
+                (5000, 1003), (1, 2, 4997, 1003), C, run_for(C, expected), label=f"C={C}"
+            )
     finally:
         conv_kcp._set_test_knobs(None)
         conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
@@ -404,28 +383,29 @@ def _record_forward_grids(monkeypatch) -> list:
 
 def _check_forward_grid(seen: list, expected: tuple, Cs: tuple, arch: str) -> None:
     """For each ``C`` of ``Cs`` and both host paths, the one-launch forward (knobs ``fwd_main`` 0, ``fwd_overlap`` 0:
-    the ``kcp_fwd`` program): one forward launch of grid ``expected``, ``y`` and ``hist`` bitwise the deterministic
-    KCP forward's."""
+    the ``kcp_fwd`` program): one forward launch of grid ``expected``, ``y`` judged against the naive tier."""
 
-    device = torch.device("cuda")
-    try:
-        for C in Cs:
-            p = _problem((5000, 1003), (1, 2, 4997, 1003), C, device)
-            y_det, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-                p.x_local, p.w, p.ctx
-            )
+    def run_for(C):
+        def run(p):
+            found = []
             for host_trim in (1, 0):
                 conv_kcp._set_test_knobs(
                     {"host_trim": host_trim, "fwd_main": 0, "fwd_overlap": 0}
                 )
                 conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
                 seen.clear()
-                y, hist = _fwd(p.x_local, p.w, p.ctx)
+                y, _ = _fwd(p.x_local, p.w, p.ctx)
                 torch.cuda.synchronize()
                 label = f"{arch} C={C} host_trim={host_trim}"
                 assert seen == [expected], (label, seen)
-                assert torch.equal(_bits(y), _bits(y_det)), label
-                assert torch.equal(_bits(hist), _bits(hist_det)), label
+                found.append(y)
+            return {"y": found}
+
+        return run
+
+    try:
+        for C in Cs:
+            judge_kcp((5000, 1003), (1, 2, 4997, 1003), C, run_for(C), label=f"{arch} C={C}")
     finally:
         conv_kcp._set_test_knobs(None)
         conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
@@ -434,8 +414,8 @@ def _check_forward_grid(seen: list, expected: tuple, Cs: tuple, arch: str) -> No
 def test_forward_grid_per_architecture(monkeypatch) -> None:
     """The one-launch forward (knobs ``fwd_main`` 0, ``fwd_overlap`` 0: the ``kcp_fwd`` program) launches the
     record's co-resident grid less ``FWD_RESERVE_SMS[arch]`` SMs of CTAs (sm_107a: one SM, the deterministic KCP
-    forward's grid; sm_100a / sm_103a: the full grid), on both host paths; ``y`` and ``hist`` are bitwise the
-    deterministic KCP forward's either way."""
+    forward's grid; sm_100a / sm_103a: the full grid), on both host paths; ``y`` is judged against the naive tier
+    either way."""
 
     arch, record, full = _forward_record(torch.device("cuda"))
     assert conv_kcp.FWD_RESERVE_SMS == {"sm_107a": 1}
@@ -451,8 +431,8 @@ def test_forward_grid_per_architecture(monkeypatch) -> None:
 def test_forward_grid_reserve_falls_back_to_the_full_grid(monkeypatch) -> None:
     """A reserve that leaves fewer CTAs than the call's channel tiles launches the full grid; one that leaves exactly
     as many launches the shorter grid; more channel tiles than the full grid holds raise ``ValueError``.  The
-    fallback launch (C = 10240, one SM of CTAs left: fewer CTAs than its channel tiles) keeps ``y`` / ``hist``
-    bitwise the deterministic KCP forward's on both host paths."""
+    fallback launch (C = 10240, one SM of CTAs left: fewer CTAs than its channel tiles) has its ``y`` judged against
+    the naive tier on both host paths."""
 
     device = torch.device("cuda")
     arch, record, full = _forward_record(device)
@@ -478,33 +458,31 @@ def test_forward_grid_reserve_falls_back_to_the_full_grid(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("form", ["knob", "keyword"])
-def test_graph_replay_is_bitwise_for_y_and_dx(monkeypatch, form) -> None:
-    """Graph replay of the KCP calls: the deterministic suite's event sequence; ``y`` / ``hist`` / ``dx`` bitwise the
-    eager results on every call, ``dweight`` within budget (the captured launch zeroes nothing itself: the
-    accumulators it replays on are left zero by every launch)."""
+def test_graph_replay(monkeypatch, form) -> None:
+    """Graph replay of the KCP calls on each draw's inputs (the graphs of the previous draw dropped first): the
+    deterministic suite's event sequence; ``y``, ``dx`` and ``dweight`` of every call judged against the naive tier
+    (the captured launch zeroes nothing itself: the accumulators it replays on are left zero by every launch)."""
 
-    device = torch.device("cuda")
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
-    x, w, ctx = p.x_local, p.w, p.ctx
-    dy = torch.randn(x.shape, device=device).to(torch.bfloat16)
-    y0, hist0 = _fwd(x, w, ctx)
-    dx0, dw0 = _bwd(x, w, ctx, dy, hist0)
     kw = {}
     if form == "knob":
         conv_kcp._set_test_knobs({"graph": "replay"})
     else:
         kw = {"graph": "replay"}
-    try:
+
+    def run(p):
+        conv_kcp._GRAPHS.clear()
+        x, w, ctx, dy = p.x_local, p.w, p.ctx, p.dy_local
+        found = {"y": [], "dx": [], "dweight": []}
         events = []
         for _ in range(4):
             y, hist = _fwd(x, w, ctx, **kw)
             events.append(conv_kcp.LAST_CALL["fwd"]["graph_event"])
-            assert torch.equal(y, y0) and torch.equal(hist, hist0)
+            found["y"].append(y.clone())
             dx, dw = _bwd(x, w, ctx, dy, hist, **kw)
             events.append(conv_kcp.LAST_CALL["bwd"]["graph_event"])
             torch.cuda.synchronize()
-            assert torch.equal(dx, dx0)
-            _dw_within(dw, dw0, "replayed dweight")
+            found["dx"].append(dx.clone())
+            found["dweight"].append(dw.clone())
         assert events == [
             "eager",
             "eager",
@@ -515,6 +493,10 @@ def test_graph_replay_is_bitwise_for_y_and_dx(monkeypatch, form) -> None:
             "replay",
             "replay",
         ], events
+        return found
+
+    try:
+        judge_kcp((5000, 1003), (1, 2, 4997, 1003), 512, run, label=f"graph {form}")
         assert conv_kcp.GRAPH_STATS["fallback"] == 0
     finally:
         conv_kcp._set_test_knobs(None)
@@ -560,65 +542,86 @@ def _ckpt_run(p, *, handle=None, reentrant=False, ckpt=True, counter=None, twice
     return {"y": y.detach(), "dx": x.grad, "dw": w.grad}
 
 
+def _outputs(*runs: dict) -> dict:
+    """The ``y`` / ``dx`` / ``dweight`` of the runs of :func:`_ckpt_run`, by output name."""
+
+    return {
+        "y": [r["y"] for r in runs],
+        "dx": [r["dx"] for r in runs],
+        "dweight": [r["dw"] for r in runs],
+    }
+
+
 @pytest.mark.parametrize("name,lens,cuts,C", ROWS, ids=[r[0] for r in ROWS])
 @pytest.mark.parametrize("reentrant", [False, True], ids=["nonreentrant", "reentrant"])
 def test_checkpoint_and_recompute_handle(
     monkeypatch, name, lens, cuts, C, reentrant
 ) -> None:
-    """Checkpointed (2 x forward + backward) with and without a recompute handle: ``y`` / ``dx`` bitwise the direct
-    pass's (``dx`` also the deterministic KCP backward's), ``dweight`` within budget; the exchange counts of the
-    deterministic suite (one per direction, none in a recompute with a handle)."""
+    """Checkpointed (2 x forward + backward) with and without a recompute handle, and the direct pass: ``y``,
+    ``dx`` and ``dweight`` of each judged against the naive tier; the exchange counts of the deterministic suite (one
+    per direction, none in a recompute with a handle)."""
 
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    direct = _ckpt_run(p, ckpt=False)
-    plain_cc = _ExchangeCounter(monkeypatch, conv_kcp)
-    plain = _ckpt_run(p, reentrant=reentrant, counter=plain_cc)
-    monkeypatch.undo()
-    handle = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
-    cc = _ExchangeCounter(monkeypatch, conv_kcp)
-    conv_kcp.LAST_CALL.pop("recompute_handle", None)
-    got = _ckpt_run(p, handle=handle, reentrant=reentrant, counter=cc)
-    monkeypatch.undo()
-    assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay"}
-    assert _same(plain, direct) and _same(got, plain)
-    _, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    dx_det, dw_det = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-        p.x_local, p.w, p.ctx, p.dy_local, hist_det
-    )
-    assert torch.equal(_bits(got["dx"]), _bits(dx_det))
-    _dw_within(got["dw"], dw_det, "checkpointed dweight vs deterministic")
-    if reentrant:
-        assert plain_cc.table() == {"orig": 1, "recompute": 0, "bwd": 2}
-        assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 1}
-    else:
-        assert plain_cc.table() == {"orig": 1, "recompute": 1, "bwd": 1}
-        assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 1}
-    assert handle.nbytes() == int(p.ctx.halo.n_hist_rows) * C * 2
-    handle.clear()
+    def run(p):
+        direct = _ckpt_run(p, ckpt=False)
+        plain_cc = _ExchangeCounter(monkeypatch, conv_kcp)
+        plain = _ckpt_run(p, reentrant=reentrant, counter=plain_cc)
+        monkeypatch.undo()
+        handle = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
+        cc = _ExchangeCounter(monkeypatch, conv_kcp)
+        conv_kcp.LAST_CALL.pop("recompute_handle", None)
+        got = _ckpt_run(p, handle=handle, reentrant=reentrant, counter=cc)
+        monkeypatch.undo()
+        assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay"}
+        if reentrant:
+            assert plain_cc.table() == {"orig": 1, "recompute": 0, "bwd": 2}
+            assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 1}
+        else:
+            assert plain_cc.table() == {"orig": 1, "recompute": 1, "bwd": 1}
+            assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 1}
+        assert handle.nbytes() == int(p.ctx.halo.n_hist_rows) * C * 2
+        handle.clear()
+        return _outputs(direct, plain, got)
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} {'reentrant' if reentrant else 'nonreentrant'}")
 
 
 def test_gradient_accumulation_and_retain_graph(monkeypatch) -> None:
-    """``retain_graph`` + a second backward: ``dx`` exactly twice (one exact BF16 doubling of the same bits),
-    ``dweight`` twice within twice the budget; the recompute exchanges nothing."""
+    """``retain_graph`` + a second backward of the same ``dy``: the accumulated ``dx`` and ``dweight`` judged against
+    the naive tier's two-pass sums (the float64 oracle's sum of the two passes, twice one pass); the recompute
+    exchanges nothing."""
 
     device = torch.device("cuda")
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
-    direct = _ckpt_run(p, ckpt=False)
-    cc = _ExchangeCounter(monkeypatch, conv_kcp)
-    twice = _ckpt_run(
-        p,
-        handle=conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(),
-        counter=cc,
-        twice=True,
-    )
-    assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 2}
-    assert torch.equal(_bits(twice["dx"]), _bits(direct["dx"] + direct["dx"]))
-    _dw_within(
-        twice["dw"], direct["dw"] + direct["dw"], "accumulated dweight", scale=2.0
-    )
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    judge = TierJudge(DRAWS)
+    failures = []
+    for j in range(DRAWS):
+        seed = draw_seed(0, j)
+        seed_all(seed)
+        p = _problem(lens, cuts, C, device, seed=seed)
+        cc = _ExchangeCounter(monkeypatch, conv_kcp)
+        twice = _ckpt_run(
+            p,
+            handle=conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(),
+            counter=cc,
+            twice=True,
+        )
+        monkeypatch.undo()
+        assert cc.table() == {"orig": 1, "recompute": 0, "bwd": 2}
+        want = oracle(p.x, p.w, p.cu, None, p.dy, outputs=("dx", "dweight"))
+        naive = naive_bf16(p.x, p.w, p.cu, None, p.dy, outputs=("dx", "dweight"))
+        for name, actual, rows in (
+            ("dx", twice["dx"], p.l2g),
+            ("dweight", twice["dw"], None),
+        ):
+            expected, tier = want[name] + want[name], naive[name] + naive[name]
+            if rows is not None:
+                expected, tier = expected[rows], tier[rows]
+            if message := contract(name, actual, expected):
+                failures.append(f"draw {j}: {message}")
+                continue
+            judge.add(name, j, actual, expected, {"bf16": tier})
+    failures += judge.failures()
+    assert not failures, "\n".join(failures)
 
 
 def test_recompute_handle_misuse_raises() -> None:
@@ -655,11 +658,12 @@ def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     record_property,
 ) -> None:
     """The main KCP backward is an ordinary launch, so one 1-thread kernel resident
-    on another stream does not stall it (``busy <= 2 x alone``, medians of 7 after 3 warm-ups); ``dx`` is bitwise
-    unchanged beside it."""
+    on another stream does not stall it (``busy <= 2 x alone``, medians of 7 after 3 warm-ups); the ``dx`` and
+    ``dweight`` of backward calls launched beside it are judged against the naive tier."""
 
     device = torch.device("cuda")
-    p = _problem((150000, 111393), (1, 2, 149997, 111393), 512, device)
+    lens, cuts, C = (150000, 111393), (1, 2, 149997, 111393), 512
+    p = _problem(lens, cuts, C, device)
     _, hist = _fwd(p.x_local, p.w, p.ctx)
     side = torch.cuda.Stream(device=device)
     start, end = (
@@ -683,31 +687,55 @@ def test_backward_keeps_its_speed_beside_a_resident_side_kernel(
     for _ in range(3):
         timed(False)
     alone = statistics.median(timed(False) for _ in range(7))
-    dx_alone = out["dx"].clone()
     busy = statistics.median(timed(True) for _ in range(7))
     print(
         f"KCP backward alone {alone:.3f} ms, beside a resident kernel {busy:.3f} ms ({busy / alone:.2f}x)"
     )
     record_property("kcp_backward_alone_ms", f"{alone:.4f}")
     record_property("kcp_backward_beside_side_kernel_ms", f"{busy:.4f}")
-    assert torch.equal(out["dx"], dx_alone)
     assert busy <= 2.0 * alone, (
         f"the KCP backward stalled beside a resident kernel: {busy:.3f} vs {alone:.3f} ms"
     )
 
+    def beside(p):
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
+        torch.cuda.synchronize(device)
+        with torch.cuda.stream(side):
+            torch.cuda._sleep(10_000_000)
+        torch.cuda._sleep(1_000_000)
+        dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
+        torch.cuda.synchronize(device)
+        return {"dx": dx, "dweight": dw}
 
-def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
-    device = torch.device("cuda")
-    p = _problem((65,), (64, 1), 256, device)
-    y0, hist = _fwd(p.x_local, p.w, p.ctx)
+    judge_kcp(lens, cuts, C, beside, label="beside the side kernel")
+
+
+@contextlib.contextmanager
+def _torch_deterministic(*, warn_only: bool = False):
+    """Torch's deterministic mode (``warn_only`` as given) inside the block, the previous mode restored after it (the
+    oracle and the naive tier run outside the block)."""
+
     prev, prev_warn = (
         torch.are_deterministic_algorithms_enabled(),
         torch.is_deterministic_algorithms_warn_only_enabled(),
     )
+    torch.use_deterministic_algorithms(True, warn_only=warn_only)
     try:
-        torch.use_deterministic_algorithms(True)
-        y, _ = _fwd(p.x_local, p.w, p.ctx)
-        assert torch.equal(y, y0)
+        yield
+    finally:
+        torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+
+
+def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
+    """Under ``torch.use_deterministic_algorithms(True)`` the forward runs (``y`` judged against the naive tier) and
+    the backward raises, through the direct call and through autograd; ``warn_only=True``: the backward warns and
+    runs (``dx`` and ``dweight`` judged against the naive tier)."""
+
+    device = torch.device("cuda")
+    lens, cuts, C = (65,), (64, 1), 256
+    p = _problem(lens, cuts, C, device)
+    _, hist = _fwd(p.x_local, p.w, p.ctx)
+    with _torch_deterministic():
         with pytest.raises(
             RuntimeError, match="cake_causal_conv1d_nondet_train_kcp_backward"
         ):
@@ -718,49 +746,56 @@ def test_torch_deterministic_mode_alerts_on_the_backward() -> None:
             RuntimeError, match="cake_causal_conv1d_nondet_train_kcp_backward"
         ):
             y.backward(p.dy_local)
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        with pytest.warns(
+
+    def forward(p):
+        with _torch_deterministic():
+            y, _ = _fwd(p.x_local, p.w, p.ctx)
+        return {"y": y}
+
+    def warned(p):
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
+        with _torch_deterministic(warn_only=True), pytest.warns(
             UserWarning, match="cake_causal_conv1d_nondet_train_kcp_backward"
         ):
-            _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-    finally:
-        torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+            dx, dw = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
+        return {"dx": dx, "dweight": dw}
+
+    judge_kcp(lens, cuts, C, forward, label="deterministic mode forward")
+    judge_kcp(lens, cuts, C, warned, label="warn_only")
 
 
 @pytest.mark.parametrize("multi", [False, True], ids=["single", "multi"])
 def test_kcp_facade_under_torch_deterministic_mode(multi) -> None:
     """``cake_pplx.cake_causal_conv1d_nondet_train_kcp`` on a device: its entries take no ``deterministic`` keyword
-    (the ordinary ``TypeError``) and return the package's bits; under torch's deterministic mode the forward runs and
-    the backward raises (strict, also when the mode is set between the forward and the backward: the mode is read
-    when the backward runs) or warns and runs (``warn_only``); it never falls back to the deterministic package."""
+    (the ordinary ``TypeError``); under torch's deterministic mode the forward runs and the backward raises (strict,
+    also when the mode is set between the forward and the backward: the mode is read when the backward runs) or
+    warns and runs (``warn_only``).  ``y``, ``dx`` and ``dweight`` of a pass without the mode and of a
+    ``warn_only`` pass are judged against the naive tier."""
 
     import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
     device = torch.device("cuda")
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    p = _problem(lens, cuts, C, device)
 
-    def call(x, w, **kw):
+    def call(x, w, ctx, **kw):
         if multi:
-            (y,) = facade.cake_causal_conv1d_nondet_kcp_multi((x,), (w,), p.ctx, **kw)
+            (y,) = facade.cake_causal_conv1d_nondet_kcp_multi((x,), (w,), ctx, **kw)
             return y
-        return facade.cake_causal_conv1d_nondet_kcp(x, w, p.ctx, **kw)
+        return facade.cake_causal_conv1d_nondet_kcp(x, w, ctx, **kw)
 
-    def run(before_backward=None):
+    def run(p, before_backward=None):
         x = p.x_local.clone().requires_grad_(True)
         w = p.w.clone().requires_grad_(True)
-        y = call(x, w)
+        y = call(x, w, p.ctx)
         if before_backward is not None:
             before_backward()
         y.backward(p.dy_local)
-        return {"y": y.detach(), "dx": x.grad, "dw": w.grad}
+        return {"y": y.detach(), "dx": x.grad, "dweight": w.grad}
 
     for value in (False, True):
         with pytest.raises(TypeError, match="deterministic"):
-            call(p.x_local, p.w, deterministic=value)
-    y_direct, hist = _fwd(p.x_local, p.w, p.ctx)
-    dx_direct, dw_direct = _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist)
-    direct = {"y": y_direct, "dx": dx_direct, "dw": dw_direct}
-    assert _same(run(), direct)
+            call(p.x_local, p.w, p.ctx, deterministic=value)
 
     alert = "cake_causal_conv1d_nondet_train_kcp_(multi_)?backward does not have a deterministic"
     prev, prev_warn = (
@@ -770,13 +805,17 @@ def test_kcp_facade_under_torch_deterministic_mode(multi) -> None:
     try:
         torch.use_deterministic_algorithms(True)
         with pytest.raises(RuntimeError, match=alert):
-            run()
+            run(p)
         torch.use_deterministic_algorithms(False)
         with pytest.raises(RuntimeError, match=alert):
-            run(before_backward=lambda: torch.use_deterministic_algorithms(True))
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        with pytest.warns(UserWarning, match=alert):
-            got = run()
-        assert _same(got, direct)
+            run(p, before_backward=lambda: torch.use_deterministic_algorithms(True))
     finally:
         torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+
+    def judged(p):
+        plain = run(p)
+        with _torch_deterministic(warn_only=True), pytest.warns(UserWarning, match=alert):
+            got = run(p)
+        return {name: [plain[name], got[name]] for name in plain}
+
+    judge_kcp(lens, cuts, C, judged, label="multi" if multi else "single")
