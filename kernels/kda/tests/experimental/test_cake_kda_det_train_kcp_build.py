@@ -854,3 +854,16 @@ def test_workspace_bytes_without_cuda_pass_no_architecture(
     seen = _spy_byte_query(monkeypatch)
     assert kcp_plan.cake_kda_det_train_kcp_workspace_bytes(ctx, H=64) > 0
     assert seen == [(name, None) for name in BYTE_QUERY_CALLS]
+
+
+def test_the_l2n_twins_are_the_fused_records_that_read_the_raw_rows() -> None:
+    # A fused-mode record is the ``_l2n`` twin of its stage only when it reads the raw rows ``q_raw`` / ``k_raw``.
+    # The kb-once replay prep of the raw gate's segmented route reads the rows the fused intra program normalized
+    # before it, so that route's replay has exactly one normalizing record and the KCP local stages take the fused
+    # mode of either gate on every architecture.
+    assert kcp_plan.qk_l2norm_twin("fwd_intra_v14_raw_l2n")
+    assert kcp_plan.qk_l2norm_twin("bwd_prep_g8_replay_raw_l2n")
+    assert not kcp_plan.qk_l2norm_twin("bwd_prep_g8_replay_kbonce_raw_l2n")
+    for arch in ARCHES:
+        for gate in ("g", "raw"):
+            assert kcp_plan.qk_l2norm_missing("fused", gate, arch) is None, (arch, gate)
