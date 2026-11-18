@@ -304,8 +304,8 @@ returns `(indices, scores)`.  For query row `t` with `n` visible keys the pool
 `P_t` is the keys `j < n` whose block `j // 8` appears in its row (any order;
 `-1` and ids at or past the visible blocks name no key; the non-negative ids
 of a row distinct).  The row selects the top `min(top_k, |P_t|)` keys of
-`P_t` by score descending, then key id descending (`+0.0 == -0.0`), with the
-scores of the plain call, rows in ascending id order with a `-1` tail: the program's
+`P_t` by score descending, then key id descending (`+0.0 == -0.0`), scored by
+the plain call's formula, rows in ascending id order with a `-1` tail: the program's
 unordered rows are sorted by the CUB finalize of the plain call (`finalize:t<threads>`
 over the policy's key bits of `Tkv`).
 
