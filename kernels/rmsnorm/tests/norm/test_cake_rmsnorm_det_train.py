@@ -911,6 +911,105 @@ def test_nd_autograd_matches_the_2d_call(hidden: int) -> None:
     assert torch.equal(w3.grad, w2.grad)
 
 
+@pytest.mark.parametrize("heads", (24, 4))
+@pytest.mark.parametrize("consumer", ("sum", "transposed"))
+@pytest.mark.parametrize("residual", (False, True))
+def test_nd_autograd_gradients(
+    heads: int, consumer: str, residual: bool, record_property
+) -> None:
+    """``[T, heads, H]`` through autograd with a ``.sum()`` consumer and a transposed consumer: the gradient of
+    ``y.transpose(0, 1)`` reaches the backward with strides ``(H, T x H, 1)``, a layout outside the forward's
+    collapse rule, and with a residual (H = 6144, the width of the residual route) so does the gradient of
+    ``h_new``.  The backward copies such gradients once: ``y`` (and ``h_new``), ``dx`` and ``dw`` meet the naive
+    BF16 tier over the draws (the FP64 oracle of the whole step at its FP64 ``rstd``, the naive step at its own
+    ``rstd``; each gradient is the consumer's in BF16), both residual-add inputs receive the same gradient, and
+    ``dx`` and ``dw`` are the bits of the backward call on the same gradients made contiguous."""
+
+    hidden = 6144 if residual else 256
+    _skip_unless_route(hidden, residual)
+    eps = EPS[hidden]
+    tokens = 300
+    check = ref.Draws(f"heads={heads} consumer={consumer} residual={residual}")
+    for draw in range(check.draws):
+        generator = _generator(hidden, heads, residual, 79, draw=draw)
+        x0 = _nd_rows(tokens, heads, hidden, pitch_pad=0, generator=generator)
+        w0 = _weight(hidden, generator)
+        u0 = (
+            _nd_rows(tokens, heads, hidden, pitch_pad=0, generator=generator)
+            if residual
+            else None
+        )
+        scales = torch.randn(
+            2 if residual else 1,
+            heads,
+            tokens,
+            hidden,
+            dtype=torch.float32,
+            device=_device(),
+            generator=generator,
+        )
+        x = x0.clone().requires_grad_(True)
+        w = w0.clone().requires_grad_(True)
+        u = u0.clone().requires_grad_(True) if residual else None
+        outputs = cake_rmsnorm_det(x, w, eps, residual=u)
+        y, h_new = outputs if residual else (outputs, None)
+        grad_h = None
+        if consumer == "sum":
+            loss = y.float().sum()
+            grad_y = torch.ones(
+                tokens, heads, hidden, dtype=torch.bfloat16, device=_device()
+            )
+            if residual:
+                loss = loss + h_new.float().sum()
+                grad_h = torch.ones_like(grad_y)
+        else:
+            loss = (y.transpose(0, 1).float() * scales[0]).sum()
+            grad_y = scales[0].to(torch.bfloat16).transpose(0, 1)
+            if residual:
+                loss = loss + (h_new.transpose(0, 1).float() * scales[1]).sum()
+                grad_h = scales[1].to(torch.bfloat16).transpose(0, 1)
+        loss.backward()
+        label = f"heads={heads} consumer={consumer} residual={residual} draw={draw}"
+        assert x.grad.shape == x.shape and w.grad.shape == w.shape, label
+        if residual:
+            assert torch.equal(x.grad, u.grad), (
+                f"{label}: both residual-add inputs receive the same gradient"
+            )
+
+        forward = cake_rmsnorm_det_train_forward(x0, w0, eps, residual=u0)
+        normalized = forward[2] if residual else x0
+        dx, dw = cake_rmsnorm_det_train_backward(
+            grad_y.contiguous(),
+            normalized,
+            w0,
+            forward[1],
+            g_residual=None if grad_h is None else grad_h.contiguous(),
+        )
+        assert torch.equal(x.grad, dx), f"{label}: dx differs from the contiguous call"
+        assert torch.equal(w.grad, dw.to(w0.dtype)), (
+            f"{label}: dw differs from the contiguous call"
+        )
+
+        oracle = ref.oracle_forward(x0, w0, eps, residual=u0)
+        oracle_normalized = (
+            (x0.double() + u0.double()).to(torch.bfloat16) if residual else x0
+        )
+        oracle.update(
+            ref.oracle_backward(grad_y, oracle_normalized, w0, oracle["rstd"], grad_h)
+        )
+        naive = ref.naive_forward(x0, w0, eps, residual=u0)
+        naive.update(
+            ref.naive_backward(
+                grad_y, naive.get("h_new", x0), w0, naive["rstd"], eps, grad_h
+            )
+        )
+        judged = {"y": y.detach(), "dx": x.grad, "dw": w.grad}
+        if residual:
+            judged["h_new"] = h_new.detach()
+        check.add(draw, judged, oracle, naive)
+    check.check(record_property)
+
+
 def test_the_issues_hidden_256_view_collapses_before_the_route_lookup() -> None:
     """The ``[T, 24, 256]`` view with strides ``(12288, 512, 1)`` of a ``[T, 24, 512]`` buffer collapses to
     ``24 T`` rows of 256: the host reaches the route lookup, which answers for hidden 256 with the width-256

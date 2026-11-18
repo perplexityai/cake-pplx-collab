@@ -109,7 +109,9 @@ def _validate_tensor(
         raise ValueError(f"{name} must have shape {shape}, got {tuple(tensor.shape)}")
 
 
-def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int, ...]]:
+def _row_view(
+    tensor: torch.Tensor, name: str, *, copy: bool = False
+) -> tuple[torch.Tensor, tuple[int, ...]]:
     """``(the [rows, H] view of an input, its leading shape)``.
 
     A ``[T, H]`` tensor is its own view.  A tensor of more dimensions,
@@ -121,8 +123,10 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
     stride apart (a ``[T, heads, H]`` slice of a wider ``[T, heads, W]``
     buffer, strides ``(heads * W, W, 1)``, qualifies).  The view keeps that
     row stride, so the alignment rules of the kernel inputs apply to it
-    unchanged.  Any other layout raises ``ValueError`` naming the rule: the
-    kernels index rows by one stride and write contiguous outputs.
+    unchanged.  Any other layout raises ``ValueError`` naming the rule (the
+    kernels index rows by one stride and write contiguous outputs), or, with
+    ``copy`` (the backward's gradients, which autograd hands over in whatever
+    layout the consumer produced), is copied once into a contiguous tensor.
     """
 
     if not isinstance(tensor, torch.Tensor):
@@ -144,6 +148,8 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
         tensor.stride(outer) == tensor.stride(inner) * tensor.shape[inner]
         for outer, inner in zip(dims, dims[1:], strict=False)
     )
+    if not collapsible and copy:
+        return tensor.contiguous().view(rows, hidden), lead
     if not collapsible:
         raise ValueError(
             f"{name} of shape {tuple(tensor.shape)} with strides "
@@ -159,7 +165,12 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
 
 
 def _companion_view(
-    tensor: torch.Tensor, name: str, *, lead: tuple[int, ...], hidden: int
+    tensor: torch.Tensor,
+    name: str,
+    *,
+    lead: tuple[int, ...],
+    hidden: int,
+    copy: bool = False,
 ) -> torch.Tensor:
     """The ``[rows, H]`` view of an input that takes the first input's shape
     (``residual``; the backward's ``g``, ``x`` companions and ``g_residual``)."""
@@ -171,7 +182,7 @@ def _companion_view(
         raise ValueError(
             f"{name} must have shape {expected}, got {tuple(tensor.shape)}"
         )
-    return _row_view(tensor, name)[0]
+    return _row_view(tensor, name, copy=copy)[0]
 
 
 def _rows_view(
@@ -808,7 +819,7 @@ def cake_rmsnorm_det_train_backward(
         alignment=4,
     )
     g = _kernel_input(
-        _companion_view(g, "g", lead=lead, hidden=hidden),
+        _companion_view(g, "g", lead=lead, hidden=hidden, copy=True),
         "g",
         rows=rows,
         hidden=hidden,
@@ -818,7 +829,9 @@ def cake_rmsnorm_det_train_backward(
     )
     if has_residual:
         g_residual = _kernel_input(
-            _companion_view(g_residual, "g_residual", lead=lead, hidden=hidden),
+            _companion_view(
+                g_residual, "g_residual", lead=lead, hidden=hidden, copy=True
+            ),
             "g_residual",
             rows=rows,
             hidden=hidden,
