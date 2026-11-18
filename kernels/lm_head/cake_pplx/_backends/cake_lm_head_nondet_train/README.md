@@ -889,7 +889,10 @@ norm without a cap, or a draw where the tier's error is 0 and its own is not),
 that meets the tier, or that a test passing its other checks did not judge.
 The entries of a test that is not collected (a renamed or removed
 parametrization, or a run over other test ids) or that skips are not
-checked.
+checked.  Since version 0.3.0 every listed output is a weight gradient (`dW`;
+81 outputs of 30 tests of both packages): the FP32 label residual folded into
+`dX` brought every `dX` output that version 0.2.1 listed within the tier, and
+those entries are removed.
 
 Toolchain: the deterministic package's rules apply unchanged (CUDA 12.9 or
 newer; the `sm_100a` 2-CTA producer loops issue the stage's
