@@ -15685,7 +15685,7 @@ def test_k1_dgrad_rules_by_sm():
 
 def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
     """The plans the deterministic package's version 0.3.4 changed, as this package runs them.  The weight gradients
-    12288 -> 4096, 4096 -> 12288 and 4096 x 4096 on 148-SM parts and 5120 -> 128 from T 65535 on sm_100a parts: no row
+    12288 -> 4096, 4096 -> 12288 and 4096 x 4096 on 148-SM parts and 5120 -> 128 from T 32768 on sm_100a parts: no row
     of this package's stream-K, split or named-program tables (``plan_atomic_gemm`` keeps the row on the deterministic
     program), so the row runs the deterministic plan, which is now the exact-split fit / the synchronised tail / the
     synchronised split of the sm_103a rule; 5120 -> 64 keeps this package's split verdict there.  The FP32 input
@@ -15715,7 +15715,7 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
                 "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7",
             )
             for sms in (148, 152)
-            for T in (65535, 98304)
+            for T in (32768, 65535, 98304)
         ),
     )
     for arch, sms, d_in, d_out, T, template in det_rows:
@@ -15743,7 +15743,7 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
         )[0]
         assert det_plan.template == template, (what, det_plan.template)
     for sms in (148, 152):
-        for T in (65535, 98304):
+        for T in (32768, 65535, 98304):
             assert cake_backend.k1_plan(
                 arch="sm_100a", L=1, M=5120, N=64, K=T, out_f32=False, sm_count=sms
             ) == (64, 2), (sms, T)

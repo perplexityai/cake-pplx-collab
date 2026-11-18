@@ -25,6 +25,7 @@ import warnings
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 import torch
@@ -13039,12 +13040,12 @@ def test_sm107a_212_tranche_token_floors(monkeypatch, key):
 # gradients of sm_100a
 # ---------------------------------------------------------------------------
 
-#: The token tiers of the sm_100a 5120 -> 64 / 128 BF16 weight gradients (cake_backend.ROW_RULE_MIN_T): below T 65535
+#: The token tiers of the sm_100a 5120 -> 64 / 128 BF16 weight gradients (cake_backend.ROW_RULE_MIN_T): below T 32768
 #: the 64-row program of the rows' rule before version 0.3.4.
 # fmt: off
 SM100A_5120_WGRAD_TIERS = {
-    ("sm_100a", True, True, False, True, False, 64, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
-    ("sm_100a", True, True, False, True, False, 128, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
+    ("sm_100a", True, True, False, True, False, 64, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
+    ("sm_100a", True, True, False, True, False, 128, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
 }
 #: The token tiers of the 4096 x 4096 BF16 weight gradients of sm_100a and sm_103a (cake_backend.ROW_RULE_MIN_T): below
 #: T 8192, the shortest measured token count of the exact-wave yield, the rule without its ``wave_yield``.
@@ -13144,8 +13145,8 @@ ROUTING_034_SWEEP = (
     *(("wgrad", d_in, d_out, "bf16", (1001, 4096, 7680, 7681, 8192, 8256, 16231, 16384))
       for d_in, d_out in ((12288, 4096), (4096, 12288))),
     ("wgrad", 4096, 4096, "bf16", (1001, 4032, 4033, 8191, 8192, 16231, 16384, 32768)),
-    *(("wgrad", 5120, d_out, "bf16", (16231, 32768, 65534, 65535, 98304)) for d_out in (32, 48, 64, 128)),
-    ("wgrad", 5120, 64, "f32", (65534, 65535)),
+    *(("wgrad", 5120, d_out, "bf16", (16231, 32767, 32768, 65535, 98304)) for d_out in (32, 48, 64, 128)),
+    ("wgrad", 5120, 64, "f32", (32767, 32768, 65535)),
     *(("dgrad", d_in, d_out, "f32", (16171, 16172, 16231, 16232, 16384, 16385))
       for d_in, d_out in (*SM100A_148_DGRAD_F32_ROWS, (6144, 32))),
 )
@@ -13169,7 +13170,7 @@ def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
         # 128 tiles on 74 pairs: a 54-tile tail; the synchronised split from the token tier's floor on, where admitted
         held = T >= 8192 and sk_sync_plan(128, k_blocks, 74, None, 32)
         return WAVE_YIELD_PROGRAM if held else None
-    if arch == "sm_100a" and d_in == 5120 and d_out in (64, 128) and T >= 65535:
+    if arch == "sm_100a" and d_in == 5120 and d_out in (64, 128) and T >= 32768:
         return LONG_5120_WGRAD_PROGRAM
     return None
 
@@ -13180,7 +13181,7 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
     sm_107a at 212 SMs: a plan changes exactly where ``_changed_034`` names a program, and runs that program - the
     exact-split fit and the exact-wave yield on the 148-SM parts of both architectures where the rule's split is
     admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a part at their token counts, the
-    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 65535 on.  Every other plan (the 152- and 160-SM parts
+    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on.  Every other plan (the 152- and 160-SM parts
     but for the last, sm_107a, the FP32 output, the other rows and token counts) is the plan of version 0.3.3."""
     changed = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_034_SWEEP:
@@ -13203,8 +13204,8 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
                     assert plan.template == program, (where, plan.template)
                     assert _plan_signature(plan) != _plan_signature(before), where
                     assert program in _registered(arch), (where, program)
-    # 2 rows x 4 T x 2 architectures + 4 T x 2 architectures + 19 part keys + 2 rows x 2 T x 2 parts
-    assert changed == 16 + 8 + 19 + 8
+    # 2 rows x 4 T x 2 architectures + 4 T x 2 architectures + 19 part keys + 2 rows x 3 T x 2 parts
+    assert changed == 16 + 8 + 19 + 12
 
 
 def test_exact_split_fit_plans_one_wave_of_units(monkeypatch):
@@ -13394,8 +13395,9 @@ def test_sm100a_148_fp32_dgrad_part_rules(monkeypatch):
 def test_sm100a_5120_wgrad_long_token_rule():
     """The sm_100a 5120 -> 64 / 128 BF16 weight-gradient rules (the swapped orientation, ragged in T) are the sm_103a
     rules of the rows: the synchronised split of the 20-tile tail (20 collectors, margin 16: s = ceil((k_blocks + 16)
-    / 2)), whose segments promote (the ``_kc128`` twin), from T 65535 on; below T 65535 their token tier keeps the
-    64-row program of version 0.3.3.  Both on the 148- and the 152-SM part."""
+    / 2)), whose segments promote (the ``_kc128`` twin), from T 32768 on, where the main parts hold 264 K blocks (more
+    than ``K1_PROMOTE_MIN_SEGMENT``); below T 32768 their token tier keeps the 64-row program of version 0.3.3.  Both
+    on the 148- and the 152-SM part."""
     for key, tiers in SM100A_5120_WGRAD_TIERS.items():
         assert cake_backend.ROW_RULE_MIN_T[key] == tiers, key
         own = ("sm_103a",) + key[1:]
@@ -13410,15 +13412,15 @@ def test_sm100a_5120_wgrad_long_token_rule():
         ), key
         _arch, a_mn, b_mn, out_f32, out_t, batched, d_out, _K, d_in = key
         ident = (a_mn, b_mn, out_f32, out_t, batched)
-        for T in (16231, 65534, 65535, 98304):
+        for T in (16231, 32767, 32768, 65535, 98304):
             k_blocks = -(-T // 64)
             rule = cake_backend._measured_row_rule("sm_100a", *ident, d_out, T, d_in)
-            assert rule == (ROW_RULES[key] if T >= 65535 else tiers[0][1]), (key, T)
+            assert rule == (ROW_RULES[key] if T >= 32768 else tiers[0][1]), (key, T)
             for sm_count in (148, 152):
                 plan = _rows_plan("wgrad", "sm_100a", sm_count, d_in, d_out, T)
                 where = (key, T, sm_count, plan.template)
                 assert plan.transposed_out, where
-                if T < 65535:
+                if T < 32768:
                     assert plan.cta_rows == 64 and not plan.sk_sync, where
                     continue
                 assert plan.template == LONG_5120_WGRAD_PROGRAM, where
@@ -13430,11 +13432,29 @@ def test_sm100a_5120_wgrad_long_token_rule():
                     plan.sk_units,
                     plan.iters_per_unit,
                 ) == (0, 20, 40, -(-(k_blocks + 16) // 2)), where
+                assert plan.iters_per_unit > cake_backend.K1_PROMOTE_MIN_SEGMENT, where
 
 
-# GPU cases of the plans version 0.3.4 changed: (op, d_in, d_out, T, out dtype, {(arch, SM count): program}).  Every
-# supported device runs the default plan of each case (judged against the naive BF16 tier, then the same bits on
-# repeated launches); on a listed device class the plan runs the listed program.
+class _Routing034Case(NamedTuple):
+    """A GPU case of a plan version 0.3.4 changed (``ROUTING_034_GPU_CASES``)."""
+
+    op: str
+    d_in: int
+    d_out: int
+    T: int
+    out_dtype: str
+    #: ``{(arch, SM count): program}``: on a listed device class the default plan runs the listed program
+    programs: dict
+    #: only the listed device classes run the case (the plan changed there alone); else every supported device does
+    scoped: bool = False
+    #: on a listed device class the output also equals, bit for bit, the output of the plan before
+    #: (``ROW_RULES_BY_SM`` empty)
+    same_bits: bool = False
+
+
+# GPU cases of the plans version 0.3.4 changed.  Every supported device runs the default plan of each case (judged
+# against the naive BF16 tier, then the same bits on repeated launches), a scoped case only the listed device classes;
+# on a listed device class the plan runs the listed program.
 _GB_148 = (("sm_100a", 148), ("sm_103a", 148))
 _EXACT_FIT_GPU = dict.fromkeys(_GB_148, EXACT_FIT_PROGRAM)
 _WAVE_YIELD_GPU = dict.fromkeys(_GB_148, WAVE_YIELD_PROGRAM)
@@ -13444,13 +13464,16 @@ _LONG_5120_GPU = dict.fromkeys(
 )
 # fmt: off
 ROUTING_034_GPU_CASES = (
-    ("wgrad", 12288, 4096, 8192, "bf16", _EXACT_FIT_GPU),
-    ("wgrad", 4096, 12288, 8192, "bf16", _EXACT_FIT_GPU),
-    ("wgrad", 4096, 12288, 16231, "bf16", _EXACT_FIT_GPU),
-    ("wgrad", 4096, 4096, 16384, "bf16", _WAVE_YIELD_GPU),
-    *(("dgrad", d_in, d_out, T, "f32", _DGRAD_PART_GPU)
+    _Routing034Case("wgrad", 12288, 4096, 8192, "bf16", _EXACT_FIT_GPU),
+    _Routing034Case("wgrad", 4096, 12288, 8192, "bf16", _EXACT_FIT_GPU),
+    _Routing034Case("wgrad", 4096, 12288, 16231, "bf16", _EXACT_FIT_GPU),
+    _Routing034Case("wgrad", 4096, 4096, 16384, "bf16", _WAVE_YIELD_GPU),
+    *(_Routing034Case("dgrad", d_in, d_out, T, "f32", _DGRAD_PART_GPU, same_bits=True)
       for (d_in, d_out), token_counts in SM100A_148_DGRAD_F32_ROWS.items() for T in token_counts),
-    *(("wgrad", 5120, d_out, 65535, "bf16", _LONG_5120_GPU) for d_out in (64, 128)),
+    *(_Routing034Case("wgrad", 5120, d_out, 65535, "bf16", _LONG_5120_GPU) for d_out in (64, 128)),
+    # the floor of these rules at T 32768: run on the sm_100a parts alone (every other device class plans the rows
+    # with its own, unchanged rules)
+    *(_Routing034Case("wgrad", 5120, d_out, 32768, "bf16", _LONG_5120_GPU, scoped=True) for d_out in (64, 128)),
 )
 # fmt: on
 
@@ -13458,23 +13481,29 @@ ROUTING_034_GPU_CASES = (
 @pytest.mark.parametrize(
     "case",
     ROUTING_034_GPU_CASES,
-    ids=lambda c: f"{c[0]}-{c[1]}x{c[2]}-T{c[3]}-{c[4]}",
+    ids=lambda c: f"{c.op}-{c.d_in}x{c.d_out}-T{c.T}-{c.out_dtype}",
 )
 def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
     case, monkeypatch, record_property
 ):
-    """Each row of ``ROUTING_034_GPU_CASES`` runs its default plan on the device (no device class is skipped; on a listed
-    class the plan runs the listed program): its output is judged against the FP64 oracle beside the naive BF16 tier
-    over the draws, and it returns the same bits on three more launches into NaN.  On the 148-SM sm_100a part the FP32
-    input gradients of the part rules also equal, bit for bit, the plan they had before (``ROW_RULES_BY_SM`` empty)."""
+    """Each row of ``ROUTING_034_GPU_CASES`` runs its default plan on the device (no device class is skipped but for a
+    scoped case, which runs on its listed classes alone; on a listed class the plan runs the listed program): its
+    output is judged against the FP64 oracle beside the naive BF16 tier over the draws, and it returns the same bits on
+    three more launches into NaN.  On a listed class a ``same_bits`` case also equals, bit for bit, the plan it had
+    before (``ROW_RULES_BY_SM`` empty): the FP32 input gradients of the 148-SM sm_100a part rules."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
             f"(compute capability {_registered_capabilities()})"
         )
-    op, d_in, d_out, T, out_dtype, programs = case
+    op, d_in, d_out, T, out_dtype, programs, scoped, same_bits = case
     device = torch.device("cuda")
     arch, sm_count = arch_for(device), _sm_count()
+    if scoped and (arch, sm_count) not in programs:
+        pytest.skip(
+            f"a case of the device classes {sorted(programs)} alone, where version 0.3.4 changed the plan; this "
+            f"device is {arch} with {sm_count} SMs"
+        )
     odt = torch.float32 if out_dtype == "f32" else torch.bfloat16
     bits = torch.int32 if out_dtype == "f32" else torch.int16
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
@@ -13527,7 +13556,7 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
         prepared.launch()
         torch.cuda.synchronize()
         assert torch.equal(out.view(bits), first.view(bits)), case
-    if op == "dgrad" and (arch, sm_count) in programs:
+    if same_bits and (arch, sm_count) in programs:
         before_out = torch.full_like(out, float("nan"))
         with monkeypatch.context() as m:
             m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
