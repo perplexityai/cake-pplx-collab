@@ -61,7 +61,8 @@ are ``BUILD_OF``: the lanes that own a row and the rows of a thread (with the
 launch block's threads, the rows one CTA owns) and the load width (the stride
 and alignment rule of every BF16 tensor).  Both kernels take the row count,
 the limit, the weight flag and every BF16 row stride (in elements) as launch
-arguments, so one build serves every row count and both layouts.  The host
+arguments, so one library per program and architecture serves every row
+count routed to it and both layouts.  The host
 launches nothing for ``rows == 0``.
 """
 

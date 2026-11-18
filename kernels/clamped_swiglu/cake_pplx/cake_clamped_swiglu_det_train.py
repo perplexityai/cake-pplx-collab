@@ -34,7 +34,8 @@ passes at ``g = L`` and ``u = +-L``.  ``d_weight`` does not divide by ``w``,
 so a zero-weight row gets exactly 0 in ``h``, ``d_gate`` and ``d_up`` and its
 full ``d_weight``.  ``R`` is a run-time value (any ``R >= 0``; ``R = 0``
 returns empty outputs and launches nothing), and so are ``L`` and the weight
-flag: one build serves every call, with no recompilation.  ``limit`` has no
+flag: one library per program and architecture serves every call, with no
+recompilation (the row count picks the program).  ``limit`` has no
 default: pass the model's value (``swiglu_limit``, 10.0 for
 DeepSeek-V4.1-Flash) on every call.
 

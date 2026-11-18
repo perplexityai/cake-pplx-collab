@@ -106,6 +106,13 @@ LARGE = "_large"
 ROLES = ("fwd", "fwd_large", "bwd", "bwd_large")
 # The SM counts of the delivered GPUs the routes are checked on.
 SM_COUNTS = (148, 152, 212)
+# The rows per SM from which each stage's large-R program runs (the measured cuts), and the lane layout every program
+# keeps: literal copies, so a record that drifts from them fails here, and the route tests expect these cuts.
+MIN_ROWS_PER_SM = {
+    "fwd_large": {"sm_100a": 96, "sm_103a": 192, "sm_107a": 384},
+    "bwd_large": {"sm_100a": 12, "sm_103a": 12, "sm_107a": 12},
+}
+LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
 # The program a forced launch runs: the small-R or the large-R program of its stage (:func:`_force`).
 PROGRAMS = ("small", "large")
 # The kernel parameters of each stage, in launch order (the kernels' signatures).
@@ -249,16 +256,16 @@ def _routed(stage: str, rows: int, device_index: int) -> str:
 
 
 def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[int, str, str]:
-    """``(cut_rows, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs, from the records: the record of
-    the stage's role, and the one of its large-R role from its ``min_rows_per_sm[arch]`` times ``sm_count`` rows
-    (none: ``MAX_ROWS`` and the small-R record)."""
+    """``(cut_rows, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: the record of the stage's role,
+    and the one of its large-R role from ``MIN_ROWS_PER_SM`` of that role and ``arch`` times ``sm_count`` rows (none:
+    ``MAX_ROWS`` and the small-R record)."""
     on_arch = {name: record["role"] for name, record in cake_jit.MODULES.items() if arch in record["arches"]}
     small = [name for name, role in on_arch.items() if role == stage]
     large = [name for name, role in on_arch.items() if role == stage + LARGE]
     assert len(small) == 1 and len(large) <= 1, (stage, arch, small, large)
     if not large:
         return cake_jit.MAX_ROWS, small[0], small[0]
-    return cake_jit.MODULES[large[0]]["min_rows_per_sm"][arch] * sm_count, small[0], large[0]
+    return MIN_ROWS_PER_SM[stage + LARGE][arch] * sm_count, small[0], large[0]
 
 
 def _edge_rows(cut: int) -> list[int]:
@@ -413,6 +420,18 @@ def test_registry_records_are_well_formed() -> None:
     # The BF16 stride and alignment rule is one load of the widest build: 8 values and 16 bytes for 128-bit loads.
     widest = max(build["width_bits"] for build in cake_jit.BUILD_OF.values())
     assert cake_jit.VECTOR_ELEMENTS == widest // 16 and cake_jit.ALIGNMENT_BYTES == widest // 8
+
+
+def test_the_cuts_and_the_lane_layout_are_the_measured_ones() -> None:
+    cuts: dict = {role: {} for role in MIN_ROWS_PER_SM}
+    for name, record in cake_jit.MODULES.items():
+        if record["role"] in cuts:
+            for arch, rows in record["min_rows_per_sm"].items():
+                assert arch not in cuts[record["role"]], (name, arch)
+                cuts[record["role"]][arch] = rows
+    assert cuts == MIN_ROWS_PER_SM
+    layouts = {stage: dict(build) for stage, build in cake_jit.BUILD_OF.items()}
+    assert layouts == {stage: LANE_LAYOUT for stage in STAGES}
 
 
 def test_argument_plans_are_the_kernel_parameters() -> None:
