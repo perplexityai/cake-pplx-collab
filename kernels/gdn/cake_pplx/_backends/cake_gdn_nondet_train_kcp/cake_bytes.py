@@ -609,7 +609,10 @@ def cake_gdn_nondet_train_kcp_workspace_layout(
       ``fused_o=0`` test knob).  The eager forward binds its c2 send plane as a fresh tensor (``fwd.c2_send`` 0).
       ``save_mode="full"`` with a saved set writes its tapes into fresh saved tensors (no tape term; the shipped
       full forward writes them from the tape-and-output walk ``kcp_fwdh_out_tape``, its output a fresh tensor too);
-      without one they are arena tapes of the split form.
+      without one they are arena tapes of the split form.  With the norm every forward but a ``"full"`` /
+      ``"light_akk"`` save with a saved set runs the forward form of #1_l2n where the registry ships it: #1 writes six
+      tapes (no ``akk`` / ``gcum`` term in either moment); the kept form's recompute forward
+      (``bwd.phase.recompute_forward``) runs the full #1.
     * ``backward``: the largest of its phases -- the adjoint exchange (the backward pools, without the c1 send pool
       that a replayed forward has already released, plus the forward tapes of the form and the tapes #6 wrote), the
       adjoint tape walk (``carry``, ``b2_recv`` unless the fused walks at ``P > 1`` dropped it, and ``dh``) and the

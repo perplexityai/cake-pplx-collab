@@ -4778,12 +4778,14 @@ def _prep_backward_tapes(
 ) -> bool:
     """Whether this forward's #1 writes the backward-only ``akk`` / ``g_cum`` (the full ``fwd_prep_l2n`` record):
     ``True`` unless every reader of those tapes takes them from elsewhere -- a replay-mode backward's forward
-    (``replay``) and a hand-off forward (``reuse_recompute_tapes``) give them to #6 / #8, and a saved set that keeps
-    them (``save_mode="full"``; ``"light_akk"`` keeps ``akk``) carries this launch's planes; every other forward (no
-    grad, the light save's forward, whose backward re-runs #1, the checkpoint's first forward and a non-hand-off
-    recompute) runs the forward form ``fwd_prep_l2n_fwd`` when test knob ``prep_form`` = 1 (shipped), the call runs
-    the in-kernel L2 norm and the registry ships that record for the device's architecture
-    (:func:`prep_form_shipped`)."""
+    (``replay``) and a hand-off forward (``reuse_recompute_tapes``) give them to #6 / #8, and a forward that keeps a
+    saved set holding them (``save_mode="full"``; ``"light_akk"``, the default with the in-kernel L2 norm, keeps
+    ``akk``) carries this launch's planes.  The autograd entry keeps its saved set without grad too, so a no-grad call
+    of a ``"light_akk"`` save runs the full record.  Every other forward (a low-level forward without a saved set,
+    the ``"light"`` save's forward, whose backward re-runs #1, the checkpoint's first forward, which saves
+    ``"light_akk"`` as ``"light"`` (:func:`_checkpoint_opts`), and a non-hand-off recompute) runs the forward form
+    ``fwd_prep_l2n_fwd`` when test knob ``prep_form`` = 1 (shipped), the call runs the in-kernel L2 norm and the
+    registry ships that record for the device's architecture (:func:`prep_form_shipped`)."""
     if replay or hand_off:
         return True
     if keep and (

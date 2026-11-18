@@ -558,7 +558,9 @@ orders (bitwise the device programs; the `fma.rn` of `ss` is emulated
 exactly in FP64).  Programs: `fwd_prep_l2n` (#1 that first writes `qn` /
 `kn` and `r`, then runs #1's body on them; its forward form, record
 `fwd_prep_l2n_fwd`, stores no `akk` / `g_cum` and runs for every forward
-whose `akk` / `g_cum` reach no backward), `bwd_dqkg_l2n` (#8 on `qn` /
+that neither keeps them in a saved set nor hands them to a backward; the
+autograd entry keeps its saved set without grad too, so a no-grad call
+under the default `"light_akk"` save runs the full record), `bwd_dqkg_l2n` (#8 on `qn` /
 `kn` with the pullback before the one BF16 rounding; `group_reduce="host"`
 runs the unchanged #8 and the reference pullback on the host, per block of
 2048 tokens) and `qk_apply` (`qn = bf16(q * r)` from the saved `r`).  Every
