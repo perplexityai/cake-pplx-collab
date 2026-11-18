@@ -1031,8 +1031,8 @@ The only module of the family. Every output element is one fixed chain of FP32 o
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_gated_kv_compression_det` | `(c, z, cu_seqlens, num_pairs)` | `c`, `z` may require grad; `num_pairs` a Python int | Autograd. Returns BF16 `out [G, 512]`. The node saves `c`, `z`, `cu_seqlens` and the int32 `[S + 1]` pair table only. Works under `torch.utils.checkpoint(..., use_reentrant=False)`. |
-| `cake_gated_kv_compression_det_cz` | `(cz, cu_seqlens, num_pairs)` | `cz` FP32 `[T, 1024]` (`C` \| `Z`), may require grad | Autograd. Returns BF16 `out [G, 512]`. The gradient of `cz` is one FP32 `[T, 1024]` buffer that one launch writes, with no slice-backward copy. The node saves `cz`, `cu_seqlens` and the pair table only. |
+| `cake_gated_kv_compression_det` | `(c, z, cu_seqlens, num_pairs)` | `c`, `z` may require grad; `num_pairs` a Python int, at least the pair count | Autograd. Returns BF16 `out [G, 512]`. The node saves `c`, `z`, `cu_seqlens` and the int32 `[S + 1]` pair table only. Works under `torch.utils.checkpoint(..., use_reentrant=False)`. |
+| `cake_gated_kv_compression_det_cz` | `(cz, cu_seqlens, num_pairs)` | `cz` FP32 `[T, 1024]` (`C` \| `Z`), may require grad; `num_pairs` a Python int, at least the pair count | Autograd. Returns BF16 `out [G, 512]`. The gradient of `cz` is one FP32 `[T, 1024]` buffer that one launch writes, with no slice-backward copy. The node saves `cz`, `cu_seqlens` and the pair table only. |
 | `cake_gated_kv_compression_det_train_forward` | `(c, z, cu_seqlens, num_pairs=None, *, out=None)` | `num_pairs` or a preallocated `out` (both given must agree) | Returns `out`. Rows past the pair count are zero. `G == 0` launches nothing, and `T == 0` or `S == 0` zero-fills `out` without a kernel. Not autograd. |
 | `cake_gated_kv_compression_det_train_backward` | `(dout, c, z, cu_seqlens, *, dc=None, dz=None, pair_offsets=None)` | `dout` rows `G` at least the pair count; `pair_offsets` the int32 `[S + 1]` pair table, which skips the pair-table launch | Returns FP32 `(dc, dz)`, every row written; these are the caller's tensors when given. `T == 0` launches nothing, and `G == 0` or `S == 0` zero-fills both without a kernel. |
 | `cake_gated_kv_compression_det_train_memory_bytes` | `(num_tokens, num_docs)` | `T`, `S` | Returns a dict. `forward_workspace` and `backward_workspace` are `4 (S + 1)`: the pair table one explicit call allocates and frees. `retained_for_backward` is `4 (S + 1)`: the pair table the autograd node keeps. `retained_inputs` is `4096 T + 4 (S + 1)`: the caller's tensors the node references, with no copy. |
@@ -1074,7 +1074,7 @@ cake_gated_kv_compression_det_train_backward(torch.randn_like(out), c, z, cu_seq
 
 **Caveats.**
 
-- The host never reads `cu_seqlens`. The caller keeps its contract (non-decreasing, last bound `T`) and passes `G`. A `G` below the pair count gives the first `G` rows in the forward and leaves the gradient rows of the later pairs unwritten in the backward.
+- The host never reads `cu_seqlens`. The caller keeps its contract (non-decreasing, last bound `T`) and passes `G`. A `G` below the pair count gives the first `G` rows in the forward and leaves the gradient rows of the later pairs unwritten in the backward. The autograd entries need `num_pairs` at least the pair count: their gradient buffers are not zero-filled, so with a smaller `num_pairs` the gradient rows of the tokens of the later pairs are uninitialized.
 - A layout the kernels cannot read or write in place raises `ValueError`, and no call copies an operand silently. The autograd backward copies a non-contiguous or misaligned incoming gradient once.
 - Capture a call in a CUDA graph only after one eager call has loaded the programs.
 - Only ratio 2 and width 512 are supported.

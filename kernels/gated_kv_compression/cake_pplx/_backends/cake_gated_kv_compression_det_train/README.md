@@ -65,7 +65,10 @@ run-time values, no shape list, no recompilation.  The caller keeps the `cu_seql
 contract (non-decreasing, `cu_seqlens[S] == T`); the host cannot check it.  A forward with
 `G` above the pair count stores zero rows past it; a `G` below it returns the first `G`
 rows.  The backward needs `G` (the rows of `dout`) at least the pair count: rows of `dout`
-past it are not read, and the gradient rows of a pair at or past `G` are not written.
+past it are not read, and the gradient rows of a pair at or past `G` are not written.  The
+autograd entries need `num_pairs` at least the pair count too: their gradient buffers are not
+zero-filled, so with a smaller `num_pairs` the gradient rows of the tokens of the pairs at or
+past it are uninitialized.
 
 A layout the kernels cannot read or write in place (a feature stride other than 1, a row
 stride off a multiple of 8, a base off its alignment), a wrong dtype, shape or device, and a

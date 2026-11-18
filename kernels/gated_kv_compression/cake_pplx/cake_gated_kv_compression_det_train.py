@@ -247,7 +247,10 @@ def cake_gated_kv_compression_det(
     cu_seqlens : torch.Tensor
         Int32 ``[S + 1]`` document bounds on the device.
     num_pairs : int
-        ``G``, the pair count of ``cu_seqlens``.
+        ``G``, the pair count of ``cu_seqlens``, or more: a larger ``G`` gives zero rows past the pair count (their
+        incoming gradient is not read).  Never less: unlike the explicit forward, an autograd entry does not support a
+        smaller ``G``, since its backward would leave the gradient rows of the tokens of the pairs at or past ``G``
+        uninitialized.
 
     Returns
     -------
@@ -272,7 +275,10 @@ def cake_gated_kv_compression_det_cz(cz: torch.Tensor, cu_seqlens: torch.Tensor,
     cu_seqlens : torch.Tensor
         Int32 ``[S + 1]`` document bounds on the device.
     num_pairs : int
-        ``G``, the pair count of ``cu_seqlens``.
+        ``G``, the pair count of ``cu_seqlens``, or more: a larger ``G`` gives zero rows past the pair count (their
+        incoming gradient is not read).  Never less: unlike the explicit forward, an autograd entry does not support a
+        smaller ``G``, since its backward would leave the gradient rows of the tokens of the pairs at or past ``G``
+        uninitialized.
 
     Returns
     -------
