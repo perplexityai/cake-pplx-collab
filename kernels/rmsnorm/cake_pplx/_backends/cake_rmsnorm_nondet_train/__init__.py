@@ -902,6 +902,8 @@ def cake_rmsnorm_nondet_train_forward(
         receives a copy after the launch.  A buffer that shares memory with ``x``,
         ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
         kernels write a temporary, which is copied into it after the launch.
+        The outputs must not share memory with one another; the call does not
+        check this.
 
     Returns
     -------
@@ -1109,6 +1111,9 @@ def cake_rmsnorm_nondet_train_backward(
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout
         receives a copy after the launch.  Their previous contents are ignored.
+        ``dx`` and ``dw`` must not share memory with ``g``, ``x``, ``w``,
+        ``rstd``, ``g_residual`` or ``workspace``, or with each other; the call
+        does not check this.
 
     Returns
     -------
