@@ -2193,6 +2193,45 @@ def test_capture_without_mem_pool(failure, fresh_pool, monkeypatch) -> None:
                    buffers=cap["buffers"].values())  # fmt: skip
 
 
+def test_out_of_memory_keeps_the_package_pool(fresh_pool) -> None:
+    """An out-of-memory error while the package allocates does not take the device off its memory pool or its
+    pre-zeroed buffers: a refill for a size that does not fit leaves the pool's buffers and size as they were, a
+    per-stream workspace that does not fit raises the error and the device keeps its pool, and a later capture still
+    takes the pre-zeroed buffers (no fill node, no fallback); its replays are judged against the naive tier."""
+
+    kind, case, device = "bwd", GRAPH_CASES[2], _device()
+    d = device.index
+    stream = torch.cuda.Stream(device=device)
+    inputs = _draw_inputs(*case, kind, key=135)
+    outs = _phase_outs("step", inputs[0], inputs[1], inputs[4], kind)
+
+    def step():
+        _phase_step("step", inputs, outs, kind)
+
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        step()
+    torch.cuda.synchronize(device)
+    mem_pool = pkg._MEM_POOLS.get(d)
+    assert mem_pool is not None
+    huge = 1 << 50
+    for k in ("fwd", "bwd"):
+        idle, size = list(pkg._ZEROED_POOL[(d, k)]), pkg._POOL_SIZE[(d, k)]
+        assert len(idle) == pkg._POOL_DEPTH, (k, len(idle))
+        with torch.cuda.stream(stream):
+            pkg._pool_refill(d, k, huge, device)
+        assert [id(b) for b in pkg._ZEROED_POOL[(d, k)]] == [id(b) for b in idle], k
+        assert pkg._POOL_SIZE[(d, k)] == size and pkg._POOL_READY[k][d] == huge, k
+    with pytest.raises(pkg._OUT_OF_MEMORY):
+        pkg._package_zeros(huge, torch.uint8, device, d)
+    assert pkg._MEM_POOLS.get(d) is mem_pool
+    cap = _capture(step, stream)
+    assert cap["fallbacks"] == {"fwd": 0, "bwd": 0} and len(cap["taken"]) == 2, cap["fallbacks"]
+    assert _graph_nodes(cap["graph"])["fill"] == 0
+    _judge_replays(cap["graph"], inputs, outs, case, kind, key=135, label="capture after an out-of-memory error",
+                   buffers=cap["taken"])  # fmt: skip
+
+
 _TREE_OPS: dict = {}
 
 
