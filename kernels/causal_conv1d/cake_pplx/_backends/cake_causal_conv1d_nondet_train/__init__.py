@@ -95,8 +95,11 @@ Host design (the knobs are keywords; no environment variable):
   buffers of the largest need of such a call so far, refilled by the next such
   call after a capture took one or when a call needs more.  A captured call
   finds none ready when no such eager call of its kind ran before the capture,
-  when the captures since the last one took them all, or when it needs more
-  than that eager need; it then zeroes a buffer of its own (one fill node per
+  when the captures since the last one took them all, when it needs more than
+  that eager need, or when their zero fills have not completed yet (a
+  ``CUDAGraph.capture_begin`` right after such an eager call, with no
+  synchronization; ``torch.cuda.graph`` synchronizes first); it then zeroes a
+  buffer of its own (one fill node per
   call; so does every captured call when the capture id is 0, also when
   ``cuda.bindings`` is not importable), which the package keeps no reference
   to after the call.  Inside a capture the forward's omitted workspace (int32
@@ -110,8 +113,13 @@ Host design (the knobs are keywords; no environment variable):
   largest footprint these buffers reached at once.  Per device and kind the
   live pre-zeroed buffers are at most ``_POOL_DEPTH`` idle ones of the largest
   eager need, those live graphs hold, and those that graphs released since the
-  device's last refill; a kind whose refill failed refills no more and keeps
-  its idle buffers and those its graphs held then for the life of the process.
+  device's last refill.  A kind turned off (a refill that failed other than
+  out of memory, or a device without its memory pool) refills and hands out
+  no more: its idle buffers stay allocated for the life of the process, and a
+  buffer its graphs held returns, once released, only at a refill of the
+  device's other kind (while that kind still refills), which keeps it idle
+  (when fewer than ``_POOL_DEPTH`` are idle and it holds the kind's last pool
+  size) or drops it into the package's memory pool.
   Its size depends on ``C`` (and the route), not on ``S``.  Two backward
   launches that may run at once (two streams, two graphs replayed
   concurrently) need two buffers: never share one between them.
@@ -268,13 +276,25 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # long as the graphs that hold it and then until the device's next refill returns it.
 # Without ``torch.cuda.MemPool`` or ``cuda.bindings`` the device has no pool: every
 # captured call zeroes a buffer of its own (a fill node).  A failure that turns a
-# kind off (``_pool_off``) frees nothing: the kind's idle buffers, the buffers its
-# graphs hold then and the user objects and flag slots of an interrupted refill stay
-# allocated for the life of the process.
+# kind off (``_pool_off``) frees nothing itself: the kind's idle buffers and the user
+# objects, semaphores and flag slots of an interrupted refill stay allocated for the
+# life of the process.  The buffers its graphs hold then wait, once released, in
+# ``_GRAPH_HELD`` until a refill of the device's other kind drains them
+# (``_pool_drain`` returns the released buffers of every kind of the device): it
+# keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``, at least the
+# kind's ``_POOL_SIZE``, which the failed refill already raised) or drops it; with no
+# such refill (the other kind off too, or the device without its memory pool) they
+# stay.  A dropped buffer's memory stays cached in the package's memory pool.
 # ``_POOL_READY[kind][device index]`` is the size up to which the device's pool is
 # full (absent or 0: the next eager call refills it; a capture that takes a buffer
 # or finds none sets 0): the one lookup of an eager call while the pool needs
-# nothing.  ``_POOL_LOCK`` guards the take, the drain and the refill.
+# nothing.  ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards the
+# take (``_pool_take``), the refill and its drain (``_pool_refill``), every entry
+# into the package's memory pool (the refill's and ``_package_zeros``': two threads
+# never route their allocations to one pool at once) and the writes and drops of
+# the ``_CAPTURE_*WORKSPACES`` entries.  Nothing that runs under it may call a
+# function that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
+# ``_capture_buffer``): the thread would wait for itself.
 _POOL_DEPTH = 4
 # torch's out-of-memory error: a refill that meets it leaves the pool as it was.
 _OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
@@ -1136,9 +1156,10 @@ def _flag_ready(buf: _PoolBuffer) -> bool:
 
 
 def _pool_off(kind: str, device_index: int) -> None:
-    """No pre-zeroed buffers of ``kind`` on the device: its eager calls never refill again.  What the kind holds
-    stays allocated (its idle buffers and the buffers its graphs hold: at most ``_POOL_DEPTH`` idle ones plus those
-    of the graphs alive then)."""
+    """No pre-zeroed buffers of ``kind`` on the device: its eager calls never refill again and its captures take
+    none.  Its idle buffers (at most ``_POOL_DEPTH``) stay allocated; a buffer its graphs hold returns, once
+    released, only at a refill of the device's other kind, which keeps it idle or drops it (the pool comment above
+    ``_POOL_DEPTH``); a dropped buffer's memory stays cached in the package's memory pool."""
 
     _POOL_READY[kind][device_index] = sys.maxsize
 
@@ -1662,9 +1683,11 @@ def cake_causal_conv1d_nondet_train_backward(
         stream, that an earlier eager backward call without ``workspace=``
         zeroed (no fill node; the graph holds it until the graph is destroyed
         and its launches have completed), or, when none is ready (no such
-        eager call before the capture, all taken by earlier captures, or too
-        small), a fresh zeroed one per call (one fill node each), as with
-        capture id 0 (also without ``cuda.bindings``).
+        eager call before the capture, all taken by earlier captures, too
+        small, or their zero fill not complete yet: a
+        ``CUDAGraph.capture_begin`` right after that eager call with no
+        synchronization), a fresh zeroed one per call (one fill node each), as
+        with capture id 0 (also without ``cuda.bindings``).
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
         (FP32 or BF16 each; the parameter's dtype when omitted), contiguous.
