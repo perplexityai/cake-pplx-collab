@@ -28,11 +28,11 @@ existing ``.grad``).  The comparisons are fixed: every operation against ``torch
 ``compile_max_autotune``, the same arms on every architecture.
 
 Timing, modes (eager launches and CUDA graph replays), groups, the cold L2 and the JSON record are those of the mHC
-benchmarks (``../../mhc/benchmarks/cake_mhc_harness.py``, whose timer this file uses).  Accuracy before timing: the
-family's judge (``tests/cake_naive.py``) over ``--judge-draws`` (32) draws of ``(--judge-tokens, H)`` per hidden size
-holds every arm to the naive tier (PyTorch BF16, i.e. ``torch_eager`` itself) against a float64 oracle; on every row
-each arm's outputs are also compared bit for bit with ``torch_eager``'s (the Cake head's contract).  Each arm's
-determinism is measured by ``--det-runs`` (5) runs of the same call compared bit for bit.
+benchmarks (``cake_mhc_head_harness.py`` beside this file: this family's copy of their timer and helpers).  Accuracy
+before timing: the family's judge (``tests/cake_naive.py``) over ``--judge-draws`` (32) draws of ``(--judge-tokens, H)``
+per hidden size holds every arm to the naive tier (PyTorch BF16, i.e. ``torch_eager`` itself) against a float64 oracle;
+on every row each arm's outputs are also compared bit for bit with ``torch_eager``'s (the Cake head's contract).  Each
+arm's determinism is measured by ``--det-runs`` (5) runs of the same call compared bit for bit.
 
 Example::
 
@@ -59,11 +59,9 @@ from typing import Callable, Optional
 
 import torch
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parents[1] / "mhc" / "benchmarks"))
+import cake_mhc_head_harness as harness
 
-import cake_mhc_baselines as mbase  # noqa: E402
-import cake_mhc_harness as harness  # noqa: E402
+_HERE = Path(__file__).resolve().parent
 
 STREAMS = 4
 BF16, F64 = torch.bfloat16, torch.float64
@@ -107,7 +105,7 @@ def _sha256(path: Path) -> Optional[str]:
         return None
 
 
-class CakeHead(mbase.Arm):
+class CakeHead(harness.Arm):
     cake = True
     ops = OPS
 
@@ -132,7 +130,7 @@ class CakeHead(mbase.Arm):
     def versions(self) -> dict:
         backend = importlib.import_module(f"cake_pplx._backends.cake_mhc_head_{self.mode}_train")
         d = Path(backend.__file__).resolve().parent
-        out = {"distribution": "cake-pplx-mhc-head", "version": mbase.dist_version("cake-pplx-mhc-head"),
+        out = {"distribution": "cake-pplx-mhc-head", "version": harness.dist_version("cake-pplx-mhc-head"),
                "module": str(Path(self.mod.__file__).resolve()), "backend": str(d),
                "build_json_sha256": _sha256(d / "build.json"), "cake_jit_sha256": _sha256(d / "cake_jit.py")}
         try:
@@ -164,7 +162,7 @@ def _mean(X):
     return X.mean(dim=1)
 
 
-class TorchHead(mbase.Arm):
+class TorchHead(harness.Arm):
     """PyTorch's ``X.mean(dim=1)`` with autograd: eager, or through ``torch.compile`` (``mode``)."""
 
     ops = OPS
@@ -200,7 +198,7 @@ class TorchHead(mbase.Arm):
             kwargs = {"fullgraph": True, "dynamic": False}
             if self.compile_mode:
                 kwargs["mode"] = self.compile_mode
-            self._fn = torch.compile(mbase._fresh_function(_mean, f"{self.name}_{self._count}"), **kwargs)
+            self._fn = torch.compile(harness._fresh_function(_mean, f"{self.name}_{self._count}"), **kwargs)
         else:
             self._fn = _mean
         return {}
@@ -322,10 +320,10 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer, device, eligible:
             outs = arm.run_once(i)
             if ref is not None:
                 rec["bitwise_vs_torch_eager"] = {
-                    k: bool(torch.equal(mbase._bits(outs[k]), mbase._bits(ref[k]))) for k in OUTPUTS}
+                    k: bool(torch.equal(harness._bits(outs[k]), harness._bits(ref[k]))) for k in OUTPUTS}
             del outs
             if args.det_runs > 1 and not arm.name.endswith("~aa"):
-                rec["determinism"] = mbase.determinism_runs(arm, i, args.det_runs)
+                rec["determinism"] = harness.determinism_runs(arm, i, args.det_runs)
         except Exception as exc:  # noqa: BLE001
             rec["error"] = "check: " + harness._err(exc, f"{arm.name} check")
             live.remove(arm)
