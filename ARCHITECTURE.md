@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 15 families and 32 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 16 families and 34 backend packages, about 212 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -84,6 +84,7 @@ The repository has 15 families and 32 backend packages, about 212 MB in total. M
 | `causal_conv1d` | det, nondet (each package also holds a KCP route; `_kcp` facades) | `cake-pplx-causal-conv1d` |
 | `mhc` | det, nondet | `cake-pplx-mhc` |
 | `mhc_head` | det, nondet | `cake-pplx-mhc-head` |
+| `engram_gate` | det, nondet | `cake-pplx-engram-gate` |
 | `gdn` | det, det_kcp, nondet, nondet_kcp | `cake-pplx-gdn` |
 | `kda` | det, det_kcp, nondet, nondet_kcp | `cake-pplx-kda` |
 | `lm_head` | det, nondet | `cake-pplx-lm-head` |
