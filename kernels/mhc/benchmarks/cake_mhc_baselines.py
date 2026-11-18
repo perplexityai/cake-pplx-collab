@@ -63,16 +63,18 @@ arm as a composite.
 Every arm computes the whole function from the same inputs: the forward gives ``U`` and ``Y``; the backward the five
 gradients.  The PyTorch, compiled and Liger arms record the autograd graph in the forward; ``bwd`` is the backward of a
 recorded forward; ``ckpt`` is a forward without the graph, the forward again with it and the backward (the
-recomputation of ``torch.utils.checkpoint``); ``bwd_acc`` is ``bwd`` adding into the existing parameter gradients
-only, like the Cake ``accumulate=True`` (``dfn``, ``dscale`` and ``dbase`` added into, ``dX`` and ``dB`` written):
-autograd accumulates into the existing ``.grad`` of the parameters (``fn``, ``scale``, ``base``; Liger's ``phi``,
-``base`` and three scales), and the ``.grad`` of ``X`` and ``B`` is cleared before each call, so that ``dX`` and ``dB``
-are written fresh.
+recomputation of ``torch.utils.checkpoint``); ``ckpt_stats`` is the same work as their ``ckpt`` (these arms have no
+statistics-only replay; the Cake arms replay only the statistics there); ``bwd_acc`` is ``bwd`` adding into the
+existing parameter gradients only, like the Cake ``accumulate=True`` (``dfn``, ``dscale`` and ``dbase`` added into,
+``dX`` and ``dB`` written): autograd accumulates into the existing ``.grad`` of the parameters (``fn``, ``scale``,
+``base``; Liger's ``phi``, ``base`` and three scales), and the ``.grad`` of ``X`` and ``B`` is cleared before each
+call, so that ``dX`` and ``dB`` are written fresh.
 
 The comparisons (:data:`COMPARISONS`) are fixed: each one names a single non-Cake arm, the same arm on every
 architecture, and never the fastest arm of a cell.  The forward has two, ``fwd-A`` (``tk_cublas``, every
 architecture) and ``fwd-B`` (``tk_deepgemm``, where DeepGEMM runs; elsewhere the cell says why it is unsupported); the
-backward and the checkpointed step compare with ``compile_max_autotune`` and, in a second column, with ``liger``.
+backward and the checkpointed step (``ckpt`` and ``ckpt_stats``) compare with ``compile_max_autotune`` and, in a second
+column, with ``liger``.
 
 Determinism class.  Each arm declares what is known about its run-to-run bits (:attr:`Arm.determinism`), and
 :func:`determinism_runs` measures it: the same call on the same inputs several times, every output compared bit for
@@ -111,7 +113,7 @@ BACKWARD_OUTPUTS = ("dX", "dfn", "dscale", "dbase", "dB")
 OUTPUTS = FORWARD_OUTPUTS + BACKWARD_OUTPUTS
 PER_TOKEN_OUTPUTS = ("U", "Y", "dX", "dB")
 PARAMETER_OUTPUTS = ("dfn", "dscale", "dbase")
-OPS = ("fwd", "bwd", "ckpt", "bwd_acc")
+OPS = ("fwd", "bwd", "ckpt", "ckpt_stats", "bwd_acc")
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 
 #: The fixed comparisons: ``(name, operations, non-Cake arm)``.  The arm is the same on every architecture; where it
@@ -121,8 +123,8 @@ COMPARISONS = (
     ("fwd-B", ("fwd",), "tk_deepgemm"),
     ("bwd", ("bwd", "bwd_acc"), "compile_max_autotune"),
     ("bwd-liger", ("bwd", "bwd_acc"), "liger"),
-    ("ckpt", ("ckpt",), "compile_max_autotune"),
-    ("ckpt-liger", ("ckpt",), "liger"),
+    ("ckpt", ("ckpt", "ckpt_stats"), "compile_max_autotune"),
+    ("ckpt-liger", ("ckpt", "ckpt_stats"), "liger"),
 )
 
 
@@ -520,7 +522,8 @@ class AutogradArm(Arm):
                         t.grad = None
                     torch.autograd.backward([U, Y], [dU, dY], retain_graph=True)
 
-        elif op == "ckpt":
+        elif op in ("ckpt", "ckpt_stats"):
+            # ``ckpt_stats`` is the same work: an autograd arm has no statistics-only replay to recompute.
 
             def call() -> None:
                 clear()

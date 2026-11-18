@@ -27,9 +27,14 @@ Operations (``--ops``):
   training forward (``U`` and ``Y``, the autograd graph recorded);
 * ``bwd``: Cake ``backward_prepare`` + ``backward_finish`` from the saved statistics (``dB`` and the gradient
   statistics, then ``dX``, ``dfn``, ``dscale``, ``dbase``); a non-Cake arm's backward of a recorded forward;
-* ``ckpt``: the checkpointed step: Cake ``forward_prepare`` + ``forward_finish``, the statistics replay
-  ``forward_stats`` and the backward; a non-Cake arm's forward without the graph, its forward with the graph and the
-  backward;
+* ``ckpt``: the checkpointed step, the forward, then the forward recomputed in full, then the backward: Cake
+  ``forward_prepare`` + ``forward_finish``, again ``forward_prepare`` + ``forward_finish`` (the recomputation of
+  ``torch.utils.checkpoint`` around the connection) and the backward from the recomputed statistics; a non-Cake arm's
+  forward without the graph, its forward with the graph and the backward;
+* ``ckpt_stats`` (not in the default ``--ops``): the checkpointed step with a statistics-only replay: Cake
+  ``forward_prepare`` + ``forward_finish``, the statistics replay ``forward_stats`` (no ``U`` and no ``Y``) and the
+  backward; the non-Cake arms have no statistics-only replay, so their ``ckpt_stats`` is the same work as their
+  ``ckpt``;
 * ``bwd_acc`` (not in the default ``--ops``): ``bwd`` with ``accumulate=True`` (the parameter gradients ``dfn``,
   ``dscale`` and ``dbase`` added into the caller's buffers; ``dX`` and ``dB`` written); a non-Cake arm's backward
   adding into its parameters' existing ``.grad`` tensors, the ``.grad`` of ``X`` and ``B`` cleared before each call
@@ -48,11 +53,12 @@ is the noise band of the row.
 
 Comparisons.  The non-Cake arm of each comparison is fixed (``cake_mhc_baselines.COMPARISONS``): ``fwd-A``
 ``tk_cublas``, ``fwd-B`` ``tk_deepgemm``, ``bwd`` / ``ckpt`` ``compile_max_autotune`` and the ``bwd-liger`` /
-``ckpt-liger`` columns ``liger``, the same arm on every architecture.  Each cell of a row records the arm, its time,
-the first Cake arm's time and their ratio, and a status: ``ok``, ``unsupported: <why>`` (the arm cannot run on this
-device or stack), ``different contract`` (the arm missed the judge), or ``error: <message>``.  No cell ever falls
-back to another arm, and no "fastest arm" is chosen per cell.  ``check_baselines.py`` verifies across the records of
-several architectures that each comparison used the same arm and the same versions everywhere.
+``ckpt-liger`` columns ``liger`` (``bwd_acc`` uses the ``bwd`` comparisons and ``ckpt_stats`` the ``ckpt`` ones), the
+same arm on every architecture.  Each cell of a row records the arm, its time, the first Cake arm's time and their
+ratio, and a status: ``ok``, ``unsupported: <why>`` (the arm cannot run on this device or stack), ``different contract``
+(the arm missed the judge), or ``error: <message>``.  No cell ever falls back to another arm, and no "fastest arm" is
+chosen per cell.  ``check_baselines.py`` verifies across the records of several architectures that each comparison used
+the same arm and the same versions everywhere.
 
 Determinism class.  The JSON records each arm's declared class (``cake_mhc_baselines.Arm.determinism``) and, per
 row, the measured one (``--det-runs``, 5: the same call on the row's inputs repeated, every output compared bit for
@@ -123,6 +129,17 @@ CAKE_ACCUMULATIONS = ("fp32", "fp32x2")
 PAIR_HIDDEN = 4096
 CAKE_ARMS = {"cake_det": ("det", "fp32"), "cake_nondet": ("nondet", "fp32"),
              "cake_det_fp32x2": ("det", "fp32x2"), "cake_nondet_fp32x2": ("nondet", "fp32x2")}
+#: What each operation times (see the module docstring); printed for the selected operations and recorded in the JSON.
+OP_DEFINITIONS = {
+    "fwd": "Cake: forward_prepare + forward_finish; non-Cake: the training forward (autograd graph recorded)",
+    "bwd": "Cake: backward_prepare + backward_finish; non-Cake: the backward of a recorded forward",
+    "ckpt": "the forward, the forward recomputed in full, the backward (Cake: forward_prepare + forward_finish twice; "
+            "non-Cake: a forward without the graph, a forward with it)",
+    "ckpt_stats": "Cake: the forward, the statistics-only replay forward_stats, the backward; non-Cake: no "
+                  "statistics-only replay, the same work as their ckpt",
+    "bwd_acc": "bwd adding into the parameter gradients only (Cake accumulate=True; non-Cake: the .grad of X and B "
+               "cleared before each call)",
+}
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -431,7 +448,15 @@ class CakeArm(base.Arm):
             backward(b["S"])  # dfn, dscale, dbase hold a gradient before the first accumulation
 
             return lambda: backward(b["S"], accumulate=True)
-        if op == "ckpt":
+        if op == "ckpt":  # the forward, the forward recomputed in full, the backward
+
+            def call() -> None:
+                forward(b["S"])
+                forward(b["S2"])
+                backward(b["S2"])
+
+            return call
+        if op == "ckpt_stats":  # the forward, the statistics-only replay, the backward
 
             def call() -> None:
                 forward(b["S"])
@@ -780,7 +805,7 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     p.add_argument("--shapes", nargs="*", default=None, help="HxT items, e.g. 4096x1024,7168x65536")
     p.add_argument("--hidden", type=int, nargs="*", default=None)
     p.add_argument("--tokens", type=int, nargs="*", default=None)
-    p.add_argument("--ops", default="fwd,bwd,ckpt", help="comma-separated: fwd, bwd, ckpt, bwd_acc")
+    p.add_argument("--ops", default="fwd,bwd,ckpt", help="comma-separated: " + ", ".join(base.OPS))
     p.add_argument("--sinkhorn-iters", type=int, default=base.SINKHORN_ITERS,
                    help="Sinkhorn count of every arm and reference (default 20; 1..64 for the Cake packages)")
     p.add_argument("--det-runs", type=int, default=5,
@@ -823,8 +848,12 @@ def make_arms(names: list, args) -> list:
 
 
 def main(argv: Optional[list] = None, *, description: str, default_arms: str) -> int:
-    args = build_parser(description, default_arms).parse_args(argv)
+    parser = build_parser(description, default_arms)
+    args = parser.parse_args(argv)
     args.ops = [o for o in args.ops.split(",") if o]
+    unknown = [o for o in args.ops if o not in base.OPS]
+    if unknown:
+        parser.error(f"unknown --ops {unknown}; known: {', '.join(base.OPS)}")
     args.modes = [m for m in args.modes.split(",") if m]
     if "liger" in args.arms and "TRITON_F32_DEFAULT" not in os.environ:
         os.environ["TRITON_F32_DEFAULT"] = "tf32x3"
@@ -851,7 +880,8 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                      "ops": args.ops, "modes": args.modes, "flush_bytes": timer.flush_bytes,
                      "statistic": "median of group medians of per-call CUPTI active time (us)",
                      "judge_draws": args.judge_draws, "judge_tokens": args.judge_tokens, "check": args.check,
-                     "sinkhorn_iters": args.sinkhorn_iters, "det_runs": args.det_runs},
+                     "sinkhorn_iters": args.sinkhorn_iters, "det_runs": args.det_runs,
+                     "op_definitions": {op: OP_DEFINITIONS[op] for op in args.ops}},
         "comparisons": [{"name": n, "ops": list(o), "arm": a} for n, o, a in base.COMPARISONS],
         "arms": {a.name: a.describe() for a in arms},
         "versions": {},
@@ -860,6 +890,8 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
     }
     print(f"device {record['device']}", flush=True)
     print(f"software {record['software']}", flush=True)
+    for op in args.ops:
+        print(f"op {op}: {OP_DEFINITIONS[op]}", flush=True)
     for arm in arms:
         try:
             record["versions"][arm.name] = arm.versions()
