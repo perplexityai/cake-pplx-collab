@@ -880,7 +880,7 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
 - `dot_sum="compensated"` (the default): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end.
-- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 13% less time (GB300, `T = 16384`: 0.326 ms against 0.375 ms). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
+- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 7% less time (GB300, `T = 16384`: 0.313 ms against 0.337 ms). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
