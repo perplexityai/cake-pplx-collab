@@ -343,6 +343,7 @@ kernel_cake_rmsnorm_det_train_e7f4221a7c26b9dfdd23(__nv_bfloat16* __restrict__ x
                     total += partials[par + rg * 8 + 6];
                     total += partials[par + rg * 8 + 7];
                     float mean = __fdiv_rn(total, h_f);
+                    long long obase = (long long)row * 6144ll;
                     float rs_a = mean + eps;
                     unsigned int rs_ab = __as_u32(rs_a);
                     float rs_y;
@@ -410,7 +411,6 @@ kernel_cake_rmsnorm_det_train_e7f4221a7c26b9dfdd23(__nv_bfloat16* __restrict__ x
                     if (g0 == 0) {
                         r[row] = rstd;
                     }
-                    long long obase = (long long)row * 6144ll;
                     #pragma unroll
                     for (int c_2 = 0; c_2 < 4; c_2++) {
                         #pragma unroll

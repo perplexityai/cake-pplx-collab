@@ -288,74 +288,45 @@ kernel_cake_rmsnorm_det_train_bde56bd5a68c493f07a2(__nv_bfloat16* __restrict__ x
                         _warp_reduce_5 += __shfl_xor_sync(0xFFFFFFFF, _warp_reduce_5, offset);
                     float total = _warp_reduce_0 + _warp_reduce_5;
                     float mean = __fdiv_rn(total, h_f);
-                    float rs_a = mean + eps;
-                    unsigned int rs_ab = __as_u32(rs_a);
-                    float rs_y;
-                    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(rs_y) : "f"(rs_a));
-                    float rs_t;
-                    asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_t) : "f"(rs_a), "f"(rs_y));
-                    float _neg_6;
-                    asm("neg.f32 %0, %1;" : "=f"(_neg_6) : "f"(rs_t));
-                    float rs_tl;
-                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_tl) : "f"(rs_a), "f"(rs_y), "f"(_neg_6));
-                    float _neg_7;
-                    asm("neg.f32 %0, %1;" : "=f"(_neg_7) : "f"(rs_t));
-                    float rs_e;
-                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_e) : "f"(_neg_7), "f"(rs_y), "f"(1.0f));
-                    float _neg_9;
-                    asm("neg.f32 %0, %1;" : "=f"(_neg_9) : "f"(rs_tl));
-                    float _fma_8;
-                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_8) : "f"(_neg_9), "f"(rs_y), "f"(rs_e));
-                    rs_e = _fma_8;
-                    float rs_h;
-                    asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_h) : "f"(rs_y), "f"(0.5f));
-                    float _sub_10;
-                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(rs_e), "f"(3.637979e-12f));
-                    float rs_lo;
-                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_lo) : "f"(_sub_10), "f"(rs_h), "f"(rs_y));
-                    float _add_11;
-                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_11) : "f"(rs_e), "f"(3.637979e-12f));
-                    float rs_hi;
-                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_hi) : "f"(_add_11), "f"(rs_h), "f"(rs_y));
-                    float rs_r = rs_lo;
-                    unsigned int rs_slow = ((rs_ab - 8388608 >= 2130706432) ? 1 : 0);
-                    if (__as_u32(rs_lo) != __as_u32(rs_hi)) {
-                        rs_slow = 1;
-                    }
-                    if (rs_slow != 0) {
-                        float _sqrt_13;
-                        asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(_sqrt_13) : "f"(rs_a));
-                        float _rcp_12 = approx_rcp(_sqrt_13);
-                        rs_y = _rcp_12;
-                        rs_t = mul_f32_rn_noftz(rs_a, rs_y);
-                        float _neg_15;
-                        asm("neg.f32 %0, %1;" : "=f"(_neg_15) : "f"(rs_t));
-                        float _fma_14;
-                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_14) : "f"(rs_a), "f"(rs_y), "f"(_neg_15));
-                        rs_tl = _fma_14;
-                        float _neg_17;
-                        asm("neg.f32 %0, %1;" : "=f"(_neg_17) : "f"(rs_t));
-                        float _fma_16;
-                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_16) : "f"(_neg_17), "f"(rs_y), "f"(1.0f));
-                        rs_e = _fma_16;
-                        float _neg_19;
-                        asm("neg.f32 %0, %1;" : "=f"(_neg_19) : "f"(rs_tl));
-                        float _fma_18;
-                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_18) : "f"(_neg_19), "f"(rs_y), "f"(rs_e));
-                        rs_e = _fma_18;
-                        float _fma_20;
-                        asm("fma.rz.f32 %0, %1, %2, %3;" : "=f"(_fma_20) : "f"(rs_e), "f"(mul_f32_rn_noftz(rs_y, 0.5f)), "f"(rs_y));
-                        unsigned int rs_fb = __as_u32(_fma_20);
-                        unsigned long long rs_m = (unsigned long long)((rs_fb & 8388607) << 1 | 16777217);
-                        unsigned int rs_an = ((rs_ab < 8388608) ? __as_u32((float)rs_ab) : rs_ab);
-                        unsigned long long rs_p = rs_m * rs_m * (unsigned long long)(rs_an & 8388607 | 8388608);
-                        rs_r = ((rs_ab - 1 < 2139095039) ? __uint_as_float(rs_fb + (unsigned int)(rs_p >> 63ull)) : rs_y);
-                    }
-                    float rstd = rs_r;
-                    if (g0 == 0) {
-                        r[row] = rstd;
-                    }
                     long long obase = (long long)row * 2048ll;
+                    float a_row = mean + eps;
+                    float rw_a = a_row;
+                    unsigned int rw_ab = __as_u32(rw_a);
+                    float rw_y;
+                    asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(rw_y) : "f"(rw_a));
+                    float rw_t;
+                    asm("mul.rn.f32 %0, %1, %2;" : "=f"(rw_t) : "f"(rw_a), "f"(rw_y));
+                    float _neg_6;
+                    asm("neg.f32 %0, %1;" : "=f"(_neg_6) : "f"(rw_t));
+                    float rw_tl;
+                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rw_tl) : "f"(rw_a), "f"(rw_y), "f"(_neg_6));
+                    float _neg_7;
+                    asm("neg.f32 %0, %1;" : "=f"(_neg_7) : "f"(rw_t));
+                    float rw_e;
+                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rw_e) : "f"(_neg_7), "f"(rw_y), "f"(1.0f));
+                    float _neg_9;
+                    asm("neg.f32 %0, %1;" : "=f"(_neg_9) : "f"(rw_tl));
+                    float _fma_8;
+                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_8) : "f"(_neg_9), "f"(rw_y), "f"(rw_e));
+                    rw_e = _fma_8;
+                    float rw_h;
+                    asm("mul.rn.f32 %0, %1, %2;" : "=f"(rw_h) : "f"(rw_y), "f"(0.5f));
+                    float _sub_10;
+                    asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(rw_e), "f"(3.637979e-12f));
+                    float rw_lo;
+                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rw_lo) : "f"(_sub_10), "f"(rw_h), "f"(rw_y));
+                    float _add_11;
+                    asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_11) : "f"(rw_e), "f"(3.637979e-12f));
+                    float rw_hi;
+                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rw_hi) : "f"(_add_11), "f"(rw_h), "f"(rw_y));
+                    float rw_r = rw_lo;
+                    if (rw_ab - 8388608 >= 2130706432) {
+                        rw_r = __uint_as_float(2147483648u);
+                    }
+                    if (__as_u32(rw_lo) != __as_u32(rw_hi)) {
+                        rw_r = __uint_as_float(2147483648u);
+                    }
+                    float rstd = rw_r;
                     #pragma unroll
                     for (int c_2 = 0; c_2 < 2; c_2++) {
                         #pragma unroll
@@ -410,12 +381,167 @@ kernel_cake_rmsnorm_det_train_bde56bd5a68c493f07a2(__nv_bfloat16* __restrict__ x
                                 _packed_0[_lp + 7] = *(uint32_t*)&_bf2;
                             }
                             {
-                                const unsigned* _raw_stv8_21 = reinterpret_cast<const unsigned*>(_packed_0);
+                                const unsigned* _raw_stv8_12 = reinterpret_cast<const unsigned*>(_packed_0);
                                 asm volatile(
                                     "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                    :: "l"((void*)(y + (obase + (long long)((g0 + c_2 * 32) * 16 + v_2 * 1024)))), "r"(_raw_stv8_21[0]), "r"(_raw_stv8_21[1]), "r"(_raw_stv8_21[2]), "r"(_raw_stv8_21[3]), "r"(_raw_stv8_21[4]), "r"(_raw_stv8_21[5]), "r"(_raw_stv8_21[6]), "r"(_raw_stv8_21[7]) : "memory");
+                                    :: "l"((void*)(y + (obase + (long long)((g0 + c_2 * 32) * 16 + v_2 * 1024)))), "r"(_raw_stv8_12[0]), "r"(_raw_stv8_12[1]), "r"(_raw_stv8_12[2]), "r"(_raw_stv8_12[3]), "r"(_raw_stv8_12[4]), "r"(_raw_stv8_12[5]), "r"(_raw_stv8_12[6]), "r"(_raw_stv8_12[7]) : "memory");
                             }
                         }
+                    }
+                    if (__as_u32(rstd) == 2147483648u) {
+                        float rs_a = a_row;
+                        unsigned int rs_ab = __as_u32(rs_a);
+                        float rs_y;
+                        asm("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(rs_y) : "f"(rs_a));
+                        float rs_t;
+                        asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_t) : "f"(rs_a), "f"(rs_y));
+                        float _neg_13;
+                        asm("neg.f32 %0, %1;" : "=f"(_neg_13) : "f"(rs_t));
+                        float rs_tl;
+                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_tl) : "f"(rs_a), "f"(rs_y), "f"(_neg_13));
+                        float _neg_14;
+                        asm("neg.f32 %0, %1;" : "=f"(_neg_14) : "f"(rs_t));
+                        float rs_e;
+                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_e) : "f"(_neg_14), "f"(rs_y), "f"(1.0f));
+                        float _neg_16;
+                        asm("neg.f32 %0, %1;" : "=f"(_neg_16) : "f"(rs_tl));
+                        float _fma_15;
+                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_15) : "f"(_neg_16), "f"(rs_y), "f"(rs_e));
+                        rs_e = _fma_15;
+                        float rs_h;
+                        asm("mul.rn.f32 %0, %1, %2;" : "=f"(rs_h) : "f"(rs_y), "f"(0.5f));
+                        float _sub_17;
+                        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_17) : "f"(rs_e), "f"(3.637979e-12f));
+                        float rs_lo;
+                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_lo) : "f"(_sub_17), "f"(rs_h), "f"(rs_y));
+                        float _add_18;
+                        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_18) : "f"(rs_e), "f"(3.637979e-12f));
+                        float rs_hi;
+                        asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rs_hi) : "f"(_add_18), "f"(rs_h), "f"(rs_y));
+                        float rs_r = rs_lo;
+                        unsigned int rs_slow = ((rs_ab - 8388608 >= 2130706432) ? 1 : 0);
+                        if (__as_u32(rs_lo) != __as_u32(rs_hi)) {
+                            rs_slow = 1;
+                        }
+                        if (rs_slow != 0) {
+                            float _sqrt_20;
+                            asm volatile("sqrt.rn.f32 %0, %1;" : "=f"(_sqrt_20) : "f"(rs_a));
+                            float _rcp_19 = approx_rcp(_sqrt_20);
+                            rs_y = _rcp_19;
+                            rs_t = mul_f32_rn_noftz(rs_a, rs_y);
+                            float _neg_22;
+                            asm("neg.f32 %0, %1;" : "=f"(_neg_22) : "f"(rs_t));
+                            float _fma_21;
+                            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_21) : "f"(rs_a), "f"(rs_y), "f"(_neg_22));
+                            rs_tl = _fma_21;
+                            float _neg_24;
+                            asm("neg.f32 %0, %1;" : "=f"(_neg_24) : "f"(rs_t));
+                            float _fma_23;
+                            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_23) : "f"(_neg_24), "f"(rs_y), "f"(1.0f));
+                            rs_e = _fma_23;
+                            float _neg_26;
+                            asm("neg.f32 %0, %1;" : "=f"(_neg_26) : "f"(rs_tl));
+                            float _fma_25;
+                            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_25) : "f"(_neg_26), "f"(rs_y), "f"(rs_e));
+                            rs_e = _fma_25;
+                            float _fma_27;
+                            asm("fma.rz.f32 %0, %1, %2, %3;" : "=f"(_fma_27) : "f"(rs_e), "f"(mul_f32_rn_noftz(rs_y, 0.5f)), "f"(rs_y));
+                            unsigned int rs_fb = __as_u32(_fma_27);
+                            unsigned long long rs_m = (unsigned long long)((rs_fb & 8388607) << 1 | 16777217);
+                            unsigned int rs_an = ((rs_ab < 8388608) ? __as_u32((float)rs_ab) : rs_ab);
+                            unsigned long long rs_p = rs_m * rs_m * (unsigned long long)(rs_an & 8388607 | 8388608);
+                            rs_r = ((rs_ab - 1 < 2139095039) ? __uint_as_float(rs_fb + (unsigned int)(rs_p >> 63ull)) : rs_y);
+                        }
+                        rstd = rs_r;
+                        long long xrow = (long long)row * x_stride;
+                        #pragma unroll
+                        for (int c_3 = 0; c_3 < 2; c_3++) {
+                            #pragma unroll
+                            for (int v_3 = 0; v_3 < 2; v_3++) {
+                                {
+                                    const uint4* _vptr_28 = reinterpret_cast<const uint4*>(x + (xrow + (long long)((g0 * 32 + c_3 * 1024 + v_3 * 2048) / 2)) + 0);
+                                    uint4* _vdst_28 = reinterpret_cast<uint4*>(&xw[c_3 * 16 + v_3 * 8]);
+                                    #pragma unroll
+                                    for (int _blk = 0; _blk < 1; _blk++) {
+                                        asm volatile("ld.global.nc.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                            : "=r"(_vdst_28[_blk].x), "=r"(_vdst_28[_blk].y), "=r"(_vdst_28[_blk].z), "=r"(_vdst_28[_blk].w) : "l"((const void*)(_vptr_28 + _blk)) : "memory");
+                                    }
+                                }
+                                {
+                                    const uint4* _vptr_29 = reinterpret_cast<const uint4*>(x + (xrow + (long long)((g0 * 32 + c_3 * 1024 + v_3 * 2048 + 16) / 2)) + 0);
+                                    uint4* _vdst_29 = reinterpret_cast<uint4*>(&xw[c_3 * 16 + v_3 * 8 + 4]);
+                                    #pragma unroll
+                                    for (int _blk = 0; _blk < 1; _blk++) {
+                                        asm volatile("ld.global.nc.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                            : "=r"(_vdst_29[_blk].x), "=r"(_vdst_29[_blk].y), "=r"(_vdst_29[_blk].z), "=r"(_vdst_29[_blk].w) : "l"((const void*)(_vptr_29 + _blk)) : "memory");
+                                    }
+                                }
+                            }
+                        }
+                        #pragma unroll
+                        for (int c_4 = 0; c_4 < 2; c_4++) {
+                            #pragma unroll
+                            for (int v_4 = 0; v_4 < 2; v_4++) {
+                                float out_1[16];
+                                #pragma unroll
+                                for (int q_1 = 0; q_1 < 8; q_1++) {
+                                    float2 _cvt_f32_0_1 = cake_bf16x2_to_f32x2(__as_bf16x2(xw[c_4 * 16 + v_4 * 8 + q_1]));
+                                    float2 _cvt_f32_1_1 = cake_bf16x2_to_f32x2(__as_bf16x2(wreg[c_4 * 16 + v_4 * 8 + q_1]));
+                                    out_1[2 * q_1] = _cvt_f32_0_1.x * rstd * _cvt_f32_1_1.x;
+                                    out_1[2 * q_1 + 1] = _cvt_f32_0_1.y * rstd * _cvt_f32_1_1.y;
+                                }
+                                unsigned int _packed_0_1[8];
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 0], out_1[_lp*2+1 + 0]));
+                                    _packed_0_1[_lp] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 2], out_1[_lp*2+1 + 2]));
+                                    _packed_0_1[_lp + 1] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 4], out_1[_lp*2+1 + 4]));
+                                    _packed_0_1[_lp + 2] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 6], out_1[_lp*2+1 + 6]));
+                                    _packed_0_1[_lp + 3] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 8], out_1[_lp*2+1 + 8]));
+                                    _packed_0_1[_lp + 4] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 10], out_1[_lp*2+1 + 10]));
+                                    _packed_0_1[_lp + 5] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 12], out_1[_lp*2+1 + 12]));
+                                    _packed_0_1[_lp + 6] = *(uint32_t*)&_bf2;
+                                }
+                                #pragma unroll
+                                for (int _lp = 0; _lp < 1; _lp++) {
+                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out_1[_lp*2 + 14], out_1[_lp*2+1 + 14]));
+                                    _packed_0_1[_lp + 7] = *(uint32_t*)&_bf2;
+                                }
+                                {
+                                    const unsigned* _raw_stv8_30 = reinterpret_cast<const unsigned*>(_packed_0_1);
+                                    asm volatile(
+                                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                                        :: "l"((void*)(y + (obase + (long long)((g0 + c_4 * 32) * 16 + v_4 * 1024)))), "r"(_raw_stv8_30[0]), "r"(_raw_stv8_30[1]), "r"(_raw_stv8_30[2]), "r"(_raw_stv8_30[3]), "r"(_raw_stv8_30[4]), "r"(_raw_stv8_30[5]), "r"(_raw_stv8_30[6]), "r"(_raw_stv8_30[7]) : "memory");
+                                }
+                            }
+                        }
+                    }
+                    if (g0 == 0) {
+                        r[row] = rstd;
                     }
                 }
                 k += 1;
