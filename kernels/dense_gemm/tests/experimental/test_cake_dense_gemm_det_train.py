@@ -9907,10 +9907,11 @@ def test_gpu_promoted_programs(case):
 # Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T, the architectures).  Each row is a weight
 # gradient of the benchmark rows that the planner runs on that twin on some part (a plan enumeration over the rows and
 # part sizes), at a token count where its longest segment holds more than one chunk.  The test forces the twin's
-# program (``_template_knobs``); the architectures are those of the twin's registered ones on which the forced knobs
-# plan exactly the twin for this row (``test_forced_twin_cases_plan_their_twin``).  On the others the row's rule
-# still decides a knob the symbol leaves open: ``sk_exact`` (``None`` reads the rule: the ``sm_107a`` 32 -> 5120 rule
-# splits it exactly) or the orientation ``wgrad_views`` picks (the ``sm_107a`` 512 -> 5120 rule plans ``_hne_t``).
+# program (``_template_knobs``) on the listed architectures, each a registered one of the twin on which the forced
+# knobs plan exactly the twin for this row (``test_forced_twin_cases_plan_their_twin``); the lists are not exhaustive.
+# On some registered architectures the row's rule still decides a knob the symbol leaves open: ``sk_exact`` (``None``
+# reads the rule: the ``sm_107a`` 5120 -> 32 rule splits it exactly) or the orientation ``wgrad_views`` picks (on
+# ``sm_107a`` the 5120 -> 512 row's swapped orientation names ``..._hne_t_sks_sb2...``, which has no registered twin).
 # The synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
 # ``PROMOTED_GPU_CASES`` does not reach.
 PROMOTED_TWIN_GPU_CASES = (
