@@ -77,7 +77,10 @@ buffer when a call needs more bytes).  With capture id 0 (also when
 ``cuda.bindings`` is not importable) each captured backward call allocates
 and zeroes a buffer of its own.  The forward workspace (zeroed int32
 token-chunk counters) has the deterministic package's size and rules; inside
-a capture the forward's omitted workspace follows the backward's rules.
+a capture the forward's omitted workspace is a pre-zeroed buffer per capture
+and stream, shared by its later forward calls on that stream, like the
+backward's, but without one ready each captured forward call zeroes a buffer
+of its own (one fill node per call).
 
 Programmatic dependent launch: the single-rank forward and backward programs
 (not those of the opt-in pair routes) take it per call, by architecture and
