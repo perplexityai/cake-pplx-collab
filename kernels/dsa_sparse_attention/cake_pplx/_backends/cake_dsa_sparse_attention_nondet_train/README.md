@@ -328,13 +328,16 @@ on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
 
 The constants are a fit over the rows measured with both paths (both
 programs, 1 to 528 segments, top-k 128 to 2176): the rule takes the cast path
-on none of them where it was slower.  Near the bound it gives up a few small
-cast-path gains: `nope_doc_16384_k128` (2.8 %), `nope_short_4096_k256`
-(1.3 %), `nope_short_2048_k256` and `nope_tail_2048x32768` (0.5 % or less).
-At `K_slots` 2176 and one segment the rule takes the cast path up to `S / T`
-10.3 at `T = 1024`, 14.9 at 2048, 17.1 at 4096, 18.3 at 8192 and 18.9 at
-16,384, and the natural drain above.  `sm_100a` and `sm_103a` keep their base
-rules.
+on none of them where it was slower.  On seven of them it keeps the natural
+drain, the base test's choice, although the cast path measured faster beyond
+the spread (natural / cast backward time - 1): `nope_doc_16384_k128` 2.8 %,
+`nope_short_4096_k256` 1.3 %, `nope_short_2048_k256` 0.5 %,
+`nope_tail_2048x32768` 0.3 %, `nope_tail_4096x81920` 2.6 % and
+`nope_tail_4096x98304` 1.1 % (NoPE, one segment), and `chunk_3943x268757`
+2.1 % (RoPE with `dkv_acc`, 9 segments).  At `K_slots` 2176 and one segment
+the rule takes the cast path up to `S / T` 10.3 at `T = 1024`, 14.9 at 2048,
+17.1 at 4096, 18.3 at 8192 and 18.9 at 16,384, and the natural drain above.
+`sm_100a` and `sm_103a` keep their base rules.
 
 ### Explicit entry points, prepared runner and binding cache
 
