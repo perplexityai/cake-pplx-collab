@@ -573,8 +573,9 @@ def cake_dsa_sparse_attention_nondet_nope(
         ``K_eff = min(K_slots, ceil(S / num_segments))`` (the permuted
         accumulator plus cast was faster on the measured rows with more
         work) or ``S > 131072`` (``cast_max_keys``: on long single-segment
-        rows the cast path measured slower at 163,840 keys with
-        ``T = 32768`` in both runs and from 262,144 keys with ``T = 16384``); any other row takes
+        rows the cast path's backward median was slower at 163,840 keys
+        with ``T = 32768`` in both runs, and from 262,144 keys with
+        ``T = 16384``); any other row takes
         the cast --, ``1`` forces the direct path whenever the stages are
         registered, ``0`` always
         takes the accumulate-and-cast path; any

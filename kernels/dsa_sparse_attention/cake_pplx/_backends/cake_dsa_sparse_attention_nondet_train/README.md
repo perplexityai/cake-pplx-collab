@@ -301,7 +301,7 @@ The rule weighs what each path adds to the backward.  The cast path adds a
 zero fill and a cast over the `S` accumulator rows plus two launches, a cost
 proportional to `S`.  The rule models the natural drain's extra cost as
 proportional to the main stage's work (a fit to the measured backward
-crossovers; the stages were not timed separately): its `T * K_eff` (query,
+crossovers, not to stage times): its `T * K_eff` (query,
 selected slot) pairs, where
 `K_eff = min(K_slots, ceil(S / num_segments))` bounds the keys a query can
 select by the mean key count of a packed segment.  So the `sm_107a` rule of
@@ -330,9 +330,10 @@ on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
 | `nope_doc_16384_k128` | NoPE | 16,384 | 16,384 | 128 | 1 | 1.083 ms | 1.053 ms | natural |
 | `nope_tail_2048x32768` | NoPE | 2,048 | 32,768 | 2176 | 1 | 1.141 ms | 1.138 ms | natural |
 
-The constants of the work test are a fit over the rows measured with both
+The constants of the work test are a fit over rows measured with both
 paths (both programs, 1 to 528 segments, top-k 128 to 2176): the rule takes
-the cast path on none of them where it was slower.  On eight of them the work
+the cast path on none of them where it was slower.  On eight rows measured
+with both paths the work
 test keeps the natural drain, the base test's choice, although the cast path measured
 faster beyond the spread (natural / cast backward time - 1):
 `nope_doc_16384_k128` 2.8 %, `nope_short_4096_k256` 1.3 %,
@@ -349,8 +350,8 @@ The NoPE rule also carries a key cap, `cast_max_keys` 131,072: a NoPE row
 with more keys (and at least one key per query) takes the natural drain
 whatever its work.  On long single-segment rows the cast path's advantage
 is smaller at the largest key counts and turns into a loss: at `T = 32,768`
-the cast path is faster up to 131,072 keys and slower at 163,840 keys in both
-runs; at `T = 16,384` it
+the cast path is faster up to 131,072 keys and slower at 163,840 keys (the
+backward median in both runs, beyond the spread in the first); at `T = 16,384` it
 is faster at 163,840 keys, at parity at 196,608 and 229,376 keys and slower
 from 262,144 keys on.  The backward times below are what was measured; the
 stages behind them were not timed separately.  Backward medians of the two
