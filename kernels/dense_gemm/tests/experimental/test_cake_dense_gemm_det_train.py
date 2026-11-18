@@ -18,6 +18,7 @@ import ast
 import contextlib
 import dataclasses
 import gc
+import inspect
 import re
 import threading
 import warnings
@@ -617,11 +618,41 @@ def _transposed_template(template: str) -> bool:
     return _TRANSPOSED_STEM.search(template) is not None
 
 
+def _key_knobs(knobs: dict) -> dict:
+    """The instance-key keywords of a decoded template (``_template_knobs``): the knobs it sets, ``sk_exact`` as a flag
+    and the planner's ``promote`` as the instance-key field ``promote_blocks``."""
+    key_knobs = {k: v for k, v in knobs.items() if v is not None}
+    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs["promote_blocks"] = (
+        cake_backend.K1_PROMOTE_BLOCKS if key_knobs.pop("promote", False) else 0
+    )
+    return key_knobs
+
+
 def _nopro(template: str) -> str:
     """``template`` without the round-33 pair prologue / cleanup sync suffix (``_pro<n>``, the LAST knob suffix of every
-    planned pair program since round 33): the hand-written tests of rounds 15..27 assert their own round's program modulo that
-    suffix; the round-33 tests assert the suffix itself."""
-    return re.sub(r"_pro\d+$", "", template)
+    planned pair program since round 33) and the promoted-chunk token before it (``_kc128``: the planner's promoted twin
+    of a long weight-gradient plan; no other chunk size is a program): the hand-written tests of rounds 15..27 assert
+    their own round's program modulo that suffix; the round-33 tests assert the suffix itself, the promotion tests the
+    token."""
+    return re.sub(r"(?:_kc128)?_pro\d+$", "", template)
+
+
+def _promoted(arch, plan, template):
+    """The program the planner names for ``plan`` of the program ``template`` (without promotion) on ``arch``, by the
+    rule of ``K1_PROMOTE_BLOCKS`` restated here: its promoted twin (``_kc128`` before ``_pro<n>``) where ``arch``
+    registers the twin, the plan's longest segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the row is
+    no row of ``K1_PROMOTE_EXEMPT_ROWS``; else ``template``.  The measured rows of the tables below name the program
+    without promotion: a registry that ships its twin runs the twin at their long token counts."""
+    twin = re.sub(r"(_pro\d+)$", rf"_kc{cake_backend.K1_PROMOTE_BLOCKS}\1", template)
+    if (
+        twin != template
+        and twin in _registered(arch)
+        and cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_MIN_SEGMENT
+        and not cake_backend._promote_exempt(arch, plan)
+    ):
+        return twin
+    return template
 
 
 def _rule_of(plan, sm_count):
@@ -1456,6 +1487,20 @@ def test_epilogue_rules():
             ),
             "dense_proj_det_gemm_nn_n192_bz64_t_sks_sb2",
         ),
+        # the promoted chunks (``_kc<KC>`` directly before ``_pro<n>``)
+        (
+            dict(
+                a_mn=True,
+                b_mn=True,
+                out_t=True,
+                block_n=128,
+                cta_rows=64,
+                hints=("evict_first", "none"),
+                pro=15,
+                promote_blocks=128,
+            ),
+            "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15",
+        ),
         # round 19 (Cake W3): the single-CTA form (trailing ``_c1``; ``_s<n>`` relative to its own stage default)
         (
             dict(a_mn=False, b_mn=False, block_n=128, cta1=True),
@@ -1510,7 +1555,7 @@ def test_round13_w3_knobs():
     # default stage count follows the deepest fit; ovl needs the 128-byte panel; htail and sk_exact exclude each other
     key = instance_key(a_mn=True, b_mn=True, block_n=160, cta_rows=256, b_swz=64)
     assert (
-        len(key) == 38
+        len(key) == 39
         and key[18] == 64
         and key[19] is False
         and key[20] == 0
@@ -1572,7 +1617,7 @@ def test_round15_store_hint_knob():
     key = instance_key(
         a_mn=False, b_mn=True, epi="tma", slots=1, store_hint="evict_last"
     )
-    assert len(key) == 38 and key[22] == "evict_last"
+    assert len(key) == 39 and key[22] == "evict_last"
     assert instance_symbol(key) == "dense_proj_det_gemm_kn_n256_tma1_sol"
     assert (
         instance_key(a_mn=False, b_mn=True, epi="reg", store_hint="evict_last")[22]
@@ -1666,7 +1711,7 @@ def test_round15_pd_sh_knobs():
     # family (1 = in-tile chunk pipelining, 2 = cross-tile prefetch, 3 = both chunks in flight; ``_pd<n>``) and the
     # suspend-time hint of the free-running waits in ns (``_sh<n>``); both 0 when off, validated like the Cake kernel
     key = instance_key(a_mn=False, b_mn=True, epi="tma", slots=2, pd=2)
-    assert len(key) == 38 and key[23] == 2 and key[24] == 0
+    assert len(key) == 39 and key[23] == 2 and key[24] == 0
     assert instance_symbol(key) == "dense_proj_det_gemm_kn_n256_tma2_pd2"
     assert (
         instance_key(a_mn=False, b_mn=True)[23:]
@@ -1686,8 +1731,9 @@ def test_round15_pd_sh_knobs():
             0,
             "",
             0,
+            0,
         )
-    )  # ... followed by the round-18 sk_sync flag, the round-19 sk_slab / cta1 fields, the round-21 cgrp flag, the round-24 ovr flag, the round-27 stt flag, the round-33 pro knob (0 = off), the round-2 shapes tranche's sk_first / lw flags, the whole-tile tile resolve flag mg and the paced output-store step count sw, the CTA form token ("" = the default form) and the serpentine K walk kser (0 = off)
+    )  # ... followed by the round-18 sk_sync flag, the round-19 sk_slab / cta1 fields, the round-21 cgrp flag, the round-24 ovr flag, the round-27 stt flag, the round-33 pro knob (0 = off), the round-2 shapes tranche's sk_first / lw flags, the whole-tile tile resolve flag mg and the paced output-store step count sw, the CTA form token ("" = the default form), the serpentine K walk kser (0 = off) and the promoted chunk promote_blocks (0 = off)
     assert (
         instance_symbol(
             instance_key(a_mn=False, b_mn=True, epi="tma", slots=2, pd=2, sh=1000)
@@ -1791,7 +1837,7 @@ def test_round13_knob_normalisation():
     # knob (narrower or shorter tiles raise), htail needs the 256-row family or (round 16, Cake W2) the 128-row standard
     # family with the 256-column row-major tile and the plain drain, park only the bf16 row-major tall store
     key = instance_key(a_mn=False, b_mn=False, cta_rows=256, ovl=True, htail=True)
-    assert len(key) == 38 and key[15] is False and key[16] is True and key[17] is True
+    assert len(key) == 39 and key[15] is False and key[16] is True and key[17] is True
     assert (
         instance_key(a_mn=False, b_mn=False, cta_rows=256, out_f32=True, park=True)[15]
         is False
@@ -1934,7 +1980,7 @@ def test_round19_sk_slab_knob():
     # one key); 3 needs an fp32 output through the TMA-store or the transposed register epilogue; 2 needs the eight warp
     # slabs (EPI_WARPS x epi_cols x 128 B) to fit the mainloop stage ring
     key = instance_key(a_mn=True, b_mn=True, cta_rows=256, sk_sync=True, sk_slab=2)
-    assert len(key) == 38 and key[25] is True and key[26] == 2 and key[27] is False
+    assert len(key) == 39 and key[25] is True and key[26] == 2 and key[27] is False
     assert instance_symbol(key) == "dense_proj_det_gemm_nn_n256_m256_sks_sb2"
     assert instance_key(a_mn=True, b_mn=True, cta_rows=256, sk_slab=2)[26] == 0
     assert instance_key(a_mn=True, b_mn=True, cta_rows=256, sk_slab=2) == instance_key(
@@ -2005,7 +2051,7 @@ def test_round19_cta1_knob():
     # single-CTA fit and ``_s<n>`` is relative to it; it excludes the tall / 64-row families, the pair-level tail
     # policies / probes and the batched raster knob
     key = instance_key(a_mn=False, b_mn=False, block_n=128, cta1=True)
-    assert len(key) == 38 and key[27] is True and key[26] == 0 and key[5] == 7
+    assert len(key) == 39 and key[27] is True and key[26] == 0 and key[5] == 7
     assert instance_symbol(key) == "dense_proj_det_gemm_kk_n128_c1"
     assert b_stage_bytes(False, 128, 128, 1) == 2 * b_stage_bytes(False, 128) == 16384
     assert b_stage_bytes(True, 256, 128, 1) == 2 * b_stage_bytes(True, 256) == 32768
@@ -3234,7 +3280,7 @@ def test_round27_stt_knob(T):
         sk_sync=True,
         stt=True,
     )
-    assert len(on) == 38 and on[30] is True and on[25] is True and on[29] is False
+    assert len(on) == 39 and on[30] is True and on[25] is True and on[29] is False
     assert instance_symbol(on) == "dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt"
     off = instance_key(
         a_mn=True,
@@ -3245,13 +3291,13 @@ def test_round27_stt_knob(T):
         hints=("evict_first", "evict_first"),
         sk_sync=True,
     )
-    assert len(off) == 38 and off[30] is False and off[:30] == on[:30]
+    assert len(off) == 39 and off[30] is False and off[:30] == on[:30]
     assert (
         instance_symbol(off) == "dense_proj_det_gemm_nn_n192_bz64_hee_t_sks"
     )  # the round-18 symbol, byte-identical
     plain = instance_key(a_mn=True, b_mn=True, out_t=True, stt=True)
     assert (
-        len(plain) == 38
+        len(plain) == 39
         and plain[30] is True
         and plain[5] == off[5] == on[5]
         or plain[30] is True
@@ -3259,7 +3305,7 @@ def test_round27_stt_knob(T):
     assert instance_symbol(plain) == "dense_proj_det_gemm_nn_n256_t_stt"
     default = instance_key(a_mn=False, b_mn=False)
     assert (
-        len(default) == 38
+        len(default) == 39
         and default[30] is False
         and instance_symbol(default) == "dense_proj_det_gemm_kk_n256"
     )
@@ -3726,10 +3772,10 @@ def test_round33_pro_knob(T):
     # pair programs only (the single-CTA form refuses it); every other field is unchanged: the OFF form's key is the round-27 key plus a
     # trailing 0 and its symbol is the round-27 symbol
     on = instance_key(a_mn=False, b_mn=True, pro=7)
-    assert len(on) == 38 and on[31] == 7 and on[30] is False and on[27] is False
+    assert len(on) == 39 and on[31] == 7 and on[30] is False and on[27] is False
     assert instance_symbol(on) == "dense_proj_det_gemm_kn_n256_pro7"
     off = instance_key(a_mn=False, b_mn=True)
-    assert len(off) == 38 and off[31] == 0 and off[:31] == on[:31]
+    assert len(off) == 39 and off[31] == 0 and off[:31] == on[:31]
     assert (
         instance_symbol(off) == "dense_proj_det_gemm_kn_n256"
     )  # the round-2 symbol, byte-identical
@@ -3777,7 +3823,7 @@ def test_round33_pro_knob(T):
     )
     default = instance_key(a_mn=False, b_mn=False)
     assert (
-        len(default) == 38
+        len(default) == 39
         and default[31] == 0
         and instance_symbol(default) == "dense_proj_det_gemm_kk_n256"
     )
@@ -3860,10 +3906,10 @@ def test_round21_cgrp_knob(T):
     key = instance_key(
         a_mn=False, b_mn=False, cta_rows=256, ovl=True, htail=True, cgrp=True
     )
-    assert len(key) == 38 and key[28] is True and key[27] is False
+    assert len(key) == 39 and key[28] is True and key[27] is False
     assert instance_symbol(key) == "dense_proj_det_gemm_kk_n256_m256_ov_ht_cg"
     off = instance_key(a_mn=False, b_mn=False, cta_rows=256, ovl=True, htail=True)
-    assert len(off) == 38 and off[:28] == key[:28] and off[28] is False
+    assert len(off) == 39 and off[:28] == key[:28] and off[28] is False
     assert instance_symbol(off) == "dense_proj_det_gemm_kk_n256_m256_ov_ht"
     assert (
         instance_symbol(instance_key(a_mn=False, b_mn=False, cgrp=True))
@@ -4029,26 +4075,26 @@ def test_round24_ovr_knob(T, monkeypatch):
     key = instance_key(
         a_mn=False, b_mn=False, cta_rows=256, htail=True, cgrp=True, ovr=True
     )
-    assert len(key) == 38 and key[29] is True and key[28] is True and key[16] is False
+    assert len(key) == 39 and key[29] is True and key[28] is True and key[16] is False
     assert instance_symbol(key) == "dense_proj_det_gemm_kk_n256_m256_ht_cg_or"
     solo = instance_key(a_mn=False, b_mn=False, cta_rows=256, htail=True, ovr=True)
-    assert len(solo) == 38 and solo[29] is True and solo[28] is False
+    assert len(solo) == 39 and solo[29] is True and solo[28] is False
     assert instance_symbol(solo) == "dense_proj_det_gemm_kk_n256_m256_ht_or"
     off = instance_key(a_mn=False, b_mn=False, cta_rows=256, ovl=True, htail=True)
-    assert len(off) == 38 and off[29] is False and off[16] is True
+    assert len(off) == 39 and off[29] is False and off[16] is True
     assert (
         instance_symbol(off) == "dense_proj_det_gemm_kk_n256_m256_ov_ht"
     )  # the round-21 symbol, byte-identical
     cg = instance_key(
         a_mn=False, b_mn=False, cta_rows=256, ovl=True, htail=True, cgrp=True
     )
-    assert len(cg) == 38 and cg[:28] == off[:28] and cg[28] is True and cg[29] is False
+    assert len(cg) == 39 and cg[:28] == off[:28] and cg[28] is True and cg[29] is False
     assert (
         instance_symbol(cg) == "dense_proj_det_gemm_kk_n256_m256_ov_ht_cg"
     )  # test_round21_cgrp_knob's symbol, now on a 30-field key
     default = instance_key(a_mn=False, b_mn=False)
     assert (
-        len(default) == 38
+        len(default) == 39
         and default[29] is False
         and instance_symbol(default) == "dense_proj_det_gemm_kk_n256"
     )
@@ -4281,7 +4327,7 @@ def test_instance_key_rejects_bad_configurations():
     # arguments in round 11): pf, hints, f32_v8, quad_store, park, ovl, htail, b_swz, sk_exact, batch_group, store_ef,
     # store_hint, pd, sh, sk_sync (26 fields since round 18), sk_slab, cta1 (28 fields since round 19), cgrp (29 fields
     # since round 21), ovr (30 fields since round 24)
-    assert len(key) == 38 and key[11:] == (
+    assert len(key) == 39 and key[11:] == (
         0,
         ("none", "none"),
         False,
@@ -4309,6 +4355,7 @@ def test_instance_key_rejects_bad_configurations():
         0,  # sw (36 fields: the paced output stores)
         "",  # form (37 fields: the eight-warp CTA form)
         0,  # kser (38 fields: the serpentine K walk)
+        0,  # promote_blocks (39 fields: the promoted chunks)
     )
     # the promotion is validated where it is resolved, by the planner
     v = _views("proj", "o_proj", "fwd", "bf16", 257)
@@ -6778,8 +6825,7 @@ def test_template_knobs_invert_instance_symbol():
             knobs = cake_backend._template_knobs(template)
             assert knobs is not None, (arch, template)
             layout, out_f32, out_t = cake_backend._template_class(tokens)
-            key_knobs = {k: v for k, v in knobs.items() if v is not None}
-            key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+            key_knobs = _key_knobs(knobs)
             key = cake_backend.instance_key(
                 a_mn=layout[0] == "n",
                 b_mn=layout[1] == "n",
@@ -6794,6 +6840,14 @@ def test_template_knobs_invert_instance_symbol():
     assert (
         cake_backend._template_knobs("dense_proj_det_gemm_kk_n256_box64_pro7") is None
     )
+    # the promoted twin decodes to promote=True, its program to promote=False; another chunk is no planner knob
+    twin = "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15"
+    assert cake_backend._template_knobs(twin) == {
+        **cake_backend._template_knobs(twin.replace("_kc128", "")),
+        "promote": True,
+    }
+    assert cake_backend._template_knobs(twin.replace("_kc128", ""))["promote"] is False
+    assert cake_backend._template_knobs(twin.replace("_kc128", "_kc64")) is None
     assert cake_backend._template_knobs("router_fp32_det_gemm_kk") is None
     assert cake_backend._template_tokens("router_fp32_det_gemm_kk") is None
     # the exact split carries no part count: the rule's parts, else the kernel tests' 3 (128 rows) / 2 (64 rows)
@@ -7015,7 +7069,13 @@ def test_registry_fallback_reaches_the_shapes_tranche_programs(monkeypatch):
         plan, *_ = cake_dense_gemm_det_train_projection_plan(
             v["A"], v["B"], v["out"], transposed_out=out_t, **kw
         )
-        assert plan.template == neighbour, (M, N, K, plan.template, neighbour)
+        assert plan.template == _promoted("sm_100a", plan, neighbour), (
+            M,
+            N,
+            K,
+            plan.template,
+            neighbour,
+        )
         assert plan.knob_fallback and not plan.rule_fallback and not plan.swap_fallback
         # the single-CTA neighbour carries no tail policy and no pro; the 64-row neighbour keeps the hints
         if neighbour.endswith("_c1"):
@@ -7046,10 +7106,11 @@ def test_registry_fallback_reaches_the_shapes_tranche_programs(monkeypatch):
         mirror.template == P + "nn_n128_hen_t_pro7"
         and mirror.template not in registered107
     )
-    assert plan.template == neighbour107 and plan.knob_fallback, (
+    assert plan.template == _promoted("sm_107a", plan, neighbour107), (
         plan.template,
         neighbour107,
     )
+    assert plan.knob_fallback
 
 
 def test_registry_fallback_decodes_the_nearest_generated_program(monkeypatch):
@@ -7517,7 +7578,11 @@ def test_measured_shape_rules_plan_their_programs(arch):
         mirror, *_ = cake_dense_gemm_det_train_projection_plan(
             v["A"], v["B"], v["out"], _fallback=False, **kw
         )
-        assert mirror.template == template, (key, T, mirror.template)
+        assert mirror.template == _promoted(arch, mirror, template), (
+            key,
+            T,
+            mirror.template,
+        )
         if arch not in cake_jit.KERNELS:
             continue  # the registry of this architecture has not landed: the plans are checked, the programs cannot be
         assert template in registered or template in PENDING_PROGRAMS[arch], (
@@ -7529,7 +7594,11 @@ def test_measured_shape_rules_plan_their_programs(arch):
             v["A"], v["B"], v["out"], **kw
         )
         if template in registered:
-            assert plan.template == template, (key, T, plan.template)
+            assert plan.template == _promoted(arch, plan, template), (
+                key,
+                T,
+                plan.template,
+            )
             assert not (
                 plan.rule_fallback or plan.knob_fallback or plan.swap_fallback
             ), (key, T)
@@ -7782,7 +7851,9 @@ def test_wgrad_swap_follows_the_measured_rule():
         arch="sm_100a",
         _fallback=False,
     )
-    assert plan.template == "dense_proj_det_gemm_nn_n256_m64_hen_t_pro15"
+    assert plan.template == _promoted(
+        "sm_100a", plan, "dense_proj_det_gemm_nn_n256_m64_hen_t_pro15"
+    )
     # the measured rules never key one weight-gradient row in both orientations (the decision would be undefined)
     for key in ROW_RULES:
         arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M = key
@@ -7841,7 +7912,10 @@ def test_unbatched_wgrad_view_pair_plans_the_wgrad_entry(T, out_f32):
                 w.stride()[1:],
             ), where
         if T == 16384 and not out_f32:
-            assert got[0].template == template, (where, got[0].template)
+            assert got[0].template == _promoted(arch, got[0], template), (
+                where,
+                got[0].template,
+            )
 
 
 @pytest.mark.parametrize("out_f32", [False, True])
@@ -8106,7 +8180,7 @@ def test_round2_knobs_name_their_programs():
     key = cake_backend.instance_key(
         **nn, cta_rows=256, sk_exact=True, sk_first=True, pro=7
     )
-    assert len(key) == 38 and key[32] is True and key[33] is False and key[34] is False
+    assert len(key) == 39 and key[32] is True and key[33] is False and key[34] is False
     assert (
         cake_backend.instance_symbol(key)
         == "dense_proj_det_gemm_nn_n256_m256_skx_skf_pro7"
@@ -8157,8 +8231,7 @@ def test_round2_knobs_name_their_programs():
         knobs = cake_backend._template_knobs(template, sk_exact_parts=16)
         assert knobs is not None, template
         layout, out_f32, out_t = cake_backend._template_class(tokens)
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         key = cake_backend.instance_key(
             a_mn=layout[0] == "n",
             b_mn=layout[1] == "n",
@@ -8509,8 +8582,7 @@ def test_mg_rules_plan_the_whole_tile_programs(T):
         # the symbol decoder reads the knob back (the registry fallback's inverse) and names the program again
         knobs = cake_backend._template_knobs(template)
         assert knobs is not None and knobs["mg"] and knobs["lw"] == lw, template
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         assert (
             cake_backend.instance_symbol(
                 cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -8585,7 +8657,7 @@ def test_mg_rules_plan_the_whole_tile_programs(T):
     # the key: field 35, the symbol token after ``_lw``; the forms the program excludes are refused with it
     kn = dict(a_mn=False, b_mn=True, epi="tma", slots=1, pd=2, pro=15)
     key = cake_backend.instance_key(**kn, mg=True)
-    assert len(key) == 38 and key[34] is True and key[33] is False
+    assert len(key) == 39 and key[34] is True and key[33] is False
     assert (
         cake_backend.instance_symbol(key)
         == "dense_proj_det_gemm_kn_n256_tma1_pd2_mg_pro15"
@@ -8659,8 +8731,7 @@ def test_sw_rules_plan_the_paced_store_programs(T):
         # the symbol decoder reads the step count back and names the program again
         knobs = cake_backend._template_knobs(template)
         assert knobs is not None and knobs["sw"] == 25 and knobs["mg"] == mg, template
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         assert (
             cake_backend.instance_symbol(
                 cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -8710,7 +8781,7 @@ def test_sw_rules_plan_the_paced_store_programs(T):
     # the key: field 36, the symbol token after ``_mg``; the knob is a step count on the bf16 TMA-store pd-2 drain
     kn = dict(a_mn=False, b_mn=True, epi="tma", slots=1, pd=2, pro=15)
     key = cake_backend.instance_key(**kn, mg=True, sw=25)
-    assert len(key) == 38 and key[35] == 25 and key[34] is True
+    assert len(key) == 39 and key[35] == 25 and key[34] is True
     assert (
         cake_backend.instance_symbol(key)
         == "dense_proj_det_gemm_kn_n256_tma1_pd2_mg_sw25_pro15"
@@ -8960,7 +9031,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
     # the key: field 37, the symbol token after ``_pro<n>``; every field the form cannot carry is refused with it
     kn = dict(a_mn=False, b_mn=True, epi="tma", slots=1)
     key = cake_backend.instance_key(**kn, form="w8r")
-    assert len(key) == 38 and key[36] == "w8r" and key[35] == 0 and key[34] is False
+    assert len(key) == 39 and key[36] == "w8r" and key[35] == 0 and key[34] is False
     assert cake_backend.instance_symbol(key) == "dense_proj_det_gemm_kn_n256_tma1_w8r"
     assert (
         cake_backend.instance_symbol(cake_backend.instance_key(**kn, form="w8rs"))
@@ -9028,8 +9099,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
         0,
         False,
     )
-    key_knobs = {k: v for k, v in knobs.items() if v is not None}
-    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs = _key_knobs(knobs)
     assert (
         cake_backend.instance_symbol(
             cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -9038,8 +9108,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
     )
     knobs = cake_backend._template_knobs("dense_proj_det_gemm_kn_n256_tma1_w8r_pro15")
     assert knobs is not None and knobs["form"] == "w8r" and knobs["pro"] == 15
-    key_knobs = {k: v for k, v in knobs.items() if v is not None}
-    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs = _key_knobs(knobs)
     with pytest.raises(ValueError, match=r"form"):
         cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
     # the form is a class for the registry fallback: a ten-warp row never falls onto an eight-warp program, nor the
@@ -9413,6 +9482,611 @@ def test_gb_t_exact_rows_and_their_plan_without_the_key_match_fp64(
     judge_gemm(record_property, seed=SEED, draw=draw, launch=launch, product=product)
 
 
+# ---------------------------------------------------------------------------
+# The promoted chunks (``K1_PROMOTE_BLOCKS``): the twins ``..._kc128_pro<n>`` of ten weight-gradient programs
+# ---------------------------------------------------------------------------
+
+#: The promoted twins the export ships, restated: twin template -> its architectures.  Each is the program without
+#: ``_kc128`` with ``promote_blocks`` 128; the kernel's ``pro`` 12 / 4 are the host's 15 / 7.
+PROMOTED_TWINS = {
+    "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15": (
+        "sm_100a",
+        "sm_103a",
+        "sm_107a",
+    ),
+    "dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15": ("sm_100a", "sm_103a", "sm_107a"),
+    "dense_proj_det_gemm_nn_n256_m64_hen_t_kc128_pro15": (
+        "sm_100a",
+        "sm_103a",
+        "sm_107a",
+    ),
+    "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7": (
+        "sm_100a",
+        "sm_103a",
+        "sm_107a",
+    ),
+    "dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15": (
+        "sm_100a",
+        "sm_103a",
+        "sm_107a",
+    ),
+    "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro7": ("sm_100a", "sm_103a"),
+    "dense_proj_det_gemm_nn_n192_hee_t_tma1_kc128_pro7": ("sm_100a", "sm_103a"),
+    "dense_proj_det_gemm_nn_n128_hen_t_skx_kc128_pro7": ("sm_107a",),
+    "dense_proj_det_gemm_nn_n128_m64_hen_t_skx_kc128_pro15": ("sm_107a",),
+    "dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt_kc128_pro15": ("sm_107a",),
+}
+
+
+def _twin_of(template):
+    return re.sub(r"(_pro\d+)$", rf"_kc{cake_backend.K1_PROMOTE_BLOCKS}\1", template)
+
+
+def _register_twins(monkeypatch, arch, *programs):
+    """Pretend ``arch`` registers the promoted twin of each of ``programs`` (CPU planner tests: nothing is loaded; the
+    twin names its program's module)."""
+    table = dict(cake_jit.KERNELS[arch])
+    for program in programs:
+        table[_twin_of(program)] = table[program]
+    monkeypatch.setitem(cake_jit.KERNELS, arch, table)
+
+
+def _without_twins(monkeypatch, arch):
+    """Pretend ``arch`` registers no promoted twin (the registry before the twins ship)."""
+    table = {t: m for t, m in cake_jit.KERNELS[arch].items() if "_kc" not in t}
+    monkeypatch.setitem(cake_jit.KERNELS, arch, table)
+
+
+def test_promote_instance_key_symbol_and_refusals():
+    """``promote_blocks`` is instance-key field 39 (symbol ``_kc<KC>`` between ``_ks<P>`` and ``_pro<n>``); 0 renders the key
+    and symbol of the program without it.  The programs of the shipped twins take it, and so does the 256-wide
+    synchronised slab program of a row-major store; a K-major operand, the tall tile, a tile width other than 128 / 192 /
+    256, no ``pro`` form, a non-default stage count, the single-CTA form, the half-height tail, the pipelined drain, the
+    load-warp prelude, the whole-tile tile resolve, a batch or column-grouped raster, the serpentine K walk, the
+    tail-first order, the slab paths other than ``sk_slab`` 2 on its two tiles and a negative count are refused."""
+    base = dict(
+        a_mn=True,
+        b_mn=True,
+        out_t=True,
+        block_n=128,
+        cta_rows=64,
+        hints=("evict_first", "none"),
+        pro=15,
+    )
+    on, off = instance_key(**base, promote_blocks=128), instance_key(**base)
+    assert len(on) == 39 and on[38] == 128 and off[38] == 0 and on[:38] == off[:38]
+    assert instance_symbol(on) == "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15"
+    assert instance_symbol(off) == "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
+    assert (
+        cake_backend.promote_refusal(on) == "" and cake_backend.K1_PROMOTE_BLOCKS == 128
+    )
+    # every shipped twin is the key of its program with promote_blocks 128
+    for twin in PROMOTED_TWINS:
+        knobs = cake_backend._template_knobs(twin)
+        assert knobs.pop("promote") is True and not knobs.pop("kser"), twin
+        knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key = instance_key(
+            a_mn=True,
+            b_mn=True,
+            out_t="_t_" in twin,
+            promote_blocks=128,
+            **{k: v for k, v in knobs.items() if v is not None},
+        )
+        assert instance_symbol(key) == twin
+        assert instance_symbol(key[:-1] + (0,)) == twin.replace("_kc128", "")
+    nn = dict(a_mn=True, b_mn=True)
+    instance_key(**nn, pro=7, sk_sync=True, sk_slab=2, promote_blocks=128)
+    for bad in (
+        dict(a_mn=False, b_mn=False, pro=7),
+        dict(a_mn=False, b_mn=True, pro=7),
+        dict(**nn, cta_rows=256, pro=7),
+        dict(**nn, block_n=160, pro=7),
+        dict(**nn, out_t=True, block_n=128),
+        dict(**nn, out_t=True, block_n=128, pro=7, stages=4),
+        dict(**nn, out_t=True, block_n=128, cta1=True),
+        dict(**nn, htail=True, pro=7),
+        dict(**nn, pd=2, pro=7),
+        dict(**nn, pro=7, lw=True),
+        dict(**nn, pro=7, mg=True),
+        dict(**nn, pro=7, batch_group=1),
+        dict(**nn, pro=7, cgrp=True),
+        dict(**nn, pro=7, kser=76),
+        dict(**nn, pro=7, sk_exact=True, sk_first=True),
+        dict(**nn, pro=7, sk_sync=True, sk_slab=1),
+        dict(**nn, out_t=True, block_n=128, pro=7, sk_sync=True, sk_slab=2),
+        dict(**nn, out_t=True, pro=7, sk_sync=True, sk_slab=2),
+    ):
+        instance_key(**bad)  # a valid program without promotion
+        with pytest.raises(ValueError, match="promote_blocks"):
+            instance_key(**bad, promote_blocks=128)
+    with pytest.raises(ValueError, match="promote_blocks"):
+        instance_key(**base, promote_blocks=-1)
+
+
+def test_segment_blocks_reads_the_longest_segment():
+    """``segment_blocks``: a whole tile's K blocks where a plan stores whole tiles, else the longest part of a tile a
+    stream-K unit, an exact split part or a synchronised main or collector part sums; the 32 x 4096 weight gradient
+    on a 152-SM sm_100a part (32 tiles, two K halves each) holds 128 K blocks at 16384 tokens, 129 at 16385, 256 at
+    32768 and 257 at 32769."""
+    seg = cake_backend.segment_blocks
+
+    def plan(**fields):
+        return SimpleNamespace(
+            **{
+                "num_full": 0,
+                "sk_units": 0,
+                "iters_per_unit": 0,
+                "sk_sync": False,
+                **fields,
+            }
+        )
+
+    assert seg(plan(k_blocks=256, num_full=12, iters_per_unit=256)) == 256
+    assert seg(plan(k_blocks=257, sk_units=64, iters_per_unit=129)) == 129
+    assert seg(plan(k_blocks=256, num_full=74, sk_units=80, iters_per_unit=128)) == 256
+    assert seg(plan(k_blocks=1024, sk_units=96, iters_per_unit=342)) == 342
+    assert (
+        seg(plan(k_blocks=254, sk_units=106, iters_per_unit=191, sk_sync=True)) == 191
+    )
+    assert (
+        seg(plan(k_blocks=254, sk_units=106, iters_per_unit=100, sk_sync=True)) == 154
+    )
+    assert seg(plan(k_blocks=10, sk_units=3, iters_per_unit=40)) == 10
+    for T, blocks in (
+        (16384, 128),
+        (16385, 129),
+        (32768, 256),
+        (32769, 257),
+        (65536, 512),
+    ):
+        G = torch.empty(T, 32, dtype=torch.bfloat16)
+        X = torch.empty(T, 4096, dtype=torch.bfloat16)
+        A, B, transposed = wgrad_views(G, X, arch="sm_100a")
+        p, *_ = cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            torch.empty(32, 4096, dtype=torch.bfloat16),
+            sm_count=152,
+            l2_bytes=L2_BYTES,
+            transposed_out=transposed,
+            arch="sm_100a",
+            promote=False,
+        )
+        assert (p.num_full, p.tail_tiles) == (0, 32) and seg(p) == blocks, T
+
+
+def test_long_segments_plan_the_promoted_twin(monkeypatch):
+    """The 32 x 4096 BF16 weight gradient on a 152-SM sm_100a part plans the 64-row ``hen`` program of its rule
+    (two K halves of each of its 32 tiles): with the program's twin registered, a plan whose longest segment holds more
+    than 256 K blocks (32769 tokens and more) runs the twin, the same plan but for the template and
+    ``promote_blocks``; at 16384 and 32768 tokens (128 and 256 blocks) it keeps the program.  ``promote=False`` keeps
+    the program at any length, ``promote=True`` runs the twin at any length; without the twin registered the plan
+    keeps the program and ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall
+    tile (the kernel's refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 128 blocks the twin runs from
+    16385 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all) keeps the
+    program unless ``promote=True``."""
+    arch, sm_count = "sm_100a", 152
+    program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
+    twin = _twin_of(program)
+    assert program in _registered(arch)
+
+    def plan_at(T, out_dtype=torch.bfloat16, **knobs):
+        G = torch.empty(T, 32, dtype=torch.bfloat16)
+        X = torch.empty(T, 4096, dtype=torch.bfloat16)
+        A, B, transposed = wgrad_views(
+            G, X, arch=arch, out_f32=out_dtype == torch.float32
+        )
+        assert transposed
+        return cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            torch.empty(32, 4096, dtype=out_dtype),
+            sm_count=sm_count,
+            l2_bytes=L2_BYTES,
+            transposed_out=True,
+            arch=arch,
+            **knobs,
+        )[0]
+
+    with monkeypatch.context() as m:
+        _without_twins(m, arch)
+        for T in (16384, 65536):
+            assert (plan_at(T).template, plan_at(T).promote_blocks) == (program, 0), T
+        with pytest.raises(ValueError, match="not registered"):
+            plan_at(65536, promote=True)
+    _register_twins(monkeypatch, arch, program)
+    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 256
+    for T in (16384, 16385, 32768):
+        short = plan_at(T)
+        assert (short.template, short.promote_blocks) == (program, 0), T
+        forced = plan_at(T, promote=True)
+        assert (forced.template, forced.promote_blocks) == (twin, 128), T
+        assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
+    for T in (32769, 65536):
+        plan, plain = plan_at(T), plan_at(T, promote=False)
+        assert (plan.template, plan.promote_blocks) == (twin, 128), T
+        assert (plain.template, plain.promote_blocks) == (program, 0), T
+        assert dataclasses.replace(plan, template=program, promote_blocks=0) == plain, T
+        assert plan_at(T, promote=True) == plan, T
+        assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback), T
+    # an FP32 output has no twin: the program at any length, promote=True raises
+    f32 = plan_at(65536, torch.float32)
+    assert f32.promote_blocks == 0 and "_kc" not in f32.template
+    with pytest.raises(ValueError, match="no promoted twin"):
+        plan_at(65536, torch.float32, promote=True)
+    # a K-major layout (the forward) and a tall tile (o_proj's weight gradient) are the kernel's refusals
+    v = _views("proj", "o_proj", "fwd", "bf16", 2049)
+    with pytest.raises(ValueError, match="promote=True"):
+        cake_dense_gemm_det_train_projection_plan(
+            v["A"], v["B"], v["out"], sm_count=148, l2_bytes=L2_BYTES, promote=True
+        )
+    v = _views("proj", "o_proj", "wgrad", "bf16", 2049)
+    tall, *_ = cake_dense_gemm_det_train_projection_plan(
+        v["A"],
+        v["B"],
+        v["out"],
+        sm_count=148,
+        l2_bytes=L2_BYTES,
+        transposed_out=v.get("transposed", False),
+    )
+    assert tall.cta_rows == 256 and tall.promote_blocks == 0
+    with pytest.raises(ValueError, match="cta_rows 256"):
+        cake_dense_gemm_det_train_projection_plan(
+            v["A"],
+            v["B"],
+            v["out"],
+            sm_count=148,
+            l2_bytes=L2_BYTES,
+            transposed_out=v.get("transposed", False),
+            promote=True,
+        )
+    # the threshold: at 128 blocks the twin runs from 16385 tokens (129 blocks a half) on
+    with monkeypatch.context() as m:
+        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
+        assert plan_at(16384).template == program
+        assert plan_at(16385).template == plan_at(32768).template == twin
+        assert plan_at(16384, promote=True).template == twin
+    # the exempt rows: an exact key at 65536 tokens, a ragged key at every token count; promote=True runs the twin
+    row = (arch, True, True, False, True, False, 32)
+    with monkeypatch.context() as m:
+        m.setattr(
+            cake_backend, "K1_PROMOTE_EXEMPT_ROWS", frozenset({row + (65536, 4096)})
+        )
+        assert plan_at(65536).template == program
+        assert plan_at(65536, promote=True).template == twin
+        assert plan_at(65537).template == twin
+    with monkeypatch.context() as m:
+        m.setattr(
+            cake_backend, "K1_PROMOTE_EXEMPT_ROWS", frozenset({row + (None, 4096)})
+        )
+        assert plan_at(32769).template == plan_at(65536).template == program
+        assert plan_at(65536, promote=True).template == twin
+
+
+def test_promoted_twins_are_no_registry_variants(monkeypatch):
+    """The registry fallback never names a twin as a variant (``_registry_variants`` skips it and leaves ``promote`` to
+    the caller): a row whose program is not registered lands on the registered program nearest it and, where that
+    program's twin is registered and a segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` K blocks (set to 128 here),
+    runs the twin; ``promote=False`` keeps the program."""
+    module = cake_jit.KERNELS["sm_100a"]["dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"]
+    program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
+    twin = _twin_of(program)
+    monkeypatch.setattr(
+        cake_backend, "KERNELS", {"sm_100a": {program: module, twin: module}}
+    )
+    monkeypatch.setattr(cake_backend, "ROW_RULES", {})
+    monkeypatch.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
+    variants = cake_backend._registry_variants(
+        "dense_proj_det_gemm_nn_n128_hen_t_pro7", "sm_100a", False
+    )
+    assert len(variants) == 1 and "promote" not in variants[0], variants
+    assert variants[0]["cta_rows"] == 64 and variants[0]["pro"] == 15
+    v = _class_views("nn", False, True, 4096, 32, 65536)
+    kw = dict(sm_count=152, l2_bytes=L2_BYTES, arch="sm_100a", transposed_out=True)
+    mirror, *_ = cake_dense_gemm_det_train_projection_plan(
+        v["A"], v["B"], v["out"], _fallback=False, **kw
+    )
+    assert mirror.template not in (program, twin)
+    plan, *_ = cake_dense_gemm_det_train_projection_plan(v["A"], v["B"], v["out"], **kw)
+    assert (plan.template, plan.promote_blocks, plan.knob_fallback) == (twin, 128, True)
+    plain, *_ = cake_dense_gemm_det_train_projection_plan(
+        v["A"], v["B"], v["out"], promote=False, **kw
+    )
+    assert (plain.template, plain.promote_blocks) == (program, 0)
+    assert cake_backend.segment_blocks(plain) > cake_backend.K1_PROMOTE_MIN_SEGMENT
+    assert dataclasses.replace(plan, template=program, promote_blocks=0) == plain
+
+
+def test_promoted_twins_registered_are_twins_of_registered_programs():
+    """Every registered ``_kc<KC>`` program is a shipped twin (``PROMOTED_TWINS``) on one of its architectures, of a
+    program the architecture registers, with that program's cluster shape; a rendered twin builds the K1 module with
+    ``promote_blocks`` 128.  A registry without twins (before they ship) holds none."""
+    for arch, table in cake_jit.KERNELS.items():
+        for template, name in table.items():
+            if "_kc" not in template:
+                continue
+            assert arch in PROMOTED_TWINS.get(template, ()), (arch, template)
+            program = template.replace("_kc128", "")
+            assert program in table, (arch, template)
+            record, base = cake_jit.MODULES[name], cake_jit.MODULES[table[program]]
+            assert record["launch"]["cluster"] == base["launch"]["cluster"], template
+            if "build" in record:
+                assert record["build"]["module"].endswith(".dense_projection_det_gemm")
+                assert record["build"]["kwargs"]["promote_blocks"] == 128, template
+
+
+# The promoted twins on the device: (d_out, d_in, T of a plan whose longest segment holds more than
+# ``K1_PROMOTE_MIN_SEGMENT`` (256) K blocks, T of the same row's plan at one chunk a segment, the architectures).
+# 512 x 4096 plans the 64-row 256-wide ``hen`` program of its rule, 32 x 4096 the 64-row 128-wide one; at T 65536 a
+# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 256), at T 8192 128, so no
+# segment holds more than one chunk.  Both programs are rendered from the kernel source the twins are, on these
+# architectures (the sm_107a 32 x 4096 rule names a carried ``skx`` program).
+PROMOTED_GPU_CASES = (
+    (512, 4096, 65536, 8192, ("sm_100a", "sm_103a", "sm_107a")),
+    (32, 4096, 65536, 8192, ("sm_100a", "sm_103a")),
+)
+
+
+@pytest.mark.parametrize(
+    "case", PROMOTED_GPU_CASES, ids=lambda c: f"{c[0]}x{c[1]}-T{c[2]}"
+)
+def test_gpu_promoted_programs(case):
+    """On the device's architecture, the weight gradient of a ``PROMOTED_GPU_CASES`` row plans the promoted twin of
+    its program at the long token count (the export must ship the twins: this test needs them registered); the
+    promoted program meets the naive BF16 tier against FP64 over the judge's draws, each launch into a NaN-poisoned
+    output (three on the first draw), and writes the same bits on three more launches.  At one chunk a segment the twin
+    (``promote=True``) writes the bits of the program without promotion (``promote=False``) on the same inputs."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch = arch_for(device)
+    d_out, d_in, T, T_one, arches = case
+    if arch not in arches:
+        pytest.skip(f"a case of {list(arches)}; the device is {arch}")
+    G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
+    out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
+    prepared = cake_dense_gemm_det_train_projection_wgrad_prepare(G, X, out)
+    plan = prepared.plan
+    assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, prepared.template
+    assert prepared.template == _twin_of(prepared.template.replace("_kc128", ""))
+    assert cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_MIN_SEGMENT
+
+    def draw(s):
+        for t, value in zip(
+            (G, X), _d1_wgrad_operands(T, d_out, d_in, s, device), strict=True
+        ):
+            t.copy_(value)
+        nan_fill([out])
+        return SimpleNamespace(G=G, X=X)
+
+    def launch(_inputs):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"promoted": out}
+
+    def product(v, dtype):
+        return {"promoted": torch.matmul(v.G.to(dtype).t(), v.X.to(dtype))}
+
+    judge_gemm(
+        None,
+        seed=SEED,
+        draw=draw,
+        launch=launch,
+        product=product,
+        launches=3,
+        poison=lambda v: [out],
+    )
+    # run to run: the same bits on every launch of the last draw's inputs
+    runs = []
+    for _ in range(3):
+        nan_fill([out])
+        prepared.launch()
+        torch.cuda.synchronize()
+        runs.append(out.clone())
+    assert all(torch.equal(run, runs[0]) for run in runs[1:])
+    # one chunk a segment: the twin's bits are the program's
+    G1, X1 = _d1_wgrad_operands(T_one, d_out, d_in, SEED + 1, device)
+    A, B, transposed = wgrad_views(G1, X1, arch=arch)
+    outs = {}
+    for promote in (True, False):
+        o = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
+        p = cake_dense_gemm_det_train_projection_prepare(
+            A, B, o, transposed_out=transposed, promote=promote
+        )
+        assert p.plan.promote_blocks == (128 if promote else 0), p.template
+        assert cake_backend.segment_blocks(p.plan) <= cake_backend.K1_PROMOTE_BLOCKS
+        p.launch()
+        torch.cuda.synchronize()
+        outs[promote] = o
+    assert torch.equal(outs[True], outs[False])
+
+
+# Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T, the architectures).  Each row is a weight
+# gradient of the benchmark rows that the planner runs on that twin on some part (a plan enumeration over the rows and
+# part sizes), at a token count where its longest segment holds more than one chunk.  The test forces the twin's
+# program (``_template_knobs``) on the listed architectures, each a registered one of the twin on which the forced
+# knobs plan exactly the twin for this row (``test_forced_twin_cases_plan_their_twin``); the lists are not exhaustive.
+# On some registered architectures the row's rule still decides a knob the symbol leaves open: ``sk_exact`` (``None``
+# reads the rule: the ``sm_107a`` 5120 -> 32 rule splits it exactly) or the orientation ``wgrad_views`` picks (on
+# ``sm_107a`` the 5120 -> 512 row's swapped orientation names ``..._hne_t_sks_sb2...``, which has no registered twin).
+# The synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
+# ``PROMOTED_GPU_CASES`` does not reach.
+PROMOTED_TWIN_GPU_CASES = (
+    ("dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15", 32, 5120, 65535, ("sm_100a",)),
+    (
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro7",
+        32,
+        6144,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7",
+        32,
+        5120,
+        32768,
+        ("sm_100a", "sm_103a", "sm_107a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15",
+        512,
+        5120,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_hee_t_tma1_kc128_pro7",
+        576,
+        6144,
+        32768,
+        ("sm_100a", "sm_103a"),
+    ),
+    ("dense_proj_det_gemm_nn_n128_hen_t_skx_kc128_pro7", 32, 6144, 65535, ("sm_107a",)),
+    (
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_skx_kc128_pro15",
+        32,
+        4096,
+        65535,
+        ("sm_107a",),
+    ),
+    (
+        "dense_proj_det_gemm_nn_n192_bz64_hee_t_sks_stt_kc128_pro15",
+        576,
+        6144,
+        32768,
+        ("sm_107a",),
+    ),
+)
+
+
+def test_promoted_twin_gpu_cases_cover_every_twin():
+    """``PROMOTED_TWIN_GPU_CASES`` and ``PROMOTED_GPU_CASES`` together launch every shipped twin: the eight forms
+    above by their knobs, the 64-row 128- and 256-wide programs through the planner."""
+    forced = {case[0] for case in PROMOTED_TWIN_GPU_CASES}
+    planned = {
+        "dense_proj_det_gemm_nn_n256_m64_hen_t_kc128_pro15",
+        "dense_proj_det_gemm_nn_n128_m64_hen_t_kc128_pro15",
+    }
+    assert len(forced) == len(PROMOTED_TWIN_GPU_CASES) and not forced & planned
+    assert forced | planned == set(PROMOTED_TWINS)
+    for twin, *_, arches in PROMOTED_TWIN_GPU_CASES:
+        assert arches and set(arches) <= set(PROMOTED_TWINS[twin]), twin
+        knobs = cake_backend._template_knobs(twin)
+        assert knobs is not None and knobs["promote"] is True, twin
+
+
+#: The SM count of a part of each architecture the CPU plan check plans for.
+_FORCED_TWIN_SM_COUNT = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
+
+
+def _forced_twin_knobs(twin):
+    """The knobs of ``twin``'s symbol the prepare call takes (``promote=True`` among them); the rest (``kser``,
+    ``sk_first``, ``lw``, ``mg``, ``sw``) are off in every twin."""
+    knobs = cake_backend._template_knobs(twin)
+    assert knobs is not None and knobs["promote"] is True, twin
+    takes = inspect.signature(cake_dense_gemm_det_train_projection_prepare).parameters
+    assert not any(v for k, v in knobs.items() if k not in takes), (twin, knobs)
+    return {k: v for k, v in knobs.items() if k in takes}
+
+
+def test_forced_twin_cases_plan_their_twin():
+    """On every architecture of a ``PROMOTED_TWIN_GPU_CASES`` row, the twin's knobs plan exactly the twin for the
+    row's weight gradient, with a longest segment of more than one chunk: the GPU test's premise, checked without a
+    device."""
+    for twin, d_out, d_in, T, arches in PROMOTED_TWIN_GPU_CASES:
+        knobs = _forced_twin_knobs(twin)
+        for arch in arches:
+            G = torch.empty(T, d_out, dtype=torch.bfloat16)
+            X = torch.empty(T, d_in, dtype=torch.bfloat16)
+            A, B, transposed = wgrad_views(G, X, arch=arch)
+            plan = cake_dense_gemm_det_train_projection_plan(
+                A,
+                B,
+                torch.empty(d_out, d_in, dtype=torch.bfloat16),
+                sm_count=_FORCED_TWIN_SM_COUNT[arch],
+                l2_bytes=L2_BYTES,
+                transposed_out=transposed,
+                arch=arch,
+                **knobs,
+            )[0]
+            assert plan.template == twin, (arch, twin, plan.template)
+            assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, (arch, twin)
+            assert cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_BLOCKS, (
+                arch,
+                twin,
+            )
+
+
+@pytest.mark.parametrize(
+    "case",
+    PROMOTED_TWIN_GPU_CASES,
+    ids=lambda c: f"{c[0].removeprefix('dense_proj_det_gemm_')}-{c[1]}x{c[2]}-T{c[3]}",
+)
+def test_gpu_promoted_twin_forms(case):
+    """On each architecture of ``case``, the twin ``case[0]`` forced by its knobs (``promote=True`` among them) plans
+    itself for the weight gradient of ``case``, with a longest segment of more than one chunk; it meets the naive BF16
+    tier against FP64 over the judge's draws, each launch into a NaN-poisoned output (three on the first draw), and
+    writes the same bits on three more launches."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch = arch_for(device)
+    twin, d_out, d_in, T, arches = case
+    if arch not in arches:
+        pytest.skip(f"a case of {list(arches)}; the device is {arch}")
+    knobs = _forced_twin_knobs(twin)
+    G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
+    A, B, transposed = wgrad_views(G, X, arch=arch)
+    out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
+    prepared = cake_dense_gemm_det_train_projection_prepare(
+        A, B, out, transposed_out=transposed, **knobs
+    )
+    plan = prepared.plan
+    assert prepared.template == twin, (prepared.template, twin)
+    assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, twin
+    assert cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_BLOCKS, twin
+
+    def draw(s):
+        for t, value in zip(
+            (G, X), _d1_wgrad_operands(T, d_out, d_in, s, device), strict=True
+        ):
+            t.copy_(value)
+        nan_fill([out])
+        return SimpleNamespace(G=G, X=X)
+
+    def launch(_inputs):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"promoted": out}
+
+    def product(v, dtype):
+        return {"promoted": torch.matmul(v.G.to(dtype).t(), v.X.to(dtype))}
+
+    judge_gemm(
+        None,
+        seed=SEED,
+        draw=draw,
+        launch=launch,
+        product=product,
+        launches=3,
+        poison=lambda v: [out],
+    )
+    # run to run: the same bits on every launch of the last draw's inputs
+    runs = []
+    for _ in range(3):
+        nan_fill([out])
+        prepared.launch()
+        torch.cuda.synchronize()
+        runs.append(out.clone())
+    assert all(torch.equal(run, runs[0]) for run in runs[1:])
+
+
 # The GB T-exact serpentine-K rules: (arch, B MN-major, N, K) -> (the T of the exact keys, the program on the 76-pair parts, the
 # program without ``kser``).  Each key names the T 16231 key's program of the row with ``kser`` 76 (at T 16172; at the T of
 # the row's round-9 / round-10 keys the key's own rule gains ``kser`` 76); the wave guard keeps it on
@@ -9444,7 +10118,7 @@ def test_kser_instance_key_symbol_and_refusals():
         a_mn=False, b_mn=True, cta_rows=256, ovr=True, htail=True, cgrp=True, pro=7
     )
     on, off = instance_key(**tall, kser=76), instance_key(**tall)
-    assert len(on) == 38 and on[37] == 76 and off[37] == 0 and on[:37] == off[:37]
+    assert len(on) == 39 and on[37] == 76 and off[37] == 0 and on[:37] == off[:37]
     assert instance_symbol(on) == "dense_proj_det_gemm_kn_n256_m256_ht_cg_or_ks76_pro7"
     assert instance_symbol(off) == "dense_proj_det_gemm_kn_n256_m256_ht_cg_or_pro7"
     assert cake_backend._template_knobs(instance_symbol(on))["kser"] == 76

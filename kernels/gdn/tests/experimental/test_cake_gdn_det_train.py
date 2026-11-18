@@ -37,7 +37,8 @@ value-head group of two and the ``dhu_tc2`` pass 2 of split plans beside that of
 stream; and the groups' rule without a device, caller-stream allocations between and during two-stream calls, a CUDA
 graph capture and one side stream per caller stream), the launches on the
 caller's stream (one and two streams) and from cached entries, the two preps, ``q`` / ``k`` off the tensor maps' 16-byte
-alignment (the plain prep), and an equal-length batch against the same sequences packed; and the input contract: every
+alignment (the plain prep), the head views of a packed row taking ``prep_tma`` inside the plain band (no copy; the
+contiguous call's bits), and an equal-length batch against the same sequences packed; and the input contract: every
 rejected input raises before the first launch, a host tensor at the low-level entries reaches the binding's device
 check, and the device route does not synchronize.  The wavefront pair (``dhu_tc2_wavefront`` / ``tail_g2_bf16_wavefront``,
 the split pass 2 of more CTAs than SMs on ``dhu_tc2_wavefront_split``): its chunk order and its rule per architecture
@@ -5053,6 +5054,47 @@ def test_packed_row_gives_the_view_bits(heads, finalize, device, monkeypatch) ->
     assert nodes == {True: want_node, False: "CakeGDNDetFunctionBackward"}, nodes
     _assert_bitwise(results[True], results[False], OUTPUT_NAMES)
     _assert_bitwise(results[True], _run(inputs, seq_lens, **pins), OUTPUT_NAMES)
+
+
+@pytest.mark.parametrize("band", ["rule", "plain-band", "plain-pin"])
+@pytest.mark.parametrize("heads", [(2, 6), (1, 3), (2, 4)], ids=["g3", "g3-h1", "g2"])
+def test_packed_views_take_prep_tma_in_the_plain_band(
+    band, heads, device, monkeypatch
+) -> None:
+    # q / k / v as head views of one packed row: prep_tma reads q / k in place, also where the rule's band runs the
+    # plain prep on contiguous rows (VIEWS_TAKE_PREP_TMA: no copy of q / k); a plain pin copies them and runs the plain
+    # prep.  The prep's forward only (the forwards on wy_a's A read the packed row in place on their own); the same
+    # bits as the contiguous call on every output
+    monkeypatch.setattr(cake_chain, "FWD_A_ARCHS", ())
+    monkeypatch.setattr(cake_chain, "FWD_SPLIT_ARCHS", ())
+    seq_lens = (300, 77, 640, 1)
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=617)
+    pins = {"prep": "plain"} if band == "plain-pin" else {}
+    if band == "plain-band":
+        monkeypatch.setattr(cake_chain, "use_prep_tma", lambda *_args: False)
+    stages = _record_launches(monkeypatch)
+    want = _run(inputs, seq_lens, **pins)
+    want_preps = _preps(stages)
+    stages.clear()
+    got = _run_packed(inputs, seq_lens, heads, **pins)
+    expected = {"rule": ({"prep_tma"}, {"prep_tma"}), "plain-band": ({"prep"}, {"prep_tma"}),
+                "plain-pin": ({"prep"}, {"prep"})}[band]  # fmt: skip
+    assert (want_preps, _preps(stages)) == expected, (want_preps, stages)
+    _assert_bitwise(got, want, OUTPUT_NAMES)
+
+
+def test_view_rows_takes_row_major_head_views() -> None:
+    # VIEWS_TAKE_PREP_TMA's views: the head views of a packed row; not a contiguous tensor, a transposed, unaligned or
+    # overlapping view
+    row = torch.empty(64, (2 * 2 + 6) * HEAD_DIM, dtype=torch.bfloat16)
+    q = row[:, : 2 * HEAD_DIM].view(64, 2, HEAD_DIM)
+    assert cake_chain._view_rows(q) and cake_chain._view_rows(q[None])
+    assert not cake_chain._view_rows(q.contiguous())
+    assert not cake_chain._view_rows(q.transpose(0, 1))
+    assert not cake_chain._view_rows(row[:, 4 : 4 + 2 * HEAD_DIM].view(64, 2, HEAD_DIM))
+    assert not cake_chain._view_rows(
+        torch.empty(64, HEAD_DIM, dtype=torch.bfloat16)[:, None].expand(64, 2, HEAD_DIM)
+    )
 
 
 def test_packed_row_of_a_non_leaf_with_other_consumers(device, monkeypatch) -> None:

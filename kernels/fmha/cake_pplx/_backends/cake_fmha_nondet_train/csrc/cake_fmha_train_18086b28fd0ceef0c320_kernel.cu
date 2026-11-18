@@ -1524,27 +1524,27 @@ kernel_cake_fmha_train_18086b28fd0ceef0c320(float* __restrict__ dQ_accum, float*
                     mbarrier_arrive(dq_reduce_done_addr);
                 }
                 #pragma unroll
-                for (int g = 0; g < HEAD_DIM / 32; g++) {
-                    int smem_stage = g & 1;
-                    int stage_base = dq_stage_addr + (unsigned int)(smem_stage * 16384);
+                for (int g = 0; g < HEAD_DIM / 8; g++) {
+                    int smem_stage = g & 7;
+                    int stage_base = dq_stage_addr + (unsigned int)(smem_stage * 4096);
                     int thread_vec_base = stage_base + (warp % 4 * 32 + lane) * 16;
                     #pragma unroll
-                    for (int v4 = 0; v4 < 8; v4++) {
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(thread_vec_base + v4 * 128 * 16), "f"(dq_all[g * 32 + v4 * 4]), "f"(dq_all[g * 32 + v4 * 4 + 1]), "f"(dq_all[g * 32 + v4 * 4 + 2]), "f"(dq_all[g * 32 + v4 * 4 + 3]) : "memory");
+                    for (int v4 = 0; v4 < 2; v4++) {
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(thread_vec_base + v4 * 128 * 16), "f"(dq_all[g * 8 + v4 * 4]), "f"(dq_all[g * 8 + v4 * 4 + 1]), "f"(dq_all[g * 8 + v4 * 4 + 2]), "f"(dq_all[g * 8 + v4 * 4 + 3]) : "memory");
                     }
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("barrier.sync 4, 128;" ::: "memory");
                     if (warp == 0) {
                         if (elect_sync()) {
                             {
-                                void* _cpred_dst_0 = reinterpret_cast<void*>(dQ_accum + (off_q_2 * HEAD_DIM + g * BLOCK_M * 32));
+                                void* _cpred_dst_0 = reinterpret_cast<void*>(dQ_accum + (off_q_2 * HEAD_DIM + g * BLOCK_M * 8));
                                 asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                                     " [%0], [%1], %2;"
-                                    :: "l"(_cpred_dst_0), "r"(stage_base), "r"((uint32_t)(16384))
+                                    :: "l"(_cpred_dst_0), "r"(stage_base), "r"((uint32_t)(4096))
                                     : "memory");
                             }
                             asm volatile("cp.async.bulk.commit_group;");
-                            asm volatile("cp.async.bulk.wait_group.read 1;");
+                            asm volatile("cp.async.bulk.wait_group.read 7;");
                         }
                     }
                     asm volatile("barrier.sync 4, 128;" ::: "memory");
