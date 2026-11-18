@@ -53,9 +53,9 @@ register one, and then launches no ``dv_local``: its pre-scan
 (the same bits).  On ``sm_107a``, on a host-built table of a value-head group
 of two, a split adjoint plan the serial-scan rule (:func:`serial_scan_pricing`)
 prices slower than ``dhu_tc2`` over whole sequences becomes that serial plan
-(other bits of ``dk`` / ``dv`` / ``dg`` / ``dbeta``, within the same
-accuracy).  A host-built table without plan pins then takes the adjoint table
-priced for ``dhu_tc2`` itself where that pricing (:func:`tc_plan_pricing`,
+(other bits of ``dk`` / ``dv`` / ``dg`` / ``dbeta``).  A host-built table
+without plan pins then takes the adjoint table priced for ``dhu_tc2``
+itself where that pricing (:func:`tc_plan_pricing`,
 ``TC_PLAN``) beats the planner's table, and on the architectures of
 ``CHAIN_PLAN`` deeper split tables priced for the ``fwd_ho`` and ``dhu_tc2``
 chains (:func:`chain_plan_pricing`); a table whose adjoint scan runs as two
