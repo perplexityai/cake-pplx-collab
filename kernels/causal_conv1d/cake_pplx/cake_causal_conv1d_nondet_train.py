@@ -65,14 +65,26 @@ launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
 returns it zeroed; size depends on ``C`` and the route, not on ``S``; never
 share one between two backward launches that may run at once, e.g. on two
 streams); when omitted the package keeps one zeroed buffer per (device,
-current stream), or inside a CUDA Graph capture one zeroed buffer per capture
-and stream, shared by its backward calls on that stream: the capture records
-one fill node for it, and another for a larger buffer when a call needs more
-bytes.  That buffer stays alive after its graph is freed, until a later
-capture on that stream replaces it.  With capture id 0 (also when
+current stream), or inside a CUDA Graph capture one buffer per capture and
+stream, shared by its calls on that stream: a buffer the package zeroed
+before the capture, on an eager call, so the graph records no fill node for
+it (the graph holds it until the graph and its instantiations are destroyed
+and their launches have completed; then it returns to the package, zero
+again).  The replays of one graph must not overlap.  When the package has no
+such buffer ready (no earlier eager call on the device, all taken, or too
+small) the capture zeroes one itself (one fill node, and another for a larger
+buffer when a call needs more bytes).  With capture id 0 (also when
 ``cuda.bindings`` is not importable) each captured backward call allocates
 and zeroes a buffer of its own.  The forward workspace (zeroed int32
-token-chunk counters) has the deterministic package's size and rules.
+token-chunk counters) has the deterministic package's size and rules; inside
+a capture the forward's omitted workspace follows the backward's rules.
+
+Programmatic dependent launch: the single-rank forward and backward programs
+(not those of the opt-in pair routes) take it per call, by architecture and
+mode (outside / inside a CUDA Graph capture; the backend's
+``cake_jit.PDL_EAGER`` / ``PDL_GRAPH``): with it a launch may begin while the
+stream's preceding kernel finishes, and every program waits for that kernel
+before it reads or writes global memory, so the outputs do not depend on it.
 
 The backward entry points and the backward workspace helpers take the
 deterministic package's opt-in ``bwd_grid_mult: int = 1`` (one of
