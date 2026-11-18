@@ -3463,7 +3463,7 @@ def test_registry_programs_are_well_formed(program):
         # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured
         # faster than the permuted drain on every row there); on sm_107a (its natural-layout drain costs extra in
         # proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 163,840 keys (the key
-        # cap: beyond it the cast path measured slower on long rows); and one pass by default (measured fastest on
+        # cap: beyond it the cast path measured no faster on long rows); and one pass by default (measured fastest on
         # every row): no per-arch key-pass rules
         assert direct.min_keys_per_query == 1
         assert {a: direct.min_keys_for(a) for a in record["arches"]} == {

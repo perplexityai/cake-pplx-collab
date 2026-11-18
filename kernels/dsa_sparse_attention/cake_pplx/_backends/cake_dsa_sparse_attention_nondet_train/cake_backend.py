@@ -1332,8 +1332,8 @@ def _plan_nope_direct(
     the cast also where the main stage's work is large against the key count, ``T * K_eff >= 112 * S + 2^20``
     with ``K_eff = min(K_slots, ceil(S / num_segments))``, on rows of at most 163,840 keys (``cast_max_keys``):
     there the natural drain, slower on that target, costs more than the cast path's zero fill and cast; above
-    the cap the cast path's main stage grows faster with the key count, and the natural drain serves every row
-    with at least one key per query.
+    the cap the natural drain serves every row with at least one key per query (on long single-segment rows the
+    cast path's advantage shrinks as S grows: parity, then a measured loss; see the README).
     A problem below either threshold, or ``dkv_direct=False``, uses the permuted accumulator and the cast.
     Without the natural-layout stages the kernels' permuted accumulator and the cast serve both forms.
     """

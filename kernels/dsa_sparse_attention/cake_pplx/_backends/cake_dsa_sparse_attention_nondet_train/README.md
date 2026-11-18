@@ -345,9 +345,10 @@ the bound to `S / T` 10 at `T = 16,384` (163,840 keys).
 The NoPE rule also carries a key cap, `cast_max_keys` 163,840: a NoPE row
 with more keys (and at least one key per query) takes the natural drain
 whatever its work.  On long single-segment rows the cast path's advantage
-shrinks as `S` grows and becomes a loss above about 196,608 keys at
-`T = 16,384`; the backward times below are what was measured, the stages
-behind them were not timed separately.  Backward medians of the two paths on single-segment NoPE rows at
+shrinks as `S` grows: at `T = 16,384` it is at parity at 196,608 and
+229,376 keys and a loss from 262,144 keys on.  The backward times below are
+what was measured; the stages behind them were not timed separately.
+Backward medians of the two paths on single-segment NoPE rows at
 `T = 16,384` and `K_slots` 2176, every one on the cast side of the work test
 (VR200, 8 fresh processes per path, 20 steps each, cold L2, eager):
 

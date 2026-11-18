@@ -35,7 +35,8 @@ from . import cake_build
 # weigh the cast path's extra cost, proportional to the key count, against
 # the natural drain's, proportional to the main stage's query x selected-slot
 # work -- and an optional key cap ``cast_max_keys``, above which the rule
-# keeps the natural drain whatever the work), and one physical entry per stage: the
+# keeps the natural drain whatever the work; the base test still applies),
+# and one physical entry per stage: the
 # ``library`` stem of its ``build.json`` entries (``<library>_<arch>``, see
 # ``cake_build``), the FFI entry and the launch
 # geometry the binding bakes in (block, cluster, cooperative launch, dynamic
@@ -231,13 +232,14 @@ MODULES: dict[str, dict[str, Any]] = {
     # selected-slot pairs, K_eff = min(K_slots, ceil(S / num_segments))), the
     # cast path a zero fill and a cast proportional to S plus two launches, so
     # the ``sm_107a`` rule takes the permuted accumulator plus cast where
-    # T * K_eff >= 112 * S + 2^20 and S <= 163,840 (``cast_max_keys``), and the
-    # natural stage otherwise.  On long single-segment rows the cast path's
-    # advantage shrinks as S grows and turns into a loss (one segment,
-    # T = 16,384, K_slots 2176: natural / cast backward 9.520 / 9.272 ms at
-    # S = 131,072, 10.781 / 11.209 ms at 262,144); the cap counts the total
-    # S, since the planners do not know the longest segment of a packed row.  On VR200 the rule picks the cast path
-    # on no measured row where it was slower, and keeps the natural stage on
+    # S < T (the base test) or where T * K_eff >= 112 * S + 2^20 and
+    # S <= 163,840 (``cast_max_keys``), and the natural stage otherwise.  On
+    # long single-segment rows the cast path's advantage shrinks as S grows
+    # and turns into a loss (one segment, T = 16,384, K_slots 2176: natural /
+    # cast backward 9.520 / 9.272 ms at S = 131,072, 10.781 / 11.209 ms at
+    # 262,144); the cap counts the total S, since the planners do not know
+    # the longest segment of a packed row.  On VR200 the rule picks the cast
+    # path on no measured row where it was slower, and keeps the natural stage on
     # small rows, small top-k and short-document packs, where the cast path
     # measured up to 8 % slower in backward, and on rows above the cap.  The
     # compaction and cast stages are rope-independent kernels shared with the
